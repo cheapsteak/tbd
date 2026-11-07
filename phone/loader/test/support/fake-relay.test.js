@@ -110,7 +110,7 @@ test('frames from a replaced socket are dropped', () => {
 
 test('peer-left goes to the other role when the last socket of a role closes', () => {
   const { relay, laptop, phone, phoneSocket, laptopSocket } = paired();
-  phoneSocket.close(1000, '');
+  phoneSocket.close(1000, 'bye');
   assert.deepEqual(laptop.events, [['text', 'peer-left']]);
   phoneSocket.close(1000, '');
   assert.deepEqual(laptop.events, [['text', 'peer-left']], 'a second close is a no-op');
@@ -118,7 +118,9 @@ test('peer-left goes to the other role when the last socket of a role closes', (
   relay.connect(path('phone'), phone2);
   laptopSocket.close();
   assert.deepEqual(phone2.events, [['text', 'peer-joined'], ['text', 'peer-left']]);
-  assert.deepEqual(phone.events, []);
+  // The relay answers each client's own close, once.
+  assert.deepEqual(phone.events, [['close', [1000, 'bye']]]);
+  assert.deepEqual(laptop.events.at(-1), ['close', [1005, '']]);
 });
 
 test('binary frames are forwarded unchanged to the other role, up to 65,536 bytes', () => {
@@ -180,7 +182,13 @@ test('a black-holed room drops everything both ways, answers no ping and never c
   const phone2 = recorder();
   relay.connect(path('phone'), phone2);
   laptopSocket.send(new Uint8Array(70_000));
-  assert.deepEqual([laptop.events, phone.events, phone2.events], [[], [], []]);
+  const phone3 = recorder();
+  relay.connect(path('phone', OTHER_ROOM), phone3);
+  relay.blackHole(OTHER_ROOM, true);
+  const phone4 = recorder();
+  relay.connect(path('phone', OTHER_ROOM), phone4)?.close(1000);
+  assert.deepEqual([laptop.events, phone.events, phone2.events, phone4.events], [[], [], [], []], 'not even the echo of a close');
+  assert.deepEqual(phone3.events, [['text', 'peer-absent']], 'no 4000 for the replaced socket');
   assert.equal(relay.stats.pings.get(ROOM), undefined);
   assert.equal(relay.stats.phoneJoins.get(ROOM), 2, 'joins still count');
   relay.blackHole(ROOM, false);
@@ -290,6 +298,43 @@ test('the fake socket gives ArrayBuffer data for arraybuffer and a Blob otherwis
   assert.deepEqual([...new Uint8Array(await b.events[2][1].arrayBuffer())], [9]);
 });
 
+test('a socket pinned to a relay origin is refused anywhere else, like a refused path', async () => {
+  const relay = createFakeRelay();
+  /** @type {Array<[string, string, boolean]>} */
+  const cases = [
+    ['https://relay.acme.test', 'wss://relay.acme.test', true],
+    ['https://relay.acme.test', 'wss://RELAY.acme.test:443', true],
+    ['https://relay.acme.test', 'ws://relay.acme.test', false],
+    ['https://relay.acme.test', 'wss://relay.acme.test:8443', false],
+    ['https://relay.acme.test', 'wss://other.acme.test', false],
+    ['http://127.0.0.1:8787', 'ws://127.0.0.1:8787', true],
+    ['http://127.0.0.1:8787', 'ws://127.0.0.1', false],
+    ['http://127.0.0.1:8787', 'wss://127.0.0.1:8787', false],
+    ['http://127.0.0.1', 'ws://127.0.0.1:80', true],
+    ['http://127.0.0.1', 'ws://localhost', false],
+  ];
+  for (const [origin, base, reaches] of cases) {
+    const before = relay.stats.phoneJoins.get(ROOM) ?? 0;
+    const ws = fakeSocketFactory(relay, { origin })(`${base}${path('phone')}`);
+    /** @type {Array<[string, any]>} */
+    const events = [];
+    ws.onopen = () => events.push(['open', ws.readyState]);
+    ws.onerror = () => events.push(['error', ws.readyState]);
+    ws.onclose = (ev) => events.push(['close', [ev.code, ws.readyState]]);
+    await until(() => events.length > 0 && (reaches || events.length === 2), `${base} for ${origin}`);
+    const what = `${base} for ${origin}`;
+    if (reaches) {
+      assert.deepEqual(events, [['open', 1]], what);
+      assert.equal(relay.stats.phoneJoins.get(ROOM), before + 1, what);
+      ws.close(1000);
+    } else {
+      assert.deepEqual(events, [['error', 3], ['close', [1006, 3]]], what);
+      assert.equal(relay.stats.phoneJoins.get(ROOM) ?? 0, before, what);
+    }
+  }
+  assert.throws(() => fakeSocketFactory(relay, { origin: 'ftp://relay.acme.test' }), TypeError);
+});
+
 test('a refused path fires error, then close 1006, without open', async () => {
   const relay = createFakeRelay();
   const { ws, events } = browserSocket(relay, 'wss://relay.acme.test/v1/rooms/short?role=phone');
@@ -331,6 +376,25 @@ test('closing the fake socket goes 2 then 3, and the peer gets peer-left at once
   await until(() => events.length === 3, 'the close');
   assert.deepEqual(events[2], ['close', [1000, 3]]);
   assert.deepEqual(laptop.events, [['text', 'peer-left']]);
+});
+
+test('closing a fake socket in a black-holed room never fires onclose', async () => {
+  const relay = createFakeRelay();
+  const laptop = recorder();
+  relay.connect(path('laptop'), laptop);
+  const { ws, events } = browserSocket(relay, `wss://relay.acme.test${path('phone')}`);
+  await until(() => events.length === 2, 'open and peer-joined');
+  relay.blackHole(ROOM, true);
+  ws.close(1000);
+  assert.equal(ws.readyState, 2);
+  for (let i = 0; i < 20; i++) await turn();
+  relay.blackHole(ROOM, false);
+  // The relay counts the socket as gone, so the next one replaces nobody (no 4000 either).
+  const next = browserSocket(relay, `wss://relay.acme.test${path('phone')}`);
+  await until(() => next.events.length === 2, 'the next socket');
+  for (let i = 0; i < 20; i++) await turn();
+  assert.deepEqual(events.slice(2), [], 'no close comes, even after the black hole lifts');
+  assert.equal(ws.readyState, 2);
 });
 
 test('closing a fake socket that is still connecting fails it without joining', async () => {

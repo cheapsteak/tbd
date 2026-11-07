@@ -45,12 +45,25 @@ async function phoneKeys() {
 }
 
 /**
- * A phone's socket in one room. Events queue in arrival order.
- * @param {ReturnType<typeof createFakeRelay>} relay
+ * The phone's URL for a room, built as the loader builds it from the link's `relay`.
+ * @param {string} origin
  * @param {string} room
  */
-function phoneSocket(relay, room) {
-  const ws = fakeSocketFactory(relay)(`wss://relay.acme.test/v1/rooms/${room}?role=phone`);
+function roomUrl(origin, room) {
+  const url = new URL(`/v1/rooms/${room}?role=phone`, origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.href;
+}
+
+/**
+ * A phone's socket in one room, through a fake socket pinned to the laptop's relay origin.
+ * Events queue in arrival order.
+ * @param {{ relay: ReturnType<typeof createFakeRelay>, laptop: { relayOrigin: string } }} env
+ * @param {string} room
+ * @param {string} [url]
+ */
+function phoneSocket({ relay, laptop }, room, url = roomUrl(laptop.relayOrigin, room)) {
+  const ws = fakeSocketFactory(relay, { origin: laptop.relayOrigin })(url);
   ws.binaryType = 'arraybuffer';
   /** @type {Array<{ kind: string, name?: string, bytes?: Uint8Array, code?: number }>} */
   const queue = [];
@@ -88,6 +101,32 @@ function phoneSocket(relay, room) {
   return phone;
 }
 
+/**
+ * A fresh IKpsk2 initiator for an offer, with the offer's secret unless told otherwise.
+ * @param {{ pair: CryptoKeyPair }} keys
+ * @param {{ key: string, secret: string, room: string }} offer
+ * @param {Uint8Array} [psk]
+ */
+function offerInitiator(keys, offer, psk = b64(offer.secret)) {
+  return createInitiator({
+    pattern: 'IKpsk2', localStatic: keys.pair, remoteStatic: b64(offer.key), psk, prologue: phonePrologue(b64(offer.room)),
+  });
+}
+
+/**
+ * Sends message 1 and `hello` on a pairing socket and returns the laptop's answer.
+ * @param {ReturnType<typeof phoneSocket>} phone
+ * @param {{ pair: CryptoKeyPair }} keys
+ * @param {{ key: string, secret: string, room: string }} offer
+ */
+async function pairOn(phone, keys, offer) {
+  const initiator = await offerInitiator(keys, offer);
+  phone.send(await initiator.writeMessage1(encode({ deviceName: 'iPhone' })));
+  const result = await initiator.readMessage2(await phone.frame());
+  phone.send(await result.transport.encrypt(encode(HELLO)));
+  return { result, answer: decode(await result.transport.decrypt(await phone.frame())) };
+}
+
 /** @param {object} [options] */
 async function setup(options = {}) {
   const relay = createFakeRelay();
@@ -98,21 +137,15 @@ async function setup(options = {}) {
 /**
  * Runs the pairing handshake and sends `hello`, as plan 3's order has the phone do.
  * @param {{ relay: any, laptop: any }} env
- * @param {{ decision?: any, deviceName?: string, pairedRoom?: string, hello?: boolean }} [options]
+ * @param {{ decision?: any, deviceName?: string, pairedRoom?: string, deviceJoin?: any, hello?: boolean }} [options]
  */
-async function pairUntilDecision({ relay, laptop }, { decision = 'allow', deviceName = 'iPhone', pairedRoom, hello = true } = {}) {
+async function pairUntilDecision(env, { decision = 'allow', deviceName = 'iPhone', pairedRoom, deviceJoin, hello = true } = {}) {
   const keys = await phoneKeys();
-  const offer = laptop.makeOffer({ decision, pairedRoom });
-  const phone = phoneSocket(relay, offer.room);
+  const offer = env.laptop.makeOffer({ decision, pairedRoom, deviceJoin });
+  const phone = phoneSocket(env, offer.room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
-  const initiator = await createInitiator({
-    pattern: 'IKpsk2',
-    localStatic: keys.pair,
-    remoteStatic: b64(offer.key),
-    psk: b64(offer.secret),
-    prologue: phonePrologue(b64(offer.room)),
-  });
+  const initiator = await offerInitiator(keys, offer);
   phone.send(await initiator.writeMessage1(encode({ deviceName })));
   const result = await initiator.readMessage2(await phone.frame());
   if (hello) phone.send(await result.transport.encrypt(encode(HELLO)));
@@ -122,9 +155,10 @@ async function pairUntilDecision({ relay, laptop }, { decision = 'allow', device
 /**
  * Pairs with `allow` and returns the device room from `paired`.
  * @param {{ relay: any, laptop: any }} env
+ * @param {{ deviceJoin?: any }} [options]
  */
-async function pairDevice(env) {
-  const pairing = await pairUntilDecision(env);
+async function pairDevice(env, options = {}) {
+  const pairing = await pairUntilDecision(env, options);
   const paired = decode(await pairing.transport.decrypt(await pairing.phone.frame()));
   await pairing.phone.signal('peer-left');
   return { ...pairing, room: paired.room };
@@ -137,8 +171,9 @@ async function pairDevice(env) {
  * @param {{ pair: CryptoKeyPair }} keys
  * @param {{ hello?: boolean }} [options]
  */
-async function connect({ relay, laptop }, room, keys, { hello = true } = {}) {
-  const phone = phoneSocket(relay, room);
+async function connect(env, room, keys, { hello = true } = {}) {
+  const { laptop } = env;
+  const phone = phoneSocket(env, room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
   const initiator = await createInitiator({
@@ -185,14 +220,14 @@ test('an IKpsk2 pairing with allow sends paired with a new room, and the codes m
   assert.equal(laptop.counts.handshakes, 1);
   assert.deepEqual([...laptop.devices.keys()], [paired.room]);
   assert.deepEqual(laptop.devices.get(paired.room), { phoneKey: keys.raw, deviceName: 'iPhone' });
-  assert.deepEqual(laptop.log, [{ room: offer.room, type: 'hello' }]);
+  assert.deepEqual(laptop.log, [{ room: offer.room, type: 'hello', message: HELLO }], 'logged in full');
 
   assert.deepEqual(relay.presence(`/v1/rooms/${offer.room}/presence`).body, { laptop: false });
   assert.deepEqual(relay.presence(`/v1/rooms/${paired.room}/presence`).body, { laptop: true });
-  const oldRoom = phoneSocket(relay, offer.room);
+  const oldRoom = phoneSocket(env, offer.room);
   assert.deepEqual(await oldRoom.next(), { kind: 'open' });
   await oldRoom.signal('peer-absent');
-  const newRoom = phoneSocket(relay, paired.room);
+  const newRoom = phoneSocket(env, paired.room);
   assert.deepEqual(await newRoom.next(), { kind: 'open' });
   await newRoom.signal('peer-joined');
   assert.deepEqual(laptop.errors, []);
@@ -228,31 +263,46 @@ test('deny and expire send pairDenied and leave; silent sends nothing and stays'
   assert.equal(env.laptop.devices.size, 0);
 });
 
-test('a first transport message that fails to decrypt ends the offer', async () => {
+test('a first transport message that fails to decrypt sends the offer back to waiting', async () => {
   const env = await setup();
-  const { phone } = await pairUntilDecision(env, { hello: false });
+  const { phone, offer, keys } = await pairUntilDecision(env, { hello: false });
   phone.send(new Uint8Array(randomBytes(40)));
-  await phone.signal('peer-left');
+  await until(() => env.laptop.counts.refused === 1, 'the refusal');
+  // The laptop stays in the room, and never reads the failed frame as a message 1.
+  await phone.quiet();
   assert.equal(env.laptop.counts.refused, 1);
-  assert.equal(env.laptop.devices.size, 0);
   assert.equal(env.laptop.counts.hello, 0);
+  assert.equal(env.laptop.devices.size, 0);
+  assert.deepEqual(env.relay.presence(`/v1/rooms/${offer.room}/presence`).body, { laptop: true });
+  // A new message 1 on the same room pairs, and only that hello spends the offer.
+  const { result, answer } = await pairOn(phone, keys, offer);
+  assert.equal(answer.type, 'paired');
+  assert.equal(env.laptop.lastCode, await confirmationCode(result.handshakeHash));
+  assert.equal(env.laptop.counts.pairings, 2);
+  assert.equal(env.laptop.counts.hello, 1);
+  assert.deepEqual([...env.laptop.devices.keys()], [answer.room]);
+  assert.deepEqual(env.laptop.errors, []);
 });
 
-test('a peer-left or a new phone after the handshake ends the offer', async () => {
-  const env = await setup();
-  const { offer } = await pairUntilDecision(env, { hello: false });
-  const replacement = phoneSocket(env.relay, offer.room);
-  assert.deepEqual(await replacement.next(), { kind: 'open' });
-  await replacement.signal('peer-joined');
-  await replacement.signal('peer-left');
-  assert.equal(env.laptop.devices.size, 0);
+test('a phone that leaves or is replaced before its hello decrypts leaves the offer open', async () => {
+  for (const how of ['replaced', 'left']) {
+    const env = await setup();
+    const { offer, phone: first, keys } = await pairUntilDecision(env, { hello: false });
+    if (how === 'left') first.ws.close(1000);
+    const next = phoneSocket(env, offer.room);
+    assert.deepEqual(await next.next(), { kind: 'open' }, how);
+    await next.signal('peer-joined');
+    const { answer } = await pairOn(next, keys, offer);
+    assert.equal(answer.type, 'paired', how);
+    assert.equal(env.laptop.devices.size, 1, how);
+  }
 });
 
 test('a bad device name gets no message 2 and the offer stays open', async () => {
   const env = await setup();
-  const { relay, laptop } = env;
+  const { laptop } = env;
   const offer = laptop.makeOffer({});
-  const phone = phoneSocket(relay, offer.room);
+  const phone = phoneSocket(env, offer.room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
   const keys = await phoneKeys();
@@ -289,23 +339,62 @@ test('a bad device name gets no message 2 and the offer stays open', async () =>
   assert.equal(laptop.devices.get(paired.room)?.deviceName, name);
 });
 
-test('a wrong secret still gets message 2, which the phone cannot read, and the offer is spent', async () => {
+test('a wrong secret still gets message 2, which the phone cannot read, and the offer stays open', async () => {
   // The PSK enters at message 2's psk token, so the laptop cannot tell at message 1.
   const env = await setup();
   const offer = env.laptop.makeOffer({});
-  const phone = phoneSocket(env.relay, offer.room);
+  const phone = phoneSocket(env, offer.room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
   const keys = await phoneKeys();
-  const initiator = await createInitiator({
-    pattern: 'IKpsk2', localStatic: keys.pair, remoteStatic: b64(offer.key), psk: new Uint8Array(32),
-    prologue: phonePrologue(b64(offer.room)),
-  });
-  phone.send(await initiator.writeMessage1(encode({ deviceName: 'iPhone' })));
-  await assert.rejects(initiator.readMessage2(await phone.frame()));
+  const wrong = await offerInitiator(keys, offer, new Uint8Array(32));
+  phone.send(await wrong.writeMessage1(encode({ deviceName: 'iPhone' })));
+  await assert.rejects(wrong.readMessage2(await phone.frame()), { code: 'decryptFailed' });
   phone.ws.close(1000);
-  await until(() => env.relay.presence(`/v1/rooms/${offer.room}/presence`).body?.laptop === false, 'the offer to end');
-  assert.equal(env.laptop.devices.size, 0);
+  // The offer is not spent: the next phone finds the laptop still there and pairs.
+  const next = phoneSocket(env, offer.room);
+  assert.deepEqual(await next.next(), { kind: 'open' });
+  await next.signal('peer-joined');
+  const { answer } = await pairOn(next, keys, offer);
+  assert.equal(answer.type, 'paired');
+  assert.equal(env.laptop.counts.pairings, 2);
+  assert.equal(env.laptop.devices.size, 1);
+});
+
+test('a phone socket reaches the laptop only at the relay origin its offer names', async () => {
+  const env = await setup();
+  const offer = env.laptop.makeOffer({});
+  assert.equal(offer.relay, env.laptop.relayOrigin);
+  const elsewhere = phoneSocket(env, offer.room, `wss://relay.acme.test/v1/rooms/${offer.room}?role=phone`);
+  assert.deepEqual(await elsewhere.next(), { kind: 'closed', code: 1006 });
+  assert.equal(env.relay.stats.phoneJoins.get(offer.room), undefined);
+
+  const custom = await setup({ relayOrigin: 'https://relay.acme.test' });
+  const customOffer = custom.laptop.makeOffer({});
+  assert.equal(customOffer.relay, 'https://relay.acme.test');
+  const phone = phoneSocket(custom, customOffer.room);
+  assert.equal(phone.ws.url, `wss://relay.acme.test/v1/rooms/${customOffer.room}?role=phone`);
+  assert.deepEqual(await phone.next(), { kind: 'open' });
+  await phone.signal('peer-joined');
+});
+
+test('deviceJoin manual keeps the laptop out of the new room until join, so the phone can come first', async () => {
+  const env = await setup();
+  assert.throws(() => env.laptop.makeOffer({ deviceJoin: 'later' }), RangeError);
+  const { room, keys } = await pairDevice(env, { deviceJoin: 'manual' });
+  assert.ok(env.laptop.devices.has(room));
+  assert.equal(env.relay.stats.laptopJoins.get(room), undefined);
+  const phone = phoneSocket(env, room);
+  assert.deepEqual(await phone.next(), { kind: 'open' });
+  await phone.signal('peer-absent');
+  env.laptop.join(room);
+  await phone.signal('peer-joined');
+  const initiator = await createInitiator({
+    pattern: 'IK', localStatic: keys.pair, remoteStatic: env.laptop.publicKey, psk: null, prologue: phonePrologue(b64(room)),
+  });
+  phone.send(await initiator.writeMessage1(encode({})));
+  await initiator.readMessage2(await phone.frame());
+  assert.equal(env.laptop.counts.ikHandshakes, 1);
 });
 
 // --- device link ----------------------------------------------------------------------------
@@ -333,7 +422,7 @@ test('an IK handshake from an unknown key, or on the pairing room, gets no messa
   const env = await setup();
   const { room } = await pairDevice(env);
   const stranger = await phoneKeys();
-  const phone = phoneSocket(env.relay, room);
+  const phone = phoneSocket(env, room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
   const initiator = await createInitiator({
@@ -344,7 +433,7 @@ test('an IK handshake from an unknown key, or on the pairing room, gets no messa
   await phone.quiet();
 
   const offer = env.laptop.makeOffer({});
-  const pairingPhone = phoneSocket(env.relay, offer.room);
+  const pairingPhone = phoneSocket(env, offer.room);
   assert.deepEqual(await pairingPhone.next(), { kind: 'open' });
   await pairingPhone.signal('peer-joined');
   const ik = await createInitiator({
@@ -365,7 +454,7 @@ test('a forgotten device gets no answer, and a new phone socket resets the link'
   assert.equal(second.welcome.type, 'welcome');
   assert.deepEqual(first.phone.queue.at(-1), { kind: 'closed', code: 4000 });
   env.laptop.devices.clear();
-  const phone = phoneSocket(env.relay, room);
+  const phone = phoneSocket(env, room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
   const initiator = await createInitiator({
@@ -441,19 +530,27 @@ test('setBundle and setWelcome change later welcomes, and the named hash is the 
 });
 
 test('a broken channel makes the laptop leave and rejoin the device room', async () => {
-  /** @type {Array<[string, (c: Awaited<ReturnType<typeof connect>>) => Promise<void>]>} */
+  /** @param {object} message Sent after hello and welcome. */
+  const afterWelcome = (message) => async (/** @type {Awaited<ReturnType<typeof connect>>} */ c) => {
+    await c.send(HELLO);
+    await c.read();
+    await c.send(message);
+  };
+  /** @type {Array<[string, (c: Awaited<ReturnType<typeof connect>>) => Promise<void>, ((laptop: any) => void)?]>} */
   const cases = [
     ['a frame that fails to decrypt', async (c) => c.phone.send(new Uint8Array(randomBytes(40)))],
     ['a first message other than hello', async (c) => c.send({ type: 'bundle.get', sha256: 'a'.repeat(64) })],
-    ['bundle.get for another hash', async (c) => {
-      await c.send(HELLO);
-      await c.read();
-      await c.send({ type: 'bundle.get', sha256: 'a'.repeat(64) });
-    }],
+    ['a message whose type is not a string', afterWelcome({ type: 5 })],
+    ['bundle.get for another hash', afterWelcome({ type: 'bundle.get', sha256: 'a'.repeat(64) })],
+    ['bundle.get whose sha256 is not a string, even one welcome named',
+      afterWelcome({ type: 'bundle.get', sha256: 5 }), (laptop) => laptop.setWelcome({ bundle: { sha256: 5 } })],
+    ['an app message with no body', afterWelcome({ type: 'app' })],
+    ...[[1], null, 'x', 5].map((body) => /** @type {[string, any]} */ ([`an app body of ${JSON.stringify(body)}`, afterWelcome({ type: 'app', body })])),
   ];
-  for (const [what, breakIt] of cases) {
+  for (const [what, breakIt, prepare] of cases) {
     const env = await setup();
     const { room, keys } = await pairDevice(env);
+    prepare?.(env.laptop);
     const c = await connect(env, room, keys, { hello: false });
     await breakIt(c);
     await c.phone.signal('peer-left');
@@ -463,6 +560,7 @@ test('a broken channel makes the laptop leave and rejoin the device room', async
     assert.equal(env.laptop.counts.refused, 0, what);
     const again = await connect(env, room, keys);
     assert.equal(again.welcome.type, 'welcome', what);
+    assert.deepEqual(env.laptop.appBodies, [], what);
     assert.deepEqual(env.laptop.errors, [], what);
   }
 });
@@ -479,6 +577,54 @@ test('incompatible answers hello, then the laptop leaves and rejoins', async () 
     env.laptop.setIncompatible(null);
     assert.equal((await connect(env, room, keys)).welcome.type, 'welcome');
   }
+});
+
+test('a hello whose protocols is not a list of integers ends the channel', async () => {
+  const env = await setup();
+  const { room, keys } = await pairDevice(env);
+  const bad = [undefined, 1, '1', { 0: 1 }, null, [true], [1.5], ['1'], [1, null], [1e300]]
+    .map((protocols) => ({ type: 'hello', loaderVersion: '1.0.0', protocols }));
+  for (const [i, hello] of bad.entries()) {
+    const c = await connect(env, room, keys, { hello: false });
+    await c.send(hello);
+    await c.phone.signal('peer-left');
+    await c.phone.signal('peer-joined');
+    assert.equal(env.laptop.counts.rejoins, i + 1, JSON.stringify(hello));
+  }
+  assert.deepEqual(env.laptop.log.filter((entry) => entry.room === room).map((entry) => entry.message), bad.map((hello) => JSON.parse(JSON.stringify(hello))));
+  assert.deepEqual(env.laptop.errors, []);
+});
+
+test('with no protocol in common, hello gets incompatible with tooOld as LoaderHandler works it out', async () => {
+  const env = await setup();
+  const { room, keys } = await pairDevice(env);
+  /** @type {Array<[number[], string]>} */
+  const cases = [[[], 'loader'], [[0], 'loader'], [[-3, 0], 'loader'], [[2], 'laptop'], [[0, 2], 'laptop'], [[3, 2], 'laptop']];
+  for (const [protocols, tooOld] of cases) {
+    const c = await connect(env, room, keys, { hello: false });
+    await c.send({ type: 'hello', loaderVersion: '1.0.0', protocols });
+    assert.deepEqual(await c.read(), { type: 'incompatible', tooOld }, JSON.stringify(protocols));
+    await c.phone.signal('peer-left');
+    await c.phone.signal('peer-joined');
+  }
+  assert.equal(env.laptop.counts.rejoins, cases.length);
+});
+
+test('hello picks the common version and does not check loaderVersion', async () => {
+  const env = await setup();
+  const { room, keys } = await pairDevice(env);
+  for (const hello of [
+    { type: 'hello', protocols: [1] },
+    { type: 'hello', loaderVersion: 7, protocols: [2, 1, 0] },
+    { type: 'hello', loaderVersion: '0.0.1', protocols: [1, 1] },
+  ]) {
+    const c = await connect(env, room, keys, { hello: false });
+    await c.send(hello);
+    const welcome = await c.read();
+    assert.equal(welcome.type, 'welcome', JSON.stringify(hello));
+    assert.equal(welcome.protocol, 1);
+  }
+  assert.equal(env.laptop.counts.rejoins, 0);
 });
 
 test('app bodies: the default onApp answers sessions.subscribe, and sendApp reaches the phone', async () => {
@@ -536,7 +682,7 @@ test('leave and join take the laptop out of a device room and back', async () =>
   const { room, keys } = await pairDevice(env);
   env.laptop.leave(room);
   assert.deepEqual(env.relay.presence(`/v1/rooms/${room}/presence`).body, { laptop: false });
-  const phone = phoneSocket(env.relay, room);
+  const phone = phoneSocket(env, room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-absent');
   env.laptop.join(room);
@@ -546,49 +692,58 @@ test('leave and join take the laptop out of a device room and back', async () =>
   assert.equal(env.relay.stats.laptopJoins.get(room), 2);
 });
 
-test('the junk hook sends one random frame right before each message 2', async () => {
+test('the junk hook sends a short and a 64-byte stale frame right before each message 2', async () => {
   const env = await setup();
   env.laptop.sendJunkBeforeMessage2(true);
   const keys = await phoneKeys();
   const offer = env.laptop.makeOffer({});
-  const phone = phoneSocket(env.relay, offer.room);
+  const phone = phoneSocket(env, offer.room);
   assert.deepEqual(await phone.next(), { kind: 'open' });
   await phone.signal('peer-joined');
-  const initiator = await createInitiator({
-    pattern: 'IKpsk2', localStatic: keys.pair, remoteStatic: b64(offer.key), psk: b64(offer.secret),
-    prologue: phonePrologue(b64(offer.room)),
-  });
+  const initiator = await offerInitiator(keys, offer);
   phone.send(await initiator.writeMessage1(encode({ deviceName: 'iPhone' })));
-  const junk = await phone.frame();
-  assert.equal(junk.length, 64);
-  await assert.rejects(initiator.readMessage2(junk));
+  const [short, long] = [await phone.frame(), await phone.frame()];
+  assert.deepEqual([short.length, long.length], [20, 64]);
+  await assert.rejects(initiator.readMessage2(short), { code: 'messageTooShort' });
+  await assert.rejects(initiator.readMessage2(long), { code: 'decryptFailed' });
   const result = await initiator.readMessage2(await phone.frame());
   phone.send(await result.transport.encrypt(encode(HELLO)));
   const { room } = decode(await result.transport.decrypt(await phone.frame()));
 
-  const ikPhone = phoneSocket(env.relay, room);
-  assert.deepEqual(await ikPhone.next(), { kind: 'open' });
-  await ikPhone.signal('peer-joined');
-  const ik = await createInitiator({
-    pattern: 'IK', localStatic: keys.pair, remoteStatic: env.laptop.publicKey, psk: null, prologue: phonePrologue(b64(room)),
-  });
+  /** @param {ReturnType<typeof phoneSocket>} socket */
+  const ikOn = async (socket) => {
+    assert.deepEqual(await socket.next(), { kind: 'open' });
+    await socket.signal('peer-joined');
+    const ik = await createInitiator({
+      pattern: 'IK', localStatic: keys.pair, remoteStatic: env.laptop.publicKey, psk: null, prologue: phonePrologue(b64(room)),
+    });
+    return ik;
+  };
+  const ikPhone = phoneSocket(env, room);
+  const ik = await ikOn(ikPhone);
   ikPhone.send(await ik.writeMessage1(encode({})));
-  const ikJunk = await ikPhone.frame();
-  assert.equal(ikJunk.length, 64);
-  await assert.rejects(ik.readMessage2(ikJunk));
+  const ikJunk = [await ikPhone.frame(), await ikPhone.frame()];
+  assert.deepEqual(ikJunk.map((frame) => frame.length), [20, 64]);
+  await assert.rejects(ik.readMessage2(ikJunk[0]), { code: 'messageTooShort' });
+  await assert.rejects(ik.readMessage2(ikJunk[1]), { code: 'decryptFailed' });
   await ik.readMessage2(await ikPhone.frame());
+
+  // A test can pass its own frames.
+  env.laptop.sendJunkBeforeMessage2([Uint8Array.of(1, 2, 3)]);
+  const custom = phoneSocket(env, room);
+  const customIK = await ikOn(custom);
+  custom.send(await customIK.writeMessage1(encode({})));
+  assert.deepEqual([...await custom.frame()], [1, 2, 3]);
+  await customIK.readMessage2(await custom.frame());
+
   // Junk sent by the phone before its message 1 is dropped too.
   env.laptop.sendJunkBeforeMessage2(false);
-  const third = phoneSocket(env.relay, room);
-  assert.deepEqual(await third.next(), { kind: 'open' });
-  await third.signal('peer-joined');
+  const third = phoneSocket(env, room);
+  const again = await ikOn(third);
   third.send(new Uint8Array(randomBytes(64)));
-  const again = await createInitiator({
-    pattern: 'IK', localStatic: keys.pair, remoteStatic: env.laptop.publicKey, psk: null, prologue: phonePrologue(b64(room)),
-  });
   third.send(await again.writeMessage1(encode({})));
   await again.readMessage2(await third.frame());
-  assert.equal(env.laptop.counts.ikHandshakes, 2);
+  assert.equal(env.laptop.counts.ikHandshakes, 3);
 });
 
 test('the pairedRoom hook sends the room verbatim and joins nothing', async () => {

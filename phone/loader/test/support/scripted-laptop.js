@@ -6,25 +6,34 @@
 //   name that is empty after trimming, longer than 64 characters or holding a Cc or Cf
 //   scalar, gets no reply and the offer stays open (counts.refused). A stale frame is
 //   therefore dropped and the offer keeps waiting.
-// - Otherwise it sends message 2 with {"laptopName"} and sets lastCode. That handshake
-//   consumes the offer. The laptop then waits for the phone's first transport message
-//   (its `hello`). If that fails to decrypt, or a peer-joined or peer-left comes first, the
-//   offer ends and the laptop leaves.
-// - Once the first transport message decrypts it acts on the decision: `allow` sends
-//   {"type":"paired","room":<fresh room>}, stores the device under the new room, leaves the
-//   pairing room for good and joins the new room as the device link; `deny` and `expire`
-//   send pairDenied and leave; `silent` sends nothing.
+// - Otherwise it sends message 2 with {"laptopName"} and sets lastCode, then waits for the
+//   phone's first transport message (its `hello`). In IKpsk2 the secret enters only at
+//   message 2, so a wrong secret shows here: a first transport message that fails to
+//   decrypt (counts.refused), or a peer-joined or peer-left before one decrypts, sends the
+//   offer back to waiting for a new message 1 on the same room. The failed frame is never
+//   read as a message 1. The offer is consumed only when that first message decrypts.
+// - Then it acts on the decision: `allow` sends {"type":"paired","room":<fresh room>},
+//   stores the device under the new room, leaves the pairing room for good and, unless the
+//   offer's `deviceJoin` is 'manual', joins the new room as the device link; `deny` and
+//   `expire` send pairDenied and leave; `silent` sends nothing, and a later peer-joined,
+//   peer-left or undecryptable frame ends the offer.
+// - The offer stays open until a decision or leave(); nothing here expires it.
 //
-// Device room (a device link):
+// Device room (a device link), mirroring plan 3's PhoneConnection and LoaderHandler:
 // - peer-joined or peer-left resets the channel to awaiting a handshake.
 // - While awaiting, each frame goes to a fresh IK responder, and the laptop answers only
 //   when the read succeeds and the phone's key is the one stored for this room; otherwise
 //   it stays silent (counts.refused). Message 1's payload is ignored.
-// - Once the handshake is done, a frame that fails to decrypt ends the channel: the laptop
-//   leaves and rejoins the room (counts.rejoins). So does a first message other than
-//   `hello`, an undecodable message, and a `bundle.get` for a hash other than the one
-//   `welcome` named.
-// - `hello` gets `welcome`, or `incompatible` followed by leaving and rejoining.
+// - Once the handshake is done, the laptop ends the channel by leaving and rejoining the
+//   room (counts.rejoins), as LoaderHandler's `.end` restarts the link, on: a frame that
+//   fails to decrypt; a message that is not one JSON object with a string `type`; a first
+//   message other than `hello`; a `hello` whose `protocols` is not a list of integers; a
+//   `bundle.get` whose `sha256` is not the string `welcome` named; an `app` whose `body` is
+//   not a JSON object.
+// - `hello` picks the highest version in both its `protocols` and 1...1 and answers
+//   `welcome`. With none in common it answers `incompatible` (`tooOld` is "loader" when the
+//   phone's highest version is below 1 or it offers none, else "laptop"), then rejoins.
+//   `loaderVersion` is not checked. A later `hello`, and any unknown type, is ignored.
 //
 // Every frame and signal for a room is handled in arrival order through one promise chain.
 
@@ -46,6 +55,7 @@ import { generatePair, importPair } from './x25519.js';
 /** @typedef {import('../../clock.js').Clock} Clock */
 
 /** @typedef {'allow' | 'deny' | 'expire' | 'silent'} Decision */
+/** @typedef {'immediate' | 'manual'} DeviceJoin */
 
 /**
  * @typedef {object} Offer
@@ -53,6 +63,8 @@ import { generatePair, importPair } from './x25519.js';
  * @property {Decision} decision
  * @property {string | undefined} pairedRoom When a string, `paired` carries it verbatim and the
  *   laptop joins nothing.
+ * @property {DeviceJoin} deviceJoin When the laptop joins the new room after `paired`: at once,
+ *   or only when a test calls `join(room)`.
  * @property {Uint8Array | null} phoneKey Set by the handshake.
  * @property {string | null} deviceName Set by the handshake, trimmed.
  */
@@ -77,9 +89,10 @@ import { generatePair, importPair } from './x25519.js';
  * @property {number} signals Signals that have arrived, counted on arrival rather than when
  *   handled, so a bundle transfer stops as soon as its phone leaves.
  * @property {'waiting' | 'bound' | 'silent' | 'awaiting' | 'open' | 'welcomed'} phase
- *   An offer is `waiting` for message 1, `bound` to a phone that completed the handshake, or
- *   `silent` after its first transport message under the silent decision. A device link is
- *   `awaiting` a handshake, `open` before `welcome`, or `welcomed`.
+ *   An offer is `waiting` for message 1, `bound` to a phone that completed the handshake but
+ *   whose first transport message has not decrypted yet, or `silent` after that message under
+ *   the silent decision. A device link is `awaiting` a handshake, `open` before `welcome`, or
+ *   `welcomed`.
  * @property {NoiseTransport | null} transport
  * @property {{ sha256: unknown, bundle: Bundle } | null} served What `welcome` named, and the
  *   bundle that was current then.
@@ -87,8 +100,15 @@ import { generatePair, importPair } from './x25519.js';
 
 const DEFAULT_BUNDLE = 'globalThis.tbdScriptedLaptop = true;\n';
 const DEFAULT_RELAY_ORIGIN = 'http://127.0.0.1';
-const JUNK_FRAME_BYTES = 64;
+// One frame under plan 1's 48-byte message 2 minimum (`messageTooShort`) and one long enough
+// to be read (`decryptFailed`).
+const JUNK_FRAME_SIZES = [20, 64];
 const ROOM_BYTES = 32;
+// The loader protocol versions this laptop speaks (PhoneBridgeConstants).
+const MIN_PROTOCOL = 1;
+const MAX_PROTOCOL = 1;
+// Swift's Int range, which LoaderHandler's `Int(exactly:)` enforces.
+const INT_LIMIT = 2 ** 63;
 const utf8 = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
@@ -144,11 +164,18 @@ export async function createScriptedLaptop({
   let incompatible = null;
   /** @type {((index: number) => unknown) | null} */
   let chunkHook = null;
+  /** @type {Uint8Array[] | null} Frames to send before each message 2; null for random ones. */
+  let junkFrames = null;
   let junkBeforeMessage2 = false;
 
   const laptop = {
     publicKey: staticPair.publicRaw.slice(),
-    /** @type {Array<{ room: string, type: string }>} Every phone message that decrypted. */
+    /** The `relay` field of each offer; pass it to fakeSocketFactory's `origin`. */
+    relayOrigin,
+    /**
+     * Every phone message that decrypted to a JSON object with a string `type`, in full.
+     * @type {Array<{ room: string, type: string, message: Record<string, any> }>}
+     */
     log: [],
     counts: {
       bundleGet: 0,
@@ -156,7 +183,7 @@ export async function createScriptedLaptop({
       /** Completed handshakes of either pattern. */
       handshakes: 0,
       ikHandshakes: 0,
-      /** Completed IKpsk2 handshakes. */
+      /** IKpsk2 handshakes that reached message 2, whether or not `hello` then decrypted. */
       pairings: 0,
       refused: 0,
       /** Times a device link left and rejoined its room to end a broken channel. */
@@ -173,15 +200,18 @@ export async function createScriptedLaptop({
 
     /**
      * Opens a pairing offer and joins its room.
-     * @param {{ expSeconds?: number, decision?: Decision, pairedRoom?: string }} [options]
+     * @param {{ expSeconds?: number, decision?: Decision, pairedRoom?: string, deviceJoin?: DeviceJoin }} [options]
+     *   `deviceJoin: 'manual'` leaves the new room empty after `paired` until `join(room)`, so a
+     *   test can have the phone arrive there first.
      * @returns {{ v: 1, relay: string, room: string, secret: string, key: string, name: string, exp: number }}
      */
-    makeOffer({ expSeconds = 300, decision = 'allow', pairedRoom } = {}) {
+    makeOffer({ expSeconds = 300, decision = 'allow', pairedRoom, deviceJoin = 'immediate' } = {}) {
       if (!['allow', 'deny', 'expire', 'silent'].includes(decision)) throw new RangeError(`unknown decision ${decision}`);
+      if (!['immediate', 'manual'].includes(deviceJoin)) throw new RangeError(`unknown deviceJoin ${deviceJoin}`);
       const roomBytes = randomBytes(ROOM_BYTES);
       const secret = new Uint8Array(randomBytes(32));
       const room = base64urlEncode(roomBytes);
-      join(room, 'offer', { secret, decision, pairedRoom, phoneKey: null, deviceName: null });
+      join(room, 'offer', { secret, decision, pairedRoom, deviceJoin, phoneKey: null, deviceName: null });
       return {
         v: 1,
         relay: relayOrigin,
@@ -207,7 +237,11 @@ export async function createScriptedLaptop({
       welcomePatch = patch;
     },
 
-    /** @param {'laptop' | 'loader' | null} tooOld Answer `hello` with `incompatible`. */
+    /**
+     * Answers every well-formed `hello` with `incompatible` and this `tooOld`, whatever its
+     * `protocols`; null goes back to choosing by `protocols`.
+     * @param {'laptop' | 'loader' | null} tooOld
+     */
     setIncompatible(tooOld) {
       incompatible = tooOld;
     },
@@ -220,9 +254,15 @@ export async function createScriptedLaptop({
       chunkHook = fn ?? null;
     },
 
-    /** @param {boolean} on Send one random 64-byte frame right before each message 2. */
+    /**
+     * Sends stale frames right before each message 2, in pairing and in IK: by default a
+     * random 20-byte frame (too short for message 2) and a random 64-byte one, or the given
+     * frames. false stops it.
+     * @param {boolean | Uint8Array[]} on
+     */
     sendJunkBeforeMessage2(on) {
       junkBeforeMessage2 = Boolean(on);
+      junkFrames = Array.isArray(on) ? on.map((frame) => frame.slice()) : null;
     },
 
     /**
@@ -364,7 +404,9 @@ export async function createScriptedLaptop({
 
   /** @param {Link} link */
   function sendJunk(link) {
-    if (junkBeforeMessage2) sendFrame(link, new Uint8Array(randomBytes(JUNK_FRAME_BYTES)));
+    if (!junkBeforeMessage2) return;
+    const frames = junkFrames ?? JUNK_FRAME_SIZES.map((size) => new Uint8Array(randomBytes(size)));
+    for (const frame of frames) sendFrame(link, frame.slice());
   }
 
   /**
@@ -372,8 +414,23 @@ export async function createScriptedLaptop({
    * @param {string} signal
    */
   function offerSignal(link, signal) {
-    // Before the handshake the offer waits for any phone; after it, the phone is gone.
-    if ((signal === 'peer-joined' || signal === 'peer-left') && link.phase !== 'waiting') leaveLink(link);
+    if (signal !== 'peer-joined' && signal !== 'peer-left') return;
+    // The handshaken phone is gone. Until its first message decrypted the offer is not
+    // spent, so it waits for another phone; after that, the offer is over.
+    if (link.phase === 'bound') resetOffer(link);
+    else if (link.phase === 'silent') leaveLink(link);
+  }
+
+  /**
+   * Back to waiting for a new message 1, with the offer still open.
+   * @param {Link} link
+   */
+  function resetOffer(link) {
+    const offer = /** @type {Offer} */ (link.offer);
+    link.phase = 'waiting';
+    link.transport = null;
+    offer.phoneKey = null;
+    offer.deviceName = null;
   }
 
   /**
@@ -411,15 +468,18 @@ export async function createScriptedLaptop({
       return;
     }
 
-    const message = await openMessage(link, frame);
-    if (message === null) {
-      // Not a transport message from this phone: the offer is over.
+    const opened = await openMessage(link, frame);
+    if (!opened.decrypted) {
       laptop.counts.refused += 1;
-      leaveLink(link);
+      // A wrong secret, or not this phone's frame: before the first message decrypts the
+      // offer goes back to waiting; once spent (silent), it ends.
+      if (link.phase === 'bound') resetOffer(link);
+      else leaveLink(link);
       return;
     }
     if (link.phase !== 'bound') return; // silent: the first message already decided
-    if (message.type === 'hello') laptop.counts.hello += 1;
+    // Decrypting proves the phone holds the secret, which spends the offer.
+    if (opened.message?.type === 'hello') laptop.counts.hello += 1;
     switch (offer.decision) {
       case 'allow': {
         const room = typeof offer.pairedRoom === 'string' ? offer.pairedRoom : base64urlEncode(randomBytes(ROOM_BYTES));
@@ -429,7 +489,7 @@ export async function createScriptedLaptop({
           deviceName: /** @type {string} */ (offer.deviceName),
         });
         leaveLink(link);
-        if (typeof offer.pairedRoom !== 'string') join(room, 'device', null);
+        if (typeof offer.pairedRoom !== 'string' && offer.deviceJoin === 'immediate') join(room, 'device', null);
         return;
       }
       case 'deny':
@@ -483,8 +543,8 @@ export async function createScriptedLaptop({
       return;
     }
 
-    const message = await openMessage(link, frame);
-    if (message === null) {
+    const { decrypted, message } = await openMessage(link, frame);
+    if (!decrypted || message === null) {
       rejoin(link);
       return;
     }
@@ -494,53 +554,78 @@ export async function createScriptedLaptop({
         return;
       }
       laptop.counts.hello += 1;
-      if (incompatible !== null) {
-        await sendMessage(link, { type: 'incompatible', tooOld: incompatible });
-        rejoin(link);
-        return;
-      }
-      const welcome = makeWelcome(bundle, welcomePatch);
-      link.served = { sha256: /** @type {any} */ (welcome.bundle)?.sha256, bundle };
-      link.phase = 'welcomed';
-      await sendMessage(link, welcome);
+      await hello(link, message);
       return;
     }
 
     switch (message.type) {
       case 'bundle.get':
         laptop.counts.bundleGet += 1;
-        if (link.served === null || message.sha256 !== link.served.sha256) {
+        if (typeof message.sha256 !== 'string' || link.served === null || message.sha256 !== link.served.sha256) {
           rejoin(link);
           return;
         }
         await sendChunks(link, link.served.sha256, link.served.bundle);
         return;
       case 'app':
+        if (!isPlainObject(message.body)) {
+          rejoin(link);
+          return;
+        }
         laptop.appBodies.push(message.body);
         await onApp(message.body, (body) => sendMessage(link, { type: 'app', body }));
     }
   }
 
   /**
-   * Decrypts and parses one transport message, and logs it. Null when it does not decrypt
-   * or is not a JSON object with a string `type`.
+   * LoaderHandler's `hello`: `welcome` with the highest common version, or `incompatible`
+   * and the end of the channel.
+   * @param {Link} link
+   * @param {Record<string, any>} message
+   */
+  async function hello(link, message) {
+    const offered = protocolVersions(message.protocols);
+    if (offered === null) {
+      rejoin(link);
+      return;
+    }
+    const common = offered.filter((version) => version >= MIN_PROTOCOL && version <= MAX_PROTOCOL);
+    if (incompatible !== null || common.length === 0) {
+      // An empty list counts as too old: a loader that offers nothing predates every version.
+      const tooOld = incompatible ?? (Math.max(-Infinity, ...offered) < MIN_PROTOCOL ? 'loader' : 'laptop');
+      await sendMessage(link, { type: 'incompatible', tooOld });
+      rejoin(link);
+      return;
+    }
+    const welcome = makeWelcome(bundle, Math.max(...common), welcomePatch);
+    link.served = { sha256: /** @type {any} */ (welcome.bundle)?.sha256, bundle };
+    link.phase = 'welcomed';
+    await sendMessage(link, welcome);
+  }
+
+  /**
+   * Decrypts and parses one transport message, and logs it when it is a JSON object with a
+   * string `type` (LoaderHandler's rule; anything else is `message: null`).
    * @param {Link} link
    * @param {Uint8Array} frame
-   * @returns {Promise<Record<string, any> | null>}
+   * @returns {Promise<{ decrypted: boolean, message: Record<string, any> | null }>}
    */
   async function openMessage(link, frame) {
+    let plaintext;
+    try {
+      plaintext = await /** @type {NoiseTransport} */ (link.transport).decrypt(frame);
+    } catch {
+      return { decrypted: false, message: null };
+    }
     let message;
     try {
-      const plaintext = await /** @type {NoiseTransport} */ (link.transport).decrypt(frame);
       message = JSON.parse(utf8Decoder.decode(plaintext));
     } catch {
-      return null;
+      return { decrypted: true, message: null };
     }
-    if (message === null || typeof message !== 'object' || Array.isArray(message) || typeof message.type !== 'string') {
-      return null;
-    }
-    laptop.log.push({ room: link.room, type: message.type });
-    return message;
+    if (!isPlainObject(message) || typeof message.type !== 'string') return { decrypted: true, message: null };
+    laptop.log.push({ room: link.room, type: message.type, message });
+    return { decrypted: true, message };
   }
 
   /**
@@ -578,15 +663,16 @@ function makeBundle(text) {
 
 /**
  * @param {Bundle} bundle
+ * @param {number} protocol The version chosen.
  * @param {Record<string, unknown> | null} patch
  * @returns {Record<string, unknown>}
  */
-function makeWelcome(bundle, patch) {
+function makeWelcome(bundle, protocol, patch) {
   /** @type {Record<string, unknown>} */
   const welcome = {
     type: 'welcome',
-    protocol: 1,
-    minProtocol: 1,
+    protocol,
+    minProtocol: MIN_PROTOCOL,
     tbdVersion: '0.0.0-test',
     bundle: { sha256: bundle.sha256, size: bundle.compressed.length },
   };
@@ -618,6 +704,21 @@ function acceptedDeviceName(payload) {
   let count = 0;
   for (const _ of graphemes.segment(name)) count += 1;
   return count <= DEVICE_NAME_MAX ? name : null;
+}
+
+/**
+ * LoaderHandler's `protocolVersions`: `hello`'s `protocols` as integers, or null when it is not
+ * a list of integers. A boolean, a number with a fraction and one outside Swift's Int range
+ * are not integers.
+ * @param {unknown} value
+ * @returns {number[] | null}
+ */
+function protocolVersions(value) {
+  if (!Array.isArray(value)) return null;
+  for (const element of value) {
+    if (!Number.isInteger(element) || element < -INT_LIMIT || element >= INT_LIMIT) return null;
+  }
+  return value;
 }
 
 /**

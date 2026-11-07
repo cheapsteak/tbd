@@ -7,6 +7,7 @@ const PRESENCE_PATH = /^\/v1\/rooms\/([A-Za-z0-9_-]{43})\/presence$/;
 const MAX_FRAME_BYTES = 65_536;
 const CLOSE_REPLACED = { code: 4000, reason: 'replaced' };
 const CLOSE_TOO_LARGE = { code: 1009, reason: 'frame too large' };
+const NO_STATUS = 1005;
 
 /**
  * What the relay calls to reach one socket's client.
@@ -14,7 +15,8 @@ const CLOSE_TOO_LARGE = { code: 1009, reason: 'frame too large' };
  */
 
 /**
- * A client's end of one socket.
+ * A client's end of one socket. `close` echoes the close back through the client's sink, as a
+ * server answers a close frame, except in a black-holed room.
  * @typedef {{ send(data: string | ArrayBufferLike | ArrayBufferView): void, close(code?: number, reason?: string): void }} RelayHandle
  */
 
@@ -36,7 +38,8 @@ const CLOSE_TOO_LARGE = { code: 1009, reason: 'frame too large' };
  *   `GET /v1/rooms/<roomID>/presence`. It never joins, displaces or touches a socket.
  * @property {(room: string, on: boolean) => void} blackHole
  *   While on, nothing reaches or leaves any socket in the room: no signal, frame, `pong` or
- *   close. Joins and leaves still change who is in the room.
+ *   close, not even the echo of a client's own close. Joins and leaves still change who is
+ *   in the room.
  * @property {(room: string, fn: TamperFn | null) => void} tamper
  *   Passes each laptop-to-phone binary frame through `fn`.
  * @property {{ pings: Map<string, number>, phoneJoins: Map<string, number>,
@@ -141,8 +144,11 @@ export function createFakeRelay() {
             peer.sink.binary(frame);
           }
         },
-        close() {
-          if (member.open) remove(room, member);
+        close(code = NO_STATUS, reason = '') {
+          if (!member.open) return;
+          remove(room, member);
+          // The server's half of the close handshake, which a black hole swallows.
+          reach(room, member, (s) => s.close(code, reason));
         },
       };
     },
