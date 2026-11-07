@@ -28,12 +28,16 @@ export const PONG = "pong";
 
 export type Role = "laptop" | "phone";
 
+export function isRole(value: string | undefined): value is Role {
+  return value === "laptop" || value === "phone";
+}
+
 /** The role of a room URL: exactly one `role` parameter, equal to `laptop` or `phone`. */
 export function parseRole(url: URL): Role | null {
   const roles = url.searchParams.getAll("role");
   if (roles.length !== 1) return null;
   const role = roles[0];
-  return role === "laptop" || role === "phone" ? role : null;
+  return isRole(role) ? role : null;
 }
 
 export function otherRole(role: Role): Role {

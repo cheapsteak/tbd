@@ -6,13 +6,11 @@ import {
   PING,
   PONG,
   SIGNAL,
+  isRole,
   otherRole,
   parseRole,
   type Role,
 } from "./api";
-
-/** `WebSocket.readyState` of an open socket. */
-const OPEN = 1;
 
 /**
  * One room pairs one `laptop` socket with one `phone` socket. The role lives in
@@ -44,13 +42,7 @@ export class Room extends DurableObject<Env> {
     const role = parseRole(new URL(request.url));
     if (role === null) return new Response("Bad Request\n", { status: 400 });
 
-    for (const old of this.openSockets(role)) {
-      try {
-        old.close(CLOSE_REPLACED.code, CLOSE_REPLACED.reason);
-      } catch {
-        // Closed meanwhile.
-      }
-    }
+    for (const old of this.openSockets(role)) close(old, CLOSE_REPLACED);
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [role]);
@@ -67,16 +59,12 @@ export class Room extends DurableObject<Env> {
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
     // A socket the relay is closing (replaced, or too large) sends nothing more.
-    if (ws.readyState !== OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
     // Text is never forwarded. Checking for ArrayBuffer rather than for string
     // also means no other binary type could skip the size check below.
     if (!(message instanceof ArrayBuffer)) return;
     if (message.byteLength > MAX_FRAME_BYTES) {
-      try {
-        ws.close(CLOSE_TOO_LARGE.code, CLOSE_TOO_LARGE.reason);
-      } catch {
-        // Closed meanwhile.
-      }
+      close(ws, CLOSE_TOO_LARGE);
       // Signal now rather than when the client answers the Close, which it may
       // never do. The close event repeats the `peer-left`, which receivers ignore.
       this.leave(ws);
@@ -108,12 +96,12 @@ export class Room extends DurableObject<Env> {
 
   /** The open sockets of `role`, leaving out `except`. */
   private openSockets(role: Role, except?: WebSocket): WebSocket[] {
-    return this.ctx.getWebSockets(role).filter((ws) => ws !== except && ws.readyState === OPEN);
+    return this.ctx.getWebSockets(role).filter((ws) => ws !== except && ws.readyState === WebSocket.OPEN);
   }
 
   private roleOf(ws: WebSocket): Role | null {
     const tag = this.ctx.getTags(ws)[0];
-    return tag === "laptop" || tag === "phone" ? tag : null;
+    return isRole(tag) ? tag : null;
   }
 
   /**
@@ -125,6 +113,14 @@ export class Room extends DurableObject<Env> {
     if (role === null) return;
     if (this.openSockets(role, ws).length > 0) return;
     for (const peer of this.openSockets(otherRole(role))) send(peer, SIGNAL.peerLeft);
+  }
+}
+
+function close(ws: WebSocket, { code, reason }: { code: number; reason: string }): void {
+  try {
+    ws.close(code, reason);
+  } catch {
+    // The socket closed meanwhile.
   }
 }
 

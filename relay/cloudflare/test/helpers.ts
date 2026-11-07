@@ -9,6 +9,11 @@ const MESSAGE_TIMEOUT_MS = 5_000;
 
 export type Message = string | ArrayBuffer;
 
+export interface Closed {
+  code: number;
+  reason: string;
+}
+
 export interface TestSocket {
   send(data: string | ArrayBuffer | Uint8Array): void;
   /** The next message, in arrival order. Rejects after 5 s, or once the socket has closed. */
@@ -16,7 +21,7 @@ export interface TestSocket {
   /** Every message before the binary frame equal to `marker`, which is consumed. */
   until(marker: Uint8Array): Promise<Message[]>;
   close(code?: number): void;
-  closed: Promise<{ code: number; reason: string }>;
+  closed: Promise<Closed>;
 }
 
 /** A fresh room: 32 random bytes, base64url without padding. Tests share storage, so each mints its own. */
@@ -35,6 +40,13 @@ export function newRoomID(): string {
  */
 export function marker(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(16));
+}
+
+/** Sends a fresh marker from `from`, and returns every message `to` gets before it. */
+export async function flush(from: TestSocket, to: TestSocket): Promise<Message[]> {
+  const m = marker();
+  from.send(m);
+  return to.until(m);
 }
 
 /** The room's Durable Object stub. */
@@ -82,9 +94,9 @@ export async function connect(room: string, role: Role): Promise<TestSocket> {
 
   const queue: Message[] = [];
   const waiters: Waiter[] = [];
-  let closeEvent: { code: number; reason: string } | null = null;
-  let resolveClosed!: (value: { code: number; reason: string }) => void;
-  const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+  let closeEvent: Closed | null = null;
+  let resolveClosed!: (value: Closed) => void;
+  const closed = new Promise<Closed>((resolve) => {
     resolveClosed = resolve;
   });
 

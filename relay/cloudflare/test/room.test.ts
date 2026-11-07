@@ -6,14 +6,13 @@ import {
   LAPTOP_ONLINE,
   bytes,
   connect,
+  flush,
   marker,
   newRoomID,
   presence,
   stub,
   type TestSocket,
 } from "./helpers";
-
-const OPEN = 1;
 
 /** A laptop and a phone in one room, each past its `peer-joined`. */
 async function pair(room: string): Promise<{ laptop: TestSocket; phone: TestSocket }> {
@@ -32,7 +31,7 @@ async function pair(room: string): Promise<{ laptop: TestSocket; phone: TestSock
 async function finishClosing(room: string, role: Role): Promise<void> {
   await runInDurableObject(stub(room), (instance, state) => {
     for (const ws of state.getWebSockets(role)) {
-      if (ws.readyState !== OPEN) instance.webSocketClose(ws, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
+      if (ws.readyState !== WebSocket.OPEN) instance.webSocketClose(ws, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
     }
   });
 }
@@ -116,9 +115,7 @@ describe("room", () => {
     expect(await phone1.closed).toEqual(CLOSE_REPLACED);
     await finishClosing(room, "phone");
 
-    const m = marker();
-    phone2.send(m);
-    expect(await laptop.until(m)).toEqual([SIGNAL.peerJoined, SIGNAL.peerJoined]);
+    expect(await flush(phone2, laptop)).toEqual([SIGNAL.peerJoined, SIGNAL.peerJoined]);
     expect(await phone2.next()).toBe(SIGNAL.peerJoined);
 
     laptop.send(new Uint8Array([7]));
@@ -134,9 +131,7 @@ describe("room", () => {
     expect(await laptop1.closed).toEqual(CLOSE_REPLACED);
     await finishClosing(room, "laptop");
 
-    const m = marker();
-    laptop2.send(m);
-    expect(await phone.until(m)).toEqual([SIGNAL.peerJoined, SIGNAL.peerJoined]);
+    expect(await flush(laptop2, phone)).toEqual([SIGNAL.peerJoined, SIGNAL.peerJoined]);
     expect(await laptop2.next()).toBe(SIGNAL.peerJoined);
   });
 
@@ -159,7 +154,7 @@ describe("room", () => {
       const [server] = state.getWebSockets("phone");
       // The socket still reads as open, so the signal depends on `leave`
       // leaving the failed socket itself out of the count.
-      expect(server!.readyState).toBe(OPEN);
+      expect(server!.readyState).toBe(WebSocket.OPEN);
       instance.webSocketError(server!, new Error("x"));
     });
     expect(await laptop.next()).toBe(SIGNAL.peerLeft);
@@ -181,9 +176,7 @@ describe("room", () => {
 
     // The dropped frame was not queued for the next phone.
     const phone2 = await connect(room, "phone");
-    const m = marker();
-    laptop.send(m);
-    expect(await phone2.until(m)).toEqual([SIGNAL.peerJoined]);
+    expect(await flush(laptop, phone2)).toEqual([SIGNAL.peerJoined]);
   });
 
   it("text from a client is never forwarded", async () => {
@@ -192,15 +185,11 @@ describe("room", () => {
 
     phone.send(SIGNAL.peerLeft);
     phone.send("hello");
-    const m1 = marker();
-    phone.send(m1);
-    expect(await laptop.until(m1)).toEqual([]);
+    expect(await flush(phone, laptop)).toEqual([]);
 
     phone.send(PING);
     expect(await phone.next()).toBe(PONG);
-    const m2 = marker();
-    phone.send(m2);
-    expect(await laptop.until(m2)).toEqual([]);
+    expect(await flush(phone, laptop)).toEqual([]);
   });
 
   it("the 64 KiB limit", async () => {
@@ -253,12 +242,8 @@ describe("room", () => {
     const { laptop, phone } = await pair(room);
 
     await evictDurableObject(stub(room));
-    const fromPhone = marker();
-    phone.send(fromPhone);
-    expect(await laptop.until(fromPhone)).toEqual([]);
-    const fromLaptop = marker();
-    laptop.send(fromLaptop);
-    expect(await phone.until(fromLaptop)).toEqual([]);
+    expect(await flush(phone, laptop)).toEqual([]);
+    expect(await flush(laptop, phone)).toEqual([]);
 
     await evictDurableObject(stub(room));
     phone.close(1000);
@@ -275,9 +260,7 @@ describe("room", () => {
     const phone2 = await connect(room, "phone");
     expect(await phone1.closed).toEqual(CLOSE_REPLACED);
     await finishClosing(room, "phone");
-    const m = marker();
-    phone2.send(m);
-    expect(await laptop.until(m)).toEqual([SIGNAL.peerJoined]);
+    expect(await flush(phone2, laptop)).toEqual([SIGNAL.peerJoined]);
     expect(await phone2.next()).toBe(SIGNAL.peerJoined);
 
     laptop.send(new Uint8Array([7]));
@@ -344,12 +327,8 @@ describe("presence", () => {
     expect(await presence(room)).toBe(LAPTOP_ONLINE);
 
     // Both sockets are still open and hear no signal: frames flow both ways.
-    const fromPhone = marker();
-    phone.send(fromPhone);
-    expect(await laptop.until(fromPhone)).toEqual([]);
-    const fromLaptop = marker();
-    laptop.send(fromLaptop);
-    expect(await phone.until(fromLaptop)).toEqual([]);
+    expect(await flush(phone, laptop)).toEqual([]);
+    expect(await flush(laptop, phone)).toEqual([]);
   });
 
   it("leaves no trace for the next laptop", async () => {
@@ -360,8 +339,6 @@ describe("presence", () => {
 
     const laptop = await connect(room, "laptop");
     expect(await laptop.next()).toBe(SIGNAL.peerJoined);
-    const m = marker();
-    laptop.send(m);
-    expect(await phone.until(m)).toEqual([SIGNAL.peerJoined]);
+    expect(await flush(laptop, phone)).toEqual([SIGNAL.peerJoined]);
   });
 });

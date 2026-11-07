@@ -239,9 +239,7 @@ $files"
 # NUL, newline-separated otherwise.
 classify_file() {
   local file="$1" nuls delim path part shown total=0 named=0 runs="" files=""
-  nuls="$(tr -cd '\000' < "$file" | wc -c)" ||
-    answer "$ALL_PARTS" "The list of changed files could not be read, so every part runs."
-  nuls="$(printf '%s' "$nuls" | tr -d ' ')"
+  nuls="$(tr -cd '\000' < "$file" | wc -c | tr -d ' ')" || nuls=""
   case "$nuls" in
     ''|*[!0-9]*) answer "$ALL_PARTS" "The list of changed files could not be read, so every part runs." ;;
   esac
