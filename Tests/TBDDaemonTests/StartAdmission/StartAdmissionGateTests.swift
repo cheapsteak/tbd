@@ -37,10 +37,11 @@ struct StartAdmissionGateTests {
     // MARK: - Actor table
 
     @Test(
-        "every actor kind except app and daemon is checked",
+        "every actor kind except app, daemon and phone is checked",
         arguments: [
             (ActuationActor.Kind.app, false),
             (ActuationActor.Kind.daemon, false),
+            (ActuationActor.Kind.phone, false),
             (ActuationActor.Kind.session, true),
             (ActuationActor.Kind.anonymous, true),
             ("declared-by-a-newer-client", true),
@@ -80,6 +81,34 @@ struct StartAdmissionGateTests {
     /// The rule by kind has no rail to read, so a daemon kind stays unchecked.
     @Test func theKindRuleKeepsTheDaemonUnchecked() {
         #expect(!StartAdmissionActorRule.isChecked(kind: ActuationActor.Kind.daemon))
+    }
+
+    /// Each phone action is a person's gesture through a verified pairing, so a
+    /// phone is exempt the way the app is, and the anonymous actor still is not.
+    @Test func phoneIsUncheckedLikeTheApp() {
+        #expect(StartAdmissionActorRule.isChecked(ActuationActor.phone(deviceID: UUID())) == false)
+        #expect(StartAdmissionActorRule.isChecked(ActuationActor.app) == false)
+        #expect(StartAdmissionActorRule.isChecked(ActuationActor.anonymous) == true)
+    }
+
+    /// The session-restore exception belongs to the daemon's rail: a phone
+    /// actor that carries the rail name is still never checked.
+    @Test func theRailNameDoesNotCheckThePhone() {
+        #expect(!StartAdmissionActorRule.isChecked(ActuationActor(
+            kind: ActuationActor.Kind.phone, rail: ActuationRail.sessionRestore,
+            device: UUID().uuidString)))
+    }
+
+    /// The exemption matches the three kind names exactly. A near miss on one of
+    /// them is a kind this build does not know, and is checked.
+    @Test("a near miss on an exempt kind name is checked",
+          arguments: [
+            "Phone", "PHONE", " phone", "phone ", "phone:acme", "phones", "phone-v2",
+            "App", "app ", "Daemon", "daemon:limit-resume", "cli", "",
+          ])
+    func nearMissKindsAreChecked(kind: String) {
+        #expect(StartAdmissionActorRule.isChecked(kind: kind))
+        #expect(StartAdmissionActorRule.isChecked(ActuationActor(kind: kind)))
     }
 
     // MARK: - Verdicts
