@@ -84,7 +84,9 @@
                 "available": true
               }
             },
+            "model": "claude-sonnet-5-5",
             "openPromptID": "D054CB2D-4963-5CE3-A04E-03568A5714E4",
+            "profileID": "6C2471BC-B073-5CE4-B694-F648094C061D",
             "profileName": "Personal",
             "ref": {
               "kind": "local",

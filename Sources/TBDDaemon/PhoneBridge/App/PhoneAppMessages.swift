@@ -137,6 +137,15 @@ struct PhoneSession: Codable, Equatable, Sendable {
     let tabName: String
     let status: PhoneStatus
     let profileName: String?
+    /// The session's model profile, matching `PhoneProfile.id` from
+    /// `profiles.list`. Filled from the terminal's profile ID. Omitted when the
+    /// session has none (a remote session, or a terminal on the default account
+    /// with no profile).
+    let profileID: UUID?
+    /// The session's current model name, filled when the daemon knows it (for
+    /// example from the transcript's latest assistant line). Omitted when
+    /// unknown.
+    let model: String?
     let capabilities: PhoneCapabilities
     /// The prompt waiting for an answer, if any.
     let openPromptID: String?
