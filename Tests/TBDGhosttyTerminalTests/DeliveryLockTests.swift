@@ -24,33 +24,47 @@ struct DeliveryLockTests {
 
         // The resize's drain reaches writePty, which blocks there, holding the delivery lock.
         let resize = gateHoldingTask { terminal.resize(cols: 100, rows: 30) }
-        let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { gate.isHolding }
-        guard held == .satisfied else {
-            gate.release()
-            await resize.value
-            terminal.close()
-            if held == .timedOut { Issue.record("the resize's size report never reached writePty") }
-            return
-        }
 
-        // On another thread, three calls that produce nothing for the callbacks.
-        let finished = CompletionFlag()
-        let others = gateHoldingTask {
-            terminal.feed(text: "plain output, nothing to answer")
-            _ = terminal.encodeMouse(MousePress(action: .motion, button: nil, position: SurfacePoint(x: 5, y: 5)))
-            _ = terminal.encodeKey(
-                KeyPress(key: MacKeyCodes.key(forVirtualKeyCode: 0x00), text: "a", unshiftedCodepoint: 0x61),
-                optionAsAlt: .never)
-            finished.set()
+        // The whole observation, release included, runs on threads the tests own, so the hold
+        // spans only the hops it exists to observe: the polls' resumptions never wait on the
+        // cooperative pool while writePty is held (Tests/CLAUDE.md).
+        let observation = gateHoldingTask { () async -> BoundedWaitTimeout? in
+            defer { gate.release() }
+            let armed = ContinuousClock.now
+            let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { gate.isHolding }
+            guard held == .satisfied else {
+                guard held == .timedOut else { return nil }
+                return BoundedWaitTimeout(
+                    what: "the resize's size report to reach writePty",
+                    observed: "writePty not reached after \(ContinuousClock.now - armed)",
+                    deadline: TestDeadlines.saturatedPass)
+            }
+
+            // On another thread, three calls that produce nothing for the callbacks.
+            let finished = CompletionFlag()
+            let others = gateHoldingTask {
+                terminal.feed(text: "plain output, nothing to answer")
+                _ = terminal.encodeMouse(MousePress(action: .motion, button: nil, position: SurfacePoint(x: 5, y: 5)))
+                _ = terminal.encodeKey(
+                    KeyPress(key: MacKeyCodes.key(forVirtualKeyCode: 0x00), text: "a", unshiftedCodepoint: 0x61),
+                    optionAsAlt: .never)
+                finished.set()
+            }
+            let started = ContinuousClock.now
+            let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { finished.isSet }
+            let waited = ContinuousClock.now - started
+            gate.release()
+            await others.value
+            guard outcome == .timedOut else { return nil }
+            return BoundedWaitTimeout(
+                what: "a feed with no reply, a mouse event and a key to return while writePty is blocked",
+                observed: "still waiting on the blocked writePty after \(waited)",
+                deadline: TestDeadlines.saturatedPass)
         }
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { finished.isSet }
-        gate.release()
+        let failure = await observation.value
         await resize.value
-        await others.value
         terminal.close()
-        if outcome == .timedOut {
-            Issue.record("a feed with no reply, a mouse event or a key waited on the blocked writePty")
-        }
+        if let failure { Issue.record(failure) }
     }
 }
 
