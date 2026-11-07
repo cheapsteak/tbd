@@ -409,9 +409,11 @@ final class TerminalSurface {
         didSet { if isCursorSuppressed != oldValue { markNeedsDisplay() } }
     }
 
-    /// True when the cursor should appear this frame (visible, inside the grid, blink phase on).
+    /// True when the cursor should appear this frame: visible, inside the grid, and either steady
+    /// or in the on phase of its blink. A steady cursor ignores the phase, so one set while the
+    /// blink was off shows on the next frame.
     var isCursorDrawn: Bool {
-        !isCursorSuppressed && cursor.isVisible && cursorBlinkOn
+        !isCursorSuppressed && cursor.isVisible && (cursorBlinkOn || !cursor.isBlinking)
             && cursor.column >= 0 && cursor.column < columns
             && cursor.row >= 0 && cursor.row < rowCount
     }

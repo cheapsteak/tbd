@@ -504,6 +504,7 @@ public final class GhosttyTerminalView: NSView {
         if let renderSignalToken { terminal.clearRenderSignal(renderSignalToken) }
         renderSignalToken = nil
         relay = nil
+        // Before the detach, which leaves a clean surface: stopping the blink marks it dirty.
         stopBlink()
         surface.detach()
         frameDriver.update {
@@ -862,14 +863,28 @@ public final class GhosttyTerminalView: NSView {
         }
     }
 
+    /// Stops the blink with the cursor shown. Stopped in the off phase it would otherwise stay
+    /// hidden, as an unfocused view's hollow cursor did.
     private func stopBlink() {
         blinkTask?.cancel()
         blinkTask = nil
+        surface.cursorBlinkOn = true
     }
 
     /// One blink half-period.
+    ///
+    /// The timer runs while the view is focused, whatever cursor the program asked for. When the
+    /// program stops the blink — a steady style, or the cursor hidden — this puts the phase back
+    /// on instead of toggling, so the cursor does not stay hidden in the off phase.
     func blinkTick() {
-        guard surface.isAttached, isTerminalFocused, surface.cursor.isBlinking, surface.cursor.isVisible else { return }
+        guard surface.isAttached, isTerminalFocused else { return }
+        guard surface.cursor.isBlinking, surface.cursor.isVisible else {
+            if !surface.cursorBlinkOn {
+                surface.cursorBlinkOn = true
+                requestFrame()
+            }
+            return
+        }
         surface.cursorBlinkOn.toggle()
         requestFrame()
     }
@@ -896,7 +911,8 @@ public final class GhosttyTerminalView: NSView {
         return accepted
     }
 
-    private func setFocused(_ focused: Bool) {
+    /// Internal so the blink tests can focus a view in a window that is never key.
+    func setFocused(_ focused: Bool) {
         guard focused != isTerminalFocused else { return }
         isTerminalFocused = focused
         surface.isFocused = focused

@@ -23,14 +23,14 @@ private struct ViewFixture {
     let view: GhosttyTerminalView
     let appearance: GhosttyAppearance
 
-    init() throws {
+    init(clock: any Clock<Duration> = ContinuousClock()) throws {
         terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
         appearance = GhosttyAppearance(
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
             foreground: .init(r: 0xDD, g: 0xDD, b: 0xDD),
             background: .init(r: 0x10, g: 0x10, b: 0x10),
             cursor: .init(r: 0xFF, g: 0xFF, b: 0xFF))
-        view = try GhosttyTerminalView(terminal: terminal, appearance: appearance)
+        view = try GhosttyTerminalView(terminal: terminal, appearance: appearance, clock: clock)
     }
 }
 
@@ -328,6 +328,42 @@ struct GhosttyTerminalViewTests {
         view.renderTick(now: .seconds(111.5))
         let heldPastTimeout = terminal.withLocked { $0.mode(2026) }
         #expect(!heldPastTimeout, "mode 2026 held 1.5 s past the show was not forced off")
+    }
+
+    /// A steady cursor set while the blink is in its off phase must show. DECSCUSR 1 is a
+    /// blinking block and DECSCUSR 2 a steady one.
+    @Test(.clockDriven, .enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func steadyCursorSetInTheBlinkOffPhaseIsShown() async throws {
+        let clock = EventDrivenTestClock()
+        let fixture = try ViewFixture(clock: clock)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+
+        fixture.terminal.feed(text: "\u{1b}[1 q")
+        view.renderTick()
+        try #require(view.surface.cursor.isBlinking, "DECSCUSR 1 did not make the cursor blink")
+        view.setFocused(true)
+
+        // One half-period turns the cursor off. The timer arming again is the tick having run.
+        try await clock.requireAdvanceWhenArmed(by: GhosttyTerminalView.blinkInterval, timeout: TestDeadlines.saturatedPass)
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        try #require(!view.surface.cursorBlinkOn, "the first blink tick left the cursor on")
+        #expect(!view.surface.isCursorDrawn, "a blinking cursor in its off phase was drawn")
+
+        fixture.terminal.feed(text: "\u{1b}[2 q")
+        view.renderTick()
+        #expect(view.surface.isCursorDrawn, "a steady cursor set in the blink's off phase is hidden")
+
+        // The next tick puts the phase itself back on.
+        try await clock.requireAdvanceWhenArmed(by: GhosttyTerminalView.blinkInterval, timeout: TestDeadlines.saturatedPass)
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        #expect(view.surface.cursorBlinkOn, "the tick after the cursor went steady left the blink phase off")
     }
 
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
