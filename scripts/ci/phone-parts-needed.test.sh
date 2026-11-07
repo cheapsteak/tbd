@@ -777,6 +777,19 @@ test_phone_workflow_part_wiring() {
   assert_eq "no job or step in phone.yml sets continue-on-error" "" "$tolerant"
 }
 
+# The part jobs run `npm ci`, and so third-party install scripts, so their
+# checkouts must not leave the token in the git config. The `changes` job's
+# checkout is the one that needs only a clone and a diff.
+test_part_checkouts_do_not_persist_credentials() {
+  local job block
+  read_parts
+  while read -r job _; do
+    [ -n "$job" ] || continue
+    block="$(step_lines "$PHONE_YML" "$job" 'uses: actions/checkout@' prefix)"
+    assert_line "the $job job's checkout sets persist-credentials: false" "$block" "          persist-credentials: false"
+  done <<< "$PARTS_LIST"
+}
+
 # `Phone checks` runs, and its verdict runs, whatever happened before it. A
 # job skipped for any reason reports success to branch protection, and so does
 # a job whose every step was skipped, so a missing `always()` on the job or on

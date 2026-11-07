@@ -149,7 +149,11 @@ jobs:
       # Wrangler and the Workers test runner otherwise send usage metrics.
       WRANGLER_SEND_METRICS: "false"
     steps:
+      # `persist-credentials: false`: `npm ci` runs third-party install
+      # scripts, and nothing later needs the token in the git config.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # The relay pins its own Node, the one Cloudflare's Workers Builds image
       # preinstalls, so it reads its own `.nvmrc` and lockfile.
       - uses: actions/setup-node@v4
@@ -181,7 +185,11 @@ jobs:
       run:
         working-directory: phone
     steps:
+      # `persist-credentials: false`: `npm ci` runs third-party install
+      # scripts, and nothing later needs the token in the git config.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version-file: phone/.nvmrc
@@ -205,7 +213,11 @@ jobs:
     # 10: `npm ci`, the app's tests and one bundle build, a few minutes cold.
     timeout-minutes: 10
     steps:
+      # `persist-credentials: false`: `npm ci` runs third-party install
+      # scripts, and nothing later needs the token in the git config.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version-file: phone/.nvmrc
