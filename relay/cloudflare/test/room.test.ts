@@ -1,7 +1,7 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CLOSE_REPLACED, CLOSE_TOO_LARGE, MAX_FRAME_BYTES, PING, PONG, SIGNAL, type Role } from "../src/api";
-import { isMarkedClosing, markClosing } from "../src/room";
+import { isMarkedClosing, markClosing } from "../src/closing";
 import {
   BASE_URL,
   LAPTOP_OFFLINE,
@@ -502,5 +502,14 @@ describe("presence", () => {
     const laptop = await connect(room, "laptop");
     expect(await laptop.next()).toBe(SIGNAL.peerJoined);
     expect(await flush(laptop, phone)).toEqual([SIGNAL.peerJoined]);
+  });
+});
+
+describe("room module", () => {
+  // The closing-mark helpers live in `closing.ts`, which the room and these
+  // tests share, so the Durable Object's module exports its class alone.
+  it("exports only Room", async () => {
+    const room = await import("../src/room");
+    expect(Object.keys(room)).toEqual(["Room"]);
   });
 });

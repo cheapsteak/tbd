@@ -11,6 +11,7 @@ import {
   parseRole,
   type Role,
 } from "./api";
+import { isMarkedClosing, markClosing } from "./closing";
 
 /**
  * One room pairs one `laptop` socket with one `phone` socket. The role lives in
@@ -31,9 +32,9 @@ import {
  *   error event arrives, so a peer that joined meanwhile never hears it leave.
  * - Presence: says whether a laptop socket is open, without joining.
  *
- * "Open" means live: `readyState` OPEN and not marked closing. The relay marks
- * a socket before it closes one (4000 or 1009), so a socket the relay is
- * closing never counts as open, even if after a hibernation wake its
+ * "Open" means live: `readyState` OPEN and not marked closing (`closing.ts`).
+ * The relay marks a socket before it closes one (4000 or 1009), so a socket the
+ * relay is closing never counts as open, even if after a hibernation wake its
  * `readyState` read OPEN: its frames are dropped, it never holds back the other
  * role's `peer-left`, and presence does not count it.
  */
@@ -131,33 +132,6 @@ export class Room extends DurableObject<Env> {
     if (this.openSockets(role, ws).length > 0) return;
     for (const peer of this.openSockets(otherRole(role))) send(peer, SIGNAL.peerLeft);
   }
-}
-
-/**
- * The mark on a socket the relay is closing. It is the socket's attachment,
- * which the runtime keeps with the socket across hibernation, so the room tells
- * a closing socket from a live one by the mark as well as by `readyState`.
- *
- * An attachment is allowed under the rule that the relay stores nothing. The
- * rule keeps out the object's own SQLite database, alarms, timers and outbound
- * requests. An attachment is none of them: it holds one flag and no content,
- * it lives only with its socket, and it goes when the socket goes.
- */
-const CLOSING_MARK = { closing: true } as const;
-
-/** Marks `ws` as a socket the relay is closing. Exported so tests can mark a socket without closing it. */
-export function markClosing(ws: WebSocket): void {
-  try {
-    ws.serializeAttachment(CLOSING_MARK);
-  } catch {
-    // The socket closed meanwhile; its `readyState` already leaves it out.
-  }
-}
-
-/** Whether `ws` carries the closing mark. */
-export function isMarkedClosing(ws: WebSocket): boolean {
-  const attachment: unknown = ws.deserializeAttachment();
-  return typeof attachment === "object" && attachment !== null && "closing" in attachment && attachment.closing === true;
 }
 
 /** Open by `readyState` and not marked closing. The mark is read only for an open socket. */
