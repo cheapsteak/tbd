@@ -299,11 +299,14 @@ struct PhoneSendRailTests {
     }
 
     /// A message of invisible characters types nothing a person could see,
-    /// and with submit it would press Enter on the laptop's draft. So a
-    /// message whose every scalar is whitespace or a format character (a
-    /// zero-width space, a word joiner, a byte-order mark) is empty, in `text`
-    /// and in a text part. The shape check counts such a part as content, so
-    /// the phone's refusal is what stops it, and the refusal is recorded.
+    /// and with submit it would press Enter on the laptop's draft. So the
+    /// phone refuses a message whose every scalar is whitespace, a format
+    /// character or a default-ignorable one. In a text part, the core's shape
+    /// check stops first any part that Foundation's whitespace trim empties
+    /// (on Apple platforms that includes U+200B ZERO WIDTH SPACE), and refuses
+    /// it without an actuation row, because a malformed send names no act.
+    /// The arguments `"\u{200B}"` and `" \u{200B}\n"` take that path; the
+    /// others reach the phone's refusal, which is recorded.
     @Test(arguments: ["\u{200B}", "\u{2060}", "\u{FEFF}", " \u{200B}\n", "\u{3164}", "\u{FE0F}"])
     func aPairedPhoneSendOfInvisibleCharactersIsRefusedAsEmpty(text: String) async throws {
         let textHarness = try await SendHarness.make()
@@ -318,12 +321,26 @@ struct PhoneSendRailTests {
                 terminalID: partsHarness.terminal.id, submit: true, parts: [.text(text)]),
             deviceID: device)
 
+        let coreSeesNoContent = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         #expect(textResponse.error == RPCRouter.phoneEmptySendRefusal)
-        #expect(partsResponse.error == RPCRouter.phoneEmptySendRefusal)
-        for harness in [textHarness, partsHarness] {
-            #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
-            #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
-            try await harness.expectRecordedRefusal(
+        try await textHarness.expectRecordedRefusal(
+            device: device, message: text, error: RPCRouter.phoneEmptySendRefusal)
+        #expect(textHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(textHarness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        #expect(partsHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(partsHarness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        if coreSeesNoContent {
+            #expect(
+                partsResponse.error
+                    == "terminal.send parts must carry at least one non-empty text part or one "
+                    + "image path")
+            let logPath = await partsHarness.router.actuationLog.path
+            let requests = ActuationRecordReader(activePath: logPath).readRows()
+                .filter { $0.method == RPCMethod.terminalSend }
+            #expect(requests.isEmpty, "a malformed send writes no request row")
+        } else {
+            #expect(partsResponse.error == RPCRouter.phoneEmptySendRefusal)
+            try await partsHarness.expectRecordedRefusal(
                 device: device, message: text, error: RPCRouter.phoneEmptySendRefusal)
         }
     }
