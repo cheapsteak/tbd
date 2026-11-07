@@ -1,9 +1,6 @@
 import CryptoKit
 import Foundation
-import os
 import TBDShared
-
-private let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
 
 /// Pairing offers: the QR code's room, the `Noise_IKpsk2` responder, the
 /// confirmation code, and Allow and Deny (spec section 2).
@@ -249,7 +246,7 @@ actor PairingService {
         }
         offer = created
         session = openSession(offerID: created.id, roomID: created.roomID)
-        logger.notice("Created a phone pairing offer")
+        PhoneBridgeLog.record(.offerCreated)
         onChange()
         return created.status
     }
@@ -305,7 +302,7 @@ actor PairingService {
         guard let closing = end(as: .denied, sending: last) else {
             throw PhoneBridgeError.noSuchOffer
         }
-        logger.notice("Phone pairing denied")
+        PhoneBridgeLog.record(.denied)
         await closing.value
     }
 
@@ -346,13 +343,12 @@ actor PairingService {
         } catch {
             // The error names the check that failed, never the secret or a
             // field's text.
-            logger.error(
-                "Refused to show a pairing link a phone could not read: \(error.localizedDescription, privacy: .public)"
-            )
+            PhoneBridgeLog.record(.failed(
+                "Refused to show a pairing link a phone could not read: \(error.localizedDescription)"))
             throw PhoneBridgeError.invalidPairingLink
         }
         guard parsed == link else {
-            logger.error("Refused to show a pairing link that does not read back as it was built")
+            PhoneBridgeLog.record(.failed("Refused to show a pairing link that does not read back as it was built"))
             throw PhoneBridgeError.invalidPairingLink
         }
         return Offer(
@@ -487,13 +483,7 @@ actor PairingService {
         channel = reply.transport
         outbox.yield(Outgoing(frame: reply.message, onLeft: nil))
         armHandshakeTimer(offerID: offerID, attemptID: attempt.id)
-        if replaced == nil {
-            logger.notice("Answered a phone pairing handshake; waiting for its first message")
-        } else {
-            logger.notice(
-                "Answered a phone pairing handshake in place of one whose first message had not arrived; waiting for its first message"
-            )
-        }
+        PhoneBridgeLog.record(.handshakeAnswered(deviceID: nil, replacing: replaced != nil))
     }
 
     /// The attempt's first transport message was a `hello`: the offer is
@@ -504,7 +494,7 @@ actor PairingService {
         // `channel` stays: the attempt's transport is the confirmed phone's.
         offer?.phase = .awaitingApproval(Confirmed(
             code: attempt.code, deviceName: attempt.deviceName, phoneKey: attempt.phoneKey))
-        logger.notice("a phone completed the pairing handshake; waiting for Allow")
+        PhoneBridgeLog.record(.handshakeCompleted)
         onChange()
         await cancelHandshakeTimer()
     }
@@ -514,7 +504,7 @@ actor PairingService {
         guard case .waiting(.some) = offer?.phase else { return }
         offer?.phase = .waiting(nil)
         channel = nil
-        logger.notice("Dropped a phone pairing handshake: \(reason, privacy: .public)")
+        PhoneBridgeLog.record(.attemptDropped(reason: reason))
         await cancelHandshakeTimer()
     }
 
@@ -540,7 +530,7 @@ actor PairingService {
               case .waiting(.some(let attempt)) = current.phase, attempt.id == attemptID else { return }
         offer?.phase = .waiting(nil)
         channel = nil
-        logger.notice("Dropped a phone pairing handshake: no first message within the handshake timeout")
+        PhoneBridgeLog.record(.attemptDropped(reason: "no first message within the handshake timeout"))
     }
 
     private func cancelHandshakeTimer() async {
@@ -594,15 +584,12 @@ actor PairingService {
         do {
             try await devices.insert(device)
         } catch {
-            logger.error(
-                "Could not store an allowed phone; the pairing is interrupted: \(error.localizedDescription, privacy: .public)"
-            )
+            PhoneBridgeLog.record(.failed(
+                "Could not store an allowed phone; the pairing is interrupted: \(error.localizedDescription)"))
             await end(as: .interrupted)?.value
             throw error
         }
-        logger.notice(
-            "Allowed phone \(device.name, privacy: .public) (\(device.id, privacy: .public)); it moves to its own room"
-        )
+        PhoneBridgeLog.record(.allowed(name: device.name, deviceID: device.id))
         if let ending = session, offer?.id == offerID {
             session = nil
             await close(ending, timer: takeHandshakeTimer(), sending: claim.pairedFrame)
@@ -625,12 +612,12 @@ actor PairingService {
         case .allowing, .paired, .ended:
             return
         }
-        logger.notice("Phone pairing offer expired")
+        PhoneBridgeLog.record(.expired)
         end(as: .expired, sending: last)
     }
 
     private func interrupt(because reason: String) {
-        logger.notice("Phone pairing interrupted: \(reason, privacy: .public)")
+        PhoneBridgeLog.record(.interrupted(reason: reason))
         end(as: .interrupted)
     }
 
@@ -731,7 +718,7 @@ actor PairingService {
             do {
                 try await link.send(item.frame)
             } catch {
-                logger.notice("A phone pairing frame did not leave: \(error.localizedDescription, privacy: .public)")
+                PhoneBridgeLog.record(.frameNotSent(deviceID: nil, detail: error.localizedDescription))
             }
             item.onLeft?()
         }
@@ -760,7 +747,7 @@ actor PairingService {
         do {
             return try channel?.encrypt(plaintext)
         } catch {
-            logger.error("Could not encrypt a pairing message: \(error.localizedDescription, privacy: .public)")
+            PhoneBridgeLog.record(.failed("Could not encrypt a pairing message: \(error.localizedDescription)"))
             return nil
         }
     }
@@ -768,7 +755,7 @@ actor PairingService {
     // MARK: - Helpers
 
     private func refuse(_ reason: String) {
-        logger.notice("Refused a phone pairing handshake: \(reason, privacy: .public)")
+        PhoneBridgeLog.record(.handshakeRefused(reason: reason, deviceID: nil))
     }
 
     /// Whether `plaintext` is one JSON object whose `type` is `hello`.

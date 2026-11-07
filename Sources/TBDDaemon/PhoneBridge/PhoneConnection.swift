@@ -1,9 +1,6 @@
 import CryptoKit
 import Foundation
-import os
 import TBDShared
-
-private let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
 
 /// One paired phone's relay room: the laptop's socket there, the `Noise_IK`
 /// responder that accepts only that phone's key, the ordered writer, and the
@@ -217,9 +214,8 @@ actor PhoneConnection {
         do {
             message = try LoaderHandler.appMessage(body: body)
         } catch {
-            logger.error(
-                "Refused an app message for phone \(self.deviceID, privacy: .public), a caller bug: \(error.localizedDescription, privacy: .public)"
-            )
+            PhoneBridgeLog.record(.failed(
+                "Refused an app message for phone \(deviceID), a caller bug: \(error.localizedDescription)"))
             return false
         }
         return enqueueEncrypted(message, channelID: channelID)
@@ -277,9 +273,8 @@ actor PhoneConnection {
                 await answerHandshake(frame)
                 return
             }
-            logger.notice(
-                "A frame from phone \(self.deviceID, privacy: .public) failed to decrypt; ending the channel and reopening the room socket"
-            )
+            PhoneBridgeLog.record(.channelEnded(
+                deviceID: deviceID, reason: "a frame failed to decrypt; reopening the room socket"))
             await endChannel()
             await link.restart()
             return
@@ -315,9 +310,8 @@ actor PhoneConnection {
         } catch {
             // `stop()` cancels this task, which can fail the read.
             guard !isClosing else { return }
-            logger.error(
-                "Could not read the paired phone for device \(self.deviceID, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
+            PhoneBridgeLog.record(.failed(
+                "Could not read the paired phone for device \(deviceID): \(error.localizedDescription)"))
             refuse(Refusal.storeFailed)
             return
         }
@@ -353,13 +347,7 @@ actor PhoneConnection {
         // message 2 still queued is dropped there.
         outboxContinuation.yield(Outgoing(frame: reply.message, channelID: channelID, onLeft: nil))
         armHandshakeTimer(for: channelID)
-        if replacing {
-            logger.debug(
-                "Answered a new handshake from phone \(self.deviceID, privacy: .public) in place of one with nothing decrypted; waiting for its first message"
-            )
-        } else {
-            logger.debug("Answered a handshake from phone \(self.deviceID, privacy: .public); waiting for its first message")
-        }
+        PhoneBridgeLog.record(.handshakeAnswered(deviceID: deviceID, replacing: replacing))
     }
 
     /// The first frame of channel `channelID` decrypted: the channel becomes
@@ -374,7 +362,7 @@ actor PhoneConnection {
         channel?.established = Established(peer: peer, handler: handler, loader: LoaderHandler(bundle: bundle))
         await touchLastSeen()
         emit(.connected(deviceID: deviceID))
-        logger.notice("Phone \(peer.deviceName, privacy: .public) (\(self.deviceID, privacy: .public)) connected")
+        PhoneBridgeLog.record(.connected(name: peer.deviceName, deviceID: deviceID))
         await handler.phoneConnected(peer, outbox: PhoneChannelOutbox(connection: self, channelID: channelID))
         return true
     }
@@ -406,9 +394,7 @@ actor PhoneConnection {
                 await established.handler.handleAppMessage(body, from: established.peer)
             case .end(let reason):
                 // A fixed phrase from the loader, never message content.
-                logger.notice(
-                    "Ending the channel with phone \(self.deviceID, privacy: .public): \(reason, privacy: .public)"
-                )
+                PhoneBridgeLog.record(.channelEnded(deviceID: deviceID, reason: reason))
                 if let lastLeft {
                     await waitUntilLeft(lastLeft)
                 }
@@ -433,9 +419,7 @@ actor PhoneConnection {
         guard let established = ended.established else { return }
         await established.handler.phoneDisconnected(established.peer)
         emit(.disconnected(deviceID: deviceID))
-        logger.notice(
-            "Phone \(established.peer.deviceName, privacy: .public) (\(self.deviceID, privacy: .public)) disconnected"
-        )
+        PhoneBridgeLog.record(.disconnected(name: established.peer.deviceName, deviceID: deviceID))
         await touchLastSeen()
     }
 
@@ -490,9 +474,8 @@ actor PhoneConnection {
             }
             frame = sealed
         } catch {
-            logger.error(
-                "Could not encrypt a message for phone \(self.deviceID, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
+            PhoneBridgeLog.record(.failed(
+                "Could not encrypt a message for phone \(deviceID): \(error.localizedDescription)"))
             onLeft?()
             return false
         }
@@ -512,9 +495,7 @@ actor PhoneConnection {
                 do {
                     try await link.send(item.frame)
                 } catch {
-                    logger.debug(
-                        "A frame for phone \(self.deviceID, privacy: .public) did not leave: \(error.localizedDescription, privacy: .public)"
-                    )
+                    PhoneBridgeLog.record(.frameNotSent(deviceID: deviceID, detail: error.localizedDescription))
                 }
             }
             item.onLeft?()
@@ -557,7 +538,7 @@ actor PhoneConnection {
     // MARK: - Helpers
 
     private func refuse(_ reason: String) {
-        logger.notice("Refused a phone handshake for device \(self.deviceID, privacy: .public): \(reason, privacy: .public)")
+        PhoneBridgeLog.record(.handshakeRefused(reason: reason, deviceID: deviceID))
         emit(.handshakeRefused(reason))
     }
 
@@ -574,9 +555,8 @@ actor PhoneConnection {
         do {
             try await write.value
         } catch {
-            logger.error(
-                "Could not record when phone \(self.deviceID, privacy: .public) was last seen: \(error.localizedDescription, privacy: .public)"
-            )
+            PhoneBridgeLog.record(.failed(
+                "Could not record when phone \(deviceID) was last seen: \(error.localizedDescription)"))
         }
     }
 
