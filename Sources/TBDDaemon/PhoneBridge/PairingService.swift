@@ -26,8 +26,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge
 /// - The attempt's first frame decrypts to a `hello`: the offer is
 ///   *consumed* and moves to `awaitingApproval`.
 /// - It decrypts to anything else: the attempt is dropped.
-/// - It fails to decrypt: the attempt is dropped and the same frame is tried
-///   as a new message 1, so a phone retrying on the same socket is not lost.
+/// - It fails to decrypt: the frame is tried as a new message 1, because a
+///   valid replayed message 1 can arrive before the phone's real one, and
+///   nothing tells the two apart until a transport message decrypts. A frame
+///   that reads and names an acceptable device replaces the attempt, with a
+///   new message 2 and a new handshake timer; any other is dropped, and the
+///   attempt kept. A phone retrying on the same socket is not lost either.
 /// - `peer-joined`, `peer-left`, a link `.closed`, or the handshake timer
 ///   drops the attempt.
 ///
@@ -372,22 +376,19 @@ actor PairingService {
         switch current.phase {
         case .waiting(.some(let pending)):
             var attempt = pending
-            if let plaintext = try? attempt.transport.decrypt(frame) {
-                if Self.isHello(plaintext) {
-                    await confirm(attempt)
-                } else {
-                    await dropAttempt(because: "the first message was not hello")
-                }
+            guard let plaintext = try? attempt.transport.decrypt(frame) else {
+                // Nothing has decrypted on the attempt, so it may be a
+                // replayed message 1's and this frame the phone's real one.
+                await answerMessage1(frame, offerID: offerID)
                 return
             }
-            await dropAttempt(because: "the first message failed to decrypt")
-            // Dropping waited for the attempt's timer, so read the offer again.
-            guard let after = offer, after.id == offerID, session != nil, case .waiting(.none) = after.phase else {
-                return
+            if Self.isHello(plaintext) {
+                await confirm(attempt)
+            } else {
+                await dropAttempt(because: "the first message was not hello")
             }
-            answerMessage1(frame, offer: after)
         case .waiting(.none):
-            answerMessage1(frame, offer: current)
+            await answerMessage1(frame, offerID: offerID)
         case .awaitingApproval(var confirmed):
             if (try? confirmed.transport.decrypt(frame)) != nil {
                 offer?.phase = .awaitingApproval(confirmed)
@@ -399,11 +400,12 @@ actor PairingService {
         }
     }
 
-    /// Tries `frame` as IKpsk2 message 1 for `current` and, when it reads and
-    /// names an acceptable device, answers with message 2 and keeps the
-    /// handshake as the offer's attempt.
-    private func answerMessage1(_ frame: Data, offer current: Offer) {
-        guard let outbox = session?.outbox else { return }
+    /// Tries `frame` as IKpsk2 message 1 for offer `offerID` and, when it
+    /// reads and names an acceptable device, answers with message 2 and keeps
+    /// the handshake as the offer's attempt, replacing the attempt it had, if
+    /// any. A refused frame leaves the attempt as it was.
+    private func answerMessage1(_ frame: Data, offerID: UUID) async {
+        guard let current = offer, current.id == offerID, session != nil else { return }
         var responder: NoiseResponder
         let read: (remoteStatic: Curve25519.KeyAgreement.PublicKey, payload: Data)
         do {
@@ -427,14 +429,29 @@ actor PairingService {
             refuse(Refusal.unanswerable)
             return
         }
+        // The attempt this one replaces, if any, loses its timer first, so a
+        // timer never outlives its attempt.
+        await cancelHandshakeTimer()
+        // Deny, expiry, `cancel` or a new `start` may have ended the offer
+        // meanwhile.
+        guard let after = offer, after.id == offerID, case .waiting(let replaced) = after.phase,
+              let outbox = session?.outbox else {
+            return
+        }
         let attempt = Attempt(
             id: UUID(), transport: reply.transport,
             code: PhoneConfirmationCode.make(handshakeHash: reply.handshakeHash),
             deviceName: deviceName, phoneKey: read.remoteStatic.rawRepresentation)
         offer?.phase = .waiting(attempt)
         outbox.yield(Outgoing(frame: reply.message, onLeft: nil))
-        armHandshakeTimer(offerID: current.id, attemptID: attempt.id)
-        logger.notice("Answered a phone pairing handshake; waiting for its first message")
+        armHandshakeTimer(offerID: offerID, attemptID: attempt.id)
+        if replaced == nil {
+            logger.notice("Answered a phone pairing handshake; waiting for its first message")
+        } else {
+            logger.notice(
+                "Answered a phone pairing handshake in place of one whose first message had not arrived; waiting for its first message"
+            )
+        }
     }
 
     /// The attempt's first transport message was a `hello`: the offer is
@@ -461,8 +478,8 @@ actor PairingService {
     // MARK: - The handshake timer
 
     private func armHandshakeTimer(offerID: UUID, attemptID: UUID) {
-        // Every path back to `waiting(nil)` has already ended the previous
-        // timer; this only guards against a leak.
+        // `answerMessage1` has already ended the previous timer; this only
+        // guards against a leak.
         handshakeTimer?.cancel()
         let clock = self.clock
         handshakeTimer = Task {

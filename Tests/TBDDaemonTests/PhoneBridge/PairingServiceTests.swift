@@ -469,8 +469,8 @@ struct PairingServiceTests {
                 try await phone.rejoin(room: link.room)
             }
             // On the same socket, the laptop still holds the failed attempt:
-            // this message 1 fails to decrypt against it and is read as a
-            // new message 1.
+            // this message 1 fails to decrypt against it, is read as a new
+            // message 1, and replaces it.
             let (code, _) = try await phone.pair(link: link, deviceName: "iPhone")
             try await h.waitForState(.awaitingApproval)
             let shown = await h.service.status
@@ -485,27 +485,70 @@ struct PairingServiceTests {
         }
     }
 
-    @Test func anUndecryptableFirstTransportMessageKeepsTheOfferOpen() async throws {
+    @Test func aJunkFrameAfterMessage2IsDroppedAndHelloStillRaisesThePrompt() async throws {
         try await withPairing { h in
             let (status, link) = try await h.startOffer()
             let phone = try await h.joinedPhone(link)
-            try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
-            try await phone.sendRaw(randomBytes(100))
-            // A correct attempt: once its message 2 is read, the junk has
-            // been handled.
             let (code, _) = try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
-            // Both attempts were answered; the junk was not.
-            #expect(h.relay.laptopFrames(room: link.room).count == 2)
-            let waiting = await h.service.status
-            #expect(waiting?.state == .waitingForPhone)
-            let seen = await h.states.seen
-            #expect(!seen.contains(.awaitingApproval))
+            // Nothing has decrypted on the attempt, so the junk is tried as a
+            // message 1, refused, and dropped; the attempt stays.
+            try await phone.sendRaw(randomBytes(100))
             try await phone.sendHello()
             try await h.waitForState(.awaitingApproval)
             let shown = await h.service.status
             #expect(shown?.confirmationCode == code)
+            #expect(shown?.deviceName == "iPhone")
+            // Only message 2 went out: nothing answered the junk.
+            #expect(h.relay.laptopFrames(room: link.room).count == 1)
+            let seen = await h.states.seen
+            #expect(!seen.contains(.interrupted))
             let device = try await h.service.allow(offerID: status.offerID)
             #expect(device.name == "iPhone")
+            let message = try await phone.next()
+            #expect(message["type"] as? String == "paired")
+            // The pairing link never restarted.
+            #expect(h.relay.connectAttempts.count == 1)
+        }
+    }
+
+    @Test func thePhonesRealMessage1ReplacesAValidReplayThatArrivedFirst() async throws {
+        try await withPairing { h in
+            let (status, link) = try await h.startOffer()
+            let phone = try await h.joinedPhone(link)
+            // An earlier attempt by the phone, whose message 1 a replayer
+            // captured.
+            try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
+            let replayed = try #require(phone.lastMessage1)
+
+            // The replay reaches the laptop first, on the phone's socket.
+            // Nothing has decrypted, so the laptop reads it as a message 1,
+            // accepts it, and answers with a message 2 the phone cannot use.
+            try await phone.sendRaw(replayed)
+            try await h.waitUntil("the laptop to answer the replay") {
+                h.relay.laptopFrames(room: link.room).count == 2
+            }
+            let replayAnswer = try await phone.nextRawFrame()
+            #expect(replayAnswer == h.relay.laptopFrames(room: link.room).last)
+            let waiting = await h.service.status
+            #expect(waiting?.state == .waitingForPhone)
+
+            // Then the phone's real attempt: its message 1 fails to decrypt
+            // on the replay's attempt, is read as a message 1, and replaces
+            // it, so its `hello` raises the prompt with its own code.
+            let (code, _) = try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForState(.awaitingApproval)
+            let shown = await h.service.status
+            #expect(shown?.confirmationCode == code)
+            #expect(shown?.deviceName == "iPhone")
+            // Three message 2s.
+            #expect(h.relay.laptopFrames(room: link.room).count == 3)
+            let device = try await h.service.allow(offerID: status.offerID)
+            let message = try await phone.next()
+            #expect(message["type"] as? String == "paired")
+            #expect(message["room"] as? String == device.roomID)
+            #expect(device.publicKey == phone.key.publicKey.rawRepresentation)
+            // The pairing link never restarted.
+            #expect(h.relay.connectAttempts.count == 1)
         }
     }
 

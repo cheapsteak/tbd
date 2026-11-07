@@ -53,9 +53,10 @@ enum TestPhoneError: Error, Equatable, LocalizedError {
 ///   attempt. Message 2 is the next binary frame: a frame this handshake
 ///   cannot read makes the call throw, as a wrong pairing secret does.
 /// - **Frames.** `next()` takes the next binary frame and decrypts it;
-///   `nextSignal()` takes the next text frame. A frame of the other kind that
-///   arrives first is kept, in order, for the other call. A wait that gets
-///   nothing throws ``FakePhoneSocketTimeout``.
+///   `nextRawFrame()` takes it as it is; `nextSignal()` takes the next text
+///   frame. A frame of the other kind that arrives first is kept, in order,
+///   for the other call. A wait that gets nothing throws
+///   ``FakePhoneSocketTimeout``.
 ///
 /// Calls on one phone are made one at a time. A lock guards its state, so the
 /// phone is `Sendable` and a `Task` may hold it.
@@ -200,6 +201,13 @@ final class TestPhone: @unchecked Sendable {
             throw TestPhoneError.notAJSONObject
         }
         return object
+    }
+
+    /// The next binary frame as it arrived, not decrypted: a message 2 that
+    /// answered a replayed message 1, for instance, which the loader tries
+    /// and drops.
+    func nextRawFrame() async throws -> Data {
+        try await nextBinaryFrame()
     }
 
     /// The next text frame: a relay signal.

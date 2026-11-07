@@ -29,13 +29,19 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge
 ///   reloaded page needs nothing more: its socket makes the relay send
 ///   `peer-joined`, and its message 1 starts a fresh channel on the same
 ///   laptop socket.
+/// - While a channel is handshaken, a frame that fails to decrypt is tried
+///   as a new message 1 with a fresh responder: a valid replayed message 1
+///   can arrive before the phone's real one, and nothing tells the two apart
+///   until a transport message decrypts. A frame that is accepted replaces
+///   the handshaken channel, with a new message 2 and a new handshake timer;
+///   a frame that is refused is dropped, and the channel kept.
 /// - A handshaken channel with nothing decrypted after
 ///   `PhoneBridgeConstants.handshakeTimeout` is dropped silently, and the
 ///   room waits for a new message 1.
-/// - A frame that fails to decrypt after the handshake ends the channel and
-///   reopens the room socket, so the phone sees `peer-left`, then
-///   `peer-joined`, and handshakes again. So does a loader `.end`, after any
-///   message it sends first has left, bounded by the flush limit.
+/// - A frame that fails to decrypt on an established channel ends the
+///   channel and reopens the room socket, so the phone sees `peer-left`,
+///   then `peer-joined`, and handshakes again. So does a loader `.end`, after
+///   any message it sends first has left, bounded by the flush limit.
 ///
 /// **Ordering.** One inbound task handles the link's events one at a time, so
 /// `handleAppMessage` runs once per message, in arrival order, each awaited
@@ -265,6 +271,12 @@ actor PhoneConnection {
             return
         }
         guard let plaintext = try? channel?.transport.decrypt(frame) else {
+            if current.established == nil {
+                // Nothing has decrypted on this channel, so it may be a
+                // replayed message 1's and this frame the phone's real one.
+                await answerHandshake(frame)
+                return
+            }
             logger.notice(
                 "A frame from phone \(self.deviceID, privacy: .public) failed to decrypt; ending the channel and reopening the room socket"
             )
@@ -280,6 +292,8 @@ actor PhoneConnection {
 
     /// Tries `message1` as IK message 1 from this room's paired phone, and
     /// answers with message 2 only when the phone's key is the paired one.
+    /// The answer starts a handshaken channel, replacing a handshaken one if
+    /// there is one. A refused frame leaves any handshaken channel as it was.
     private func answerHandshake(_ message1: Data) async {
         guard let prologue else {
             refuse(Refusal.invalidRoom)
@@ -307,8 +321,11 @@ actor PhoneConnection {
             refuse(Refusal.storeFailed)
             return
         }
-        // `stop()` may have begun while the row was read.
-        guard !isClosing, channel == nil else { return }
+        // `stop()` or `revokeAndStop()` may have begun while the row was
+        // read. Only this task establishes a channel, so none was
+        // established meanwhile; the handshake timer may have dropped a
+        // handshaken one.
+        guard !isClosing, !isRevoked, channel?.established == nil else { return }
         guard let row, row.id == deviceID else {
             refuse(Refusal.noDevice)
             return
@@ -324,13 +341,25 @@ actor PhoneConnection {
             refuse(Refusal.unanswerable)
             return
         }
+        // The handshaken channel this one replaces, if any, loses its timer
+        // first, so a timer never outlives its channel.
+        await cancelHandshakeTimer()
+        guard !isClosing, !isRevoked, channel?.established == nil else { return }
+        let replacing = channel != nil
         let channelID = UUID()
         channel = Channel(id: channelID, transport: reply.transport, deviceName: row.name)
         // Through the writer, behind any frame of an earlier channel still in
-        // flight, so message 2 never overtakes one.
+        // flight, so message 2 never overtakes one. A replaced channel's
+        // message 2 still queued is dropped there.
         outboxContinuation.yield(Outgoing(frame: reply.message, channelID: channelID, onLeft: nil))
         armHandshakeTimer(for: channelID)
-        logger.debug("Answered a handshake from phone \(self.deviceID, privacy: .public); waiting for its first message")
+        if replacing {
+            logger.debug(
+                "Answered a new handshake from phone \(self.deviceID, privacy: .public) in place of one with nothing decrypted; waiting for its first message"
+            )
+        } else {
+            logger.debug("Answered a handshake from phone \(self.deviceID, privacy: .public); waiting for its first message")
+        }
     }
 
     /// The first frame of channel `channelID` decrypted: the channel becomes
@@ -413,8 +442,8 @@ actor PhoneConnection {
     // MARK: - The handshake timer
 
     private func armHandshakeTimer(for channelID: UUID) {
-        // Every path back to awaiting a handshake has already ended the
-        // previous timer; this only guards against a leak.
+        // `answerHandshake` has already ended the previous timer; this only
+        // guards against a leak.
         handshakeTimer?.cancel()
         let clock = self.clock
         handshakeTimer = Task {

@@ -404,20 +404,65 @@ struct PhoneConnectionTests {
         }
     }
 
-    @Test func anUndecryptableFrameAfterMessage2ReopensTheRoom() async throws {
+    @Test func aJunkFrameAfterMessage2IsDroppedAndHelloStillConnects() async throws {
         try await withConnection { h in
             let phone = try await h.joinedPhone()
             try await phone.connectIK(room: h.room, laptopKey: h.laptopKey.publicKey)
+            // Nothing has decrypted yet, so the junk is tried as a message 1,
+            // refused, and dropped; the handshaken channel stays.
             try await phone.sendRaw(randomBytes(100))
-            let left = try await phone.nextSignal()
-            #expect(left == "peer-left")
-            // The channel was never established, so the app heard nothing.
+            try await h.waitForEvent(.handshakeRefused("unreadable handshake message"))
+            try await phone.sendHello()
+            let welcome = try await phone.next()
+            #expect(welcome["type"] as? String == "welcome")
+            #expect(h.events.values.contains(.connected(deviceID: h.device.id)))
             let log = await h.app.log
-            #expect(log.isEmpty)
-            #expect(!h.events.values.contains(.connected(deviceID: h.device.id)))
-            try await h.clock.advanceUntil("the laptop rejoined", by: .seconds(1)) { h.relay.laptopPresent(room: h.room) }
-            let joined = try await phone.nextSignal()
-            #expect(joined == "peer-joined")
+            #expect(log == ["connected"])
+            // Message 2 and `welcome`: nothing answered the junk.
+            #expect(h.relay.laptopFrames(room: h.room).count == 2)
+            // The room socket never reopened.
+            #expect(phone.closeCode == nil)
+            #expect(h.relay.connectAttempts.count == 1)
+        }
+    }
+
+    @Test func thePhonesRealMessage1ReplacesAValidReplayThatArrivedFirst() async throws {
+        try await withConnection { h in
+            let phone = try await h.joinedPhone()
+            // An earlier attempt by the phone, whose message 1 a replayer
+            // captured.
+            try await phone.connectIK(room: h.room, laptopKey: h.laptopKey.publicKey)
+            let replayed = try #require(phone.lastMessage1)
+
+            // The replay reaches the laptop first, on the phone's socket.
+            // Nothing has decrypted, so the laptop reads it as a message 1,
+            // accepts it, and answers with a message 2 the phone cannot use.
+            try await phone.sendRaw(replayed)
+            try await h.waitUntil("the laptop to answer the replay") {
+                h.relay.laptopFrames(room: h.room).count == 2
+            }
+            let replayAnswer = try await phone.nextRawFrame()
+            #expect(replayAnswer == h.relay.laptopFrames(room: h.room).last)
+
+            // Then the phone's real message 1: it fails to decrypt on the
+            // replay's channel, is read as a message 1, and replaces it.
+            try await phone.connectIK(room: h.room, laptopKey: h.laptopKey.publicKey)
+            try await phone.sendHello()
+            let welcome = try await phone.next()
+            #expect(welcome["type"] as? String == "welcome")
+            #expect(h.events.values.contains(.connected(deviceID: h.device.id)))
+            let log = await h.app.log
+            #expect(log == ["connected"])
+            let refusals = h.events.values.filter { event in
+                if case .handshakeRefused = event { return true }
+                return false
+            }
+            #expect(refusals.isEmpty)
+            // Three message 2s and `welcome`.
+            #expect(h.relay.laptopFrames(room: h.room).count == 4)
+            // The room socket never reopened.
+            #expect(phone.closeCode == nil)
+            #expect(h.relay.connectAttempts.count == 1)
         }
     }
 
