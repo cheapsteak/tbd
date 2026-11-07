@@ -85,8 +85,9 @@ struct TerminalHolderTransportGateTests {
     }
 
     /// Collects OSC 777 notification titles. Written and read on the main
-    /// queue (the view hops there before calling `onNotification`), but the
-    /// bounded wait reads it from a `@Sendable` closure, so it carries a lock.
+    /// queue (the view hops there before the engine tells the coordinator),
+    /// but the bounded wait reads it from a `@Sendable` closure, so it carries
+    /// a lock.
     private final class NotificationRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var storage: [String] = []
@@ -337,8 +338,11 @@ struct TerminalHolderTransportGateTests {
         defer { tearDown(panel) }
         let pty = try FakePTY()
         defer { pty.closeWriteEnd() }
+        // Observed where production delivers a notification, through the
+        // engine to its coordinator, so the view's own hook stays the engine's.
         let notifications = NotificationRecorder()
-        panel.view.onNotification = { title, _ in notifications.record(title) }
+        panel.engine.delegate = panel.coordinator
+        panel.coordinator.onTerminalNotification = { title, _ in notifications.record(title) }
         let stub = attachStub(panel, fd: pty.readEnd)
         // The ingest window is closed by a block on the main queue, so nothing
         // reachable through the attach RPCs can observe it still open — every
