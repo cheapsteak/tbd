@@ -1806,6 +1806,15 @@ public struct Config: Codable, Sendable, Equatable {
     /// it off stops a running pass.
     /// Assigned after construction by the daemon, like `composerDraftEnabled`.
     public var sessionRestoreEnabled: Bool = Config.sessionRestoreDefault
+    /// Phone control: the daemon's bridge to a paired phone through a relay.
+    /// Resolved as `phone_control_enabled ?? Config.phoneControlEnabledDefault`.
+    public var phoneControlEnabled: Bool = Config.phoneControlEnabledDefault
+    /// Normalized relay base URL; nil means phone control is not set up.
+    public var phoneRelayURL: String?
+    /// Loader URL override; nil means `Config.phoneLoaderURLDefault`.
+    public var phoneLoaderURL: String?
+    /// The loader URL in effect: the override, else the default.
+    public var resolvedPhoneLoaderURL: String { phoneLoaderURL ?? Config.phoneLoaderURLDefault }
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1962,6 +1971,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// is a change to this constant, reaching everyone who never chose and
     /// keeping every explicit choice.
     public static let sessionRestoreDefault = false
+    /// The shipped default for `phoneControlEnabled`, and the single place it
+    /// lives. Ships off; the backing column has no SQL default, so graduation
+    /// is a change to this constant.
+    public static let phoneControlEnabledDefault = false
+    /// Placeholder until the maintainer creates the loader org (spec section 11). Replace with the org's Pages URL.
+    public static let phoneLoaderURLDefault = "https://tbd-phone.github.io/"
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -2163,6 +2178,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
         sessionRestoreEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionRestoreEnabled) ?? Config.sessionRestoreDefault
+        phoneControlEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .phoneControlEnabled) ?? Config.phoneControlEnabledDefault
+        phoneRelayURL = try c.decodeIfPresent(String.self, forKey: .phoneRelayURL)
+        phoneLoaderURL = try c.decodeIfPresent(String.self, forKey: .phoneLoaderURL)
         // Absent means never set, the NULL column's situation; the policy
         // resolves it.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
@@ -2183,6 +2202,41 @@ public struct Config: Codable, Sendable, Equatable {
         // as an unminted column. Unlike every flag above there is no shipped
         // default to fall through to; see the property's note.
         holderOwnerToken = try c.decodeIfPresent(String.self, forKey: .holderOwnerToken)
+    }
+}
+
+/// One paired phone, as the daemon stores it in `phone_device`. Created only
+/// when the user clicks Allow; revoking deletes it.
+public struct PhoneDevice: Codable, Sendable, Equatable, Identifiable {
+    /// The same value as `PhonePeer.deviceID`.
+    public var id: UUID
+    public var name: String
+    /// 32 raw X25519 bytes.
+    public var publicKey: Data
+    /// 43-char base64url relay room, permanent for this phone.
+    public var roomID: String
+    public var pairedAt: Date
+    public var lastSeenAt: Date?
+
+    public init(id: UUID, name: String, publicKey: Data, roomID: String,
+                pairedAt: Date, lastSeenAt: Date? = nil) {
+        self.id = id
+        self.name = name
+        self.publicKey = publicKey
+        self.roomID = roomID
+        self.pairedAt = pairedAt
+        self.lastSeenAt = lastSeenAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Phone"
+        publicKey = try c.decodeIfPresent(Data.self, forKey: .publicKey) ?? Data()
+        roomID = try c.decodeIfPresent(String.self, forKey: .roomID) ?? ""
+        pairedAt = try c.decodeIfPresent(Date.self, forKey: .pairedAt)
+            ?? Date(timeIntervalSince1970: 0)
+        lastSeenAt = try c.decodeIfPresent(Date.self, forKey: .lastSeenAt)
     }
 }
 

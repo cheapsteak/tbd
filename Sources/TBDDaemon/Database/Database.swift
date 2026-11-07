@@ -39,6 +39,9 @@ public final class TBDDatabase: Sendable {
     /// so these rows are the only listing a caller has.
     public let retainedTranscripts: RetainedTranscriptStore
 
+    /// The phones paired with this laptop (`phone_device`).
+    public let phoneDevices: PhoneDeviceStore
+
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
@@ -81,6 +84,7 @@ public final class TBDDatabase: Sendable {
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: pool)
         self.retainedTranscripts = RetainedTranscriptStore(writer: pool)
+        self.phoneDevices = PhoneDeviceStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         // Both refusal gates before touching the database: rethrow a
@@ -158,6 +162,7 @@ public final class TBDDatabase: Sendable {
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: queue)
         self.retainedTranscripts = RetainedTranscriptStore(writer: queue)
+        self.phoneDevices = PhoneDeviceStore(writer: queue)
         try Self.inMemoryTemplate.get().backup(to: queue)
     }
 
