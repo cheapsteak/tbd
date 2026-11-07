@@ -254,6 +254,12 @@ public final class Daemon: Sendable {
     /// (docs/specs/2026-10-11-dev-servers-design.md, "Sidebar dot"). `nil` in
     /// mock mode. Internal because the type is.
     nonisolated(unsafe) var devServerMonitor: DevServerRunningFileMonitor?
+    /// Owns phone control: the pairing service and one relay link per paired
+    /// phone, while the "Phone control" setting is on and a relay is set
+    /// (docs/specs/2026-11-07-phone-control-design.md). Built at step
+    /// 8f-phone, reconciled at step 11a-phone-bridge, stopped at shutdown.
+    /// `nil` in mock mode. Internal because the type is.
+    nonisolated(unsafe) var phoneBridge: PhoneBridge?
     /// Logs the holder transport's reader census — the double-reader violation
     /// count — once at startup and then hourly. `nil` in mock mode.
     ///
@@ -1595,6 +1601,24 @@ public final class Daemon: Sendable {
             rpcRouter.devServerSummaryProvider = { [monitor] in await monitor.runningWorktreeIDs() }
         }
 
+        // 8f-phone. Build the phone bridge and install it as the router's
+        // `phoneBridge` BEFORE the socket server serves (step 9), for the
+        // reason step 8f gives: the hook is a plain `nonisolated(unsafe)` var
+        // a request handler reads. Building opens nothing: no socket, no
+        // relay check and no key read happen until step 11a-phone-bridge
+        // reconciles. Until a phone app service hands over its handler, every
+        // phone request is answered "unavailable".
+        var phoneBridge: PhoneBridge?
+        if mockMode == nil {
+            let bridge = PhoneBridge(
+                db: database, keyStore: LaptopKeyStore(path: TBDConstants.phoneLaptopKeyPath()),
+                transport: URLSessionRelayTransport(), infoClient: URLSessionRelayInfoClient(),
+                broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            phoneBridge = bridge
+            self.phoneBridge = bridge
+            rpcRouter.phoneBridge = bridge
+        }
+
         // 8g. Install the app → daemon input sink BEFORE the sidecar listens:
         // each adopted connection captures `onInput` at adopt time (M2.1
         // contract), so wiring it after `listen` would miss the app's connect.
@@ -1821,6 +1845,15 @@ public final class Daemon: Sendable {
             // liveness recheck. Reads only. Started after the bind rather
             // than before it, so its tab reads never delay the socket.
             await devServerMonitor?.start()
+
+            // 11a-phone-bridge. Start phone control if the setting is on and a
+            // relay is set: load the laptop key, check the relay, and open one
+            // room socket per paired phone. After the bind, so a slow relay
+            // never delays the socket; with the setting off it opens nothing.
+            // The phone app service's `await phoneBridge?.setAppHandler(...)`
+            // goes immediately before this call, so the first channels already
+            // use the real handler.
+            await phoneBridge?.reconcile()
 
             // 11a-reader-census. Record the holder transport's double-reader
             // violation count where a human can read it back. The detector is
@@ -2349,6 +2382,10 @@ public final class Daemon: Sendable {
 
         // Stop the dev server running-file watch and its recheck loop.
         await devServerMonitor?.stop()
+
+        // Stop phone control: every room socket and the pairing service,
+        // sending no `revoked`, so paired phones stay paired.
+        await phoneBridge?.stop()
 
         if let questionSweep = pendingPromptExpirySweep {
             await questionSweep.stop()
