@@ -278,6 +278,8 @@ final class TerminalCore {
     var cellHeightPx: UInt32 = 0
     /// Called after the lock drops whenever what is on screen may have changed. Set by the view.
     var renderSignal: (@Sendable () -> Void)?
+    /// Which `setRenderSignal` call installed `renderSignal`. Every call takes the next number.
+    var renderSignalID: UInt64 = 0
     var bound: (any TerminalBoundObject)?
     /// Deliveries produced under the lock and not yet run, oldest first.
     var outbox: [Delivery] = []
@@ -311,6 +313,11 @@ final class TerminalCore {
         context.pendingEffects.removeAll(keepingCapacity: true)
         if !delivery.isEmpty { outbox.append(delivery) }
     }
+}
+
+/// Names one `setRenderSignal` call, so only the view that installed a signal can clear it.
+struct RenderSignalToken: Equatable, Sendable {
+    fileprivate let id: UInt64
 }
 
 /// What one locked call produced, to run after the lock drops.
@@ -562,16 +569,36 @@ public final class GhosttyTerminal: @unchecked Sendable {
         return result
     }
 
-    /// The view's frame request. Called after the lock drops whenever the screen may have changed.
-    func setRenderSignal(_ signal: (@Sendable () -> Void)?) {
-        let previous = locked { core -> (@Sendable () -> Void)? in
+    /// Installs the view's frame request, replacing any other. It is called after the lock drops
+    /// whenever the screen may have changed. Returns the token that takes it off again.
+    @discardableResult
+    func setRenderSignal(_ signal: @escaping @Sendable () -> Void) -> RenderSignalToken {
+        let (token, previous) = locked { core -> (RenderSignalToken, (@Sendable () -> Void)?) in
             let previous = core.renderSignal
+            core.renderSignalID &+= 1
             core.renderSignal = signal
-            return previous
+            return (RenderSignalToken(id: core.renderSignalID), previous)
         }
         // Released after the lock drops, so nothing it captured is torn down under the lock.
         _ = previous
+        return token
     }
+
+    /// Takes the render signal off, if it is still the one `token` installed. A second view over
+    /// the same terminal may have installed its own since; clearing that one would leave it
+    /// drawing nothing.
+    func clearRenderSignal(_ token: RenderSignalToken) {
+        let previous = locked { core -> (@Sendable () -> Void)? in
+            guard core.renderSignalID == token.id else { return nil }
+            let previous = core.renderSignal
+            core.renderSignal = nil
+            return previous
+        }
+        _ = previous
+    }
+
+    /// Whether a render signal is installed. A test seam.
+    var hasRenderSignal: Bool { locked { $0.renderSignal != nil } }
 
     // MARK: Public API
 

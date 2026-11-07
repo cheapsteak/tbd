@@ -48,6 +48,26 @@ private func makeOffscreenWindow() -> NSWindow {
     return window
 }
 
+/// Puts `view`, 400×200 points, into `parent`, which must already be in a window. The window is
+/// never on screen, so the view counts it as visible; only hiding keeps its frames off.
+@MainActor
+private func place(_ view: GhosttyTerminalView, in parent: NSView) {
+    view.windowVisibility = { _ in true }
+    view.setFrameSize(NSSize(width: 400, height: 200))
+    parent.addSubview(view)
+}
+
+/// What a view's frame counters were at one moment.
+private struct FrameCounts: Equatable {
+    var built: Int
+    var committed: Int
+}
+
+@MainActor
+private func frameCounts(of view: GhosttyTerminalView) -> FrameCounts {
+    FrameCounts(built: view.framesBuilt, committed: view.framesCommitted)
+}
+
 /// A mouse event at `location`, in window coordinates, addressed to `window`.
 @MainActor
 private func mouseEvent(
@@ -121,12 +141,75 @@ struct GhosttyTerminalViewTests {
             fixture.terminal.feed(text: "line \(index)\r\n")
             view.renderTick()
         }
-        #expect(view.framesBuilt == 0, "a hidden view built \(view.framesBuilt) frames")
+        #expect(frameCounts(of: view) == FrameCounts(built: 0, committed: 0),
+                "a hidden view built or committed frames: \(frameCounts(of: view))")
         #expect(!view.surface.isAttached, "a hidden view kept its surface attached")
 
+        // The same counters must move once the view is shown, or the zeros above prove nothing.
         view.isHidden = false
         view.renderTick()
         #expect(view.framesBuilt >= 1, "a view shown again built no frame")
+        #expect(view.framesCommitted >= 1,
+                "a view shown again committed no frame (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+    }
+
+    /// Hiding an ancestor detaches the view as hiding the view does. AppKit reports it through
+    /// `viewDidHide`, not through the view's own `isHidden`.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func viewUnderAHiddenAncestorBuildsNoFrames() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        content.addSubview(container)
+        place(view, in: container)
+
+        view.renderTick()
+        let shown = frameCounts(of: view)
+        #expect(shown.committed >= 1,
+                "the shown view committed no frame (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+
+        container.isHidden = true
+        #expect(!view.surface.isAttached, "hiding the view's container left its surface attached")
+        for index in 0..<30 {
+            fixture.terminal.feed(text: "line \(index)\r\n")
+            view.renderTick()
+        }
+        #expect(frameCounts(of: view) == shown,
+                "under a hidden container the view went from \(shown) to \(frameCounts(of: view))")
+
+        container.isHidden = false
+        view.renderTick()
+        #expect(view.surface.isAttached, "showing the container again left the view detached")
+        #expect(view.framesCommitted > shown.committed, "the view shown again committed no frame")
+    }
+
+    /// An occluded window keeps its views from building frames, and they build again once it is
+    /// visible.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func viewInAnOccludedWindowBuildsNoFrames() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.windowVisibility = { _ in false }
+        view.refreshOcclusion()
+
+        for index in 0..<30 {
+            fixture.terminal.feed(text: "line \(index)\r\n")
+            view.renderTick()
+        }
+        #expect(frameCounts(of: view) == FrameCounts(built: 0, committed: 0),
+                "a view in an occluded window built or committed frames: \(frameCounts(of: view))")
+
+        view.windowVisibility = { _ in true }
+        view.refreshOcclusion()
+        view.renderTick()
+        #expect(view.framesCommitted >= 1, "the view committed no frame once its window was visible")
     }
 
     /// A button's route is fixed when it goes down. A Shift-click that starts a selection in
@@ -198,15 +281,71 @@ struct GhosttyTerminalViewTests {
         #expect(view.framesBuilt == 0, "a windowless view built \(view.framesBuilt) frames")
     }
 
+    /// Two views over one terminal. Hiding the first must not take the second's render signal
+    /// off: only the view that installed a signal may clear it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func hidingOneViewKeepsTheOtherViewsRenderSignal() throws {
+        let fixture = try ViewFixture()
+        let second = try GhosttyTerminalView(terminal: fixture.terminal, appearance: fixture.appearance)
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(fixture.view, in: content)
+        place(second, in: content)
+        #expect(fixture.terminal.hasRenderSignal, "two attached views left the terminal with no render signal")
+
+        fixture.view.isHidden = true
+        #expect(second.surface.isAttached, "hiding the first view detached the second")
+        #expect(fixture.terminal.hasRenderSignal, "hiding the first view took the second view's render signal off")
+
+        second.isHidden = true
+        #expect(!fixture.terminal.hasRenderSignal, "hiding both views left a render signal installed")
+    }
+
+    /// A view takes no frames while hidden, so the DEC 2026 watchdog must start afresh when it is
+    /// shown. Otherwise the mode's first sighting before the hide counts against it, and the
+    /// first frame after the show forces it off.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func syncOutputIsTimedAfreshWhenTheViewIsShownAgain() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        let terminal = fixture.terminal
+
+        terminal.feed(text: "\u{1b}[?2026h")
+        view.renderTick(now: .seconds(100))
+        view.isHidden = true
+        view.isHidden = false
+
+        view.renderTick(now: .seconds(110))
+        let heldAfterShow = terminal.withLocked { $0.mode(2026) }
+        #expect(heldAfterShow, "the first frame after the view was shown forced synchronized output off")
+        // The watchdog still works: held past its timeout from the new first sighting, the mode
+        // is forced off.
+        view.renderTick(now: .seconds(111.5))
+        let heldPastTimeout = terminal.withLocked { $0.mode(2026) }
+        #expect(!heldPastTimeout, "mode 2026 held 1.5 s past the show was not forced off")
+    }
+
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func applyingAppearanceUpdatesPaletteAndCellSize() throws {
         let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.renderTick()
+
         let custom = GhosttyAppearance.RGB(r: 0x12, g: 0x34, b: 0x56)
         let background = GhosttyAppearance.RGB(r: 0x20, g: 0x21, b: 0x22)
         var next = fixture.appearance
         next.palette[1] = custom
         next.background = background
-        fixture.view.apply(next)
+        view.apply(next)
 
         let palette = fixture.terminal.withLocked { $0.palette }
         let backgroundInForce = fixture.terminal.withLocked { $0.backgroundColor }
@@ -215,12 +354,29 @@ struct GhosttyTerminalViewTests {
         #expect(entry == custom, "palette[1] reads back as \(String(describing: entry))")
         #expect(backgroundInForce == background, "the background reads back as \(String(describing: backgroundInForce))")
 
-        let before = fixture.view.cellSize
+        let cellBefore = view.cellSize
+        let gridBefore = view.gridSize
+        let atlasBefore = view.renderContext.renderer.glyphCache.grayscale
         var larger = next
         larger.font = NSFont.monospacedSystemFont(ofSize: 26, weight: .regular)
-        fixture.view.apply(larger)
-        let after = fixture.view.cellSize
-        #expect(after.width > before.width && after.height > before.height,
-                "a 26 pt font gave cells of \(after), against \(before) at 13 pt")
+        view.apply(larger)
+        view.renderTick()
+
+        let cellAfter = view.cellSize
+        #expect(cellAfter.width > cellBefore.width && cellAfter.height > cellBefore.height,
+                "a 26 pt font gave cells of \(cellAfter), against \(cellBefore) at 13 pt")
+        // The same 400×200 points hold fewer of the larger cells.
+        let gridAfter = view.gridSize
+        #expect(gridAfter.cols < gridBefore.cols && gridAfter.rows < gridBefore.rows,
+                "the grid went from \(gridBefore) to \(gridAfter) with cells twice the size")
+        let terminalGrid = fixture.terminal.withLocked { [$0.cols, $0.rows] }
+        #expect(terminalGrid == [gridAfter.cols, gridAfter.rows],
+                "the terminal is \(terminalGrid) but the view's grid is \(gridAfter)")
+        // A new font means a new glyph atlas, and rows rebuilt against its metrics. A fresh atlas
+        // numbers its generations from the start again, so identity is what tells them apart.
+        let atlasAfter = view.renderContext.renderer.glyphCache.grayscale
+        #expect(atlasAfter !== atlasBefore, "the 26 pt font still draws from the 13 pt glyph atlas")
+        #expect(view.surface.metrics == view.renderContext.metrics,
+                "the surface was built at \(String(describing: view.surface.metrics)), not at the new font's metrics")
     }
 }

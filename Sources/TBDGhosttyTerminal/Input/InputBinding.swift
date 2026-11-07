@@ -69,6 +69,9 @@ struct SyncOutputWatchdog: Sendable, Equatable {
 
     /// Whether the mode has been continuously active since the last `.render`.
     var isTracking: Bool { activeSince != nil }
+
+    /// Forgets when the mode was first seen, so the next active tick starts the timeout afresh.
+    mutating func reset() { activeSince = nil }
 }
 
 // MARK: - The binding
@@ -248,6 +251,15 @@ extension GhosttyTerminal {
     }
 
     // MARK: DEC 2026
+
+    /// Restarts the DEC 2026 watchdog. The view calls this when it attaches: it took no frames
+    /// while detached, so the watchdog's record of when the mode was first seen is stale. Kept,
+    /// it would force off at the first frame a mode the program set only just now.
+    func resetSyncOutputWatchdog() {
+        input("resetting the synchronized-output watchdog", fallback: ()) { _, binding in
+            binding.watchdog.reset()
+        }
+    }
 
     /// One render-tick decision: reads mode 2026, runs the watchdog, and forces the mode off when a
     /// program has held it past the timeout. A closed terminal renders.

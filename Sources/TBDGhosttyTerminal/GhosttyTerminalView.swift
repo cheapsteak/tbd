@@ -294,6 +294,9 @@ public final class GhosttyTerminalView: NSView {
     /// seen and a display tick finds work: the terminal is read into the render state and, if it
     /// changed, encoded. A hidden or windowless view builds none. A test seam.
     public private(set) var framesBuilt = 0
+    /// How many of the built frames were encoded and committed to the GPU. A built frame with
+    /// nothing changed, or with no drawable to draw into, is not committed. A test seam.
+    public private(set) var framesCommitted = 0
 
     // MARK: Collaborators
 
@@ -319,6 +322,12 @@ public final class GhosttyTerminalView: NSView {
 
     private var grid: GridSize
     private var relay: RenderSignalRelay?
+    /// The render signal this view installed, so it only ever clears its own.
+    private var renderSignalToken: RenderSignalToken?
+    /// True from a failed attach until one succeeds. Only the first failure of a run is logged:
+    /// the attach is retried on every layout pass, and a surface that cannot attach would
+    /// otherwise log on each one.
+    private var attachFailing = false
     private var pendingGridResize = false
     private var isTerminalFocused = false
     private var blinkTask: Task<Void, Never>?
@@ -364,7 +373,7 @@ public final class GhosttyTerminalView: NSView {
             blinkTask?.cancel()
             frameDriver.adopt(nil)
             NotificationCenter.default.removeObserver(self)
-            if surface.isAttached { terminal.setRenderSignal(nil) }
+            if let renderSignalToken { terminal.clearRenderSignal(renderSignalToken) }
         }
     }
 
@@ -426,8 +435,10 @@ public final class GhosttyTerminalView: NSView {
             do {
                 try surface.attach(terminal)
             } catch {
-                terminalEngineLog.error(
-                    "re-attaching the surface failed: \(String(describing: error), privacy: .public)")
+                noteAttachFailure(error, "re-attaching the surface failed")
+                // The failed attach left the surface detached. Detach the view's half too, so
+                // the next layout pass or backing change sees a detached view and retries.
+                detachSurface()
             }
         }
         pendingGridResize = true
@@ -445,38 +456,69 @@ public final class GhosttyTerminalView: NSView {
     /// Attaches the surface while the view has a window and is not hidden, and detaches it
     /// otherwise. Detaching frees the render state and takes the render signal off the terminal,
     /// so a hidden view costs only the terminal itself.
+    ///
+    /// Also called from `layout()` and `viewDidChangeBackingProperties()`, which is what retries
+    /// an attach that failed. Nothing else retries it, so a surface that cannot attach costs one
+    /// attempt per layout pass and never a loop.
     private func updateAttachment() {
         if window != nil, !isHiddenOrHasHiddenAncestor {
             guard !surface.isAttached else { return }
-            do {
-                try surface.attach(terminal)
-            } catch {
-                terminalEngineLog.error("attaching the surface failed: \(String(describing: error), privacy: .public)")
-                return
-            }
-            surface.isFocused = isTerminalFocused
-            surface.cursorBlinkOn = true
-            let target = selfRef
-            let relay = RenderSignalRelay { target.object?.frameDriver.requestFrame() }
-            self.relay = relay
-            terminal.setRenderSignal { [weak relay] in relay?.signal() }
-            frameDriver.update {
-                $0.hasVisibleSurface = true
-                $0.needsUpdate = true
-            }
-            applyPendingGridResize()
-            startBlinkIfNeeded()
+            attachSurface()
         } else {
-            guard surface.isAttached else { return }
-            terminal.setRenderSignal(nil)
-            relay = nil
-            surface.detach()
-            stopBlink()
-            frameDriver.update {
-                $0.hasVisibleSurface = false
-                $0.needsUpdate = false
-            }
+            detachSurface()
         }
+    }
+
+    private func attachSurface() {
+        do {
+            try surface.attach(terminal)
+        } catch {
+            noteAttachFailure(error, "attaching the surface failed")
+            return
+        }
+        if attachFailing {
+            terminalEngineLog.notice("attaching the surface succeeded after failing")
+            attachFailing = false
+        }
+        surface.isFocused = isTerminalFocused
+        surface.cursorBlinkOn = true
+        let target = selfRef
+        let relay = RenderSignalRelay { target.object?.frameDriver.requestFrame() }
+        self.relay = relay
+        renderSignalToken = terminal.setRenderSignal { [weak relay] in relay?.signal() }
+        // While detached the view took no frames, so the watchdog's record of when mode 2026
+        // was first seen is stale. Kept, it would force off a mode the program set just now.
+        terminal.resetSyncOutputWatchdog()
+        frameDriver.update {
+            $0.hasVisibleSurface = true
+            $0.needsUpdate = true
+        }
+        applyPendingGridResize()
+        startBlinkIfNeeded()
+    }
+
+    /// Detaches the surface and the view's half of the attachment. Also run when the surface is
+    /// already detached but the view's half is not, as after a failed re-attach.
+    private func detachSurface() {
+        guard surface.isAttached || renderSignalToken != nil else { return }
+        if let renderSignalToken { terminal.clearRenderSignal(renderSignalToken) }
+        renderSignalToken = nil
+        relay = nil
+        stopBlink()
+        surface.detach()
+        frameDriver.update {
+            $0.hasVisibleSurface = false
+            $0.needsUpdate = false
+        }
+    }
+
+    /// Logs an attach failure, once per run of failures.
+    private func noteAttachFailure(_ error: any Error, _ what: StaticString) {
+        if !attachFailing {
+            terminalEngineLog.error(
+                "\(String(describing: what), privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+        attachFailing = true
     }
 
     /// `viewDidHide` and `viewDidUnhide` cover an ancestor being hidden; this covers the view's own
@@ -607,6 +649,7 @@ public final class GhosttyTerminalView: NSView {
 
     public override func layout() {
         super.layout()
+        updateAttachment()
         applyPendingGridResize()
     }
 
@@ -650,6 +693,7 @@ public final class GhosttyTerminalView: NSView {
     public override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         applyBackingScale(window?.backingScaleFactor ?? renderContext.scale)
+        updateAttachment()
     }
 
     /// Rebuilds the atlas at `scale` when it changed, and re-fits the grid: new metrics mean a
@@ -784,10 +828,11 @@ public final class GhosttyTerminalView: NSView {
             }
         }
         do {
-            try renderContext.renderer.render(
+            let outcome = try renderContext.renderer.render(
                 surface: surface, layer: layer,
                 willEncode: { self.onDrawStart?() },
                 onPresented: presented)
+            if outcome.didEncode { framesCommitted += 1 }
         } catch {
             terminalEngineLog.error("rendering a frame failed: \(String(describing: error), privacy: .public)")
         }
