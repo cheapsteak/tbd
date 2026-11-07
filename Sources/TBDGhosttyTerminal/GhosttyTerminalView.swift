@@ -328,6 +328,9 @@ public final class GhosttyTerminalView: NSView {
     /// the attach is retried on every layout pass, and a surface that cannot attach would
     /// otherwise log on each one.
     private var attachFailing = false
+    /// True from a frame whose render threw until one renders without throwing. Only the first
+    /// failure of a run is logged, for the same reason as `attachFailing`.
+    private var renderFailing = false
     private var pendingGridResize = false
     private var isTerminalFocused = false
     private var blinkTask: Task<Void, Never>?
@@ -853,7 +856,19 @@ public final class GhosttyTerminalView: NSView {
                 onPresented: presented)
             if outcome.didEncode { framesCommitted += 1 }
         } catch {
-            terminalEngineLog.error("rendering a frame failed: \(String(describing: error), privacy: .public)")
+            if !renderFailing {
+                terminalEngineLog.error("rendering a frame failed: \(String(describing: error), privacy: .public)")
+                renderFailing = true
+            }
+            // A failed frame leaves the surface dirty, so handing `needsDisplay` to the link would
+            // rerun the failure on every tick. Park the link instead: the next thing that asks for
+            // a frame (output, the blink, a resize, focus) tries again.
+            frameDriver.update { $0.needsUpdate = false }
+            return
+        }
+        if renderFailing {
+            terminalEngineLog.notice("rendering a frame succeeded after failing")
+            renderFailing = false
         }
         frameDriver.update { $0.needsUpdate = surface.needsDisplay }
     }
