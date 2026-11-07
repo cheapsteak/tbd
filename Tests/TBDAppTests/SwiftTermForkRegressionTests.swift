@@ -140,6 +140,57 @@ struct SwiftTermForkRegressionTests {
             mismatches.isEmpty,
             "\(mismatches.count) erased cells lost their background; first: \(mismatches.prefix(5))")
     }
+
+    /// The terminal caches the erase cells of a pen with a background, and
+    /// only those cached cells hold their background-only style until
+    /// something erases. A reclaim must keep that style while the pen stays
+    /// selected, or a new colour takes its identifier and erasing paints that
+    /// colour's foreground. The 300 by 220 screen holds every printed cell
+    /// without scrolling, because a line scrolled in would be filled with the
+    /// erase style and keep it whether or not the reclaim marks the cache.
+    @Test
+    func erasingWithAPenKeptThroughAReclaimKeepsTheEraseStyle() {
+        let cols = 300
+        let harness = Harness(cols: cols, rows: 220)
+        let blue = Attribute.Color.ansi256(code: 4)
+
+        // The pen takes style identifier 1 and its erase style 2, and the
+        // background stays blue from here on.
+        harness.feed("\u{1b}[31;44mA")
+        // The first flood colour takes 3, and the second prints over its cell,
+        // so nothing holds 3 any more.
+        harness.feed(foregroundSequence(floodColour(0)) + "x\u{8}")
+        // The rest take 4 through 65,535, which fills the table, and the last
+        // finds it full. Its reclaim releases 3, which the last colour then
+        // takes. A reclaim that left out the cached erase cells would release
+        // 2 as well, and the last colour would take that one, the lowest.
+        let floodCount = 65_534
+        var flood = ""
+        flood.reserveCapacity(floodCount * 20)
+        for index in 1..<floodCount {
+            flood += foregroundSequence(floodColour(index)) + "x"
+        }
+        harness.feed(flood)
+
+        harness.feed("\u{1b}[H\u{1b}[K")
+
+        var mismatches: [String] = []
+        for col in 0..<cols {
+            guard let attribute = harness.terminal.getCharData(col: col, row: 0)?.attribute else {
+                mismatches.append("col \(col): no cell")
+                continue
+            }
+            if attribute.fg != .defaultColor || attribute.bg != blue
+                || attribute.style != SwiftTerm.CharacterStyle.none
+                || attribute.underlineStyle != SwiftTerm.UnderlineStyle.none
+                || attribute.underlineColor != nil {
+                mismatches.append("col \(col): \(attribute)")
+            }
+        }
+        #expect(
+            mismatches.isEmpty,
+            "\(mismatches.count) erased cells lost the erase style; first: \(mismatches.prefix(5))")
+    }
 }
 
 /// A distinct truecolour for each flood cell.
