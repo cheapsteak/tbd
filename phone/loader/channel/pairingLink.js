@@ -14,10 +14,11 @@
 //   to in ways only one side observes, such as a nonzero number too small
 //   for a double, which `JSON.parse` reads as 0 and the daemon refuses;
 // - JSON that `JSON.parse` refuses and the daemon's JSONDecoder accepts: one
-//   trailing comma before a `}` or `]`, and anything malformed inside the
-//   value of a key the link does not define (a lone surrogate, an unknown
-//   escape, a raw control character, or a misspelled number such as `01` or
-//   `1.`), because JSONDecoder checks only the values it reads;
+//   trailing comma before a `}` or `]`, and anything malformed inside a value
+//   the daemon never reads (a lone surrogate, an unknown escape, a raw control
+//   character, or a misspelled number such as `01` or `1.`): the value of a key
+//   the link does not define, and, when `v` is not 1, every value but `v`,
+//   because JSONDecoder checks only the values it reads;
 // - link text with surrounding whitespace, or a tab or line break inside it,
 //   which this parser drops and the daemon's `URL(string:)` percent-encodes.
 

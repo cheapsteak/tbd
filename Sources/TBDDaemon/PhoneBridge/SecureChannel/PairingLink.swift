@@ -20,10 +20,11 @@ import Foundation
 ///   to in ways only one side observes, such as a nonzero number too small
 ///   for a double, which this decoder refuses and the loader reads as 0;
 /// - JSON that this decoder accepts and the loader's `JSON.parse` refuses:
-///   one trailing comma before a `}` or `]`, and anything malformed inside
-///   the value of a key the link does not define (a lone surrogate, an
-///   unknown escape, a raw control character, or a misspelled number such
-///   as `01` or `1.`), because this decoder checks only the values it reads;
+///   one trailing comma before a `}` or `]`, and anything malformed inside a
+///   value this decoder never reads (a lone surrogate, an unknown escape, a
+///   raw control character, or a misspelled number such as `01` or `1.`): the
+///   value of a key the link does not define, and, when `v` is not 1, every
+///   value but `v`, because this decoder checks only the values it reads;
 /// - link text with surrounding whitespace, or a tab or line break inside
 ///   it, which the loader drops before parsing and `URL(string:)`
 ///   percent-encodes.
