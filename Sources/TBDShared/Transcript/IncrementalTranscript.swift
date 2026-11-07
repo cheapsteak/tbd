@@ -33,12 +33,21 @@ public struct IncrementalTranscript: Sendable {
         /// Every `tool_use_id` whose `tool_result` arrived in this batch, in
         /// arrival order without duplicates — including ids whose call this
         /// transcript never ingested (the call sits in a page it never saw).
+        /// `isEmpty` does not read this field, so a batch whose only news is
+        /// here, as when each result's call was never ingested, reads as
+        /// empty. A consumer that needs result-only news must read this field
+        /// itself.
         public let resolvedToolUseIDs: [String]
         public init(appended: Range<Int>, updated: [Int], resolvedToolUseIDs: [String] = []) {
             self.appended = appended
             self.updated = updated
             self.resolvedToolUseIDs = resolvedToolUseIDs
         }
+        /// No item was appended and none was updated. Deliberately blind to
+        /// `resolvedToolUseIDs`: a batch whose only news is resolved tool-use
+        /// IDs, as when each result's call was never ingested, reads as
+        /// empty. A consumer that needs result-only news must read
+        /// `resolvedToolUseIDs` itself.
         public var isEmpty: Bool { appended.isEmpty && updated.isEmpty }
     }
 
