@@ -349,6 +349,24 @@
       "field": "relay"
     },
     {
+      "description": "the relay host ends in a label that starts with xn--",
+      "url": "https://acme-loader.github.io/#p=eyJleHAiOjE4MDAwMDAzMDAsImtleSI6Ik1lQXdQOVpCalMtTURuaTVIeUxveXUwUHZraGxiYzlIWi1TRFQzQWJqMkkiLCJuYW1lIjoiQWNtZeKAmXMgTWFjQm9vayBQcm8iLCJyZWxheSI6Imh0dHBzOi8vYWNtZS1yZWxheS54bi0tYWNtZSIsInJvb20iOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4Iiwic2VjcmV0IjoiSUNFaUl5UWxKaWNvS1NvckxDMHVMekF4TWpNME5UWTNPRGs2T3p3OVBqOCIsInYiOjF9",
+      "error": "badField",
+      "field": "relay"
+    },
+    {
+      "description": "the relay host has a label that ends in a hyphen",
+      "url": "https://acme-loader.github.io/#p=eyJleHAiOjE4MDAwMDAzMDAsImtleSI6Ik1lQXdQOVpCalMtTURuaTVIeUxveXUwUHZraGxiYzlIWi1TRFQzQWJqMkkiLCJuYW1lIjoiQWNtZeKAmXMgTWFjQm9vayBQcm8iLCJyZWxheSI6Imh0dHBzOi8vYWNtZS0ud29ya2Vycy5kZXYiLCJyb29tIjoiQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOCIsInNlY3JldCI6IklDRWlJeVFsSmljb0tTb3JMQzB1THpBeE1qTTBOVFkzT0RrNk96dzlQajgiLCJ2IjoxfQ",
+      "error": "badField",
+      "field": "relay"
+    },
+    {
+      "description": "the relay host has a 64-character label",
+      "url": "https://acme-loader.github.io/#p=eyJleHAiOjE4MDAwMDAzMDAsImtleSI6Ik1lQXdQOVpCalMtTURuaTVIeUxveXUwUHZraGxiYzlIWi1TRFQzQWJqMkkiLCJuYW1lIjoiQWNtZeKAmXMgTWFjQm9vayBQcm8iLCJyZWxheSI6Imh0dHBzOi8vYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYS53b3JrZXJzLmRldiIsInJvb20iOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4Iiwic2VjcmV0IjoiSUNFaUl5UWxKaWNvS1NvckxDMHVMekF4TWpNME5UWTNPRGs2T3p3OVBqOCIsInYiOjF9",
+      "error": "badField",
+      "field": "relay"
+    },
+    {
       "description": "v is written as 1e20 (the main JSON text respelled)",
       "url": "https://acme-loader.github.io/#p=eyJleHAiOjE4MDAwMDAzMDAsImtleSI6Ik1lQXdQOVpCalMtTURuaTVIeUxveXUwUHZraGxiYzlIWi1TRFQzQWJqMkkiLCJuYW1lIjoiQWNtZeKAmXMgTWFjQm9vayBQcm8iLCJyZWxheSI6Imh0dHBzOi8vYWNtZS1yZWxheS5hY21lLndvcmtlcnMuZGV2Iiwicm9vbSI6IkFBRUNBd1FGQmdjSUNRb0xEQTBPRHhBUkVoTVVGUllYR0JrYUd4d2RIaDgiLCJzZWNyZXQiOiJJQ0VpSXlRbEppY29LU29yTEMwdUx6QXhNak0wTlRZM09EazZPenc5UGo4IiwidiI6MWUyMH0",
       "error": "unsupportedVersion"

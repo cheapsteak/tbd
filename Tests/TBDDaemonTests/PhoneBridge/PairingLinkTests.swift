@@ -47,7 +47,7 @@ struct PairingLinkTests {
     @Test func invalidVectors() throws {
         let file = try PhoneTestVectors.load("pairing-link.json", as: PairingLinkFile.self)
         let now = Date(timeIntervalSince1970: file.now)
-        #expect(file.invalid.count == 38)
+        #expect(file.invalid.count == 41)
         for c in file.invalid {
             let url = try #require(URL(string: c.url), "\(c.description)")
             do {

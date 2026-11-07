@@ -242,6 +242,9 @@ function pairingLinkVectors() {
     relayCase('the relay host is the dotted address 256.0.0.1', 'https://256.0.0.1'),
     relayCase('the relay host has a label that starts with xn--', 'https://xn--acme.workers.dev'),
     relayCase('the relay ends in a newline, the JSON escape \\n', `${mainLink.relay}\n`),
+    relayCase('the relay host ends in a label that starts with xn--', 'https://acme-relay.xn--acme'),
+    relayCase('the relay host has a label that ends in a hyphen', 'https://acme-.workers.dev'),
+    relayCase('the relay host has a 64-character label', `https://${'a'.repeat(64)}.workers.dev`),
     {
       description: 'v is written as 1e20 (the main JSON text respelled)',
       url: respelledLinkURL('"v":1}', '"v":1e20}'),

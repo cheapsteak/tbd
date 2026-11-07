@@ -9,7 +9,7 @@ import Foundation
 /// The loader parses the same format with the same rules, in the same order,
 /// so both sides name the same error for the same link.
 ///
-/// Parity contract: for every input except those below, `parse` and the
+/// Parity contract: for every link text except those below, `parse` and the
 /// loader's `parsePairingLink` return the same link or fail with the same
 /// error code, and `phone/test-vectors/pairing-link.json` pins the cases.
 /// Outside the contract, either side's answer is acceptable, because the
@@ -17,7 +17,16 @@ import Foundation
 /// - duplicate object keys (this decoder keeps the first, the loader the last);
 /// - nesting depth within a few levels of 512;
 /// - numbers whose decimal text differs from the IEEE-754 double they round
-///   to in ways only one side observes.
+///   to in ways only one side observes, such as a nonzero number too small
+///   for a double, which this decoder refuses and the loader reads as 0;
+/// - JSON that this decoder accepts and the loader's `JSON.parse` refuses:
+///   one trailing comma before a `}` or `]`, and anything malformed inside
+///   the value of a key the link does not define (a lone surrogate, an
+///   unknown escape, a raw control character, or a misspelled number such
+///   as `01` or `1.`), because this decoder checks only the values it reads;
+/// - link text with surrounding whitespace, or a tab or line break inside
+///   it, which the loader drops before parsing and `URL(string:)`
+///   percent-encodes.
 struct PairingLink: Codable, Equatable, Sendable {
     var v: Int
     var relay: String
@@ -117,9 +126,10 @@ struct PairingLink: Codable, Equatable, Sendable {
     /// The payload as UTF-8 JSON text, under the loader's byte rules: no 00
     /// byte, at most one leading byte order mark, and strict UTF-8. Valid
     /// UTF-8 JSON never holds a raw 00 byte. Refusing one stops `JSONDecoder`
-    /// reading the payload as UTF-16 or UTF-32, as it does when 00 bytes
-    /// come first. Its own byte order mark check would also skip a second
-    /// mark, which the loader's `JSON.parse` refuses.
+    /// reading the payload as UTF-16 or UTF-32, as it does when a 00
+    /// byte is among its first four bytes. Its own byte order mark check
+    /// would also skip a second mark, which the loader's `JSON.parse`
+    /// refuses.
     private static func jsonText(_ payload: Data) throws -> Data {
         guard !payload.contains(0) else {
             throw PairingLinkError.badJSON
