@@ -4,7 +4,7 @@ import Testing
 @testable import TBDTerminalSerialization
 
 /// Snapshots of screens that end in blank rows or hold blank cells with a
-/// background colour, round-tripped through the `Pair` fixture from
+/// background colour, round-tripped through the `SnapshotPair` fixture from
 /// `TerminalSnapshotRoundTripTests`.
 ///
 /// The oracle is the screen a person sees: the receiver's viewport row by row,
@@ -53,7 +53,7 @@ struct TerminalSnapshotBlankRowTests {
     /// when it is below what the source holds: the receiver then holds the
     /// source's newest rows up to that many.
     private static func expectSameScreen(
-        _ pair: Pair, historyLimit: Int? = nil,
+        _ pair: SnapshotPair, historyLimit: Int? = nil,
         sourceLocation: SourceLocation = #_sourceLocation
     ) {
         #expect(viewport(of: pair.fresh) == viewport(of: pair.source),
@@ -92,7 +92,7 @@ struct TerminalSnapshotBlankRowTests {
 
     @Test("A screen cleared after scrollback keeps its rows and history in place")
     func screenClearedAfterScrollback() {
-        let pair = Pair(cols: 80, rows: 24)
+        let pair = SnapshotPair(cols: 80, rows: 24)
         // `ESC[H ESC[2J` is `clear` in xterm's terminfo entry. It erases the
         // screen and keeps the scrollback, so the viewport is one line of
         // text over 23 blank rows, with history above it.
@@ -104,7 +104,7 @@ struct TerminalSnapshotBlankRowTests {
 
     @Test("Lines that each end in a line feed keep the blank row the cursor sits on")
     func linesEndingInLineFeeds() {
-        let pair = Pair(cols: 80, rows: 24)
+        let pair = SnapshotPair(cols: 80, rows: 24)
         // Thirty lines on 24 rows: seven scroll into history and the cursor
         // sits on the blank last row, below `line 30`.
         pair.transfer(Self.numberedLines(30))
@@ -120,7 +120,7 @@ struct TerminalSnapshotBlankRowTests {
 
     @Test("A capped walk keeps the viewport in place")
     func cappedWalkKeepsTheViewportInPlace() {
-        let pair = Pair(cols: 80, rows: 24)
+        let pair = SnapshotPair(cols: 80, rows: 24)
         // The cap keeps 10 of the 37 history rows. Those 10 must still arrive
         // above a viewport that ends in 23 blank rows.
         pair.transfer(
@@ -136,7 +136,7 @@ struct TerminalSnapshotBlankRowTests {
     /// would send 24 lines here, and this catches it.
     @Test("A screen without history still trims its blank rows and round-trips")
     func screenWithoutHistoryStillTrims() {
-        let pair = Pair(cols: 80, rows: 24)
+        let pair = SnapshotPair(cols: 80, rows: 24)
         // The cursor is parked below the text, among the rows the trim drops,
         // so only the closing cursor address can put it back.
         pair.transfer("one\r\ntwo\r\nthree\u{1b}[10;5H")
@@ -164,7 +164,7 @@ struct TerminalSnapshotBlankRowTests {
         "abcdefgh\u{1b}[1;3H\u{1b}[45m\u{1b}[2P\u{1b}[0m",
     ])
     func eraseUnderABackgroundKeepsTheColour(input: String) {
-        let pair = Pair(cols: 80, rows: 24)
+        let pair = SnapshotPair(cols: 80, rows: 24)
         pair.source.feed(text: input)
         let expected = Self.attributes(of: pair.source)
         #expect(Self.colouredCells(expected) > 0, "the fixture must leave coloured blanks")
@@ -178,7 +178,7 @@ struct TerminalSnapshotBlankRowTests {
 
     @Test("A coloured alternate screen keeps its colour on the receiver and the source")
     func colouredAlternateScreen() {
-        let pair = Pair(cols: 80, rows: 24)
+        let pair = SnapshotPair(cols: 80, rows: 24)
         pair.source.feed(text: "\u{1b}[?1049h\u{1b}[44m\u{1b}[2Jx\u{1b}[0m")
         let expected = Self.attributes(of: pair.source)
         #expect(Self.colouredCells(expected) == 80 * 24, "the fixture must colour every cell")
@@ -197,7 +197,7 @@ struct TerminalSnapshotBlankRowTests {
 
     @Test("A coloured last row under history arrives whole, with no extra row after it")
     func colouredLastRowUnderHistory() {
-        let pair = Pair(cols: 20, rows: 5)
+        let pair = SnapshotPair(cols: 20, rows: 5)
         // Ten lines scroll six into history and leave the cursor on the last
         // row, which `ESC[2K` then colours out to the last column. That row
         // is the last one the walk sends, so the receiver ends it in pending

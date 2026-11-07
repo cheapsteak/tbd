@@ -3,7 +3,7 @@ import SwiftTerm
 import Testing
 @testable import TBDTerminalSerialization
 
-private final class ReplyCollector: TerminalDelegate, ModeReplyReader {
+final class SnapshotReplyCollector: TerminalDelegate, ModeReplyReader {
     var bytes: [UInt8] = []
     weak var terminal: Terminal?
     func send(source: Terminal, data: ArraySlice<UInt8>) { bytes.append(contentsOf: data) }
@@ -19,10 +19,9 @@ private final class ReplyCollector: TerminalDelegate, ModeReplyReader {
     }
 }
 
-/// Internal rather than private so `TerminalSnapshotBlankRowTests` can reuse it.
-final class Pair {
-    fileprivate let sourceReply = ReplyCollector()
-    fileprivate let freshReply = ReplyCollector()
+final class SnapshotPair {
+    let sourceReply = SnapshotReplyCollector()
+    let freshReply = SnapshotReplyCollector()
     let source: Terminal
     let fresh: Terminal
 
@@ -52,7 +51,7 @@ final class Pair {
 struct TerminalSnapshotRoundTripTests {
     @Test("Every captured mode survives the round trip")
     func stateRoundTrip() {
-        let pair = Pair()
+        let pair = SnapshotPair()
         pair.transfer("\u{1b}[?6h\u{1b}[?7l\u{1b}[?25l\u{1b}[?66h\u{1b}[4h\u{1b}[?2004h"
             + "\u{1b}[?1002h\u{1b}[?1006h\u{1b}[3;20r\u{1b}[1;31mhello")
         let (before, after) = pair.states()
@@ -61,7 +60,7 @@ struct TerminalSnapshotRoundTripTests {
 
     @Test("The visible screen matches cell for cell")
     func screenRoundTrip() {
-        let pair = Pair()
+        let pair = SnapshotPair()
         pair.transfer("\u{1b}[1;32mgreen bold\u{1b}[0m\r\nplain\r\n\u{1b}[7minverse")
         for row in 0..<3 {
             for col in 0..<20 {
@@ -75,7 +74,7 @@ struct TerminalSnapshotRoundTripTests {
 
     @Test("A stale alt screen in the receiver is superseded")
     func preludeSupersedesStaleState() {
-        let pair = Pair()
+        let pair = SnapshotPair()
         // Put the RECEIVER into a state the snapshot must overwrite. The red
         // background is set BEFORE `?1049h`, so it is what that switch saves
         // and what the prelude's `?1049l` restores. Setting it after would
@@ -102,7 +101,7 @@ struct TerminalSnapshotRoundTripTests {
 
     @Test("An alt-screen session round-trips, and exiting restores the primary")
     func altScreenRoundTrip() {
-        let pair = Pair()
+        let pair = SnapshotPair()
         // The saved cursor is parked away from home (`\e[s` at row 10, col 30)
         // on purpose: `assemble` positions the saved cursor before `?1049h`,
         // and with a home-position save the `\e[H` that follows would be
@@ -130,7 +129,7 @@ struct TerminalSnapshotRoundTripTests {
 
     @Test("The saved cursor a receiver restores on exit is the PRIMARY one")
     func primarySavedCursorSurvivesAltScreen() {
-        let pair = Pair()
+        let pair = SnapshotPair()
         // Two saved cursors, deliberately different. `?1049h` stores the
         // primary cursor — here row 7, col 20 — for a later `?1049l` to
         // restore; the `\e[s` on the alt screen stores an unrelated second one
@@ -152,7 +151,7 @@ struct TerminalSnapshotRoundTripTests {
 
     @Test("The cursor lands where it was, under origin mode and a scroll region")
     func originModeCursor() {
-        let pair = Pair()
+        let pair = SnapshotPair()
         pair.transfer("\u{1b}[5;15r\u{1b}[?6h\u{1b}[3;9H")
         #expect(pair.fresh.buffer.x == pair.source.buffer.x)
         #expect(pair.fresh.buffer.y == pair.source.buffer.y)
@@ -160,7 +159,7 @@ struct TerminalSnapshotRoundTripTests {
 
     @Test("Scrollback above the viewport arrives")
     func scrollbackArrives() {
-        let pair = Pair(cols: 40, rows: 5)
+        let pair = SnapshotPair(cols: 40, rows: 5)
         pair.transfer((1...30).map { "row-\($0)" }.joined(separator: "\r\n"))
         // The newest scrolled-away row must be reachable above the viewport.
         var seen = false
