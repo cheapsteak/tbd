@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chooseDecoder, startScanner } from '../../qr.js';
 import { QR_INTERVAL_MS } from '../../constants.js';
+import { FakeDocument } from '../support/fake-dom.js';
 
 /** A BarcodeDetector stand-in whose static getSupportedFormats is given per test. */
 function detectorWith(getSupportedFormats) {
@@ -204,4 +205,131 @@ test('no camera API, or a refused camera, calls onError once', async () => {
   assert.deepEqual(r2.errors, [refused]);
   assert.deepEqual(r2.texts, []);
   assert.equal(clock2.pending, 0);
+});
+
+test('startScanner calls back only after it returns, so onError can stop the scanner', async () => {
+  setCamera(null);
+  const clock = new FakeClock();
+  const errors = [];
+  const thrown = [];
+  /** @type {{stop(): void}} */
+  let scanner;
+  scanner = startScanner({
+    video: fakeVideo(),
+    onText: () => {},
+    onError: (error) => {
+      errors.push(error);
+      try {
+        scanner.stop();
+      } catch (e) {
+        thrown.push(e);
+      }
+    },
+    clock,
+  });
+  await flush();
+  assert.equal(errors.length, 1);
+  assert.deepEqual(thrown, []);
+  assert.equal(clock.pending, 0);
+});
+
+test('stop() right after startScanner returns never asks for the camera', async () => {
+  let asked = 0;
+  setCamera(async () => { asked += 1; return fakeStream(); });
+  const clock = new FakeClock();
+  const r = record();
+  const scanner = startScanner({ video: fakeVideo(), onText: r.onText, onError: r.onError, clock });
+  scanner.stop();
+  await flush();
+  assert.equal(asked, 0);
+  assert.deepEqual(r.errors, []);
+  assert.equal(clock.pending, 0);
+});
+
+// --- loadJsQR, with a fake document and fake Trusted Types --------------------------------
+
+const JSQR_URL = new URL('../../vendor/jsqr/dist/jsQR.js', import.meta.url).href;
+let copies = 0;
+
+/** A fresh copy of qr.js, so its memoized load and its policy start empty. */
+function freshQR() {
+  copies += 1;
+  return import(`../../qr.js?copy=${copies}`);
+}
+
+/**
+ * Installs a `trustedTypes` whose policies wrap each URL their rule passes, and returns the
+ * policies made, as `{name, rules}`.
+ */
+function installTrustedTypes(t) {
+  const policies = [];
+  globalThis.trustedTypes = {
+    createPolicy(name, rules) {
+      policies.push({ name, rules });
+      return { createScriptURL: (url) => ({ trustedScriptURL: rules.createScriptURL(url) }) };
+    },
+  };
+  t.after(() => { delete globalThis.trustedTypes; });
+  return policies;
+}
+
+/** Defines `globalThis.jsQR`, as the vendored script does, until the test ends. */
+function defineJsQR(t) {
+  const jsQR = function jsQR() { return null; };
+  globalThis.jsQR = jsQR;
+  t.after(() => { delete globalThis.jsQR; });
+  return jsQR;
+}
+
+test('the loader-jsqr policy passes only the jsQR URL, and two loads insert one script', async (t) => {
+  const policies = installTrustedTypes(t);
+  const { loadJsQR } = await freshQR();
+  const doc = new FakeDocument();
+
+  const first = loadJsQR(doc);
+  assert.equal(loadJsQR(doc), first);
+  assert.equal(policies.length, 1);
+  const [{ name, rules }] = policies;
+  assert.equal(name, 'loader-jsqr');
+  assert.equal(rules.createScriptURL(JSQR_URL), JSQR_URL);
+  for (const bad of [JSQR_URL + '?x', JSQR_URL + '#x', 'blob:https://acme.example/6b1f0c1e-0000-4000-8000-000000000000', 'https://acme.example/jsQR.js', '']) {
+    assert.throws(() => rules.createScriptURL(bad), TypeError, bad);
+  }
+
+  assert.equal(doc.head.children.length, 1);
+  const [script] = doc.head.children;
+  assert.equal(script.tagName, 'script');
+  assert.deepEqual(script.src, { trustedScriptURL: JSQR_URL });
+
+  const jsQR = defineJsQR(t);
+  script.load();
+  assert.equal(await first, jsQR);
+  assert.equal(loadJsQR(doc), first);
+  assert.equal(doc.head.children.length, 1);
+  assert.equal(policies.length, 1);
+});
+
+test('a failed jsQR load is forgotten, so a later scan tries again', async (t) => {
+  const policies = installTrustedTypes(t);
+  const { loadJsQR } = await freshQR();
+  const doc = new FakeDocument();
+
+  const fetchFailed = loadJsQR(doc);
+  doc.head.children[0].fail();
+  await assert.rejects(fetchFailed, /jsQR failed to load/);
+  assert.deepEqual(doc.head.children, []);
+
+  const undefinedGlobal = loadJsQR(doc);
+  assert.notEqual(undefinedGlobal, fetchFailed);
+  assert.equal(doc.head.children.length, 1);
+  doc.head.children[0].load();
+  await assert.rejects(undefinedGlobal, /jsQR did not define itself/);
+
+  const retry = loadJsQR(doc);
+  assert.notEqual(retry, undefinedGlobal);
+  const jsQR = defineJsQR(t);
+  doc.head.children.at(-1).load();
+  assert.equal(await retry, jsQR);
+  assert.equal(loadJsQR(doc), retry);
+  assert.equal(policies.length, 1);
 });

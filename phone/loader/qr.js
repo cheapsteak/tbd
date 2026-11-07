@@ -40,23 +40,32 @@ export async function chooseDecoder(g = globalThis) {
 }
 
 /**
- * Loads the vendored jsQR once, as one classic script, and resolves with `globalThis.jsQR`.
- * Later calls get the same promise, even after a failure.
+ * Loads the vendored jsQR as one classic script, and resolves with `globalThis.jsQR`.
+ * Calls while a load is pending, or after one succeeded, get the same promise. A failed load
+ * is forgotten, so a later call tries again.
  * @param {Document} [doc]
  * @returns {Promise<Function>}
  */
 export function loadJsQR(doc = document) {
   if (jsQRPromise === null) {
-    jsQRPromise = new Promise((resolve, reject) => {
+    /** @type {Promise<Function>} */
+    const loading = new Promise((resolve, reject) => {
       const script = doc.createElement('script');
       script.addEventListener('load', () => {
         const jsQR = /** @type {any} */ (globalThis).jsQR;
         if (typeof jsQR === 'function') resolve(jsQR);
         else reject(new Error('jsQR did not define itself'));
       });
-      script.addEventListener('error', () => reject(new Error('jsQR failed to load')));
+      script.addEventListener('error', () => {
+        script.remove();
+        reject(new Error('jsQR failed to load'));
+      });
       script.src = jsQRScriptURL();
       doc.head.append(script);
+    });
+    jsQRPromise = loading;
+    loading.catch(() => {
+      if (jsQRPromise === loading) jsQRPromise = null;
     });
   }
   return jsQRPromise;
@@ -130,8 +139,9 @@ function sourceSize(source) {
 /**
  * Shows the rear camera in `video` and scans it every QR_INTERVAL_MS. The first text holding
  * a pairing fragment (`#p=`) stops the scanner and goes to `onText`. No camera, a refused
- * camera, or a decoder that cannot load stops it and calls `onError`. After `stop()`, or
- * after either callback, nothing more is called and every camera track is stopped.
+ * camera, or a decoder that cannot load stops it and calls `onError`. Neither callback runs
+ * before this function returns. After `stop()`, or after either callback, nothing more is
+ * called and every camera track is stopped.
  * @param {{video: HTMLVideoElement, onText: (text: string) => void,
  *   onError: (error: unknown) => void, clock?: Clock}} options
  * @returns {{stop(): void}}
@@ -193,6 +203,9 @@ export function startScanner({ video, onText, onError, clock = systemClock }) {
   }
 
   async function begin() {
+    // Never call back before startScanner has returned, so a callback can use its result.
+    await null;
+    if (stopped) return;
     const media = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices;
     if (!media || typeof media.getUserMedia !== 'function') {
       fail(new Error('no camera on this page'));

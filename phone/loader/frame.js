@@ -19,7 +19,7 @@ import { base64urlEncode } from './channel/pairingLink.js';
  * @property {string} text The bundle's text.
  * @property {string} sha256 The lowercase hex SHA-256 of `text`'s UTF-8 bytes.
  * @property {(body: object) => 'sent' | 'offline' | 'tooLarge'} sendApp Sends an `app` body
- *   to the laptop.
+ *   to the laptop. A throw is reported to the app as `tooLarge`.
  * @property {(url: string) => void} onOpenLink Gets a URL that passed `openableURL`.
  * @property {(reason: FaultReason) => void} onFault Called at most once. The frame is already
  *   destroyed when it is called.
@@ -209,7 +209,15 @@ export class AppFrame {
     const message = appPortMessage(data);
     if (message === null) return;
     if (message.t === 'app') {
-      const result = this.#sendApp(message.body);
+      /** @type {'sent' | 'offline' | 'tooLarge'} */
+      let result;
+      try {
+        result = this.#sendApp(message.body);
+      } catch {
+        // A body that cannot be encoded, such as one with a cycle or a BigInt, makes
+        // JSON.stringify throw. To the app it is a message the loader cannot send.
+        result = 'tooLarge';
+      }
       if (result !== 'sent') this.#post({ t: 'sendFailed', reason: result });
     } else {
       const url = openableURL(message.url);
@@ -220,9 +228,10 @@ export class AppFrame {
 
 /**
  * Whether a window `message` event is the runner's `ready` from this frame: from the frame's
- * own window, carrying this frame's nonce, before the frame loaded a second document, and
- * before the bundle went out. A `ready` may arrive before the frame's first `load`.
- * @param {{source: unknown, data: unknown}} event
+ * own window, from an opaque origin (so the sandbox took effect), carrying this frame's
+ * nonce, before the frame loaded a second document, and before the bundle went out. A
+ * `ready` may arrive before the frame's first `load`.
+ * @param {{source: unknown, origin: unknown, data: unknown}} event
  * @param {{frameWindow: unknown, nonce: string, loadCount: number, started: boolean}} state
  * @returns {boolean}
  */
@@ -230,6 +239,8 @@ export function isRunnerReady(event, { frameWindow, nonce, loadCount, started })
   if (frameWindow === null || frameWindow === undefined || event.source !== frameWindow) {
     return false;
   }
+  // A sandboxed document without allow-same-origin posts with the origin "null".
+  if (event.origin !== 'null') return false;
   if (loadCount > 1 || started) return false;
   const data = event.data;
   if (!isRecord(data) || data.type !== 'ready') return false;
@@ -276,8 +287,7 @@ export function openableURL(value) {
 
 /**
  * The app-to-loader messages, rebuilt from only their known fields: `{t:'app', body}` with
- * a non-null, non-array object body, or `{t:'openLink', url}` with a string url. Anything
- * else is null.
+ * a plain-object body, or `{t:'openLink', url}` with a string url. Anything else is null.
  * @param {unknown} data
  * @returns {{t: 'app', body: object} | {t: 'openLink', url: string} | null}
  */
@@ -285,8 +295,7 @@ export function appPortMessage(data) {
   if (!isRecord(data)) return null;
   if (data.t === 'app') {
     const body = data.body;
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
-    return { t: 'app', body };
+    return isPlainObject(body) ? { t: 'app', body } : null;
   }
   if (data.t === 'openLink') {
     return typeof data.url === 'string' ? { t: 'openLink', url: data.url } : null;
@@ -347,4 +356,16 @@ function px(value) {
  */
 function isRecord(value) {
   return typeof value === 'object' && value !== null;
+}
+
+/**
+ * An object literal or a null-prototype object; not an array, a Date, a Map or any other
+ * built-in or class instance.
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isPlainObject(value) {
+  if (!isRecord(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
