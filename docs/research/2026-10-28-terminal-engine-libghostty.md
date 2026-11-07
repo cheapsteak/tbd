@@ -266,9 +266,11 @@ compress that the host calls took that scrollback from about 17 MB to between
 
 **Same screen.** Most of the corpus matched at cell level, and every difference
 has a named cause. Where the engines disagreed, SwiftTerm was wrong more often.
-Two kinds of grapheme cluster could not be ruled either way: Devanagari
-conjuncts, and VS16 at the right edge. Which one suits a program depends on that
-program's own width calculation.
+For example, `CSI S` on the primary screen pushes rows into scrollback on
+`libghostty-vt`, as on xterm, and not on SwiftTerm. Two kinds of grapheme
+cluster could not be ruled either way: Devanagari conjuncts, and VS16 at the
+right edge. Which one suits a program depends on that program's own width
+calculation.
 
 **Handover.** See "Two emulators, one snapshot format".
 
@@ -322,14 +324,18 @@ TBD's own handover and in its SwiftTerm fork:
 - **Rows shift on reattach** – the cell walk dropped trailing blank rows even
   with history above them, so the replayed screen landed too low and the cursor
   pointed at the wrong line. It hit 6 of 24 checkpoints in a Claude Code
-  recording.
+  recording. Fixed in #1393.
 - **Background colour lost on blank cells** – a blank cell with only a
-  background colour was trimmed from the end of its line.
-- **Hidden cursor shown again** – the writer sent `?25l` before `?1049h`.
+  background colour was trimmed from the end of its line. Fixed in #1393.
+- **Hidden cursor shown again** – the writer sent `?25l` before `?1049h`, on
+  both the holder and the tmux attach paths. Fixed in #1392.
 - **No tab stops past column 80** – on a SwiftTerm terminal created wider than
-  80 columns, which is how the daemon creates its terminal.
+  80 columns, which is how the daemon creates its terminal. Fixed in #1394.
 - **Colour lost after 65,535 styles** – the fork's style table never reclaimed
-  entries, so new styles fell back to the default.
+  entries, so new styles fell back to the default. Fixed in #1394.
+
+The check also found state that TBD's writer never carries, such as a cursor
+left in pending wrap. It bounds what any viewer can show after attach.
 
 ## Ghostty on 2026-11-06
 
