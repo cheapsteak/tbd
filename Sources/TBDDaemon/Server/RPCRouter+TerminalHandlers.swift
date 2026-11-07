@@ -6239,7 +6239,7 @@ extension RPCRouter {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
-        guard let sessionID = terminal.claudeSessionID,
+        guard terminal.claudeSessionID != nil,
               let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
@@ -6247,14 +6247,8 @@ extension RPCRouter {
         // The transcript renders parent-file items only (Task/Agent tool calls
         // and their results live in the parent JSONL), so the full-body lookup
         // scans only the primary session file — subagent JSONLs are never opened.
-        let primaryPath: String
-        if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
-            primaryPath = storedPath
-        } else {
-            guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-                return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
-            }
-            primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        guard let primaryPath = ClaudeTranscriptLocator.filePath(terminal: terminal, worktreePath: worktree.path) else {
+            return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
         let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
 
