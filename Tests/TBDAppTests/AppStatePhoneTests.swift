@@ -111,7 +111,9 @@ struct AppStatePhoneTests {
             let fake = FakePhoneClient(status: status())
             state.phoneClient = fake
             state.handleDelta(.phoneStatusChanged)
-            let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            // `fake` is an actor, so the closure can be `@Sendable` and leave
+            // the main actor for `pollUntilTrue`.
+            let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
                 await fake.statusCalls == 1
             }
             #expect(outcome == .satisfied)
