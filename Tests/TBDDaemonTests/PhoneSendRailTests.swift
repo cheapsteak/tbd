@@ -447,6 +447,28 @@ struct PhoneSendRailTests {
         #expect(sendRows.isEmpty, "a missing target leaves no row")
     }
 
+    /// The phone's refusals run after the send core's own terminal and
+    /// worktree lookup. A send to a terminal whose worktree is not local gets
+    /// the core's own answer and leaves no row, even when the terminal is a
+    /// shell the phone's shell refusal would otherwise decline.
+    @Test func aPairedPhoneSendToANonLocalWorktreeGetsTheCoresNotFound() async throws {
+        let harness = try await SendHarness.make()
+        let remote = try await harness.addRemoteTerminal(kind: .shell)
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: remote.id, submit: true, parts: [.text("ls")]),
+            deviceID: UUID())
+
+        #expect(response.error == "Worktree not found for terminal: \(remote.id)")
+        #expect(response.error != RPCRouter.phoneShellSendRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        let logPath = await harness.router.actuationLog.path
+        let sendRows = ActuationRecordReader(activePath: logPath).readRows()
+            .filter { row in row.method == RPCMethod.terminalSend }
+        #expect(sendRows.isEmpty, "a non-local target leaves no row")
+    }
+
     /// The queued prompt now runs through the shared rail, and still reaches
     /// the pane with no envelope in front of it.
     @Test func theQueuedPromptRailStillSuppresses() async throws {
@@ -455,6 +477,17 @@ struct PhoneSendRailTests {
         #expect(await harness.router.sendQueuedPromptVerbatim(
             terminalID: harness.terminal.id, text: "q", submit: true))
         #expect(harness.tmux.pastedBodies == ["q"])
+    }
+
+    /// The phone's checks stay on the phone's rail. The queued prompt shares
+    /// the internal rail and the send core, and delivers a lone CR, which the
+    /// phone would refuse as a control character, byte for byte.
+    @Test func theQueuedPromptRailDeliversALoneCRUnchanged() async throws {
+        let harness = try await SendHarness.make()
+
+        #expect(await harness.router.sendQueuedPromptVerbatim(
+            terminalID: harness.terminal.id, text: "a\rb", submit: true))
+        #expect(harness.tmux.pastedBodies == ["a\rb"])
     }
 }
 
@@ -498,5 +531,18 @@ private extension SendHarness {
         try await db.terminals.create(
             worktreeID: terminal.worktreeID, tmuxWindowID: "@4", tmuxPaneID: "%8",
             claudeSessionID: claudeSessionID, kind: nil)
+    }
+
+    /// A terminal of `kind` in a remote worktree of the harness's repo: a
+    /// worktree with no files on this machine, which `getLocal` refuses.
+    func addRemoteTerminal(kind: TerminalKind) async throws -> TBDShared.Terminal {
+        let local = try await db.worktrees.get(id: terminal.worktreeID)
+        let repoID = try #require(local?.repoID)
+        let remote = try await db.worktrees.createRemote(
+            repoID: repoID, name: "acme-remote", branch: "main",
+            provider: "acme-provider", sessionID: "acme-session")
+        return try await db.terminals.create(
+            worktreeID: remote.id, tmuxWindowID: "@5", tmuxPaneID: "%9",
+            claudeSessionID: nil, kind: kind)
     }
 }
