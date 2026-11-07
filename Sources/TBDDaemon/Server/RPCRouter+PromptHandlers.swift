@@ -42,7 +42,8 @@ extension RPCRouter {
     /// envelope suppression does, through the same check: the kernel-named
     /// peer pid must be the recorded app identity, re-verified
     /// (`authenticatesEnvelopeSuppression`). A nil context — every non-socket
-    /// caller — is refused, as is any other process on the socket.
+    /// caller — is refused, as is any other process on the socket. A paired
+    /// phone's `.pairedPhone` authority never reaches this check.
     func promptAnswerPeerRefusal(
         connection: RPCConnectionContext?, method: String
     ) async -> RPCResponse? {
@@ -89,8 +90,10 @@ extension RPCRouter {
 
     /// The core of `prompt.answer`, for every caller past its own edge: the
     /// socket handler above and the phone bridge. Same results and errors as
-    /// `handlePromptAnswer`; `authority` decides only whether the socket
-    /// peer check runs, and it runs right after the flag check.
+    /// `handlePromptAnswer`, except that it never throws a decode error (the
+    /// handler decodes) and, under `.pairedPhone`, never returns
+    /// `promptAnswerNotFromAppRefusal`. `authority` decides only whether the
+    /// socket peer check runs, and it runs right after the flag check.
     func answerPrompt(
         _ p: PromptAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
