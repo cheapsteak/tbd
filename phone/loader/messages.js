@@ -20,4 +20,9 @@ export const MESSAGES = Object.freeze({
   badName: 'Use 1 to 64 letters, with no control characters.',
   /** @param {string} code */
   checkCode: (code) => `Check this code on your laptop: ${formatCode(code)}`,
+  // Status and hint text of the laptops list and the header strip, in the mocks' words.
+  online: 'Online',
+  offlineRow: 'Offline',
+  reconnecting: 'Reconnecting…',
+  homeScreenHint: "Add this page to your Home Screen. Safari then keeps this phone's keys, even after a week without a visit.",
 });

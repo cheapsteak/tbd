@@ -300,7 +300,8 @@ before="$(cd "$real_loader" && find . -type f -exec shasum -a 256 {} + | LC_ALL=
 run "$real_loader" "$tmp/real-site" https://acme.github.io
 after="$(cd "$real_loader" && find . -type f -exec shasum -a 256 {} + | LC_ALL=C sort)"
 if [ "$rc" -eq 0 ]; then ok "the real phone/loader stages"; else bad "real tree: rc=$rc err=$err"; fi
-for p in runner.html runner.js channel/noise.js vendor/jsqr/dist/jsQR.js; do
+for p in index.html main.js loader.css ui.js manifest.webmanifest runner.html runner.js \
+  channel/noise.js vendor/jsqr/dist/jsQR.js; do
   if listed "$p"; then ok "the real tree stages $p"; else bad "the real tree must stage $p"; fi
 done
 if grep -Eq '^test/|\.test\.js$|\.md$|(^|/)\.|^vendor/vendor\.lock$' <<<"$out"; then
