@@ -372,9 +372,10 @@ carries message text or answers. Pairing, Allow, Deny and Revoke are logged the 
 **Laptop-side RPCs** are app-only, so no other local process can approve a pairing: `phone.status`,
 `phone.pairStart`, `phone.pairAllow`, `phone.pairDeny`, `phone.devices`, `phone.revoke`,
 `config.setPhoneControlEnabled`, `config.setPhoneRelayURL` and `config.setPhoneLoaderURL`.
-App-only phone RPCs also check that the caller's executable is one of TBD's own app binaries: the
-one beside the daemon, its bundle, or /Applications/TBD.app. A process that can reach the daemon's
-sockets but cannot write those locations, such as a sandboxed agent, cannot pair a phone.
+App-only phone RPCs also check that the caller's executable is one of TBD's own app binaries. This
+stops a process that only connects to the daemon's sockets. It does not stop a same-user process
+that can launch the TBD app binary, which section 1 already treats as trusted. Every pairing raises
+a TBD notification naming the phone, so a pairing the user did not make is visible.
 
 ## 6. Sessions the phone can reach
 
