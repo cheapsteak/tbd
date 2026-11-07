@@ -1686,15 +1686,7 @@ extension AppState {
 
     /// Where a depth-first walk of the sidebar (`sidebarWalk`,
     /// `appendSubtree`) lists a row against its nested worktrees.
-    enum SidebarWalkOrder {
-        /// The row, then its nested worktrees: the order the sidebar shows
-        /// (`allWorktreesOrdered`).
-        case parentsFirst
-        /// Its nested worktrees, then the row: the order a selection's
-        /// archive runs in (`selectionArchiveRunOrder`), since a worktree
-        /// cannot be archived while a nested one is active.
-        case childrenFirst
-    }
+    typealias SidebarWalkOrder = SidebarOrder.Walk
 
     /// The sidebar's walk of every repo: each repo's main row (if any), then
     /// a depth-first walk of its top-level active and creating worktrees in
@@ -1702,20 +1694,12 @@ extension AppState {
     /// `order`. Both orders visit the same rows; only where a row stands
     /// against its nested worktrees differs.
     func sidebarWalk(_ order: SidebarWalkOrder) -> [Worktree] {
+        let index = childrenIndex()
         var result: [Worktree] = []
         for repo in repos {
-            let inRepo = worktrees[repo.id] ?? []
-            // Main row first (if present in this repo).
-            if let main = inRepo.first(where: { $0.status == .main }) {
-                result.append(main)
-            }
-            // Top-level active/creating worktrees in this repo, in sibling order.
-            let topLevel = inRepo
-                .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
-                .sorted(by: Worktree.precedesSibling)
-            for wt in topLevel {
-                appendSubtree(wt, depth: 0, order: order, into: &result)
-            }
+            result += SidebarOrder.walk(
+                repoWorktrees: worktrees[repo.id] ?? [], children: index, order: order
+            ).map(\.worktree)
         }
         return result
     }
@@ -1734,7 +1718,7 @@ extension AppState {
         _ wt: Worktree, depth: Int, order: SidebarWalkOrder, into result: inout [Worktree]
     ) {
         if order == .parentsFirst { result.append(wt) }
-        if depth < 50 {
+        if depth < SidebarOrder.maxDepth {
             for child in children(of: wt.id) {
                 appendSubtree(child, depth: depth + 1, order: order, into: &result)
             }

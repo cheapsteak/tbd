@@ -203,19 +203,6 @@ extension AppState {
     }
 }
 
-extension Worktree {
-    /// The order of one set of siblings, the daemon's: `sortOrder`, then
-    /// `createdAt`, then ID. `worktree.moveMany` renumbers a group in this
-    /// order, so every list that shows a group sorts it this way too: rows
-    /// that tie on `sortOrder` then show where the first move into their
-    /// group leaves them, instead of in whatever order the sort met them.
-    static func precedesSibling(_ lhs: Worktree, _ rhs: Worktree) -> Bool {
-        if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
-        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
-        return lhs.id.uuidString < rhs.id.uuidString
-    }
-}
-
 /// What a failed move restores: the carried rows' parents, and the
 /// `sortOrder` of every row in the groups they left and the group they
 /// joined, as they stood at the drop.

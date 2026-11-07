@@ -207,25 +207,7 @@ final class AppState {
         // cache hits — see "THE WARM-CACHE DEPENDENCY TRAP" above.
         _ = worktrees
         if let cached = childrenIndexCache { return cached }
-        var index: [UUID: [Worktree]] = [:]
-        for rows in worktrees.values {
-            for worktree in rows {
-                guard let parentID = worktree.parentWorktreeID,
-                      worktree.status == .active || worktree.status == .creating else { continue }
-                index[parentID, default: []].append(worktree)
-            }
-        }
-        // The daemon's sibling order, ties included: `Dictionary.values`
-        // iteration order is nondeterministic and `sort` is not stable, so a
-        // comparator on `sortOrder` alone left tied rows in an arbitrary
-        // order, which the first `worktree.moveMany` into the group then
-        // renumbered by `createdAt` — moving rows the user never touched.
-        // `Array(index.keys)` rather than `index.keys`: the lazy view holds a
-        // reference to the dictionary's storage, so mutating `index` inside
-        // the loop would force a full copy-on-write copy on every iteration.
-        for key in Array(index.keys) {
-            index[key]?.sort(by: Worktree.precedesSibling)
-        }
+        let index = SidebarOrder.childrenIndex(worktrees.values.joined())
         childrenIndexCache = index
         return index
     }

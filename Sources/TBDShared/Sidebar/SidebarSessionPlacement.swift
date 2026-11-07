@@ -1,5 +1,4 @@
 import Foundation
-import TBDShared
 
 /// Where the sidebar places each remote session: under the repository it
 /// resolved to, after that repository's local worktrees, or under its
@@ -7,13 +6,13 @@ import TBDShared
 /// `AppState`'s sidebar projections, `SidebarTreeBuilder` and the Provider
 /// Desk share one rule, and a test can call it without an `AppState` or a
 /// view hierarchy.
-enum SidebarSessionPlacement {
+public enum SidebarSessionPlacement {
     // MARK: Sessions under a repository
 
     /// The remote locations a section's worktree rows already stand for. The
     /// adopted-lane half of the filter in `matchedRemoteSessionIndices`, split
     /// out so a caller can compare it across renders without re-deriving it.
-    static func adoptedLocations(_ worktrees: [Worktree]) -> Set<WorktreeLocation> {
+    public static func adoptedLocations(_ worktrees: [Worktree]) -> Set<WorktreeLocation> {
         Set(worktrees.map(\.location).filter { !$0.isLocal })
     }
 
@@ -57,7 +56,7 @@ enum SidebarSessionPlacement {
     /// O(n log n) times, and parsing inside it was the measured main-thread
     /// stall while typing. `parse` is the test seam for counting those parses;
     /// production always takes the default.
-    static func matchedRemoteSessionIndices(
+    public static func matchedRemoteSessionIndices(
         _ all: [RemoteSessionInfo],
         repoID: UUID,
         adopted: Set<WorktreeLocation>,
@@ -77,9 +76,14 @@ enum SidebarSessionPlacement {
 
     /// The pre-parsed sort key for one session: its `created_at` (nil when
     /// absent or unparseable) and its `id.uuidString`, the tie-break.
-    struct CreationKey {
-        let createdAt: Date?
-        let uuid: String
+    public struct CreationKey {
+        public let createdAt: Date?
+        public let uuid: String
+
+        public init(createdAt: Date?, uuid: String) {
+            self.createdAt = createdAt
+            self.uuid = uuid
+        }
     }
 
     /// Ascending creation-time ordering on pre-parsed keys. A session
@@ -90,7 +94,7 @@ enum SidebarSessionPlacement {
     /// deterministic across renders regardless of source-array order.
     /// Keys are parsed once before sorting because this comparator runs
     /// O(n log n) times.
-    static func isOrderedByCreation(_ a: CreationKey, _ b: CreationKey) -> Bool {
+    public static func isOrderedByCreation(_ a: CreationKey, _ b: CreationKey) -> Bool {
         switch (a.createdAt, b.createdAt) {
         case let (x?, y?) where x != y: return x < y
         case (nil, .some): return false
@@ -109,7 +113,7 @@ enum SidebarSessionPlacement {
     /// (`lastSeen`, `gone`, `payload.state`, `agentState`) are deliberately
     /// absent, so a sighting that changes only those does not force a
     /// re-sort.
-    static func sameMatchInputs(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
+    public static func sameMatchInputs(_ a: RemoteSessionInfo, _ b: RemoteSessionInfo) -> Bool {
         a.provider == b.provider
             && a.payload.id == b.payload.id
             && a.payload.createdAt == b.payload.createdAt
@@ -129,7 +133,7 @@ enum SidebarSessionPlacement {
     /// `RemoteTimestamp`, alongside the ordering rule that reads the
     /// contract's other timestamp. Two parsers for one wire format is one
     /// too many.
-    static func parsedCreatedAt(_ raw: String?) -> Date? {
+    public static func parsedCreatedAt(_ raw: String?) -> Date? {
         RemoteTimestamp.parse(raw)
     }
 
@@ -167,7 +171,7 @@ enum SidebarSessionPlacement {
     ///   vanish from the sidebar entirely once their repo is hidden. Hiding
     ///   a repo is a durable choice; its remote sessions disappearing along
     ///   with it is the deliberate consequence, not a bug to route around.
-    static func knownRepoIDs(repos: [Repo], repoFilter: UUID?) -> Set<UUID> {
+    public static func knownRepoIDs(repos: [Repo], repoFilter: UUID?) -> Set<UUID> {
         if let repoFilter {
             return [repoFilter]
         }
@@ -194,7 +198,7 @@ enum SidebarSessionPlacement {
     /// archived sessions in `list` and assigns the caller the display policy
     /// for them, and these two filters are where TBD applies it. They stay
     /// reachable in the Provider Desk's session ledger.
-    static func sessions(
+    public static func sessions(
         in all: [RemoteSessionInfo], forProvider provider: String, knownRepoIDs: Set<UUID>
     ) -> [RemoteSessionInfo] {
         all.filter {
