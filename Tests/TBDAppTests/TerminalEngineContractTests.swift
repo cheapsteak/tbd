@@ -87,16 +87,25 @@ struct TerminalEngineContractTests {
 
         // Only the engine, which is `Sendable`, the lock and the deadline
         // cross into the task; `feed` is the one requirement callable off main.
+        // The loop never suspends, so it runs on a thread these tests own
+        // instead of holding a cooperative-pool thread for as long as main is
+        // slow to read. A task executor preference does not reach into a
+        // detached task from outside (SE-0417), so the task takes it itself,
+        // and records its thread so a preference that stops applying goes red.
         let feeder = Task.detached { [engine, progress, end] in
-            var index = 0
-            while ContinuousClock.now < end {
-                guard index < 1_000 || progress.withLock({ $0.overlappingReads }) < 50 else { break }
-                engine.feed(Array("\u{1b}[H\u{1b}[2Kline \(index)".utf8)[...])
-                let fed = index
-                progress.withLock { $0.lastFed = fed }
-                index += 1
+            await withTaskExecutorPreference(GateExecutor.shared) {
+                let thread = runningThreadName()
+                progress.withLock { $0.feederThread = thread }
+                var index = 0
+                while ContinuousClock.now < end {
+                    guard index < 1_000 || progress.withLock({ $0.overlappingReads }) < 50 else { break }
+                    engine.feed(Array("\u{1b}[H\u{1b}[2Kline \(index)".utf8)[...])
+                    let fed = index
+                    progress.withLock { $0.lastFed = fed }
+                    index += 1
+                }
+                progress.withLock { $0.finished = true }
             }
-            progress.withLock { $0.finished = true }
         }
 
         // The start barrier: until the first feed is in, row 0 is blank.
@@ -120,6 +129,8 @@ struct TerminalEngineContractTests {
         await feeder.value
 
         let outcome = progress.withLock { $0 }
+        #expect(outcome.feederThread == GateExecutor.threadName,
+                "the feeder ran on \(outcome.feederThread ?? "an unnamed thread"), not on a thread these tests own")
         #expect(outcome.overlappingReads >= 50,
                 "main read only \(outcome.overlappingReads) times while the feeder ran, so the reads did not overlap the feeds")
         #expect(torn.isEmpty, "\(torn.count) of \(reads) reads were torn, for example \(torn.prefix(3))")
@@ -588,12 +599,24 @@ struct TerminalEngineContractTests {
 
 // MARK: - Fixture
 
-/// What the background feed test's two sides share: the last line fed, whether
-/// the feeder is done, and how many of main's reads it overlapped.
+/// What the background feed test's two sides share: the thread the feeder ran
+/// on, the last line fed, whether the feeder is done, and how many of main's
+/// reads it overlapped.
 private struct FeedProgress: Sendable {
+    var feederThread: String?
     var lastFed: Int?
     var finished = false
     var overlappingReads = 0
+}
+
+/// Which thread is running this code.
+///
+/// Synchronous on purpose: `Thread.current` is unavailable from an async
+/// context, because the answer can change across a suspension point. The
+/// feeder calls it with no suspension between it and its loop, so it names the
+/// thread the loop runs on.
+private func runningThreadName() -> String? {
+    Thread.current.name
 }
 
 /// One engine built the way the coordinators build theirs, with a recorder as
