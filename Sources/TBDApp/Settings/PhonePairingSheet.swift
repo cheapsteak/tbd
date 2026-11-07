@@ -101,7 +101,7 @@ struct PhonePairingSheet: View {
                     Image(nsImage: qrImage)
                         .interpolation(.none)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
+                        .scaledToFit()
                         .frame(maxWidth: min(qrImage.size.width / 2, Self.qrMaxSide))
                         .accessibilityLabel("Pairing QR code")
                     Spacer()
