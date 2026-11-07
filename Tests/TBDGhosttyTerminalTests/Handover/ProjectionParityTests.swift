@@ -16,7 +16,9 @@ import Testing
 /// listed state that stops differing, which means the list is stale. The lists are derived from the
 /// proof of concept's engine comparison, which found these cells and cursors differing; CI confirms
 /// them against the pinned SwiftTerm fork.
-@Suite(.fastPassBounded)
+///
+/// Every body runs on a thread the tests own, one at a time: see `onHandoverThread`.
+@Suite(.serialized, .fastPassBounded)
 struct ProjectionParityTests {
     /// The two line counts asked for: none, which must read no row, and more than any state's
     /// screen, which reaches into every state's scrollback.
@@ -36,42 +38,44 @@ struct ProjectionParityTests {
     ]
 
     @Test(arguments: HandoverCorpus.names)
-    func projectionMatchesSwiftTermAcrossTheCorpus(_ name: String) throws {
-        let state = HandoverCorpus.state(named: name)
-        let swiftTerm = state.swiftTerm()
-        let ghostty = try state.ghostty()
+    func projectionMatchesSwiftTermAcrossTheCorpus(_ name: String) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let swiftTerm = state.swiftTerm()
+            let ghostty = try state.ghostty()
 
-        var differences: [String] = []
-        for maxLines in Self.lineCounts {
-            let expected = swiftTerm.locked { TerminalScreenProjection.project($0, maxLines: maxLines) }
-            let actual = ghostty.withLocked { GhosttyScreenProjection.project($0, maxLines: maxLines) }
-            guard expected != actual else { continue }
-            var parts: [String] = []
-            if expected.lines != actual.lines { parts.append(handoverFirstDifference(expected.lines, actual.lines)) }
-            if expected.viewportStart != actual.viewportStart {
-                parts.append("viewportStart \(expected.viewportStart) vs \(actual.viewportStart)")
+            var differences: [String] = []
+            for maxLines in Self.lineCounts {
+                let expected = swiftTerm.locked { TerminalScreenProjection.project($0, maxLines: maxLines) }
+                let actual = ghostty.withLocked { GhosttyScreenProjection.project($0, maxLines: maxLines) }
+                guard expected != actual else { continue }
+                var parts: [String] = []
+                if expected.lines != actual.lines { parts.append(handoverFirstDifference(expected.lines, actual.lines)) }
+                if expected.viewportStart != actual.viewportStart {
+                    parts.append("viewportStart \(expected.viewportStart) vs \(actual.viewportStart)")
+                }
+                if expected.cursorRow != actual.cursorRow || expected.cursorColumn != actual.cursorColumn {
+                    parts.append("cursor \(expected.cursorColumn),\(expected.cursorRow) vs \(actual.cursorColumn),\(actual.cursorRow) (x,y)")
+                }
+                if expected.size != actual.size { parts.append("size \(expected.size) vs \(actual.size)") }
+                if expected.modes != actual.modes { parts.append("modes \(expected.modes) vs \(actual.modes)") }
+                differences.append("maxLines \(maxLines): " + parts.joined(separator: "; "))
             }
-            if expected.cursorRow != actual.cursorRow || expected.cursorColumn != actual.cursorColumn {
-                parts.append("cursor \(expected.cursorColumn),\(expected.cursorRow) vs \(actual.cursorColumn),\(actual.cursorRow) (x,y)")
-            }
-            if expected.size != actual.size { parts.append("size \(expected.size) vs \(actual.size)") }
-            if expected.modes != actual.modes { parts.append("modes \(expected.modes) vs \(actual.modes)") }
-            differences.append("maxLines \(maxLines): " + parts.joined(separator: "; "))
-        }
-        expectOutcome(name, differences: differences, misses: Self.projectionMisses, walk: "projection")
+            Self.expectOutcome(name, differences: differences, misses: Self.projectionMisses, walk: "projection")
 
-        let expectedCapture = swiftTerm.locked {
-            TerminalCellWalk.styledCapture(of: $0, maxScrollbackLines: Self.captureScrollback)
+            let expectedCapture = swiftTerm.locked {
+                TerminalCellWalk.styledCapture(of: $0, maxScrollbackLines: Self.captureScrollback)
+            }
+            let actualCapture = ghostty.withLocked {
+                GhosttyScreenProjection.styledCapture($0, maxScrollbackLines: Self.captureScrollback)
+            }
+            var captureDifferences: [String] = []
+            if expectedCapture != actualCapture {
+                captureDifferences.append(handoverFirstDifference(
+                    expectedCapture.components(separatedBy: "\r\n"), actualCapture.components(separatedBy: "\r\n")))
+            }
+            Self.expectOutcome(name, differences: captureDifferences, misses: Self.captureMisses, walk: "styled capture")
         }
-        let actualCapture = ghostty.withLocked {
-            GhosttyScreenProjection.styledCapture($0, maxScrollbackLines: Self.captureScrollback)
-        }
-        var captureDifferences: [String] = []
-        if expectedCapture != actualCapture {
-            captureDifferences.append(handoverFirstDifference(
-                expectedCapture.components(separatedBy: "\r\n"), actualCapture.components(separatedBy: "\r\n")))
-        }
-        expectOutcome(name, differences: captureDifferences, misses: Self.captureMisses, walk: "styled capture")
     }
 
     @Test func knownMissesNameCorpusStates() {
@@ -81,7 +85,7 @@ struct ProjectionParityTests {
         }
     }
 
-    private func expectOutcome(_ name: String, differences: [String], misses: [String: String], walk: String) {
+    private static func expectOutcome(_ name: String, differences: [String], misses: [String: String], walk: String) {
         if let reason = misses[name] {
             #expect(
                 !differences.isEmpty,
