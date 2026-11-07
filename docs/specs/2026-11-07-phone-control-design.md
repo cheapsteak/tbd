@@ -770,29 +770,57 @@ Home Screen app, and on Android Chrome:
 
 Research: `ci-layout.md`.
 
-- **A new workflow, `phone.yml`,** with its own concurrency group:
-  - a `changes` job runs a new classifier, `scripts/ci/phone-parts-needed.sh`, modelled on
-    `scripts/ci/swift-suite-needed.sh`. It outputs `relay`, `loader` and `phone_app`, and runs every
-    part for any path it does not recognize;
-  - a `harness` job tests the classifier;
-  - `relay`, `loader` and `phone-app` jobs each run only when the classifier says so. The
-    `phone-app` job rebuilds the bundle and fails if the committed file differs;
-  - an always-running `Phone checks` job passes when each part either succeeded or was skipped by
-    the classifier. An admin adds it as a required check after the workflow lands.
+- **The `Phone` workflow, `phone.yml`,** tests the relay, the loader and the phone app on Linux, so
+  it takes none of the macOS runners the Swift suite competes for:
+  - it runs on pushes to `main`, on dispatch, and on every pull request, with no branch filter, so a
+    stacked phone PR whose base is another PR's branch gets its own run. It has no path filter,
+    because a workflow that a path filter keeps from starting never reports, and a required check
+    that never reports blocks the merge. The `changes` job is the path filter;
+  - its concurrency group is its own, apart from `test.yml`'s, and is keyed on the pull request's
+    number, or on the ref for any other event. Only a pull request's newer push cancels its older
+    run. A run for any other event, such as a push to `main`, waits for the one in progress, since a
+    cancelled run fails `Phone checks`;
+  - a `changes` job runs the classifier, `scripts/ci/phone-parts-needed.sh`, modelled on
+    `scripts/ci/swift-suite-needed.sh`. It outputs `relay`, `loader` and `phone_app`. It answers
+    `true` for all three on any event but a pull request, and runs every part for any path it does
+    not recognize and whenever it cannot compute the diff;
+  - a `harness` job, with no `if:`, runs the classifier's harness and the bundle check's harness.
+    The classifier's harness also pins the wiring of both phone workflows line by line;
+  - the `relay`, `loader` and `phone-app` jobs are each skipped only on the classifier's explicit
+    `false`, so a failed gate runs every part rather than none. The `phone-app` job runs the app's
+    tests, rebuilds the bundle with `npm run build:app`, and fails if the result differs from the
+    committed bundle under `Sources/`. While `phone/package.json` names no `build:app` script, it
+    passes only if no bundle is committed;
+  - an always-running `Phone checks` job passes when the harness job passed and each part either
+    succeeded or was skipped by the classifier's `false`. A cancelled part, or one skipped for any
+    other reason, fails it. It is the one context branch protection requires, so exactly one job
+    across `.github/workflows/` carries that name. An admin adds it as a required check after the
+    workflow lands.
 - **Inputs that run more than one part:** `phone/protocol/**` and `phone/test-vectors/**` run the
-  Swift suite and every JavaScript part. A change to `phone.yml` or the classifier runs every part.
-- **The Swift gate** gains three narrow skip rules: `relay/**`, `phone/loader/**` and
-  `phone/app/**`. A change to the committed bundle under `Sources/` still runs the Swift suite.
-  `test.yml` does not change, because the release workflow, the flake fixer and the remote
-  verification valve all read its result.
+  Swift suite and every JavaScript part. A change to `phone.yml`, or to a script under `scripts/`
+  named for the phone (the classifier, the bundle check and their harnesses), runs every part. The
+  rest of `phone/` outside `loader/` and `app/` is the workspace's shared tooling, such as
+  `phone/package.json`, its lockfile, `.nvmrc` and `tsconfig.json`, and runs the loader and the app.
+- **The Swift gate's rule:** the Swift suite skips `relay/**` and every path under `phone/` except
+  `phone/protocol/**` and `phone/test-vectors/**`. Every path under those two runs it, Markdown
+  included, because Swift tests read them. The committed app bundle lives under `Sources/`, so a
+  change to it runs the Swift suite. The rule lives in `scripts/ci/swift-suite-needed.sh`, and
+  `test.yml` carries nothing phone-specific, because the release workflow, the flake fixer and the
+  remote verification valve all read its result.
 - **Loader deploy, `phone-loader-deploy.yml`:**
-  - runs on pushes to `main` that touch `phone/loader/**`, and only while a repository variable
-    turns it on;
-  - runs in an environment limited to `main`;
-  - mints a GitHub App token that can only trigger the loader repo's deploy workflow;
-  - the loader repo's workflow checks that the commit is on `main` and still current, then
-    publishes with GitHub's Pages deploy action. A leaked token can trigger a redeploy but cannot
-    change what is served.
+  - runs on pushes to `main` that touch `phone/loader/**` or the workflow itself, and on dispatch.
+    No pull request event can start it;
+  - a `verify` job tests the loader as `phone.yml`'s `loader` job does. A PR that edits only this
+    workflow runs no phone part, so the classifier's harness pins `verify`'s Node setup, working
+    directory and npm commands to the `loader` job's;
+  - a `dispatch` job runs only after `verify` passed, only while the repository variable
+    `PHONE_LOADER_DEPLOY_ENABLED` is `true`, and only from `main`, in an environment whose
+    deployment branches admit only `main`;
+  - that job mints a GitHub App token scoped to the loader repo, whose one permission is Actions:
+    write, and asks the loader repo's deploy workflow to publish this commit;
+  - the loader repo's workflow checks that the commit is on `main` and that its loader is still the
+    newest, then publishes with GitHub's Pages deploy action. A leaked token can start, cancel,
+    re-run or disable the loader repo's workflow runs, but cannot change what is served.
 
 ## 16. Build order
 
@@ -801,7 +829,7 @@ The parts with no UI come first, so work can start before the phone's visual des
 1. **Secure channel** – the Swift and JavaScript Noise code, the test vectors, and the app-protocol
    fixtures.
 2. **Relay and CI** – `relay/cloudflare/`, `phone.yml` with its classifier, and the Swift gate's
-   skip rules.
+   skip rule.
 3. **Daemon bridge and laptop UI** – the migration and flag, pairing, devices, the relay link, the
    loader handler, the app protocol with every action and the transcript feed, the Settings pane,
    the menu item and the status-bar chip. Tests drive the app protocol directly, with no phone UI.
