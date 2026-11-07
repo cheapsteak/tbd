@@ -138,6 +138,36 @@ struct PhoneSendRailTests {
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
     }
 
+    /// A row with no recorded kind and no Claude session id is a shell to the
+    /// send core: the foreground rail skips it, so nothing else would stop the
+    /// paste. The phone's refusal reads it the same way and types nothing.
+    @Test func aPairedPhoneSendToAKindlessRowWithNoSessionIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make()
+        let kindless = try await harness.addKindlessTerminal(claudeSessionID: nil)
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: kindless.id, submit: true, parts: [.text("ls")]),
+            deviceID: UUID())
+
+        #expect(response.error == RPCRouter.phoneShellSendRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+    }
+
+    /// A row with no recorded kind that carries a Claude session id is
+    /// Claude's, so the phone's message reaches it.
+    @Test func aPairedPhoneSendToAKindlessRowWithASessionIsDelivered() async throws {
+        let harness = try await SendHarness.make()
+        let kindless = try await harness.addKindlessTerminal(claudeSessionID: "sess-2")
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: kindless.id, submit: true, parts: [.text("hi")]),
+            deviceID: UUID())
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(harness.tmux.pastedBodies == ["hi"])
+    }
+
     /// An image part names a path on the laptop, which a phone cannot know.
     /// The whole send is refused, so the text part beside it is not typed.
     @Test func aPairedPhoneSendWithAnImagePartIsRefusedAndTypesNothing() async throws {
@@ -192,5 +222,13 @@ private extension SendHarness {
             awaitingInputReason: AwaitingInputReason(
                 message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
                 notificationType: "permission_prompt"))
+    }
+
+    /// A second terminal in the harness's worktree whose row predates the
+    /// `kind` column: no kind recorded, and the given Claude session id.
+    func addKindlessTerminal(claudeSessionID: String?) async throws -> TBDShared.Terminal {
+        try await db.terminals.create(
+            worktreeID: terminal.worktreeID, tmuxWindowID: "@4", tmuxPaneID: "%8",
+            claudeSessionID: claudeSessionID, kind: nil)
     }
 }

@@ -3734,6 +3734,25 @@ extension RPCRouter {
             + "would have run as a command line. Nothing was typed."
     }
 
+    /// The kind the send core reads a terminal row as: its recorded kind, or
+    /// for a row with none, the kind its Claude session id implies.
+    ///
+    /// A row with NO recorded kind predates the column, and gets exactly the
+    /// reading migration `v22_terminal_kind`'s backfill gave every such row
+    /// when the column was introduced — Claude when it carries a Claude
+    /// session id, shell otherwise — which is also what `Terminal
+    /// .isClaudeResumable` already requires of a kindless row. Reading every
+    /// kindless row as Claude regardless of session id would run the
+    /// foreground rail, expecting a "claude" process, against a plain shell
+    /// pane that never had one.
+    ///
+    /// The foreground rail (`foregroundAgentName(kind:claudeSessionID:)`) and
+    /// the phone's shell refusal (`sendFromPairedPhone`) both read a row
+    /// through this, so the two cannot disagree about which rows are shells.
+    static func effectiveKind(kind: TerminalKind?, claudeSessionID: String?) -> TerminalKind {
+        kind ?? (claudeSessionID == nil ? .shell : .claude)
+    }
+
     /// The process name the foreground rail looks for in a pane, per terminal
     /// kind — and `nil` for a kind the rail must not run for at all.
     ///
@@ -3743,19 +3762,13 @@ extension RPCRouter {
     /// its command line, so the kind picks the name and the same `ps` question
     /// answers for both.
     ///
-    /// A row with NO recorded kind predates the column, and gets exactly the
-    /// reading migration `v22_terminal_kind`'s backfill gave every such row
-    /// when the column was introduced — Claude when it carries a Claude
-    /// session id, shell otherwise — which is also what `Terminal
-    /// .isClaudeResumable` already requires of a kindless row. Reading every
-    /// kindless row as Claude regardless of session id would run this rail,
-    /// expecting a "claude" process, against a plain shell pane that never
-    /// had one.
+    /// The kind is the row's effective kind (`effectiveKind(kind:claudeSessionID:)`),
+    /// so a row with no recorded kind and no Claude session id is a shell here.
     ///
     /// Pure and static so the mapping is testable without a database, a pane, or
     /// a process table.
     static func foregroundAgentName(kind: TerminalKind?, claudeSessionID: String?) -> String? {
-        switch kind ?? (claudeSessionID == nil ? .shell : .claude) {
+        switch effectiveKind(kind: kind, claudeSessionID: claudeSessionID) {
         case .shell: return nil
         case .claude: return "claude"
         case .codex: return "codex"
@@ -3857,15 +3870,20 @@ extension RPCRouter {
     ///   part dropped.
     ///
     /// **A shell is refused before anything is typed.** Shells are hidden from
-    /// the phone (spec section 6), and a shell runs what is typed into it. A
-    /// row with no recorded kind is not refused, because `session.states`,
-    /// which is how the phone learns of a terminal, reports such a row. A
-    /// terminal with no row falls through to the send core, which reports it
-    /// missing.
+    /// the phone (spec section 6), and a shell runs what is typed into it. The
+    /// row is judged by its effective kind (`effectiveKind(kind:claudeSessionID:)`),
+    /// the reading the send core's foreground rail uses: a row with no recorded
+    /// kind is a shell when it carries no Claude session id, and is refused
+    /// like one, because the foreground rail would skip it and nothing else
+    /// would stop the paste. `session.states` reports kindless rows, so the
+    /// phone can name one. A kindless row with a session id is Claude's and is
+    /// sent. A terminal with no row falls through to the send core, which
+    /// reports it missing.
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
-        if try await db.terminals.get(id: params.terminalID)?.kind == .shell {
+        if let row = try await db.terminals.get(id: params.terminalID),
+           Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
             return RPCResponse(error: Self.phoneShellSendRefusal)
         }
         for part in params.parts ?? [] {
