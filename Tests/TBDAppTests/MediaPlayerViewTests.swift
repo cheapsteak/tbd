@@ -93,6 +93,15 @@ private final class PlayerScene {
     }
 }
 
+/// Carries a main-actor view into a `@Sendable` poll closure. A
+/// `@MainActor` final class that is not an `NSView` is Sendable, and every
+/// read of `value` happens on the main actor.
+@MainActor
+private final class MainActorRef<Value: AnyObject> {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// The class a failure callback flips, so the test can read it afterwards.
 @MainActor
 private final class FailureFlag {
@@ -277,5 +286,148 @@ struct MediaPlayerViewTests {
         await check.value
 
         #expect(flag.fired)
+    }
+
+    /// For an item with no video track, AVKit adds a private view that fills
+    /// the player with opaque grey once the item is ready to play, and the
+    /// host hides it, for the first item and again for the item a reload puts
+    /// in its place. Each wait needs the view present as well as hidden,
+    /// because "none visible" also holds before AVKit has added it, and the
+    /// reload's wait starts only once the new item is ready, so a view AVKit
+    /// kept from the first item cannot satisfy it early. Whether AVKit reuses
+    /// that view or builds a new one is left open.
+    @Test func hidesAVKitsAudioOnlyIndicator() async throws {
+        let fixtures = try MediaFixtures()
+        defer { fixtures.remove() }
+        let scene = PlayerScene()
+        defer { scene.tearDown() }
+        let host = scene.addHost()
+        let url = try fixtures.silentWAV()
+
+        host.load(url: url, revision: 0)
+        host.player?.isMuted = true
+        guard await waitForHiddenAudioOnlyIndicators(in: host, phase: "first load") else { return }
+
+        let firstItem = try #require(host.player?.currentItem)
+        let firstItemID = ObjectIdentifier(firstItem)
+        host.load(url: url, revision: 1)
+
+        let start = ContinuousClock.now
+        let hostRef = MainActorRef(host)
+        let ready = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { @Sendable in
+            await MainActor.run {
+                RunLoopPump.turn()
+                guard let item = hostRef.value.player?.currentItem else { return false }
+                return ObjectIdentifier(item) != firstItemID && item.status == .readyToPlay
+            }
+        }
+        guard ready == .satisfied else {
+            if ready == .timedOut {
+                let current = host.player?.currentItem
+                let status = current === firstItem
+                    ? "still the first item"
+                    : "new, \(statusName(of: current))"
+                recordAudioOnlyIndicatorTimeout(
+                    in: host, phase: "reload, waiting for the new item to be ready",
+                    itemStatus: status, since: start)
+            }
+            return
+        }
+        #expect(host.player?.currentItem !== firstItem)
+
+        await waitForHiddenAudioOnlyIndicators(in: host, phase: "reload")
+    }
+}
+
+/// Polls until at least one audio-only indicator sits under `host`'s player
+/// view and every one of them is hidden. On a timeout it records what it last
+/// saw, naming `phase`. Returns whether the wait succeeded.
+@MainActor
+@discardableResult
+private func waitForHiddenAudioOnlyIndicators(in host: MediaPlayerHostView, phase: String) async -> Bool {
+    let start = ContinuousClock.now
+    let hostRef = MainActorRef(host)
+    let outcome = await pollUntilTrue(
+        timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+    ) { @Sendable in
+        await MainActor.run {
+            RunLoopPump.turn()
+            let indicators = audioOnlyIndicators(under: hostRef.value.playerView)
+            return !indicators.isEmpty && indicators.allSatisfy { $0.isHidden }
+        }
+    }
+    if outcome == .timedOut {
+        recordAudioOnlyIndicatorTimeout(
+            in: host, phase: phase, itemStatus: statusName(of: host.player?.currentItem), since: start)
+    }
+    return outcome == .satisfied
+}
+
+@MainActor
+private func recordAudioOnlyIndicatorTimeout(
+    in host: MediaPlayerHostView, phase: String, itemStatus: String, since start: ContinuousClock.Instant
+) {
+    let indicators = audioOnlyIndicators(under: host.playerView)
+    Issue.record(AudioOnlyIndicatorTimeout(
+        phase: phase,
+        found: indicators.count,
+        visible: indicators.filter { !$0.isHidden }.count,
+        itemStatus: itemStatus,
+        viewClasses: viewClassNames(under: host.playerView),
+        elapsed: ContinuousClock.now - start))
+}
+
+/// Every view under `view` whose class is AVKit's audio-only indicator,
+/// matched by name as `MediaPlayerHostView` matches it.
+@MainActor
+private func audioOnlyIndicators(under view: NSView) -> [NSView] {
+    var found: [NSView] = []
+    for subview in view.subviews {
+        if String(describing: type(of: subview)) == MediaPlayerHostView.audioOnlyIndicatorClassName {
+            found.append(subview)
+        }
+        found.append(contentsOf: audioOnlyIndicators(under: subview))
+    }
+    return found
+}
+
+/// The class names of every view under `view`, depth first, so a timeout
+/// shows what AVKit built if the indicator went by another name.
+@MainActor
+private func viewClassNames(under view: NSView) -> [String] {
+    var names: [String] = []
+    for subview in view.subviews {
+        names.append(String(describing: type(of: subview)))
+        names.append(contentsOf: viewClassNames(under: subview))
+    }
+    return names
+}
+
+@MainActor
+private func statusName(of item: AVPlayerItem?) -> String {
+    guard let item else { return "no item" }
+    switch item.status {
+    case .unknown: return "unknown"
+    case .readyToPlay: return "readyToPlay"
+    case .failed: return "failed"
+    @unknown default: return "status \(item.status.rawValue)"
+    }
+}
+
+/// What the audio-only indicator wait last saw, recorded as an error so the
+/// diagnostic lands on the failure's primary line.
+private struct AudioOnlyIndicatorTimeout: Error, CustomStringConvertible {
+    let phase: String
+    let found: Int
+    let visible: Int
+    let itemStatus: String
+    let viewClasses: [String]
+    let elapsed: Duration
+
+    var description: String {
+        "audio-only indicator (\(phase)): found \(found), \(visible) still visible, item \(itemStatus), "
+            + "after \(elapsed); views under the player: \(viewClasses.joined(separator: ", "))"
     }
 }

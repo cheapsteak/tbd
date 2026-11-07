@@ -138,7 +138,7 @@ struct FilePreviewViewTests {
         let rate = mediaHost.player?.rate
         #expect(rate == 0)
         let playerHeight = mediaHost.playerView.frame.height
-        #expect(playerHeight == AudioPreviewCard.controlBarHeight)
+        #expect(playerHeight == AudioPreviewView.controlBarHeight)
         #expect(coordinator.registeredCount == 1)
     }
 
@@ -207,7 +207,7 @@ struct FilePreviewViewTests {
 
         // The stack layout has landed once the one player sits somewhere
         // else: the video's height becomes 9/16 of the pane's width, and the
-        // card moves from the middle of the pane to its top.
+        // audio view moves from the middle of the pane to its top.
         var after: MediaPlayerHostView?
         var afterFrame = NSRect.zero
         let relaidOut = await host.settle {
@@ -226,16 +226,6 @@ struct FilePreviewViewTests {
         let firstPlayer = first.player
         #expect(firstPlayer != nil, "the first player view was torn down by the flip")
         #expect(coordinator.registeredCount == 1)
-    }
-
-    @Test func durationReadsAsMinutesThenHours() {
-        #expect(AudioPreviewCard.formattedDuration(seconds: 1) == "0:01")
-        #expect(AudioPreviewCard.formattedDuration(seconds: 61) == "1:01")
-        #expect(AudioPreviewCard.formattedDuration(seconds: 3599) == "59:59")
-        #expect(AudioPreviewCard.formattedDuration(seconds: 3600) == "1:00:00")
-        #expect(AudioPreviewCard.formattedDuration(seconds: 3725) == "1:02:05")
-        #expect(AudioPreviewCard.formattedDuration(seconds: .nan) == "")
-        #expect(AudioPreviewCard.formattedDuration(seconds: .infinity) == "")
     }
 }
 

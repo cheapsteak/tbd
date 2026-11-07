@@ -12,9 +12,15 @@ private let logger = os.Logger(subsystem: "com.tbd.app", category: "media-previe
 /// It never starts playback itself. It pauses when it leaves its window and
 /// when it or an ancestor is hidden, which covers switching worktree or tab,
 /// pointing the pane at another file, and closing the pane. When its player
-/// starts, it tells the coordinator, which pauses every other player.
+/// starts, it tells the coordinator, which pauses every other player. For an
+/// audio file it hides AVKit's grey audio-only backdrop
+/// (`hideAudioOnlyIndicator()`).
 @MainActor
 final class MediaPlayerHostView: NSView, MediaPlaybackParticipant {
+    /// The class name of AVKit's private view that paints an audio-only
+    /// item's backdrop. See `hideAudioOnlyIndicator()`.
+    static let audioOnlyIndicatorClassName = "AVAudioOnlyIndicatorView"
+
     let playerView: AVPlayerView
     private(set) var player: AVPlayer?
     /// Called when the loaded file turns out not to be playable: the asset
@@ -110,7 +116,25 @@ final class MediaPlayerHostView: NSView, MediaPlaybackParticipant {
         super.viewDidMoveToWindow()
         if window == nil {
             pausePlayback()
+        } else {
+            hideAudioOnlyIndicator()
         }
+    }
+
+    /// Hides every `AVAudioOnlyIndicatorView` under `playerView`.
+    ///
+    /// For an item with no video track, AVKit adds this private view when the
+    /// item becomes ready to play. It fills the player's whole frame with
+    /// opaque grey (measured on macOS 27 as sRGB 0.26, 0.26, 0.27) and holds
+    /// the QuickTime placeholder image, so left alone it puts the play bar in
+    /// a grey box. `AVPlayerView` has no public switch for it. Once hidden it
+    /// stays hidden through a new item, an appearance change, playback, a
+    /// resize and a move to another superview, and the play bar, which sits
+    /// on a sibling branch, is untouched. The match is by class name, so if a
+    /// later macOS renames the view the grey box comes back and nothing else
+    /// breaks. A video item has no such view, so this does nothing there.
+    func hideAudioOnlyIndicator() {
+        Self.hideAudioOnlyIndicators(in: playerView)
     }
 
     /// AppKit calls this when this view or one of its ancestors is hidden.
@@ -140,9 +164,38 @@ final class MediaPlayerHostView: NSView, MediaPlaybackParticipant {
     private func observeStatus(of item: AVPlayerItem) {
         statusObservation?.invalidate()
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
-            guard observedItem.status == .failed else { return }
-            let itemID = ObjectIdentifier(observedItem)
-            MediaPlayerHostView.performOnMain { self?.itemDidFail(itemID) }
+            switch observedItem.status {
+            case .failed:
+                let itemID = ObjectIdentifier(observedItem)
+                MediaPlayerHostView.performOnMain { self?.itemDidFail(itemID) }
+            case .readyToPlay:
+                MediaPlayerHostView.performOnMain { self?.itemBecameReady() }
+            default:
+                break
+            }
+        }
+    }
+
+    /// AVKit adds its audio-only indicator in its own reaction to this same
+    /// status change, which may run after this one, so this hides it now and
+    /// again on the next main-queue turn, once AVKit's reaction has run.
+    private func itemBecameReady() {
+        hideAudioOnlyIndicator()
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.hideAudioOnlyIndicator()
+            }
+        }
+    }
+
+    private static func hideAudioOnlyIndicators(in view: NSView) {
+        for subview in view.subviews {
+            if !subview.isHidden,
+               String(describing: type(of: subview)) == audioOnlyIndicatorClassName {
+                subview.isHidden = true
+            }
+            hideAudioOnlyIndicators(in: subview)
         }
     }
 
