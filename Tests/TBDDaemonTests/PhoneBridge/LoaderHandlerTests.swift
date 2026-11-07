@@ -92,16 +92,20 @@ struct LoaderHandlerTests {
     }
 
     @Test func aNewerOnlyLoaderIsToldTheLaptopIsTooOld() throws {
-        var handler = LoaderHandler(bundle: try smallBundle())
-        let actions = handler.handle(hello([2]))
-        try #require(actions.count == 2)
-        let incompatible = try #require(sent(actions).first)
-        let expected: NSDictionary = ["type": "incompatible", "tooOld": "laptop"]
-        #expect(try dictionary(incompatible) == expected)
-        #expect(actions.last == LoaderHandler.Action.end("no common loader protocol"))
-        // The connection is over: nothing later is answered.
-        let later = handler.handle(hello([1]))
-        #expect(later == [.end("no common loader protocol")])
+        // [0, 2] tells "the phone's highest version" from "lowest": its
+        // highest (2) is above this laptop's range, so the laptop is too old.
+        for protocols in [[2], [0, 2]] as [[Int]] {
+            var handler = LoaderHandler(bundle: try smallBundle())
+            let actions = handler.handle(hello(protocols))
+            try #require(actions.count == 2)
+            let incompatible = try #require(sent(actions).first)
+            let expected: NSDictionary = ["type": "incompatible", "tooOld": "laptop"]
+            #expect(try dictionary(incompatible) == expected)
+            #expect(actions.last == LoaderHandler.Action.end("no common loader protocol"))
+            // The connection is over: nothing later is answered.
+            let later = handler.handle(hello([1]))
+            #expect(later == [.end("no common loader protocol")])
+        }
     }
 
     @Test func anOlderOrEmptyLoaderIsToldItIsTooOld() throws {

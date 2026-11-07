@@ -58,11 +58,23 @@ struct LoaderHandler: Sendable {
 
     private let bundle: PhoneAppBundle
     private let tbdVersion: String
+    /// The `bundle.chunk` messages, built once. Their size is checked where
+    /// they are sent, in `handle`, like every other outgoing message.
+    private let chunkMessages: [Data]
     private var state: State = .awaitingHello
 
     init(bundle: PhoneAppBundle, tbdVersion: String = TBDConstants.version) {
         self.bundle = bundle
         self.tbdVersion = tbdVersion
+        let hash = Self.jsonString(bundle.sha256Hex)
+        let count = bundle.chunks.count
+        // Standard base64 uses only letters, digits, `+`, `/` and `=`, none
+        // of which a JSON string escapes.
+        self.chunkMessages = bundle.chunks.enumerated().map { index, chunk in
+            let text = #"{"type":"bundle.chunk","sha256":\#(hash),"index":\#(index),"count":\#(count),"#
+                + #""data":"\#(chunk.base64EncodedString())"}"#
+            return Data(text.utf8)
+        }
     }
 
     /// What to do with one decrypted message from the phone.
@@ -153,24 +165,15 @@ struct LoaderHandler: Sendable {
         guard requested.utf8.elementsEqual(bundle.sha256Hex.utf8) else {
             return [.end("unknown bundle")]
         }
-        let hash = Self.jsonString(bundle.sha256Hex)
-        let count = bundle.chunks.count
-        var actions: [Action] = []
-        for (index, chunk) in bundle.chunks.enumerated() {
-            // Standard base64 uses only letters, digits, `+`, `/` and `=`,
-            // none of which a JSON string escapes.
-            let text = #"{"type":"bundle.chunk","sha256":\#(hash),"index":\#(index),"count":\#(count),"#
-                + #""data":"\#(chunk.base64EncodedString())"}"#
-            actions.append(.send(Data(text.utf8)))
-        }
-        return actions
+        return chunkMessages.map { .send($0) }
     }
 
     private func app(_ message: [String: Any]) -> [Action] {
-        // `isValidJSONObject` before writing: the parser accepts values the
-        // writer refuses (`-1e400` parses to an infinity, and a value nested
-        // 513 deep parses), and for those the writer raises an Objective-C
-        // exception rather than throwing.
+        // `isValidJSONObject` before writing: the parser accepts a value the
+        // writer refuses. The only such value reachable here is a non-finite
+        // number (`-1e400` parses to `-inf`), for which the writer raises an
+        // Objective-C exception rather than throwing. (Nesting is no hazard:
+        // the parser refuses depth 513 and the writer handles depth 512.)
         guard let body = message["body"], body is NSDictionary,
               JSONSerialization.isValidJSONObject(body),
               let bytes = try? JSONSerialization.data(withJSONObject: body) else {
@@ -189,7 +192,10 @@ struct LoaderHandler: Sendable {
     ///
     /// Because nothing re-reads the splice, `body` must be exactly one UTF-8
     /// JSON object: its first byte other than JSON whitespace is `{`, and the
-    /// whole of it parses as one object with nothing after it. A body like
+    /// whole of it parses as one object, as Foundation parses it, with
+    /// nothing after it. Foundation accepts a trailing comma (`{"a":1,}`),
+    /// which a strict phone parser rejects, so callers must emit strict JSON
+    /// (plan 04's encoders do); this check does not enforce it. A body like
     /// `{"a":1},"type":"revoked"` would otherwise make the phone read another
     /// `type`. Throws `.notAJSONObject` when it is not, and `.messageTooLarge`
     /// when the message would not fit one transport message.
