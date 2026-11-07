@@ -73,7 +73,7 @@ private struct StartWentUnreported: Error, CustomStringConvertible {
 }
 
 /// Tier 2: drives the real
-/// `LocalPTYTerminalRepresentable.Coordinator.start(terminalView:argv:environment:)`
+/// `LocalPTYTerminalRepresentable.Coordinator.start(engine:argv:environment:)`
 /// through a real `forkpty` and a real child — no tmux server, no daemon, no
 /// `~/tbd`. Sibling in spirit to `TerminalTeardownReapTests`, which drives the
 /// same coordinator's `cleanup()` the same way; this one drives the spawn side.
@@ -161,7 +161,8 @@ struct LocalPTYTerminalStartReportTests {
     /// is what pins that it works; this suite only has to call it.
     private func runStart(on view: TBDTerminalView) -> StartAttempt {
         let coordinator = LocalPTYTerminalRepresentable.Coordinator()
-        coordinator.terminalView = view
+        let engine = SwiftTermEngine(view: view)
+        coordinator.engine = engine
         let report = StartReport()
         coordinator.onStarted = { report.date = $0 }
 
@@ -169,7 +170,7 @@ struct LocalPTYTerminalStartReportTests {
         // assertion hygiene rule 2 in `Tests/CLAUDE.md`.
         let before = Date()
         coordinator.start(
-            terminalView: view,
+            engine: engine,
             argv: ["/bin/sleep", Self.childLifetime],
             environment: ["TERM": "xterm-256color", "PATH": "/usr/bin:/bin"])
         let after = Date()

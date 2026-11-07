@@ -200,31 +200,33 @@ struct TerminalLockedAccessTests {
 
     // MARK: - Holder teardown
 
-    @Test("holder: set → withView sees the view; clear → withView returns nil")
+    @Test("holder: set → withEngine sees the engine; clear → withEngine returns nil")
     func holderTeardown() {
         withView { view in
+            let engine = SwiftTermEngine(view: view)
             let holder = TerminalViewHolder()
-            #expect(holder.withView { _ in true } == nil)
-            holder.set(view)
-            #expect(holder.withView { $0 === view } == true)
+            #expect(holder.withEngine { _ in true } == nil)
+            holder.set(engine)
+            #expect(holder.withEngine { $0 === engine } == true)
             holder.clear()
-            #expect(holder.withView { _ in true } == nil)
+            #expect(holder.withEngine { _ in true } == nil)
         }
     }
 
-    @Test("holder: concurrent withView racing clear neither crashes nor resurrects the view",
+    @Test("holder: concurrent withEngine racing clear neither crashes nor resurrects the engine",
           .fastPassBounded)
     func holderConcurrentClearIsSafe() async {
         let view = makeView()
+        let engine = SwiftTermEngine(view: view)
         let holder = TerminalViewHolder()
-        holder.set(view)
+        holder.set(engine)
         await withCheckedContinuation { continuation in
             let group = DispatchGroup()
             for _ in 0..<4 {
                 group.enter()
                 DispatchQueue.global().async {
                     for _ in 0..<2_000 {
-                        holder.withView { _ in () }
+                        holder.withEngine { _ in () }
                     }
                     group.leave()
                 }
@@ -236,6 +238,6 @@ struct TerminalLockedAccessTests {
             }
             group.notify(queue: .main) { continuation.resume() }
         }
-        #expect(holder.withView { _ in true } == nil)
+        #expect(holder.withEngine { _ in true } == nil)
     }
 }

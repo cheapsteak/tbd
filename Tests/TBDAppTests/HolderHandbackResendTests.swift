@@ -265,7 +265,10 @@ struct HolderHandbackResendTests {
 
         func panel(
             clock: EventDrivenTestClock, client: any HolderAttaching
-        ) -> (coordinator: TerminalPanelRepresentable.Coordinator, view: TBDTerminalView) {
+        ) -> (
+            coordinator: TerminalPanelRepresentable.Coordinator, engine: SwiftTermEngine,
+            view: TBDTerminalView
+        ) {
             let view = TBDTerminalView(
                 frame: CGRect(x: 0, y: 0, width: 600, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
@@ -273,10 +276,11 @@ struct HolderHandbackResendTests {
             let coordinator = TerminalPanelRepresentable.Coordinator(clock: clock)
             coordinator.appState = state
             coordinator.panelID = terminalID
-            coordinator.terminalView = view
-            view.terminalDelegate = coordinator
+            let engine = SwiftTermEngine(view: view)
+            coordinator.engine = engine
+            engine.delegate = coordinator
             coordinator.holderAttachClient = client
-            return (coordinator, view)
+            return (coordinator, engine, view)
         }
 
         func tearDown() { suite.tearDown() }
@@ -314,7 +318,7 @@ struct HolderHandbackResendTests {
             clock: clock)
         let panel = session.panel(clock: clock, client: daemon)
 
-        await panel.coordinator.startHolderClient(terminalView: panel.view)
+        await panel.coordinator.startHolderClient(engine: panel.engine)
         #expect(daemon.events == ["attach", "ready"], "the attach must be live first: \(daemon.events)")
 
         panel.coordinator.cleanup()
@@ -379,11 +383,11 @@ struct HolderHandbackResendTests {
         let successorPlacards = Counter()
         successor.coordinator.onHolderAttachRetryOffered = { successorPlacards.value += 1 }
 
-        await predecessor.coordinator.startHolderClient(terminalView: predecessor.view)
+        await predecessor.coordinator.startHolderClient(engine: predecessor.engine)
         #expect(predecessorDaemon.events == ["attach", "ready"])
         predecessor.coordinator.cleanup()
         let attaching = Task { @MainActor in
-            await successor.coordinator.startHolderClient(terminalView: successor.view)
+            await successor.coordinator.startHolderClient(engine: successor.engine)
         }
         try await waitFor("the successor's first attempt") { successorDaemon.attaches == 1 }
 
@@ -462,10 +466,10 @@ struct HolderHandbackResendTests {
         successor.coordinator.onHolderAttachRetryOffered = { successorPlacards.value += 1 }
         let ledger = session.ledger
 
-        await predecessor.coordinator.startHolderClient(terminalView: predecessor.view)
+        await predecessor.coordinator.startHolderClient(engine: predecessor.engine)
         predecessor.coordinator.cleanup()
         let attaching = Task { @MainActor in
-            await successor.coordinator.startHolderClient(terminalView: successor.view)
+            await successor.coordinator.startHolderClient(engine: successor.engine)
         }
         try await waitFor("the successor's first attempt") { successorDaemon.attaches == 1 }
 
@@ -521,7 +525,7 @@ struct HolderHandbackResendTests {
                 detach: { _ in await gate.wait() })
             let panel = session.panel(clock: EventDrivenTestClock(), client: daemon)
 
-            await panel.coordinator.startHolderClient(terminalView: panel.view)
+            await panel.coordinator.startHolderClient(engine: panel.engine)
             #expect(daemon.events == ["attach", "ready"], "the attach must be live first: \(daemon.events)")
             #expect(ledger.isHeld(terminalID), "a live attach must be held")
 
@@ -549,7 +553,7 @@ struct HolderHandbackResendTests {
                 clock: clock)
             let panel = session.panel(clock: clock, client: daemon)
 
-            await panel.coordinator.startHolderClient(terminalView: panel.view)
+            await panel.coordinator.startHolderClient(engine: panel.engine)
             #expect(daemon.events == ["attach", "ready"], "the attach must be live first: \(daemon.events)")
 
             panel.coordinator.cleanup()
@@ -605,7 +609,7 @@ struct HolderHandbackResendTests {
         let terminalID = session.terminalID
 
         let attaching = Task { @MainActor in
-            await panel.coordinator.startHolderClient(terminalView: panel.view)
+            await panel.coordinator.startHolderClient(engine: panel.engine)
         }
         try await waitFor("the ack to be in flight", observed: { "\(daemon.events)" }) {
             daemon.readies == 1
@@ -650,7 +654,7 @@ struct HolderHandbackResendTests {
         let ledger = session.ledger
         let terminalID = session.terminalID
 
-        await panel.coordinator.startHolderClient(terminalView: panel.view)
+        await panel.coordinator.startHolderClient(engine: panel.engine)
         panel.coordinator.cleanup()
         // What a successor does before it asks. Nothing advances the clock
         // until this has ended, so a wait that took in the resend never would.

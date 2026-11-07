@@ -307,6 +307,7 @@ struct HolderInjectionDeliveryTests {
     private struct HolderPanel {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let terminalID: UUID
         /// The session's end of the pair. The panel's end belongs to the
@@ -382,10 +383,12 @@ struct HolderInjectionDeliveryTests {
             attachment: HolderAttachment(
                 ptyFD: vended, generation: 7, snapshotPreamble: Data()))
 
-        await coordinator.startHolderClient(terminalView: view)
+        let engine = SwiftTermEngine(view: view)
+        await coordinator.startHolderClient(engine: engine)
 
         return HolderPanel(
-            state: state, coordinator: coordinator, view: view, terminalID: terminalID,
+            state: state, coordinator: coordinator, engine: engine, view: view,
+            terminalID: terminalID,
             sessionEnd: sessionEnd, defaults: defaults, suite: suite)
     }
 

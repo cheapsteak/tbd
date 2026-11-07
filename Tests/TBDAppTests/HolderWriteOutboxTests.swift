@@ -30,12 +30,13 @@ struct HolderWriteOutboxTests {
         let body = Data(repeating: 0x61, count: 8 * 1024)
         let end = Data(EscapeSequences.bracketedPasteEnd)
 
-        // The production path: four chunks through `Coordinator.send`, in one
-        // main-actor turn, exactly as SwiftTerm's paste emits the first three.
-        panel.coordinator.send(source: panel.view, data: [UInt8](start)[...])
-        panel.coordinator.send(source: panel.view, data: [UInt8](body)[...])
-        panel.coordinator.send(source: panel.view, data: [UInt8](end)[...])
-        panel.coordinator.send(source: panel.view, data: [UInt8]("Z".utf8)[...])
+        // The production path: four chunks through the coordinator's
+        // `engine(_:send:)`, in one main-actor turn, exactly as SwiftTerm's
+        // paste emits the first three.
+        panel.coordinator.engine(panel.engine, send: [UInt8](start)[...])
+        panel.coordinator.engine(panel.engine, send: [UInt8](body)[...])
+        panel.coordinator.engine(panel.engine, send: [UInt8](end)[...])
+        panel.coordinator.engine(panel.engine, send: [UInt8]("Z".utf8)[...])
 
         var expected = Data()
         expected.append(start)
@@ -63,8 +64,8 @@ struct HolderWriteOutboxTests {
         #expect(ceiling > 0, "the fixture must have actually filled the queue")
         let refilled = panel.pty.fillPTY()
 
-        panel.coordinator.send(source: panel.view, data: [UInt8]("first".utf8)[...])
-        panel.coordinator.send(source: panel.view, data: [UInt8]("second".utf8)[...])
+        panel.coordinator.engine(panel.engine, send: [UInt8]("first".utf8)[...])
+        panel.coordinator.engine(panel.engine, send: [UInt8]("second".utf8)[...])
 
         #expect(panel.coordinator.outgoingQueueForTesting.pendingByteCountForTesting == 11,
                 "both keystrokes are held; a dropped one is the regression this replaces")
@@ -188,8 +189,8 @@ struct HolderWriteOutboxTests {
         defer { panel.tearDown() }
         let queue = panel.coordinator.outgoingQueueForTesting
         panel.pty.fillPTY()
-        panel.coordinator.send(
-            source: panel.view, data: [UInt8](Data(repeating: 0x61, count: 4_096))[...])
+        panel.coordinator.engine(
+            panel.engine, send: [UInt8](Data(repeating: 0x61, count: 4_096))[...])
         #expect(queue.pendingByteCountForTesting > 0,
                 "the fixture must actually produce a remainder, or this test is vacuous")
 
@@ -249,11 +250,12 @@ struct HolderWriteOutboxTests {
             attachment: HolderAttachment(
                 ptyFD: vended, generation: 7, snapshotPreamble: Data()))
 
-        await coordinator.startHolderClient(terminalView: view)
+        let engine = SwiftTermEngine(view: view)
+        await coordinator.startHolderClient(engine: engine)
 
         return HolderPanel(
-            state: state, coordinator: coordinator, view: view, terminalID: terminalID,
-            pty: pty, defaults: defaults, suite: suite)
+            state: state, coordinator: coordinator, engine: engine, view: view,
+            terminalID: terminalID, pty: pty, defaults: defaults, suite: suite)
     }
 
     /// Stands in for the daemon's two attach RPCs, handing over a descriptor
@@ -281,6 +283,7 @@ struct HolderWriteOutboxTests {
     private struct HolderPanel {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let terminalID: UUID
         /// The session's side. The reader closes the descriptor it was handed;

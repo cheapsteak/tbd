@@ -62,6 +62,7 @@ struct HolderPanelFocusTests {
     private final class Fixture {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let window: NSWindow
         let tabCloseContext: TabCloseContext
@@ -105,6 +106,7 @@ struct HolderPanelFocusTests {
                 frame: CGRect(x: 0, y: 0, width: 600, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
                 appearance: AppearanceSettings(defaults: defaults))
+            engine = SwiftTermEngine(view: view)
 
             // Borderless, far off every plausible display, never ordered front
             // and never made key: the window exists so the view has one, not so
@@ -127,12 +129,12 @@ struct HolderPanelFocusTests {
                     ptyFD: vended,
                     generation: HolderPanelFocusTests.generation,
                     snapshotPreamble: Data()))
-            coordinator.terminalView = view
-            view.terminalDelegate = coordinator
+            coordinator.engine = engine
+            engine.delegate = coordinator
         }
 
         func attach() async {
-            await coordinator.startHolderClient(terminalView: view)
+            await coordinator.startHolderClient(engine: engine)
         }
 
         /// The claim lands on the next main-queue turn rather than on the
@@ -301,7 +303,7 @@ struct HolderPanelFocusTests {
         await fixture.attach()
         try await fixture.waitForFirstResponder()
         var opened: [String] = []
-        fixture.view.onFilePathClicked = { opened.append($0) }
+        fixture.coordinator.onFilePathClicked = { opened.append($0) }
         let point = try fixture.showClickablePath()
 
         fixture.coordinator.shouldSuppressEvents = { true }
@@ -328,7 +330,7 @@ struct HolderPanelFocusTests {
         try await fixture.waitForFirstResponder()
 
         var opened: [String] = []
-        fixture.view.onFilePathClicked = { opened.append($0) }
+        fixture.coordinator.onFilePathClicked = { opened.append($0) }
         let point = try fixture.showClickablePath()
 
         fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
@@ -401,7 +403,7 @@ struct HolderPanelFocusTests {
         await fixture.attach()
         try await fixture.waitForFirstResponder()
         var opened: [String] = []
-        fixture.view.onFilePathClicked = { opened.append($0) }
+        fixture.coordinator.onFilePathClicked = { opened.append($0) }
         let point = try fixture.showClickablePath()
         // Rewrite the row as an OSC 8 hyperlink to the same file: TBD's own
         // Cmd+click handling defers those to SwiftTerm's mouse-up.

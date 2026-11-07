@@ -328,4 +328,68 @@ struct RemoteAttachFocusTests {
         replacement.onViewDismantled?(newView)
         #expect(state.remoteTerminalFocusTargets[Self.selected] == nil)
     }
+
+    /// The view's `onMovedToWindow` belongs to the terminal engine that owns
+    /// it before the registry ever sees the view. A registration that replaced
+    /// that hook would cut the engine off from its own window changes.
+    @MainActor
+    @Test("registration chains its claim after the view's own window hook, and unregistering puts that hook back")
+    func registrationKeepsTheViewsOwnWindowHook() {
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachFocus")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: defaults)
+        let view = TBDTerminalView(
+            frame: CGRect(x: 0, y: 0, width: 600, height: 300),
+            font: TBDTerminalView.defaultMonospaceFont,
+            appearance: AppearanceSettings(defaults: defaults))
+        // Stands in for the forwarder the engine installs.
+        var ownHookCalls = 0
+        view.onMovedToWindow = { ownHookCalls += 1 }
+
+        state.registerRemoteTerminalView(view, for: Self.selected)
+        view.onMovedToWindow?()
+        #expect(ownHookCalls == 1, "registration replaced the view's own window hook instead of chaining to it")
+
+        state.unregisterRemoteTerminalView(view, for: Self.selected)
+        view.onMovedToWindow?()
+        #expect(ownHookCalls == 2, "unregistering must put the view's own window hook back")
+    }
+
+    /// A reconnect registers the replacement before the superseded view is
+    /// dismantled, and the dismantle's unregister is identity-guarded, so the
+    /// superseded view's own hook has to come back when it is superseded.
+    @MainActor
+    @Test("a registration that supersedes a view puts that view's own window hook back")
+    func supersedingAViewRestoresItsOwnWindowHook() {
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachFocus")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: defaults)
+        let appearance = AppearanceSettings(defaults: defaults)
+        func makeView() -> TBDTerminalView {
+            TBDTerminalView(
+                frame: CGRect(x: 0, y: 0, width: 600, height: 300),
+                font: TBDTerminalView.defaultMonospaceFont, appearance: appearance)
+        }
+        let superseded = makeView()
+        let replacement = makeView()
+        // Stands in for the forwarder the superseded view's engine installs.
+        var supersededHookCalls = 0
+        superseded.onMovedToWindow = { supersededHookCalls += 1 }
+
+        state.registerRemoteTerminalView(superseded, for: Self.selected)
+        state.registerRemoteTerminalView(replacement, for: Self.selected)
+        superseded.onMovedToWindow?()
+        #expect(supersededHookCalls == 1, "the superseded view's own window hook was not put back")
+
+        // Its dismantle, landing after the replacement registered, changes
+        // neither view's hook nor the registration.
+        state.unregisterRemoteTerminalView(superseded, for: Self.selected)
+        superseded.onMovedToWindow?()
+        #expect(supersededHookCalls == 2)
+        #expect(state.remoteTerminalFocusTargets[Self.selected]?.view === replacement)
+
+        state.unregisterRemoteTerminalView(replacement, for: Self.selected)
+    }
 }

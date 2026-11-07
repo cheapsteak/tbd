@@ -59,7 +59,7 @@ struct ViewerScreenProducerTests {
     func payloadMatchesTheSharedProjection() throws {
         try withView(feeding: "\u{1b}[?2004h\u{1b}[?1hfirst\r\nsecond\r\n\u{1b}[2;4H") { view in
             let answer = ViewerScreenProducer.answer(
-                for: request(), terminalView: view,
+                for: request(), engine: SwiftTermEngine(view: view),
                 lastByteAt: Self.start, attachedAt: Self.start, now: Self.start)
             let projected = view.withTerminal {
                 TerminalScreenProjection.project($0, maxLines: 50)
@@ -86,12 +86,12 @@ struct ViewerScreenProducerTests {
         let body = (1...80).map { "line \($0)" }.joined(separator: "\r\n")
         try withView(feeding: body) { view in
             let shallow = ViewerScreenProducer.answer(
-                for: request(lines: 5), terminalView: view,
+                for: request(lines: 5), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             #expect(shallow.payload.lines.count <= 5)
 
             let deep = ViewerScreenProducer.answer(
-                for: request(lines: 500), terminalView: view,
+                for: request(lines: 500), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             #expect(deep.payload.lines.count > shallow.payload.lines.count,
                     "a deeper request must actually reach further back")
@@ -104,7 +104,7 @@ struct ViewerScreenProducerTests {
     func zeroLineRequestCarriesModesOnly() throws {
         try withView(feeding: "\u{1b}[?2004hvisible text") { view in
             let answer = ViewerScreenProducer.answer(
-                for: request(lines: 0), terminalView: view,
+                for: request(lines: 0), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
 
             #expect(answer.payload.lines.isEmpty)
@@ -122,7 +122,7 @@ struct ViewerScreenProducerTests {
         try withView(feeding: "hello") { view in
             let fedAt = Self.start
             let answer = ViewerScreenProducer.answer(
-                for: request(), terminalView: view,
+                for: request(), engine: SwiftTermEngine(view: view),
                 lastByteAt: fedAt, attachedAt: fedAt.advanced(by: .seconds(-30)),
                 now: fedAt.advanced(by: .milliseconds(1_250)))
 
@@ -139,7 +139,7 @@ struct ViewerScreenProducerTests {
         try withView { view in
             let attachedAt = Self.start
             let answer = ViewerScreenProducer.answer(
-                for: request(), terminalView: view,
+                for: request(), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: attachedAt,
                 now: attachedAt.advanced(by: .milliseconds(700)))
 
@@ -155,7 +155,7 @@ struct ViewerScreenProducerTests {
         try withView { view in
             let fedAt = Self.start
             let answer = ViewerScreenProducer.answer(
-                for: request(), terminalView: view,
+                for: request(), engine: SwiftTermEngine(view: view),
                 lastByteAt: fedAt, attachedAt: fedAt,
                 now: fedAt.advanced(by: .milliseconds(-500)))
 
@@ -176,7 +176,7 @@ struct ViewerScreenProducerTests {
         // because this store cannot see the difference — and says so.
         try withView(feeding: "\u{1b}[?25lhidden") { view in
             let answer = ViewerScreenProducer.answer(
-                for: request(), terminalView: view,
+                for: request(), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
 
             #expect(answer.payload.cursorVisible == ViewerScreenProducer.cursorVisibleDefault)
@@ -194,7 +194,7 @@ struct ViewerScreenProducerTests {
     func payloadCarriesNoDaemonProvenance() throws {
         try withView(feeding: "text") { view in
             let answer = ViewerScreenProducer.answer(
-                for: request(), terminalView: view,
+                for: request(), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             let encoded = try JSONEncoder().encode(answer.payload)
             let object = try JSONSerialization.jsonObject(with: encoded)
@@ -212,12 +212,12 @@ struct ViewerScreenProducerTests {
     func styledCaptureOnlyWhenAsked() throws {
         try withView(feeding: "\u{1b}[31mred line\u{1b}[0m") { view in
             let without = ViewerScreenProducer.answer(
-                for: request(styled: false), terminalView: view,
+                for: request(styled: false), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             #expect(without.styledCapture == nil)
 
             let with = ViewerScreenProducer.answer(
-                for: request(styled: true), terminalView: view,
+                for: request(styled: true), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             let capture = try #require(with.styledCapture)
             #expect(capture.contains("red line"))
@@ -233,7 +233,7 @@ struct ViewerScreenProducerTests {
     func styledCaptureMatchesTheHistoryShape() throws {
         try withView(feeding: "first\r\nsecond") { view in
             let answer = ViewerScreenProducer.answer(
-                for: request(styled: true), terminalView: view,
+                for: request(styled: true), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
             let capture = try #require(answer.styledCapture)
 
@@ -250,7 +250,7 @@ struct ViewerScreenProducerTests {
     func emptyScreenGivesAnEmptyCapture() throws {
         try withView { view in
             let answer = ViewerScreenProducer.answer(
-                for: request(styled: true), terminalView: view,
+                for: request(styled: true), engine: SwiftTermEngine(view: view),
                 lastByteAt: nil, attachedAt: Self.start, now: Self.start)
 
             #expect(answer.styledCapture == "",

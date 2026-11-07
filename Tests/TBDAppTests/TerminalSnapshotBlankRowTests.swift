@@ -484,7 +484,7 @@ struct TerminalCaptureBlankRowTests {
             retainedScrollbackLines: 5_000, wantStyledCapture: true)
         let now = ContinuousClock.now
         let answer = ViewerScreenProducer.answer(
-            for: request, terminalView: view, lastByteAt: nil, attachedAt: now, now: now)
+            for: request, engine: SwiftTermEngine(view: view), lastByteAt: nil, attachedAt: now, now: now)
         let capture = try #require(answer.styledCapture)
 
         // The shape ends in one `\n`, so the last component is empty and the

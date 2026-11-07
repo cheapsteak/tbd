@@ -156,6 +156,7 @@ struct HolderDetachHandbackTests {
     private final class Fixture {
         let state: AppState
         let coordinator: TerminalPanelRepresentable.Coordinator
+        let engine: SwiftTermEngine
         let view: TBDTerminalView
         let stub: StubHolderAttach
         let worktreeID: UUID
@@ -206,6 +207,7 @@ struct HolderDetachHandbackTests {
                 frame: CGRect(x: 0, y: 0, width: 600, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
                 appearance: AppearanceSettings(defaults: defaults))
+            engine = SwiftTermEngine(view: view)
 
             stub = StubHolderAttach(
                 attachment: HolderAttachment(
@@ -235,16 +237,16 @@ struct HolderDetachHandbackTests {
             // time it is asked, so a retry would reuse one its reader closed.
             coordinator.holderAttachRetryDelays = []
             // Both halves of what `makeNSView` wires, and both are
-            // load-bearing here: the coordinator serializes the view it holds,
-            // and the view routes its terminal's replies back to the
-            // coordinator — which is the only path the handback's DECRQM
-            // answers can take.
-            coordinator.terminalView = view
-            view.terminalDelegate = coordinator
+            // load-bearing here: the coordinator serializes through the engine
+            // it holds, and the engine, the view's delegate, routes its
+            // terminal's replies on to the coordinator — the handback's DECRQM
+            // answers are caught on that path, in the engine.
+            coordinator.engine = engine
+            engine.delegate = coordinator
         }
 
         func attach() async {
-            await coordinator.startHolderClient(terminalView: view)
+            await coordinator.startHolderClient(engine: engine)
         }
 
         /// Clears `FD_CLOEXEC` on the vended end, for the one test whose
@@ -568,7 +570,7 @@ struct HolderDetachHandbackTests {
         // Opened through the production classifier — the marker goes in as its
         // own chunk, exactly as SwiftTerm delivers it — rather than by calling
         // `beginUserPaste()`, which would bypass the detection entirely.
-        fixture.coordinator.send(source: fixture.view, data: EscapeSequences.bracketedPasteStart[...])
+        fixture.engine.send(source: fixture.view, data: EscapeSequences.bracketedPasteStart[...])
         #expect(fixture.coordinator.outgoingQueueForTesting.isPasteOpenForTesting,
                 "the fixture never opened a paste, so the release below would prove nothing")
 
@@ -614,7 +616,7 @@ struct HolderDetachHandbackTests {
         let fixture = try Fixture(readyFails: true)
         defer { fixture.tearDown() }
 
-        fixture.coordinator.send(source: fixture.view, data: EscapeSequences.bracketedPasteStart[...])
+        fixture.engine.send(source: fixture.view, data: EscapeSequences.bracketedPasteStart[...])
         #expect(fixture.coordinator.outgoingQueueForTesting.isPasteOpenForTesting,
                 "the fixture never opened a paste, so the release below would prove nothing")
 
@@ -839,7 +841,7 @@ struct HolderDetachHandbackTests {
             await MainActor.run {
                 fixture.coordinator.cleanup()
                 box.attach = Task { @MainActor in
-                    await successor.startHolderClient(terminalView: fixture.view)
+                    await successor.startHolderClient(engine: fixture.engine)
                 }
             }
         }
