@@ -184,6 +184,28 @@ test('transport: a queued encrypt sends the bytes as they were when it was calle
   assert.deepEqual(await b.decrypt(c1), p0);
 });
 
+// An array of numbers, a string, a bare ArrayBuffer, another typed array,
+// nothing, and a number (which `new Uint8Array` reads as a length).
+test('transport: encrypt and decrypt reject a non-Uint8Array without spending a nonce', async () => {
+  const { a, b } = await pair();
+  for (const value of [[1, 2, 3], 'abc', new ArrayBuffer(32), new Uint16Array(16), null, undefined, 16]) {
+    const kind = Object.prototype.toString.call(value);
+    /** @type {Promise<Uint8Array> | undefined} */
+    let encrypting;
+    /** @type {Promise<Uint8Array> | undefined} */
+    let decrypting;
+    // A promise that rejects, like every other refusal, not a synchronous throw.
+    assert.doesNotThrow(() => {
+      encrypting = a.encrypt(/** @type {any} */ (value));
+      decrypting = b.decrypt(/** @type {any} */ (value));
+    }, kind);
+    await assert.rejects(/** @type {Promise<Uint8Array>} */ (encrypting), TypeError, `encrypt: ${kind}`);
+    await assert.rejects(/** @type {Promise<Uint8Array>} */ (decrypting), TypeError, `decrypt: ${kind}`);
+  }
+  // Both counters are still at 0.
+  assert.deepEqual(await b.decrypt(await a.encrypt(p)), p);
+});
+
 test('transport: decrypts a view into a larger buffer', async () => {
   const { a, b } = await pair();
   const message = await a.encrypt(p);

@@ -80,14 +80,22 @@ async function afterMessage1(vector) {
 }
 
 /**
- * Reads the vector's message 2 and checks the payload, the handshake hash and
- * transport messages 2 through 5 against the vector.
+ * Reads the vector's message 2 and checks the result against the vector.
  * @param {Vector} vector
  * @param {{ readMessage2(message: Uint8Array): Promise<{ payload: Uint8Array, transport: any, handshakeHash: Uint8Array }> }} initiator
  * @param {Uint8Array} [message2] defaults to the vector's message 2
  */
 async function assertCompletes(vector, initiator, message2 = fromHex(vector.messages[1].ciphertext)) {
-  const { payload, transport, handshakeHash } = await initiator.readMessage2(message2);
+  await assertResult(vector, await initiator.readMessage2(message2));
+}
+
+/**
+ * Checks a read of message 2 against the vector: the payload, the handshake
+ * hash and transport messages 2 through 5.
+ * @param {Vector} vector
+ * @param {{ payload: Uint8Array, transport: any, handshakeHash: Uint8Array }} result
+ */
+async function assertResult(vector, { payload, transport, handshakeHash }) {
   assert.deepEqual(payload, fromHex(vector.messages[1].payload), 'message 2 payload');
   assert.deepEqual(handshakeHash, fromHex(vector.handshake_hash), 'handshake hash');
   for (let n = 2; n < 6; n += 1) {
@@ -173,6 +181,66 @@ for (const vector of vectors) {
     }
     await assertCompletes(vector, initiator);
   });
+
+  // The loader calls readMessage2 once per relay frame without awaiting, so
+  // the real message 2 can arrive while a stale frame is still being read.
+  // The reads are queued: the stale one fails on its own, and the real one
+  // reads after it from the unchanged state.
+  /** @type {[string, () => Uint8Array, string][]} */
+  const staleKinds = [
+    ['message 2 with its last bit flipped', () => flipped(vector, -1), 'decryptFailed'],
+    ['message 2 with an all-zero ephemeral', () => zeroEphemeral(vector), 'invalidPublicKey'],
+    ['10 bytes', () => randomBytes(10), 'messageTooShort'],
+  ];
+  for (const [label, makeStale, code] of staleKinds) {
+    test(`handshake: ${name} a stale frame being read does not shadow the real message 2 (${label})`, async () => {
+      const initiator = await afterMessage1(vector);
+      const stale = initiator.readMessage2(makeStale());
+      const real = initiator.readMessage2(realMessage2(vector));
+      const [, result] = await Promise.all([rejectsWith(stale, code), real]);
+      await assertResult(vector, result);
+    });
+  }
+
+  test(`handshake: ${name} three stale frames and the real message 2, read all at once`, async () => {
+    const initiator = await afterMessage1(vector);
+    const stale1 = initiator.readMessage2(randomBytes(64));
+    const stale2 = initiator.readMessage2(zeroEphemeral(vector));
+    const stale3 = initiator.readMessage2(flipped(vector, -1));
+    const real = initiator.readMessage2(realMessage2(vector));
+    const [, , , result] = await Promise.all([
+      rejectsWith(stale1, 'decryptFailed', 'random 64 bytes'),
+      rejectsWith(stale2, 'invalidPublicKey', 'an all-zero ephemeral'),
+      rejectsWith(stale3, 'decryptFailed', 'a bit flipped'),
+      real,
+    ]);
+    await assertResult(vector, result);
+  });
+
+  test(`handshake: ${name} a frame read after the real message 2 is invalidState and leaves its result intact`, async () => {
+    const initiator = await afterMessage1(vector);
+    const real = initiator.readMessage2(realMessage2(vector));
+    const stale = initiator.readMessage2(flipped(vector, -1));
+    const again = initiator.readMessage2(realMessage2(vector));
+    const [result] = await Promise.all([
+      real,
+      rejectsWith(stale, 'invalidState', 'a stale frame'),
+      rejectsWith(again, 'invalidState', 'message 2 again'),
+    ]);
+    // Checked once the later reads have settled.
+    await assertResult(vector, result);
+  });
+
+  // Message 2 is 48 bytes besides its payload. The vector's payload is not
+  // empty, so 48 bytes of it pass the length check and fail the payload's tag.
+  test(`handshake: ${name} message 2 needs at least 48 bytes`, async () => {
+    const initiator = await afterMessage1(vector);
+    const real = realMessage2(vector);
+    assert.ok(real.length > 48);
+    await rejectsWith(initiator.readMessage2(real.slice(0, 47)), 'messageTooShort', '47 bytes');
+    await rejectsWith(initiator.readMessage2(real.slice(0, 48)), 'decryptFailed', '48 bytes');
+    await assertCompletes(vector, initiator);
+  });
 }
 
 test('handshake: the psk enters only at message 2', async () => {
@@ -185,6 +253,8 @@ test('handshake: the psk enters only at message 2', async () => {
 test('handshake: readMessage2 before writeMessage1 is invalidState and changes nothing', async () => {
   const initiator = await vectorInitiator(vectorIKpsk2);
   await rejectsWith(initiator.readMessage2(realMessage2(vectorIKpsk2)), 'invalidState');
+  // The phase is checked before the length.
+  await rejectsWith(initiator.readMessage2(new Uint8Array(10)), 'invalidState', '10 bytes');
   const [m0] = vectorIKpsk2.messages;
   assert.deepEqual(await initiator.writeMessage1(fromHex(m0.payload)), fromHex(m0.ciphertext));
   await assertCompletes(vectorIKpsk2, initiator);
@@ -225,29 +295,40 @@ test('handshake: a remote static key of low order fails message 1, and the initi
   await rejectsWith(initiator.readMessage2(realMessage2(vectorIK)), 'invalidState');
 });
 
-test('handshake: a read during another read is invalidState and leaves the first alone', async () => {
-  // A stale frame in flight: the real message 2 overlapping it is refused,
-  // the stale frame fails on its own, and the real message 2 then completes.
-  const staleFirst = await afterMessage1(vectorIK);
-  const stale = staleFirst.readMessage2(flipped(vectorIK, -1));
-  const overlapping = staleFirst.readMessage2(realMessage2(vectorIK));
-  await rejectsWith(overlapping, 'invalidState');
-  await rejectsWith(stale, 'decryptFailed');
-  await assertCompletes(vectorIK, staleFirst);
+// Message 2 answers message 1, which the caller sends only once
+// writeMessage1 resolves, so a read is not held back for a write still
+// running: it is refused, even with the real message 2's bytes, and changes
+// nothing. A read called just before the write, in the same turn, starts
+// once the write has begun, so it is refused too.
+test('handshake: a read that starts while writeMessage1 is running is invalidState and changes nothing', async () => {
+  for (const vector of vectors) {
+    const initiator = await vectorInitiator(vector);
+    const [m0] = vector.messages;
+    const before = initiator.readMessage2(realMessage2(vector));
+    const write = initiator.writeMessage1(fromHex(m0.payload));
+    const during = initiator.readMessage2(realMessage2(vector));
+    const [message1] = await Promise.all([
+      write,
+      rejectsWith(before, 'invalidState', `${vector.protocol_name}: called before the write`),
+      rejectsWith(during, 'invalidState', `${vector.protocol_name}: called during the write`),
+    ]);
+    assert.deepEqual(message1, fromHex(m0.ciphertext));
+    await assertCompletes(vector, initiator);
+  }
+});
 
-  // The real message 2 in flight: a stale frame overlapping it is refused,
-  // a refused call does not free the state for the next one, and the real
-  // one completes.
-  const realFirst = await afterMessage1(vectorIKpsk2);
-  const real = realFirst.readMessage2(realMessage2(vectorIKpsk2));
-  const late = realFirst.readMessage2(flipped(vectorIKpsk2, -1));
-  const again = realFirst.readMessage2(realMessage2(vectorIKpsk2));
-  const write = realFirst.writeMessage1(new Uint8Array(0));
-  await rejectsWith(late, 'invalidState');
-  await rejectsWith(again, 'invalidState');
-  await rejectsWith(write, 'invalidState');
-  const { handshakeHash } = await real;
-  assert.deepEqual(handshakeHash, fromHex(vectorIKpsk2.handshake_hash));
+// A stray writeMessage1 is refused, and while a read is queued or running it
+// changes nothing, so the reads go on as if it had not been made.
+test('handshake: a writeMessage1 made while reads are pending is invalidState and disturbs none of them', async () => {
+  const initiator = await afterMessage1(vectorIKpsk2);
+  const stale = initiator.readMessage2(flipped(vectorIKpsk2, -1));
+  const queuedWrite = rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', 'before the read starts');
+  // The stale read has started by the time this continues.
+  await null;
+  const runningWrite = rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', 'while the read runs');
+  const real = initiator.readMessage2(realMessage2(vectorIKpsk2));
+  const [, , , result] = await Promise.all([queuedWrite, runningWrite, rejectsWith(stale, 'decryptFailed'), real]);
+  await assertResult(vectorIKpsk2, result);
 });
 
 test('handshake: after completion, every call is invalidState', async () => {
@@ -279,6 +360,99 @@ test('handshake: refuses malformed keys, prologue and pattern', async () => {
   const pair = /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']));
   await assert.rejects(vectorInitiator(vectorIK, { localStatic: pair.privateKey }), TypeError);
   await assert.rejects(vectorInitiator(vectorIK, { remoteStatic: pair.privateKey }), TypeError);
+});
+
+// Values that are not Uint8Arrays, some of which a careless copy would turn
+// into bytes: an array of numbers, a string, a bare ArrayBuffer, another
+// typed array, nothing, and a number (which `new Uint8Array` reads as a length).
+const notBytes = [Array.from({ length: 32 }, () => 7), 'x'.repeat(32), new ArrayBuffer(32), new Uint16Array(16), null, 32];
+
+test('handshake: createInitiator refuses byte options that are not Uint8Arrays', async () => {
+  for (const value of notBytes) {
+    const kind = Object.prototype.toString.call(value);
+    // null means "none" for psk and ephemeral, so it is not a wrong type there.
+    const options =
+      value === null
+        ? ['localStatic', 'remoteStatic', 'prologue']
+        : ['psk', 'localStatic', 'ephemeral', 'remoteStatic', 'prologue'];
+    for (const option of options) {
+      await assert.rejects(vectorInitiator(vectorIKpsk2, { [option]: value }), TypeError, `${option}: ${kind}`);
+    }
+    // The type is checked before the psk's fit to the pattern.
+    if (value !== null) {
+      await assert.rejects(vectorInitiator(vectorIK, { psk: value }), TypeError, `IK psk: ${kind}`);
+    }
+  }
+});
+
+test('handshake: writeMessage1 and readMessage2 refuse a non-Uint8Array, and the refusal changes nothing', async () => {
+  for (const vector of vectors) {
+    const initiator = await vectorInitiator(vector);
+    for (const value of [...notBytes, undefined]) {
+      await assert.rejects(initiator.writeMessage1(value), TypeError, `writeMessage1(${String(value)})`);
+      await assert.rejects(initiator.readMessage2(value), TypeError, `readMessage2(${String(value)}) before message 1`);
+    }
+    // The refused writeMessage1 calls did not end the handshake.
+    const [m0] = vector.messages;
+    assert.deepEqual(await initiator.writeMessage1(fromHex(m0.payload)), fromHex(m0.ciphertext));
+    for (const value of [...notBytes, undefined]) {
+      await assert.rejects(initiator.readMessage2(value), TypeError, `readMessage2(${String(value)})`);
+    }
+    await assertCompletes(vector, initiator);
+  }
+});
+
+test('handshake: createInitiator refuses keys it could not use', async () => {
+  const generate = async (/** @type {KeyUsage[]} */ usages) =>
+    /** @type {CryptoKeyPair} */ (await subtle.generateKey({ name: 'X25519' }, false, usages));
+  /** The same public key, imported so it cannot be exported. @param {CryptoKey} publicKey */
+  const hidden = async (publicKey) =>
+    subtle.importKey('raw', await subtle.exportKey('raw', publicKey), { name: 'X25519' }, false, []);
+  const phone = await generate(['deriveBits']);
+  const laptop = await generate(['deriveBits']);
+  const options = {
+    pattern: /** @type {'IK'} */ ('IK'),
+    localStatic: phone,
+    remoteStatic: laptop.publicKey,
+    prologue: randomBytes(43),
+    ephemeral: await generate(['deriveBits']),
+  };
+  // The usable keys are accepted.
+  await createInitiator(options);
+
+  const noDeriveBits = await generate(['deriveKey']);
+  const hiddenPublic = { privateKey: phone.privateKey, publicKey: await hidden(phone.publicKey) };
+  /** @type {[string, object][]} */
+  const cases = [
+    ['a remoteStatic that cannot be exported', { remoteStatic: await hidden(laptop.publicKey) }],
+    ['a localStatic without deriveBits', { localStatic: noDeriveBits }],
+    ['an ephemeral without deriveBits', { ephemeral: noDeriveBits }],
+    ['a localStatic whose public key cannot be exported', { localStatic: hiddenPublic }],
+    ['an ephemeral whose public key cannot be exported', { ephemeral: hiddenPublic }],
+  ];
+  for (const [label, overrides] of cases) {
+    await assert.rejects(createInitiator({ ...options, ...overrides }), TypeError, label);
+  }
+});
+
+// Node's deriveBits refuses an all-zero result itself (`OperationError`), so
+// no real key reaches the module's own zero check. The stub stands in for an
+// engine that returns the zeros.
+test('handshake: an all-zero DH result is invalidPublicKey even when Web Crypto returns it', async () => {
+  const initiator = await vectorInitiator(vectorIK);
+  assert.ok(!Object.hasOwn(subtle, 'deriveBits'), 'deriveBits is inherited, so deleting the stub restores it');
+  let calls = 0;
+  subtle.deriveBits = async () => {
+    calls += 1;
+    return new ArrayBuffer(32);
+  };
+  try {
+    await rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidPublicKey');
+  } finally {
+    delete subtle.deriveBits;
+  }
+  // `es`, message 1's first DH, got the zeros.
+  assert.equal(calls, 1);
 });
 
 test('handshake: message 1 payload size limit', async () => {

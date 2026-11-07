@@ -37,9 +37,9 @@ import { base64urlDecode } from './pairingLink.js';
  */
 
 /**
- * The initiator's phases. `writing1` and `reading2` mean a call owns the
- * state until it settles.
- * @typedef {'initial' | 'writing1' | 'afterMessage1' | 'reading2' | 'complete' | 'failed'} InitiatorPhase
+ * The initiator's phases. `writing1` means `writeMessage1` owns the state
+ * until it settles.
+ * @typedef {'initial' | 'writing1' | 'afterMessage1' | 'complete' | 'failed'} InitiatorPhase
  */
 
 /**
@@ -125,16 +125,26 @@ export async function createTransport({ sendKey, receiveKey, sendNonce = 0n, rec
   const send = new CipherState(sendKey, sendNonce);
   const receive = new CipherState(receiveKey, receiveNonce);
   await Promise.all([send.prepare('encrypt'), receive.prepare('decrypt')]);
+  // A refused argument rejects before its call reaches the queue, so it
+  // spends no nonce.
   return Object.freeze({
-    /** @param {Uint8Array} plaintext */
+    /**
+     * @param {Uint8Array} plaintext
+     * @throws {TypeError} as a rejection, unless `plaintext` is a `Uint8Array`
+     */
     async encrypt(plaintext) {
+      requireBytes(plaintext, 'a transport plaintext');
       if (plaintext.length > MAX_PLAINTEXT_LENGTH) {
         throw new NoiseError('messageTooLong');
       }
       return send.encrypt(NO_ASSOCIATED_DATA, plaintext);
     },
-    /** @param {Uint8Array} ciphertext */
+    /**
+     * @param {Uint8Array} ciphertext
+     * @throws {TypeError} as a rejection, unless `ciphertext` is a `Uint8Array`
+     */
     async decrypt(ciphertext) {
+      requireBytes(ciphertext, 'a transport message');
       if (ciphertext.length > MAX_MESSAGE_LENGTH) {
         throw new NoiseError('messageTooLong');
       }
@@ -149,47 +159,75 @@ export async function createTransport({ sendKey, receiveKey, sendNonce = 0n, rec
  * `e, ee, se`, then `psk` for `IKpsk2`. Reading message 2 completes the
  * handshake.
  *
- * Phases advance synchronously when a call is made, before its first await:
- * - A call made while another is in flight rejects `invalidState` and changes
- *   nothing, so it never disturbs the call in flight.
- * - `writeMessage1` works once. Otherwise it rejects `invalidState` and
- *   leaves the initiator failed, as any other rejection of it does; once
- *   failed, every call rejects `invalidState`.
- * - `readMessage2` is atomic. It runs on a copy of the symmetric state (`h`,
- *   `ck`, the cipher's key and nonce) and keeps the copy only on success, so
- *   a rejected frame (a stale one from a replaced peer, say) leaves the state
- *   exactly as it was, and the real message 2 can still be read. The
- *   responder's ephemeral key lives only inside the attempt, and its static
- *   key is fixed at creation. A call in the wrong phase rejects
- *   `invalidState` and changes nothing.
+ * Arguments are checked first, when a call is made: a byte array that is not
+ * a `Uint8Array` rejects `TypeError` and changes nothing. Every byte array is
+ * copied when it is passed in. Past that check:
  *
- * Every byte array is copied when it is passed in.
+ * Writing message 1:
+ * - `writeMessage1` works once, from the start. Its phase advances when it
+ *   is called, before its first await.
+ * - If it rejects, the initiator fails.
+ * - A second `writeMessage1` rejects `invalidState`. Made while the first is
+ *   still running, or while a read is queued or running, it changes nothing,
+ *   so it never disturbs that call; otherwise it fails the initiator.
+ * - Once the initiator has failed, every call rejects `invalidState`.
+ *
+ * Reading message 2:
+ * - Reads are queued. The caller may call `readMessage2` once per relay
+ *   frame without awaiting: each read starts once the read before it has
+ *   settled, so a stale frame still being read cannot shadow the real
+ *   message 2 behind it.
+ * - A read checks the phase when it starts, not when it is called, and
+ *   reads only once `writeMessage1` has resolved. A read that starts before
+ *   then, with no `writeMessage1` made or one still running, rejects
+ *   `invalidState` and changes nothing; it is not held back for the write.
+ *   Message 2 answers message 1, which the caller sends only after
+ *   `writeMessage1` resolves, so any frame that comes earlier is stale.
+ * - A read that starts after another read has succeeded rejects
+ *   `invalidState` and changes nothing.
+ * - Each read is atomic. It runs on a copy of the symmetric state (`h`,
+ *   `ck`, the cipher's key and nonce) and keeps the copy only on success, so
+ *   a rejected frame (a stale one from a replaced peer, say) leaves the
+ *   state exactly as it was, and the next read starts from there. The
+ *   responder's ephemeral key lives only inside the attempt, and its static
+ *   key is fixed at creation.
  *
  * @param {{ pattern: NoisePattern, localStatic: CryptoKeyPair | Uint8Array, remoteStatic: CryptoKey | Uint8Array,
  *           psk?: Uint8Array | null, prologue: Uint8Array, ephemeral?: CryptoKeyPair | Uint8Array | null }} options
- *   - `localStatic`: the phone's X25519 key pair, or its 32 raw private-key bytes.
+ *   - `localStatic`: the phone's X25519 key pair, or its 32 raw private-key
+ *     bytes. A key pair's private key must have the `deriveBits` usage, and
+ *     its public key must be extractable.
  *   - `remoteStatic`: the laptop's public key, as an extractable X25519
  *     `CryptoKey` or 32 raw bytes.
  *   - `psk`: the 32-byte pairing secret for `IKpsk2`; null or absent for `IK`.
  *   - `prologue`: from `phonePrologue`.
- *   - `ephemeral`: for vector tests only; a fresh key pair is made when absent.
+ *   - `ephemeral`: for vector tests only, in the same forms as `localStatic`;
+ *     a fresh key pair is made when absent.
  * @returns {Promise<NoiseInitiator>}
  * @throws {NoiseError} `invalidPSK` when the PSK does not fit the pattern, and
  *   `invalidPublicKey` when raw `remoteStatic` bytes are not 32 long
  * @throws {RangeError} for an unknown pattern, or raw private-key bytes that are not 32 long
- * @throws {TypeError} for a prologue that is not a `Uint8Array`, or a key of the wrong kind
+ * @throws {TypeError} for a `psk` or `prologue` that is not a `Uint8Array`, a key of the wrong
+ *   kind, or a key without the capabilities above. All of these come from this call, before any
+ *   key is used.
  */
 export async function createInitiator({ pattern, localStatic, remoteStatic, psk = null, prologue, ephemeral = null }) {
   if (pattern !== 'IKpsk2' && pattern !== 'IK') {
     throw new RangeError(`unknown handshake pattern ${String(pattern)}`);
   }
+  if (psk !== null) {
+    requireBytes(psk, 'psk');
+  }
   const usesPSK = pattern === 'IKpsk2';
   if (usesPSK ? psk === null || psk.length !== PSK_BYTES : psk !== null) {
     throw new NoiseError('invalidPSK');
   }
-  if (!(prologue instanceof Uint8Array)) {
-    throw new TypeError('the prologue must be a Uint8Array');
+  requireBytes(prologue, 'the prologue');
+  checkKeyPair(localStatic, 'localStatic');
+  if (ephemeral !== null) {
+    checkKeyPair(ephemeral, 'ephemeral');
   }
+  checkRemoteStatic(remoteStatic);
   // Copy every byte input before the first await.
   const pskBytes = psk === null ? null : copyBytes(psk);
   const prologueBytes = copyBytes(prologue);
@@ -205,6 +243,56 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
   await symmetric.mixHash(rs.bytes);
   /** @type {InitiatorPhase} */
   let phase = 'initial';
+  // Reads run one at a time, in call order.
+  const reads = new SerialQueue();
+  // Reads called and not yet settled. While there are any, a stray
+  // `writeMessage1` changes nothing.
+  let pendingReads = 0;
+
+  /**
+   * One read of message 2, run from the queue. Nothing else changes the
+   * state while it runs: later reads wait their turn, and a `writeMessage1`
+   * made meanwhile is refused without effect.
+   * @param {Uint8Array<ArrayBuffer>} input the caller's message, copied
+   * @returns {Promise<HandshakeResult>}
+   */
+  async function readAttempt(input) {
+    // The phase comes first, so a read out of turn is `invalidState`
+    // whatever its length.
+    if (phase !== 'afterMessage1') {
+      throw new NoiseError('invalidState');
+    }
+    if (input.length > MAX_MESSAGE_LENGTH) {
+      throw new NoiseError('messageTooLong');
+    }
+    if (input.length < MESSAGE2_OVERHEAD) {
+      throw new NoiseError('messageTooShort');
+    }
+    // Every step runs on this copy, and each awaits the one before it, so
+    // no operation on the copy is still running when it is kept or dropped.
+    const next = symmetric.copy();
+    // e
+    const remoteEphemeralBytes = input.slice(0, DH_BYTES);
+    const remoteEphemeral = await importPublicKey(remoteEphemeralBytes);
+    await next.mixHash(remoteEphemeralBytes);
+    if (usesPSK) {
+      await next.mixKey(remoteEphemeralBytes);
+    }
+    // ee
+    await next.mixKey(await dh(e.privateKey, remoteEphemeral));
+    // se
+    await next.mixKey(await dh(s.privateKey, remoteEphemeral));
+    // psk
+    if (pskBytes !== null) {
+      await next.mixKeyAndHash(pskBytes);
+    }
+    const payload = await next.decryptAndHash(input.subarray(DH_BYTES));
+    const [sendKey, receiveKey] = await next.split();
+    const transport = await createTransport({ sendKey, receiveKey });
+    symmetric = next;
+    phase = 'complete';
+    return { payload, transport, handshakeHash: copyBytes(next.h) };
+  }
 
   return Object.freeze({
     /**
@@ -212,11 +300,12 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
      * @returns {Promise<Uint8Array>} message 1, 96 bytes longer than the payload
      */
     async writeMessage1(payload) {
-      if (phase === 'writing1' || phase === 'reading2') {
-        throw new NoiseError('invalidState');
-      }
+      requireBytes(payload, 'the message 1 payload');
       if (phase !== 'initial') {
-        phase = 'failed';
+        // A second write, which must not disturb a call still pending.
+        if (phase !== 'writing1' && pendingReads === 0) {
+          phase = 'failed';
+        }
         throw new NoiseError('invalidState');
       }
       phase = 'writing1';
@@ -248,51 +337,19 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
     },
 
     /**
+     * Queues a read of one frame as message 2; see `createInitiator` for the
+     * rules.
      * @param {Uint8Array} message 48 through 65,535 bytes
      * @returns {Promise<HandshakeResult>}
      */
     async readMessage2(message) {
-      if (phase !== 'afterMessage1') {
-        throw new NoiseError('invalidState');
-      }
-      phase = 'reading2';
+      requireBytes(message, 'message 2');
+      const input = copyBytes(message);
+      pendingReads += 1;
       try {
-        if (message.length > MAX_MESSAGE_LENGTH) {
-          throw new NoiseError('messageTooLong');
-        }
-        if (message.length < MESSAGE2_OVERHEAD) {
-          throw new NoiseError('messageTooShort');
-        }
-        const input = copyBytes(message);
-        // Every step runs on this copy, and each awaits the one before it, so
-        // no operation on the copy is still running when it is kept or dropped.
-        const next = symmetric.copy();
-        // e
-        const remoteEphemeralBytes = input.slice(0, DH_BYTES);
-        const remoteEphemeral = await importPublicKey(remoteEphemeralBytes);
-        await next.mixHash(remoteEphemeralBytes);
-        if (usesPSK) {
-          await next.mixKey(remoteEphemeralBytes);
-        }
-        // ee
-        await next.mixKey(await dh(e.privateKey, remoteEphemeral));
-        // se
-        await next.mixKey(await dh(s.privateKey, remoteEphemeral));
-        // psk
-        if (pskBytes !== null) {
-          await next.mixKeyAndHash(pskBytes);
-        }
-        const payload = await next.decryptAndHash(input.subarray(DH_BYTES));
-        const [sendKey, receiveKey] = await next.split();
-        const transport = await createTransport({ sendKey, receiveKey });
-        symmetric = next;
-        phase = 'complete';
-        return { payload, transport, handshakeHash: copyBytes(next.h) };
-      } catch (error) {
-        // This call owns the state while it is `reading2`: an overlapping call
-        // changes nothing, so restoring the phase cannot undo another's work.
-        phase = 'afterMessage1';
-        throw error;
+        return await reads.run(() => readAttempt(input));
+      } finally {
+        pendingReads -= 1;
       }
     },
   });
@@ -647,21 +704,66 @@ async function importPublicKey(bytes) {
 }
 
 /**
- * The laptop's static key as a `CryptoKey` and as the raw bytes the
- * handshake hash takes in.
- * @param {CryptoKey | Uint8Array} key an extractable X25519 public key, or 32 raw bytes
- * @returns {Promise<{ key: CryptoKey, bytes: Uint8Array<ArrayBuffer> }>}
+ * Checks the `remoteStatic` option before any work: 32 raw bytes, or an
+ * X25519 public `CryptoKey` that can be exported, because its raw bytes go
+ * into the handshake hash.
+ * @param {unknown} key
+ * @throws {NoiseError} `invalidPublicKey` for raw bytes that are not 32 long
+ * @throws {TypeError} for anything else
  */
-async function importRemoteStatic(key) {
+function checkRemoteStatic(key) {
   if (key instanceof Uint8Array) {
     if (key.length !== DH_BYTES) {
       throw new NoiseError('invalidPublicKey');
     }
-    const bytes = copyBytes(key);
-    return { key: await importPublicKey(bytes), bytes };
+    return;
   }
   if (!isX25519Key(key, 'public')) {
     throw new TypeError('remoteStatic must be an X25519 public CryptoKey or 32 raw bytes');
+  }
+  if (!key.extractable) {
+    throw new TypeError('remoteStatic must be extractable, because its raw bytes go into the handshake hash');
+  }
+}
+
+/**
+ * Checks a `localStatic` or `ephemeral` option before any work: 32 raw
+ * private-key bytes, or an X25519 key pair whose private key has the
+ * `deriveBits` usage and whose public key can be exported.
+ * @param {unknown} key
+ * @param {string} name the option's name, for errors
+ * @throws {RangeError} for raw bytes that are not 32 long
+ * @throws {TypeError} for anything else
+ */
+function checkKeyPair(key, name) {
+  if (key instanceof Uint8Array) {
+    if (key.length !== DH_BYTES) {
+      throw new RangeError(`${name} must be ${DH_BYTES} raw private-key bytes, got ${key.length}`);
+    }
+    return;
+  }
+  const pair = /** @type {{ privateKey?: unknown, publicKey?: unknown } | null | undefined} */ (key);
+  if (pair == null || !isX25519Key(pair.privateKey, 'private') || !isX25519Key(pair.publicKey, 'public')) {
+    throw new TypeError(`${name} must be an X25519 CryptoKeyPair or 32 raw private-key bytes`);
+  }
+  if (!pair.privateKey.usages.includes('deriveBits')) {
+    throw new TypeError(`${name}: the private key must have the deriveBits usage`);
+  }
+  if (!pair.publicKey.extractable) {
+    throw new TypeError(`${name}: the public key must be extractable`);
+  }
+}
+
+/**
+ * The laptop's static key as a `CryptoKey` and as the raw bytes the
+ * handshake hash takes in.
+ * @param {CryptoKey | Uint8Array} key passed by `checkRemoteStatic`
+ * @returns {Promise<{ key: CryptoKey, bytes: Uint8Array<ArrayBuffer> }>}
+ */
+async function importRemoteStatic(key) {
+  if (key instanceof Uint8Array) {
+    const bytes = copyBytes(key);
+    return { key: await importPublicKey(bytes), bytes };
   }
   return { key, bytes: new Uint8Array(await subtle.exportKey('raw', key)) };
 }
@@ -670,15 +772,12 @@ async function importRemoteStatic(key) {
  * A key pair with its public half as raw bytes. Raw private-key bytes are
  * imported through PKCS#8, and their public half read from the JWK export,
  * because Web Crypto cannot derive a public key from a private `CryptoKey`.
- * @param {CryptoKeyPair | Uint8Array} key
+ * @param {CryptoKeyPair | Uint8Array} key passed by `checkKeyPair`, or a generated pair
  * @param {string} name the option's name, for errors
  * @returns {Promise<DHKeyPair>}
  */
 async function importKeyPair(key, name) {
   if (key instanceof Uint8Array) {
-    if (key.length !== DH_BYTES) {
-      throw new RangeError(`${name} must be ${DH_BYTES} raw private-key bytes, got ${key.length}`);
-    }
     const der = new Uint8Array(X25519_PKCS8_PREFIX.length + DH_BYTES);
     der.set(X25519_PKCS8_PREFIX);
     der.set(key, X25519_PKCS8_PREFIX.length);
@@ -689,9 +788,6 @@ async function importKeyPair(key, name) {
       throw new TypeError(`${name}: Web Crypto gave no 32-byte public key`);
     }
     return { privateKey, publicKey: copyBytes(publicKey) };
-  }
-  if (key == null || !isX25519Key(key.privateKey, 'private') || !isX25519Key(key.publicKey, 'public')) {
-    throw new TypeError(`${name} must be an X25519 CryptoKeyPair or 32 raw private-key bytes`);
   }
   return { privateKey: key.privateKey, publicKey: new Uint8Array(await subtle.exportKey('raw', key.publicKey)) };
 }
@@ -740,6 +836,18 @@ function gcmParams(nonce, associatedData) {
   const iv = new Uint8Array(12);
   new DataView(iv.buffer).setBigUint64(4, nonce, false);
   return { name: 'AES-GCM', iv, additionalData: associatedData, tagLength: TAG_BYTES * 8 };
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name what the value is, for the error
+ * @returns {asserts value is Uint8Array}
+ * @throws {TypeError} unless `value` is a `Uint8Array`
+ */
+function requireBytes(value, name) {
+  if (!(value instanceof Uint8Array)) {
+    throw new TypeError(`${name} must be a Uint8Array`);
+  }
 }
 
 /**
