@@ -67,11 +67,17 @@ extension TranscriptParser {
     /// The newest whole lines before `end`, built into items, holding at most
     /// `messageLimit` messages and about `itemLimit` items.
     ///
-    /// `end` is a byte offset, nil for the end of the file, and is clamped to
-    /// the file's size. Below the file's size it must be a line start: the
-    /// byte before it must be `"\n"`. Otherwise this returns nil, as it does
-    /// when the file cannot be read. A window's `startOffset` is always a line
-    /// start, so it is the `end` of the next older window.
+    /// `end` (`endingBefore`) is a byte offset. Below the file's size it must
+    /// be a line start: the byte before it must be `"\n"`. Otherwise this
+    /// returns nil, as it does when the file cannot be read. Nil, or an offset
+    /// at or past the file's size, means the end of the file's complete lines:
+    /// just past its last `"\n"`, or 0 when it has none. A last line with no
+    /// newline yet is one Claude Code is still writing, so the window leaves
+    /// it out and `endOffset` stops before it. A live append cursor started at
+    /// `endOffset` then reads that line whole once it is finished, the way
+    /// `TranscriptFileWindow.read(path:from:)` withholds a partial line. A
+    /// window's `startOffset` is always a line start, so it is the `end` of
+    /// the next older window.
     ///
     /// The read goes backwards from `end`, `windowInitialChunkBytes` at first.
     /// A read that starts inside the file drops its bytes up to and including
@@ -103,17 +109,23 @@ extension TranscriptParser {
     /// read, trimmed lines included. Sidechain (subagent) lines build items
     /// only when `includeSidechain` is true. Limits below 1 count as 1.
     public static func parseWindow(
-        filePath: String, endingBefore end: UInt64?, messageLimit: Int,
+        filePath: String, endingBefore requestedEnd: UInt64?, messageLimit: Int,
         itemLimit: Int, includeSidechain: Bool = false
     ) -> TranscriptWindow? {
         guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
         defer { try? handle.close() }
         guard let fileSize = try? handle.seekToEnd() else { return nil }
 
-        let end = min(end ?? fileSize, fileSize)
-        if end > 0, end < fileSize {
-            guard let before = readBytes(handle, in: (end - 1)..<end),
-                  before.first == UInt8(ascii: "\n") else { return nil }
+        let end: UInt64
+        if let requestedEnd, requestedEnd < fileSize {
+            if requestedEnd > 0 {
+                guard let before = readBytes(handle, in: (requestedEnd - 1)..<requestedEnd),
+                      before.first == UInt8(ascii: "\n") else { return nil }
+            }
+            end = requestedEnd
+        } else {
+            guard let linesEnd = completeLinesEnd(handle, fileSize: fileSize) else { return nil }
+            end = linesEnd
         }
         let messageLimit = max(1, messageLimit)
         let itemLimit = max(1, itemLimit)
@@ -226,8 +238,9 @@ extension TranscriptParser {
     }
 
     /// Splits `bytes`, which start at a line start whose file offset is
-    /// `firstLineOffset`, on `"\n"`, and decodes each line. A last line with
-    /// no trailing newline is decoded like the rest.
+    /// `firstLineOffset`, on `"\n"`, and decodes each line. `parseWindow`
+    /// only hands it bytes that end in `"\n"`, since a window never ends
+    /// inside a line.
     private static func decodeWindowLines(_ bytes: Data, firstLineOffset: UInt64) -> WindowLines {
         var lines = WindowLines()
         var lineStart = bytes.startIndex
@@ -319,6 +332,27 @@ extension TranscriptParser {
               let data = try? handle.read(upToCount: count),
               data.count == count else { return nil }
         return data
+    }
+
+    /// Where the file's complete lines end: just past the last `"\n"` before
+    /// `fileSize`, or 0 when there is none. Nil when a read fails. A file
+    /// that ends in `"\n"` costs a one-byte read; otherwise the scan goes back
+    /// `windowInitialChunkBytes` at a time over the unfinished last line.
+    private static func completeLinesEnd(_ handle: FileHandle, fileSize: UInt64) -> UInt64? {
+        guard fileSize > 0 else { return 0 }
+        guard let last = readBytes(handle, in: (fileSize - 1)..<fileSize) else { return nil }
+        if last.first == UInt8(ascii: "\n") { return fileSize }
+
+        var readEnd = fileSize - 1
+        while readEnd > 0 {
+            let readStart = readEnd - min(windowInitialChunkBytes, readEnd)
+            guard let bytes = readBytes(handle, in: readStart..<readEnd) else { return nil }
+            if let newline = bytes.lastIndex(of: UInt8(ascii: "\n")) {
+                return readStart + UInt64(newline - bytes.startIndex) + 1
+            }
+            readEnd = readStart
+        }
+        return 0
     }
 
     private static func editStats(old: Any?, new: Any?) -> FileEditStats {

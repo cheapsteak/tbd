@@ -118,16 +118,25 @@ struct TranscriptParserWindowTests {
         #expect(text.count == 3_000_000)
     }
 
-    @Test func aLastLineWithNoNewlineIsRead() throws {
-        let fixture = try WindowFixture(WindowLine.conversation(messages: 3), trailingNewline: false)
+    @Test func aTrailingPartialLineIsLeftForTheLiveCursor() throws {
+        // The last line, `m4`, has no newline yet: Claude Code is still
+        // writing it.
+        var objects = WindowLine.conversation(messages: 3)
+        objects.append(WindowLine.prompt("m4", "placeholder prompt 4"))
+        let fixture = try WindowFixture(objects, trailingNewline: false)
         defer { fixture.remove() }
+        let partialLine = try #require(fixture.offset(ofUUID: "m4"))
 
         let w = try #require(TranscriptParser.parseWindow(
             filePath: fixture.path, endingBefore: nil, messageLimit: 10, itemLimit: 256))
+        let atTheFileSize = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: fixture.size, messageLimit: 10, itemLimit: 256))
         let ids = w.entries.map(\.item.id)
 
         #expect(ids == ["m1", "toolu_1", "m2", "toolu_2", "m3", "toolu_3"])
-        #expect(w.toolResultsByID["toolu_3"]?.text == "output 3", "the unterminated last line holds this result")
+        #expect(w.toolResultsByID["toolu_3"]?.text == "output 3")
+        #expect(w.endOffset == partialLine, "the window ends just after the last newline")
+        #expect(atTheFileSize.endOffset == partialLine, "an end at the file's size is capped the same way")
         #expect(w.reachedStart)
     }
 
