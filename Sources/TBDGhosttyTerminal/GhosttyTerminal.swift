@@ -407,6 +407,10 @@ public final class GhosttyTerminal: @unchecked Sendable {
     static let maxScrollbackLines = 1_000_000
     /// The byte ceiling allowed per scrollback line, generous for wide, styled rows.
     private static let scrollbackBytesPerLine = 4096
+    /// The longest unfinished sequence kept for replay. A longer one still parses, but a clone taken
+    /// in the middle of it fails.
+    /// 1 MiB: the header recommends no value; this covers long OSC 8 and OSC 52, and caps the kept buffer.
+    static let continuationMaxBytes = 1 << 20
 
     /// Sets every option a new terminal needs. Runs before any byte is fed.
     private static func configure(_ terminal: VtTerminal, context: IOContext, scrollbackLines: Int) throws {
@@ -482,6 +486,11 @@ public final class GhosttyTerminal: @unchecked Sendable {
         // A program can set a title and read it back into the input stream; keep that off.
         var titleReport = false
         try set(GHOSTTY_TERMINAL_OPT_TITLE_REPORT, &titleReport, "TITLE_REPORT")
+        // Keep the bytes of a sequence a write leaves unfinished. Without them libghostty cannot
+        // clone a terminal stopped in the middle of one: `ghostty_snapshot_encode` refuses. It has
+        // to be on before the sequence starts, so it is set here, before the first byte.
+        var retainedBytes = continuationMaxBytes
+        try set(GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &retainedBytes, "CONTINUATION_MAX_BYTES")
     }
 
     // MARK: Locking

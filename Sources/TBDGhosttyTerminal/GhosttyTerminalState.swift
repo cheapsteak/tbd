@@ -170,6 +170,36 @@ public struct GhosttyTerminalState {
         return style.fg_color.tag != 0 || style.bg_color.tag != 0
     }
 
+    /// The palette index of the cell's foreground colour, when SGR took it from the palette
+    /// (`38;5;n`, or one of the 16 basic colours). nil for the default colour, a direct RGB colour,
+    /// or a cell outside the grid.
+    public func foregroundPaletteIndex(column: Int, row: Int) -> UInt8? {
+        guard let raw, var ref = gridRef(raw, column: column, row: row) else { return nil }
+        var style = GhosttyStyle()
+        guard ghostty_grid_ref_style(&ref, &style) == GHOSTTY_SUCCESS,
+              style.fg_color.tag == UInt8(GHOSTTY_STYLE_COLOR_PALETTE.rawValue) else { return nil }
+        return style.fg_color.value.palette
+    }
+
+    /// The bytes of the escape sequence or UTF-8 character the last write left unfinished, as
+    /// libghostty keeps them for replay: fed to a terminal at rest, they leave its parser in the
+    /// same unfinished state, without repeating anything this terminal already did. Empty when
+    /// nothing is unfinished. nil when closed, or when the sequence grew past
+    /// `GhosttyTerminal.continuationMaxBytes` and cannot be rebuilt.
+    ///
+    /// A snapshot already carries these bytes, and decoding one replays them. Add them only to a
+    /// handback that the receiver parses as a plain byte stream, or they are fed twice.
+    func pendingContinuationBytes() -> [UInt8]? {
+        guard let raw else { return nil }
+        var allocated: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        guard ghostty_terminal_continuation_alloc(raw, nil, &allocated, &length) == GHOSTTY_SUCCESS else { return nil }
+        // An empty continuation comes back as NULL and zero, which `ghostty_free` also takes.
+        defer { ghostty_free(nil, allocated, length) }
+        guard let start = allocated, length > 0 else { return [] }
+        return Array(UnsafeBufferPointer(start: start, count: length))
+    }
+
     /// The active screen through libghostty's formatter. nil when closed or when formatting fails.
     public func formatted(_ format: TextFormat = .plain, trim: Bool = true, unwrap: Bool = false) -> String? {
         guard let raw else { return nil }
