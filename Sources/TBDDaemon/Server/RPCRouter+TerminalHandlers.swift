@@ -3880,6 +3880,15 @@ extension RPCRouter {
     /// sent. A terminal with no row falls through to the send core, which
     /// reports it missing.
     ///
+    /// **An empty message is refused before anything is typed.** A message
+    /// whose text, or every text part, is empty or whitespace would reach the
+    /// pane as a bare Enter (or as blank space and then Enter), which submits
+    /// whatever draft the person left in the laptop's composer. A phone
+    /// answers a prompt through `prompt.answer`, never by pressing Enter, so
+    /// the rail refuses an empty message whatever `submit` says. A send that
+    /// names no message at all (neither `text` nor `parts`) is not judged
+    /// here: the send core's shape check refuses it.
+    ///
     /// **These refusals are recorded as the send core records its own.** A
     /// well-formed act the daemon declined gets a `terminal.send` row naming
     /// the phone and a refusal outcome; a payload whose shape names no act
@@ -3905,7 +3914,22 @@ extension RPCRouter {
                     message: Self.phoneNonTextPartRefusal)
             }
         }
+        if params.text != nil || params.parts != nil,
+           Self.phoneMessageIsBlank(text: params.text, parts: params.parts ?? []) {
+            return try await recordPhoneSendRefusal(
+                phoneParams, terminal: row, actor: actor, message: Self.phoneEmptySendRefusal)
+        }
         return try await sendOnInternalRail(phoneParams, actor: actor)
+    }
+
+    /// Whether `text` and every text part in `parts` are empty or whitespace,
+    /// so the message would type nothing a person wrote.
+    private static func phoneMessageIsBlank(text: String?, parts: [SendPart]) -> Bool {
+        let bodies = [text].compactMap { $0 } + parts.compactMap { part -> String? in
+            guard case .text(let value) = part else { return nil }
+            return value
+        }
+        return bodies.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     /// What a paired phone hears when it sends to a shell tab.
@@ -3913,6 +3937,9 @@ extension RPCRouter {
 
     /// What a paired phone hears when its send carries a part that is not text.
     static let phoneNonTextPartRefusal = "a phone can send text only"
+
+    /// What a paired phone hears when its message is empty or whitespace.
+    static let phoneEmptySendRefusal = "a phone message cannot be empty"
 
     /// Refuse a phone send with `message`, writing the rows the send core
     /// writes when it declines a well-formed act: a `terminal.send` request

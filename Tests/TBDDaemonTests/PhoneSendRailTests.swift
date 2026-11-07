@@ -218,6 +218,50 @@ struct PhoneSendRailTests {
             error: RPCRouter.phoneNonTextPartRefusal)
     }
 
+    /// An empty message with submit would reach the pane as a bare Enter and
+    /// submit whatever draft the person left in the laptop's composer, so the
+    /// rail refuses it before anything is typed or pressed. Empty text is a
+    /// well-formed send the daemon declined, so it is recorded as refused.
+    @Test func aPairedPhoneSendOfEmptyTextIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make()
+        let device = UUID()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "", submit: true),
+            deviceID: device)
+
+        #expect(response.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        try await harness.expectRecordedRefusal(
+            device: device, message: "", error: RPCRouter.phoneEmptySendRefusal)
+    }
+
+    /// Whitespace is empty too, in text and in parts. Text parts that carry
+    /// only whitespace are a shape the send core already calls malformed, so
+    /// that refusal leaves no row.
+    @Test func aPairedPhoneSendOfWhitespaceIsRefusedAndTypesNothing() async throws {
+        let harness = try await SendHarness.make()
+
+        let textResponse = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: " \n\t", submit: true),
+            deviceID: UUID())
+        let partsResponse = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true, parts: [.text(" "), .text("\n")]),
+            deviceID: UUID())
+
+        #expect(textResponse.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(partsResponse.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        let logPath = await harness.router.actuationLog.path
+        let requests = ActuationRecordReader(activePath: logPath).readRows()
+            .filter { $0.method == RPCMethod.terminalSend }
+        #expect(requests.count == 1, "only the text send is a well-formed act")
+        #expect(requests.first?.message == " \n\t")
+    }
+
     /// A terminal with no row is not the shell check's to judge: the send core
     /// reports it missing, as it does for every caller.
     @Test func aPairedPhoneSendToAMissingTerminalFallsThroughToTheSendCore() async throws {
