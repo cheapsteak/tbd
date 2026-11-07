@@ -1010,6 +1010,20 @@ test_deploy_dispatch_is_gated() {
     "    if: \${{ vars.PHONE_LOADER_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' }}"
 }
 
+# One group per ref. A group shared across refs would let a dispatch from a
+# branch, which never deploys, cancel an in-flight deploy run on main, and the
+# merged loader would wait for the next loader change. Within one ref the
+# newest run wins.
+test_deploy_workflow_concurrency() {
+  local group
+  phone_workflow_exists phone-loader-deploy.yml || return
+  group="$(top_lines "$DEPLOY_YML" concurrency)"
+  # shellcheck disable=SC2016 # a GitHub expression, matched literally
+  assert_eq "the deploy's concurrency group is one per ref, and a newer run on that ref wins" \
+    '  group: phone-loader-deploy-${{ github.ref }}
+  cancel-in-progress: true' "$group"
+}
+
 # One App token in the workflow, minted for the one loader repo with one
 # permission, Actions: write. Without `owner:` and `repositories:` the token
 # would cover whatever the installation covers. The App key is the

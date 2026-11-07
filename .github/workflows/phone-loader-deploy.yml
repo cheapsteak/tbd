@@ -34,10 +34,14 @@ on:
 # No job gets a permission it does not name.
 permissions: {}
 
-# One run at a time, newest wins: a newer push dispatches its own commit, and
-# the loader repo publishes only the newest loader anyway.
+# One run at a time per ref, newest wins. The group is keyed on the ref
+# because a run from any other branch never dispatches, and in a group shared
+# across refs it would cancel an in-flight run on main, leaving the merged
+# loader unpublished until the next loader change. Within main, a newer push
+# supersedes an older run: it dispatches its own, newer commit, and the loader
+# repo's deploy refuses a commit whose loader is not the newest anyway.
 concurrency:
-  group: phone-loader-deploy
+  group: phone-loader-deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
