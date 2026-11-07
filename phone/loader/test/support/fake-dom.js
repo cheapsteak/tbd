@@ -1,5 +1,5 @@
 // Just enough DOM to drive the loader's DOM modules in Node: a window, a document, plain
-// elements, an iframe and a script element. Each fake records what was done to it, so a
+// elements, text, an iframe and a script element. Each fake records what was done to it, so a
 // test can check what the code did and in which order. Events are real EventTarget events.
 
 /** An EventTarget that counts its listeners for each event type. */
@@ -67,12 +67,47 @@ export class FakeFrameWindow {
   }
 }
 
+/** A text node, as `append` makes from a string. */
+export class FakeText {
+  /** @type {FakeElement | null} */
+  parent = null;
+
+  /** @param {string} data */
+  constructor(data) {
+    this.data = data;
+  }
+
+  get textContent() {
+    return this.data;
+  }
+
+  remove() {
+    detach(this);
+  }
+
+  /** Called after the node is appended. */
+  attached() {}
+}
+
+/** @typedef {FakeElement | FakeText} FakeNode */
+
+/**
+ * Takes a node out of its parent's children, if it has a parent.
+ * @param {FakeNode} node
+ */
+function detach(node) {
+  if (node.parent === null) return;
+  const siblings = node.parent.children;
+  siblings.splice(siblings.indexOf(node), 1);
+  node.parent = null;
+}
+
 export class FakeElement extends CountingTarget {
   /** @type {Map<string, string>} */
   #attributes = new Map();
   /** @type {FakeElement | null} */
   parent = null;
-  /** @type {FakeElement[]} */
+  /** Child elements and text nodes, in order. @type {FakeNode[]} */
   children = [];
 
   /**
@@ -98,21 +133,67 @@ export class FakeElement extends CountingTarget {
     return this.#attributes.get(name) ?? null;
   }
 
-  /** @param {...FakeElement} nodes */
+  /** @param {...(FakeNode | string)} nodes strings become text nodes */
   append(...nodes) {
-    for (const node of nodes) {
-      node.remove();
-      node.parent = this;
-      this.children.push(node);
-      node.attached();
-    }
+    for (const node of nodes) this.#insert(this.children.length, node);
+  }
+
+  /** @param {...(FakeNode | string)} nodes */
+  prepend(...nodes) {
+    nodes.forEach((node, i) => this.#insert(i, node));
+  }
+
+  /** @param {...(FakeNode | string)} nodes */
+  replaceChildren(...nodes) {
+    for (const child of [...this.children]) child.remove();
+    this.append(...nodes);
   }
 
   remove() {
-    if (this.parent === null) return;
-    const siblings = this.parent.children;
-    siblings.splice(siblings.indexOf(this), 1);
-    this.parent = null;
+    detach(this);
+  }
+
+  /**
+   * @param {number} index
+   * @param {FakeNode | string} node
+   */
+  #insert(index, node) {
+    const child = typeof node === 'string' ? new FakeText(node) : node;
+    child.remove();
+    child.parent = this;
+    this.children.splice(Math.min(index, this.children.length), 0, child);
+    child.attached();
+  }
+
+  /** The text of every text node inside, in document order. */
+  get textContent() {
+    return this.children.map((child) => child.textContent).join('');
+  }
+
+  /**
+   * Whether `node` is this element or inside it.
+   * @param {unknown} node
+   */
+  contains(node) {
+    for (let at = /** @type {any} */ (node); at != null; at = at.parent) {
+      if (at === this) return true;
+    }
+    return false;
+  }
+
+  /** Every element inside this one, depth first in document order. @returns {Generator<FakeElement>} */
+  *descendants() {
+    for (const child of this.children) {
+      if (child instanceof FakeElement) {
+        yield child;
+        yield* child.descendants();
+      }
+    }
+  }
+
+  /** Makes this the document's active element. */
+  focus() {
+    this.ownerDocument.activeElement = this;
   }
 
   /** Called after the element is appended. */
@@ -198,14 +279,20 @@ export class FakeScript extends FakeElement {
   }
 }
 
-export class FakeDocument {
+export class FakeDocument extends CountingTarget {
   /** Every element made by createElement, in order. @type {FakeElement[]} */
   created = [];
+  /** @type {FakeElement | null} */
+  activeElement = null;
+  /** @type {'visible' | 'hidden'} */
+  visibilityState = 'visible';
 
   /** @param {FakeWindow} [defaultView] */
   constructor(defaultView = new FakeWindow()) {
+    super();
     this.defaultView = defaultView;
     this.head = new FakeElement('head', this);
+    this.body = new FakeElement('body', this);
   }
 
   /** @param {string} tagName */
@@ -215,5 +302,25 @@ export class FakeDocument {
       : new FakeElement(tagName, this);
     this.created.push(element);
     return element;
+  }
+
+  /**
+   * An SVG element, made like any other element.
+   * @param {string} _namespace
+   * @param {string} tagName
+   */
+  createElementNS(_namespace, tagName) {
+    return this.createElement(tagName);
+  }
+
+  /**
+   * The first element in the body whose `id` attribute is `id`.
+   * @param {string} id
+   */
+  getElementById(id) {
+    for (const element of this.body.descendants()) {
+      if (element.getAttribute('id') === id) return element;
+    }
+    return null;
   }
 }

@@ -133,6 +133,8 @@ export class LaptopConnection {
   /** @type {RelaySocket | null} */
   #socket = null;
   #socketOpen = false;
+  /** @type {RelaySocket | null} The socket the last `resume()` opened. */
+  #resumeSocket = null;
   /** Whether any socket of this connection has opened. Until one has, a failure is `relayUnreachable`. */
   #everOpened = false;
   #gotSignal = false;
@@ -194,6 +196,11 @@ export class LaptopConnection {
    * gets a liveness probe, and a dead one reconnects at once. Otherwise (a reconnect is
    * waiting, or a socket is still connecting, perhaps one frozen while the page was hidden)
    * a fresh socket replaces it at once and the backoff starts over.
+   *
+   * Back-to-back calls coalesce: while the socket an earlier `resume()` opened is still
+   * connecting, another call does nothing, so the two events a return to the page can fire
+   * open one socket, not two. (The probe already runs one at a time.) Should that socket hang,
+   * the signal timeout still ends it.
    */
   resume() {
     if (!this.#started) return;
@@ -202,10 +209,12 @@ export class LaptopConnection {
         this.#socket?.probe();
         return;
       }
+      if (this.#socket !== null && this.#socket === this.#resumeSocket) return;
       this.#closeSocket();
       this.#reconnectTimer = this.#disarm(this.#reconnectTimer);
       this.#attempt = 0;
       this.#connect();
+      this.#resumeSocket = this.#socket;
     });
   }
 

@@ -13,6 +13,9 @@ export const RECONNECT_MAX_MS = 60_000;
 export const SIGNAL_TIMEOUT_MS = 10_000;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
 export const CACHE_READ_TIMEOUT_MS = 3_000;
+// A store request the page waits on with nothing else to show (opening the store, listing
+// the laptops, saving or forgetting one) that takes longer shows "Reload this page".
+export const STORE_TIMEOUT_MS = 10_000;
 export const RUNNER_START_TIMEOUT_MS = 10_000;
 export const PAIRING_EXPIRY_GRACE_MS = 120_000;
 

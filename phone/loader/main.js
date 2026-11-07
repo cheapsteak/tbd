@@ -3,9 +3,9 @@
 // connection with its header strip and app frame. Which screen follows what is decided in
 // views.js; the work is done by the modules it wires together.
 
-import { systemClock } from './clock.js';
+import { systemClock, withTimeout } from './clock.js';
 import { LaptopConnection } from './connection.js';
-import { SIGNAL_TIMEOUT_MS } from './constants.js';
+import { SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from './constants.js';
 import { AppFrame, readEnv } from './frame.js';
 import { KeyMissingError, unwrapPhoneKeyPair } from './keys.js';
 import {
@@ -17,8 +17,8 @@ import { checkPresence } from './presence.js';
 import { startScanner } from './qr.js';
 import { laptopIDFromKey, openStore } from './store.js';
 import {
-  h, renderCode, renderConfirm, renderConnecting, renderLaptops, renderLinkSheet, renderMenu, renderMessage, renderName,
-  renderPairStart, renderPaste, renderStrip,
+  h, renderCode, renderConfirm, renderConnecting, renderLaptops, renderLinkSheet, renderLoading, renderMenu, renderMessage,
+  renderName, renderPairStart, renderPaste, renderStrip,
 } from './ui.js';
 import {
   bootRoute, connectionScreen, fatalScreen, lastConnectedText, pairingFailureScreen, presenceLine, sortLaptops,
@@ -37,6 +37,13 @@ import {
 /** @typedef {import('./links.js').PairingLinkData} PairingLinkData */
 /** @typedef {import('./presence.js').PresenceStatus} PresenceStatus */
 /** @typedef {import('./presence.js').FetchLike} FetchLike */
+/** @typedef {import('./ui.js').RowHandle} RowHandle */
+
+/**
+ * The strip's open laptop menu. `nodes` stays empty until the laptops are read and the menu
+ * is drawn; from then on its nodes stay in the strip until it closes.
+ * @typedef {{ abort(): void, nodes: HTMLElement[] }} Menu
+ */
 
 /**
  * Everything the page touches outside its own modules, so a test can hand in fakes.
@@ -65,17 +72,40 @@ export async function boot(options) {
   const win = options.window;
   if (isFramed(win)) return;
   // The pairing secret leaves the address bar, and the history entry, before anything else.
-  const { link, cleanURL } = takePairingFragment(win.location.href);
-  if (link !== null) win.history.replaceState(null, '', cleanURL);
-  const page = new LoaderPage(options);
+  // A link opened while the page is already open only changes the fragment, so the page does
+  // not load again: it is taken out of the address the moment it arrives, whatever the page
+  // is doing (still opening the store, or showing that the store is lost), and only then
+  // does the page decide whether to act on it.
+  const link = takeLinkFromAddress(win);
+  /** @type {LoaderPage | null} */
+  let page = null;
+  win.addEventListener('hashchange', () => {
+    const opened = takeLinkFromAddress(win);
+    if (opened !== null) page?.openLink(opened);
+  });
+  page = new LoaderPage(options);
+  page.showLoading();
+  if (link !== null) page.openLink(link);
   let store;
   try {
-    store = await openStore(options.indexedDB);
+    store = await withTimeout(openStore(options.indexedDB), STORE_TIMEOUT_MS, options.clock);
   } catch {
     page.showStoreFailure();
     return;
   }
-  page.start(store, link);
+  page.start(store);
+}
+
+/**
+ * Takes a pairing link (`#p=…`) out of the page's address, replacing the history entry, so
+ * the secret is in neither the address bar nor the history.
+ * @param {Window} win
+ * @returns {string | null} the link, or null when the address holds none
+ */
+function takeLinkFromAddress(win) {
+  const { link, cleanURL } = takePairingFragment(win.location.href);
+  if (link !== null) win.history.replaceState(null, '', cleanURL);
+  return link;
 }
 
 /**
@@ -118,6 +148,8 @@ class LoaderPage {
   #store = null;
   /** Set once the store is lost: only "Reload this page" shows from then on. */
   #dead = false;
+  /** @type {string | null} A pairing link opened before the store was open, taken once it is. */
+  #queuedLink = null;
   /** Bumped by every move to another screen, so work that finishes late can tell it is stale. */
   #epoch = 0;
   /** @type {(() => void) | null} Undoes what the current screen started (scanner, presence). */
@@ -137,8 +169,10 @@ class LoaderPage {
   #frameSha = null;
   #envQueued = false;
 
-  /** @type {{ abort(): void, laptops: LaptopRecord[] | null, statuses: Map<string, PresenceStatus> } | null} */
+  /** @type {Menu | null} */
   #menu = null;
+  /** @type {HTMLElement[]} The strip's own nodes (its button, and "Reconnecting…"), not the menu's. */
+  #stripHead = [];
   /** @type {HTMLButtonElement | null} */
   #stripButton = null;
   /** @type {HTMLElement[]} */
@@ -164,7 +198,11 @@ class LoaderPage {
     this.#doc.addEventListener('visibilitychange', () => {
       if (this.#doc.visibilityState === 'visible') this.#resume();
     });
-    this.#win.addEventListener('pageshow', () => this.#resume());
+    // `persisted`: shown from the back-forward cache. A first load fires `pageshow` too, with
+    // nothing to resume.
+    this.#win.addEventListener('pageshow', (event) => {
+      if (event.persisted) this.#resume();
+    });
     this.#doc.addEventListener('keydown', (event) => this.#onKeyDown(event));
     const queueEnv = () => this.#queueEnv();
     this.#win.visualViewport?.addEventListener('resize', queueEnv);
@@ -173,21 +211,35 @@ class LoaderPage {
     this.#win.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', queueEnv);
   }
 
+  /** The spinner, while the store opens. */
+  showLoading() {
+    this.#mount(renderLoading());
+  }
+
   /**
-   * @param {Store} store
-   * @param {string | null} link the pairing link from the address, if any
+   * A pairing link, already taken out of the page's address. Until the store is open it
+   * waits (a later link replaces it); once the store is lost it is dropped.
+   * @param {string} link
    */
-  start(store, link) {
+  openLink(link) {
+    if (this.#dead) return;
+    if (this.#store === null) {
+      this.#queuedLink = link;
+      return;
+    }
+    this.#takeLink(link, 'scan');
+  }
+
+  /**
+   * Runs the page on its open store: a pairing link that came first, or else the route.
+   * @param {Store} store
+   */
+  start(store) {
+    if (this.#dead) return;
     this.#store = store;
     store.onClosed = () => this.showStoreFailure();
-    // A pairing link opened while the page is already open only changes the fragment, so the
-    // page does not load again. It is taken, and cleared, the same way.
-    this.#win.addEventListener('hashchange', () => {
-      const opened = takePairingFragment(this.#win.location.href);
-      if (opened.link === null || this.#dead) return;
-      this.#win.history.replaceState(null, '', opened.cleanURL);
-      this.#takeLink(opened.link, 'scan');
-    });
+    const link = this.#queuedLink;
+    this.#queuedLink = null;
     if (link !== null) {
       this.#takeLink(link, 'scan');
       return;
@@ -198,6 +250,7 @@ class LoaderPage {
   /** Where the page goes without a link: by how many laptops there are. */
   async #route() {
     const epoch = this.#leave();
+    this.#mount(renderLoading());
     const list = await this.#list();
     if (list === null || epoch !== this.#epoch) return;
     const route = bootRoute(list);
@@ -226,7 +279,9 @@ class LoaderPage {
   }
 
   /**
-   * Shows `node` as the screen, in place of the app frame.
+   * Shows `node` as the screen, in place of the app frame. Every screen is shown through here,
+   * and a screen replaces the app: any frame is destroyed and the strip is drawn again, so
+   * nothing in the strip (such as "Reconnecting…") outlives the frame it spoke for.
    * @param {HTMLElement} node
    * @param {(() => void) | null} [onLeave]
    */
@@ -234,14 +289,20 @@ class LoaderPage {
     if (this.#dead) return;
     this.#leaveScreen?.();
     this.#leaveScreen = onLeave;
+    this.#destroyFrame();
     this.#screen.replaceChildren(node);
     this.#screen.hidden = false;
     this.#frameHost.hidden = true;
+    this.#renderStrip();
   }
 
-  /** "Reload this page" for a store that cannot be opened or was lost. Nothing else shows after it. */
+  /**
+   * "Reload this page" for a store that cannot be opened, was lost, or stopped answering.
+   * Nothing else shows after it, and a pairing link that was waiting is dropped.
+   */
   showStoreFailure() {
     if (this.#dead) return;
+    this.#queuedLink = null;
     this.#leave();
     this.#mount(this.#reloadScreen(null));
     this.#dead = true;
@@ -250,11 +311,12 @@ class LoaderPage {
 
   /**
    * Every laptop, in the order the screens list them, or null after showing the store failure.
+   * A read that takes longer than STORE_TIMEOUT_MS is a failure too.
    * @returns {Promise<{ laptops: LaptopRecord[], damaged: DamagedLaptop[] } | null>}
    */
   async #list() {
     try {
-      const list = await /** @type {Store} */ (this.#store).listLaptops();
+      const list = await withTimeout(/** @type {Store} */ (this.#store).listLaptops(), STORE_TIMEOUT_MS, this.#clock);
       return { laptops: sortLaptops(list.laptops), damaged: list.damaged };
     } catch {
       this.showStoreFailure();
@@ -267,6 +329,7 @@ class LoaderPage {
   /** Opens the Laptops screen, listing the laptops afresh. */
   async #goLaptops() {
     const epoch = this.#leave();
+    this.#mount(renderLoading());
     const list = await this.#list();
     if (list === null || epoch !== this.#epoch) return;
     this.#showLaptops(list);
@@ -278,6 +341,8 @@ class LoaderPage {
     if (this.#dead) return;
     /** @type {Map<string, PresenceStatus>} */
     const statuses = new Map();
+    /** @type {Map<string, RowHandle>} Each laptop's row as now drawn, by laptop ID. */
+    let rowsByID = new Map();
     /** @type {{ key: IDBValidKey } | null} */
     let asking = null;
     /** @param {{ key: IDBValidKey } | null} next */
@@ -310,8 +375,11 @@ class LoaderPage {
           };
         }),
       ];
-      return renderLaptops({ rows, onPair: () => this.#goPair(null) });
+      const drawn = renderLaptops({ rows, onPair: () => this.#goPair(null) });
+      rowsByID = new Map(list.laptops.map((record, i) => [record.id, drawn.rows[i]]));
+      return drawn.root;
     };
+    // Asking to Forget, and Cancel, redraw the screen: the user's own tap, not one in progress.
     const rerender = () => {
       if (epoch !== this.#epoch) return;
       const focus = this.#focusIndex(this.#screen);
@@ -319,13 +387,17 @@ class LoaderPage {
       this.#restoreFocus(this.#screen, focus);
     };
     // Presence comes from the relay's endpoint, never a socket, so listing the laptops never
-    // knocks another tab off its room.
+    // knocks another tab off its room. Each answer changes only its row's status line, in
+    // place, so a tap in progress and the scroll position survive it.
     const checks = checkPresence(list.laptops, {
       fetch: this.#fetch,
       clock: this.#clock,
       onResult: (id, status) => {
+        if (epoch !== this.#epoch) return;
         statuses.set(id, status);
-        rerender();
+        const record = list.laptops.find((laptop) => laptop.id === id);
+        if (record === undefined) return;
+        rowsByID.get(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), 'list'));
       },
     });
     this.#mount(build(), () => checks.abort());
@@ -339,8 +411,9 @@ class LoaderPage {
    */
   async #forget(key, then) {
     const epoch = this.#leave();
+    this.#mount(renderLoading());
     try {
-      await /** @type {Store} */ (this.#store).forgetLaptop(key);
+      await withTimeout(/** @type {Store} */ (this.#store).forgetLaptop(key), STORE_TIMEOUT_MS, this.#clock);
     } catch {
       this.showStoreFailure();
       return;
@@ -509,7 +582,7 @@ class LoaderPage {
       lastConnectedAt: null,
     };
     try {
-      await /** @type {Store} */ (this.#store).putLaptop(record);
+      await withTimeout(/** @type {Store} */ (this.#store).putLaptop(record), STORE_TIMEOUT_MS, this.#clock);
     } catch {
       this.showStoreFailure();
       return;
@@ -854,65 +927,73 @@ class LoaderPage {
 
   // --- the header strip and its menu ------------------------------------------------------
 
+  /**
+   * Draws the strip's own nodes: the laptop's name and "Reconnecting…" while the frame waits
+   * for its channel. An open menu after them keeps its nodes, so a tap on it, its focus and
+   * its scroll position survive a redraw.
+   */
   #renderStrip() {
     const current = this.#current;
     if (current === null) {
       this.#strip.hidden = true;
       this.#strip.replaceChildren();
+      this.#stripHead = [];
       this.#stripButton = null;
       return;
     }
-    const menu = this.#menu;
     const { nodes, button } = renderStrip({
       laptopName: current.laptopName,
       reconnecting: stripReconnecting(this.#frame !== null, this.#state),
-      expanded: menu !== null && menu.laptops !== null,
+      expanded: this.#menu !== null && this.#menu.nodes.length > 0,
       onToggle: () => (this.#menu === null ? this.#openMenu() : this.#closeMenu(true)),
     });
-    const focus = this.#focusIndex(this.#strip);
-    this.#strip.replaceChildren(...nodes);
+    const refocus = this.#stripButton !== null && this.#doc.activeElement === this.#stripButton;
+    for (const node of this.#stripHead) node.remove();
+    this.#strip.prepend(...nodes);
+    this.#stripHead = nodes;
     this.#stripButton = button;
-    if (menu !== null && menu.laptops !== null) {
-      const now = this.#clock.now();
-      const { nodes: menuNodes } = renderMenu({
-        laptops: menu.laptops.map((record) => ({
-          name: record.laptopName,
-          line: presenceLine(menu.statuses.get(record.id), record.lastConnectedAt, now, 'menu'),
-          current: record.id === current.id,
-          onPick: () => this.#pick(record),
-        })),
-        onPair: () => this.#goPair(null),
-        onManage: () => this.#goLaptops(),
-        onDismiss: () => this.#closeMenu(true),
-      });
-      this.#strip.append(...menuNodes);
-    }
     this.#strip.hidden = false;
-    this.#restoreFocus(this.#strip, focus);
+    if (refocus) button.focus();
   }
 
   async #openMenu() {
     const current = this.#current;
     if (current === null || this.#menu !== null) return;
-    /** @type {{ abort(): void, laptops: LaptopRecord[] | null, statuses: Map<string, PresenceStatus> }} */
-    const menu = { abort: () => {}, laptops: null, statuses: new Map() };
+    /** @type {Menu} */
+    const menu = { abort: () => {}, nodes: [] };
     this.#menu = menu;
     const list = await this.#list();
     if (list === null || this.#menu !== menu) return;
     // The current laptop, as this page knows it now, in place of its stored row.
-    menu.laptops = list.laptops.map((record) => (record.id === current.id && this.#current !== null ? this.#current : record));
-    const checks = checkPresence(menu.laptops, {
+    const laptops = list.laptops.map((record) => (record.id === current.id && this.#current !== null ? this.#current : record));
+    const now = this.#clock.now();
+    const { nodes, items, rows } = renderMenu({
+      laptops: laptops.map((record) => ({
+        name: record.laptopName,
+        line: presenceLine(undefined, record.lastConnectedAt, now, 'menu'),
+        current: record.id === current.id,
+        onPick: () => this.#pick(record),
+      })),
+      onPair: () => this.#goPair(null),
+      onManage: () => this.#goLaptops(),
+      onDismiss: () => this.#closeMenu(true),
+    });
+    menu.nodes = nodes;
+    this.#strip.append(...nodes);
+    this.#renderStrip();
+    // Each answer changes only its item's status line, in place, so a tap on the menu is
+    // never lost to a redraw.
+    const checks = checkPresence(laptops, {
       fetch: this.#fetch,
       clock: this.#clock,
       onResult: (id, status) => {
-        if (this.#menu !== menu) return;
-        menu.statuses.set(id, status);
-        this.#renderStrip();
+        const at = laptops.findIndex((record) => record.id === id);
+        if (this.#menu !== menu || at < 0) return;
+        rows[at].setLine(presenceLine(status, laptops[at].lastConnectedAt, this.#clock.now(), 'menu'));
       },
     });
     menu.abort = () => checks.abort();
-    this.#renderStrip();
-    /** @type {HTMLElement | null} */ (this.#strip.querySelector('.lapdrop button'))?.focus();
+    items[0]?.focus();
   }
 
   /** @param {boolean} refocus whether to put the focus back on the strip's button */
@@ -921,6 +1002,7 @@ class LoaderPage {
     if (menu === null) return;
     this.#menu = null;
     menu.abort();
+    for (const node of menu.nodes) node.remove();
     this.#renderStrip();
     if (refocus) this.#stripButton?.focus();
   }

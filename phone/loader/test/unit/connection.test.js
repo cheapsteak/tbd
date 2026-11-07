@@ -1249,6 +1249,46 @@ test('resume replaces a socket that is still connecting', async () => {
   c.conn.stop();
 });
 
+test('back-to-back resumes open one socket, and a later resume still replaces a failed one', async () => {
+  const env = await setup();
+  const hanging = hangingSockets();
+  let hang = true;
+  const c = connection(env, { openSocket: (/** @type {string} */ url) => (hang ? hanging.factory(url) : env.net.factory(url)) });
+  c.conn.start();
+  await quiet();
+  assert.equal(hanging.sockets.length, 1);
+
+  // visibilitychange and pageshow on one return to the page: the first replaces the socket
+  // start() opened, the second finds that replacement still connecting and leaves it be.
+  c.conn.resume();
+  c.conn.resume();
+  await quiet();
+  assert.equal(hanging.sockets.length, 2, 'one replacement socket');
+  assert.deepEqual(hanging.sockets[0].closes, [1000]);
+  assert.deepEqual(hanging.sockets[1].closes, [], 'the second resume keeps the first one\'s socket');
+  c.conn.resume();
+  await quiet();
+  assert.equal(hanging.sockets.length, 2, 'still one while it connects');
+
+  // The signal timeout ends the hung socket; the next resume replaces it at once.
+  await env.clock.advance(SIGNAL_TIMEOUT_MS);
+  await quiet();
+  assert.deepEqual(hanging.sockets[1].closes, [1000]);
+  hang = false;
+  c.conn.resume();
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.equal(hanging.sockets.length, 2);
+  assert.equal(env.joins(), 1);
+
+  // Open, a resume only probes, however many come.
+  c.conn.resume();
+  c.conn.resume();
+  await quiet();
+  assert.equal(env.joins(), 1);
+  assert.equal(env.net.sockets.length, 1);
+  c.conn.stop();
+});
+
 test('a reconnect waits while hidden and runs on resume', async () => {
   const env = await setup();
   let visible = true;

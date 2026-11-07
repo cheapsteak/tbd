@@ -9,7 +9,6 @@
 // Each screen's root carries `data-state`, named as in the mock's state index (`laptops`,
 // `forget-ask`, `scan`, `paste`, `name`, `code`, …), so tests can wait for a state by name.
 
-import { formatCode } from './format.js';
 import { MESSAGES } from './messages.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -18,6 +17,11 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 /** @typedef {Leaf | ReadonlyArray<Leaf>} Child */
 /** @typedef {Record<string, unknown>} Props */
 /** @typedef {{ dot: 'on' | 'off' | null, text: string }} StatusLine */
+/**
+ * A row's handle: shows a new status line in place, without rebuilding the row, so a tap in
+ * progress and the list's scroll position survive a presence answer.
+ * @typedef {{ setLine(line: StatusLine): void }} RowHandle
+ */
 /** @typedef {'err' | 'rate' | 'idle' | 'work'} Tone */
 
 /** Props set as attributes, as given. */
@@ -192,10 +196,27 @@ function refusal(text) {
   return h('div', { class: 'refusal', role: 'alert' }, icon('warn'), h('span', null, text));
 }
 
-/** @param {StatusLine} line */
-function statusSmall(line) {
-  return h('small', null, line.dot === null ? null : h('i', { class: line.dot === 'on' ? 'odot on' : 'odot' }), line.text);
+/**
+ * A status line: an Online/Offline dot when known, and the text.
+ * @param {StatusLine} line
+ * @returns {Array<HTMLElement | string>}
+ */
+function statusParts(line) {
+  return line.dot === null ? [line.text] : [h('i', { class: line.dot === 'on' ? 'odot on' : 'odot' }), line.text];
 }
+
+/**
+ * The `<small>` status line of a Laptops row or a menu item, and its handle.
+ * @param {StatusLine} line
+ * @returns {{ node: HTMLElement, handle: RowHandle }}
+ */
+function statusSmall(line) {
+  const node = h('small', null, statusParts(line));
+  return { node, handle: { setLine: (next) => node.replaceChildren(...statusParts(next)) } };
+}
+
+/** The handle of a row that shows no status line, such as one asking to Forget. */
+const NO_LINE = Object.freeze({ setLine() {} });
 
 // --- Laptops ----------------------------------------------------------------------------
 
@@ -213,31 +234,38 @@ function statusSmall(line) {
 /**
  * The Laptops screen: "Pair a laptop", one row per laptop, and the Home Screen hint.
  * @param {{ rows: LaptopRow[], onPair: () => void }} model
- * @returns {HTMLElement}
+ * @returns {{ root: HTMLElement, rows: RowHandle[] }} `rows[i]` updates the status line of
+ *   `model.rows[i]` in place; for a row asking to Forget it does nothing
  */
 export function renderLaptops({ rows, onPair }) {
   const asking = rows.some((row) => row.asking);
+  /** @type {RowHandle[]} */
+  const handles = [];
+  /** @param {LaptopRow} row */
+  const item = (row) => {
+    if (row.asking) {
+      handles.push(NO_LINE);
+      return h('li', null, renderConfirm({ name: row.name, onForget: row.onConfirm, onCancel: row.onCancel }));
+    }
+    const status = statusSmall(row.line);
+    handles.push(status.handle);
+    const body = [icon('laptop'), h('span', null, h('b', null, row.name), status.node)];
+    return h('li', null,
+      row.onOpen === null
+        ? h('div', { class: 'lap-row' }, body)
+        : h('button', { class: 'lap-row', type: 'button', onClick: row.onOpen }, body),
+      h('button', { class: 'forget', type: 'button', 'aria-label': `Forget ${row.name}`, onClick: row.onForget }, 'Forget'));
+  };
   const list = rows.length === 0
     ? h('p', null, 'No laptops yet. Pair one to start.')
-    : h('ul', { class: 'lap' }, rows.map((row) => h('li', null, row.asking
-      ? renderConfirm({ name: row.name, onForget: row.onConfirm, onCancel: row.onCancel })
-      : [
-        row.onOpen === null
-          ? h('div', { class: 'lap-row' }, laptopRowBody(row))
-          : h('button', { class: 'lap-row', type: 'button', onClick: row.onOpen }, laptopRowBody(row)),
-        h('button', { class: 'forget', type: 'button', 'aria-label': `Forget ${row.name}`, onClick: row.onForget }, 'Forget'),
-      ])));
-  return h('div', { class: 'ld', 'data-state': asking ? 'forget-ask' : 'laptops' },
+    : h('ul', { class: 'lap' }, rows.map(item));
+  const root = h('div', { class: 'ld', 'data-state': asking ? 'forget-ask' : 'laptops' },
     h('div', { class: 'ld-head' }, h('h1', null, 'Laptops')),
     h('div', { class: 'ld-body' },
       h('button', { class: 'btn pri wide', type: 'button', onClick: onPair }, icon('plus'), 'Pair a laptop'),
       list,
       h('p', { class: 'homehint' }, icon('download'), h('span', null, MESSAGES.homeScreenHint))));
-}
-
-/** @param {LaptopRow} row */
-function laptopRowBody(row) {
-  return [icon('laptop'), h('span', null, h('b', null, row.name), statusSmall(row.line))];
+  return { root, rows: handles };
 }
 
 /**
@@ -330,9 +358,21 @@ export function renderName({ laptopName, value, error, onBack, onSubmit }) {
 }
 
 /**
+ * `MESSAGES.checkCode(code)` split at its `': '`: the lead, and the code as shown.
+ * @param {string} code
+ * @returns {{ lead: string, shown: string }}
+ */
+function checkCodeParts(code) {
+  const text = MESSAGES.checkCode(code);
+  const at = text.indexOf(': ');
+  return at < 0 ? { lead: text, shown: '' } : { lead: text.slice(0, at), shown: text.slice(at + 2) };
+}
+
+/**
  * The code screen. Until the laptop answers, `code` is null and the screen waits for it
  * (`data-state="pairing"`). Then it shows the code to compare and waits for Allow. The lead
- * and the code read together as `MESSAGES.checkCode(code)`.
+ * and the code are `MESSAGES.checkCode(code)` in two parts, so together they read as exactly
+ * that sentence.
  * @param {{ laptopName: string, phoneName: string, code: string | null, onCancel: () => void }} model
  * @returns {HTMLElement}
  */
@@ -343,12 +383,13 @@ export function renderCode({ laptopName, phoneName, code, onCancel }) {
       h('div', { class: 'ld-body' },
         h('div', { class: 'waitline', role: 'status' }, h('span', { class: 'spin' }), `Connecting to ${laptopName}…`)));
   }
+  const { lead, shown } = checkCodeParts(code);
   return h('div', { class: 'ld', 'data-state': 'code' },
     nav('Confirm', 'Cancel', onCancel),
     h('div', { class: 'ld-body' },
       h('div', { class: 'check' },
-        h('p', { class: 'lead' }, 'Check this code on your laptop', h('span', { class: 'sr' }, ': ')),
-        h('div', { class: 'code', 'aria-label': code.split('').join(' ') }, formatCode(code))),
+        h('p', { class: 'lead' }, lead, h('span', { class: 'sr' }, ': ')),
+        h('div', { class: 'code', 'aria-label': code.split('').join(' ') }, shown)),
       h('p', { class: 'c' }, `The laptop asks: "Allow '${phoneName}' to control this laptop?" Choose `,
         h('b', null, 'Allow'), ' there if the codes match.'),
       h('div', { class: 'waitline', role: 'status' }, h('span', { class: 'spin' }), `Waiting for Allow on ${laptopName}…`)));
@@ -394,6 +435,16 @@ export function renderMessage({ state, tone, icon: glyph, title, body, actions =
     return center;
   }
   return h('div', { class: 'ld', 'data-state': state }, nav(bar.title, bar.left, bar.onLeft), center);
+}
+
+/**
+ * A wait with nothing to say yet, such as reading the paired laptops: the connecting
+ * screen's spinner, with no text.
+ * @returns {HTMLElement}
+ */
+export function renderLoading() {
+  return h('div', { class: 'center', 'data-state': 'loading' },
+    h('span', { class: 'spin lg', role: 'status', 'aria-label': 'Loading' }));
 }
 
 /**
@@ -443,15 +494,20 @@ export function renderStrip({ laptopName, reconnecting, expanded, onToggle }) {
  * The first node is a transparent layer under the menu that takes any tap outside it,
  * including one over the app frame, and calls `onDismiss`.
  * @param {{ laptops: MenuLaptop[], onPair: () => void, onManage: () => void, onDismiss: () => void }} model
- * @returns {{ nodes: HTMLElement[], items: HTMLButtonElement[] }}
+ * @returns {{ nodes: HTMLElement[], items: HTMLButtonElement[], rows: RowHandle[] }} `items` in
+ *   focus order; `rows[i]` updates the status line of `model.laptops[i]` in place
  */
 export function renderMenu({ laptops, onPair, onManage, onDismiss }) {
   /** @type {HTMLButtonElement[]} */
   const items = [];
+  /** @type {RowHandle[]} */
+  const rows = [];
   for (const laptop of laptops) {
+    const status = statusSmall(laptop.line);
+    rows.push(status.handle);
     items.push(h('button', {
       class: 'ldi', type: 'button', role: 'menuitemradio', 'aria-checked': String(laptop.current), onClick: laptop.onPick,
-    }, icon('laptop'), h('span', null, laptop.name, statusSmall(laptop.line)), laptop.current ? icon('check', 'tick') : null));
+    }, icon('laptop'), h('span', null, laptop.name, status.node), laptop.current ? icon('check', 'tick') : null));
   }
   const pair = h('button', { class: 'ldi act', type: 'button', role: 'menuitem', onClick: onPair },
     icon('plus'), h('span', null, 'Pair a laptop'));
@@ -463,7 +519,7 @@ export function renderMenu({ laptops, onPair, onManage, onDismiss }) {
     onKeyDown: (/** @type {KeyboardEvent} */ event) => moveFocus(event, all),
   }, items, h('div', { class: 'ldsep', role: 'separator' }), pair, manage);
   const catcher = h('div', { class: 'lapcatch', 'aria-hidden': 'true', onClick: onDismiss });
-  return { nodes: [catcher, drop], items: all };
+  return { nodes: [catcher, drop], items: all, rows };
 }
 
 /**
