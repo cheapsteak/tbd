@@ -7,6 +7,7 @@ import {
   LAPTOP_OFFLINE,
   LAPTOP_ONLINE,
   bytes,
+  clientOf,
   connect,
   flush,
   marker,
@@ -36,6 +37,11 @@ async function finishClosing(room: string, role: Role): Promise<void> {
       if (ws.readyState !== WebSocket.OPEN) instance.webSocketClose(ws, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
     }
   });
+}
+
+/** A join for the room's own `fetch`, as the Worker hands one on. */
+function joinRequest(room: string, role: Role): Request {
+  return new Request(`${BASE_URL}/v1/rooms/${room}?role=${role}`, { headers: { Upgrade: "websocket" } });
 }
 
 /**
@@ -220,6 +226,76 @@ describe("room", () => {
     });
     expect(await laptop.until(m)).toEqual([SIGNAL.peerLeft]);
     expect(await phone.closed).toEqual(CLOSE_TOO_LARGE);
+  });
+
+  // The oversize path signals `peer-left` when it closes the sender, so the
+  // sender's own close or error event, which can arrive after a fresh peer
+  // joined, must signal nothing: that peer never paired with the closed socket.
+  // Each test runs the join and both late events itself, in one callback with
+  // no `await` before the marker, so nothing can interleave.
+  it("a phone closed for a large frame sends no peer-left to a laptop that joined after", async () => {
+    const room = newRoomID();
+    const { laptop, phone } = await pair(room);
+    await runInDurableObject(stub(room), async (instance, state) => {
+      const [phone1] = state.getWebSockets("phone");
+      const [laptop1] = state.getWebSockets("laptop");
+      instance.webSocketMessage(phone1!, new Uint8Array(MAX_FRAME_BYTES + 1).buffer);
+      // A fresh laptop replaces the one that heard the phone leave. No live
+      // phone remains, so its join signals nothing.
+      const laptop2 = clientOf(instance.fetch(joinRequest(room, "laptop")), "laptop");
+      const [laptop2Server] = state.getWebSockets("laptop").filter((ws) => ws !== laptop1);
+      instance.webSocketClose(phone1!, CLOSE_TOO_LARGE.code, CLOSE_TOO_LARGE.reason, true);
+      instance.webSocketError(phone1!, new Error("x"));
+      const m = marker();
+      laptop2Server!.send(m);
+      expect(await laptop2.until(m)).toEqual([]);
+    });
+    // The paired laptop heard the phone leave once, and then was replaced.
+    expect(await laptop.next()).toBe(SIGNAL.peerLeft);
+    expect(await laptop.closed).toEqual(CLOSE_REPLACED);
+    await expect(laptop.next()).rejects.toThrow(/closed/);
+    expect(await phone.closed).toEqual(CLOSE_TOO_LARGE);
+  });
+
+  // The other order a closing socket's late event can meet: its successor
+  // leaves first. The successor carries no mark, so its leave signals, and the
+  // replaced socket's late close adds nothing.
+  it("a replaced phone's close after its successor left neither repeats nor loses the peer-left", async () => {
+    const room = newRoomID();
+    const { laptop } = await pair(room);
+    const m = marker();
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [phone1] = state.getWebSockets("phone");
+      expect(instance.fetch(joinRequest(room, "phone")).status).toBe(101);
+      const [phone2] = state.getWebSockets("phone").filter((ws) => ws !== phone1);
+      phone2!.close(1000, "");
+      instance.webSocketClose(phone2!, 1000, "", true);
+      instance.webSocketClose(phone1!, CLOSE_REPLACED.code, CLOSE_REPLACED.reason, true);
+      state.getWebSockets("laptop")[0]!.send(m);
+    });
+    expect(await laptop.until(m)).toEqual([SIGNAL.peerJoined, SIGNAL.peerLeft]);
+  });
+
+  it("a laptop closed for a large frame sends no peer-left to a phone that joined after", async () => {
+    const room = newRoomID();
+    const { laptop, phone } = await pair(room);
+    await runInDurableObject(stub(room), async (instance, state) => {
+      const [laptop1] = state.getWebSockets("laptop");
+      const [phone1] = state.getWebSockets("phone");
+      instance.webSocketMessage(laptop1!, new Uint8Array(MAX_FRAME_BYTES + 1).buffer);
+      const phone2 = clientOf(instance.fetch(joinRequest(room, "phone")), "phone");
+      const [phone2Server] = state.getWebSockets("phone").filter((ws) => ws !== phone1);
+      instance.webSocketClose(laptop1!, CLOSE_TOO_LARGE.code, CLOSE_TOO_LARGE.reason, true);
+      instance.webSocketError(laptop1!, new Error("x"));
+      const m = marker();
+      phone2Server!.send(m);
+      // The fresh phone hears only that no laptop is there.
+      expect(await phone2.until(m)).toEqual([SIGNAL.peerAbsent]);
+    });
+    expect(await phone.next()).toBe(SIGNAL.peerLeft);
+    expect(await phone.closed).toEqual(CLOSE_REPLACED);
+    await expect(phone.next()).rejects.toThrow(/closed/);
+    expect(await laptop.closed).toEqual(CLOSE_TOO_LARGE);
   });
 
   it("frames from a socket the relay is closing are dropped", async () => {

@@ -197,8 +197,8 @@ Durable Object time.
 - **Forwarded frames are binary,** at most 65,536 bytes, and pass to the other role unchanged. When
   the other role is not connected, the relay drops the frame. It never queues. A larger frame is
   not forwarded: the relay closes the sender with code 1009 and reason `frame too large`, and the
-  other role gets `peer-left`. A socket the relay is closing sends nothing more, so a replaced
-  socket's last frames never reach the new session.
+  other role gets `peer-left` at once. A socket the relay is closing sends nothing more, so a
+  replaced socket's last frames never reach the new session.
 - **Text frames from clients are never forwarded,** so no client can forge a relay signal. The one
   exception is the keepalive below, which the runtime answers.
 - **Relay signals are text,** so they cannot be confused with forwarded frames.
@@ -208,8 +208,11 @@ Durable Object time.
   - `peer-absent` goes to a joining phone when no laptop socket is open. A laptop that joins an
     empty room gets no signal.
   - `peer-left` goes to the other role when a socket closes or errors and no open socket of its
-    role remains. A socket closed with 4000 because a new one replaced it causes no `peer-left`. A
-    `peer-left` can repeat in rare races, so receivers treat it as idempotent.
+    role remains. A socket the relay closes signals nothing more when its close completes: one
+    closed with 4000 because a new one replaced it causes no `peer-left`, and one closed with 1009
+    caused its `peer-left` when the relay closed it. So a peer that joins after the relay closed a
+    socket never hears that socket leave. A `peer-left` can repeat in rare races, so receivers
+    treat it as idempotent.
 - **Keepalive** uses Cloudflare's WebSocket auto-response: the text frame `ping` gets the answer
   `pong`, and a keepalive never wakes the Durable Object. Both sides send one every 30 seconds.
 

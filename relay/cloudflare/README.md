@@ -71,13 +71,13 @@ This contract is stable. TBD supports it for good.
 - **Frames**
   - Binary frames of up to 65,536 bytes are forwarded unchanged to the other role.
   - If the other role has no open socket, the relay drops the frame. It never queues.
-  - A binary frame over 65,536 bytes is not forwarded. The relay closes the sender with code 1009 and reason `frame too large`. The other role gets `peer-left`.
+  - A binary frame over 65,536 bytes is not forwarded. The relay closes the sender with code 1009 and reason `frame too large`. The other role gets `peer-left` at once.
   - Text frames from clients are never forwarded, so a client cannot forge a relay signal.
   - A socket the relay is closing sends nothing more. The relay drops its frames.
 - **Signals** – the relay sends these as text frames.
   - `peer-joined` – sent to both sockets when a socket joins and the other role has an open socket. It always means a new peer socket. The old session with the previous peer is over, so the receiver resets its channel.
   - `peer-absent` – sent to a joining phone when no laptop socket is open. A laptop that joins an empty room gets no signal.
-  - `peer-left` – sent to the other role when a socket closes or errors and no open socket of its role remains. A socket closed with 4000 because a new one replaced it causes no `peer-left`. A `peer-left` can repeat in rare races, so receivers treat it as idempotent.
+  - `peer-left` – sent to the other role when a socket closes or errors and no open socket of its role remains. A socket the relay closes signals nothing more when its close completes: one closed with 4000 because a new one replaced it causes no `peer-left`, and one closed with 1009 caused its `peer-left` when the relay closed it. So a peer that joins after the relay closed a socket never hears that socket leave. A `peer-left` can repeat in rare races, so receivers treat it as idempotent.
 - **Keepalive** – the text frame `ping` gets the answer `pong` from the runtime, without waking the room. Clients send one every 30 seconds.
 
 ## Develop

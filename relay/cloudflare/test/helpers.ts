@@ -85,6 +85,15 @@ export async function connect(room: string, role: Role): Promise<TestSocket> {
   const res = await exports.default.fetch(`${BASE_URL}/v1/rooms/${room}?role=${role}`, {
     headers: { Upgrade: "websocket" },
   });
+  return clientOf(res, role);
+}
+
+/**
+ * The client end of a 101 response, accepted and wrapped. `connect` uses it for
+ * a join through the Worker; a test that runs the room's `fetch` itself inside
+ * `runInDurableObject` uses it there, and reads the socket in that callback.
+ */
+export function clientOf(res: Response, role: Role): TestSocket {
   expect(res.status).toBe(101);
   const ws = res.webSocket;
   if (ws === null) throw new Error("a 101 response carried no WebSocket");

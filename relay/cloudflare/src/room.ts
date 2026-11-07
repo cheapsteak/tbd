@@ -26,7 +26,9 @@ import {
  *   forwarded, so no client can forge a relay signal; `ping` is answered by the
  *   runtime's auto-response. A larger frame closes its sender with 1009, and
  *   the other role gets `peer-left` at once.
- * - Leave: when the last open socket of a role goes, the other role gets `peer-left`.
+ * - Leave: when the last open socket of a role goes, the other role gets
+ *   `peer-left`. A socket the relay closed signals nothing when its close or
+ *   error event arrives, so a peer that joined meanwhile never hears it leave.
  * - Presence: says whether a laptop socket is open, without joining.
  *
  * "Open" means live: `readyState` OPEN and not marked closing. The relay marks
@@ -72,7 +74,7 @@ export class Room extends DurableObject<Env> {
     if (message.byteLength > MAX_FRAME_BYTES) {
       markAndClose(ws, CLOSE_TOO_LARGE);
       // Signal now rather than when the client answers the Close, which it may
-      // never do. The close event repeats the `peer-left`, which receivers ignore.
+      // never do. The mark keeps the close event from signalling again.
       this.leave(ws);
       return;
     }
@@ -92,12 +94,19 @@ export class Room extends DurableObject<Env> {
 
   // Neither handler calls `ws.close()`: the runtime answers the Close frame
   // itself, and closing with 1005 or 1006 would throw.
+  //
+  // A socket marked closing had its departure accounted for when the relay
+  // marked it: a replaced socket's successor took its place, so no `peer-left`
+  // is due, and an oversize sender's `peer-left` went out at once. So its own
+  // close or error event signals nothing. By then a fresh socket of the other
+  // role may have joined, one that never paired with the closed socket and
+  // must not hear it leave.
   webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): void {
-    this.leave(ws);
+    if (!isMarkedClosing(ws)) this.leave(ws);
   }
 
   webSocketError(ws: WebSocket, _error: unknown): void {
-    this.leave(ws);
+    if (!isMarkedClosing(ws)) this.leave(ws);
   }
 
   /** The live sockets of `role`, leaving out `except`. */
@@ -111,8 +120,10 @@ export class Room extends DurableObject<Env> {
   }
 
   /**
-   * `peer-left` goes out only when no open socket of the role remains, so a
-   * socket closed because a newer one replaced it causes none.
+   * `peer-left` goes out only when no open socket of the role remains. This
+   * runs for an unmarked socket when it closes or errors, and for an oversize
+   * sender when the relay marks it, but never for a socket marked because a
+   * newer one replaced it.
    */
   private leave(ws: WebSocket): void {
     const role = this.roleOf(ws);
