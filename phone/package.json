@@ -6,7 +6,9 @@
     "test": "node --test \"loader/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json",
     "vectors": "node test-vectors/generate.mjs",
-    "vectors:check": "node test-vectors/generate.mjs --check"
+    "vectors:check": "node test-vectors/generate.mjs --check",
+    "vendor:check": "bash scripts/vendor-check.sh",
+    "test:scripts": "bash scripts/vendor-check.test.sh && bash scripts/vendor-update.test.sh"
   },
   "devDependencies": {
     "typescript": "6.0.3"
