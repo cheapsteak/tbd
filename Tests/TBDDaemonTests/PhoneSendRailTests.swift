@@ -184,6 +184,40 @@ struct PhoneSendRailTests {
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
     }
 
+    /// A refusal of a well-formed send is an act the daemon declined, so it is
+    /// recorded as the send core records one: a `terminal.send` row naming the
+    /// phone, then a refused outcome carrying the refusal.
+    @Test func aPairedPhoneSendToAShellIsRecordedAsRefused() async throws {
+        let harness = try await SendHarness.make(kind: .shell)
+        let device = UUID()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true, parts: [.text("ls")]),
+            deviceID: device)
+
+        #expect(response.error == RPCRouter.phoneShellSendRefusal)
+        try await harness.expectRecordedRefusal(
+            device: device, message: "ls", error: RPCRouter.phoneShellSendRefusal)
+    }
+
+    /// The text-only refusal is recorded the same way.
+    @Test func aPairedPhoneSendWithAnImagePartIsRecordedAsRefused() async throws {
+        let harness = try await SendHarness.make()
+        let device = UUID()
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("hi"), .imagePath("/tmp/acme/shot.png")]),
+            deviceID: device)
+
+        #expect(response.error == RPCRouter.phoneNonTextPartRefusal)
+        try await harness.expectRecordedRefusal(
+            device: device, message: "hi[image /tmp/acme/shot.png]",
+            error: RPCRouter.phoneNonTextPartRefusal)
+    }
+
     /// A terminal with no row is not the shell check's to judge: the send core
     /// reports it missing, as it does for every caller.
     @Test func aPairedPhoneSendToAMissingTerminalFallsThroughToTheSendCore() async throws {
@@ -222,6 +256,25 @@ private extension SendHarness {
             awaitingInputReason: AwaitingInputReason(
                 message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
                 notificationType: "permission_prompt"))
+    }
+
+    /// The record holds one `terminal.send` request row, naming the phone,
+    /// this harness's terminal and `message`, and its outcome is a refusal
+    /// carrying `error`.
+    func expectRecordedRefusal(device: UUID, message: String, error: String) async throws {
+        let logPath = await router.actuationLog.path
+        let rows = ActuationRecordReader(activePath: logPath).readRows()
+        let requests = rows.filter { $0.method == RPCMethod.terminalSend }
+        #expect(requests.count == 1, "one request row, got \(requests.count)")
+        let request = try #require(requests.first)
+        #expect(request.actor == ActuationActor.phone(deviceID: device))
+        #expect(request.target?.terminal == terminal.id.uuidString)
+        #expect(request.target?.worktree == terminal.worktreeID.uuidString)
+        #expect(request.message == message)
+        let outcome = try #require(rows.first { $0.confirms == request.id })
+        #expect(outcome.result == .synchronous(.refused))
+        #expect(outcome.reason == .notEligible)
+        #expect(outcome.error == error)
     }
 
     /// A second terminal in the harness's worktree whose row predates the

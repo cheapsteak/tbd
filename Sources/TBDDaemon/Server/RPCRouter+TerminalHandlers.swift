@@ -3879,23 +3879,33 @@ extension RPCRouter {
     /// phone can name one. A kindless row with a session id is Claude's and is
     /// sent. A terminal with no row falls through to the send core, which
     /// reports it missing.
+    ///
+    /// **These refusals are recorded as the send core records its own.** A
+    /// well-formed act the daemon declined gets a `terminal.send` row naming
+    /// the phone and a refusal outcome; a payload whose shape names no act
+    /// gets none (see `recordPhoneSendRefusal`).
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
-        if let row = try await db.terminals.get(id: params.terminalID),
-           Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
-            return RPCResponse(error: Self.phoneShellSendRefusal)
-        }
-        for part in params.parts ?? [] {
-            guard case .text = part else {
-                return RPCResponse(error: Self.phoneNonTextPartRefusal)
-            }
-        }
         let phoneParams = TerminalSendParams(
             terminalID: params.terminalID, text: params.text,
             submit: params.submit, parts: params.parts,
             gateOnAwaitingInput: true)
-        return try await sendOnInternalRail(phoneParams, actor: .phone(deviceID: deviceID))
+        let actor = ActuationActor.phone(deviceID: deviceID)
+        let row = try await db.terminals.get(id: params.terminalID)
+        if let row,
+           Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
+            return try await recordPhoneSendRefusal(
+                phoneParams, terminal: row, actor: actor, message: Self.phoneShellSendRefusal)
+        }
+        for part in params.parts ?? [] {
+            guard case .text = part else {
+                return try await recordPhoneSendRefusal(
+                    phoneParams, terminal: row, actor: actor,
+                    message: Self.phoneNonTextPartRefusal)
+            }
+        }
+        return try await sendOnInternalRail(phoneParams, actor: actor)
     }
 
     /// What a paired phone hears when it sends to a shell tab.
@@ -3903,6 +3913,35 @@ extension RPCRouter {
 
     /// What a paired phone hears when its send carries a part that is not text.
     static let phoneNonTextPartRefusal = "a phone can send text only"
+
+    /// Refuse a phone send with `message`, writing the rows the send core
+    /// writes when it declines a well-formed act: a `terminal.send` request
+    /// row naming `actor` and the payload, then a `refused(.notEligible)`
+    /// outcome carrying `message`.
+    ///
+    /// The rows are written only where the core would have reached its own
+    /// `beginActuation`: the shape check passes (`validateSendShape`), the
+    /// terminal has a row, and its worktree is local. A malformed payload
+    /// names no act, and a missing target has no coordinates, so either gets
+    /// the refusal with no row, as the core's earlier returns do.
+    private func recordPhoneSendRefusal(
+        _ params: TerminalSendParams, terminal: Terminal?,
+        actor: ActuationActor, message: String
+    ) async throws -> RPCResponse {
+        guard case .valid(let payload) = Self.validateSendShape(params),
+              let terminal,
+              try await db.worktrees.getLocal(id: terminal.worktreeID) != nil else {
+            return RPCResponse(error: message)
+        }
+        let actuationID = try await beginActuation(
+            .terminalSend, actor: actor,
+            target: .local(worktree: terminal.worktreeID, terminal: terminal.id),
+            message: payload.recordedMessage,
+            submit: payload.recordedSubmit,
+            verify: payload.recordedVerify)
+        await finishActuation(actuationID, .refused(.notEligible), error: message)
+        return RPCResponse(error: message)
+    }
 
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?,
