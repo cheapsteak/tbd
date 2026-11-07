@@ -4,6 +4,17 @@ import TBDShared
 
 private let promptLog = Logger(subsystem: "com.tbd.daemon", category: "pendingPrompt")
 
+/// Where an answer's authority to decide a prompt in a person's name comes
+/// from. The answer's flag is checked first either way.
+enum AnswerAuthority: Sendable {
+    /// A request on the daemon socket. `promptAnswerPeerRefusal` must find
+    /// that the connection is the TBD app's own; a nil context is refused.
+    case socket(RPCConnectionContext?)
+    /// A gesture from a paired phone, which the phone bridge has verified
+    /// against its pairing. There is no socket peer, so no socket check runs.
+    case pairedPhone(deviceID: UUID)
+}
+
 /// Answering prompts from the transcript
 /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
 ///
@@ -73,12 +84,27 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor?, connection: RPCConnectionContext?
     ) async throws -> RPCResponse {
         let p = try decoder.decode(PromptAnswerParams.self, from: paramsData)
+        return try await answerPrompt(p, actor: actor, authority: .socket(connection))
+    }
+
+    /// The core of `prompt.answer`, for every caller past its own edge: the
+    /// socket handler above and the phone bridge. Same results and errors as
+    /// `handlePromptAnswer`; `authority` decides only whether the socket
+    /// peer check runs, and it runs right after the flag check.
+    func answerPrompt(
+        _ p: PromptAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
+    ) async throws -> RPCResponse {
         guard try await promptAnswerEnabled() else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
         }
-        if let refusal = await promptAnswerPeerRefusal(
-            connection: connection, method: RPCMethod.promptAnswer) {
-            return refusal
+        switch authority {
+        case .socket(let connection):
+            if let refusal = await promptAnswerPeerRefusal(
+                connection: connection, method: RPCMethod.promptAnswer) {
+                return refusal
+            }
+        case .pairedPhone:
+            break
         }
         let terminal = try? await db.terminals.get(id: p.terminalID)
         let target = ActuationTarget(
