@@ -126,6 +126,16 @@ extension GhosttyTerminalState {
         return pending
     }
 
+    /// True when the VT stream is between sequences: its parser is not inside an escape sequence
+    /// and its UTF-8 decoder is not inside a character. True as well when it cannot be read.
+    var isAtGround: Bool {
+        guard let raw else { return true }
+        var ground = true
+        guard ghostty_terminal_get(raw, GHOSTTY_TERMINAL_DATA_VT_GROUND, &ground) == GHOSTTY_SUCCESS
+        else { return true }
+        return ground
+    }
+
     /// The pen: the style the next printed character gets.
     var cursorStyle: GhosttyCellStyle {
         guard let raw else { return GhosttyCellStyle() }

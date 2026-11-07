@@ -217,6 +217,37 @@ struct HandoverCorpusTests {
         #expect(actual.cursorRow == expected.cursorRow && actual.cursorColumn == expected.cursorColumn)
     }
 
+    // MARK: - A detach inside a sequence
+
+    struct UnfinishedTail: Sendable, CustomTestStringConvertible {
+        let name: String
+        let bytes: [UInt8]
+
+        var testDescription: String { name }
+    }
+
+    static let unfinishedTails: [UnfinishedTail] = [
+        UnfinishedTail(name: "half an SGR colour", bytes: Array("\u{1b}[38;5".utf8)),
+        UnfinishedTail(name: "half a UTF-8 character", bytes: [0xe2, 0x94]),
+        UnfinishedTail(name: "half a window title", bytes: Array("\u{1b}]2;half a ti".utf8)),
+    ]
+
+    /// A viewer can detach while its terminal is inside a sequence. libghostty cannot clone such a
+    /// terminal, so on the alternate screen the handback has no primary to write, but it must
+    /// still be written and still rebuild the screen in view: a primary one and an alternate one.
+    @Test(arguments: ["sgr-colors", "alt-tui-full"], HandoverCorpusTests.unfinishedTails)
+    func handbackRebuildsTheScreenWhenTheTerminalStoppedMidSequence(_ name: String, _ tail: UnfinishedTail) throws {
+        let state = HandoverCorpus.state(named: name)
+        let source = try state.ghostty()
+        source.feed(tail.bytes[...])
+        #expect(source.withLocked { !$0.isAtGround }, "\(name) must be left inside \(tail.name)")
+
+        let receiver = try Self.handedBack(source, state: state)
+        let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverScreen(), history: false)
+            .filtered(to: handoverScreenCategories)
+        #expect(tally.isEmpty, "\(name), stopped inside \(tail.name): the handback differs on screen: \(tally.summary)")
+    }
+
     // MARK: - Helpers
 
     /// A libghostty viewer of the state's size that has read nothing.

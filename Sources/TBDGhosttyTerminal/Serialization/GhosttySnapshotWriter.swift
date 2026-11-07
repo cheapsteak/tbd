@@ -16,9 +16,7 @@ import os
 public enum GhosttyHandbackError: LocalizedError, Equatable, Sendable {
     /// The terminal was closed, so there is no screen to hand back.
     case terminalClosed
-    /// A libghostty call failed. `result` is its `GhosttyResult` value. Encoding the snapshot
-    /// clone fails this way when the terminal stopped inside an escape sequence or a UTF-8
-    /// character, because the terminal keeps no continuation bytes.
+    /// A libghostty call failed. `result` is its `GhosttyResult` value.
     case libraryCall(operation: String, result: Int32)
 
     public var errorDescription: String? {
@@ -34,6 +32,11 @@ public enum GhosttySnapshotWriter {
     /// with at most `maxScrollbackLines` rows of scrollback. Taken inside the terminal's lock, and
     /// the live terminal is only read: the primary screen behind an alternate one is reached
     /// through an in-process clone.
+    ///
+    /// A terminal that stopped inside an escape sequence or a UTF-8 character cannot be cloned,
+    /// so on the alternate screen it is handed back without the primary behind it: the receiver's
+    /// primary is blank, with its cursor at home. Either way the unfinished sequence is not part
+    /// of the handback, so the rest of it reaches the receiver as a sequence that never started.
     public static func snapshot(of terminal: GhosttyTerminal, maxScrollbackLines: Int) throws -> Data {
         let cap = max(0, maxScrollbackLines)
         let bytes: [UInt8]? = try terminal.withLocked { state in
@@ -93,22 +96,39 @@ public enum GhosttySnapshotWriter {
         // The primary screen is behind the alternate one, so it is written first, from a clone
         // that has left the alternate screen. Its cursor, pen, protection and charsets are put in
         // place for the receiver's `?1049h` to save, so a later `?1049l` restores them.
-        let clone = try GhosttyTerminalClone(of: live)
         var primaryOrigin = false
-        // The state below holds the clone's raw handle, so the clone must outlive every read of it.
-        try withExtendedLifetime(clone) {
-            clone.feed(Array("\(esc)[?1049l".utf8))
-            // libghostty's saved cursor carries origin mode, so the primary's comes back with it.
-            // It is set before the primary is written, where the full-screen region makes it move
-            // nothing, so the receiver's `?1049h` saves it too.
-            primaryOrigin = GhosttyTerminalState(raw: clone.raw).mode(6)
-            if primaryOrigin { out += Array("\(esc)[?6h".utf8) }
-            out += try formatCapped(clone.raw, extras: savedCursorExtras, cap: cap)
+        if let clone = try primaryClone(of: live, state: state) {
+            // The state below holds the clone's raw handle, so the clone must outlive every read of it.
+            try withExtendedLifetime(clone) {
+                clone.feed(Array("\(esc)[?1049l".utf8))
+                // libghostty's saved cursor carries origin mode, so the primary's comes back with it.
+                // It is set before the primary is written, where the full-screen region makes it move
+                // nothing, so the receiver's `?1049h` saves it too.
+                primaryOrigin = GhosttyTerminalState(raw: clone.raw).mode(6)
+                if primaryOrigin { out += Array("\(esc)[?6h".utf8) }
+                out += try formatCapped(clone.raw, extras: savedCursorExtras, cap: cap)
+            }
         }
 
         let formatted = try GhosttyVTFormat.format(live, extras: handoverExtras, unwrap: true, trim: false, selection: nil)
         out += reorderModes(formatted, live: live, alternate: AlternateEntry(primaryOrigin: primaryOrigin, liveOrigin: state.mode(6)))
         return out
+    }
+
+    /// A clone of `live` to reach the primary screen through, or nil when the terminal stopped
+    /// inside an escape sequence or a UTF-8 character. The snapshot encoder copies an unfinished
+    /// sequence only from the continuation bytes a terminal keeps once
+    /// `GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES` is set, and refuses a terminal that keeps
+    /// none. The formatter reads only the active screen, so without a clone the alternate screen
+    /// is handed back alone. A clone that fails at ground is a library failure and is thrown.
+    private static func primaryClone(of live: VtTerminal, state: GhosttyTerminalState) throws -> GhosttyTerminalClone? {
+        do {
+            return try GhosttyTerminalClone(of: live)
+        } catch let error as GhosttyCallError where !state.isAtGround {
+            terminalEngineLog.notice(
+                "libghostty handback: the terminal stopped inside a sequence, so its alternate screen is handed back without the primary screen behind it (\(error.description, privacy: .public))")
+            return nil
+        }
     }
 
     /// The formatter's output for the whole screen, unwrapped and untrimmed, as a fresh receiver
