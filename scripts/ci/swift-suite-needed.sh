@@ -150,6 +150,16 @@ judge() {
       REASON='recipe/**'; return ;;
     tools/*)
       REASON='tools/**'; return ;;
+    # JavaScript and tooling that no Swift target reads; the Phone workflow
+    # tests it. Swift tests read phone/protocol/ and phone/test-vectors/, so
+    # those two match first and run the suite. The app bundle the daemon ships
+    # lives under Sources/, which runs.
+    phone/protocol/*|phone/test-vectors/*)
+      VERDICT=run; REASON='phone/protocol/ and phone/test-vectors/ are read by Swift tests'; return ;;
+    phone/*)
+      REASON='phone/** except phone/protocol/ and phone/test-vectors/'; return ;;
+    relay/*)
+      REASON='relay/**'; return ;;
     scripts/*)
       if is_suite_script "$p"; then
         VERDICT=run; REASON="one of the suite's own scripts ($SUITE_PATTERN)"
