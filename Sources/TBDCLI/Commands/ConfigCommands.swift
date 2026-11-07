@@ -31,6 +31,8 @@ struct ConfigGet: AsyncParsableCommand {
             "holder-claim-reconcile: \(config.holderClaimReconcileEnabled ? "on" : "off")",
             "session-usage: \(config.sessionModUsageEnabled ? "on" : "off")",
             "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
+            "phone-control: \(config.phoneControlEnabled ? "on" : "off")",
+            "phone-relay: \(config.phoneRelayURL ?? "not set")",
         ].joined(separator: "\n")
     }
 
@@ -61,6 +63,9 @@ struct ConfigSet: AsyncParsableCommand {
         "clone-checkout", "start-admission", "agent-background", "holder-claim-reconcile",
     ]
     static let modeKeys = ["update-mode"]
+    /// Phone control settings that only the TBD app may change, so no other
+    /// process can turn on a remote-control channel.
+    static let appOnlyKeys = ["phone-control", "phone-relay", "phone-loader"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
     @Argument(help: """
@@ -180,8 +185,15 @@ struct ConfigSet: AsyncParsableCommand {
         "Unknown config key '\(key)'. Known keys: \(allKeys.joined(separator: ", "))"
     }
 
+    static func appOnlyKeyMessage(_ key: String) -> String {
+        "'\(key)' is set only from the TBD app (Settings → Phone). Phone control settings are app-only, so no other process can change them."
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
+        if Self.appOnlyKeys.contains(key) {
+            throw CLIError.invalidArgument(Self.appOnlyKeyMessage(key))
+        }
         switch key {
         case "auto-archive-on-merge":
             let parsed = try Self.parseOnOff(value, key: key)
