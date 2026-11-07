@@ -194,9 +194,11 @@ public enum TerminalSnapshotWriter {
     ///   against an app-side emulator, as the detach handback would, needs
     ///   that considered first.
     ///
-    /// The alt buffer's own DECSC (`altBuffer.savedX/savedY`) goes with the
-    /// `clear()` too, and no escape sequence can restore it without first
-    /// moving the real cursor.
+    /// Known gap: the alt buffer's own saved cursor (`ESC 7` / DECSC, in
+    /// `altBuffer.savedX/savedY` and the saved autowrap flag) is not carried
+    /// to the viewer, whose alt buffer keeps its defaults (origin, autowrap
+    /// off). A program that sent `ESC 7` before the attach and `ESC 8` after
+    /// it lands at the default position with autowrap off on the viewer only.
     private static func restoreAlternateScreen(
         of terminal: Terminal,
         content: String,

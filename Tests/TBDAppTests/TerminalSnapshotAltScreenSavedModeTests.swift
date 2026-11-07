@@ -60,6 +60,9 @@ struct TerminalSnapshotAltScreenSavedModeTests {
         #expect(isSet(saved.mode, in: pair.sourceReply) == !saved.setValue)
     }
 
+    // Guards against the writer falling back to default mode values for the
+    // primary screen. The program never touches the mode here, so this does
+    // not pin the alt-screen leak; the other tests in this file do that.
     @Test("A mode the shell set before the program started is still set after it exits",
           arguments: SnapshotSavedModeCase.all)
     func shellModeSurvivesTheProgram(_ saved: SnapshotSavedModeCase) {
