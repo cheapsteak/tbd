@@ -58,9 +58,12 @@ protocol PhoneSessionActions: Sendable {
     /// The order, all inside the terminal's send lane: the core's shape
     /// check, then the phone's refusals, then the send core. A malformed
     /// payload gets the shape error `terminal.send` gives, with no actuation
-    /// row, whatever its target, and only a well-formed one meets the
-    /// phone's refusals: a shell, then a part that is not text, then an
-    /// empty message, then a control character.
+    /// row, whatever its target. A terminal with no row, or one whose
+    /// worktree is not local, gets the send core's own not-found error, with
+    /// no actuation row, whatever its message. Only a well-formed payload
+    /// aimed at a terminal with a row in a local worktree meets the phone's
+    /// refusals: a shell, then a part that is not text, then an empty
+    /// message, then a control character.
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.wake` with only the terminal and the message the wake

@@ -3893,8 +3893,7 @@ extension RPCRouter {
     /// like one, because the foreground rail would skip it and nothing else
     /// would stop the paste. `session.states` reports kindless rows, so the
     /// phone can name one. A kindless row with a session id is Claude's and is
-    /// sent. A terminal with no row falls through to the send core, which
-    /// reports it missing.
+    /// sent.
     ///
     /// **An empty text message is refused before anything is typed.** Text
     /// that is empty or whitespace would reach the pane as a bare Enter (or as
@@ -3924,15 +3923,24 @@ extension RPCRouter {
     /// the phone and a refusal outcome; a payload whose shape names no act
     /// gets none (see `recordPhoneSendRefusal`).
     ///
+    /// **The phone's refusals judge only a target the send core would
+    /// record.** They run only when the terminal has a row and its worktree
+    /// is local, the point at which the core writes its own request row. A
+    /// terminal with no row, or one whose worktree is not local, falls
+    /// through to the send core, which answers with its own error ("Terminal
+    /// not found", "Worktree not found for terminal") and writes no row,
+    /// whatever the message holds.
+    ///
     /// **The order is the core's shape check, then the phone's refusals, then
     /// the send core**, all inside the terminal's send lane
     /// (`sendOnInternalRail`'s `preSend`). A malformed payload therefore gets
     /// the core's own shape error and no row, as it would from
     /// `terminal.send`, even when it is also aimed at a shell. A well-formed
-    /// one meets the shell, text-only, blank and control-character refusals
-    /// in that order, each judged on the terminal row read once this send's
-    /// turn in the lane has come, so a send queued behind another is never
-    /// admitted on a row read before its wait.
+    /// one aimed at a recorded local target meets the shell, text-only, blank
+    /// and control-character refusals in that order, each judged on the
+    /// terminal row read once this send's turn in the lane has come, so a
+    /// send queued behind another is never admitted on a row read before its
+    /// wait.
     func sendFromPairedPhone(
         _ params: TerminalSendParams, deviceID: UUID
     ) async throws -> RPCResponse {
@@ -3957,16 +3965,19 @@ extension RPCRouter {
     ///
     /// The core's shape check comes first. A malformed payload is left to the
     /// core, whose own shape check refuses it with its own error before any
-    /// row exists, exactly as it does for `terminal.send`. Only a well-formed
-    /// payload meets the phone's refusals, in this order: a shell, a part that
-    /// is not text, a blank text message, a control character in any text.
+    /// row exists, exactly as it does for `terminal.send`. So is a target the
+    /// core would not record: a terminal with no row, or one whose worktree is
+    /// not local, gets the core's own not-found error. Only a well-formed
+    /// payload aimed at a terminal with a row in a local worktree meets the
+    /// phone's refusals, in this order: a shell, a part that is not text, a
+    /// blank text message, a control character in any text.
     private func phoneSendRefusal(
         _ params: TerminalSendParams, actor: ActuationActor
     ) async throws -> RPCResponse? {
-        guard case .valid(let payload) = Self.validateSendShape(params) else { return nil }
-        let row = try await db.terminals.get(id: params.terminalID)
-        if let row,
-           Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
+        guard case .valid(let payload) = Self.validateSendShape(params),
+              let row = try await db.terminals.get(id: params.terminalID),
+              try await db.worktrees.getLocal(id: row.worktreeID) != nil else { return nil }
+        if Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
             return try await recordPhoneSendRefusal(
                 payload, terminal: row, actor: actor, message: Self.phoneShellSendRefusal)
         }
@@ -4044,18 +4055,13 @@ extension RPCRouter {
     /// `refused(.notEligible)` outcome carrying `message`.
     ///
     /// `payload` is the one the shape check (`validateSendShape`) validated,
-    /// so the act is well-formed. The rows are written only where the core
-    /// would have reached its own `beginActuation`: the terminal has a row,
-    /// and its worktree is local. A missing target has no coordinates, so it
-    /// gets the refusal with no row, as the core's earlier returns do.
+    /// so the act is well-formed, and `terminal` is a row whose worktree is
+    /// local: `phoneSendRefusal` judges no other target, so every refusal it
+    /// makes is one the core would have reached its own `beginActuation` for.
     private func recordPhoneSendRefusal(
-        _ payload: TerminalSendPayload, terminal: Terminal?,
+        _ payload: TerminalSendPayload, terminal: Terminal,
         actor: ActuationActor, message: String
     ) async throws -> RPCResponse {
-        guard let terminal,
-              try await db.worktrees.getLocal(id: terminal.worktreeID) != nil else {
-            return RPCResponse(error: message)
-        }
         let actuationID = try await beginActuation(
             .terminalSend, actor: actor,
             target: .local(worktree: terminal.worktreeID, terminal: terminal.id),

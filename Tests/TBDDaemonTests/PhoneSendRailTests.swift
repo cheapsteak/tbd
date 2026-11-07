@@ -380,6 +380,30 @@ struct PhoneSendRailTests {
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
     }
 
+    /// The phone's refusals judge only a target the send core would record.
+    /// A send the text-only refusal would decline, aimed at a terminal whose
+    /// row is gone, gets the core's own not-found answer rather than "a phone
+    /// can send text only", and leaves no row.
+    @Test func aPairedPhoneSendWithAnImagePartToADeletedTerminalGetsTheCoresNotFound() async throws {
+        let harness = try await SendHarness.make()
+        let deleted = harness.terminal.id
+        try await harness.db.terminals.delete(id: deleted)
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(
+                terminalID: deleted, submit: true,
+                parts: [.text("hi"), .imagePath("/tmp/acme/shot.png")]),
+            deviceID: UUID())
+
+        #expect(response.error == "Terminal not found: \(deleted)")
+        #expect(response.error != RPCRouter.phoneNonTextPartRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        let logPath = await harness.router.actuationLog.path
+        let sendRows = ActuationRecordReader(activePath: logPath).readRows()
+            .filter { row in row.method == RPCMethod.terminalSend }
+        #expect(sendRows.isEmpty, "a missing target leaves no row")
+    }
+
     /// The queued prompt now runs through the shared rail, and still reaches
     /// the pane with no envelope in front of it.
     @Test func theQueuedPromptRailStillSuppresses() async throws {
