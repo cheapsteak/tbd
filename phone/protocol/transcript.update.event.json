@@ -1,0 +1,22 @@
+{
+  "data": {
+    "items": [
+      {
+        "at": 1762499520000,
+        "id": "fb8527c5-21a1-5e74-98a1-50961cbee757",
+        "kind": "tool",
+        "target": "npm test -- login",
+        "toolName": "Bash",
+        "toolStatus": "ok",
+        "truncated": false
+      }
+    ],
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "event": "transcript.update",
+  "kind": "event",
+  "seq": 13
+}

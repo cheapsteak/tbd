@@ -1,0 +1,389 @@
+{
+  "kind": "reply",
+  "requestID": "B153F222-0D41-54E3-A4FB-9B6B3E703B3C",
+  "result": {
+    "layout": [
+      {
+        "id": "16E7737E-5C20-548E-81FC-5DD3F9A51D36",
+        "kind": "repo",
+        "name": "acme",
+        "rows": [
+          {
+            "depth": 0,
+            "id": "8A1E503C-B1A3-59EE-9AFE-5DE564EE906B"
+          },
+          {
+            "depth": 1,
+            "id": "6F81CDDB-0E1D-56C0-AFD2-F255B3598C18"
+          }
+        ]
+      },
+      {
+        "id": "21E6C65F-4179-57BB-9FCC-80C3FE6C812E",
+        "kind": "repo",
+        "name": "acme-api",
+        "rows": [
+          {
+            "depth": 0,
+            "id": "8E17D2B3-1130-5C0A-8AFD-27A79B1EA41C"
+          }
+        ]
+      },
+      {
+        "id": "scratch",
+        "kind": "scratch",
+        "name": "Scratch",
+        "rows": [
+          {
+            "depth": 0,
+            "id": "B63130A2-F24B-5FEE-9A46-CDD5D93249AB"
+          }
+        ]
+      },
+      {
+        "id": "provider:acme-cloud",
+        "kind": "provider",
+        "name": "acme-cloud",
+        "rows": [
+          {
+            "depth": 0,
+            "id": "remote:acme-cloud/rs-1042"
+          }
+        ]
+      }
+    ],
+    "more": false,
+    "omittedRows": 0,
+    "replayed": false,
+    "rows": [
+      {
+        "id": "8A1E503C-B1A3-59EE-9AFE-5DE564EE906B",
+        "kind": "worktree",
+        "name": "fix-login",
+        "remote": false,
+        "sessions": [
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "model": "claude-sonnet-5-5",
+            "openPromptID": "D054CB2D-4963-5CE3-A04E-03568A5714E4",
+            "profileID": "6C2471BC-B073-5CE4-B694-F648094C061D",
+            "profileName": "Personal",
+            "ref": {
+              "kind": "local",
+              "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+            },
+            "status": {
+              "changedAt": 1762499940000,
+              "chip": "waitingForYou"
+            },
+            "tabName": "Claude"
+          },
+          {
+            "agent": "codex",
+            "capabilities": {
+              "answer": {
+                "available": false,
+                "reason": "Codex sessions have no prompts the phone can answer"
+              },
+              "fork": {
+                "available": false,
+                "reason": "Only Claude sessions fork"
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": false,
+                "reason": "Only Claude sessions switch profiles"
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "ref": {
+              "kind": "local",
+              "terminalID": "E623E74A-5916-5F13-94D7-16745DF21E3D"
+            },
+            "status": {
+              "changedAt": 1762499820000,
+              "chip": "working"
+            },
+            "tabName": "Codex"
+          },
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "profileName": "Work",
+            "ref": {
+              "kind": "local",
+              "terminalID": "1B5360E0-D06A-5334-8433-BF7607BB2C83"
+            },
+            "status": {
+              "changedAt": 1762499280000,
+              "chip": "idle"
+            },
+            "tabName": "review"
+          }
+        ],
+        "statusChangedAt": 1762499940000
+      },
+      {
+        "id": "6F81CDDB-0E1D-56C0-AFD2-F255B3598C18",
+        "kind": "worktree",
+        "name": "add-search",
+        "remote": false,
+        "sessions": [
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "profileName": "Personal",
+            "ref": {
+              "kind": "local",
+              "terminalID": "08A7FA53-E9FD-5ACA-8D10-6F6F0E189F62"
+            },
+            "status": {
+              "changedAt": 1762494300000,
+              "chip": "parked"
+            },
+            "tabName": "Claude"
+          }
+        ],
+        "statusChangedAt": 1762494300000
+      },
+      {
+        "id": "8E17D2B3-1130-5C0A-8AFD-27A79B1EA41C",
+        "kind": "worktree",
+        "name": "update-deps",
+        "remote": false,
+        "sessions": [
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "profileName": "Work",
+            "ref": {
+              "kind": "local",
+              "terminalID": "B7D6390A-57A8-5E08-8198-338C82D9985C"
+            },
+            "status": {
+              "changedAt": 1762498800000,
+              "chip": "rateLimited",
+              "reason": "Usage limit reached",
+              "untilAt": 1762502400000
+            },
+            "tabName": "Claude"
+          },
+          {
+            "agent": "codex",
+            "capabilities": {
+              "answer": {
+                "available": false,
+                "reason": "Codex sessions have no prompts the phone can answer"
+              },
+              "fork": {
+                "available": false,
+                "reason": "Only Claude sessions fork"
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": false,
+                "reason": "Only Claude sessions switch profiles"
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "ref": {
+              "kind": "local",
+              "terminalID": "92D750CB-806C-5D6C-A3A9-E961407B6C5D"
+            },
+            "status": {
+              "changedAt": 1762498440000,
+              "chip": "error",
+              "reason": "Codex exited with status 1"
+            },
+            "tabName": "Codex"
+          }
+        ],
+        "statusChangedAt": 1762498800000
+      },
+      {
+        "id": "B63130A2-F24B-5FEE-9A46-CDD5D93249AB",
+        "kind": "worktree",
+        "name": "notes",
+        "remote": false,
+        "sessions": [
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": false,
+                "reason": "The session has exited"
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": false,
+                "reason": "The session has exited"
+              },
+              "send": {
+                "available": false,
+                "reason": "The session has exited"
+              },
+              "switchProfile": {
+                "available": false,
+                "reason": "The session has exited"
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "profileName": "Personal",
+            "ref": {
+              "kind": "local",
+              "terminalID": "FFB2516B-16DC-5ED3-A34A-D128FF2396E5"
+            },
+            "status": {
+              "changedAt": 1762482000000,
+              "chip": "exited"
+            },
+            "tabName": "Claude"
+          }
+        ],
+        "statusChangedAt": 1762482000000
+      },
+      {
+        "id": "remote:acme-cloud/rs-1042",
+        "kind": "remoteSession",
+        "name": "Migrate the billing tables",
+        "remote": true,
+        "sessions": [
+          {
+            "agent": "remote",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": false,
+                "reason": "A remote session cannot be forked"
+              },
+              "model": {
+                "available": false,
+                "reason": "A remote session's model is set by its provider"
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": false,
+                "reason": "A remote session runs under its provider's account"
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "ref": {
+              "kind": "remote",
+              "provider": "acme-cloud",
+              "sessionID": "rs-1042"
+            },
+            "status": {
+              "changedAt": 1762497300000,
+              "chip": "unknown"
+            },
+            "tabName": "acme-cloud"
+          }
+        ],
+        "statusChangedAt": 1762497300000
+      }
+    ],
+    "seq": 42,
+    "stream": "2E3323C5-13E0-54B1-B2D7-036813516A08"
+  }
+}

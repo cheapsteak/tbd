@@ -3634,17 +3634,22 @@ extension RPCRouter {
     /// person at the keyboard; an envelope any caller could omit over RPC would
     /// hand every caller the ability to type as a human, which is precisely the
     /// property the envelope exists to provide. So suppression is reachable
-    /// only from inside this file's own send core, by daemon rails that are
-    /// relaying the operator's own words verbatim — and the act is still
-    /// written to the actuation log either way, so the record of who typed what
-    /// stays complete.
+    /// only from inside this file's own send core, by internal rails that are
+    /// relaying the operator's own words verbatim, and by the app, which asks
+    /// for it through `params.envelope` and gets it only on a connection
+    /// `authenticatesEnvelopeSuppression` verifies as the app's — and the act
+    /// is still written to the actuation log either way, so the record of who
+    /// typed what stays complete.
     enum DispatchEnvelopeDisposition {
-        /// The default and the only disposition any RPC can ask for.
+        /// The default, and the rail disposition every RPC send carries. An
+        /// RPC's own request for suppression travels in `params.envelope`.
         case attached
         /// Deliver the caller's bytes with nothing prepended. Reserved for the
-        /// queued prompt taken at worktree creation, whose text must reach the
-        /// model byte-identical to what the argv path would have delivered
-        /// (design 2026-08-10, "The paste path delivers verbatim").
+        /// two internal rails in `sendOnInternalRail`: the queued prompt taken
+        /// at worktree creation, whose text must reach the model byte-identical
+        /// to what the argv path would have delivered (design 2026-08-10, "The
+        /// paste path delivers verbatim"), and a paired phone's send, which is
+        /// the person's own words as the app's composer send is.
         case suppressed
     }
 
@@ -3729,6 +3734,25 @@ extension RPCRouter {
             + "would have run as a command line. Nothing was typed."
     }
 
+    /// The kind the send core reads a terminal row as: its recorded kind, or
+    /// for a row with none, the kind its Claude session id implies.
+    ///
+    /// A row with NO recorded kind predates the column, and gets exactly the
+    /// reading migration `v22_terminal_kind`'s backfill gave every such row
+    /// when the column was introduced — Claude when it carries a Claude
+    /// session id, shell otherwise — which is also what `Terminal
+    /// .isClaudeResumable` already requires of a kindless row. Reading every
+    /// kindless row as Claude regardless of session id would run the
+    /// foreground rail, expecting a "claude" process, against a plain shell
+    /// pane that never had one.
+    ///
+    /// The foreground rail (`foregroundAgentName(kind:claudeSessionID:)`) and
+    /// the phone's shell refusal (`sendFromPairedPhone`) both read a row
+    /// through this, so the two cannot disagree about which rows are shells.
+    static func effectiveKind(kind: TerminalKind?, claudeSessionID: String?) -> TerminalKind {
+        kind ?? (claudeSessionID == nil ? .shell : .claude)
+    }
+
     /// The process name the foreground rail looks for in a pane, per terminal
     /// kind — and `nil` for a kind the rail must not run for at all.
     ///
@@ -3738,19 +3762,13 @@ extension RPCRouter {
     /// its command line, so the kind picks the name and the same `ps` question
     /// answers for both.
     ///
-    /// A row with NO recorded kind predates the column, and gets exactly the
-    /// reading migration `v22_terminal_kind`'s backfill gave every such row
-    /// when the column was introduced — Claude when it carries a Claude
-    /// session id, shell otherwise — which is also what `Terminal
-    /// .isClaudeResumable` already requires of a kindless row. Reading every
-    /// kindless row as Claude regardless of session id would run this rail,
-    /// expecting a "claude" process, against a plain shell pane that never
-    /// had one.
+    /// The kind is the row's effective kind (`effectiveKind(kind:claudeSessionID:)`),
+    /// so a row with no recorded kind and no Claude session id is a shell here.
     ///
     /// Pure and static so the mapping is testable without a database, a pane, or
     /// a process table.
     static func foregroundAgentName(kind: TerminalKind?, claudeSessionID: String?) -> String? {
-        switch kind ?? (claudeSessionID == nil ? .shell : .claude) {
+        switch effectiveKind(kind: kind, claudeSessionID: claudeSessionID) {
         case .shell: return nil
         case .claude: return "claude"
         case .codex: return "codex"
@@ -3771,9 +3789,40 @@ extension RPCRouter {
         }
     }
 
+    /// The send core on an internal rail: the per-terminal lane, then
+    /// `performTerminalSend` with the envelope `.suppressed`.
+    ///
+    /// The caller is the authority, and this function adds none. Every caller
+    /// is daemon code that already knows whose words these are: the queued
+    /// prompt relays what the operator typed at worktree creation, and a paired
+    /// phone relays what its person typed after the bridge verified the
+    /// pairing. `.suppressed` here is the rail disposition `effectiveEnvelope`
+    /// passes straight through, whatever the actor and whatever the request's
+    /// own `envelope` field says. The socket never reaches this function:
+    /// `handleTerminalSend` grants suppression only to the authenticated app.
+    ///
+    /// Everything else in the send core applies unchanged: the shape check,
+    /// the transport rails, the opt-in awaiting-input gate when
+    /// `params.gateOnAwaitingInput` asks for it, the pane consultation and the
+    /// actuation row, which records `actor`.
+    ///
+    /// `phoneCheck` is the phone rail's own refusals, handed through to the
+    /// send core (`performTerminalSend`), which runs it on the terminal row
+    /// and the payload it resolved itself, inside the lane. The queued prompt
+    /// passes none.
+    private func sendOnInternalRail(
+        _ params: TerminalSendParams, actor: ActuationActor,
+        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> String?)? = nil
+    ) async throws -> RPCResponse {
+        try await terminalSendSerializer.run(terminalID: params.terminalID) {
+            try await self.performTerminalSend(
+                params, actor: actor, envelope: .suppressed, phoneCheck: phoneCheck)
+        }
+    }
+
     /// Paste the operator's own words into an agent with no `<tbd-dispatch/>`
-    /// envelope — the queued-prompt paste path, and the only caller of
-    /// `.suppressed`.
+    /// envelope — the queued-prompt paste path, one of the two internal rails
+    /// that send `.suppressed` (see `sendOnInternalRail`).
     ///
     /// Reuses the send core rather than reaching for tmux directly, so the pane
     /// consultation, the per-terminal serializer lane and the actuation row all
@@ -3783,11 +3832,8 @@ extension RPCRouter {
     ) async -> Bool {
         let params = TerminalSendParams(terminalID: terminalID, text: text, submit: submit)
         do {
-            let response = try await terminalSendSerializer.run(terminalID: terminalID) {
-                try await self.performTerminalSend(
-                    params, actor: .daemon(rail: ActuationRail.queuedPrompt),
-                    envelope: .suppressed)
-            }
+            let response = try await sendOnInternalRail(
+                params, actor: .daemon(rail: ActuationRail.queuedPrompt))
             return response.success
         } catch {
             logger.warning("""
@@ -3798,10 +3844,247 @@ extension RPCRouter {
         }
     }
 
+    /// A message a person typed on a paired phone, delivered with no
+    /// `<tbd-dispatch/>` envelope, as the app's own composer send is.
+    ///
+    /// For the phone bridge only, which calls it after the phone's channel has
+    /// verified its pairing, with the device ID from that verified peer. It
+    /// adds no authority check of its own (see `sendOnInternalRail`). The
+    /// actuation row records `.phone(deviceID:)`.
+    ///
+    /// **The params are rebuilt from the fields a phone may set**: the
+    /// terminal, the message (`text` or `parts`) and `submit`. Every other
+    /// field takes its default, whatever the caller passes, so a field added
+    /// to `TerminalSendParams` later stays off the phone until it is named
+    /// here. The fields that matter today:
+    ///
+    /// - `gateOnAwaitingInput` is forced to true. Every phone send is gated on
+    ///   awaiting input (spec section 5): an ungated send into an open dialog
+    ///   would commit one of its options, bypassing the `prompt.answer` core
+    ///   and the setting it obeys, so the send core's existing gate does the
+    ///   refusing.
+    /// - `keys` is dropped. Keys skip the park and foreground rails, and they
+    ///   are not part of a message. A send that carried only keys then has no
+    ///   payload, and the shape check refuses it before any row exists.
+    /// - `verify` is dropped: a suppressed send carries no dispatch id, so
+    ///   delivery verification could never confirm it, and the shape check
+    ///   refuses `verify` with parts.
+    /// - `envelope` is dropped: this rail suppresses the envelope whatever the
+    ///   request's own field says.
+    /// - The message is text only. An image part names a file path on the
+    ///   laptop, which a phone cannot know, so a send with any non-text part
+    ///   is refused whole, before anything is typed, rather than having the
+    ///   part dropped.
+    /// - Every CRLF in the message, in `text` and in each text part, becomes
+    ///   a bare LF (`phoneLineEndingsNormalized`). A phone's keyboard or
+    ///   clipboard can end lines with CRLF, and the control-character refusal
+    ///   below would otherwise refuse every such message for its CRs. The
+    ///   shape check gives the same verdict either way: it reads text for
+    ///   emptiness after trimming whitespace, and CR is whitespace, so the
+    ///   rebuild can make this change before the shape check runs.
+    ///
+    /// **A shell is refused before anything is typed.** Shells are hidden from
+    /// the phone (spec section 6), and a shell runs what is typed into it. The
+    /// row is judged by its effective kind (`effectiveKind(kind:claudeSessionID:)`),
+    /// the reading the send core's foreground rail uses: a row with no recorded
+    /// kind is a shell when it carries no Claude session id, and is refused
+    /// like one, because the foreground rail would skip it and nothing else
+    /// would stop the paste. `session.states` reports kindless rows, so the
+    /// phone can name one. A kindless row with a session id is Claude's and is
+    /// sent.
+    ///
+    /// **A blank message is refused before anything is typed.** A message is
+    /// blank when every scalar of its `text`, or of every one of its text
+    /// parts, is whitespace or a format character (general category Cf, such
+    /// as a zero-width space, a word joiner or a byte-order mark). It types
+    /// nothing a person could see, and reaches the pane as a bare Enter (or
+    /// as blank or invisible characters and then Enter), which submits
+    /// whatever draft the person left in the laptop's composer. A phone
+    /// answers a prompt through `prompt.answer`, never by pressing Enter, so
+    /// the rail refuses a blank message whatever `submit` says. The send
+    /// core's shape check (`validateSendShape`) already refuses parts whose
+    /// every text part is empty or whitespace as malformed, with no row, so
+    /// for parts this refusal is reached by text parts of format characters,
+    /// which the shape check counts as content. The shape check also refuses
+    /// `text` and `parts` together, and a send that names no message at all
+    /// (neither `text` nor `parts`), each with no row.
+    ///
+    /// **A control character is refused before anything is typed.** The rail
+    /// drops `keys`, but text can carry a key's byte. When the pane's child
+    /// has bracketed paste off, the body reaches it bare: tmux's
+    /// `paste-buffer -p` adds the paste markers only when the child asked for
+    /// them, and so does the holder's `HolderSendComposition`. The child then
+    /// reads ESC as Escape, ETX as Ctrl-C and a CR as an Enter partway through
+    /// the message. So text or a text part holding a scalar below U+0020 other
+    /// than LF and tab, or DEL (U+007F), or a C1 control (U+0080–U+009F), is
+    /// refused whole. The check reads the message after the CRLF rebuild
+    /// above, so only a lone CR is refused.
+    ///
+    /// **A multi-line message submits line by line when bracketed paste is
+    /// off.** On the tmux transport the paste is `paste-buffer -p` without
+    /// `-r`, so tmux turns each LF into a CR, which a child with bracketed
+    /// paste off reads as Enter, submitting each line on its own; a tab
+    /// likewise arrives as the Tab key. The laptop composer's sends reach the
+    /// pane the same way, so this is parity with the laptop, not a hole only
+    /// a phone opens.
+    ///
+    /// **These refusals are recorded as the send core records its own.** A
+    /// well-formed act the daemon declined gets a `terminal.send` row naming
+    /// the phone and a `refused(.notEligible)` outcome carrying the refusal,
+    /// written by the send core; a payload whose shape names no act gets
+    /// none.
+    ///
+    /// **The phone's refusals run on the row the send core sends to.** The
+    /// send core runs them itself (`performTerminalSend`'s `phoneCheck`),
+    /// inside the terminal's send lane, right after its own shape check and
+    /// its own terminal and local-worktree lookup, and before any other rail
+    /// runs or anything is typed. So they judge the very row the core then
+    /// pastes into, read once this send's turn in the lane has come. A check
+    /// that read the row for itself would not be enough: the lane orders
+    /// sends only, and `terminal.recreateWindow` runs outside it, under the
+    /// worktree's server lock, where its shell branch can turn a Claude row
+    /// into a shell with a new pane between the two reads.
+    ///
+    /// **So the order is the core's shape check, the core's lookup, the
+    /// phone's refusals, then the rest of the send core.** A malformed
+    /// payload gets the core's own shape error and no row, as it would from
+    /// `terminal.send`, even when it is also aimed at a shell. A terminal with
+    /// no row, or one whose worktree is not local, gets the core's own error
+    /// ("Terminal not found", "Worktree not found for terminal") and no row,
+    /// whatever the message holds. A well-formed payload aimed at a terminal
+    /// with a row in a local worktree meets the shell, text-only, blank and
+    /// control-character refusals in that order (`phoneSendRefusal`).
+    func sendFromPairedPhone(
+        _ params: TerminalSendParams, deviceID: UUID
+    ) async throws -> RPCResponse {
+        let phoneParams = TerminalSendParams(
+            terminalID: params.terminalID,
+            text: params.text.map { text in Self.phoneLineEndingsNormalized(text) },
+            submit: params.submit,
+            parts: params.parts?.map { (part: SendPart) -> SendPart in
+                guard case .text(let value) = part else { return part }
+                return .text(Self.phoneLineEndingsNormalized(value))
+            },
+            gateOnAwaitingInput: true)
+        return try await sendOnInternalRail(
+            phoneParams, actor: .phone(deviceID: deviceID),
+            phoneCheck: { row, payload in RPCRouter.phoneSendRefusal(row: row, payload: payload) })
+    }
+
+    /// The phone rail's refusal of a send of `payload` to the terminal `row`,
+    /// or nil to let the send core go on.
+    ///
+    /// Pure: the send core calls it with the row and the payload it resolved
+    /// itself (see `sendFromPairedPhone`), so it reads nothing and checks no
+    /// shape. The payload has passed `validateSendShape`, and the row exists
+    /// in a local worktree. The refusals, in this order: a shell (by effective
+    /// kind), a part that is not text, a blank message, a control character
+    /// in any text.
+    private static func phoneSendRefusal(
+        row: TBDShared.Terminal, payload: TerminalSendPayload
+    ) -> String? {
+        if Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
+            return Self.phoneShellSendRefusal
+        }
+        let texts: [String]
+        switch payload {
+        case .text(let text, _, _):
+            texts = [text]
+        case .parts(let parts, _):
+            var partTexts: [String] = []
+            for part in parts {
+                guard case .text(let value) = part else { return Self.phoneNonTextPartRefusal }
+                partTexts.append(value)
+            }
+            texts = partTexts
+        case .keys:
+            // `sendFromPairedPhone` drops keys, so no phone payload is keys.
+            // Refused rather than passed, should one ever arrive.
+            return Self.phoneNonTextPartRefusal
+        }
+        if texts.allSatisfy({ text in Self.phoneTextIsBlank(text) }) {
+            return Self.phoneEmptySendRefusal
+        }
+        if texts.contains(where: { text in Self.phoneTextHasControlCharacter(text) }) {
+            return Self.phoneControlCharacterRefusal
+        }
+        return nil
+    }
+
+    /// Whether `text`, a phone message's `text` or one of its text parts,
+    /// types nothing a person could see: every scalar is whitespace, a
+    /// format character (general category Cf, such as U+200B ZERO WIDTH
+    /// SPACE, U+2060 WORD JOINER or U+FEFF, the byte-order mark), or a
+    /// default-ignorable code point (such as U+3164 HANGUL FILLER, U+034F
+    /// COMBINING GRAPHEME JOINER or a variation selector). Empty text is
+    /// blank. Whitespace is the set the shape check trims. One visible scalar
+    /// makes the text non-blank, so a ZWJ inside an emoji sequence or a
+    /// variation selector after a visible character keeps it.
+    private static func phoneTextIsBlank(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || scalar.properties.generalCategory == .format
+                || scalar.properties.isDefaultIgnorableCodePoint
+        }
+    }
+
+    /// `text` with every CRLF made a bare LF, for a phone message. A lone CR
+    /// is kept, for the control-character refusal to judge.
+    private static func phoneLineEndingsNormalized(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+    }
+
+    /// Whether `text`, a phone message's `text` or one of its text parts,
+    /// holds a control character a phone message may not carry
+    /// (`isPhoneRefusedControl`).
+    private static func phoneTextHasControlCharacter(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in Self.isPhoneRefusedControl(scalar) }
+    }
+
+    /// Whether `scalar` is a control character a phone message may not carry:
+    /// a C0 control (below U+0020) other than LF and tab, DEL (U+007F), or a
+    /// C1 control (U+0080–U+009F). Any of them reaches a pane whose child has
+    /// bracketed paste off as a key, not as text.
+    private static func isPhoneRefusedControl(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x0A, 0x09: return false
+        case 0x00..<0x20, 0x7F, 0x80...0x9F: return true
+        default: return false
+        }
+    }
+
+    /// What a paired phone hears when it sends to a shell tab.
+    static let phoneShellSendRefusal = "a phone cannot send to a shell tab"
+
+    /// What a paired phone hears when its send carries a part that is not text.
+    static let phoneNonTextPartRefusal = "a phone can send text only"
+
+    /// What a paired phone hears when its message is blank: empty, or only
+    /// whitespace and invisible format characters.
+    static let phoneEmptySendRefusal = "a phone message cannot be empty"
+
+    /// What a paired phone hears when its message holds a control character.
+    static let phoneControlCharacterRefusal = "a phone message cannot contain control characters"
+
+    /// The send core every `terminal.send` caller runs, inside the terminal's
+    /// send lane.
+    ///
+    /// `phoneCheck` is the paired phone's refusals (`phoneSendRefusal`), and
+    /// nil for every other caller. The core calls it with the terminal row
+    /// and the payload it resolved itself, right after its shape check and
+    /// its terminal and local-worktree lookup succeed, and before any other
+    /// rail runs or anything is typed, so the phone's checks judge the very
+    /// row this send goes to (see `sendFromPairedPhone`). A refusal it returns
+    /// is recorded as the core records a declined well-formed act — a request
+    /// row naming `actor`, then a `refused(.notEligible)` outcome carrying the
+    /// refusal — and is the answer. It is synchronous on purpose: it cannot
+    /// await, so it cannot read a row of its own from the database, and
+    /// judges only the values it is handed.
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?,
         envelope: DispatchEnvelopeDisposition = .attached,
-        connection: RPCConnectionContext? = nil
+        connection: RPCConnectionContext? = nil,
+        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> String?)? = nil
     ) async throws -> RPCResponse {
         // ─── The first of two refusal lines, and the reason they differ ───
         //
@@ -3834,6 +4117,15 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
+        // ─── The paired phone's own refusals ───
+        //
+        // Judged on THIS `terminal`, the row every rail below reads and the
+        // pane is addressed through, never on a row the phone rail read for
+        // itself: the send lane orders sends only, and `terminal.recreateWindow`
+        // can turn a Claude row into a shell outside it. Recorded below, once
+        // the request row exists, as a declined well-formed act.
+        let phoneRefusal = phoneCheck?(terminal, payload)
+
         // Request row first: the target is resolved and the payload is known,
         // and nothing has touched the pane yet. The paste and the Enter are
         // sub-steps of one send, so they share this one row.
@@ -3848,6 +4140,11 @@ extension RPCRouter {
             message: payload.recordedMessage,
             submit: payload.recordedSubmit,
             verify: payload.recordedVerify)
+
+        if let phoneRefusal {
+            await finishActuation(actuationID, .refused(.notEligible), error: phoneRefusal)
+            return RPCResponse(error: phoneRefusal)
+        }
 
         // ─── The transport's own declining rail ───
         //
@@ -5108,9 +5405,9 @@ extension RPCRouter {
     /// **Fails closed in every direction**, and the reason names itself so a
     /// suppression that did not happen can be explained afterwards.
     ///
-    /// The daemon's own `.suppressed` disposition — the queued-prompt rail's,
-    /// set inside the send core and never arriving from a params struct — does
-    /// not pass through here at all.
+    /// The daemon's own `.suppressed` disposition — the internal rails' in
+    /// `sendOnInternalRail`, set inside the send core and never arriving from a
+    /// params struct — does not pass through here at all.
     func authenticatesEnvelopeSuppression(
         connection: RPCConnectionContext?
     ) async -> EnvelopeSuppressionVerdict {
@@ -5643,6 +5940,18 @@ extension RPCRouter {
             .appendingPathComponent("projects", isDirectory: true)
     }
 
+    /// The transcript file both `terminal.transcript` handlers read for a
+    /// terminal: `ClaudeTranscriptLocator`'s stored-path-wins rule, with the
+    /// terminal's profile `projects/` root searched before the host store's
+    /// when the row names a profile. Both roots come from `configDirManager`,
+    /// so the host root is the injected manager's, never a static lookup.
+    func claudeTranscriptFilePath(terminal: Terminal, worktreePath: String) -> String? {
+        ClaudeTranscriptLocator.filePath(
+            terminal: terminal, worktreePath: worktreePath,
+            projectsBase: claudeProjectsRoot(forProfileID: nil),
+            profileProjectsBase: terminal.profileID.map { claudeProjectsRoot(forProfileID: $0) })
+    }
+
     /// Worktree-ownership guard shared by every hook bridge that routes on
     /// `TBD_TERMINAL_ID`.
     ///
@@ -6129,24 +6438,14 @@ extension RPCRouter {
             return response
         }
 
-        // Prefer the absolute path captured by the SessionStart hook — it's
-        // immune to `/clear` and `/compact` rollovers that change the
-        // ~/.claude/projects/ subdir away from the cwd-derived guess. Fall
-        // back to the legacy projectDir+sessionID resolution for terminals
-        // that haven't received a hook event yet (older terminals, or
-        // sessions that were already running before the overlay hook was
-        // registered).
-        let filePath: String
-        if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
-            filePath = storedPath
-        } else {
-            guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-                let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
-                response = try RPCResponse(result: result)
-                responseBytes = response.result?.utf8.count ?? 0
-                return response
-            }
-            filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        // The locator prefers the absolute path captured by the SessionStart
+        // hook and falls back to the legacy projectDir+sessionID resolution,
+        // under the terminal's profile root first.
+        guard let filePath = claudeTranscriptFilePath(terminal: terminal, worktreePath: worktree.path) else {
+            let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
+            response = try RPCResponse(result: result)
+            responseBytes = response.result?.utf8.count ?? 0
+            return response
         }
         let parsed: [TranscriptItem]
         if let tailLimit = params.tailLimit {
@@ -6196,7 +6495,7 @@ extension RPCRouter {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
-        guard let sessionID = terminal.claudeSessionID,
+        guard terminal.claudeSessionID != nil,
               let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
@@ -6204,14 +6503,8 @@ extension RPCRouter {
         // The transcript renders parent-file items only (Task/Agent tool calls
         // and their results live in the parent JSONL), so the full-body lookup
         // scans only the primary session file — subagent JSONLs are never opened.
-        let primaryPath: String
-        if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
-            primaryPath = storedPath
-        } else {
-            guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-                return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
-            }
-            primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        guard let primaryPath = claudeTranscriptFilePath(terminal: terminal, worktreePath: worktree.path) else {
+            return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
         let detail = TranscriptParser.lookupDetail(filePath: primaryPath, itemID: params.itemID)
 

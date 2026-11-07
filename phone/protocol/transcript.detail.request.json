@@ -1,0 +1,14 @@
+{
+  "kind": "request",
+  "method": "transcript.detail",
+  "params": {
+    "chunk": 0,
+    "itemID": "fb8527c5-21a1-5e74-98a1-50961cbee757",
+    "part": "result",
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "requestID": "4020F8FC-707D-5A86-A28D-F067C9400675"
+}

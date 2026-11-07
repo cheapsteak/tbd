@@ -1,0 +1,71 @@
+{
+  "data": {
+    "prompts": [
+      {
+        "allowAlways": false,
+        "id": "D054CB2D-4963-5CE3-A04E-03568A5714E4",
+        "kind": "question",
+        "questions": [
+          {
+            "header": "Cookie",
+            "multiSelect": false,
+            "options": [
+              {
+                "description": "Set it in the sign-in handler, then redirect.",
+                "label": "Before the redirect"
+              },
+              {
+                "label": "In middleware"
+              }
+            ],
+            "text": "Where should the session cookie be set?"
+          },
+          {
+            "multiSelect": true,
+            "options": [
+              {
+                "label": "Unit"
+              },
+              {
+                "label": "End to end"
+              }
+            ],
+            "text": "Which tests should run afterwards?"
+          }
+        ],
+        "targetTruncated": false,
+        "toolName": "AskUserQuestion"
+      },
+      {
+        "allowAlways": true,
+        "id": "299B8A9E-2281-5593-ADF7-09109D794A86",
+        "kind": "permission",
+        "suggestions": [
+          "Bash(npm run migrate:*)"
+        ],
+        "summary": "Run the database migration",
+        "target": "npm run migrate -- --env staging",
+        "targetTruncated": false,
+        "toolName": "Bash"
+      }
+    ],
+    "resolved": [
+      {
+        "answeredBy": "phone",
+        "deviceID": "605C4444-BCF0-5B0A-90A1-B0E4939029C3",
+        "promptID": "6C2CD8E6-F6D7-5D0D-938C-D5B33BAE6046"
+      },
+      {
+        "answeredBy": "laptop",
+        "promptID": "F7983336-F1DA-59A0-963B-10F385A150B5"
+      }
+    ],
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "event": "prompt.changed",
+  "kind": "event",
+  "seq": 15
+}

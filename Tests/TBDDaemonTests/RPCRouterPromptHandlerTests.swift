@@ -300,6 +300,89 @@ struct RPCRouterPromptHandlerTests {
         #expect(await isOpen(f, id))
     }
 
+    // MARK: prompt.answer — a paired phone answers through the core
+
+    /// A paired phone has no socket peer, so the core skips the socket check
+    /// that refuses a nil connection, and its answer is delivered.
+    @Test func aPairedPhoneAnswersWithoutASocketPeer() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = await openedPromptID(f)
+        let d = UUID()
+        let params = PromptAnswerParams(
+            terminalID: f.terminalID, promptID: id, answer: .permission(decision: .allow, message: nil))
+        let waiter = await attachWait(f, promptID: id)
+
+        let answering = Task {
+            try await f.router.answerPrompt(
+                params, actor: .phone(deviceID: d), authority: .pairedPhone(deviceID: d))
+        }
+        _ = await waiter.value
+        await f.store.receipt(terminalID: f.terminalID, toolUseID: id)
+        let r = try await answering.value
+        #expect(r.success, "error: \(r.error ?? "none")")
+        #expect(try r.decodeResult(PromptAnswerResult.self).outcome == .delivered)
+        #expect(await isOpen(f, id) == false)
+
+        let rows = ActuationRecordReader(activePath: f.logPath).readRows()
+        let request = try #require(rows.first { $0.method == RPCMethod.promptAnswer })
+        #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
+    }
+
+    /// The recorded device follows from the authority, not from `actor`, so
+    /// a caller cannot record one device while answering under another's
+    /// pairing. The prompt's terminal does not exist, so the answer is
+    /// recorded and comes back `already_resolved` without a wait.
+    @Test func aPairedPhoneAnswerRecordsTheAuthoritysDevice() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let authorityDevice = UUID()
+        let otherDevice = UUID()
+        let params = PromptAnswerParams(
+            terminalID: UUID(), promptID: "p-1", answer: .permission(decision: .allow, message: nil))
+
+        let r = try await f.router.answerPrompt(
+            params, actor: .phone(deviceID: otherDevice),
+            authority: .pairedPhone(deviceID: authorityDevice))
+
+        #expect(try r.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
+        let rows = ActuationRecordReader(activePath: f.logPath).readRows()
+        let request = try #require(rows.first { $0.method == RPCMethod.promptAnswer })
+        #expect(request.actor == ActuationActor.phone(deviceID: authorityDevice))
+    }
+
+    /// The phone obeys the same flag the app's prompt card does.
+    @Test func aPairedPhoneStillObeysTheAnswerFlag() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = await openedPromptID(f)
+        let d = UUID()
+        try await f.db.config.setTranscriptPromptAnswerEnabled(false)
+        let params = PromptAnswerParams(
+            terminalID: f.terminalID, promptID: id, answer: .permission(decision: .allow, message: nil))
+        let r = try await f.router.answerPrompt(
+            params, actor: .phone(deviceID: d), authority: .pairedPhone(deviceID: d))
+        #expect(r.success == false)
+        #expect(r.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
+    }
+
+    /// A prompt the app already answered is `already_resolved` for the phone.
+    @Test func aPairedPhoneOnAnAnsweredPromptGetsAlreadyResolved() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = await openedPromptID(f)
+        let waiter = await attachWait(f, promptID: id)
+        let first = Task { try await answer(f, promptID: id) }
+        _ = await waiter.value
+        await f.store.receipt(terminalID: f.terminalID, toolUseID: id)
+        #expect(try await first.value.decodeResult(PromptAnswerResult.self).outcome == .delivered)
+
+        let d = UUID()
+        let params = PromptAnswerParams(
+            terminalID: f.terminalID, promptID: id, answer: .permission(decision: .deny, message: nil))
+        let second = try await f.router.answerPrompt(
+            params, actor: .phone(deviceID: d), authority: .pairedPhone(deviceID: d))
+        #expect(second.success)
+        #expect(try second.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
+    }
+
     // MARK: prompt.answer — both refusals still hold with the channel wired
 
     /// The mod channel adds a way for prompts to open, not a way to answer

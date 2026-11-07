@@ -26,16 +26,16 @@ import os
 /// is decoded lossily, because a repaired line could parse into a *wrong* item
 /// rather than failing loudly. The skip is logged, so a session that hit this
 /// leaves a trace rather than quietly dropping content.
-enum TranscriptFileWindow {
+public enum TranscriptFileWindow {
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "transcript-source")
 
-    struct Read {
-        let lines: [String]
-        let newOffset: UInt64
+    public struct Read: Sendable {
+        public let lines: [String]
+        public let newOffset: UInt64
     }
 
-    static func read(path: String, from offset: UInt64) -> Read? {
+    public static func read(path: String, from offset: UInt64) -> Read? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
         do {

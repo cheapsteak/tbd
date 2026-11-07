@@ -1,0 +1,166 @@
+{
+  "data": {
+    "removedRowIDs": [
+      "B63130A2-F24B-5FEE-9A46-CDD5D93249AB"
+    ],
+    "rows": [
+      {
+        "id": "8A1E503C-B1A3-59EE-9AFE-5DE564EE906B",
+        "kind": "worktree",
+        "name": "fix-login",
+        "remote": false,
+        "sessions": [
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "model": "claude-sonnet-5-5",
+            "profileID": "6C2471BC-B073-5CE4-B694-F648094C061D",
+            "profileName": "Personal",
+            "ref": {
+              "kind": "local",
+              "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+            },
+            "status": {
+              "changedAt": 1762500000000,
+              "chip": "working"
+            },
+            "tabName": "Claude"
+          },
+          {
+            "agent": "codex",
+            "capabilities": {
+              "answer": {
+                "available": false,
+                "reason": "Codex sessions have no prompts the phone can answer"
+              },
+              "fork": {
+                "available": false,
+                "reason": "Only Claude sessions fork"
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": false,
+                "reason": "Only Claude sessions switch profiles"
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "ref": {
+              "kind": "local",
+              "terminalID": "E623E74A-5916-5F13-94D7-16745DF21E3D"
+            },
+            "status": {
+              "changedAt": 1762499820000,
+              "chip": "working"
+            },
+            "tabName": "Codex"
+          },
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "profileName": "Work",
+            "ref": {
+              "kind": "local",
+              "terminalID": "1B5360E0-D06A-5334-8433-BF7607BB2C83"
+            },
+            "status": {
+              "changedAt": 1762499280000,
+              "chip": "idle"
+            },
+            "tabName": "review"
+          }
+        ],
+        "statusChangedAt": 1762500000000
+      },
+      {
+        "id": "6F81CDDB-0E1D-56C0-AFD2-F255B3598C18",
+        "kind": "worktree",
+        "name": "add-search",
+        "remote": false,
+        "sessions": [
+          {
+            "agent": "claude",
+            "capabilities": {
+              "answer": {
+                "available": true
+              },
+              "fork": {
+                "available": true
+              },
+              "model": {
+                "available": true
+              },
+              "send": {
+                "available": true
+              },
+              "switchProfile": {
+                "available": true
+              },
+              "transcript": {
+                "available": true
+              }
+            },
+            "profileName": "Personal",
+            "ref": {
+              "kind": "local",
+              "terminalID": "08A7FA53-E9FD-5ACA-8D10-6F6F0E189F62"
+            },
+            "status": {
+              "changedAt": 1762499880000,
+              "chip": "working"
+            },
+            "tabName": "Claude"
+          }
+        ],
+        "statusChangedAt": 1762499880000
+      }
+    ]
+  },
+  "event": "sessions.changed",
+  "kind": "event",
+  "seq": 43
+}

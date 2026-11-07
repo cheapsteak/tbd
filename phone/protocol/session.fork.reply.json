@@ -1,0 +1,10 @@
+{
+  "kind": "reply",
+  "requestID": "2B1B3A1E-1B5C-5345-9C39-96E607E1C492",
+  "result": {
+    "session": {
+      "kind": "local",
+      "terminalID": "3F92B494-0D4A-5E5A-A436-8BE8DE44BF88"
+    }
+  }
+}

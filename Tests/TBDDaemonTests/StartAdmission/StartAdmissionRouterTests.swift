@@ -87,8 +87,12 @@ struct StartAdmissionRouterTests {
     // MARK: - Actor table
 
     private static let actorKinds = [
-        ActuationActor.Kind.app, ActuationActor.Kind.daemon, ActuationActor.Kind.session,
-        ActuationActor.Kind.anonymous, "declared-by-a-newer-client",
+        ActuationActor.Kind.app, ActuationActor.Kind.daemon, ActuationActor.Kind.phone,
+        ActuationActor.Kind.session, ActuationActor.Kind.anonymous, "declared-by-a-newer-client",
+    ]
+
+    private static let uncheckedKinds: Set<String> = [
+        ActuationActor.Kind.app, ActuationActor.Kind.daemon, ActuationActor.Kind.phone,
     ]
 
     @Test("each actor kind against create and wake, flag on", arguments: actorKinds)
@@ -97,7 +101,7 @@ struct StartAdmissionRouterTests {
         let worktree = try await makeWorktree(in: fixture.db)
         let terminal = try await makeParkedClaude(in: fixture.db, worktree: worktree)
         let actor = ActuationActor(kind: kind)
-        let checked = kind != ActuationActor.Kind.app && kind != ActuationActor.Kind.daemon
+        let checked = !Self.uncheckedKinds.contains(kind)
 
         fixture.stub.setVerdict(.hold(reason: Self.holdReason))
         let create = await fixture.router.holdStartIfDenied(

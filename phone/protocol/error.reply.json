@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "refused",
+    "message": "This session has exited."
+  },
+  "kind": "reply",
+  "requestID": "FF74B329-C82F-5448-9CAD-04791D03A06C"
+}

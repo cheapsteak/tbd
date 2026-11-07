@@ -48,23 +48,23 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "fileWatcher")
 /// 4. The dispatch event handler holds a weak reference to the per-stream
 ///    `StreamState` box. When the stream terminates, the box is released,
 ///    and any in-flight handler call becomes a no-op.
-final class FileWatcher: Sendable {
+public final class FileWatcher: Sendable {
 
     /// Trailing-edge debounce window for `.write` / `.extend` events.
-    /// Internal (not private) so tests assert against the production value
+    /// Public (not private) so tests assert against the production value
     /// instead of duplicating the literal.
-    static let debounceInterval: Duration = .milliseconds(150)
+    public static let debounceInterval: Duration = .milliseconds(150)
 
     /// Delay before re-opening the watched path after an atomic save
     /// (`.delete` / `.rename` / `.revoke` on the watched inode).
-    static let reopenDelay: Duration = .milliseconds(50)
+    public static let reopenDelay: Duration = .milliseconds(50)
 
     private let clock: any Clock<Duration>
 
     /// - Parameter clock: seam for the two delays above (`Duration` is
     ///   behavior). Defaulted, so the single production call site is
     ///   unchanged and the seam is behavior-preserving by construction.
-    init(clock: any Clock<Duration> = ContinuousClock()) {
+    public init(clock: any Clock<Duration> = ContinuousClock()) {
         self.clock = clock
     }
 
@@ -77,7 +77,7 @@ final class FileWatcher: Sendable {
     /// Atomic-save aware: a `.delete` / `.rename` / `.revoke` event on the
     /// watched inode triggers a re-open of the same path after ~50ms. If
     /// the re-open fails (file genuinely gone) the stream is finished.
-    func changes(for path: String) -> AsyncStream<Void> {
+    public func changes(for path: String) -> AsyncStream<Void> {
         AsyncStream<Void>(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let box = StreamState(path: path, continuation: continuation, clock: self.clock)
 
@@ -117,7 +117,7 @@ final class FileWatcher: Sendable {
     /// A path's entry is removed when its count returns to zero, so the table
     /// holds only paths with a live stream, and a path watched again later
     /// counts from zero again.
-    nonisolated static func liveStreamCount(forPath path: String) -> Int {
+    nonisolated public static func liveStreamCount(forPath path: String) -> Int {
         _liveStreamCounts.withLock { $0[path] ?? 0 }
     }
 
@@ -131,7 +131,7 @@ final class FileWatcher: Sendable {
     /// Cumulative: it never returns to zero, so its entries are kept, one per
     /// distinct path ever watched. That grows with the number of files
     /// watched, not with the number of streams or re-opens.
-    nonisolated static func closedFDCount(forPath path: String) -> Int {
+    nonisolated public static func closedFDCount(forPath path: String) -> Int {
         _closedFDCounts.withLock { $0[path] ?? 0 }
     }
 

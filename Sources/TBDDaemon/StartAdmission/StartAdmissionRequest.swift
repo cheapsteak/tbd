@@ -45,14 +45,16 @@ enum StartAdmissionVerdict: Sendable, Equatable {
 
 /// Who is checked.
 ///
-/// Every actor kind is checked except two: `app` (everything the app sends
+/// Every actor kind is checked except three: `app` (everything the app sends
 /// follows something the person did in it, including the wake that selecting a
-/// parked tab performs) and `daemon` (TBD's own rails are out of scope for this
-/// gate). One daemon rail is the exception: `session-restore` starts many
-/// agents with no gesture, the case the gate exists for, so it is checked and
-/// every other daemon rail is not. No declared actor is the anonymous actor and
-/// is checked. The actor is self-declared, so this is a resource policy and not
-/// a security boundary.
+/// parked tab performs), `phone` (each phone action is a person's gesture,
+/// relayed through a verified pairing) and `daemon` (TBD's own rails are out of
+/// scope for this gate). One daemon rail is the exception: `session-restore`
+/// starts many agents with no gesture, the case the gate exists for, so it is
+/// checked and every other daemon rail is not. The kind names match exactly, so
+/// any other string, a near miss included, is checked. No declared actor is the
+/// anonymous actor and is checked. The actor is self-declared, so this is a
+/// resource policy and not a security boundary.
 enum StartAdmissionActorRule {
     static func isChecked(_ actor: ActuationActor?) -> Bool {
         let actor = actor ?? .anonymous
@@ -66,7 +68,9 @@ enum StartAdmissionActorRule {
     /// The rule by kind alone. A daemon actor reads as unchecked here, because
     /// its one exception is named by rail.
     static func isChecked(kind: String) -> Bool {
-        kind != ActuationActor.Kind.app && kind != ActuationActor.Kind.daemon
+        kind != ActuationActor.Kind.app
+            && kind != ActuationActor.Kind.daemon
+            && kind != ActuationActor.Kind.phone
     }
 }
 

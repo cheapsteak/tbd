@@ -1,0 +1,9 @@
+{
+  "kind": "request",
+  "method": "sessions.subscribe",
+  "params": {
+    "sinceSeq": 41,
+    "stream": "2E3323C5-13E0-54B1-B2D7-036813516A08"
+  },
+  "requestID": "B153F222-0D41-54E3-A4FB-9B6B3E703B3C"
+}
