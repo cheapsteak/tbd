@@ -6,7 +6,7 @@ A tiny relay that lets TBD on a laptop reach TBD on a phone across any network.
 
 - It forwards encrypted bytes. It cannot read them.
 - It stores nothing and keeps no logs.
-- It runs on Cloudflare's Workers Free plan. That plan has daily limits and no way to charge you.
+- It runs on Cloudflare's Workers Free plan. The Free plan has no usage charges. Past its daily limit, requests fail until the limit resets at 00:00 UTC.
 
 ## Deploy it
 
@@ -21,7 +21,7 @@ A tiny relay that lets TBD on a laptop reach TBD on a phone across any network.
 7. Open the address in a browser. It should say "TBD relay".
 8. Paste the address into TBD's phone relay setup.
 
-The button copies this folder into a new repository in your GitHub account. Cloudflare then deploys from that repository. It deploys again each time that repository's `main` branch changes.
+The button copies this folder into a new repository in your GitHub account. Cloudflare builds and deploys from that repository with Workers Builds, which deploys again each time you push to its production branch (usually `main`).
 
 ## Keep the address to yourself
 
@@ -39,7 +39,7 @@ When TBD says "Relay update available", copy this folder from TBD's repository i
    ```
 
 3. If you renamed the Worker when you deployed, keep your own `name` line in `wrangler.jsonc`. Run `git diff wrangler.jsonc` and put your name back if it changed.
-4. Run `git add -A`, commit, and push to `main`. Cloudflare deploys the new version.
+4. Run `git add -A`, commit, and push to the production branch (usually `main`). Cloudflare deploys the new version.
 
 ## Deploy from the command line instead
 
