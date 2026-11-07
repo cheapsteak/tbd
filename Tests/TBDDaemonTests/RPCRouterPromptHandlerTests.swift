@@ -328,6 +328,27 @@ struct RPCRouterPromptHandlerTests {
         #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
     }
 
+    /// The recorded device follows from the authority, not from `actor`, so
+    /// a caller cannot record one device while answering under another's
+    /// pairing. The prompt's terminal does not exist, so the answer is
+    /// recorded and comes back `already_resolved` without a wait.
+    @Test func aPairedPhoneAnswerRecordsTheAuthoritysDevice() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let authorityDevice = UUID()
+        let otherDevice = UUID()
+        let params = PromptAnswerParams(
+            terminalID: UUID(), promptID: "p-1", answer: .permission(decision: .allow, message: nil))
+
+        let r = try await f.router.answerPrompt(
+            params, actor: .phone(deviceID: otherDevice),
+            authority: .pairedPhone(deviceID: authorityDevice))
+
+        #expect(try r.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
+        let rows = ActuationRecordReader(activePath: f.logPath).readRows()
+        let request = try #require(rows.first { $0.method == RPCMethod.promptAnswer })
+        #expect(request.actor == ActuationActor.phone(deviceID: authorityDevice))
+    }
+
     /// The phone obeys the same flag the app's prompt card does.
     @Test func aPairedPhoneStillObeysTheAnswerFlag() async throws {
         let f = try await makeFixture(flagOn: true)

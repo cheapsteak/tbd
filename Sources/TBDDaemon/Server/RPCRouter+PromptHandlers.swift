@@ -12,6 +12,9 @@ enum AnswerAuthority: Sendable {
     case socket(RPCConnectionContext?)
     /// A gesture from a paired phone, which the phone bridge has verified
     /// against its pairing. There is no socket peer, so no socket check runs.
+    /// The answer's actuation row records `ActuationActor.phone(deviceID:)`
+    /// with this device, whatever actor the caller passes, so the recorded
+    /// device and the authority cannot disagree.
     case pairedPhone(deviceID: UUID)
 }
 
@@ -92,29 +95,33 @@ extension RPCRouter {
     /// socket handler above and the phone bridge. Same results and errors as
     /// `handlePromptAnswer`, except that it never throws a decode error (the
     /// handler decodes) and, under `.pairedPhone`, never returns
-    /// `promptAnswerNotFromAppRefusal`. `authority` decides only whether the
-    /// socket peer check runs, and it runs right after the flag check.
+    /// `promptAnswerNotFromAppRefusal`. `authority` decides whether the socket
+    /// peer check runs, right after the flag check, and whose answer the row
+    /// records: `actor` under `.socket`, and under `.pairedPhone` the phone
+    /// that authority names, whatever `actor` says.
     func answerPrompt(
         _ p: PromptAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
         guard try await promptAnswerEnabled() else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
         }
+        let recordedActor: ActuationActor?
         switch authority {
         case .socket(let connection):
             if let refusal = await promptAnswerPeerRefusal(
                 connection: connection, method: RPCMethod.promptAnswer) {
                 return refusal
             }
-        case .pairedPhone:
-            break
+            recordedActor = actor
+        case .pairedPhone(let deviceID):
+            recordedActor = ActuationActor.phone(deviceID: deviceID)
         }
         let terminal = try? await db.terminals.get(id: p.terminalID)
         let target = ActuationTarget(
             worktree: terminal?.worktreeID.uuidString, terminal: p.terminalID.uuidString)
         let answerJSON = (try? JSONEncoder().encode(p.answer)).flatMap { String(data: $0, encoding: .utf8) }
         let actuationID = try await beginActuation(
-            .promptAnswer, actor: actor, target: target, message: answerJSON)
+            .promptAnswer, actor: recordedActor, target: target, message: answerJSON)
 
         guard terminal != nil else {
             await finishActuation(actuationID, .refused(.notFound), error: "terminal not found")

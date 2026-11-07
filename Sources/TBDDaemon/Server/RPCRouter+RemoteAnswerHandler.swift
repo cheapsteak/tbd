@@ -70,8 +70,10 @@ extension RPCRouter {
     /// as `handleRemoteAnswer` in the same order. Same results and errors as
     /// `handleRemoteAnswer`, except that it never throws a decode error (the
     /// handler decodes) and, under `.pairedPhone`, never returns
-    /// `promptAnswerNotFromAppRefusal`. `authority` decides only whether the
-    /// socket peer check runs, and it runs right after the flag check.
+    /// `promptAnswerNotFromAppRefusal`. `authority` decides whether the socket
+    /// peer check runs, right after the flag check, and whose answer the row
+    /// records: `actor` under `.socket`, and under `.pairedPhone` the phone
+    /// that authority names, whatever `actor` says.
     func answerRemotePrompt(
         _ params: RemoteAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
@@ -93,14 +95,16 @@ extension RPCRouter {
         guard try await db.config.get().transcriptPromptAnswerEnabled else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
         }
+        let recordedActor: ActuationActor?
         switch authority {
         case .socket(let connection):
             if let refusal = await promptAnswerPeerRefusal(
                 connection: connection, method: RPCMethod.remoteAnswer) {
                 return refusal
             }
-        case .pairedPhone:
-            break
+            recordedActor = actor
+        case .pairedPhone(let deviceID):
+            recordedActor = ActuationActor.phone(deviceID: deviceID)
         }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.answer) else {
@@ -111,7 +115,7 @@ extension RPCRouter {
         return try await remoteSendMessageSerializer.run(
             provider: params.provider, sessionID: params.sessionID
         ) {
-            try await self.remoteAnswer(params, manager: manager, actor: actor)
+            try await self.remoteAnswer(params, manager: manager, actor: recordedActor)
         }
     }
 

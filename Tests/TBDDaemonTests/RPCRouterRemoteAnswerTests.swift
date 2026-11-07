@@ -410,6 +410,25 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
     }
 
+    /// The recorded device follows from the authority, not from `actor`, so
+    /// a caller cannot record one device while answering under another's
+    /// pairing.
+    @Test func aPairedPhoneRemoteAnswerRecordsTheAuthoritysDevice() async throws {
+        try await enable()
+        let (_, r) = await primed([.result(providerOK("{}"))])
+        let authorityDevice = UUID()
+        let otherDevice = UUID()
+
+        let response = try await r.answerRemotePrompt(
+            RemoteAnswerParams(provider: "agentbox", sessionID: "s-1", promptID: "p-1", answer: Self.allowAnswer),
+            actor: .phone(deviceID: otherDevice), authority: .pairedPhone(deviceID: authorityDevice))
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        let rows = ActuationRecordReader(activePath: logPath).readRows()
+        let request = try #require(rows.first { $0.method == RPCMethod.remoteAnswer })
+        #expect(request.actor == ActuationActor.phone(deviceID: authorityDevice))
+    }
+
     @Test func aPairedPhoneIsRefusedWithoutTheAnswerCapability() async throws {
         try await enable()
         let invoker = FakeProviderInvoker(script: [describeDeclaring(["send"]), listing()])
