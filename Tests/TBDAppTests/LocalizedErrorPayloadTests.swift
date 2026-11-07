@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import TBDApp
+import TBDShared
 
 /// Tier 1. Regression cover for the NSError bridge-string defect.
 ///
