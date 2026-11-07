@@ -1,7 +1,9 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CLOSE_REPLACED, CLOSE_TOO_LARGE, MAX_FRAME_BYTES, PING, PONG, SIGNAL, type Role } from "../src/api";
+import { isMarkedClosing, markClosing } from "../src/room";
 import {
+  BASE_URL,
   LAPTOP_OFFLINE,
   LAPTOP_ONLINE,
   bytes,
@@ -265,6 +267,90 @@ describe("room", () => {
 
     laptop.send(new Uint8Array([7]));
     expect(bytes(await phone2.next())).toEqual(new Uint8Array([7]));
+  });
+
+  it("the relay marks a socket closing before it closes it", async () => {
+    const room = newRoomID();
+    await pair(room);
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [old] = state.getWebSockets("phone");
+      expect(isMarkedClosing(old!)).toBe(false);
+      // The room's own replace path, run here so no close event can interleave.
+      const res = instance.fetch(
+        new Request(`${BASE_URL}/v1/rooms/${room}?role=phone`, { headers: { Upgrade: "websocket" } }),
+      );
+      expect(res.status).toBe(101);
+      expect(isMarkedClosing(old!)).toBe(true);
+      const replacements = state.getWebSockets("phone").filter((ws) => ws !== old);
+      expect(replacements).toHaveLength(1);
+      expect(isMarkedClosing(replacements[0]!)).toBe(false);
+
+      // And the oversize path.
+      const [laptop] = state.getWebSockets("laptop");
+      expect(isMarkedClosing(laptop!)).toBe(false);
+      instance.webSocketMessage(laptop!, new Uint8Array(MAX_FRAME_BYTES + 1).buffer);
+      expect(isMarkedClosing(laptop!)).toBe(true);
+    });
+  });
+
+  // A socket the relay has closed reads CLOSING, and the runtime gives no way
+  // to make one read OPEN again. So these tests mark an open socket without
+  // closing it, which is the state a closed socket would be in if a wake ever
+  // reported it OPEN, and show that the mark alone, carried across a real
+  // eviction, keeps the socket out of forwarding, presence and `peer-left`.
+  it("a socket marked closing stays out of forwarding and presence after hibernation, though it reads open", async () => {
+    const room = newRoomID();
+    const { laptop, phone } = await pair(room);
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [server] = state.getWebSockets("laptop");
+      // Unmarked, a frame built this way passes, and the laptop counts.
+      instance.webSocketMessage(server!, frame(1));
+      expect(instance.presence()).toEqual({ laptop: true });
+      markClosing(server!);
+    });
+    expect(bytes(await phone.next())).toEqual(new Uint8Array([1]));
+    await evictDurableObject(stub(room));
+
+    const toPhone = marker();
+    const toLaptop = marker();
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [marked] = state.getWebSockets("laptop");
+      const [phoneServer] = state.getWebSockets("phone");
+      expect(marked!.readyState).toBe(WebSocket.OPEN);
+      expect(isMarkedClosing(marked!)).toBe(true);
+      expect(instance.presence()).toEqual({ laptop: false });
+      // Nothing the marked socket sends is forwarded...
+      instance.webSocketMessage(marked!, frame(2));
+      phoneServer!.send(toPhone);
+      // ...and nothing is forwarded to it.
+      instance.webSocketMessage(phoneServer!, frame(3));
+      marked!.send(toLaptop);
+    });
+    expect(await phone.until(toPhone)).toEqual([]);
+    expect(await laptop.until(toLaptop)).toEqual([]);
+  });
+
+  it("a socket marked closing never holds back peer-left after hibernation, though it reads open", async () => {
+    const room = newRoomID();
+    const { laptop } = await pair(room);
+    await runInDurableObject(stub(room), (_, state) => {
+      markClosing(state.getWebSockets("phone")[0]!);
+    });
+    await evictDurableObject(stub(room));
+
+    const m = marker();
+    await runInDurableObject(stub(room), (instance, state) => {
+      const [stale] = state.getWebSockets("phone");
+      expect(stale!.readyState).toBe(WebSocket.OPEN);
+      // A second phone socket, accepted directly rather than through a join,
+      // whose replace step would close the marked one for real.
+      const { 1: live } = new WebSocketPair();
+      state.acceptWebSocket(live, ["phone"]);
+      // The live phone leaves while the marked one still reads open.
+      instance.webSocketClose(live, 1000, "", true);
+      state.getWebSockets("laptop")[0]!.send(m);
+    });
+    expect(await laptop.until(m)).toEqual([SIGNAL.peerLeft]);
   });
 
   it("rooms are separate", async () => {
