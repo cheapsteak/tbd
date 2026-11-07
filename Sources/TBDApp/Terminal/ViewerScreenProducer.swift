@@ -91,7 +91,7 @@ enum ViewerScreenProducer {
             }
             return ViewerObservation(
                 projected: projected,
-                styled: TerminalCellWalk.styledHistory(
+                styled: TerminalCellWalk.styledCapture(
                     of: terminal, maxScrollbackLines: request.styledScrollbackLines))
         }
         let projected = observed.projected
