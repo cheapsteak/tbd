@@ -145,8 +145,9 @@ judge() {
     # comes next: each runs every part until someone narrows it here.
     scripts/*phone*)
       REASON='a script named for the phone parts'; return ;;
+    # The relay is a self-contained package and reads neither.
     phone/protocol/*|phone/test-vectors/*)
-      REASON='shared with Swift and every JavaScript part'; return ;;
+      PARTS='loader phone_app'; REASON='shared with Swift, the loader and the phone app'; return ;;
     relay/*)
       PARTS=relay; REASON='relay/**'; return ;;
     phone/loader/*)

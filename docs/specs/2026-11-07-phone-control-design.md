@@ -797,7 +797,7 @@ Research: `ci-layout.md`.
     across `.github/workflows/` carries that name. An admin adds it as a required check after the
     workflow lands.
 - **Inputs that run more than one part:** `phone/protocol/**` and `phone/test-vectors/**` run the
-  Swift suite and every JavaScript part. A change to `phone.yml`, or to a script under `scripts/`
+  Swift suite, the loader and the phone app, and not the relay, which is a self-contained package. A change to `phone.yml`, or to a script under `scripts/`
   named for the phone (the classifier, the bundle check and their harnesses), runs every part. The
   rest of `phone/` outside `loader/` and `app/` is the workspace's shared tooling, such as
   `phone/package.json`, its lockfile, `.nvmrc` and `tsconfig.json`, and runs the loader and the app.

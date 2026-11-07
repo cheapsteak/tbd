@@ -133,9 +133,6 @@ test_each_part_alone() {
 test_shared_inputs_run_every_part() {
   local path
   for path in \
-    phone/test-vectors/noise-cacophony.json \
-    phone/test-vectors/generate.mjs \
-    phone/protocol/README.md \
     .github/workflows/phone.yml \
     scripts/ci/phone-parts-needed.sh \
     scripts/ci/phone-parts-needed.test.sh \
@@ -143,6 +140,18 @@ test_shared_inputs_run_every_part() {
     scripts/gen-phone-app-bundle.sh
   do
     expect "$path runs every part" "$ALL" "$path"
+  done
+}
+
+# The relay is a self-contained package that reads neither directory.
+test_swift_shared_inputs_run_loader_and_app() {
+  local path
+  for path in \
+    phone/test-vectors/noise-cacophony.json \
+    phone/test-vectors/generate.mjs \
+    phone/protocol/README.md
+  do
+    expect "$path runs the loader and the app, not the relay" "$LOADER_AND_APP" "$path"
   done
 }
 
@@ -404,7 +413,7 @@ test_git_failing_diff_runs_every_part() {
 
 # The case that proves `--no-renames`: with rename detection on, `--name-only`
 # prints only `docs/a.json`, which no part reads.
-test_git_rename_out_of_test_vectors_runs_every_part() {
+test_git_rename_out_of_test_vectors_runs_loader_and_app() {
   local d; d="$(mkrepo)"
   (
     cd "$d/repo" || exit 1
@@ -412,7 +421,7 @@ test_git_rename_out_of_test_vectors_runs_every_part() {
     git commit -q -m "move a test vector into docs"
   )
   run_gate "$d" pull_request main
-  assert_eq "a test vector moved out of phone/test-vectors/ into docs/ runs every part" "$(as_lines "$ALL")" "$GATE_OUT"
+  assert_eq "a test vector moved out of phone/test-vectors/ into docs/ runs the loader and the app" "$(as_lines "$LOADER_AND_APP")" "$GATE_OUT"
   assert_contains "the summary lists the old path" "$GATE_SUMMARY" "\`phone/test-vectors/a.json\`"
 }
 
