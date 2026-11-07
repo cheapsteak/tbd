@@ -23,9 +23,9 @@ import TestSupport
 /// turn. So an assertion about an absence runs after `settle()`, the rule
 /// `QuietIngestTests` uses: five main-queue turns with a short real pause
 /// between them, which also covers the OSC observer's private queue. An
-/// assertion about a presence polls with `waitUntil`, bounded by the shared
-/// saturated-pass budget, and then settles before it counts, so a second,
-/// late delivery is caught too.
+/// assertion about a presence polls with `waitUntil`, which waits through
+/// `pollUntilTrue` within the shared saturated-pass budget, and then settles
+/// before it counts, so a second, late delivery is caught too.
 ///
 /// **Absences carry positive controls.** "Nothing reached the delegate" also
 /// reads as a pass when the fixture bytes provoke nothing at all, so each such
@@ -156,8 +156,10 @@ struct TerminalEngineContractTests {
 
         // Positive control: live, the same bytes are answered, probe first.
         feed(bytes, into: fixture.engine)
-        let answered = await waitUntil { fixture.recorder.sent.count > Self.probeReplyBytes.count }
-        #expect(answered, "the probe and DA1 fixture must be answered live; observed \(fixture.recorder.sent)")
+        let answered = await waitUntil("the probe and DA1 fixture to be answered live", observing: fixture.recorder) {
+            fixture.recorder.sent.count > Self.probeReplyBytes.count
+        }
+        guard answered else { return }
         #expect(fixture.recorder.sent.starts(with: Self.probeReplyBytes), "observed \(fixture.recorder.sent)")
     }
 
@@ -176,10 +178,10 @@ struct TerminalEngineContractTests {
         // Positive control: once the ingest is over, the same bytes fed live
         // raise one notification and forward one report.
         feed(bytes, into: fixture.engine)
-        let delivered = await waitUntil {
+        let delivered = await waitUntil("the OSC fixture to reach the delegate live", observing: fixture.recorder) {
             !fixture.recorder.notifications.isEmpty && !fixture.recorder.programStatusPayloads.isEmpty
         }
-        #expect(delivered, "the OSC fixture must reach the delegate live; observed \(fixture.recorder.calls)")
+        guard delivered else { return }
         await settle()
         #expect(fixture.recorder.notifications.count == 1)
         #expect(fixture.recorder.notifications.first?.title == "Contract")
@@ -227,12 +229,15 @@ struct TerminalEngineContractTests {
         feed("\u{07}", into: fixture.engine)
         feed(osc52, into: fixture.engine)
         feed(Self.notify, into: fixture.engine)
-        let arrived = await waitUntil {
+        let arrived = await waitUntil(
+            "a BEL, an OSC 52 copy and an OSC 777 notification to reach the delegate",
+            observing: fixture.recorder
+        ) {
             fixture.recorder.bells >= 1
                 && !fixture.recorder.clipboardCopies.isEmpty
                 && !fixture.recorder.notifications.isEmpty
         }
-        #expect(arrived, "observed \(fixture.recorder.calls)")
+        guard arrived else { return }
         await settle()
         #expect(fixture.recorder.bells == 1)
         #expect(fixture.recorder.clipboardCopies == [Data(marker.utf8)])
@@ -250,8 +255,10 @@ struct TerminalEngineContractTests {
         let before = fixture.engine.gridSize
 
         fixture.engine.view.setFrameSize(NSSize(width: 400, height: 240))
-        let reported = await waitUntil { !fixture.recorder.sizeChanges.isEmpty }
-        try #require(reported, "a frame change must report a new grid size")
+        let reported = await waitUntil("a frame change to report a new grid size", observing: fixture.recorder) {
+            !fixture.recorder.sizeChanges.isEmpty
+        }
+        guard reported else { return }
 
         let change = try #require(fixture.recorder.sizeChanges.last)
         #expect(change.cols != before.cols || change.rows != before.rows,
@@ -346,8 +353,9 @@ struct TerminalEngineContractTests {
         // so the empty `sent` above means the replies were kept, not that the
         // probe provoked none.
         feed(HolderHandback.modeProbe, into: fixture.engine)
-        let answered = await waitUntil { !fixture.recorder.sent.isEmpty }
-        #expect(answered, "the mode probe must be answered when fed live")
+        await waitUntil("the mode probe to be answered when fed live", observing: fixture.recorder) {
+            !fixture.recorder.sent.isEmpty
+        }
     }
 
     /// DECCOLM needs `CSI ? 40 h` first: that is what enables it in this
@@ -377,12 +385,15 @@ struct TerminalEngineContractTests {
         // muted BEL, and a settle lasts about that long, so a live BEL there
         // could be coalesced away and read as a muted one.
         feed(bytes, into: live.engine)
-        let delivered = await waitUntil {
+        let delivered = await waitUntil(
+            "the fixture bytes to ring, copy and resize when fed live",
+            observing: live.recorder
+        ) {
             live.recorder.bells >= 1
                 && !live.recorder.clipboardCopies.isEmpty
                 && !live.recorder.sizeChanges.isEmpty
         }
-        #expect(delivered, "the fixture bytes must ring, copy and resize when fed live; observed \(live.recorder.calls)")
+        guard delivered else { return }
         #expect(live.recorder.clipboardCopies.first == Data(marker.utf8))
     }
 
@@ -399,16 +410,20 @@ struct TerminalEngineContractTests {
         // that queue is serial, so once the notification has arrived, the
         // report ahead of it has been decided with the gate off.
         feed(Self.report + Self.notify, into: fixture.engine)
-        let drained = await waitUntil { !fixture.recorder.notifications.isEmpty }
-        #expect(drained, "the OSC 777 barrier must arrive")
+        let drained = await waitUntil("the OSC 777 barrier to arrive", observing: fixture.recorder) {
+            !fixture.recorder.notifications.isEmpty
+        }
+        guard drained else { return }
         await settle()
         #expect(fixture.recorder.programStatusPayloads.isEmpty, "a report was delivered with reporting off")
 
         // Positive control: reporting on, the same bytes are delivered.
         fixture.engine.setProgramStatusReporting(enabled: true)
         feed(Self.report, into: fixture.engine)
-        let delivered = await waitUntil { !fixture.recorder.programStatusPayloads.isEmpty }
-        #expect(delivered, "the report must be delivered with reporting on")
+        let delivered = await waitUntil("the report to be delivered with reporting on", observing: fixture.recorder) {
+            !fixture.recorder.programStatusPayloads.isEmpty
+        }
+        guard delivered else { return }
         await settle()
         #expect(fixture.recorder.programStatusPayloads == [Array(Self.reportData.utf8)])
     }
@@ -574,18 +589,39 @@ struct TerminalEngineContractTests {
         for _ in 0..<5 { await hop() }
     }
 
-    /// Polls `condition` until it holds or the deadline passes. Only positive
-    /// assertions use it, so the deadline is spent only by a failing test.
+    /// Polls `condition` on main through `pollUntilTrue` until it holds,
+    /// bounded by the shared saturated-pass budget. Only positive assertions
+    /// use it, so the budget is spent only by a failing test.
+    ///
+    /// Returns `true` once the condition holds, and the caller goes on. On a
+    /// timeout it records a `ContractWaitTimedOut` naming what was awaited,
+    /// what `recorder` holds at that moment and how long the wait took: an
+    /// error, because only an error's text reaches the primary failure line
+    /// that CI summaries keep (Tests/CLAUDE.md, rule 4). On cancellation it
+    /// records nothing, because the harness ended the test. Both return
+    /// `false`, and the caller stops there.
+    @discardableResult
     private func waitUntil(
-        _ condition: () -> Bool,
-        deadline: TimeInterval = TestDeadlines.saturatedPassSeconds
+        _ what: String,
+        observing recorder: RecordingEngineDelegate,
+        _ condition: @escaping @MainActor @Sendable () -> Bool
     ) async -> Bool {
-        let end = Date().addingTimeInterval(deadline)
-        while Date() < end {
-            if condition() { return true }
-            await hop()
+        let start = ContinuousClock.now
+        let outcome = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(20)
+        ) { @Sendable in
+            await MainActor.run { condition() }
         }
-        return condition()
+        switch outcome {
+        case .satisfied:
+            return true
+        case .cancelled:
+            return false
+        case .timedOut:
+            Issue.record(ContractWaitTimedOut(
+                what: what, observed: recorder.summary, elapsed: ContinuousClock.now - start))
+            return false
+        }
     }
 
     private func hop() async {
@@ -607,6 +643,19 @@ private struct FeedProgress: Sendable {
     var lastFed: Int?
     var finished = false
     var overlappingReads = 0
+}
+
+/// A `waitUntil` timeout, as the error its issue records, so what was awaited,
+/// what was observed and how long the wait took all reach the primary failure
+/// line.
+private struct ContractWaitTimedOut: Error, CustomStringConvertible {
+    let what: String
+    let observed: String
+    let elapsed: Duration
+
+    var description: String {
+        "Timed out after \(elapsed) waiting for \(what); observed \(observed)"
+    }
 }
 
 /// Which thread is running this code.
@@ -671,6 +720,11 @@ private final class RecordingEngineDelegate: TerminalEngineDelegate {
     private(set) var clipboardCopies: [Data] = []
     private(set) var notifications: [(title: String, body: String)] = []
     private(set) var programStatusPayloads: [[UInt8]] = []
+
+    /// Every call in order and the bytes sent, for a timeout's message.
+    var summary: String {
+        "calls \(calls), sent bytes \(sent)"
+    }
 
     func reset() {
         calls = []
