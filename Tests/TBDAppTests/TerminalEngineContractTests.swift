@@ -430,6 +430,25 @@ struct TerminalEngineContractTests {
         #expect(calls.contains("controlModePaste"), "a paste with interception on must be offered; observed \(calls)")
     }
 
+    // MARK: - Factory
+
+    /// Not parameterised: it is about the kind this build cannot make. The
+    /// fallback also logs `libghostty engine unavailable, fell back to
+    /// SwiftTerm: not built in this version` at `.notice`; `kind` is the part
+    /// a caller can read.
+    @Test("Asking for the libghostty engine in a build without it yields a SwiftTerm engine that says so")
+    func ghosttyRequestFallsBackToSwiftTerm() {
+        let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract")
+        defer { suite.tearDown() }
+        let appearance = AppearanceSettings(defaults: suite.defaults)
+        let engine = TerminalEngineFactory.make(
+            kind: .ghostty,
+            font: appearance.font,
+            appearance: appearance,
+            configuration: TerminalEngineConfiguration())
+        #expect(engine.kind == .swiftTerm)
+    }
+
     // MARK: - Helpers
 
     /// The delegate methods only click routing and paste interception reach.
