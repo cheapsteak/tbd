@@ -8,6 +8,9 @@
   One self-contained page: open it in any browser. On a phone it fills the screen, and the
   MOCK tab at the top opens the controls. On a wider screen the controls sit beside a phone frame.
   The first option in each "Design choices" row is the chosen design. All names are placeholders.
+  Open one state directly with its name after "#", for example phone-control-mocks.html#perm.
+  "?theme=dark" or "?theme=light" picks the theme; "?clean=1" hides the MOCK tab.
+  README.md lists every state and its screenshots.
 -->
 <title>TBD Phone Control Mocks</title>
 <meta name="color-scheme" content="light dark">
@@ -64,6 +67,7 @@
 body.d-comfy{--row-h:44px; --fs:15px; --small:12.5px; --tool-h:36px; --tool-fs:13.5px; --ib:44px}
 
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html{height:100%;box-sizing:border-box}
 body{height:100%;margin:0;background:var(--page);color:var(--page-fg);font-family:var(--sys);font-size:14px;-webkit-text-size-adjust:100%}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:inherit}
@@ -104,6 +108,7 @@ svg.i{width:1em;height:1em;flex:none;fill:none;stroke:currentColor;stroke-width:
 .sim-home::before{content:"";width:134px;height:5px;border-radius:3px;background:currentColor;opacity:.3}
 #screen{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
 .mocktab{display:none}
+body.clean .mocktab{display:none!important}
 
 /* ---------- loader strip ---------- */
 #strip{height:28px;flex:none;display:flex;align-items:center;gap:6px;padding:0 6px 0 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--sep);background:var(--side)}
@@ -172,7 +177,8 @@ body.w-words .row .g{min-width:72px}
 .s-title{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;padding:0 2px}
 .t1{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px}
 .t1 span{overflow:hidden;text-overflow:ellipsis}
-.t2{font-size:var(--small);color:var(--muted);display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden}
+.t2{font-size:var(--small);color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;row-gap:3px}
+.t2a,.t2b{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;min-width:0}
 .t2 .w{color:var(--sf);font-weight:600;display:inline-flex;align-items:center;gap:3px}
 .t2 .w svg.i{color:var(--sd);width:12px;height:12px}
 .rb2{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:600;color:var(--muted);border:1px solid var(--sep);border-radius:5px;padding:0 4px;height:16px;flex:none}
@@ -294,6 +300,7 @@ body.ch-stack .opts{flex-direction:column}
 .scrim{position:absolute;inset:0;background:var(--scrim);z-index:20}
 .sheet{position:absolute;left:0;right:0;bottom:0;z-index:21;background:var(--side);border-radius:14px 14px 0 0;padding:6px 12px calc(12px + var(--home));max-height:90%;overflow-y:auto;display:flex;flex-direction:column;gap:8px;box-shadow:0 -4px 20px var(--shadow)}
 .sheet.tall{top:7%}
+.sheet > *{flex-shrink:0}
 .grab{width:36px;height:5px;border-radius:3px;background:var(--sep);margin:2px auto 2px;flex:none}
 .sh-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .sh-title{font-weight:700;font-size:calc(var(--fs) + 3px);margin:0}
@@ -397,6 +404,7 @@ body.ch-stack .opts{flex-direction:column}
   .panel-close{display:inline-flex;align-self:flex-end;min-height:40px;padding:0 12px;border:1px solid var(--page-line);border-radius:8px;align-items:center;font-weight:600}
 }
 </style>
+
 <style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}</style>
 </head>
 <body>
@@ -694,14 +702,14 @@ var state = {
 };
 try { var saved = JSON.parse(localStorage.getItem('tbd-phone-mock-opt') || 'null'); if (saved) Object.keys(state.opt).forEach(function (k) { if (saved[k] != null) state.opt[k] = saved[k]; }); } catch (e) {}
 
-function applyOpt() {
+function applyOpt(noSave) {
   var b = document.body, o = state.opt;
   if (o.theme) document.documentElement.setAttribute('data-theme', o.theme); else document.documentElement.removeAttribute('data-theme');
   b.classList.toggle('d-comfy', o.density === 'comfy');
   b.classList.toggle('w-words', o.words === 'words');
   b.classList.toggle('tabs-pills', o.tabs === 'pills');
   b.classList.toggle('ch-stack', o.choices === 'stack');
-  try { localStorage.setItem('tbd-phone-mock-opt', JSON.stringify(o)); } catch (e) {}
+  if (!noSave) { try { localStorage.setItem('tbd-phone-mock-opt', JSON.stringify(o)); } catch (e) {} }
 }
 
 /* ---------- markdown (tokens only; links never become raw hrefs) ---------- */
@@ -995,7 +1003,7 @@ function sessionHTML() {
     : (s.caps.sw ? '<button class="prof" type="button" data-act="prof-menu" aria-haspopup="menu" aria-expanded="' + !!state.profMenu + '" aria-label="Account: ' + esc(s.profile) + '. Switch account">' + esc(s.profile) + ic('chev-d') + '</button>' : esc(s.profile)) + ' · ' + modelHTML;
   var html = '<div class="s-head st-' + st + '"><button class="ib" type="button" data-act="back" aria-label="Back to sessions">' + ic('chev-l') + '</button>' +
     '<div class="s-title"><span class="t1"><span>' + esc(r.name) + '</span>' + (r.remote ? '<span class="rb2">' + ic('cloud') + 'remote</span>' : '') + '</span>' +
-    '<span class="t2"><span class="w">' + glyph(st) + ST[st].word + '</span>· ' + ago(s.at) + ' · ' + meta + '</span></div>' +
+    '<span class="t2"><span class="t2a"><span class="w">' + glyph(st) + ST[st].word + '</span>· ' + ago(s.at) + '</span><span class="t2b">' + meta + '</span></span></div>' +
     (s.kind !== 'codex' ? '<label class="tg"><span>Details</span><input type="checkbox" role="switch" aria-label="Show details" data-change="details"' + (state.details ? ' checked' : '') + '><i></i></label>' +
       '<button class="ib" type="button" data-act="menu" aria-label="Session menu">' + ic('more') + '</button>' : '') + '</div>';
   if (st === 'err' || st === 'rate') html += '<div class="banner st-' + st + '">' + ic(ST[st].icon) + '<span>' + esc(s.reason) + '</span></div>';
@@ -1144,10 +1152,10 @@ function newSheetHTML() {
 
 /* ---------- panel ---------- */
 var IXG = [
-  ['Loader', [['lapmenu', 'Laptop menu'], ['laptops', 'Laptops'],['scan', 'Scan the QR code'], ['paste', 'Paste link'], ['name', 'Name this phone'], ['code', 'Confirm code'], ['denied', 'Denied'], ['expired', 'Code expired'], ['connecting', 'Connecting'], ['offline', 'Laptop offline'], ['update', 'Update TBD'], ['reload', 'Reload this page'], ['removed', 'Phone removed'], ['relay', "Can't reach the relay"], ['reconnect', 'Connection drops']]],
+  ['Loader', [['lapmenu', 'Laptop menu'], ['laptops', 'Laptops'], ['forget-ask', 'Forget a laptop'], ['scan', 'Scan the QR code'], ['paste', 'Paste link'], ['name', 'Name this phone'], ['code', 'Confirm code'], ['denied', 'Denied'], ['expired', 'Code expired'], ['connecting', 'Connecting'], ['offline', 'Laptop offline'], ['update', 'Update TBD'], ['reload', 'Reload this page'], ['removed', 'Phone removed'], ['relay', "Can't reach the relay"], ['reconnect', 'Connection drops']]],
   ['Sessions', [['sessions', 'Session list'], ['bump', 'A status changes now']]],
-  ['Session', [['q1', 'Question'], ['qm', 'Multi-select'], ['q3', 'Three questions'], ['perm', 'Permission'], ['answered', 'Answered'], ['elsewhere', 'Answered on the laptop'], ['working', 'Working, with tabs'], ['pill', 'New messages pill'], ['details', 'Show details on'], ['codex', 'Codex tab'], ['parked', 'Parked: Send and wake'], ['refused', 'Send refused'], ['error', 'Error'], ['rate', 'Rate limited'], ['gone', 'Exited'], ['remote', 'Remote session'], ['unknown', 'Unknown status']]],
-  ['Sheets', [['profmenu', 'Account dropdown'], ['modelmenu', 'Model dropdown'],['menu', 'Session menu'],['switch', 'Switch account'], ['fork', 'Fork'], ['model', 'Model'], ['new-local', 'New: local worktree'], ['new-remote', 'New: remote session']]]
+  ['Session', [['q1', 'Question'], ['q-other', 'Other answer'], ['qm', 'Multi-select'], ['q3', 'Three questions'], ['q3-review', 'Review answers'], ['perm', 'Permission'], ['deny-msg', 'Deny with a message'], ['card-hidden', 'Card hidden'], ['answered', 'Answered'], ['tool-open', 'Tool row open'], ['agent-open', 'Subagent open'],['elsewhere', 'Answered on the laptop'], ['working', 'Working, with tabs'], ['pill', 'New messages pill'], ['details', 'Show details on'], ['codex', 'Codex tab'], ['parked', 'Parked: Send and wake'], ['refused', 'Send refused'], ['error', 'Error'], ['rate', 'Rate limited'], ['gone', 'Exited'], ['remote', 'Remote session'], ['unknown', 'Unknown status']]],
+  ['Sheets', [['profmenu', 'Account dropdown'], ['prof-ask', 'Account dropdown: restart or fork'], ['modelmenu', 'Model dropdown'],['menu', 'Session menu'],['switch', 'Switch account'], ['switch-ask', 'Switch account: restart or fork'], ['fork', 'Fork'], ['model', 'Model'], ['new-local', 'New: local worktree'], ['new-remote', 'New: remote session']]]
 ];
 var OPTS = [
   ['theme', 'Colours', [['', 'System'], ['light', 'Light'], ['dark', 'Dark']]],
@@ -1323,6 +1331,22 @@ var IX = {
   gone: function () { openSession('s-schema'); },
   remote: function () { openSession('s-triage'); },
   unknown: function () { openSession('s-legacy'); },
+  'forget-ask': function () { go({ screen: 'laptops', sheet: null, forgetAsk: 'acme-studio' }); },
+  'q-other': function () { ensurePrompt('s-login'); var ps = S['s-login'].ps; ps.otherOpen = true; ps.otherText = 'Only if it takes under ten minutes.'; openSession('s-login'); },
+  'q3-review': function () { ensurePrompt('s-onb'); var ps = S['s-onb'].ps; ps.picks = ['Friendly and short', '4 steps', 'Yes, show a Skip button']; ps.step = 3; openSession('s-onb'); },
+  'deny-msg': function () { ensurePrompt('s-sse'); var ps = S['s-sse'].ps; ps.denyOpen = true; ps.denyText = 'Run only the unit tests for now.'; openSession('s-sse'); },
+  'card-hidden': function () { ensurePrompt('s-login'); S['s-login'].ps.collapsed = true; openSession('s-login'); },
+  'tool-open': function () {
+    ensurePrompt('s-login'); var it = S['s-login'].items.filter(function (x) { return x.t === 'tool' && x.name === 'Bash'; })[0];
+    state.open[it.id] = 'open'; openSession('s-login');
+  },
+  'agent-open': function () {
+    ensurePrompt('s-login'); var it = S['s-login'].items.filter(function (x) { return x.t === 'agent'; })[0];
+    state.open[it.id] = 'open'; openSession('s-login');
+    var el = document.querySelector('[data-id="' + it.id + '"]'); if (el) { state.stick = false; el.scrollIntoView({ block: 'start' }); }
+  },
+  'prof-ask': function () { openSession('s-co-rev'); state.profMenu = true; state.profAsk = 'Personal'; render(); },
+  'switch-ask': function () { openSession('s-co-rev'); openSheet('switch-confirm', { target: 'Personal' }); },
   profmenu: function () { openSession('s-co-rev'); state.profMenu = true; render(); },
   modelmenu: function () { openSession('s-co-rev'); state.modelMenu = true; render(); },
   menu: function () { ensurePrompt('s-login'); openSession('s-login'); openSheet('menu'); },
@@ -1493,9 +1517,17 @@ setInterval(function () {
 }, 8000);
 setInterval(function () { if (state.screen === 'sessions' && !state.sheet) render(); }, 30000);
 
-applyOpt();
+/* Open a state directly: #<state> (for example #perm). Locally, ?theme=dark and ?clean=1 (no MOCK tab) also work. */
+var qs = new URLSearchParams(location.search);
+var fromQuery = false; /* options in the URL apply to this load only, so they are not saved */
+Object.keys(state.opt).forEach(function (k) { if (qs.has(k)) { state.opt[k] = qs.get(k); fromQuery = true; } });
+if (qs.has('clean')) document.body.classList.add('clean');
+applyOpt(fromQuery);
 renderPanel();
 render();
+function fromHash() { var h = location.hash.slice(1); if (h && IX[h]) IX[h](); }
+fromHash();
+window.addEventListener('hashchange', fromHash);
 })();
 </script>
 </body>

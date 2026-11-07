@@ -436,11 +436,18 @@ attack.
 
 ## 8. Phone UI
 
-This section fixes what each screen shows and does. How the screens look is fixed by the reviewed
-mocks in [`docs/design/phone-control/phone-control-mocks.html`](../design/phone-control/phone-control-mocks.html),
-one self-contained page that runs every screen and state below in a browser. The phone app UI is
-built to it (see "Build order"). A change to what a screen shows or does updates this section; a
-change to how it looks updates the mocks.
+This section fixes what each screen shows and does. How the screens look and respond is fixed by
+the reviewed mocks in [`docs/design/phone-control/`](../design/phone-control/README.md):
+`phone-control-mocks.html`, one self-contained page that runs every screen and state below in a
+browser, and a screenshot of each state in light and dark mode at phone size. Its README lists the
+states and how to open each one.
+
+The phone UI is built to the mocks, not designed again from this section's words (see "Build
+order"). It copies the mocks' colour tokens, sizes, spacing, glyphs and UI text as they are. Where
+this section and the mocks differ on how a screen looks or what a tap does, the mocks win, and the
+PR that finds the difference updates this section to match. A change to what a screen shows or
+does updates this section and the mocks together. A change to how it looks updates the mocks and
+their screenshots.
 
 The look follows the TBD laptop sidebar: compact one-line rows, small text, and the sidebar's
 status symbols (an amber hand for Waiting for you, dots for Working, a moon for Parked, a red
@@ -769,13 +776,17 @@ The parts with no UI come first, so work can start before the phone's visual des
    loader handler, the app protocol with every action and the transcript feed, the Settings pane,
    the menu item and the status-bar chip. Tests drive the app protocol directly, with no phone UI.
 4. **Loader and runner** – pairing, the laptop list, keys, the channel, bundle delivery and the
-   sandboxed frame. Their screens are built plainly first, so the whole path can be tested from end
-   to end with a minimal app bundle, and restyled after the mock review.
-5. **Mock review** – visual mocks of the phone screens in section 8, reviewed with the maintainer.
-   It can happen any time before step 6, alongside steps 1 to 4. The reviewed mocks are
-   `docs/design/phone-control/phone-control-mocks.html`.
-6. **Phone app UI** – the screens in section 8, built to the reviewed mocks. The loader's screens
-   from step 4 are restyled to them too.
+   sandboxed frame. Their screens are built to the Loader group of the reviewed mocks. A minimal
+   app bundle lets the whole path be tested from end to end before step 6.
+5. **Mock review** – visual mocks of the phone screens in section 8, reviewed with the maintainer
+   before any step builds a screen. It can run alongside steps 1 to 3. The reviewed mocks and their
+   screenshots are in `docs/design/phone-control/`.
+6. **Phone app UI** – the screens in section 8, built to the reviewed mocks.
+
+Steps 4 and 6 build to the mocks, not to a reading of section 8. Each PR that builds or changes a
+phone screen shows, for every state it touches, a screenshot of the built screen beside the mock's
+screenshot of that state, in light and dark mode at the same size. A visible difference needs a
+stated reason, and the maintainer reviews the pairs.
 
 ## 17. Rollout
 
