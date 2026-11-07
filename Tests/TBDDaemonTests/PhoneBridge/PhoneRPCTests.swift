@@ -266,6 +266,22 @@ struct PhoneRPCTests {
         try await expectEveryMethodAnswers(f)
     }
 
+    /// The caller runs a hard link of an installed binary from another path.
+    /// Device and inode match, the path does not, so only an identity
+    /// comparison accepts it.
+    @Test func aHardLinkedAppBinaryIsAcceptedByInodeNotByPath() async throws {
+        let hardLink = "/tmp/acme/TBDApp"
+        let check = Self.binaryCheck(
+            callerPath: hardLink,
+            files: [
+                hardLink: Self.appFile,
+                Self.siblingAppBinary: Self.buildOutputFile,
+                Self.installedAppBinary: Self.appFile,
+            ])
+        let f = try await makeFixture(binaryCheck: check)
+        try await expectEveryMethodAnswers(f)
+    }
+
     /// The installed layout: the app runs `/Applications/TBD.app`, a copy
     /// that shares no inode with the build output beside the daemon.
     @Test func theInstalledAppIsAccepted() async throws {
