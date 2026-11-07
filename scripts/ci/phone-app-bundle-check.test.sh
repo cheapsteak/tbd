@@ -6,8 +6,9 @@
 # stub `npm`, passed as NPM, that logs each invocation and the directory it ran
 # in. For `run build:app` the stub writes $STUB_BUILD_OUTPUT to the bundle's
 # `app.js` (nothing when it is unset), plus `extra.js` when STUB_BUILD_EXTRA=1,
-# and removes `old.js` when STUB_BUILD_CLEAN=1. STUB_CI_FAIL, STUB_TEST_FAIL
-# and STUB_BUILD_FAIL set to 1 make that step fail.
+# plus STUB_BUILD_NAMED_OUTPUT to the bundle path STUB_BUILD_NAMED when that is
+# set, and removes `old.js` when STUB_BUILD_CLEAN=1. STUB_CI_FAIL,
+# STUB_TEST_FAIL and STUB_BUILD_FAIL set to 1 make that step fail.
 #
 # RUN WITH `/bin/bash`, WHICH ON MACOS IS 3.2. Every run of the script under
 # test goes through `$BASH`, this harness's own interpreter.
@@ -27,7 +28,8 @@ export LC_ALL=C
 # A CI step's own summary must not receive these cases' accounts, and a git
 # hook's `GIT_DIR` would point every fixture's `git` at this checkout.
 unset GITHUB_OUTPUT GITHUB_STEP_SUMMARY NPM STUB_LOG STUB_BUILD_OUTPUT \
-      STUB_BUILD_EXTRA STUB_BUILD_CLEAN STUB_CI_FAIL STUB_TEST_FAIL STUB_BUILD_FAIL \
+      STUB_BUILD_EXTRA STUB_BUILD_CLEAN STUB_BUILD_NAMED STUB_BUILD_NAMED_OUTPUT \
+      STUB_CI_FAIL STUB_TEST_FAIL STUB_BUILD_FAIL FIXTURE_GITIGNORE \
       GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 FAIL=0
@@ -61,8 +63,9 @@ BUNDLE_V1='// bundle v1
 '
 
 # A fixture: `repo/`, a git repository with PACKAGE as `phone/package.json`
-# (none when PACKAGE is `-`) and, after it, NAME CONTENT pairs committed under
-# the bundle folder; and `bin/npm`, the stub. Echoes the fixture directory.
+# (none when PACKAGE is `-`), FIXTURE_GITIGNORE as its top-level `.gitignore`
+# when that is set, and, after PACKAGE, NAME CONTENT pairs committed under the
+# bundle folder; and `bin/npm`, the stub. Echoes the fixture directory.
 mkfixture() {
   local d package="$1"; shift
   d="$(scratch)"
@@ -72,6 +75,9 @@ mkfixture() {
     printf '%s\n' "$package" > "$d/repo/phone/package.json"
   fi
   echo "# fixture" > "$d/repo/README.md"
+  if [ -n "${FIXTURE_GITIGNORE:-}" ]; then
+    printf '%s\n' "$FIXTURE_GITIGNORE" > "$d/repo/.gitignore"
+  fi
   while [ "$#" -ge 2 ]; do
     mkdir -p "$d/repo/$BUNDLE_DIR"
     printf '%s' "$2" > "$d/repo/$BUNDLE_DIR/$1"
@@ -95,6 +101,10 @@ case "$*" in
     fi
     if [ "${STUB_BUILD_EXTRA:-0}" = 1 ]; then
       mkdir -p "$bundle" && printf 'extra\n' > "$bundle/extra.js" || exit 1
+    fi
+    if [ -n "${STUB_BUILD_NAMED:-}" ]; then
+      mkdir -p "$(dirname "$bundle/$STUB_BUILD_NAMED")" &&
+        printf '%s' "${STUB_BUILD_NAMED_OUTPUT:-}" > "$bundle/$STUB_BUILD_NAMED" || exit 1
     fi
     if [ "${STUB_BUILD_CLEAN:-0}" = 1 ]; then
       rm -f "$bundle/old.js" || exit 1
@@ -221,6 +231,37 @@ test_a_build_that_adds_a_file_to_the_bundle_folder_fails() {
   assert_eq "a build that adds a file to the bundle folder fails" "1" "$CHECK_RC"
   assert_contains "the failure names the added file" "$CHECK_STDERR" "::error::$BUNDLE_DIR/extra.js differs"
   assert_lacks "the failure does not name the unchanged file" "$CHECK_STDERR" "app.js differs"
+}
+
+# SwiftPM copies the bundle folder from disk, ignored files and all, so a file
+# the build writes that `.gitignore` matches would ship unchecked if the check
+# read only what `git status` lists by default.
+test_a_build_that_writes_an_ignored_file_fails() {
+  local d
+  d="$(FIXTURE_GITIGNORE='*.map' mkfixture "$PACKAGE_WITH_BUILD" app.js "$BUNDLE_V1")"
+  run_check "$d" STUB_BUILD_OUTPUT="$BUNDLE_V1" STUB_BUILD_NAMED=app.js.map STUB_BUILD_NAMED_OUTPUT='{}'
+  assert_eq "a build that writes a file .gitignore matches fails" "1" "$CHECK_RC"
+  assert_contains "the failure names the ignored file" "$CHECK_STDERR" "::error::$BUNDLE_DIR/app.js.map differs"
+  assert_contains "the failure gives the ignored file's status" "$CHECK_STDERR" "(git status \`!!\`)"
+  assert_lacks "the failure does not name the unchanged file" "$CHECK_STDERR" "app.js differs"
+
+  # A whole ignored directory: each file in it is named, not just the folder.
+  d="$(FIXTURE_GITIGNORE='maps/' mkfixture "$PACKAGE_WITH_BUILD" app.js "$BUNDLE_V1")"
+  run_check "$d" STUB_BUILD_OUTPUT="$BUNDLE_V1" STUB_BUILD_NAMED=maps/app.js.map STUB_BUILD_NAMED_OUTPUT='{}'
+  assert_eq "a build that writes into an ignored directory fails" "1" "$CHECK_RC"
+  assert_contains "the failure names the file in the ignored directory" "$CHECK_STDERR" \
+    "::error::$BUNDLE_DIR/maps/app.js.map differs"
+}
+
+# The line format quotes a path holding a space; the check names it raw.
+test_a_changed_file_with_a_space_is_named_raw() {
+  local d; d="$(mkfixture "$PACKAGE_WITH_BUILD" app.js "$BUNDLE_V1" 'my app.js' "$BUNDLE_V1")"
+  run_check "$d" STUB_BUILD_OUTPUT="$BUNDLE_V1" STUB_BUILD_NAMED='my app.js' STUB_BUILD_NAMED_OUTPUT='// v2
+'
+  assert_eq "a build that changes a file whose name has a space fails" "1" "$CHECK_RC"
+  assert_contains "the failure names the file raw" "$CHECK_STDERR" "::error::$BUNDLE_DIR/my app.js differs"
+  assert_contains "the summary names the file raw" "$CHECK_SUMMARY" "- \`$BUNDLE_DIR/my app.js\` (\` M\`)"
+  assert_lacks "the failure does not quote the name" "$CHECK_STDERR" "\"$BUNDLE_DIR/my app.js\""
 }
 
 test_a_build_that_removes_a_committed_file_fails() {

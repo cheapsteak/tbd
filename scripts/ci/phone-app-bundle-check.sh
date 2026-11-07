@@ -31,8 +31,9 @@
 #   - It names one: in `phone/`, `npm ci`, `npm run test:app` and
 #     `npm run build:app`, stopping at the first failure. Then the bundle
 #     folder must hold exactly the committed files with exactly their
-#     committed contents: a changed, added or removed file fails, and so does
-#     a build that leaves the folder empty.
+#     committed contents: a changed, added or removed file fails, an added
+#     file that `.gitignore` matches included, and so does a build that
+#     leaves the folder empty.
 #   - A `package.json` that cannot be read as a JSON object fails, rather than
 #     reading as one with no build script.
 set -uo pipefail
@@ -112,20 +113,41 @@ run_npm ci
 run_npm run test:app
 run_npm run build:app
 
-status="$(git status --porcelain=v1 --untracked-files=all -- "$BUNDLE_DIR")" ||
+# Every difference between the folder on disk and the committed bundle,
+# ignored files included: SwiftPM copies the folder from disk, so a file the
+# build writes that matches a `.gitignore` pattern, such as a source map, would
+# ship although `git status` alone never lists it. `--ignored` with
+# `--untracked-files=all` lists each ignored file, even inside an ignored
+# directory. `-z` separates entries with NULs and prints every path raw, where
+# the line format would quote a name holding a space. The list goes to a file
+# because a command substitution would drop the NULs.
+STATUS_FILE="$(mktemp "${TMPDIR:-/tmp}/phone-app-bundle-check.XXXXXX")" ||
+  fail "Could not make a temporary file, so the rebuilt bundle cannot be compared with the committed one."
+# shellcheck disable=SC2329 # invoked by the EXIT trap below
+cleanup() { rm -f "$STATUS_FILE"; }
+trap cleanup EXIT
+
+git status --porcelain=v1 -z --untracked-files=all --ignored -- "$BUNDLE_DIR" > "$STATUS_FILE" ||
   fail "\`git status\` failed, so the rebuilt bundle cannot be compared with the committed one."
 
-if [ -n "$status" ]; then
+if [ -s "$STATUS_FILE" ]; then
   changed=""
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    # Porcelain v1: two status letters, a space, then the path.
-    echo "::error::${line:3} differs from what \`npm run build:app\` writes (git status \`${line:0:2}\`)." >&2
+  # Porcelain v1 with -z: two status letters, a space, then the path, then a
+  # NUL. A rename or copy in the index adds its original path as one more
+  # NUL-terminated field, which is named too.
+  while IFS= read -r -d '' entry; do
+    [ -n "$entry" ] || continue
+    code="${entry:0:2}"
+    paths="${entry:3}"
+    case "$code" in
+      R*|C*)
+        IFS= read -r -d '' from || from=""
+        [ -z "$from" ] || paths="$paths, from $from" ;;
+    esac
+    echo "::error::$paths differs from what \`npm run build:app\` writes (git status \`$code\`)." >&2
     changed="$changed
-- \`${line:3}\` (\`${line:0:2}\`)"
-  done <<EOF
-$status
-EOF
+- \`$paths\` (\`$code\`)"
+  done < "$STATUS_FILE"
   git diff --stat -- "$BUNDLE_DIR" >&2
   summary "The committed bundle under \`$BUNDLE_DIR\` is not what \`npm run build:app\` writes. Run \`npm run build:app\` in \`phone/\` and commit the result.
 $changed"
