@@ -14,25 +14,36 @@ enum SettingsTab: Hashable {
 }
 
 struct SettingsView: View {
+    @Environment(AppState.self) private var appState
+
     var body: some View {
-        TabView {
+        @Bindable var appState = appState
+        TabView(selection: $appState.settingsTab) {
             GeneralSettingsTab()
                 .tabItem {
                     Label("General", systemImage: "gear")
                 }
+                .tag(SettingsTab.general)
 
             RepositoriesSettingsTab()
                 .tabItem {
                     Label("Repositories", systemImage: "folder")
                 }
+                .tag(SettingsTab.repositories)
 
             TerminalSettingsView()
                 .tabItem {
                     Label("Terminal", systemImage: "terminal")
                 }
+                .tag(SettingsTab.terminal)
 
             ModelProfilesSettingsView()
                 .tabItem { Label("Model Profiles", systemImage: "key.fill") }
+                .tag(SettingsTab.modelProfiles)
+
+            PhoneSettingsView()
+                .tabItem { Label("Phone", systemImage: "iphone") }
+                .tag(SettingsTab.phone)
         }
         .frame(width: 500, height: 520)
     }

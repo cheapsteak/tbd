@@ -134,6 +134,9 @@ struct TBDCommands: Commands {
                     await appState.checkForUpdatesNow()
                 }
             }
+            Button("Set Up Phone Relay…") {
+                appState.openPhoneSettings(relaySetup: true)
+            }
         }
 
         CommandGroup(after: .pasteboard) {
