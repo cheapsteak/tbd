@@ -126,6 +126,9 @@ actor PhoneConnection {
     private var channel: Channel?
     /// Set once `stop()` begins.
     private var isClosing = false
+    /// Set once `revokeAndStop()` begins, before `revoked` is queued: frames
+    /// from the phone are dropped and the outbox refuses from then on.
+    private var isRevoked = false
     private var inboundTask: Task<Void, Never>?
     private var writerTask: Task<Void, Never>?
     private var handshakeTimer: Task<Void, Never>?
@@ -182,8 +185,11 @@ actor PhoneConnection {
     }
 
     /// Sends `revoked` on an established channel, waits up to the flush limit
-    /// for it to leave, then `stop()`s.
+    /// for it to leave, then `stop()`s. From the moment it is called, every
+    /// frame from the phone is dropped and the outbox answers false, so the
+    /// phone can neither act nor hear more while `revoked` leaves.
     func revokeAndStop() async {
+        isRevoked = true
         if !isClosing, let current = channel, current.established != nil {
             let (left, signal) = AsyncStream.makeStream(of: Void.self)
             enqueueEncrypted(LoaderHandler.revoked, channelID: current.id, onLeft: { signal.finish() })
@@ -193,11 +199,12 @@ actor PhoneConnection {
     }
 
     /// Sends one `app` message on channel `channelID`, for
-    /// ``PhoneChannelOutbox``. False once that channel has ended, and when
-    /// `body` is not one JSON object that fits a transport message, which is a
-    /// caller bug.
+    /// ``PhoneChannelOutbox``. False once that channel has ended or
+    /// `revokeAndStop()` has been called, and when `body` is not one JSON
+    /// object that fits a transport message, which is a caller bug.
     func sendApp(body: Data, channelID: UUID) -> Bool {
-        guard !isClosing, let current = channel, current.id == channelID, current.established != nil else {
+        guard !isClosing, !isRevoked, let current = channel, current.id == channelID,
+              current.established != nil else {
             return false
         }
         let message: Data
@@ -221,19 +228,28 @@ actor PhoneConnection {
         }
     }
 
+    /// Once `stop()` has begun, this task ends no channel. `stop()` cancels
+    /// it, yet a stream keeps handing over the events it buffered, the link's
+    /// last `.closed` among them; ending the channel here would call
+    /// `phoneDisconnected` from a cancelled task. `close()` ends the channel
+    /// instead, from a task nothing cancels.
     private func handle(_ event: RelayLinkEvent) async {
         switch event {
         case .opened:
             emit(.linkOpened)
         case .closed:
-            await endChannel()
+            if !isClosing {
+                await endChannel()
+            }
             emit(.linkClosed)
         case .connectFailed(let reason):
             emit(.linkConnectFailed(reason))
         case .refused(let reason):
             emit(.linkRefused(reason))
         case .peerJoined, .peerLeft:
-            await endChannel()
+            if !isClosing {
+                await endChannel()
+            }
         case .peerAbsent:
             break
         case .frame(let bytes):
@@ -242,7 +258,8 @@ actor PhoneConnection {
     }
 
     private func receiveFrame(_ frame: Data) async {
-        guard !isClosing else { return }
+        // A revoked phone is not heard while `revoked` leaves.
+        guard !isClosing, !isRevoked else { return }
         guard let current = channel else {
             await answerHandshake(frame)
             return
@@ -366,6 +383,9 @@ actor PhoneConnection {
                 if let lastLeft {
                     await waitUntilLeft(lastLeft)
                 }
+                // `stop()` may have begun while the message left; `close()`
+                // ends the channel then.
+                guard !isClosing else { return }
                 await endChannel()
                 await link.restart()
                 return
@@ -490,6 +510,10 @@ actor PhoneConnection {
 
     // MARK: - Stopping
 
+    /// Runs in `stopTask`, which nothing cancels, so the channel ends here
+    /// with `phoneDisconnected` and the last-seen write uncancelled: once,
+    /// after the inbound task, and with it the last `handleAppMessage`, has
+    /// returned.
     private func close() async {
         isClosing = true
         await link.stop()
@@ -509,8 +533,17 @@ actor PhoneConnection {
     }
 
     private func touchLastSeen() async {
+        let devices = self.devices
+        let id = deviceID
+        let date = now()
+        // The database write fails in a cancelled task, and `stop()` cancels
+        // the inbound task, which can be inside this call when stopping
+        // begins. A plain `Task` does not inherit that cancellation, so the
+        // write still lands; it is awaited, so it never outlives the
+        // connection.
+        let write = Task { try await devices.touchLastSeen(id: id, at: date) }
         do {
-            try await devices.touchLastSeen(id: deviceID, at: now())
+            try await write.value
         } catch {
             logger.error(
                 "Could not record when phone \(self.deviceID, privacy: .public) was last seen: \(error.localizedDescription, privacy: .public)"

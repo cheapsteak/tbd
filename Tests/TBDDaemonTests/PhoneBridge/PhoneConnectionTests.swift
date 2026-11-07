@@ -96,10 +96,88 @@ private struct ConnectionHarness: Sendable {
     }
 }
 
+/// A transport over a ``FakeRelay`` whose laptop sockets can hold binary
+/// sends, so a test can keep a frame the laptop sends from leaving.
+private final class HoldingTransport: RelayTransport, @unchecked Sendable {
+    private let relay: FakeRelay
+    private let lock = NSLock()
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+
+    init(relay: FakeRelay) {
+        self.relay = relay
+    }
+
+    func connect(url: URL, userAgent: String) async throws -> any RelaySocket {
+        let socket = try await relay.connect(url: url, userAgent: userAgent)
+        return HoldingSocket(base: socket, transport: self)
+    }
+
+    /// From now on, a binary frame a laptop socket sends waits until
+    /// `release()`.
+    func hold() {
+        lock.withLock { holding = true }
+    }
+
+    /// How many sends are waiting.
+    var heldSends: Int {
+        lock.withLock { held.count }
+    }
+
+    /// Stops holding and lets every waiting send go on. Safe to call twice.
+    func release() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            holding = false
+            let waiting = held
+            held = []
+            return waiting
+        }
+        for send in waiting {
+            send.resume()
+        }
+    }
+
+    func waitWhileHolding() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let parked = lock.withLock { () -> Bool in
+                guard holding else { return false }
+                held.append(continuation)
+                return true
+            }
+            if !parked {
+                continuation.resume()
+            }
+        }
+    }
+}
+
+/// A laptop socket of a ``HoldingTransport``.
+private struct HoldingSocket: RelaySocket {
+    let base: any RelaySocket
+    let transport: HoldingTransport
+
+    func send(_ frame: RelayFrame) async throws {
+        if case .binary = frame {
+            await transport.waitWhileHolding()
+        }
+        try await base.send(frame)
+    }
+
+    func receive() async throws -> RelayFrame {
+        try await base.receive()
+    }
+
+    func close(code: Int) async {
+        await base.close(code: code)
+    }
+}
+
 /// Builds a connection for one paired phone on a fake relay, starts it,
 /// waits for its socket to open, runs `body`, and stops the connection
-/// whatever happens, so no task outlives the test.
-private func withConnection(_ body: (ConnectionHarness) async throws -> Void) async throws {
+/// whatever happens, so no task outlives the test. The connection opens its
+/// sockets through `transport`, `relay` itself when nil.
+private func withConnection(relay: FakeRelay = FakeRelay(), transport: (any RelayTransport)? = nil,
+                            _ body: (ConnectionHarness) async throws -> Void) async throws {
     let db = try TBDDatabase(inMemory: true)
     let dates = TestDateSource()
     let phoneKey = Curve25519.KeyAgreement.PrivateKey()
@@ -109,12 +187,12 @@ private func withConnection(_ body: (ConnectionHarness) async throws -> Void) as
                              roomID: room, pairedAt: dates.now.addingTimeInterval(-3_600))
     try await db.phoneDevices.insert(device)
     let bundle = try PhoneAppBundle.loadShipped()
-    let relay = FakeRelay()
+    let sockets: any RelayTransport = transport ?? (relay as any RelayTransport)
     let clock = EventDrivenTestClock()
     let app = RecordingPhoneApp()
     let events = FireRecorder<PhoneConnection.Event>()
     let connection = PhoneConnection(
-        device: device, relayURL: relayURL, transport: relay, laptopKey: laptopKey, laptopName: "acme-laptop",
+        device: device, relayURL: relayURL, transport: sockets, laptopKey: laptopKey, laptopName: "acme-laptop",
         devices: db.phoneDevices, bundle: bundle, appSlot: PhoneAppHandlerSlot(app),
         preflight: { .proceed }, onEvent: { events.record($0) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
@@ -235,6 +313,48 @@ struct PhoneConnectionTests {
             #expect(h.relay.laptopFrames(room: h.room).isEmpty)
             let log = await h.app.log
             #expect(log.isEmpty)
+        }
+    }
+
+    @Test func anotherPairedPhonesKeyIsRefusedInThisRoom() async throws {
+        try await withConnection { h in
+            // A second phone, paired with this laptop in a room of its own.
+            let otherKey = Curve25519.KeyAgreement.PrivateKey()
+            let otherRoom = try PhoneRoom.newToken()
+            let other = PhoneDevice(id: UUID(), name: "iPad", publicKey: otherKey.publicKey.rawRepresentation,
+                                    roomID: otherRoom, pairedAt: h.dates.now)
+            try await h.db.phoneDevices.insert(other)
+
+            let intruder = try await h.joinedPhone(key: otherKey)
+            try await intruder.startIK(room: h.room, laptopKey: h.laptopKey.publicKey)
+            let refused = await h.events.next()
+            #expect(refused == .handshakeRefused("unknown key"))
+            #expect(h.relay.laptopFrames(room: h.room).isEmpty)
+            let log = await h.app.log
+            #expect(log.isEmpty)
+        }
+    }
+
+    @Test func aRowDeletedAfterAConnectionIsHonouredOnTheNextHandshake() async throws {
+        try await withConnection { h in
+            let first = try await h.connectedPhone()
+            first.close()
+            try await h.waitUntil("the channel to end") { await h.app.log.contains("disconnected") }
+            let deleted = try await h.db.phoneDevices.delete(id: h.device.id)
+            #expect(deleted)
+            // Message 2 and `welcome`, from the first connection.
+            let framesBefore = h.relay.laptopFrames(room: h.room).count
+            #expect(framesBefore == 2)
+
+            // The same key comes back, on a new socket.
+            let again = try await h.joinedPhone()
+            try await again.startIK(room: h.room, laptopKey: h.laptopKey.publicKey)
+            try await h.waitForEvent(.handshakeRefused("no paired device for this room"))
+            #expect(h.relay.laptopFrames(room: h.room).count == framesBefore)
+            let log = await h.app.log
+            #expect(log == ["connected", "disconnected"])
+            let connected = await h.connection.isConnected
+            #expect(connected == false)
         }
     }
 
@@ -490,6 +610,66 @@ struct PhoneConnectionTests {
             // `welcome`.
             #expect(h.relay.laptopFrames(room: h.room).count == 2)
             #expect(!h.clock.hasSleeper)
+        }
+    }
+
+    @Test func stopRecordsWhenThePhoneWasLastSeen() async throws {
+        try await withConnection { h in
+            _ = try await h.connectedPhone()
+            let connectedAt = h.dates.now
+            let seenAtConnect = try await h.db.phoneDevices.device(id: h.device.id)?.lastSeenAt
+            #expect(seenAtConnect == connectedAt)
+            h.dates.advance(by: 600)
+
+            // The link's last `.closed` reaches the inbound task after
+            // `stop()` cancelled it; the channel still ends in a task that
+            // can write.
+            await h.connection.stop()
+            let seen = try await h.db.phoneDevices.device(id: h.device.id)?.lastSeenAt
+            #expect(seen == connectedAt.addingTimeInterval(600))
+            let log = await h.app.log
+            #expect(log == ["connected", "disconnected"])
+            let disconnects = h.events.values.filter { $0 == .disconnected(deviceID: h.device.id) }
+            #expect(disconnects.count == 1)
+        }
+    }
+
+    @Test func aRevokedPhoneIsNotHeardWhileRevokedLeaves() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withConnection(relay: relay, transport: transport) { h in
+            // However the test ends, nothing stays held for `stop()` to wait on.
+            defer { transport.release() }
+            let phone = try await h.connectedPhone()
+            let handed = await h.app.lastOutbox
+            let outbox = try #require(handed)
+
+            // `revoked` cannot leave, so `revokeAndStop()` waits up to the
+            // flush limit, which the test clock never reaches, before it
+            // stops the connection.
+            transport.hold()
+            let revoking = Task { await h.connection.revokeAndStop() }
+            try await h.waitUntil("`revoked` to reach the socket") { transport.heldSends == 1 }
+
+            // Nothing more goes to the revoked phone.
+            let sent = await outbox.send(appBody: Data(#"{"kind":"event"}"#.utf8))
+            #expect(sent == false)
+
+            // The phone acts after `revoked` was queued, then leaves. The
+            // laptop handles its events in order, so once the channel has
+            // ended, the phone's request has been handled too.
+            try await phone.send(json: request("r9"))
+            phone.close()
+            try await h.waitUntil("the channel to end") { await h.app.log.contains("disconnected") }
+            let log = await h.app.log
+            #expect(log == ["connected", "disconnected"])
+
+            transport.release()
+            await revoking.value
+            let after = await h.app.log
+            #expect(after == ["connected", "disconnected"])
+            let connected = await h.connection.isConnected
+            #expect(connected == false)
         }
     }
 }

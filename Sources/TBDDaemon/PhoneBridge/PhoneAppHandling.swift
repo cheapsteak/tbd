@@ -18,6 +18,16 @@ public protocol PhoneAppOutbox: Sendable {
 }
 
 /// The app layer, as the phone bridge drives it.
+///
+/// A phone's connection awaits each call before it handles that phone's next
+/// frame, and stopping the connection waits for the call in flight. So a
+/// handler:
+/// - returns promptly, and hands long work to tasks of its own;
+/// - honours task cancellation: stopping a connection cancels the task a
+///   call in flight runs in, and waits for that call to return;
+/// - never awaits the bridge's `stop`, `revoke` or `reconcile` inline. Each
+///   of those waits for the connection's calls to return, so a handler that
+///   waits on its own connection's stop deadlocks it.
 public protocol PhoneAppHandling: Sendable {
     func phoneConnected(_ peer: PhonePeer, outbox: any PhoneAppOutbox) async
     /// Called once per `app` message, in arrival order, awaited before the next.
