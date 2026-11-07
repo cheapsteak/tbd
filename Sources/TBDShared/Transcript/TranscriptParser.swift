@@ -988,15 +988,26 @@ public enum TranscriptParser {
 }
 
 /// Reads a file forward from an offset one line at a time, `chunkSize` bytes
-/// per read, so a scan holds one chunk and the line it is decoding rather
-/// than the whole file. Lines are split on `"\n"` and returned without it.
-/// Empty lines are skipped, and a last line with no trailing newline is
+/// per read, so a scan holds the line it is decoding and about one chunk
+/// rather than the whole file. Lines are split on `"\n"` and returned without
+/// it. Empty lines are skipped, and a last line with no trailing newline is
 /// returned like any other.
-private struct ForwardLineReader {
+///
+/// Linear in the bytes read, however long a line is. A line that spans many
+/// chunks stays in `buffer` as each chunk is appended, and the search for its
+/// newline resumes where the last one stopped instead of rescanning the line.
+/// The consumed bytes at the front of `buffer` are dropped only once they are
+/// more than half of it, so each byte is copied a bounded number of times.
+struct ForwardLineReader {
     private let handle: FileHandle
     private let chunkSize: Int
+    /// Zero-based: indices are offsets from the first byte `buffer` holds.
     private var buffer = Data()
+    /// The first byte not yet returned.
     private var cursor = 0
+    /// Where the newline search resumes. No byte in `cursor..<scanned` is
+    /// `"\n"`.
+    private var scanned = 0
     private var reachedEnd = false
 
     init?(handle: FileHandle, from offset: UInt64, chunkSize: Int) {
@@ -1007,28 +1018,33 @@ private struct ForwardLineReader {
 
     mutating func next() -> Data? {
         while true {
-            if let newline = buffer[cursor...].firstIndex(of: UInt8(ascii: "\n")) {
+            if let newline = buffer[scanned...].firstIndex(of: UInt8(ascii: "\n")) {
                 let line = buffer[cursor..<newline]
                 cursor = newline + 1
+                scanned = cursor
                 if line.isEmpty { continue }
                 return Data(line)
             }
+            scanned = buffer.endIndex
             if reachedEnd {
                 guard cursor < buffer.endIndex else { return nil }
                 let line = Data(buffer[cursor...])
                 cursor = buffer.endIndex
+                scanned = cursor
                 return line
             }
-            // The unread tail of `buffer` is a partial line; carry it into the
-            // next chunk so the line comes out whole.
+            // The unread tail of `buffer` is a partial line; the next chunk
+            // goes after it so the line comes out whole.
             guard let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty else {
                 reachedEnd = true
                 continue
             }
-            var refilled = Data(buffer[cursor...])
-            refilled.append(chunk)
-            buffer = refilled
-            cursor = 0
+            if cursor > buffer.count / 2 {
+                buffer = Data(buffer[cursor...])
+                scanned -= cursor
+                cursor = 0
+            }
+            buffer.append(chunk)
         }
     }
 }
