@@ -67,10 +67,10 @@ struct MouseEncoderTests {
         #expect(release == nil, "with tracking off the release encoded as \(String(describing: release))")
     }
 
-    /// Under any-event tracking a move is reported once per cell, not once per pixel. libghostty
-    /// forgets the last reported cell whenever the encoder's modes are set from the terminal, so
-    /// they may be set only when the modes change. Driven through the terminal's own input seam,
-    /// so the encoder is the one bound to the terminal, which hears about every write.
+    /// Under any-event tracking a move is reported once per cell, not once per pixel: the encoder
+    /// drops a motion report that repeats the last one, and forgets it when the modes change.
+    /// Driven through the terminal's own input seam, so the encoder is the one bound to the
+    /// terminal, which hears about every write.
     @Test func motionIsReportedOncePerCellUnderAnyEventTracking() throws {
         let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
         defer { terminal.close() }
