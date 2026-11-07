@@ -389,9 +389,11 @@ the phone does not show it until tapped.
 - **The first page** holds the items back to and including the 4th-last message, where a message is
   your message or a block of assistant text. The tool rows between those messages come along. A
   page is capped at 16 KB. A typical first page is 5–10 KB, one frame.
-- **Older pages** load only when the user scrolls within about one screen of the top. Each holds the
-  next 4 messages and the rows between them, under the same cap. A page is asked for with a cursor,
-  which is a byte offset into the transcript file.
+- **Older pages** load only when the user scrolls within about two screens of the top, so a steady
+  scroll never waits. Each holds the next 20 messages and the rows between them, at most 64 KB,
+  which is one frame. Twenty messages fill several phone screens. A larger page would mostly carry
+  history the user never reaches, and the virtual list renders only what is on screen anyway. A
+  page is asked for with a cursor, which is a byte offset into the transcript file.
 - **One new parser function** is needed: parse the window that ends before a byte offset. A tool
   call near a page's end can have its result in the newer, already loaded range. The daemon joins it
   from the result index it keeps for the open transcript.
@@ -433,6 +435,10 @@ attack.
 - Scrolling up through 1,000 items stays smooth on a recent iPhone. This is an on-device check.
 
 ## 8. Phone UI
+
+This section fixes what each screen shows and does. How the screens look is settled in a review of
+visual mocks with the maintainer before the app UI is built (see "Build order"). That review may
+change layout and styling freely. A change to what a screen shows or does updates this section.
 
 ### 8.1 Loader screens
 
@@ -625,7 +631,8 @@ period. `paired_at` and `last_seen_at` come through the date seam.
 The starting values are named constants in one place:
 
 - **Pairing offer life** – 5 minutes.
-- **First page and later pages** – back to the 4th-last message, at most 16 KB.
+- **First page** – back to the 4th-last message, at most 16 KB.
+- **Older pages** – 20 messages, at most 64 KB, fetched within two screens of the top.
 - **Message preview** – 4 KB.
 - **Detail limit** – 1 MB.
 - **Request-ID memory** – 10 minutes.
@@ -714,7 +721,25 @@ Research: `ci-layout.md`.
     publishes with GitHub's Pages deploy action. A leaked token can trigger a redeploy but cannot
     change what is served.
 
-## 16. Rollout
+## 16. Build order
+
+The parts with no UI come first, so work can start before the phone's visual design is settled.
+
+1. **Secure channel** – the Swift and JavaScript Noise code, the test vectors, and the app-protocol
+   fixtures.
+2. **Relay and CI** – `relay/cloudflare/`, `phone.yml` with its classifier, and the Swift gate's
+   skip rules.
+3. **Daemon bridge and laptop UI** – the migration and flag, pairing, devices, the relay link, the
+   loader handler, the app protocol with every action and the transcript feed, the Settings pane,
+   the menu item and the status-bar chip. Tests drive the app protocol directly, with no phone UI.
+4. **Loader and runner** – pairing, the laptop list, keys, the channel, bundle delivery and the
+   sandboxed frame. Their screens are built plainly first, so the whole path can be tested from end
+   to end with a minimal app bundle, and restyled after the mock review.
+5. **Mock review** – visual mocks of the phone screens in section 8, reviewed with the maintainer.
+   It can happen any time before step 6, alongside steps 1 to 4.
+6. **Phone app UI** – the screens in section 8, built to the reviewed mocks.
+
+## 17. Rollout
 
 - **The flag.** `phone_control_enabled` is off by default, and the Settings toggle turns it on. The
   maintainer soaks it on their own machines.
@@ -726,7 +751,7 @@ Research: `ci-layout.md`.
 - **Docs:** `docs/phone-control.md` (setup, the Deploy button, pairing, revoking, self-hosting the
   loader from a fork), and `relay/cloudflare/README.md`.
 
-## 17. Theory placement
+## 18. Theory placement
 
 Run against `docs/theory-placement.md`:
 
@@ -741,7 +766,7 @@ Run against `docs/theory-placement.md`:
   decision. The daemon will expose the facts (state changes, open prompts), and a user-editable
   rule under `~/tbd/` will decide what to push.
 
-## 18. Rejected alternatives
+## 19. Rejected alternatives
 
 - **Turning on Claude Code's Remote Control as the whole answer** – TBD could add
   `--remote-control <name>` to the sessions it launches, and the Claude app would then cover
@@ -797,13 +822,13 @@ Run against `docs/theory-placement.md`:
 - **Per-repo opt-in** – narrower reach for a stolen phone. Phone control covers every repo, as the
   app does, and the master switch and per-phone revoke bound the risk.
 
-## 19. Follow-ups
+## 20. Follow-ups
 
 - **Codex transcripts and actions (v1.1)** – their own spec. TBD has no Codex transcript surface
   today.
 - **Push alerts (v1.1)** – Web Push sent by the laptop itself, encrypted to the phone (RFC 8291), so
   neither Apple, Google nor the relay can read it. It needs the Home Screen install and pairing
-  inside the installed app. When to alert is a user-land rule (section 17).
+  inside the installed app. When to alert is a user-land rule (section 18).
 - **Interrupt** – needs a reliable mechanism. A raw Escape key does different things in different
   states, and the provider contract has no interrupt verb.
 - **Remote profile switching and forking** – needs a TBD caller for the contract's `set-profile`
