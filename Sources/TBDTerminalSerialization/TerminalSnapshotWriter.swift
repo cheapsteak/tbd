@@ -5,6 +5,8 @@ import SwiftTerm
 ///
 /// The byte order is reset prelude → history → modes → (alt screen) → region →
 /// cursor, and every step of it was learned by `ReplayWriter` on the tmux path.
+/// On an alt screen, cursor visibility moves from the modes step to just after
+/// the switch, because the receiver shows the cursor on every `?1049h`.
 /// Two orderings inside are counter-intuitive and are called out where they
 /// happen: SGR reset precedes the erase, and the scroll region follows the alt
 /// content.
@@ -96,7 +98,9 @@ public enum TerminalSnapshotWriter {
 
         emit(resetPrelude)
         emit(history)   // already joined, wrap-aware — see Task 2
-        emit(modeEscapes(for: state))
+        // Cursor visibility is withheld on an alt screen: this fork shows the
+        // cursor on every `?1049h`, so it is emitted after the switch below.
+        emit(modeEscapes(for: state, includeCursorVisibility: !state.alternateOn))
 
         let region = regionEscape(for: state)
         let cursor = cursorEscape(for: state, regionEmitted: region != nil)
@@ -109,6 +113,10 @@ public enum TerminalSnapshotWriter {
             }
             emit("\(esc)[?1049h")
             emit("\(esc)[H")   // 1049h clears but inherits the primary's cursor
+            // AFTER the switch: the fork's `?1049h` calls `showCursor()`, so a
+            // `?25l` sent earlier is undone and a hidden cursor comes back.
+            // Visibility is the only mode the switch changes.
+            emit(cursorVisibilityEscape(for: state))
             emit(altScreen ?? "")
             // Region AFTER the content: SwiftTerm's region is per-buffer, and
             // painting rows through an active one scrolls inside it.
@@ -174,7 +182,13 @@ public enum TerminalSnapshotWriter {
         terminal.feed(text: out)
     }
 
-    private static func modeEscapes(for state: CapturedTerminalState) -> String {
+    private static func cursorVisibilityEscape(for state: CapturedTerminalState) -> String {
+        "\(esc)[?25\(state.cursorVisible ? "h" : "l")"
+    }
+
+    private static func modeEscapes(
+        for state: CapturedTerminalState, includeCursorVisibility: Bool = true
+    ) -> String {
         var out = ""
         func mode(_ code: Int, _ on: Bool, decPrivate: Bool = true) {
             out += "\(esc)[\(decPrivate ? "?" : "")\(code)\(on ? "h" : "l")"
@@ -192,7 +206,7 @@ public enum TerminalSnapshotWriter {
         mode(7, state.wraparound)
         mode(69, state.marginMode)
         mode(4, state.insertMode, decPrivate: false)
-        mode(25, state.cursorVisible)
+        if includeCursorVisibility { out += cursorVisibilityEscape(for: state) }
         mode(2004, state.bracketedPaste)
         mode(1004, state.focusReporting)
         // The prelude turned all tracking off, so only a set needs emitting;
