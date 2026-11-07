@@ -26,11 +26,19 @@ struct NoiseResponder: Sendable {
     }
 
     /// Reads message 1 and returns the phone's static key with the payload.
-    /// A throw leaves the handshake as it was, so the caller can drop a stale
-    /// frame and still read the real message 1.
+    ///
+    /// A throw leaves the handshake as it was, so the caller can drop a frame
+    /// that fails to read and still read the real message 1. A stale frame
+    /// that is a valid message 1 does not fail: a replay, or the phone's
+    /// previous attempt in the same room, reads successfully, and the real
+    /// message 1 after it then throws `invalidState`. Nothing here tells such
+    /// a frame from the real one, so the caller's rule is: when the completed
+    /// handshake's first transport message fails to decrypt, or the handshake
+    /// times out, discard this responder and start a new one.
     ///
     /// Check `remoteStatic` against the room's paired phones before calling
-    /// `writeMessage2`, and never write message 2 for an unknown key. Noise
+    /// `writeMessage2`, and never write message 2 for an unknown key: discard
+    /// this responder instead, because it has taken that message 1. Noise
     /// gives message 1 no replay protection, so act on nothing in its payload
     /// until the handshake completes, the phone's first transport message
     /// decrypts and, when pairing, the user allows the phone.

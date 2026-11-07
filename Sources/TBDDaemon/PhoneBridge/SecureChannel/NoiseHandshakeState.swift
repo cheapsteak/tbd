@@ -19,7 +19,9 @@ import Foundation
 /// peer before the real handshake message, so each side drops a frame it
 /// cannot use and keeps waiting. A read therefore works on a copy and keeps
 /// it only on success: when `readMessage` throws, the state is exactly as it
-/// was, and the real message can still be read.
+/// was, and the real message can still be read. Only a frame that fails can
+/// be dropped: a stale frame that reads successfully, such as a replayed
+/// message 1, is taken as the real message (see `NoiseResponder.readMessage1`).
 ///
 /// **Writes poison.** When `writeMessage` throws, the handshake is over, and
 /// every later call throws `invalidState`.
@@ -165,7 +167,7 @@ struct NoiseHandshakeState: Sendable {
 
     /// Reads the next message, the responder's message 1 or the initiator's
     /// message 2, and returns its payload. A throw leaves the state as it
-    /// was, so a stale or forged frame cannot spoil the real message.
+    /// was, so a frame that fails to read cannot spoil the real message.
     mutating func readMessage(_ message: Data) throws -> Data {
         var next = self
         let payload = try next.read(message)
