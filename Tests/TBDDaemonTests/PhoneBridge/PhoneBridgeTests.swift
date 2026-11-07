@@ -35,11 +35,18 @@ private func errorCode(of reply: [String: Any]) -> String? {
 }
 
 /// A relay info client whose answer each test sets. It answers
-/// `currentRelay` until told otherwise.
+/// `currentRelay` until told otherwise, and can hold its answers.
 private actor FakeRelayInfo: RelayInfoFetching {
     private(set) var calls = 0
     private(set) var relays: [URL] = []
     private var reply: Result<PhoneRelayInfo, PhoneBridgeError> = .success(currentRelay)
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+
+    /// How many calls wait on the hold.
+    var heldCalls: Int {
+        held.count
+    }
 
     func answer(with info: PhoneRelayInfo) {
         reply = .success(info)
@@ -49,9 +56,28 @@ private actor FakeRelayInfo: RelayInfoFetching {
         reply = .failure(error)
     }
 
+    /// From now on, each call is counted and then waits until `release()`,
+    /// when it answers with the reply set by then.
+    func hold() {
+        holding = true
+    }
+
+    /// Stops holding and lets every waiting call answer. Safe to call twice.
+    func release() {
+        holding = false
+        let waiting = held
+        held = []
+        for call in waiting {
+            call.resume()
+        }
+    }
+
     func info(relay: URL) async throws -> PhoneRelayInfo {
         calls += 1
         relays.append(relay)
+        if holding {
+            await withCheckedContinuation { held.append($0) }
+        }
         return try reply.get()
     }
 }
@@ -87,6 +113,9 @@ private struct PhoneBridgeHarness: Sendable {
     /// the bridge started.
     let laptopPublicKey: Curve25519.KeyAgreement.PublicKey?
     let relay: FakeRelay
+    /// The transport the bridge connects through, when the test asked for one
+    /// that can hold the laptop's binary sends; nil means the bare relay.
+    let holdingTransport: HoldingTransport?
     let info: FakeRelayInfo
     let app: RecordingPhoneApp
     /// Every delta the bridge broadcast, in order.
@@ -181,6 +210,30 @@ private struct PhoneBridgeHarness: Sendable {
             return nil
         }
     }
+
+    /// Adds a repository named `name` with a main worktree, after any added
+    /// before it, and returns the main worktree's ID.
+    func addRepository(_ name: String, hidden: Bool = false, status: RepoStatus = .ok) async throws -> UUID {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-phone-bridge-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(name).path
+        let repo = try await db.repos.create(path: path, displayName: name, defaultBranch: "main")
+        if hidden {
+            try await db.repos.setHidden(id: repo.id, hidden: true)
+        }
+        if status != .ok {
+            try await db.repos.updateStatus(id: repo.id, status: status)
+        }
+        let main = try await db.worktrees.createMain(repoID: repo.id, name: name, branch: "main", path: path,
+                                                     tmuxServer: "tbd-\(name)")
+        return main.id
+    }
+
+    /// Lets everything the test held go, so `stop()` has nothing to wait on.
+    func releaseHolds() async {
+        holdingTransport?.release()
+        await info.release()
+    }
 }
 
 /// Builds a bridge on a fake relay, an in-memory database and a key file in a
@@ -192,8 +245,11 @@ private struct PhoneBridgeHarness: Sendable {
 /// - `installRecorder`: false leaves the bridge's stub app handler in place.
 /// - `mainWorktree`: true adds one repository with a main worktree, where the
 ///   pairing notification goes.
+/// - `holdSends`: true puts a ``HoldingTransport`` between the bridge and the
+///   relay, as `holdingTransport`.
 private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress, devices: Int = 0,
                         keyFile: KeyFile = .present, installRecorder: Bool = true, mainWorktree: Bool = false,
+                        holdSends: Bool = false,
                         _ body: (PhoneBridgeHarness) async throws -> Void) async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("tbd-phone-bridge-\(UUID().uuidString)", isDirectory: true)
@@ -236,26 +292,36 @@ private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress, 
     }
 
     let relay = FakeRelay()
+    let holdingTransport = holdSends ? HoldingTransport(relay: relay) : nil
+    let transport: any RelayTransport
+    if let holdingTransport {
+        transport = holdingTransport
+    } else {
+        transport = relay
+    }
     let info = FakeRelayInfo()
     let app = RecordingPhoneApp()
     let deltas = FireRecorder<StateDelta>()
     let clock = EventDrivenTestClock()
     let bridge = PhoneBridge(
-        db: db, keyStore: LaptopKeyStore(path: keyPath, now: dates.provider), transport: relay, infoClient: info,
+        db: db, keyStore: LaptopKeyStore(path: keyPath, now: dates.provider), transport: transport, infoClient: info,
         laptopName: { "acme-laptop" }, broadcast: { deltas.record($0) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
     if installRecorder {
         await bridge.setAppHandler(app)
     }
     let harness = PhoneBridgeHarness(
-        db: db, keyPath: keyPath, laptopPublicKey: laptopPublicKey, relay: relay, info: info, app: app,
-        deltas: deltas, clock: clock, dates: dates, bridge: bridge, phones: phones, mainWorktreeID: mainWorktreeID)
+        db: db, keyPath: keyPath, laptopPublicKey: laptopPublicKey, relay: relay,
+        holdingTransport: holdingTransport, info: info, app: app, deltas: deltas, clock: clock, dates: dates,
+        bridge: bridge, phones: phones, mainWorktreeID: mainWorktreeID)
     do {
         try await body(harness)
     } catch {
+        await harness.releaseHolds()
         await bridge.stop()
         throw error
     }
+    await harness.releaseHolds()
     await bridge.stop()
 }
 
@@ -280,7 +346,9 @@ struct PhoneBridgeTests {
             #expect(links == 0)
             let status = await h.bridge.status()
             #expect(status.enabled == false && status.running == false && status.problem == nil)
-            #expect(status.relay.state == .unknown)
+            // A defined state, never `unknown`, which means one a newer daemon
+            // added: the relay has no answer, because nothing checks it.
+            #expect(status.relay.state == .checking)
             let armed = await watchForSleeper(on: h.clock, upTo: .milliseconds(200))
             #expect(!armed)
         }
@@ -343,6 +411,39 @@ struct PhoneBridgeTests {
             try await h.waitUntil("the relay to show as connected") {
                 await h.bridge.status().relay.state == .connected
             }
+        }
+    }
+
+    @Test func aRecheckOfAnIncompatibleRelayKeepsRefusingPairingUntilItAnswers() async throws {
+        try await withBridge { h in
+            await h.info.answer(with: PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [2]))
+            await h.bridge.reconcile()
+            try await h.waitUntil("the relay to show as incompatible") {
+                await h.bridge.status().relay.state == .incompatible
+            }
+
+            // The relay is redeployed and its address saved again, so the
+            // bridge checks it again; its answer is held, so the check stays
+            // in flight.
+            await h.info.answer(with: currentRelay)
+            await h.info.hold()
+            await h.bridge.reconcile()
+            try await h.waitUntil("the re-check to wait on the relay") { await h.info.heldCalls == 1 }
+            let checking = await h.bridge.status()
+            #expect(checking.relay.state == .checking)
+            // Until the relay answers, it is still the one found unusable: no
+            // offer, so no QR code that the relay would then interrupt.
+            await #expect(throws: PhoneBridgeError.unsupportedRelayAPI([2])) { try await h.bridge.pairStart() }
+            let pairing = await h.bridge.status().pairing
+            #expect(pairing == nil)
+
+            // A usable answer clears the refusal.
+            await h.info.release()
+            try await h.waitUntil("the relay to show as connected") {
+                await h.bridge.status().relay.state == .connected
+            }
+            let offer = try await h.bridge.pairStart()
+            #expect(offer.state == .waitingForPhone)
         }
     }
 
@@ -419,6 +520,41 @@ struct PhoneBridgeTests {
             #expect(h.relay.openLaptopRooms().isEmpty)
             let log = await h.app.log
             #expect(log == ["connected", "disconnected", "revoked:\(paired.device.id)"])
+        }
+    }
+
+    @Test func revokeDeletesTheRowBeforeTheLinkIsTornDown() async throws {
+        try await withBridge(devices: 1, holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            await h.bridge.reconcile()
+            let paired = h.phones[0]
+            let deviceID = paired.device.id
+            let phone = try await h.connectedPhone(paired)
+            try await h.waitUntil("the phone to show as connected") {
+                await h.bridge.status().connectedDeviceIDs == [deviceID]
+            }
+
+            // `revoked` cannot leave, so the revoke waits inside the
+            // connection, with the link still up, until the test releases
+            // it: the flush limit is on the test clock, which never moves.
+            transport.hold()
+            let bridge = h.bridge
+            let revoking = Task { try await bridge.revoke(deviceID: deviceID) }
+            try await h.waitUntil("`revoked` to reach the socket") { transport.heldSends == 1 }
+            #expect(h.relay.laptopPresent(room: paired.device.roomID))
+            let row = try await h.db.phoneDevices.device(id: deviceID)
+            #expect(row == nil)
+
+            transport.release()
+            try await revoking.value
+            let message = try await phone.next()
+            #expect(message["type"] as? String == "revoked")
+            let links = await h.bridge.linkCount
+            #expect(links == 0)
+            let log = await h.app.log
+            #expect(log == ["connected", "disconnected", "revoked:\(deviceID)"])
         }
     }
 
@@ -635,6 +771,99 @@ struct PhoneBridgeTests {
         }
     }
 
+    @Test func thePairingNotificationSkipsHiddenRepositoriesAndPrefersHealthyOnes() async throws {
+        try await withBridge { h in
+            // Listed in this order; each has a main worktree.
+            _ = try await h.addRepository("acme-hidden", hidden: true)
+            _ = try await h.addRepository("acme-missing", status: .missing)
+            let healthy = try await h.addRepository("acme-healthy")
+            await h.bridge.reconcile()
+            _ = try await h.pairAPhone(named: "iPhone")
+            let summary = try await h.db.notifications.unreadSummaryByWorktree()
+            #expect(Array(summary.keys) == [healthy])
+            let posted = h.notificationDeltas.map(\.worktreeID)
+            #expect(posted == [healthy])
+        }
+    }
+
+    @Test func withNoHealthyRepositoryThePairingNotificationFallsBackToAShownOne() async throws {
+        try await withBridge { h in
+            _ = try await h.addRepository("acme-hidden", hidden: true)
+            let missing = try await h.addRepository("acme-missing", status: .missing)
+            await h.bridge.reconcile()
+            _ = try await h.pairAPhone(named: "iPhone")
+            let summary = try await h.db.notifications.unreadSummaryByWorktree()
+            #expect(Array(summary.keys) == [missing])
+            let posted = h.notificationDeltas.map(\.worktreeID)
+            #expect(posted == [missing])
+        }
+    }
+
+    @Test func aPairingWithNoRepositoryPostsNothingAndAllowStillSucceeds() async throws {
+        try await withBridge { h in
+            await h.bridge.reconcile()
+            let paired = try await h.pairAPhone(named: "iPhone")
+            #expect(paired.device.name == "iPhone")
+            let rowIDs = try await h.db.phoneDevices.list().map(\.id)
+            #expect(rowIDs == [paired.device.id])
+            let summary = try await h.db.notifications.unreadSummaryByWorktree()
+            #expect(summary.isEmpty)
+            #expect(h.notificationDeltas.isEmpty)
+            // The bridge goes on to open the new phone's room.
+            let room = paired.device.roomID
+            try await h.waitUntil("the laptop to open the phone's room") { h.relay.laptopPresent(room: room) }
+        }
+    }
+
+    @Test func anAllowThatLandsAfterStopStoresAndNotifiesButOpensNoLink() async throws {
+        try await withBridge(mainWorktree: true, holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            let worktreeID = try #require(h.mainWorktreeID)
+            await h.bridge.reconcile()
+            let (offer, link) = try await h.startPairing()
+            let phone = try await h.joinedPairingPhone(link)
+            try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForPairingState(.awaitingApproval)
+
+            // Allow stores the row, then waits for `paired` to leave, which
+            // the transport holds: the flush limit is on the test clock,
+            // which never moves.
+            transport.hold()
+            let bridge = h.bridge
+            let offerID = offer.offerID
+            let allowing = Task { try await bridge.pairAllow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+
+            // TBD stops while that Allow is still in progress. The commit
+            // cannot finish until the release below, so the Allow's
+            // `onPaired` runs only after `stop()` has stopped everything
+            // and is waiting for that commit.
+            let stopping = Task { await bridge.stop() }
+            try await h.waitUntil("the bridge to stop") { await bridge.status().running == false }
+            transport.release()
+            let device = try await allowing.value
+            await stopping.value
+
+            let row = try await h.db.phoneDevices.device(id: device.id)
+            #expect(row?.name == "iPhone")
+            let unread = try await h.db.notifications.unread(worktreeID: worktreeID)
+            #expect(unread.count == 1)
+            let message = try #require(unread.first?.message)
+            #expect(message == PhoneBridge.pairingNotice(deviceName: "iPhone"))
+            #expect(h.notificationDeltas.count == 1)
+            // The reconcile `onPaired` makes changes nothing after `stop()`.
+            let links = await bridge.linkCount
+            #expect(links == 0)
+            let room = device.roomID
+            let openedTheRoom = h.relay.connectAttempts.contains { $0.url.path.hasSuffix(room) }
+            #expect(!openedTheRoom)
+            let status = await bridge.status()
+            #expect(status.running == false)
+        }
+    }
+
     // MARK: Restarts and the key file
 
     @Test func changingTheRelayURLRestartsEveryLink() async throws {
@@ -762,7 +991,7 @@ struct PhoneBridgeTests {
                         state: .connected, version: "dev"),
     ]
 
-    @Test(arguments: relayStatusCases)
+    @Test(arguments: PhoneBridgeTests.relayStatusCases)
     func relayStatusDerivation(_ c: RelayStatusCase) {
         let status = PhoneBridge.relayStatus(relayURL: c.relayURL, check: c.check, linksOpen: c.linksOpen,
                                              linksFailing: c.linksFailing)
@@ -833,7 +1062,8 @@ struct PhoneBridgeTests {
             .denied,
             .expired,
             .interrupted(reason: "the phone left before Allow"),
-            .pairingNoticeSkipped,
+            .pairingNoticeSkipped(reason: "no repository"),
+            .pairingNoticeSkipped(reason: "no shown repository has a main worktree"),
             .handshakeRefused(reason: "the first message did not decrypt", deviceID: nil),
             .handshakeRefused(reason: "an unknown phone key", deviceID: id),
             .allowed(name: name, deviceID: id),
@@ -860,6 +1090,8 @@ struct PhoneBridgeTests {
             }
         }
         #expect(PhoneBridgeLog.message(.started(devices: 1)) == "Phone control started with 1 paired phone")
+        #expect(PhoneBridgeLog.message(.pairingNoticeSkipped(reason: "no shown repository has a main worktree"))
+            == "pairing notification skipped: no shown repository has a main worktree")
     }
 
     @Test func recordLevels() {

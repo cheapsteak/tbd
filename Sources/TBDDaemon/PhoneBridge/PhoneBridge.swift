@@ -190,8 +190,11 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// The paired phones' links, by device ID.
     private var links: [UUID: Link] = [:]
     private var check: RelayCheck?
-    /// The error behind `check` while it is `.incompatible`; `pairStart`
-    /// throws it.
+    /// The error of the relay check's last `.incompatible` answer;
+    /// `pairStart` throws it. It stands while a re-check is in flight and
+    /// when one fails, and clears only when the relay answers as usable or
+    /// the bridge stops or moves to another relay, so no pairing slips
+    /// through the window of a re-check.
     private var refusal: PhoneBridgeError?
     private var checkTask: Task<Void, Never>?
     /// Why the bridge is not running although phone control is on and a
@@ -251,18 +254,14 @@ actor PhoneBridge: PhoneBridgeControlling {
         let pairing = await running?.pairing.status
         // Everything below reads the bridge's state in one turn.
         let relayURL = config?.phoneRelayURL
-        let relay: PhoneRelayStatus
-        if running != nil {
-            let states = links.values.map(\.isOpen)
-            relay = Self.relayStatus(
-                relayURL: relayURL, check: check,
-                linksOpen: states.filter { $0 == true }.count,
-                linksFailing: states.filter { $0 == false }.count)
-        } else {
-            // Nothing checks a relay while the bridge is stopped.
-            relay = PhoneRelayStatus(state: relayURL == nil ? .notSetUp : .unknown,
-                                     bundledVersion: PhoneBridgeConstants.bundledRelayVersion)
-        }
+        // A stopped bridge checks nothing and runs no link, so its relay has
+        // no answer: `checking`, which `running == false` qualifies. Never
+        // `unknown`, which means a state a newer daemon added.
+        let states = links.values.map(\.isOpen)
+        let relay = Self.relayStatus(
+            relayURL: relayURL, check: running == nil ? nil : check,
+            linksOpen: states.filter { $0 == true }.count,
+            linksFailing: states.filter { $0 == false }.count)
         let connected = links.filter { $0.value.isConnected }.map { $0.key }.sorted { $0.uuidString < $1.uuidString }
         return PhoneStatusResult(
             enabled: config?.phoneControlEnabled ?? Config.phoneControlEnabledDefault,
@@ -273,7 +272,8 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// Starts a pairing offer. Throws `.disabled` with phone control off,
     /// `.relayNotSetUp` with no relay, `.notRunning` when the bridge cannot
-    /// run, and the relay check's error when the relay is not usable.
+    /// run, and the relay check's error when the relay was last found not
+    /// usable and no check has found it usable since.
     func pairStart() async throws -> PhonePairingStatus {
         try await serialized { await self.pairStartNow() }.get()
     }
@@ -317,7 +317,8 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// The relay's status for the Phone pane, from the saved relay URL, the
     /// relay check's latest answer, and how many links have their room
-    /// socket open or are failing to open it.
+    /// socket open or are failing to open it. With no answer, as always
+    /// while the bridge is stopped, the state is `checking`.
     static func relayStatus(relayURL: String?, check: RelayCheck?, linksOpen: Int, linksFailing: Int)
         -> PhoneRelayStatus {
         let bundled = PhoneBridgeConstants.bundledRelayVersion
@@ -458,7 +459,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             guard let current = running else {
                 throw PhoneBridgeError.notRunning(problem ?? (isStopped ? "TBD is stopping." : "it has not started."))
             }
-            if case .incompatible = check, let refusal {
+            if let refusal {
                 throw refusal
             }
             let loaderURL = try PhoneURLValidation.loader(config.resolvedPhoneLoaderURL)
@@ -565,19 +566,24 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// Posts `pairingNotice` as an `.attentionNeeded` TBD notification. A
     /// notification belongs to a worktree and a pairing has none, so it goes
-    /// on the main worktree of the first repository, in the order the
-    /// database lists them, that has one. With none, nothing is posted.
+    /// on a main worktree: hidden repositories are skipped, and healthy
+    /// (`.ok`) ones come before the rest, each group in the order the
+    /// database lists them. With no such worktree, nothing is posted.
     private func postPairingNotice(for device: PhoneDevice) async {
         do {
+            let repos = try await db.repos.list()
+            let shown = repos.filter { !$0.hidden }
+            let candidates = shown.filter { $0.status == .ok } + shown.filter { $0.status != .ok }
             var target: UUID?
-            for repo in try await db.repos.list() {
+            for repo in candidates {
                 if let main = try await db.worktrees.list(repoID: repo.id, status: .main).first {
                     target = main.id
                     break
                 }
             }
             guard let worktreeID = target else {
-                PhoneBridgeLog.record(.pairingNoticeSkipped)
+                PhoneBridgeLog.record(.pairingNoticeSkipped(
+                    reason: repos.isEmpty ? "no repository" : "no shown repository has a main worktree"))
                 return
             }
             let notification = try await db.notifications.create(
@@ -619,7 +625,7 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// Checks the relay in a task of its own. The task first waits for the
     /// one it replaces, so awaiting `checkTask` awaits every check started.
     private func startRelayCheck(_ relayURL: URL) {
-        setCheck(.inFlight, refusal: nil, for: relayURL)
+        setCheck(.inFlight, for: relayURL)
         let previous = checkTask
         previous?.cancel()
         checkTask = Task {
@@ -637,26 +643,36 @@ actor PhoneBridge: PhoneBridgeControlling {
             return .retryLater("the relay check was cancelled")
         } catch {
             let detail = error.localizedDescription
-            setCheck(.failed(detail), refusal: nil, for: relayURL)
+            setCheck(.failed(detail), for: relayURL)
             return .retryLater(detail)
         }
         do {
             try RelayCompatibility.check(info)
         } catch {
             let detail = error.localizedDescription
-            setCheck(.incompatible(detail), refusal: error as? PhoneBridgeError, for: relayURL)
+            setCheck(.incompatible(detail), for: relayURL, refusal: error as? PhoneBridgeError)
             PhoneBridgeLog.record(.relayRefused(reason: detail))
             return .refuse(detail)
         }
-        setCheck(.ok(info), refusal: nil, for: relayURL)
+        setCheck(.ok(info), for: relayURL)
         return .proceed
     }
 
     /// Keeps `answer` as the relay check, unless the bridge has stopped or
-    /// moved to another relay since the check began.
-    private func setCheck(_ answer: RelayCheck, refusal: PhoneBridgeError?, for relayURL: URL) {
+    /// moved to another relay since the check began. An `.incompatible`
+    /// answer keeps `newRefusal` as the refusal; only an `.ok` answer clears
+    /// it. A check in flight, or one that failed, leaves the refusal as it
+    /// was: it says nothing about whether the relay is usable now.
+    private func setCheck(_ answer: RelayCheck, for relayURL: URL, refusal newRefusal: PhoneBridgeError? = nil) {
         guard running?.relayURL == relayURL else { return }
-        self.refusal = refusal
+        switch answer {
+        case .ok:
+            refusal = nil
+        case .incompatible:
+            refusal = newRefusal
+        case .inFlight, .failed:
+            break
+        }
         guard check != answer else { return }
         check = answer
         broadcast(.phoneStatusChanged)

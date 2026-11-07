@@ -32,6 +32,20 @@ struct PhonePresentationTests {
             == "Relay update available (relay 0.9.0, this TBD expects 1.0.0)")
     }
 
+    @Test func aStoppedBridgeSaysItsRelayIsNotChecked() {
+        #expect(PhonePresentation.relayLine(for: status(enabled: false, running: false, relayState: .checking))
+            == "Not checked while phone control is off")
+        #expect(PhonePresentation.relayLine(for: status(running: false, problem: "The laptop key file is missing.",
+                                                        relayState: .checking))
+            == "Not checked while phone control is not running")
+        // A daemon without a bridge reports `unknown`; it reads the same.
+        #expect(PhonePresentation.relayLine(for: status(running: false, relayState: .unknown))
+            == "Not checked while phone control is not running")
+        #expect(PhonePresentation.relayLine(for: status(relayURL: nil, running: false, relayState: .notSetUp)) == nil)
+        #expect(PhonePresentation.relayLine(for: status()) == "Connected (relay 1.0.0)")
+        #expect(PhonePresentation.relayLine(for: status(relayState: .checking)) == "Checking…")
+    }
+
     @Test func pairingNeedsFlagRelayAndARunningBridge() {
         let blocked: [PhoneStatusResult?] = [
             nil,

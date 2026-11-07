@@ -108,15 +108,15 @@ struct PhoneSettingsView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            if let relay = appState.phoneStatus?.relay, appState.phoneStatus?.relayURL != nil {
-                Text(PhonePresentation.relayLine(relay))
+            if let status = appState.phoneStatus, let line = PhonePresentation.relayLine(for: status) {
+                Text(line)
                     .font(.caption)
-                    .foregroundStyle(relay.state == .incompatible ? Color.red : Color.secondary)
+                    .foregroundStyle(status.relay.state == .incompatible ? Color.red : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if relay.state == .incompatible {
+                if status.relay.state == .incompatible {
                     Link("Read the Guide", destination: PhonePresentation.guideURL)
                         .font(.caption)
-                } else if relay.state == .updateAvailable {
+                } else if status.relay.state == .updateAvailable {
                     Link("How to update", destination: PhonePresentation.guideURL)
                         .font(.caption)
                 }

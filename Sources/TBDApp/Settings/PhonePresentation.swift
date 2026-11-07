@@ -21,7 +21,20 @@ enum PhonePresentation {
         "Paste it below",
     ]
 
-    /// The line under the relay URL.
+    /// The line under the relay URL for `status`, or nil with no relay set.
+    /// The relay's state means something only while the bridge runs: a
+    /// stopped bridge checks nothing, so the line says so instead.
+    static func relayLine(for status: PhoneStatusResult) -> String? {
+        guard status.relayURL != nil else { return nil }
+        guard status.running else {
+            return status.enabled
+                ? "Not checked while phone control is not running"
+                : "Not checked while phone control is off"
+        }
+        return relayLine(status.relay)
+    }
+
+    /// The line under the relay URL while the bridge runs.
     static func relayLine(_ relay: PhoneRelayStatus) -> String {
         switch relay.state {
         case .notSetUp:

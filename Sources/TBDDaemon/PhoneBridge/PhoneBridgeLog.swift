@@ -2,8 +2,14 @@ import Foundation
 import os
 
 /// The phone bridge's record: what it logs under `phone-bridge` and at which
-/// level (spec section 12). Every file in `PhoneBridge/` logs through
-/// ``record(_:)``, so the rule below holds in one place.
+/// level (spec section 12). `PhoneBridge`, `PairingService` and
+/// `PhoneConnection`, the files that see pairings and phones, log only
+/// through ``record(_:)``, so the rule below holds for them in one place.
+///
+/// `RelayLink`, `LoaderHandler` and `LaptopKeyStore` keep loggers of their
+/// own in the same category, for socket, loader-message and key-file events
+/// that know no phone. Their messages carry fixed text, counts, close codes
+/// and error descriptions only.
 ///
 /// **What a record never carries.** No pairing secret, pairing link, key
 /// bytes, confirmation code or message content, and no phone name before the
@@ -27,8 +33,10 @@ enum PhoneBridgeLog {
         case denied
         case expired
         case interrupted(reason: String)
-        /// The pairing notification had no worktree to sit on.
-        case pairingNoticeSkipped
+        /// The pairing notification had no worktree to sit on. `reason` is a
+        /// fixed phrase: no repository at all, or no shown repository with a
+        /// main worktree.
+        case pairingNoticeSkipped(reason: String)
         /// A binary frame did not lead to a channel. `deviceID` is nil in
         /// pairing and the paired phone's ID on its own room.
         case handshakeRefused(reason: String, deviceID: UUID?)
@@ -85,8 +93,8 @@ enum PhoneBridgeLog {
             return "Phone pairing offer expired"
         case .interrupted(let reason):
             return "Phone pairing interrupted: \(reason)"
-        case .pairingNoticeSkipped:
-            return "pairing notification skipped: no repository"
+        case .pairingNoticeSkipped(let reason):
+            return "pairing notification skipped: \(reason)"
         case .handshakeRefused(let reason, let deviceID):
             guard let deviceID else { return "Refused a phone pairing handshake: \(reason)" }
             return "Refused a phone handshake for device \(deviceID): \(reason)"
