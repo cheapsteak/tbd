@@ -21,10 +21,19 @@ import Foundation
 /// let a repeat start a second one. The timer sleeps on the injected clock.
 ///
 /// **The per-device limit evicts finished entries only.** When a new entry
-/// takes a device past `perDeviceLimit`, its oldest finished entries are
-/// forgotten, oldest first, until it is back at the limit. An entry still in
-/// flight is never evicted, for the same reason it never expires, so a device
-/// holds more than the limit while more than that many of its runs are going.
+/// takes a device past `perDeviceLimit`, or a run finishes while the device is
+/// past it, its oldest finished entries are forgotten, oldest first, until it
+/// is back at the limit. An entry still in flight is never evicted, for the
+/// same reason it never expires, so a device holds more than the limit while
+/// more than that many of its runs are going.
+///
+/// **Runs in flight are capped per device.** Since an entry in flight is never
+/// evicted and never expires, `perDeviceLimit` bounds nothing while runs are
+/// going. So a device may have at most `inFlightLimit` runs going at once. A
+/// call with a new request ID while the device is at that cap runs nothing,
+/// stores nothing and returns the caller's refusal; a repeat of an ID already
+/// in flight still joins its run, and a repeat of a finished one still gets
+/// its reply.
 actor PhoneRequestMemory {
     private enum State {
         case inFlight(Task<Data, Never>)
@@ -49,10 +58,13 @@ actor PhoneRequestMemory {
         var entries: [String: Entry] = [:]
         /// Request IDs, oldest first.
         var order: [String] = []
+        /// How many of `entries` are in flight.
+        var inFlight = 0
     }
 
     private let retention: Duration
     private let perDeviceLimit: Int
+    private let inFlightLimit: Int
     private let clock: any Clock<Duration>
     private var devices: [UUID: DeviceEntries] = [:]
     private var nextEntryID: UInt64 = 0
@@ -64,19 +76,24 @@ actor PhoneRequestMemory {
 
     init(retention: Duration = PhoneAppConstants.requestMemory,
          perDeviceLimit: Int = PhoneAppConstants.requestMemoryPerDevice,
+         inFlightLimit: Int = PhoneAppConstants.requestsInFlightPerDevice,
          clock: any Clock<Duration> = ContinuousClock()) {
         self.retention = retention
         self.perDeviceLimit = perDeviceLimit
+        self.inFlightLimit = inFlightLimit
         self.clock = clock
     }
 
     /// Runs `work` once per (deviceID, requestID) within `retention`; a repeat, in flight or done,
     /// returns the first run's reply bytes and does not call `work`.
     ///
-    /// `repeated` is false only for the call that ran `work`. The entry is
-    /// stored before this method first suspends, so two calls that interleave
-    /// on the actor cannot both find the pair unknown.
+    /// `repeated` is false for the call that ran `work`, and for a call
+    /// refused at the in-flight cap, which returns `refusal()` without running
+    /// `work` or storing anything. The entry is stored before this method first
+    /// suspends, so two calls that interleave on the actor cannot both find the
+    /// pair unknown.
     func reply(deviceID: UUID, requestID: String,
+               refusal: @Sendable () -> Data,
                work: @escaping @Sendable () async -> Data) async -> (reply: Data, repeated: Bool) {
         if let entry = devices[deviceID]?.entries[requestID] {
             switch entry.state {
@@ -88,6 +105,10 @@ actor PhoneRequestMemory {
                 let reply = await run.value
                 return (reply, true)
             }
+        }
+
+        guard (devices[deviceID]?.inFlight ?? 0) < inFlightLimit else {
+            return (refusal(), false)
         }
 
         let entryID = nextEntryID
@@ -132,17 +153,24 @@ actor PhoneRequestMemory {
 
     // MARK: - Entries
 
-    /// Stores a new entry and evicts the device's oldest finished entries
-    /// while it holds more than `perDeviceLimit`.
+    /// Stores a new entry in flight and evicts the device's oldest finished
+    /// entries while it holds more than `perDeviceLimit`.
     private func insert(_ entry: Entry, deviceID: UUID, requestID: String) {
         var device = devices[deviceID] ?? DeviceEntries()
         device.entries[requestID] = entry
         device.order.append(requestID)
+        device.inFlight += 1
+        evictPastLimit(&device)
+        devices[deviceID] = device
+    }
+
+    /// Forgets `device`'s oldest finished entries, oldest first, while it
+    /// holds more than `perDeviceLimit`, cancelling their retention timers.
+    private func evictPastLimit(_ device: inout DeviceEntries) {
         while device.entries.count > perDeviceLimit, let index = Self.oldestDone(in: device) {
             let evicted = device.order.remove(at: index)
             device.entries.removeValue(forKey: evicted)?.expiry?.cancel()
         }
-        devices[deviceID] = device
     }
 
     /// The position in `order` of the oldest finished entry, or nil when
@@ -151,14 +179,18 @@ actor PhoneRequestMemory {
         device.order.firstIndex { device.entries[$0]?.state.isDone == true }
     }
 
-    /// Stores a finished run's reply and starts its retention timer. Does
-    /// nothing when the entry is gone, which only ``forget(deviceID:)`` does
-    /// to an entry in flight.
+    /// Stores a finished run's reply, starts its retention timer, and evicts
+    /// the device's oldest finished entries while it is past `perDeviceLimit`,
+    /// so a device a burst took past the limit shrinks back as its runs
+    /// finish. Does nothing when the entry is gone, which only
+    /// ``forget(deviceID:)`` does to an entry in flight.
     private func finish(deviceID: UUID, requestID: String, entryID: UInt64, reply: Data) {
-        guard devices[deviceID]?.entries[requestID]?.id == entryID else { return }
-        devices[deviceID]?.entries[requestID]?.state = .done(reply)
-        devices[deviceID]?.entries[requestID]?.expiry = armExpiry(
-            deviceID: deviceID, requestID: requestID, entryID: entryID)
+        guard var device = devices[deviceID], device.entries[requestID]?.id == entryID else { return }
+        device.inFlight -= 1
+        device.entries[requestID]?.state = .done(reply)
+        device.entries[requestID]?.expiry = armExpiry(deviceID: deviceID, requestID: requestID, entryID: entryID)
+        evictPastLimit(&device)
+        devices[deviceID] = device
     }
 
     private func armExpiry(deviceID: UUID, requestID: String, entryID: UInt64) -> Task<Void, Never> {

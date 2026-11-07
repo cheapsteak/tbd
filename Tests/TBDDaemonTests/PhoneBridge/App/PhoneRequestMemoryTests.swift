@@ -66,6 +66,19 @@ private func job(_ name: String, tally: RunTally, gate: RunGate? = nil) -> @Send
     }
 }
 
+/// The refusal every test below the in-flight cap passes, so a call refused
+/// by mistake shows up as these bytes.
+private let capRefusal = Data("refused at the cap".utf8)
+
+private extension PhoneRequestMemory {
+    /// `reply(deviceID:requestID:refusal:work:)` with the shared refusal, for
+    /// the tests that stay below the in-flight cap.
+    func reply(deviceID: UUID, requestID: String,
+               work: @escaping @Sendable () async -> Data) async -> (reply: Data, repeated: Bool) {
+        await reply(deviceID: deviceID, requestID: requestID, refusal: { capRefusal }, work: work)
+    }
+}
+
 /// Tier 1: an actor, a virtual clock and in-memory closures. Nothing touches
 /// the disk or the network.
 @Suite("Phone request memory", .clockDriven)
@@ -104,6 +117,7 @@ struct PhoneRequestMemoryTests {
         let memory = PhoneRequestMemory(clock: EventDrivenTestClock())
         let tally = RunTally()
         let gate = RunGate()
+        defer { gate.open() }
         let phone = self.phone
 
         let first = Task { await memory.reply(deviceID: phone, requestID: "r1", work: job("send", tally: tally, gate: gate)) }
@@ -131,6 +145,7 @@ struct PhoneRequestMemoryTests {
         let memory = PhoneRequestMemory(clock: EventDrivenTestClock())
         let tally = RunTally()
         let gate = RunGate()
+        defer { gate.open() }
         let phone = self.phone
 
         let first = Task { await memory.reply(deviceID: phone, requestID: "r1", work: job("send", tally: tally, gate: gate)) }
@@ -188,6 +203,7 @@ struct PhoneRequestMemoryTests {
         let memory = PhoneRequestMemory(clock: clock)
         let tally = RunTally()
         let gate = RunGate()
+        defer { gate.open() }
         let phone = self.phone
 
         let first = Task { await memory.reply(deviceID: phone, requestID: "r1", work: job("send", tally: tally, gate: gate)) }
@@ -231,6 +247,7 @@ struct PhoneRequestMemoryTests {
         let memory = PhoneRequestMemory(perDeviceLimit: 2, clock: clock)
         let tally = RunTally()
         let gate = RunGate()
+        defer { gate.open() }
         let phone = self.phone
 
         _ = await memory.reply(deviceID: phone, requestID: "a", work: job("a", tally: tally))
@@ -259,11 +276,13 @@ struct PhoneRequestMemoryTests {
 
     /// An entry in flight is never evicted, however far past the limit the
     /// device goes: evicting it would let a repeat start a second run while
-    /// the first is still going. The limit takes finished entries instead.
+    /// the first is still going. The limit takes finished entries instead:
+    /// with A filling the limit of 1, B and C are each evicted as they finish.
     @Test func anEntryInFlightIsNeverEvicted() async throws {
         let memory = PhoneRequestMemory(perDeviceLimit: 1, clock: EventDrivenTestClock())
         let tally = RunTally()
         let gate = RunGate()
+        defer { gate.open() }
         let phone = self.phone
 
         let a = Task { await memory.reply(deviceID: phone, requestID: "a", work: job("a", tally: tally, gate: gate)) }
@@ -272,7 +291,7 @@ struct PhoneRequestMemoryTests {
         _ = await memory.reply(deviceID: phone, requestID: "c", work: job("c", tally: tally))
         #expect(await memory.remembers(deviceID: phone, requestID: "a"))
         #expect(await !memory.remembers(deviceID: phone, requestID: "b"))
-        #expect(await memory.remembers(deviceID: phone, requestID: "c"))
+        #expect(await !memory.remembers(deviceID: phone, requestID: "c"))
 
         let aAgain = Task { await memory.reply(deviceID: phone, requestID: "a", work: job("a", tally: tally, gate: gate)) }
         try await waitUntil("the repeat to join A's run") { await memory.waitingRepeats == 1 }
@@ -293,6 +312,7 @@ struct PhoneRequestMemoryTests {
         let memory = PhoneRequestMemory(clock: clock)
         let tally = RunTally()
         let gate = RunGate()
+        defer { gate.open() }
         let phone = self.phone
         let other = UUID()
 
@@ -307,6 +327,11 @@ struct PhoneRequestMemoryTests {
         await memory.forget(deviceID: phone)
         // Cancelling a sleeping timer takes it off the clock at once.
         #expect(clock.sleeperCount == 1)
+        // Waited for before the run's value, so a forget that cancels nothing
+        // fails here instead of hanging on the gate.
+        try await waitUntil("the run in flight to see its cancellation") {
+            await tally.count("flight saw cancellation") == 1
+        }
         let cancelled = await inFlight.value
         #expect(cancelled.reply == Data("flight cancelled".utf8))
         #expect(!cancelled.repeated)
@@ -320,8 +345,96 @@ struct PhoneRequestMemoryTests {
         let again = await memory.reply(deviceID: phone, requestID: "done", work: job("done", tally: tally))
         #expect(!again.repeated)
         #expect(await tally.count("done") == 2)
-        gate.open()
         await memory.forget(deviceID: phone)
         await memory.forget(deviceID: other)
+    }
+
+    /// A device at the in-flight cap gets the caller's refusal for a new
+    /// request ID: nothing runs and nothing is stored. A repeat of an ID in
+    /// flight still joins its run, another device is not held back, and a
+    /// finished run frees a place.
+    @Test func aNewRequestAtTheInFlightCapIsRefused() async throws {
+        let memory = PhoneRequestMemory(inFlightLimit: 2, clock: EventDrivenTestClock())
+        let tally = RunTally()
+        let gate = RunGate()
+        defer { gate.open() }
+        let phone = self.phone
+        let other = UUID()
+        let refusal = Data("too many".utf8)
+
+        let a = Task { await memory.reply(deviceID: phone, requestID: "a", work: job("a", tally: tally, gate: gate)) }
+        let b = Task { await memory.reply(deviceID: phone, requestID: "b", work: job("b", tally: tally, gate: gate)) }
+        try await waitUntil("A's and B's runs to start") {
+            let started = [await tally.count("a"), await tally.count("b")]
+            return started == [1, 1]
+        }
+
+        let c = await memory.reply(deviceID: phone, requestID: "c", refusal: { refusal }, work: job("c", tally: tally))
+        #expect(c.reply == refusal)
+        #expect(!c.repeated)
+        #expect(await tally.count("c") == 0)
+        #expect(await !memory.remembers(deviceID: phone, requestID: "c"))
+
+        let theirs = await memory.reply(deviceID: other, requestID: "c", refusal: { refusal }, work: job("theirs", tally: tally))
+        #expect(theirs.reply == Data("theirs run 1".utf8))
+
+        let aAgain = Task {
+            await memory.reply(deviceID: phone, requestID: "a", refusal: { refusal }, work: job("a", tally: tally, gate: gate))
+        }
+        try await waitUntil("the repeat to join A's run") { await memory.waitingRepeats == 1 }
+        gate.open()
+        let first = await a.value
+        let repeated = await aAgain.value
+        _ = await b.value
+        #expect(repeated.repeated)
+        #expect(repeated.reply == first.reply)
+        #expect(await tally.count("a") == 1)
+
+        let cAgain = await memory.reply(deviceID: phone, requestID: "c", refusal: { refusal }, work: job("c", tally: tally))
+        #expect(!cAgain.repeated)
+        #expect(cAgain.reply == Data("c run 1".utf8))
+        await memory.forget(deviceID: phone)
+        await memory.forget(deviceID: other)
+    }
+
+    /// Runs in flight can take a device past `perDeviceLimit`, since none of
+    /// them can be evicted. As they finish, the oldest finished entries go
+    /// until the device is back at the limit.
+    @Test func finishingRunsShrinkADeviceBackToTheLimit() async throws {
+        let memory = PhoneRequestMemory(perDeviceLimit: 1, inFlightLimit: 3, clock: EventDrivenTestClock())
+        let tally = RunTally()
+        let gateA = RunGate()
+        defer { gateA.open() }
+        let gateB = RunGate()
+        defer { gateB.open() }
+        let gateC = RunGate()
+        defer { gateC.open() }
+        let phone = self.phone
+
+        let a = Task { await memory.reply(deviceID: phone, requestID: "a", work: job("a", tally: tally, gate: gateA)) }
+        let b = Task { await memory.reply(deviceID: phone, requestID: "b", work: job("b", tally: tally, gate: gateB)) }
+        let c = Task { await memory.reply(deviceID: phone, requestID: "c", work: job("c", tally: tally, gate: gateC)) }
+        try await waitUntil("all three runs to start") {
+            let started = [await tally.count("a"), await tally.count("b"), await tally.count("c")]
+            return started == [1, 1, 1]
+        }
+        #expect(await memory.remembers(deviceID: phone, requestID: "a"))
+        #expect(await memory.remembers(deviceID: phone, requestID: "b"))
+        #expect(await memory.remembers(deviceID: phone, requestID: "c"))
+
+        // Each caller's value arrives after its run's entry is stored.
+        gateA.open()
+        _ = await a.value
+        #expect(await !memory.remembers(deviceID: phone, requestID: "a"))
+        gateB.open()
+        _ = await b.value
+        #expect(await !memory.remembers(deviceID: phone, requestID: "b"))
+        gateC.open()
+        _ = await c.value
+        #expect(await memory.remembers(deviceID: phone, requestID: "c"))
+        let cAgain = await memory.reply(deviceID: phone, requestID: "c", work: job("c", tally: tally))
+        #expect(cAgain.repeated)
+        #expect(await tally.count("c") == 1)
+        await memory.forget(deviceID: phone)
     }
 }

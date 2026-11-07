@@ -40,6 +40,9 @@ enum PhoneAppConstants {
     static let eventRingBytes = 4_194_304
     /// The most request IDs kept for one device.
     static let requestMemoryPerDevice = 1_000
+    /// The most requests one device may have running at once. A new request
+    /// past it is refused, so a phone cannot start runs without bound.
+    static let requestsInFlightPerDevice = 32
     /// The most rows one `sessions.subscribe` snapshot carries.
     static let snapshotMaxRows = 1_000
     /// The most items one first page carries.
