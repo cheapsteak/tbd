@@ -23,13 +23,18 @@ import Foundation
 ///
 /// **Writes poison.** When `writeMessage` throws, the handshake is over, and
 /// every later call throws `invalidState`.
+///
+/// **`finish()` works once.** It hands out the transport, and every later
+/// call throws `invalidState`.
 struct NoiseHandshakeState: Sendable {
     enum Role: Sendable {
         case initiator, responder
     }
 
+    /// `complete` means message 2 is written or read and `finish()` has not
+    /// run; `finished` means it has.
     private enum Phase: Sendable {
-        case initial, afterMessage1, complete, failed
+        case initial, afterMessage1, complete, finished, failed
     }
 
     private enum DiffieHellman: Sendable {
@@ -171,10 +176,16 @@ struct NoiseHandshakeState: Sendable {
     /// The transport and the handshake hash, once message 2 is written or
     /// read. The initiator sends on the first cipher state of `split()` and
     /// the responder on the second.
-    func finish() throws -> (transport: NoiseTransport, handshakeHash: Data) {
+    ///
+    /// It works once: a second transport would have the same keys at nonce
+    /// 0 and reuse AES-GCM nonces, so every later call throws
+    /// `invalidState`, as does a call before message 2. A throw changes
+    /// nothing.
+    mutating func finish() throws -> (transport: NoiseTransport, handshakeHash: Data) {
         guard phase == .complete else {
             throw NoiseError.invalidState
         }
+        phase = .finished
         let ciphers = symmetric.split()
         let transport: NoiseTransport
         switch role {

@@ -241,7 +241,10 @@ struct NoiseHandshakeTests {
         var initiator = try setup.initiator()
 
         // readMessage2 before writeMessage1 is refused and changes nothing.
+        // The phase is checked before the length, so 10 bytes are refused
+        // for the phase, not as too short.
         #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(Data(count: 48)) }
+        #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(Data(count: 10)) }
         let first = try initiator.writeMessage1(payload: Self.devicePayload)
 
         // writeMessage1 twice: the second is refused, and a failed write ends
@@ -262,6 +265,7 @@ struct NoiseHandshakeTests {
         var responder = try setup.responder()
         _ = try responder.readMessage1(first)
         #expect(throws: NoiseError.invalidState) { try responder.readMessage1(first) }
+        #expect(throws: NoiseError.invalidState) { try responder.readMessage1(Data(count: 10)) }
         let second = try responder.writeMessage2(payload: Self.laptopPayload)
         let done = try initiator.readMessage2(second.message)
         #expect(done.handshakeHash == second.handshakeHash)
@@ -275,6 +279,89 @@ struct NoiseHandshakeTests {
         #expect(throws: NoiseError.messageTooLong) { try poisoned.writeMessage1(payload: Data(count: 65_440)) }
         #expect(throws: NoiseError.invalidState) { try poisoned.writeMessage1(payload: Self.devicePayload) }
         #expect(throws: NoiseError.invalidState) { try poisoned.readMessage2(Data(count: 48)) }
+    }
+
+    /// `finish()` hands out the transport once. A second transport would
+    /// have the same keys at nonce 0 and reuse AES-GCM nonces, so a second
+    /// call throws, as does a call before message 2, and a throw changes
+    /// nothing.
+    @Test(arguments: [NoisePattern.ikpsk2, .ik]) func finishIsOneShot(pattern: NoisePattern) throws {
+        let setup = try Setup(pattern: pattern)
+        var initiator = try NoiseHandshakeState.initiator(
+            pattern: pattern,
+            staticKey: setup.initiatorKey,
+            remoteStatic: setup.responderKey.publicKey,
+            psk: setup.psk,
+            prologue: setup.prologue
+        )
+        var responder = try NoiseHandshakeState.responder(
+            pattern: pattern,
+            staticKey: setup.responderKey,
+            psk: setup.psk,
+            prologue: setup.prologue
+        )
+        #expect(throws: NoiseError.invalidState) { try initiator.finish() }
+        let first = try initiator.writeMessage(payload: Self.devicePayload)
+        _ = try responder.readMessage(first)
+        #expect(throws: NoiseError.invalidState) { try responder.finish() }
+        let second = try responder.writeMessage(payload: Self.laptopPayload)
+        _ = try initiator.readMessage(second)
+
+        var laptop = try responder.finish()
+        var phone = try initiator.finish()
+        #expect(phone.handshakeHash == laptop.handshakeHash)
+        #expect(throws: NoiseError.invalidState) { try responder.finish() }
+        #expect(throws: NoiseError.invalidState) { try initiator.finish() }
+
+        // The one transport each side got works.
+        let sealed = try phone.transport.encrypt(Self.devicePayload)
+        let opened = try laptop.transport.decrypt(sealed)
+        #expect(opened == Self.devicePayload)
+    }
+
+    /// Once the handshake completes, each wrapper refuses every call, so
+    /// neither side can get a second transport.
+    @Test(arguments: [NoisePattern.ikpsk2, .ik]) func completedHandshakeRefusesEveryCall(pattern: NoisePattern) throws {
+        let setup = try Setup(pattern: pattern)
+        var initiator = try setup.initiator()
+        var responder = try setup.responder()
+        let first = try initiator.writeMessage1(payload: Self.devicePayload)
+        _ = try responder.readMessage1(first)
+        let second = try responder.writeMessage2(payload: Self.laptopPayload)
+        _ = try initiator.readMessage2(second.message)
+
+        #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(second.message) }
+        #expect(throws: NoiseError.invalidState) { try initiator.writeMessage1(payload: Self.devicePayload) }
+        #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(second.message) }
+        #expect(throws: NoiseError.invalidState) { try responder.readMessage1(first) }
+        #expect(throws: NoiseError.invalidState) { try responder.writeMessage2(payload: Self.laptopPayload) }
+        #expect(throws: NoiseError.invalidState) { try responder.readMessage1(first) }
+    }
+
+    /// Empty payloads give the shortest messages, 96 and 48 bytes, and the
+    /// reads accept them: each minimum length is allowed.
+    @Test(arguments: [NoisePattern.ikpsk2, .ik]) func emptyPayloadsRoundTrip(pattern: NoisePattern) throws {
+        let setup = try Setup(pattern: pattern)
+        var initiator = try setup.initiator()
+        var responder = try setup.responder()
+
+        let first = try initiator.writeMessage1(payload: Data())
+        #expect(first.count == 96)
+        let received = try responder.readMessage1(first)
+        #expect(received.payload.isEmpty)
+        #expect(received.remoteStatic.rawRepresentation == setup.initiatorKey.publicKey.rawRepresentation)
+
+        let second = try responder.writeMessage2(payload: Data())
+        #expect(second.message.count == 48)
+        let done = try initiator.readMessage2(second.message)
+        #expect(done.payload.isEmpty)
+        #expect(done.handshakeHash == second.handshakeHash)
+
+        var phone = done.transport
+        var laptop = second.transport
+        let sealed = try phone.encrypt(Self.devicePayload)
+        let opened = try laptop.decrypt(sealed)
+        #expect(opened == Self.devicePayload)
     }
 
     @Test func pskMustFitPattern() throws {

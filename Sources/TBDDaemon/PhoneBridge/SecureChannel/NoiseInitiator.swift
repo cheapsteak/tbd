@@ -36,8 +36,11 @@ struct NoiseInitiator: Sendable {
 
     /// Reads message 2 and completes the handshake. A throw leaves the
     /// handshake as it was, so the caller can drop a stale frame and still
-    /// read the real message 2.
+    /// read the real message 2. After a success, every call throws
+    /// `invalidState`.
     mutating func readMessage2(_ message: Data) throws -> (payload: Data, transport: NoiseTransport, handshakeHash: Data) {
+        // `finish()` runs on the copy too, so the state changes only when
+        // both succeed.
         var next = state
         let payload = try next.readMessage(message)
         let finished = try next.finish()

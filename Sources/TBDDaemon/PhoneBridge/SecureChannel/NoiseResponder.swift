@@ -45,8 +45,8 @@ struct NoiseResponder: Sendable {
     }
 
     /// Message 2, which carries `payload` encrypted and completes the
-    /// handshake. A throw ends this handshake: every later call throws
-    /// `invalidState`.
+    /// handshake. A throw ends this handshake, and so does a success: every
+    /// later call throws `invalidState`.
     mutating func writeMessage2(payload: Data) throws -> (message: Data, transport: NoiseTransport, handshakeHash: Data) {
         let message = try state.writeMessage(payload: payload)
         let finished = try state.finish()
