@@ -3634,7 +3634,7 @@ extension RPCRouter {
     /// person at the keyboard; an envelope any caller could omit over RPC would
     /// hand every caller the ability to type as a human, which is precisely the
     /// property the envelope exists to provide. So suppression is reachable
-    /// only from inside this file's own send core, by daemon rails that are
+    /// only from inside this file's own send core, by internal rails that are
     /// relaying the operator's own words verbatim — and the act is still
     /// written to the actuation log either way, so the record of who typed what
     /// stays complete.
@@ -3642,9 +3642,11 @@ extension RPCRouter {
         /// The default and the only disposition any RPC can ask for.
         case attached
         /// Deliver the caller's bytes with nothing prepended. Reserved for the
-        /// queued prompt taken at worktree creation, whose text must reach the
-        /// model byte-identical to what the argv path would have delivered
-        /// (design 2026-08-10, "The paste path delivers verbatim").
+        /// two internal rails in `sendOnInternalRail`: the queued prompt taken
+        /// at worktree creation, whose text must reach the model byte-identical
+        /// to what the argv path would have delivered (design 2026-08-10, "The
+        /// paste path delivers verbatim"), and a paired phone's send, which is
+        /// the person's own words as the app's composer send is.
         case suppressed
     }
 
@@ -3771,9 +3773,33 @@ extension RPCRouter {
         }
     }
 
+    /// The send core on an internal rail: the per-terminal lane, then
+    /// `performTerminalSend` with the envelope `.suppressed`.
+    ///
+    /// The caller is the authority, and this function adds none. Every caller
+    /// is daemon code that already knows whose words these are: the queued
+    /// prompt relays what the operator typed at worktree creation, and a paired
+    /// phone relays what its person typed after the bridge verified the
+    /// pairing. `.suppressed` here is the rail disposition `effectiveEnvelope`
+    /// passes straight through, whatever the actor and whatever the request's
+    /// own `envelope` field says. The socket never reaches this function:
+    /// `handleTerminalSend` grants suppression only to the authenticated app.
+    ///
+    /// Everything else in the send core applies unchanged: the shape check,
+    /// the transport rails, the opt-in awaiting-input gate when
+    /// `params.gateOnAwaitingInput` asks for it, the pane consultation and the
+    /// actuation row, which records `actor`.
+    private func sendOnInternalRail(
+        _ params: TerminalSendParams, actor: ActuationActor
+    ) async throws -> RPCResponse {
+        try await terminalSendSerializer.run(terminalID: params.terminalID) {
+            try await self.performTerminalSend(params, actor: actor, envelope: .suppressed)
+        }
+    }
+
     /// Paste the operator's own words into an agent with no `<tbd-dispatch/>`
-    /// envelope — the queued-prompt paste path, and the only caller of
-    /// `.suppressed`.
+    /// envelope — the queued-prompt paste path, one of the two internal rails
+    /// that send `.suppressed` (see `sendOnInternalRail`).
     ///
     /// Reuses the send core rather than reaching for tmux directly, so the pane
     /// consultation, the per-terminal serializer lane and the actuation row all
@@ -3783,11 +3809,8 @@ extension RPCRouter {
     ) async -> Bool {
         let params = TerminalSendParams(terminalID: terminalID, text: text, submit: submit)
         do {
-            let response = try await terminalSendSerializer.run(terminalID: terminalID) {
-                try await self.performTerminalSend(
-                    params, actor: .daemon(rail: ActuationRail.queuedPrompt),
-                    envelope: .suppressed)
-            }
+            let response = try await sendOnInternalRail(
+                params, actor: .daemon(rail: ActuationRail.queuedPrompt))
             return response.success
         } catch {
             logger.warning("""
@@ -3796,6 +3819,21 @@ extension RPCRouter {
                 """)
             return false
         }
+    }
+
+    /// A message a person typed on a paired phone, delivered with no
+    /// `<tbd-dispatch/>` envelope, as the app's own composer send is.
+    ///
+    /// For the phone bridge only, which calls it after the phone's channel has
+    /// verified its pairing, with the device ID from that verified peer. It
+    /// adds no check of its own (see `sendOnInternalRail`). The caller sets
+    /// `params.gateOnAwaitingInput` to refuse a send into an open prompt, and
+    /// the send core's existing gate does the refusing. The actuation row
+    /// records `.phone(deviceID:)`.
+    func sendFromPairedPhone(
+        _ params: TerminalSendParams, deviceID: UUID
+    ) async throws -> RPCResponse {
+        try await sendOnInternalRail(params, actor: .phone(deviceID: deviceID))
     }
 
     private func performTerminalSend(
@@ -5108,9 +5146,9 @@ extension RPCRouter {
     /// **Fails closed in every direction**, and the reason names itself so a
     /// suppression that did not happen can be explained afterwards.
     ///
-    /// The daemon's own `.suppressed` disposition — the queued-prompt rail's,
-    /// set inside the send core and never arriving from a params struct — does
-    /// not pass through here at all.
+    /// The daemon's own `.suppressed` disposition — the internal rails' in
+    /// `sendOnInternalRail`, set inside the send core and never arriving from a
+    /// params struct — does not pass through here at all.
     func authenticatesEnvelopeSuppression(
         connection: RPCConnectionContext?
     ) async -> EnvelopeSuppressionVerdict {
