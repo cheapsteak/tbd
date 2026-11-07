@@ -8,7 +8,7 @@ import SwiftTerm
 /// On an alt screen, cursor visibility moves from the modes step to just after
 /// the switch, because the receiver shows the cursor on every `?1049h`. The
 /// modes that switch saves with the cursor (DECOM and the wrap modes) split in
-/// two: the modes step carries defaults for the primary, and the alt
+/// two: the modes step carries the primary's saved values, and the alt
 /// program's own values follow the alt content.
 /// Two orderings inside are counter-intuitive and are called out where they
 /// happen: SGR reset precedes the erase, and the scroll region follows the alt
@@ -75,18 +75,23 @@ public enum TerminalSnapshotWriter {
                 of: terminal, content: altScreen, state: state, attribute: attribute)
         }
 
-        // `capture` reads `savedX`/`savedY` off whichever buffer is active, so
-        // on an alt screen it returns the ALT buffer's DECSC. `assemble` needs
-        // the other one: it emits these as the cursor `?1049h` will store for
-        // a later `?1049l` to restore, which is the PRIMARY buffer's saved
-        // position. Emitting the alt buffer's sends a returning viewer to the
-        // wrong place on exit — and usually to 0,0, because an alt-screen app
-        // that never issues DECSC leaves it unset, which is what made the bug
-        // invisible. The toggle has just made the primary current, so read
-        // them here, where they mean what `assemble` needs.
+        // `capture` reads the saved cursor — `savedX`/`savedY` and the four
+        // saved modes — off whichever buffer is active, so on an alt screen it
+        // returns the ALT buffer's DECSC. `assemble` needs the other one: it
+        // emits these as the cursor and modes `?1049h` will store for a later
+        // `?1049l` to restore, which is the PRIMARY buffer's saved state.
+        // Emitting the alt buffer's sends a returning viewer to the wrong place
+        // on exit — and usually to 0,0, because an alt-screen app that never
+        // issues DECSC leaves it unset, which is what made the bug invisible.
+        // The toggle has just made the primary current, so read them here,
+        // where they mean what `assemble` needs.
         var primaryState = state
         primaryState.savedX = terminal.buffer.savedX
         primaryState.savedY = terminal.buffer.savedY
+        primaryState.savedOriginMode = terminal.buffer.savedOriginMode
+        primaryState.savedWraparound = terminal.buffer.savedWraparound
+        primaryState.savedReverseWraparound = terminal.buffer.savedReverseWraparound
+        primaryState.savedMarginMode = terminal.buffer.savedMarginMode
 
         let history = TerminalCellWalk.styledHistory(
             of: terminal, maxScrollbackLines: maxScrollbackLines)
@@ -104,22 +109,18 @@ public enum TerminalSnapshotWriter {
         // `?1049h` saves DECOM, DECAWM, reverse wraparound and DECLRMM along
         // with the cursor (`cmdSaveCursor`), and `?1049l` restores them, so
         // what is current at the switch is what the receiver's primary gets
-        // back when the program exits. On an alt screen `state` holds the
-        // program's values, and sending them here leaves the primary with
-        // autowrap off after a program that turned it off quits — long output
-        // then overwrites the last column — or with every CUP read relative to
-        // a scroll region. The primary's own values sit in the source's saved
-        // cursor, which SwiftTerm keeps internal, and a DECRQM after the
-        // history walk's toggle would read them in the daemon only: the app
-        // answers from replies it recorded before the walk. So the primary
-        // gets the defaults here, and the program's values follow the alt
-        // content below.
+        // back when the program exits. On an alt screen the live modes in
+        // `state` are the program's, and sending them here leaves the primary
+        // with autowrap off after a program that turned it off quits — long
+        // output then overwrites the last column — or with every CUP read
+        // relative to a scroll region. So the primary's saved values go here,
+        // and the program's follow the alt content below.
         var beforeSwitch = state
         if state.alternateOn {
-            beforeSwitch.originMode = false
-            beforeSwitch.wraparound = true
-            beforeSwitch.reverseWraparound = false
-            beforeSwitch.marginMode = false
+            beforeSwitch.originMode = state.savedOriginMode
+            beforeSwitch.wraparound = state.savedWraparound
+            beforeSwitch.reverseWraparound = state.savedReverseWraparound
+            beforeSwitch.marginMode = state.savedMarginMode
         }
         // Cursor visibility is withheld on an alt screen: this fork shows the
         // cursor on every `?1049h`, so it is emitted after the switch below.
@@ -135,18 +136,21 @@ public enum TerminalSnapshotWriter {
                 emit(cup(col: min(savedX, state.cols - 1), row: min(savedY, state.rows - 1)))
             }
             emit("\(esc)[?1049h")
+            // Autowrap on for the alt content, which re-wraps continuation rows
+            // through it, and so that `?45h` below lands. The primary's own
+            // `?7` may be off; the switch has already saved it.
+            emit("\(esc)[?7h")
             emit("\(esc)[H")   // 1049h clears but inherits the primary's cursor
             // AFTER the switch: the fork's `?1049h` calls `showCursor()`, so a
             // `?25l` sent earlier is undone and a hidden cursor comes back.
             // Visibility is the only mode the switch changes.
             emit(cursorVisibilityEscape(for: state))
             emit(altScreen ?? "")
-            // The program's saved-cursor modes AFTER the content: the content
-            // paints under the primary's autowrap, as the history does, and
-            // `?7h` is still current, so `?45h` lands. They still precede the
-            // region and the cursor, the order `restoreAlternateScreen` keeps:
-            // DECSTBM homes the cursor, and under DECOM the final CUP is read
-            // relative to the region, which `cursorEscape` allows for.
+            // The program's saved-cursor modes AFTER the content, so the
+            // content paints under autowrap, and before the region and the
+            // cursor, the order `restoreAlternateScreen` keeps: DECSTBM homes
+            // the cursor, and under DECOM the final CUP is read relative to
+            // the region, which `cursorEscape` allows for.
             emit(savedCursorModeEscapes(for: state))
             // Region AFTER the content: SwiftTerm's region is per-buffer, and
             // painting rows through an active one scrolls inside it.
@@ -199,11 +203,15 @@ public enum TerminalSnapshotWriter {
         state: CapturedTerminalState,
         attribute: Attribute
     ) {
-        var out = "\(esc)[?1049h\(esc)[H"
+        // `?7h` after the switch for `assemble`'s reason: the toggle restored
+        // the primary's autowrap, which may be off, and the content re-wraps
+        // continuation rows through it.
+        var out = "\(esc)[?1049h\(esc)[?7h\(esc)[H"
         out += content
-        // Same order as `assemble`'s tail, for the same reasons: modes before
-        // the region (DECOM homes the cursor), region before the cursor
-        // (DECSTBM homes it too), cursor last.
+        // Same order as `assemble`'s tail, for the same reasons: modes after
+        // the content and before the region, region before the cursor
+        // (DECSTBM homes it, and under DECOM the CUP is region-relative),
+        // cursor last.
         out += modeEscapes(for: state)
         let region = regionEscape(for: state)
         if let region { out += region }
@@ -244,9 +252,10 @@ public enum TerminalSnapshotWriter {
         // reverse wraparound turn on while autowrap is currently on, so
         // emitting `?7l` first makes a following `?45h` silently no-op — and
         // the state (autowrap off, reverse wraparound on) is reachable, since
-        // turning 7 off afterwards does not clear 45. The prelude leaves 7 on,
-        // and so do the primary's values `assemble` sends before an alt-screen
-        // switch, so 45 lands here and 7 is then set to its real value.
+        // turning 7 off afterwards does not clear 45. Every caller sends this
+        // with 7 on — after the prelude's `?7h`, or after the `?7h` that
+        // follows an alt-screen switch — so 45 lands here and 7 is then set to
+        // its real value.
         "\(esc)[?6\(state.originMode ? "h" : "l")"
             + "\(esc)[?45\(state.reverseWraparound ? "h" : "l")"
             + "\(esc)[?7\(state.wraparound ? "h" : "l")"

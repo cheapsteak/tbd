@@ -33,6 +33,11 @@ public struct CapturedTerminalState: Sendable, Equatable {
     public var scrollBottom: Int
     public var savedX: Int?
     public var savedY: Int?
+    /// The modes DECSC saves with the cursor, and DECRC and `?1049l` restore.
+    public var savedOriginMode: Bool
+    public var savedWraparound: Bool
+    public var savedReverseWraparound: Bool
+    public var savedMarginMode: Bool
 }
 
 public enum TerminalModeCapture {
@@ -69,10 +74,14 @@ public enum TerminalModeCapture {
             scrollBottom: terminal.buffer.scrollBottom,
             // tmux reports UINT_MAX when nothing was saved; SwiftTerm has no
             // such sentinel, so a zero saved cursor is indistinguishable from
-            // "never saved" and is carried as-is. The saved MODES
-            // (savedOriginMode and friends) are internal and cannot be read —
-            // an accepted v1 loss, recorded in the plan's facts section.
+            // "never saved" and is carried as-is. The saved modes are read off
+            // the same buffer, from properties TBD's SwiftTerm fork makes
+            // public; DECRQM cannot ask for them.
             savedX: terminal.buffer.savedX,
-            savedY: terminal.buffer.savedY)
+            savedY: terminal.buffer.savedY,
+            savedOriginMode: terminal.buffer.savedOriginMode,
+            savedWraparound: terminal.buffer.savedWraparound,
+            savedReverseWraparound: terminal.buffer.savedReverseWraparound,
+            savedMarginMode: terminal.buffer.savedMarginMode)
     }
 }
