@@ -577,6 +577,7 @@ import Testing
             "20261101170000_worktree_panel",
             "20261104175902_auto_close_setup_default_on",
             "20261106120000_config_session_restore",
+            "20261107184853_phone_control",
         ]
         let expectedInline = ["20261101170100_side_panel_notes"]
         let found = try SQLMigrationLoader.bundled.get()
