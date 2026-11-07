@@ -106,23 +106,63 @@ extension GhosttyTerminalView: @preconcurrency NSTextInputClient {
     public func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         actualRange?.pointee = range
         guard let window else { return .zero }
-        return window.convertToScreen(convert(cursorCellRect(columns: 1), to: nil))
+        let anchor = preeditAnchor()
+        return window.convertToScreen(convert(cellRect(column: anchor.column, row: anchor.row, columns: 1), to: nil))
     }
 
     /// There is no addressable text behind the terminal for a point to index into.
     public func characterIndex(for point: NSPoint) -> Int { NSNotFound }
+}
 
-    /// `columns` cells starting at the terminal's cursor, in view points.
+// MARK: - Where the composition goes
+
+/// The cursor's cell in the viewport and the terminal's colours, read under one lock: everything
+/// one composition step needs from the terminal.
+struct PreeditAnchor: Equatable {
+    var column: Int
+    /// A viewport row. A cursor scrolled out of the viewport is placed on its bottom row.
+    var row: Int
+    var foreground: GhosttyAppearance.RGB?
+    var background: GhosttyAppearance.RGB?
+}
+
+extension GhosttyTerminalView {
+    /// Reads the cursor's cell and the colours, taking the terminal's lock once.
     ///
     /// The cursor is read from the terminal rather than from the last frame, because composition
-    /// can start before a frame has been built (a view shown a moment ago, or one in a test). The
-    /// grid is measured in device pixels and pinned top-left in a flipped view, so the rect only
-    /// divides by the backing scale.
-    func cursorCellRect(columns: Int) -> NSRect {
+    /// can start before a frame has been built (a view shown a moment ago, or one in a test).
+    func preeditAnchor() -> PreeditAnchor {
+        terminal.withLocked { state in
+            let cursor = state.cursor
+            let metrics = state.raw.map(TerminalScrollMetrics.read) ?? .empty
+            return PreeditAnchor(
+                column: cursor.col,
+                row: Self.viewportRow(ofActiveRow: cursor.row, in: metrics),
+                foreground: state.foregroundColor,
+                background: state.backgroundColor)
+        }
+    }
+
+    /// The viewport row that active-area row `row` shows on, or the viewport's bottom row when it
+    /// is scrolled out of view.
+    ///
+    /// The cursor is addressed in the active area, the last `visible` rows of the scrollable
+    /// area. While the user has scrolled back, the viewport starts higher, at `offset`, and the
+    /// cursor sits that much further down it, or below it.
+    static func viewportRow(ofActiveRow row: Int, in metrics: TerminalScrollMetrics) -> Int {
+        guard metrics.visible > 0 else { return row }
+        let viewportRow = metrics.total - metrics.visible + row - metrics.offset
+        return (0..<metrics.visible).contains(viewportRow) ? viewportRow : metrics.visible - 1
+    }
+
+    /// `columns` cells from viewport cell (`column`, `row`), in view points.
+    ///
+    /// The grid is measured in device pixels and pinned top-left in a flipped view, so the rect
+    /// only divides by the backing scale.
+    func cellRect(column: Int, row: Int, columns: Int) -> NSRect {
         let geometry = gridGeometry
         let scale = max(backingScale, 1)
-        let cursor = terminal.withLocked { $0.cursor }
-        let origin = geometry.origin(ofColumn: cursor.col, row: cursor.row)
+        let origin = geometry.origin(ofColumn: column, row: row)
         return NSRect(
             x: CGFloat(origin.x) / scale,
             y: CGFloat(origin.y) / scale,
@@ -162,15 +202,15 @@ extension GhosttyTerminalView {
         let (container, textLayer, underline) = preeditLayers(in: host)
 
         let font = terminalAppearance.font
-        let colors = terminal.withLocked { (foreground: $0.foregroundColor, background: $0.backgroundColor) }
-        let foreground = Self.cgColor(colors.foreground ?? terminalAppearance.foreground)
-        let background = Self.cgColor(colors.background ?? terminalAppearance.background)
+        let anchor = preeditAnchor()
+        let foreground = Self.cgColor(anchor.foreground ?? terminalAppearance.foreground)
+        let background = Self.cgColor(anchor.background ?? terminalAppearance.background)
 
         // Whole cells, with a little slack so a text exactly two cells wide is not rounded to three.
-        let cellWidth = max(cursorCellRect(columns: 1).width, 1)
+        let cellWidth = max(cellRect(column: 0, row: 0, columns: 1).width, 1)
         let textWidth = NSAttributedString(string: text, attributes: [.font: font]).size().width
         let columns = max(1, Int((textWidth / cellWidth - 0.01).rounded(.up)))
-        var overlayFrame = cursorCellRect(columns: columns)
+        var overlayFrame = cellRect(column: anchor.column, row: anchor.row, columns: columns)
         if bounds.width > 0, overlayFrame.maxX > bounds.width {
             overlayFrame.origin.x = max(0, bounds.width - overlayFrame.width)
         }

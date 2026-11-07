@@ -133,6 +133,39 @@ private func ctrlBracket() throws -> NSEvent {
     try keyDown(0x21, characters: "\u{1b}", ignoringModifiers: "[", flags: .control)
 }
 
+/// A modifier key's own event: `keyCode` pressed, with `flags` held.
+private func modifierKey(_ keyCode: UInt16, flags: NSEvent.ModifierFlags) throws -> NSEvent {
+    try #require(NSEvent.keyEvent(
+        with: .flagsChanged, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0,
+        context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode))
+}
+
+/// An offscreen window holding `view`, 400×200 points, with the view as its first responder. The
+/// window is never on screen; the view counts it as visible. Clear `contentView` when done.
+@MainActor
+private func windowHolding(_ view: GhosttyTerminalView) throws -> NSWindow {
+    _ = NSApplication.shared
+    let window = NSWindow(
+        contentRect: NSRect(x: -20_000, y: -20_000, width: 400, height: 200),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+    view.windowVisibility = { _ in true }
+    try #require(window.contentView).addSubview(view)
+    try #require(window.makeFirstResponder(view), "the view would not take focus")
+    return window
+}
+
+/// Sixty numbered lines, so the primary screen has scrollback to scroll back through.
+private let sixtyLines = (0..<60).map { "line \($0)\r\n" }.joined()
+
+/// The first scrollable row the viewport shows.
+private func viewportOffset(of terminal: GhosttyTerminal) throws -> Int {
+    try terminal.withLocked { state in
+        TerminalScrollMetrics.read(try #require(state.raw, "the terminal is closed")).offset
+    }
+}
+
 /// The bytes `event` encodes to on `terminal`, through the same translation the view runs.
 @MainActor
 private func bytes(for event: NSEvent, on terminal: GhosttyTerminal, optionAsAlt: OptionAsAlt = .never) -> [UInt8] {
@@ -245,17 +278,8 @@ struct KeyAndIMETests {
     func markedTextAppearsInFrameAndIsReplacedOnCommit() throws {
         let fixture = try KeyViewFixture()
         let view = fixture.view
-        _ = NSApplication.shared
-        let window = NSWindow(
-            contentRect: NSRect(x: -20_000, y: -20_000, width: 400, height: 200),
-            styleMask: [.borderless], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let window = try windowHolding(view)
         defer { window.contentView = nil }
-        let content = try #require(window.contentView)
-        view.windowVisibility = { _ in true }
-        content.addSubview(view)
-        try #require(window.makeFirstResponder(view), "the view would not take focus")
 
         fixture.terminal.feed(text: "abc")
         let input = ScriptedInputMethod([
@@ -295,6 +319,77 @@ struct KeyAndIMETests {
         for chunk in fixture.recorder.sent { fixture.terminal.feed(chunk[...]) }
         let line = fixture.terminal.withLocked { $0.lineText(0) }
         #expect(line.hasPrefix("abcに"), "after the echo row 0 reads \(line.debugDescription)")
+    }
+
+    /// While the user has scrolled back, the composition and the candidate window sit on the row
+    /// the cursor shows on in the viewport, not on its row in the active area. A cursor scrolled
+    /// out of view puts them on the bottom row. Composing sends nothing, so it does not scroll.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func compositionWhileScrolledBackSitsOnTheCursorRow() throws {
+        let fixture = try KeyViewFixture()
+        let view = fixture.view
+        let terminal = fixture.terminal
+        let window = try windowHolding(view)
+        defer { window.contentView = nil }
+        view.applyPendingGridResize()
+        let rows = terminal.withLocked { $0.rows }
+        try #require(rows >= 10, "the view fits only \(rows) rows")
+
+        // The cursor on active row 5, column 3; the viewport three rows back puts it on row 8.
+        terminal.feed(text: sixtyLines + "\u{1b}[6;4H")
+        _ = terminal.mouseWheel(rows: -3, at: SurfacePoint(x: 1, y: 1), mods: [])
+        let scrolledBack = try viewportOffset(of: terminal)
+        ScriptedInputMethod([ScriptedInputMethod.mark("n")]).install(on: view)
+        view.keyDown(with: try keyDown(0x2D, characters: "n", ignoringModifiers: "n"))
+        #expect(fixture.recorder.sent.isEmpty, "composing sent \(fixture.recorder.sent)")
+        let afterComposing = try viewportOffset(of: terminal)
+        #expect(afterComposing == scrolledBack, "composing scrolled the viewport from \(scrolledBack) to \(afterComposing)")
+
+        let cell = view.cellSize
+        let overlay = try #require(view.preeditLayer, "composing left no overlay")
+        #expect(abs(overlay.frame.minX - cell.width * 3) < 0.01 && abs(overlay.frame.minY - cell.height * 8) < 0.01,
+                "the overlay sits at \(overlay.frame.origin), not on viewport row 8 (cell \(cell))")
+        let rowEight = window.convertToScreen(view.convert(
+            NSRect(x: cell.width * 3, y: cell.height * 8, width: cell.width, height: cell.height), to: nil))
+        let bottomRow = window.convertToScreen(view.convert(
+            NSRect(x: cell.width * 3, y: cell.height * CGFloat(rows - 1), width: cell.width, height: cell.height), to: nil))
+        let candidates = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+        #expect(abs(candidates.minY - rowEight.minY) < 0.5 && abs(candidates.minX - rowEight.minX) < 0.5,
+                "the candidate window goes to \(candidates), not to viewport row 8 at \(rowEight)")
+
+        _ = terminal.mouseWheel(rows: -20, at: SurfacePoint(x: 1, y: 1), mods: [])
+        let below = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+        #expect(abs(below.minY - bottomRow.minY) < 0.5,
+                "with the cursor below the viewport the candidate window goes to \(below), not to the bottom row at \(bottomRow)")
+    }
+
+    /// Typing brings a viewport the user scrolled back down to the cursor, as SwiftTerm does. A
+    /// modifier on its own and a ⌘ shortcut leave it where it is.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func typingScrollsTheViewportToTheBottom() throws {
+        let fixture = try KeyViewFixture()
+        let view = fixture.view
+        let terminal = fixture.terminal
+        // Kitty's "report all keys", so a modifier on its own has bytes to send as well.
+        terminal.feed(text: sixtyLines + "\u{1b}[>8u")
+        let bottom = try viewportOffset(of: terminal)
+        _ = terminal.mouseWheel(rows: -5, at: SurfacePoint(x: 1, y: 1), mods: [])
+        let scrolledBack = try viewportOffset(of: terminal)
+        try #require(scrolledBack == bottom - 5, "scrolling back five rows moved the viewport from \(bottom) to \(scrolledBack)")
+        ScriptedInputMethod([ScriptedInputMethod.commitTypedCharacters()]).install(on: view)
+
+        view.flagsChanged(with: try modifierKey(0x38, flags: .shift))
+        let afterShift = try viewportOffset(of: terminal)
+        #expect(afterShift == scrolledBack, "a Shift press scrolled the viewport from \(scrolledBack) to \(afterShift)")
+        _ = view.performKeyEquivalent(with: try keyDown(0x00, characters: "a", ignoringModifiers: "a", flags: .command))
+        let afterCommand = try viewportOffset(of: terminal)
+        #expect(afterCommand == scrolledBack, "⌘A scrolled the viewport from \(scrolledBack) to \(afterCommand)")
+
+        fixture.recorder.sent = []
+        view.keyDown(with: try keyDown(0x00, characters: "a", ignoringModifiers: "a"))
+        #expect(!fixture.recorder.sent.isEmpty, "typing a sent nothing")
+        let afterTyping = try viewportOffset(of: terminal)
+        #expect(afterTyping == bottom, "after typing the viewport is at row \(afterTyping), not \(bottom)")
     }
 
     /// With Option typing the layout's characters, Option-E is a dead key: it composes the accent

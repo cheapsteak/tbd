@@ -177,9 +177,10 @@ final class TerminalInputController {
             // paste — one press per committed string, `composing` false because the composition is
             // finished, whatever the preedit state is now.
             for text in accumulated where !Self.isBareControl(text, composing: composing) {
-                send(Self.keyPress(
+                let press = Self.keyPress(
                     event: event, translationEvent: translation, action: action,
-                    optionAsAlt: optionAsAlt, text: text, composing: false, layout: layout))
+                    optionAsAlt: optionAsAlt, text: text, composing: false, layout: layout)
+                send(press, scrollsToBottom: true)
             }
             return true
         }
@@ -187,10 +188,11 @@ final class TerminalInputController {
         // A bare control character arriving mid-composition belongs to the IME, not the terminal.
         if Self.isBareControl(event.characters, composing: composing) { return true }
 
-        send(Self.keyPress(
+        let press = Self.keyPress(
             event: event, translationEvent: translation, action: action,
             optionAsAlt: optionAsAlt, text: Self.filteredText(of: translation, layout: layout),
-            composing: composing, layout: layout))
+            composing: composing, layout: layout)
+        send(press, scrollsToBottom: true)
         return true
     }
 
@@ -270,7 +272,10 @@ final class TerminalInputController {
         // produced this text here and now — the safety prompt exists for the *clipboard*, whose
         // contents came from somewhere else.
         guard let view else { return }
-        view.send(view.terminal.pasteText(text, source: .text, allowUnsafe: true).bytes)
+        let bytes = view.terminal.pasteText(text, source: .text, allowUnsafe: true).bytes
+        guard !bytes.isEmpty else { return }
+        scrollToBottom(view)
+        view.send(bytes)
     }
 
     // MARK: - Clipboard image chord
@@ -478,12 +483,22 @@ final class TerminalInputController {
     ///
     /// Returns true when bytes were sent. An empty encoding (a release in legacy mode, a bare
     /// modifier) is normal and returns false.
+    ///
+    /// - Parameter scrollsToBottom: true for a typed key, which brings a viewport the user scrolled
+    ///   back down to the cursor before the bytes go out, as SwiftTerm and every other terminal
+    ///   do. A modifier on its own, a release, and the image chord of a ⌘V do not.
     @discardableResult
-    private func send(_ press: KeyPress) -> Bool {
+    private func send(_ press: KeyPress, scrollsToBottom: Bool = false) -> Bool {
         guard let view else { return false }
         let bytes = view.terminal.encodeKey(press, optionAsAlt: optionAsAlt)
         guard !bytes.isEmpty else { return false }
+        if scrollsToBottom { scrollToBottom(view) }
         view.send(bytes)
         return true
+    }
+
+    /// Brings the viewport down to the cursor, and asks for a frame when it moved.
+    private func scrollToBottom(_ view: GhosttyTerminalView) {
+        if view.terminal.scrollViewportToBottom() { view.requestFrame() }
     }
 }

@@ -136,6 +136,22 @@ extension GhosttyTerminal {
         }
     }
 
+    // MARK: Viewport
+
+    /// Moves the viewport down to the active area, as typing does in every terminal. Returns true
+    /// when it moved, so the caller asks for a frame only then.
+    @discardableResult
+    func scrollViewportToBottom() -> Bool {
+        withRaw { raw -> Bool in
+            let metrics = TerminalScrollMetrics.read(raw)
+            guard metrics.offset + metrics.visible < metrics.total else { return false }
+            var behavior = GhosttyTerminalScrollViewport()
+            behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM
+            _ = ghostty_terminal_scroll_viewport(raw, behavior)
+            return true
+        } ?? false
+    }
+
     // MARK: Paste
 
     /// Pastes `text`: bracketing (mode 2004), newline conversion, unsafe-byte stripping and the
