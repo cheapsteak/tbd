@@ -126,6 +126,14 @@ test_markdown_under_sources_runs() {
   expect "Markdown under Tests/ runs" true Tests/CLAUDE.md
 }
 
+# Swift tests read `phone/protocol/` and `phone/test-vectors/`, so the `*.md`
+# rule must not skip Markdown there; elsewhere under `phone/` it skips.
+test_markdown_under_the_swift_read_phone_dirs_runs() {
+  expect "Markdown under phone/protocol/ runs"     true phone/protocol/README.md
+  expect "Markdown under phone/test-vectors/ runs" true phone/test-vectors/notes.md
+  expect "Markdown under phone/loader/ skips"      false phone/loader/README.md
+}
+
 # ---------------------------------------------------------------------------
 # 2. Each skip rule, alone
 # ---------------------------------------------------------------------------

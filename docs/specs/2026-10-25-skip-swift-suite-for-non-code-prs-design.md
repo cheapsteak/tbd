@@ -36,7 +36,7 @@ The script lists the PR's changed files with `git diff --name-only --no-renames 
 The suite is skipped only when the list is non-empty and every path on it matches one of these:
 
 - **`docs/**`**
-- **`*.md` outside `Sources/` and `Tests/`** – Markdown inside those trees still runs the suite, because a target can bundle it as a resource: `Sources/TBDApp/Resources/markdown-stylesheets.md` ships in the app. Elsewhere Markdown skips even beside a suite script, as in `scripts/ci/README.md`, since no script loads it.
+- **`*.md` outside `Sources/`, `Tests/`, `phone/protocol/` and `phone/test-vectors/`** – Markdown inside `Sources/` and `Tests/` still runs the suite, because a target can bundle it as a resource: `Sources/TBDApp/Resources/markdown-stylesheets.md` ships in the app. Markdown inside `phone/protocol/` and `phone/test-vectors/` runs it as well, like every other path there, because Swift tests read those directories. Elsewhere Markdown skips even beside a suite script, as in `scripts/ci/README.md`, since no script loads it.
 - **`.claude/**`**
 - **`.github/**` except `.github/workflows/test.yml`** – the workflow that runs the suite is a suite input.
 - **`SessionMod/**`** – the daemon ships the copy embedded in `Sources/TBDShared/SessionModContent.swift`, and the `Session mod` job checks that the copy is current. A PR that changes the embedded copy changes `Sources/` and runs the suite.
@@ -73,6 +73,8 @@ The skip list is only as good as its list of suite scripts. If the suite comes t
 - `relay/cloudflare/src/index.ts` → skip
 - `phone/package.json` → skip
 - `phone/test-vectors/x.json` → run
+- a Markdown file under `phone/protocol/` or `phone/test-vectors/` → run
+- a Markdown file under `phone/loader/` → skip
 - the committed phone app bundle under `Sources/` → run
 - a rename from `Sources/` into `docs/` → run, because only `--no-renames` lists the `Sources/` side
 - an empty diff → run

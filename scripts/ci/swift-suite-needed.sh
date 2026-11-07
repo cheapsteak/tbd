@@ -131,8 +131,11 @@ judge() {
   case "$p" in
     # Markdown inside a target tree can be a bundled resource:
     # `Sources/TBDApp/Resources/markdown-stylesheets.md` ships in the app.
-    Sources/*|Tests/*) ;;
-    *.md) REASON='*.md outside Sources/ and Tests/'; return ;;
+    # Swift tests read `phone/protocol/` and `phone/test-vectors/`, so
+    # Markdown there runs the suite too: these fall through to the arms below
+    # that run them.
+    Sources/*|Tests/*|phone/protocol/*|phone/test-vectors/*) ;;
+    *.md) REASON='*.md outside Sources/, Tests/, phone/protocol/ and phone/test-vectors/'; return ;;
   esac
   case "$p" in
     .claude/*)
@@ -152,8 +155,9 @@ judge() {
       REASON='tools/**'; return ;;
     # JavaScript and tooling that no Swift target reads; the Phone workflow
     # tests it. Swift tests read phone/protocol/ and phone/test-vectors/, so
-    # those two match first and run the suite. The app bundle the daemon ships
-    # lives under Sources/, which runs.
+    # every path under those two, Markdown included (the `*.md` arm above
+    # lets them through), matches the next arm before `phone/*` and runs the
+    # suite. The app bundle the daemon ships lives under Sources/, which runs.
     phone/protocol/*|phone/test-vectors/*)
       VERDICT=run; REASON='phone/protocol/ and phone/test-vectors/ are read by Swift tests'; return ;;
     phone/*)
