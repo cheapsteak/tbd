@@ -242,8 +242,11 @@ function isWellFormedValue(value, depth) {
 
 /**
  * Encoding replaces a lone surrogate with U+FFFD, so only a well-formed
- * string survives the round trip. `String.prototype.isWellFormed` would say
- * the same, but postdates the loader's oldest supported browsers.
+ * string survives the round trip. `String.prototype.isWellFormed` (Safari
+ * 16.4) would say the same, but the TypeScript `es2022` lib has no type for
+ * it, and widening `lib` to `es2024` would also admit APIs newer than the
+ * iOS 17.0 floor, such as `Object.groupBy` (Safari 17.4), so the round trip
+ * stays.
  * @param {string} text
  * @returns {boolean}
  */

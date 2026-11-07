@@ -7,9 +7,13 @@ const HANDSHAKE_HASH_BYTES = 32;
  * modulo 1,000,000, zero-padded to 6 digits with no space.
  * @param {Uint8Array} handshakeHash 32 bytes
  * @returns {Promise<string>}
- * @throws {RangeError} unless the hash is 32 bytes
+ * @throws {TypeError} as a rejection, unless the hash is a `Uint8Array`
+ * @throws {RangeError} as a rejection, unless the hash is 32 bytes
  */
 export async function confirmationCode(handshakeHash) {
+  if (!(handshakeHash instanceof Uint8Array)) {
+    throw new TypeError('the handshake hash must be a Uint8Array');
+  }
   if (handshakeHash.length !== HANDSHAKE_HASH_BYTES) {
     throw new RangeError(`handshake hash must be ${HANDSHAKE_HASH_BYTES} bytes, got ${handshakeHash.length}`);
   }

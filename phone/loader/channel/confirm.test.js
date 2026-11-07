@@ -30,3 +30,29 @@ test('confirmation code: rejects a hash that is not 32 bytes', async () => {
   await assert.rejects(confirmationCode(new Uint8Array(31)), RangeError);
   await assert.rejects(confirmationCode(new Uint8Array(33)), RangeError);
 });
+
+// Some of these would give a code if read as bytes: a Uint16Array or a
+// Uint8ClampedArray of 32 elements has a 4-byte view at its start.
+test('confirmation code: rejects a hash that is not a Uint8Array with a TypeError', async () => {
+  const notBytes = [
+    new Uint16Array(32),
+    new Uint8ClampedArray(32),
+    new DataView(new ArrayBuffer(32)),
+    new ArrayBuffer(32),
+    Array.from({ length: 32 }, () => 7),
+    'x'.repeat(32),
+    null,
+    undefined,
+    32,
+  ];
+  for (const value of notBytes) {
+    const kind = Object.prototype.toString.call(value);
+    await assert.rejects(
+      confirmationCode(value),
+      (/** @type {unknown} */ error) => error instanceof TypeError && /Uint8Array/.test(error.message),
+      kind,
+    );
+  }
+  // A Node Buffer is a Uint8Array, so it is accepted.
+  assert.equal(await confirmationCode(Buffer.alloc(32)), '000000');
+});
