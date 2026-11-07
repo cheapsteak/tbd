@@ -100,6 +100,34 @@ struct RendererTests {
         #expect(MemoryLayout<TkzRectInstance>.stride == 32)
     }
 
+    /// A frame that acquires a slot and bails before committing must not move the ring on: the
+    /// next frame takes the same slot. Only committed frames advance it.
+    @Test func frameRingAdvancesOnlyOnCommit() {
+        let ring = FrameRing()
+        let bailed = ring.acquire()
+        ring.release()
+        let retried = ring.acquire()
+        #expect(retried === bailed, "a frame that bailed moved the ring on to another slot")
+
+        // Committed frames cycle through every slot before reusing one. Each committed frame's
+        // permit stays with the "GPU" until its releaser runs, as a completion handler would.
+        ring.commit()
+        var committed = [retried]
+        for _ in 1..<FrameRing.depth {
+            let slot = ring.acquire()
+            ring.commit()
+            committed.append(slot)
+        }
+        for (index, slot) in committed.enumerated() {
+            for other in committed[(index + 1)...] {
+                #expect(slot !== other, "two committed frames in a row shared a slot")
+            }
+        }
+        for _ in committed { ring.releaser.release() }
+        #expect(ring.acquire() === committed[0], "the ring did not wrap back to the oldest slot")
+        ring.release()
+    }
+
     @Test func selectionCompositesOverTheCellBackground() {
         // White at 20% over black is 51 grey, opaque.
         let blended = composite(FrameBuilder.defaultSelectionColor, over: 0xFF00_0000)

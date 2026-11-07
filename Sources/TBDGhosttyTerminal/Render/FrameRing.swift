@@ -44,21 +44,38 @@ final class FrameRing {
 
     private let inflight = DispatchSemaphore(value: FrameRing.depth)
     private var slots: [Slot] = (0..<FrameRing.depth).map { _ in Slot() }
+    /// The slot the last *committed* frame used. In-flight frames hold the slots ending here.
     private var index = 0
+    /// The slot handed out by `acquire` and not yet committed or released.
+    private var pending: Int?
 
     init() {}
 
     /// Blocks until a slot is free, then hands out the next one. Every `acquire` must be balanced
-    /// by exactly one `release`, including on every early return between them.
+    /// by exactly one `commit` or `release`, including on every early return between them.
+    ///
+    /// The ring only moves on at `commit`. A frame that acquires and then bails gives its slot
+    /// back unused, so the next frame takes the same slot; had the ring moved on, the next frame
+    /// could land on a slot the GPU is still reading.
     func acquire() -> Slot {
         inflight.wait()
-        index = (index + 1) % FrameRing.depth
-        return slots[index]
+        let next = (index + 1) % FrameRing.depth
+        pending = next
+        return slots[next]
     }
 
-    /// Called directly on an encode that bailed before committing a command buffer. A committed
-    /// buffer releases through `releaser` from its completion handler instead.
+    /// The acquired slot's frame is being committed: the slot is the GPU's until the command
+    /// buffer's completion handler releases it through `releaser`.
+    func commit() {
+        if let pending { index = pending }
+        pending = nil
+    }
+
+    /// Called directly on an encode that bailed before committing a command buffer: gives back
+    /// both the permit and the slot. A committed buffer releases through `releaser` from its
+    /// completion handler instead.
     func release() {
+        pending = nil
         inflight.signal()
     }
 

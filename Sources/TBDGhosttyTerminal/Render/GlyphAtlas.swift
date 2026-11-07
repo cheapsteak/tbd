@@ -205,6 +205,9 @@ final class GlyphAtlas {
     private func rebuild() {
         staging = [UInt8](repeating: 0, count: staging.count)
         shelves.removeAll(keepingCapacity: true)
+        // A new texture, as `grow()` makes: frames already encoded may still be sampling the old
+        // one on the GPU, and clearing it in place would tear their glyphs.
+        texture = GlyphAtlas.makeTexture(device: device, kind: kind, size: size)
         generation &+= 1
         rebuildGeneration = generation
         rebuildCount += 1

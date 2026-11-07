@@ -384,6 +384,7 @@ final class TerminalRenderer {
 
         commandBuffer.addCompletedHandler { [releaser = ring.releaser] _ in releaser.release() }
         if presentViaCommandBuffer, let drawable { commandBuffer.present(drawable) }
+        ring.commit()
         commandBuffer.commit()
 
         surface.clearNeedsDisplay()
