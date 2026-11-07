@@ -126,7 +126,13 @@ final class FrameBuilder {
         case GHOSTTY_RENDER_STATE_DIRTY_FULL: dirty = .full
         default: dirty = .none
         }
-        guard dirty != .none else {
+        // Clean cells are not a clean surface when the atlas was rebuilt since its rows were built.
+        // Views with the same font and scale share this builder's glyph cache, so another surface's
+        // frame can clear the atlas while this one is idle. Its row caches then point at whatever has
+        // been packed there since, and its next frame — a blink, a cursor move — would draw that. So
+        // a stale stamp falls through to the full rebuild below instead of returning here.
+        let atlasIsStale = surface.atlasRebuildStamp != atlasRebuildStamp
+        guard dirty != .none || atlasIsStale else {
             // libghostty's dirty flag tracks *cells*. A cursor that only moved — a space echoed
             // onto a blank cell, a bare cursor-motion sequence — leaves every row clean, and the
             // cursor would stay drawn where it was until the next real change (GUI pass
@@ -167,10 +173,10 @@ final class FrameBuilder {
         // An atlas *rebuild* (the atlas ran out of room at max size and was cleared) invalidates
         // every `atlasPos` ever handed out, including the ones sitting in rows this tick is not
         // going to visit. `GlyphCache` drops its own entries, but only a full re-iteration can fix
-        // the row caches — so the stamp is checked before the loop (a rebuild that happened while
-        // some other surface was visible) and again after it (a rebuild caused by this very tick).
+        // the row caches — so the stamp is checked before the loop (a rebuild during another
+        // surface's frame) and again after it (a rebuild caused by this very tick).
         var effectiveDirty = dirty
-        if surface.atlasRebuildStamp != atlasRebuildStamp {
+        if atlasIsStale {
             effectiveDirty = .full
         }
         var rowsRebuilt = try iterateRows(rs, surface: surface, colors: colors,

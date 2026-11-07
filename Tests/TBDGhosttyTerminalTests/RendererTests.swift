@@ -129,6 +129,75 @@ struct RendererTests {
         #expect(after !== before, "the rebuild cleared, in place, the texture an encoded frame may be sampling")
     }
 
+    /// Views with the same font and scale share one renderer, and so one glyph cache. When another
+    /// surface's frame clears the atlas, an idle surface's rows still hold positions in the old
+    /// one. Its next frame, here a cursor blink, must rebuild every row against the new atlas, not
+    /// draw the old positions over whatever was packed there since.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func anIdleSurfaceRebuildsItsRowsWhenAnotherSurfaceClearsTheSharedAtlas() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let glyphCache = GlyphCache(fontSet: FontSet(font: font, scale: 2), device: device)
+        let renderer = try TerminalRenderer(device: device, glyphCache: glyphCache)
+        let size = renderer.drawableSize(columns: 10, rows: 3)
+        let atlas = glyphCache.grayscale
+        try #require(atlas.size == AtlasKind.grayscale.maxSize,
+                     "the atlas starts at \(atlas.size) px, so filling it would grow it, not clear it")
+
+        // Surface A draws an "A", the only glyph in the atlas, and goes idle.
+        let terminalA = try GhosttyTerminal(
+            cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminalA.close() }
+        terminalA.feed(text: "A")
+        let surfaceA = TerminalSurface()
+        try surfaceA.attach(terminalA)
+        let textureA = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
+        try renderer.render(surface: surfaceA, to: textureA).commandBuffer?.waitUntilCompleted()
+        let idle = try renderer.render(surface: surfaceA, to: textureA)
+        try #require(!idle.didEncode, "surface A drew again with nothing changed, so it never went idle")
+
+        // Fill the atlas around the "A": the rest of its shelf, then everything under that shelf.
+        // The next glyph packed anywhere then clears the atlas.
+        let slotA = try #require(glyphCache.glyph(forScalar: "A", cellSpan: 1)?.slot, "surface A's A was not cached")
+        try #require(slotA.x == 0 && slotA.y == 0,
+                     "the A sits at (\(slotA.x), \(slotA.y)), so it was not the first glyph in the atlas")
+        let edge = atlas.size
+        let rebuildsBefore = atlas.rebuildCount
+        let restOfShelf = edge - slotA.width
+        let underShelf = edge - slotA.height
+        try #require(atlas.insert(pixels: [UInt8](repeating: 0, count: restOfShelf * slotA.height),
+                                  width: restOfShelf, height: slotA.height, bytesPerRow: restOfShelf) != nil)
+        try #require(atlas.insert(pixels: [UInt8](repeating: 0, count: edge * underShelf),
+                                  width: edge, height: underShelf, bytesPerRow: edge) != nil)
+        try #require(atlas.rebuildCount == rebuildsBefore, "filling the atlas cleared it already")
+
+        // Surface B's frame packs a "B", which fits nowhere, so the atlas is cleared and the "B" goes
+        // where the "A" was.
+        let terminalB = try GhosttyTerminal(
+            cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminalB.close() }
+        terminalB.feed(text: "B")
+        let surfaceB = TerminalSurface()
+        try surfaceB.attach(terminalB)
+        let textureB = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
+        try renderer.render(surface: surfaceB, to: textureB).commandBuffer?.waitUntilCompleted()
+        try #require(atlas.rebuildCount == rebuildsBefore + 1,
+                     "surface B's frame cleared the atlas \(atlas.rebuildCount - rebuildsBefore) times, not once")
+
+        // Surface A's cells are still clean. Only its cursor blinks.
+        surfaceA.cursorBlinkOn.toggle()
+        let blink = try renderer.render(surface: surfaceA, to: textureA)
+        blink.commandBuffer?.waitUntilCompleted()
+        #expect(blink.didEncode, "the blink drew no frame")
+        #expect(blink.update.dirty == .full,
+                "the blink after the atlas was cleared was a \(blink.update.dirty) frame, not a full rebuild")
+        #expect(blink.update.rowsRebuilt == 3, "the blink rebuilt \(blink.update.rowsRebuilt) of 3 rows")
+        let freshA = try #require(glyphCache.glyph(forScalar: "A", cellSpan: 1)?.slot)
+        let drawnAt = surfaceA.withGlyphInstances { instances in instances.map { $0.atlasPos } }
+        #expect(drawnAt == [SIMD2<UInt16>(UInt16(freshA.x), UInt16(freshA.y))],
+                "surface A draws its A from atlas position \(drawnAt), but the A is now at (\(freshA.x), \(freshA.y))")
+    }
+
     /// A frame that acquires a slot and bails before committing must not move the ring on: the
     /// next frame takes the same slot. Only committed frames advance it.
     @Test func frameRingAdvancesOnlyOnCommit() {
