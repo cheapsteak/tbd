@@ -1,0 +1,455 @@
+import AppKit
+import Foundation
+import os
+import Testing
+@testable import TBDApp
+import TBDShared
+import TBDTerminalSerialization
+import TestSupport
+
+/// What every `TerminalEngine` must do, written once and run against each engine
+/// this build can make (`TerminalEngineFactory.availableKinds`).
+///
+/// Each test builds its engine through the factory, the way both coordinators
+/// do, and observes it only through the protocol and a recording
+/// `TerminalEngineDelegate`. Nothing here names SwiftTerm, so a second engine
+/// joins the suite by joining `availableKinds`. Design:
+/// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+///
+/// **Timing.** Every delegate method arrives on main, and a callback a parse
+/// provokes is queued there during the parse and delivered a later main-queue
+/// turn. So an assertion about an absence runs after `settle()`, the rule
+/// `QuietIngestTests` uses: five main-queue turns with a short real pause
+/// between them, which also covers the OSC observer's private queue. An
+/// assertion about a presence polls with `waitUntil`, bounded by the shared
+/// saturated-pass budget, and then settles before it counts, so a second,
+/// late delivery is caught too.
+///
+/// **Absences carry positive controls.** "Nothing reached the delegate" also
+/// reads as a pass when the fixture bytes provoke nothing at all, so each such
+/// test feeds the same bytes live afterwards and requires the effect.
+///
+/// **Every fixture settles before it is used.** Building a view can queue
+/// callbacks of its own; the fixture waits them out and clears the recorder, so
+/// a test sees only what its own bytes caused.
+///
+/// The suite limit is a hang guard: every wait here is bounded on its own. It
+/// takes the shared dial; see `.fastPassBounded` in
+/// `Tests/TestSupport/ClockTestSupport.swift`.
+@MainActor
+@Suite("Terminal engine contract", .fastPassBounded)
+struct TerminalEngineContractTests {
+
+    // MARK: - Fixtures
+
+    private static let da1 = "\u{1b}[c"
+    private static let probe = "\u{1b}]7501;?\u{07}"
+    private static let reportData = "state=working;app=claude-code"
+    private static var report: String { "\u{1b}]7501;\(reportData)\u{07}" }
+    private static let notify = "\u{1b}]777;notify;Contract;Body\u{07}"
+    private static var probeReplyBytes: [UInt8] { Array(ProgramStatusProtocol.probeReply.utf8) }
+
+    /// An engine from the factory, its recorder, and the isolated defaults its
+    /// appearance reads. Settled, and the recorder cleared, before it is
+    /// returned.
+    private func makeFixture(kind: TerminalEngineKind) async -> EngineFixture {
+        let fixture = EngineFixture(kind: kind)
+        await settle()
+        fixture.recorder.reset()
+        return fixture
+    }
+
+    // MARK: - Threads
+
+    @Test("Feeding from a background task while main reads the screen stays consistent",
+          arguments: TerminalEngineFactory.availableKinds)
+    func feedFromBackgroundWhileReadingIsConsistent(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        let engine = fixture.engine
+        let finished = OSAllocatedUnfairLock(initialState: false)
+
+        // Only the engine, which is `Sendable`, and the lock cross into the
+        // task; `feed` is the one requirement callable off main.
+        let feeder = Task.detached { [engine, finished] in
+            for index in 0..<1_000 {
+                engine.feed(Array("\u{1b}[H\u{1b}[2Kline \(index)".utf8)[...])
+            }
+            finished.withLock { $0 = true }
+        }
+
+        var reads = 0
+        let end = ContinuousClock.now + TestDeadlines.saturatedPass
+        while !finished.withLock({ $0 }), ContinuousClock.now < end {
+            _ = engine.withScreen { $0.lineText(row: 0) }
+            reads += 1
+            await mainQueueTurn()
+        }
+        await feeder.value
+
+        let didFinish = finished.withLock { $0 }
+        #expect(didFinish, "the feeder did not finish; main read \(reads) times")
+        let last = engine.withScreen { $0.lineText(row: 0) }
+        #expect(last == "line 999", "after \(reads) concurrent reads")
+    }
+
+    // MARK: - Snapshot ingest
+
+    @Test("A snapshot's DA1 and OSC 7501 probe produce no send",
+          arguments: TerminalEngineFactory.availableKinds)
+    func ingestSnapshotDropsReplies(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        fixture.engine.setProgramStatusReporting(enabled: true)
+        let bytes = Self.probe + Self.da1
+
+        fixture.engine.ingestSnapshot(Data(bytes.utf8))
+        await settle()
+        #expect(fixture.recorder.sent.isEmpty, "replayed queries were answered: \(fixture.recorder.sent)")
+        #expect(!fixture.engine.isIngestingSnapshot)
+
+        // Positive control: live, the same bytes are answered, probe first.
+        feed(bytes, into: fixture.engine)
+        let answered = await waitUntil { fixture.recorder.sent.count > Self.probeReplyBytes.count }
+        #expect(answered, "the probe and DA1 fixture must be answered live; observed \(fixture.recorder.sent)")
+        #expect(fixture.recorder.sent.starts(with: Self.probeReplyBytes), "observed \(fixture.recorder.sent)")
+    }
+
+    @Test("A snapshot's OSC 777 and OSC 7501 report reach no delegate method",
+          arguments: TerminalEngineFactory.availableKinds)
+    func ingestSnapshotSuppressesOscEvents(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        fixture.engine.setProgramStatusReporting(enabled: true)
+        let bytes = Self.notify + Self.report
+
+        fixture.engine.ingestSnapshot(Data(bytes.utf8))
+        await settle()
+        #expect(fixture.recorder.calls.isEmpty, "a replayed OSC event reached the delegate: \(fixture.recorder.calls)")
+
+        // Positive control: once the ingest is over, the same bytes fed live
+        // raise one notification and forward one report.
+        feed(bytes, into: fixture.engine)
+        let delivered = await waitUntil {
+            !fixture.recorder.notifications.isEmpty && !fixture.recorder.programStatusPayloads.isEmpty
+        }
+        #expect(delivered, "the OSC fixture must reach the delegate live; observed \(fixture.recorder.calls)")
+        await settle()
+        #expect(fixture.recorder.notifications.count == 1)
+        #expect(fixture.recorder.notifications.first?.title == "Contract")
+        #expect(fixture.recorder.notifications.first?.body == "Body")
+        #expect(fixture.recorder.programStatusPayloads == [Array(Self.reportData.utf8)])
+    }
+
+    // MARK: - Parser replies
+
+    /// The name states the requirement on the answer's *writing*: it is written
+    /// inside the parse, so it is queued ahead of the DA1 reply that follows the
+    /// probe in the same chunk. Its *delivery* is pinned here as it is today:
+    /// SwiftTerm hops every reply through `TerminalView.onMain`, an unconditional
+    /// `DispatchQueue.main.async`, so nothing has reached `send` when `feed`
+    /// returns, and both replies, probe first, have reached it one main-queue
+    /// turn later.
+    @Test("The OSC 7501 probe is answered inside the parse, ahead of DA1, and reaches send one main-queue turn after feed returns",
+          arguments: TerminalEngineFactory.availableKinds)
+    func programStatusProbeIsAnsweredBeforeFeedReturns(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        fixture.engine.setProgramStatusReporting(enabled: true)
+
+        feed(Self.probe + Self.da1, into: fixture.engine)
+        #expect(fixture.recorder.sent.isEmpty,
+                "a reply reached send inside feed; the main-queue hop this pins is gone: \(fixture.recorder.sent)")
+
+        await mainQueueTurn()
+        #expect(fixture.recorder.sent.starts(with: Self.probeReplyBytes), "observed \(fixture.recorder.sent)")
+        #expect(fixture.recorder.sent.count > Self.probeReplyBytes.count,
+                "the DA1 reply must land in the same main-queue turn; observed \(fixture.recorder.sent)")
+    }
+
+    // MARK: - Live events
+
+    /// The clipboard payload is a per-run marker, and the recorder never writes
+    /// the pasteboard: a test must not overwrite the developer's.
+    @Test("A BEL, an OSC 52 copy and an OSC 777 notification each reach the delegate once",
+          arguments: TerminalEngineFactory.availableKinds)
+    func bellClipboardAndNotificationReachTheDelegate(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        let marker = "tbd-engine-contract-\(UUID().uuidString)"
+        let osc52 = "\u{1b}]52;c;\(Data(marker.utf8).base64EncodedString())\u{07}"
+
+        feed("\u{07}", into: fixture.engine)
+        feed(osc52, into: fixture.engine)
+        feed(Self.notify, into: fixture.engine)
+        let arrived = await waitUntil {
+            fixture.recorder.bells >= 1
+                && !fixture.recorder.clipboardCopies.isEmpty
+                && !fixture.recorder.notifications.isEmpty
+        }
+        #expect(arrived, "observed \(fixture.recorder.calls)")
+        await settle()
+        #expect(fixture.recorder.bells == 1)
+        #expect(fixture.recorder.clipboardCopies == [Data(marker.utf8)])
+        #expect(fixture.recorder.notifications.count == 1)
+        #expect(fixture.recorder.notifications.first?.title == "Contract")
+    }
+
+    // MARK: - Geometry
+
+    @Test("The grid is resized before sizeChanged reports it",
+          arguments: TerminalEngineFactory.availableKinds)
+    func resizeHappensBeforeSizeChanged(kind: TerminalEngineKind) async throws {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        let before = fixture.engine.gridSize
+
+        fixture.engine.view.setFrameSize(NSSize(width: 400, height: 240))
+        let reported = await waitUntil { !fixture.recorder.sizeChanges.isEmpty }
+        try #require(reported, "a frame change must report a new grid size")
+
+        let change = try #require(fixture.recorder.sizeChanges.last)
+        #expect(change.cols != before.cols || change.rows != before.rows,
+                "the fixture frame must change the grid; it was \(before.cols)x\(before.rows)")
+        #expect(change.gridCols == change.cols, "gridSize inside sizeChanged read \(change.gridCols) columns")
+        #expect(change.gridRows == change.rows, "gridSize inside sizeChanged read \(change.gridRows) rows")
+    }
+
+    // MARK: - Preamble into a used engine
+
+    /// A viewer can be reused: the engine a preamble lands in may hold a
+    /// full-screen program that never left, still on the alternate screen with
+    /// a coloured attribute open and its modes set. After `prepareForPreamble`,
+    /// the preamble must leave it exactly as it leaves a fresh engine. On
+    /// SwiftTerm `prepareForPreamble` does nothing, and the snapshot writer's
+    /// reset prelude is what makes this hold.
+    @Test("prepareForPreamble on a reused engine gives the preamble a fresh screen",
+          arguments: TerminalEngineFactory.availableKinds)
+    func prepareForPreambleOnAReusedEngineGivesAFreshScreen(kind: TerminalEngineKind) async {
+        let source = await makeFixture(kind: kind)
+        let used = await makeFixture(kind: kind)
+        let fresh = await makeFixture(kind: kind)
+        defer {
+            source.tearDown()
+            used.tearDown()
+            fresh.tearDown()
+        }
+
+        var vimLife = "$ vim notes.txt\r\n\u{1b}[?1049h\u{1b}[?1h\u{1b}[?2004h\u{1b}[44m\u{1b}[2J\u{1b}[H"
+        for line in 1...10 {
+            vimLife += "~ vim line \(line)\r\n"
+        }
+        feed(vimLife, into: used.engine)
+        let usedBefore = used.engine.withScreen { ($0.isAlternateScreen, $0.lineText(row: 0)) }
+        #expect(usedBefore.0, "the used engine must be left on the alternate screen")
+        #expect(usedBefore.1?.hasPrefix("~ vim line 1") == true, "the program's screen must have landed: \(usedBefore.1 ?? "nil")")
+
+        feed("hello\r\n\u{1b}[31mworld\u{1b}[0m\r\n$ ", into: source.engine)
+        let preamble = await source.engine.handbackPreamble(maxScrollbackLines: 100)
+        #expect(!preamble.isEmpty)
+
+        used.engine.prepareForPreamble()
+        used.engine.ingestSnapshot(preamble)
+        fresh.engine.ingestSnapshot(preamble)
+        await settle()
+
+        let usedScreen = used.engine.withScreen { $0.projection(maxLines: 200) }
+        let freshScreen = fresh.engine.withScreen { $0.projection(maxLines: 200) }
+        #expect(freshScreen.lines.contains("world"), "the preamble must carry the source's screen: \(freshScreen.lines)")
+        #expect(!usedScreen.modes.alternateScreen)
+        #expect(usedScreen == freshScreen)
+    }
+
+    // MARK: - Appearance
+
+    @Test("Applying an appearance with a larger font grows the cell",
+          arguments: TerminalEngineFactory.availableKinds)
+    func appearanceIsApplied(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        let before = fixture.engine.cellSize
+
+        let largerSuite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract.Larger")
+        defer { largerSuite.tearDown() }
+        let larger = AppearanceSettings(defaults: largerSuite.defaults)
+        larger.fontSize = fixture.appearance.fontSize + 6
+
+        fixture.engine.apply(appearance: larger)
+        let after = fixture.engine.cellSize
+        #expect(after.height > before.height, "cell height \(before.height) -> \(after.height)")
+        #expect(after.width > before.width, "cell width \(before.width) -> \(after.width)")
+    }
+
+    // MARK: - Helpers
+
+    private func feed(_ text: String, into engine: any TerminalEngine) {
+        engine.feed(Array(text.utf8)[...])
+    }
+
+    /// One main-queue turn: resumes behind everything already queued on main.
+    private func mainQueueTurn() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    /// `QuietIngestTests`' settle rule: five main-queue turns with a short real
+    /// pause between them. The turns are what the delegate hops need; the
+    /// pauses cover the OSC observer's private serial queue.
+    private func settle() async {
+        for _ in 0..<5 { await hop() }
+    }
+
+    /// Polls `condition` until it holds or the deadline passes. Only positive
+    /// assertions use it, so the deadline is spent only by a failing test.
+    private func waitUntil(
+        _ condition: () -> Bool,
+        deadline: TimeInterval = TestDeadlines.saturatedPassSeconds
+    ) async -> Bool {
+        let end = Date().addingTimeInterval(deadline)
+        while Date() < end {
+            if condition() { return true }
+            await hop()
+        }
+        return condition()
+    }
+
+    private func hop() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                continuation.resume()
+            }
+        }
+    }
+}
+
+// MARK: - Fixture
+
+/// One engine built the way the coordinators build theirs, with a recorder as
+/// its delegate and isolated defaults behind its appearance.
+@MainActor
+private final class EngineFixture {
+    let suite: TestDefaultsSuite
+    let appearance: AppearanceSettings
+    let engine: any TerminalEngine
+    let recorder: RecordingEngineDelegate
+
+    init(kind: TerminalEngineKind) {
+        // Isolated defaults: `UserDefaults.standard` on this unbundled
+        // executable is the developer's real TBDApp.plist.
+        let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract")
+        let appearance = AppearanceSettings(defaults: suite.defaults)
+        let engine = TerminalEngineFactory.make(
+            kind: kind,
+            font: appearance.font,
+            appearance: appearance,
+            configuration: TerminalEngineConfiguration())
+        let recorder = RecordingEngineDelegate()
+        engine.delegate = recorder
+        self.suite = suite
+        self.appearance = appearance
+        self.engine = engine
+        self.recorder = recorder
+    }
+
+    func tearDown() {
+        engine.delegate = nil
+        suite.tearDown()
+    }
+}
+
+/// Records every `TerminalEngineDelegate` call, in order, and what it carried.
+/// Acts on nothing: no pty, no pasteboard, no beep.
+@MainActor
+private final class RecordingEngineDelegate: TerminalEngineDelegate {
+    /// One `sizeChanged`, with the engine's `gridSize` as read inside the call.
+    struct SizeChange {
+        let cols: Int
+        let rows: Int
+        let gridCols: Int
+        let gridRows: Int
+    }
+
+    private(set) var calls: [String] = []
+    private(set) var sent: [UInt8] = []
+    private(set) var sizeChanges: [SizeChange] = []
+    private(set) var bells = 0
+    private(set) var clipboardCopies: [Data] = []
+    private(set) var notifications: [(title: String, body: String)] = []
+    private(set) var programStatusPayloads: [[UInt8]] = []
+
+    func reset() {
+        calls = []
+        sent = []
+        sizeChanges = []
+        bells = 0
+        clipboardCopies = []
+        notifications = []
+        programStatusPayloads = []
+    }
+
+    func engine(_ e: any TerminalEngine, send data: ArraySlice<UInt8>) {
+        calls.append("send")
+        sent.append(contentsOf: data)
+    }
+
+    func engine(_ e: any TerminalEngine, sizeChanged cols: Int, rows: Int) {
+        calls.append("sizeChanged")
+        let grid = e.gridSize
+        sizeChanges.append(SizeChange(cols: cols, rows: rows, gridCols: grid.cols, gridRows: grid.rows))
+    }
+
+    func engineBell(_ e: any TerminalEngine) {
+        calls.append("bell")
+        bells += 1
+    }
+
+    func engine(_ e: any TerminalEngine, clipboardCopy content: Data) {
+        calls.append("clipboardCopy")
+        clipboardCopies.append(content)
+    }
+
+    func engine(_ e: any TerminalEngine, openLink link: String, params: [String: String]) {
+        calls.append("openLink")
+    }
+
+    func engine(_ e: any TerminalEngine, notification title: String, body: String) {
+        calls.append("notification")
+        notifications.append((title: title, body: body))
+    }
+
+    func engine(_ e: any TerminalEngine, programStatusPayload payload: [UInt8], observedAt: Date) {
+        calls.append("programStatusPayload")
+        programStatusPayloads.append(payload)
+    }
+
+    func engine(_ e: any TerminalEngine, filePathClicked path: String) {
+        calls.append("filePathClicked")
+    }
+
+    func engineRequestsCloseTab(_ e: any TerminalEngine) {
+        calls.append("requestsCloseTab")
+    }
+
+    func engineReady(_ e: any TerminalEngine) {
+        calls.append("ready")
+    }
+
+    func engine(_ e: any TerminalEngine, focusChanged focused: Bool) {
+        calls.append("focusChanged")
+    }
+
+    func engineMouseDownClaimsFocus(_ e: any TerminalEngine) -> Bool {
+        calls.append("mouseDownClaimsFocus")
+        return false
+    }
+
+    func engineMovedToWindow(_ e: any TerminalEngine) {
+        calls.append("movedToWindow")
+    }
+
+    func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool {
+        calls.append("controlModePaste")
+        return false
+    }
+}
