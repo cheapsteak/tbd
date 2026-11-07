@@ -255,6 +255,33 @@ struct TerminalSnapshotBlankRowTests {
         Self.expectSameScreen(pair)
         #expect(Self.history(of: pair.fresh).count == 6)
     }
+
+    @Test("Coloured blanks past the last column do not stretch the row they sit in")
+    func colouredBlanksPastTheLastColumn() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // The alternate screen has no scrollback, so narrowing the terminal
+        // does not reflow it and its rows keep their old width. Row 0 holds
+        // an `x`, then coloured blanks from column 74, which the 70-column
+        // screen leaves past its last column.
+        pair.source.feed(text: "\u{1b}[?1049hx\u{1b}[1;75H\u{1b}[44m\u{1b}[K\u{1b}[0m")
+        pair.source.resize(cols: 70, rows: 24)
+        pair.fresh.resize(cols: 70, rows: 24)
+        #expect(pair.source.getLine(row: 0)?.count == 80,
+                "the fixture must leave a row wider than the screen")
+        #expect(pair.source.getLine(row: 0)?.getTrimmedLength() == 1)
+
+        // Read before the transfer, which repaints the source's alt screen
+        // from what it sends. With its SGR runs taken out, the row is the `x`
+        // alone: no blanks out to the edge, and no cursor moves either.
+        let firstRow = TerminalCellWalk.styledViewport(of: pair.source)
+            .components(separatedBy: "\r\n").first ?? ""
+        let sgr = "\u{1b}\\[[0-9;:]*m"
+        #expect(firstRow.replacingOccurrences(of: sgr, with: "", options: .regularExpression) == "x")
+
+        pair.transfer("")
+        #expect(pair.fresh.getLine(row: 0)?.getTrimmedLength() == 1,
+                "the receiver's row runs past its `x`")
+    }
 }
 
 /// The viewer's half of the Closed Terminals capture, through the production

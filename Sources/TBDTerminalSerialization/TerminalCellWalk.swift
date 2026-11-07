@@ -141,7 +141,8 @@ public enum TerminalCellWalk {
         // trailing row is the application's own layout, not unused padding.
         let holdsHistory = walked.count > viewportRows
         if purpose == .capture || !holdsHistory {
-            while let last = walked.last, !last.isWrapped, visibleLength(of: last) == 0 {
+            while let last = walked.last, !last.isWrapped,
+                  visibleLength(of: last, cols: terminal.cols) == 0 {
                 walked.removeLast()
             }
         }
@@ -165,11 +166,19 @@ public enum TerminalCellWalk {
     /// whose CR clears the pending wrap before the LF moves down, and after
     /// the last line the writer sends only mode escapes and cursor moves
     /// before anything prints again. So no extra row wraps.
-    private static func visibleLength(of line: BufferLine) -> Int {
-        let trimmed = line.getTrimmedLength()
+    ///
+    /// Only the first `cols` cells count, because `render` never sends one
+    /// past them. A line can hold more: the alternate screen has no
+    /// scrollback, so narrowing the terminal does not reflow it, and its rows
+    /// keep their old width. A coloured blank out there is off screen, and
+    /// counting it would stretch the row to the last column with blanks the
+    /// source shows as nothing.
+    private static func visibleLength(of line: BufferLine, cols: Int) -> Int {
+        let width = min(line.count, cols)
+        let trimmed = min(line.getTrimmedLength(), width)
         // Every cell from `trimmed` on has no character, so only attributes
         // can make one of them visible.
-        var length = line.count
+        var length = width
         while length > trimmed {
             if isVisibleWhenBlank(line[length - 1].attribute) { return length }
             length -= 1
@@ -238,7 +247,7 @@ public enum TerminalCellWalk {
         // the row too, but as a hard break: reflow on a resize and selection
         // would then split a line the source keeps whole, and a handback
         // would carry that split to the daemon.
-        var limit = fullWidth ? min(cols, line.count) : min(visibleLength(of: line), cols)
+        var limit = fullWidth ? min(cols, line.count) : visibleLength(of: line, cols: cols)
         if continuation { limit = max(limit, min(1, line.count)) }
         guard limit > 0 else { return "" }
 
