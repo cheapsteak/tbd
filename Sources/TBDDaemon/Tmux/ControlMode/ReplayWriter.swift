@@ -112,7 +112,9 @@ enum ReplayWriter {
         // after the last — the final CUP owns the cursor, and a trailing
         // newline would scroll one extra row into scrollback).
         emit(history.joined(separator: "\r\n"))
-        emit(modeEscapes(for: state))
+        // Cursor visibility is withheld on an alt screen and emitted after
+        // the switch below: SwiftTerm shows the cursor on every `?1049h`.
+        emit(modeEscapes(for: state, includeCursorVisibility: !state.alternateOn))
 
         let region = regionEscape(for: state, rows: rows)
         let cursor = cursorEscape(for: state, cols: cols, rows: rows, regionEmitted: region != nil)
@@ -132,6 +134,10 @@ enum ReplayWriter {
             // 1049h clears the alt screen but inherits the primary's cursor
             // position — home before painting (deviation 2, see type doc).
             emit("\(esc)[H")
+            // AFTER the switch, or a hidden cursor comes back (SwiftTerm's
+            // `?1049h` calls `showCursor()`). It is the only mode the switch
+            // changes.
+            emit(state.cursorVisible ? "\(esc)[?25h" : "\(esc)[?25l")
             emit((altScreen ?? []).joined(separator: "\r\n"))
             // Region AFTER the alt switch and content (deviation 1) — still
             // before the cursor, because DECSTBM homes it (M4.0 finding).
@@ -220,9 +226,13 @@ enum ReplayWriter {
     /// (`paste-buffer -p`, addendum §2) — the daemon never needs the app's
     /// emulator to know. The prelude reset 2004; it stays off until the
     /// pane's application re-enables it through live output.
-    private static func modeEscapes(for state: PaneState) -> String {
+    private static func modeEscapes(
+        for state: PaneState, includeCursorVisibility: Bool = true
+    ) -> String {
         var out = ""
-        out += state.cursorVisible ? "\(esc)[?25h" : "\(esc)[?25l"
+        if includeCursorVisibility {
+            out += state.cursorVisible ? "\(esc)[?25h" : "\(esc)[?25l"
+        }
         out += state.insertMode ? "\(esc)[4h" : "\(esc)[4l"
         out += state.applicationCursorKeys ? "\(esc)[?1h" : "\(esc)[?1l"
         out += state.applicationKeypad ? "\(esc)=" : "\(esc)>"
