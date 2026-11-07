@@ -97,6 +97,47 @@ struct SwiftTermForkRegressionTests {
             mismatches.isEmpty,
             "\(mismatches.count) cells lost their colour; first: \(mismatches.prefix(5))")
     }
+
+    /// A pen with a background also interns a background-only style for the
+    /// cells that erases paint. Reclaiming style identifiers can release that
+    /// erase style while a cell keeps the pen. Selecting the pen again must
+    /// still erase with its background, as `ESC[31;44m ESC[K` does in a shell
+    /// that has run long enough to fill the style table.
+    @Test
+    func erasingWithAReselectedPenKeepsItsBackground() {
+        let cols = 80
+        let harness = Harness(cols: cols, rows: 24, scrollback: 1000)
+        let blue = Attribute.Color.ansi256(code: 4)
+
+        // The pen and its erase style take two of the table's 65,535 style
+        // identifiers, and only the printed cell holds either of them.
+        harness.feed("\u{1b}[31;44mA\u{1b}[0m")
+        // The first 65,533 colours take the remaining identifiers, and the
+        // scrollback keeps every cell. The last colour finds the table full and
+        // reclaims the one identifier no cell holds: the erase style's.
+        let floodCount = 65_534
+        var flood = ""
+        flood.reserveCapacity(floodCount * 20)
+        for index in 0..<floodCount {
+            flood += foregroundSequence(floodColour(index)) + "x"
+        }
+        harness.feed(flood)
+        // ED 3, which `clear` sends, discards the scrollback.
+        harness.feed("\u{1b}[3J")
+
+        harness.feed("\u{1b}[0;31;44m\u{1b}[H\u{1b}[K")
+
+        var mismatches: [String] = []
+        for col in 0..<cols {
+            let background = harness.terminal.getCharData(col: col, row: 0)?.attribute.bg
+            if background != blue {
+                mismatches.append("col \(col): \(String(describing: background))")
+            }
+        }
+        #expect(
+            mismatches.isEmpty,
+            "\(mismatches.count) erased cells lost their background; first: \(mismatches.prefix(5))")
+    }
 }
 
 /// A distinct truecolour for each flood cell.

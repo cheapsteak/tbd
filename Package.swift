@@ -56,14 +56,16 @@ let package = Package(
         // reporting the way Shift-drag does, which TBD turns on with "Send
         // clicks and drags to apps that use the mouse"; verbatim, so a later
         // sync with upstream applies cleanly whether or not #705 has merged.
-        // The pinned revision is upstream `9c2518e` plus six commits (branch
-        // `tbd/fix-tab-stops-style-cap`): one making `withTerminal` public,
-        // one adding `showsProgressBar`, #705, a test pinning #705's
-        // behavior, a fix that lays the default tab stops at the width a
-        // terminal is created with (a terminal created wider than 80 columns
-        // otherwise has no stops past column 80), and a fix that reclaims
-        // unused style identifiers once the 65,535-entry style table is full
-        // (new colours otherwise render as the default attribute).
+        // The pinned revision is upstream `9c2518e` plus fifteen commits
+        // (branch `tbd/fix-tab-stops-style-cap`): one making `withTerminal`
+        // public, one adding `showsProgressBar`, #705, a test pinning #705's
+        // behavior, and eleven that fix two bugs with their tests. A terminal
+        // created or set up wider than 80 columns gets default tab stops
+        // across its whole width, where it otherwise has none past column 80.
+        // Once the 65,535-entry style table is full, the terminal reclaims the
+        // style identifiers that nothing still uses, for the pen and for the
+        // background-only style that erases paint, where new colours
+        // otherwise render as the default attribute.
         // `SwiftTermForkRegressionTests` pins both fixes. Once upstream
         // merges equivalents, re-pin to upstream and delete the fork; once a
         // tagged release contains them all, switch back to `from:`.
@@ -92,7 +94,7 @@ let package = Package(
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "06d90d81040463c478b000313a280cf466797eba"),
+        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "a507ba4142db1ab94b9503292f8cab00a7cc4ce9"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
