@@ -54,6 +54,39 @@ private final class ScriptedInputMethod {
     }
 }
 
+/// A US layout for the keys these tests press, so the tests give the same answers whatever layout
+/// the machine running them has selected.
+private let usLayout = KeyboardLayout { event, modifiers in
+    usCharacters(keyCode: event.keyCode, modifiers: modifiers)
+}
+
+/// What a US layout types for `keyCode` with `modifiers`, for the keys these tests press.
+private func usCharacters(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) -> String? {
+    let keys: [UInt16: Character] = [
+        0x00: "a", 0x09: "v", 0x0B: "b", 0x0E: "e", 0x21: "[", 0x22: "i", 0x26: "j", 0x2D: "n", 0x2E: "m",
+    ]
+    if keyCode == 0x24 { return "\r" }
+    guard let key = keys[keyCode] else { return nil }
+    if modifiers.contains(.option), !modifiers.contains(.control) {
+        // Option-b types ∫; Option-e is the acute dead key, which types nothing by itself.
+        switch key {
+        case "b": return "∫"
+        case "e": return ""
+        default: break
+        }
+    }
+    var character = key
+    if modifiers.contains(.shift) {
+        character = key == "[" ? "{" : Character(key.uppercased())
+    } else if modifiers.contains(.capsLock), key.isLetter {
+        character = Character(key.uppercased())
+    }
+    guard modifiers.contains(.control) else { return String(character) }
+    // Control types the C0 byte: a letter's code AND 0x1F, and ESC for [.
+    guard let ascii = character.asciiValue else { return nil }
+    return String(UnicodeScalar(ascii & 0x1F))
+}
+
 /// An 80×24 terminal and a view over it in a 13 pt monospaced font.
 @MainActor
 private struct KeyViewFixture {
@@ -72,6 +105,7 @@ private struct KeyViewFixture {
             cursor: .init(r: 0xFF, g: 0xFF, b: 0xFF))
         view = try GhosttyTerminalView(terminal: terminal, appearance: appearance)
         view.setFrameSize(NSSize(width: 400, height: 200))
+        view.inputController.layout = usLayout
         view.onSend = { recorder.sent.append($0) }
     }
 }
@@ -102,7 +136,7 @@ private func ctrlBracket() throws -> NSEvent {
 /// The bytes `event` encodes to on `terminal`, through the same translation the view runs.
 @MainActor
 private func bytes(for event: NSEvent, on terminal: GhosttyTerminal, optionAsAlt: OptionAsAlt = .never) -> [UInt8] {
-    let press = TerminalInputController.keyPress(event: event, action: .press, optionAsAlt: optionAsAlt)
+    let press = TerminalInputController.keyPress(event: event, action: .press, optionAsAlt: optionAsAlt, layout: usLayout)
     return terminal.encodeKey(press, optionAsAlt: optionAsAlt)
 }
 
@@ -282,13 +316,11 @@ struct KeyAndIMETests {
         ])
         input.install(on: view)
         let optionB = try keyDown(0x0B, characters: "∫", ignoringModifiers: "b", flags: .option)
-        let unmodified = try #require(optionB.characters(byApplyingModifiers: []), "the layout has no character for B")
 
         view.optionAsMeta = true
         #expect(view.optionAsMeta, "the setting did not stick")
         view.keyDown(with: optionB)
-        #expect(fixture.recorder.sent == [[0x1B] + Array(unmodified.utf8)],
-                "Option-b as Meta sent \(fixture.recorder.sent)")
+        #expect(fixture.recorder.sent == [[0x1B, UInt8(ascii: "b")]], "Option-b as Meta sent \(fixture.recorder.sent)")
         #expect(input.eventsSeen.last?.modifierFlags.contains(.option) == false,
                 "the input method was handed Option-b with Option, so it would type ∫")
 
