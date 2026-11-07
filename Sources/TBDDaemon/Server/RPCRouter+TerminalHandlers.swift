@@ -6183,24 +6183,13 @@ extension RPCRouter {
             return response
         }
 
-        // Prefer the absolute path captured by the SessionStart hook — it's
-        // immune to `/clear` and `/compact` rollovers that change the
-        // ~/.claude/projects/ subdir away from the cwd-derived guess. Fall
-        // back to the legacy projectDir+sessionID resolution for terminals
-        // that haven't received a hook event yet (older terminals, or
-        // sessions that were already running before the overlay hook was
-        // registered).
-        let filePath: String
-        if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
-            filePath = storedPath
-        } else {
-            guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-                let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
-                response = try RPCResponse(result: result)
-                responseBytes = response.result?.utf8.count ?? 0
-                return response
-            }
-            filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        // The locator prefers the absolute path captured by the SessionStart
+        // hook and falls back to the legacy projectDir+sessionID resolution.
+        guard let filePath = ClaudeTranscriptLocator.filePath(terminal: terminal, worktreePath: worktree.path) else {
+            let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
+            response = try RPCResponse(result: result)
+            responseBytes = response.result?.utf8.count ?? 0
+            return response
         }
         let parsed: [TranscriptItem]
         if let tailLimit = params.tailLimit {
