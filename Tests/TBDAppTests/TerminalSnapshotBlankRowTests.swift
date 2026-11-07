@@ -154,6 +154,24 @@ struct TerminalSnapshotBlankRowTests {
                 "a screen with no history walks as its text alone")
     }
 
+    @Test("An erased wrapped row still moves the receiver down a row, and stays wrapped")
+    func erasedWrappedRowKeepsItsPlace() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // A hundred `a`s wrap onto the last row, which `ESC[2K` then erases.
+        // EL leaves the row's wrap flag set, so the source holds a
+        // continuation with nothing in it, the cursor on it, and 8 rows of
+        // history above the viewport.
+        pair.transfer(
+            Self.numberedLines(30) + String(repeating: "a", count: 100) + "\r\u{1b}[2K")
+        #expect(Self.history(of: pair.source).count == 8, "the fixture must scroll 8 rows")
+        Self.expectSameScreen(pair)
+        #expect(Self.text(pair.fresh.getLine(row: 22)) == String(repeating: "a", count: 80))
+
+        // The row arrives as the continuation it is, with no character in it.
+        #expect(pair.fresh.getLine(row: 23)?.isWrapped == true)
+        #expect(pair.fresh.getLine(row: 23)?.getTrimmedLength() == 0)
+    }
+
     // MARK: - Captures
 
     @Test("A capture drops the blank rows below a cleared screen's text, and a replay keeps them")

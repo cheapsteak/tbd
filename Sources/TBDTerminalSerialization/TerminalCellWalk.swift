@@ -63,12 +63,22 @@ public enum TerminalCellWalk {
     /// of a wrapped paragraph out to the full column count with blank cells
     /// instead of trimming it, because that row's own flag is `true` (it
     /// continues the row above) even though nothing continues it.
+    ///
+    /// Every row moves the receiver down exactly one row: a hard break by its
+    /// `\r\n`, a continuation by the wrap its first printed cell causes. That
+    /// is why `render` always prints a continuation's first cell, even on a
+    /// row that holds nothing (see `continuation` there). The first walked row
+    /// is never treated as a continuation, because nothing above it on the
+    /// receiver leaves a pending wrap to continue.
     private static func join(_ lines: [BufferLine], cols: Int) -> String {
         var out = ""
         for (index, line) in lines.enumerated() {
             if index > 0 && !line.isWrapped { out += "\r\n" }
+            let continuesPreviousLine = index > 0 && line.isWrapped
             let continuesToNextLine = index + 1 < lines.count && lines[index + 1].isWrapped
-            out += render(line: line, cols: cols, fullWidth: continuesToNextLine)
+            out += render(
+                line: line, cols: cols,
+                fullWidth: continuesToNextLine, continuation: continuesPreviousLine)
         }
         return out
     }
@@ -105,13 +115,15 @@ public enum TerminalCellWalk {
         // A replay drops trailing blank rows only when the walk holds no row
         // above the viewport. The receiver starts on an erased screen with
         // the cursor at home, and once it reaches its bottom row, every
-        // further row it is sent scrolls one row into its scrollback. So a
-        // walk that holds history must arrive whole: each trailing row
-        // dropped is a scroll the receiver never makes, so the viewport lands
-        // that many rows low, the history comes up that many rows short, and
-        // the absolute cursor address that ends the snapshot points at the
-        // wrong line. The cap above changes only how much history there is,
-        // so the same test holds for a capped walk.
+        // further row it is sent scrolls one row into its scrollback. So for
+        // the viewport to land where it was, a walk that holds history must
+        // send every row and move the receiver down one row for each (`join`
+        // says how a continuation does). Each trailing row dropped is a
+        // scroll the receiver never makes: the viewport lands that many rows
+        // low, the history comes up that many rows short, and the absolute
+        // cursor address that ends the snapshot points at the wrong line. The
+        // cap above changes only how much history there is, so the same test
+        // holds for a capped walk.
         //
         // Without history the receiver never scrolls, its screen below the
         // last row sent is already blank, and the closing cursor address puts
@@ -191,7 +203,17 @@ public enum TerminalCellWalk {
             || style.contains(.crossedOut)
     }
 
-    private static func render(line: BufferLine, cols: Int, fullWidth: Bool) -> String {
+    /// Whether ECH, sent under this attribute's SGR, leaves a blank that
+    /// carries exactly this attribute. SwiftTerm's erase cell keeps only the
+    /// background, so it does for a default foreground and no style.
+    private static func erasesExactly(_ attribute: Attribute) -> Bool {
+        attribute.fg == .defaultColor && attribute.style.isEmpty
+            && attribute.underlineStyle == .none && attribute.underlineColor == nil
+    }
+
+    private static func render(
+        line: BufferLine, cols: Int, fullWidth: Bool, continuation: Bool
+    ) -> String {
         // A line the next one wraps from is emitted at full width; `join` is
         // what withholds its line ending so DECAWM re-wraps it in the
         // receiver. Otherwise the line ends at its `visibleLength`, so a
@@ -204,7 +226,20 @@ public enum TerminalCellWalk {
         // storage — `BufferLine`'s subscript clamps an out-of-range index to
         // its last cell instead of trapping, which would silently repeat
         // that cell out to `cols`.
-        let limit = fullWidth ? min(cols, line.count) : min(visibleLength(of: line), cols)
+        //
+        // A continuation always sends at least its first cell. The receiver
+        // reaches a continuation only by printing past the edge of the row
+        // above, because SwiftTerm wraps when it prints and at no other time,
+        // so a continuation that sent nothing would leave the receiver one row
+        // short, with the viewport one row low and the closing cursor address
+        // on the row above. EL never clears a row's wrap flag, so `ESC[2K` on
+        // a wrapped row leaves exactly that: a continuation with nothing in
+        // it. Sending a line break there instead would land the receiver on
+        // the row too, but as a hard break: reflow on a resize and selection
+        // would then split a line the source keeps whole, and a handback
+        // would carry that split to the daemon.
+        var limit = fullWidth ? min(cols, line.count) : min(visibleLength(of: line), cols)
+        if continuation { limit = max(limit, min(1, line.count)) }
         guard limit > 0 else { return "" }
 
         var out = ""
@@ -229,7 +264,16 @@ public enum TerminalCellWalk {
             // forward exactly one column, under whatever SGR run is already
             // open, so a coloured blank still paints its background.
             let character = cell.getCharacter()
-            out.append(character == Character(Unicode.Scalar(0)) ? " " : character)
+            let isBlank = character == Character(Unicode.Scalar(0))
+            out.append(isBlank ? " " : character)
+            // The space that made the receiver wrap onto a continuation is
+            // erased back to a blank under the same SGR (BS, then ECH), so the
+            // receiver's cell holds no character, as the source's does, and
+            // CUF steps past it when more of the row follows.
+            if continuation && column == 0 && isBlank && erasesExactly(cell.attribute) {
+                out += "\u{8}\u{1b}[X"
+                if limit > 1 { out += "\u{1b}[C" }
+            }
         }
         // Never leave an attribute open across a line boundary.
         if openAttribute != nil { out += "\u{1b}[0m" }
