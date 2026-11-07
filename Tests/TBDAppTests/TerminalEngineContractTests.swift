@@ -12,8 +12,10 @@ import TestSupport
 ///
 /// Each test builds its engine through the factory, the way both coordinators
 /// do, and observes it only through the protocol and a recording
-/// `TerminalEngineDelegate`. Nothing here names SwiftTerm, so a second engine
-/// joins the suite by joining `availableKinds`. Design:
+/// `TerminalEngineDelegate`, so a second engine joins the suite by joining
+/// `availableKinds`. One check reaches below the protocol: the routing test
+/// drives a paste through `TBDTerminalView`'s drop entry, and records a known
+/// issue for an engine whose view has none. Design:
 /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
 ///
 /// **Timing.** Every delegate method arrives on main, and a callback a parse
@@ -380,7 +382,14 @@ struct TerminalEngineContractTests {
         defer { fixture.tearDown() }
 
         fixture.engine.setProgramStatusReporting(enabled: false)
-        feed(Self.report, into: fixture.engine)
+        // The gate is read where OSC events are delivered, on SwiftTerm's
+        // observer queue, so a report still queued there when the gate turns
+        // on would be delivered late. The OSC 777 behind it is the barrier:
+        // that queue is serial, so once the notification has arrived, the
+        // report ahead of it has been decided with the gate off.
+        feed(Self.report + Self.notify, into: fixture.engine)
+        let drained = await waitUntil { !fixture.recorder.notifications.isEmpty }
+        #expect(drained, "the OSC 777 barrier must arrive")
         await settle()
         #expect(fixture.recorder.programStatusPayloads.isEmpty, "a report was delivered with reporting off")
 
@@ -396,10 +405,14 @@ struct TerminalEngineContractTests {
     // MARK: - Routing
 
     /// A click is a left mouse-down and its release; a focus change is the view
-    /// becoming first responder and giving it up; a control-mode paste is a
-    /// drop, which asks the same paste hook a pasteboard paste does. The drop
-    /// stands in for a paste because a paste reads the general pasteboard,
-    /// which a test must not write.
+    /// becoming first responder and giving it up. Both run for every engine.
+    ///
+    /// A control-mode paste is driven as a drop, which asks the same paste
+    /// hook a pasteboard paste does, because a paste reads the general
+    /// pasteboard and a test must not write it. The drop needs a headless
+    /// entry on the engine's view, which only `TBDTerminalView` has today;
+    /// for any other view the paste half is recorded as a known issue, until
+    /// the libghostty engine's PR gives its view an entry of its own.
     @Test("With click routing and paste interception off, no click, focus change or paste reaches the delegate; on, each does",
           arguments: TerminalEngineFactory.availableKinds)
     func routingOffReportsNoClickFocusOrPaste(kind: TerminalEngineKind) async throws {
@@ -414,45 +427,79 @@ struct TerminalEngineContractTests {
         fixture.recorder.reset()
 
         fixture.engine.setClickRouting(enabled: false)
-        fixture.engine.setControlModePasteInterception(enabled: false)
-        try await clickFocusAndDrop(on: fixture.engine, in: window)
-        let routedWhileOff = fixture.recorder.calls.filter { Self.routedCalls.contains($0) }
-        #expect(routedWhileOff.isEmpty, "routing is off, yet the delegate was asked: \(routedWhileOff)")
+        try await clickAndMoveFocus(on: fixture.engine, in: window)
+        let clickCallsWhileOff = fixture.recorder.calls.filter { Self.clickRoutedCalls.contains($0) }
+        #expect(clickCallsWhileOff.isEmpty, "click routing is off, yet the delegate was asked: \(clickCallsWhileOff)")
 
         // Positive control: on, the same gestures reach the delegate.
         fixture.recorder.reset()
         fixture.engine.setClickRouting(enabled: true)
+        try await clickAndMoveFocus(on: fixture.engine, in: window)
+        let clickCalls = fixture.recorder.calls
+        #expect(clickCalls.contains("mouseDownClaimsFocus"), "a click with routing on must ask the delegate; observed \(clickCalls)")
+        #expect(clickCalls.contains("focusChanged"), "a focus change with routing on must be reported; observed \(clickCalls)")
+
+        guard let dropTarget = fixture.engine.view as? TBDTerminalView else {
+            withKnownIssue("this engine's view has no headless drop entry, so its paste interception is unchecked") {
+                Issue.record("no headless drop entry for \(kind)")
+            }
+            return
+        }
+
+        fixture.recorder.reset()
+        fixture.engine.setControlModePasteInterception(enabled: false)
+        dropTarget.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
+        await settle()
+        #expect(!fixture.recorder.calls.contains("controlModePaste"),
+                "paste interception is off, yet the paste was offered: \(fixture.recorder.calls)")
+
+        // Positive control: on, the same drop is offered to the delegate.
+        fixture.recorder.reset()
         fixture.engine.setControlModePasteInterception(enabled: true)
-        try await clickFocusAndDrop(on: fixture.engine, in: window)
-        let calls = fixture.recorder.calls
-        #expect(calls.contains("mouseDownClaimsFocus"), "a click with routing on must ask the delegate; observed \(calls)")
-        #expect(calls.contains("focusChanged"), "a focus change with routing on must be reported; observed \(calls)")
-        #expect(calls.contains("controlModePaste"), "a paste with interception on must be offered; observed \(calls)")
+        dropTarget.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
+        await settle()
+        #expect(fixture.recorder.calls.contains("controlModePaste"),
+                "a paste with interception on must be offered; observed \(fixture.recorder.calls)")
     }
 
     // MARK: - Factory
 
     /// Not parameterised: it is about the kind this build cannot make. The
-    /// fallback also logs `libghostty engine unavailable, fell back to
-    /// SwiftTerm: not built in this version` at `.notice`; `kind` is the part
-    /// a caller can read.
-    @Test("Asking for the libghostty engine in a build without it yields a SwiftTerm engine that says so")
+    /// fallback is observed through the factory's `onFallback`, whose default
+    /// logs it at `.notice`.
+    @Test("A libghostty request in a build without it yields SwiftTerm and reports the fallback once; a SwiftTerm request reports none")
     func ghosttyRequestFallsBackToSwiftTerm() {
         let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract")
         defer { suite.tearDown() }
         let appearance = AppearanceSettings(defaults: suite.defaults)
-        let engine = TerminalEngineFactory.make(
+        var fallbacks: [(requested: TerminalEngineKind, reason: String)] = []
+
+        let ghostty = TerminalEngineFactory.make(
             kind: .ghostty,
             font: appearance.font,
             appearance: appearance,
-            configuration: TerminalEngineConfiguration())
-        #expect(engine.kind == .swiftTerm)
+            configuration: TerminalEngineConfiguration(),
+            onFallback: { fallbacks.append((requested: $0, reason: $1)) })
+        #expect(ghostty.kind == .swiftTerm)
+        #expect(fallbacks.count == 1)
+        #expect(fallbacks.first?.requested == .ghostty)
+        #expect(fallbacks.first?.reason == "not built in this version")
+
+        fallbacks = []
+        let swiftTerm = TerminalEngineFactory.make(
+            kind: .swiftTerm,
+            font: appearance.font,
+            appearance: appearance,
+            configuration: TerminalEngineConfiguration(),
+            onFallback: { fallbacks.append((requested: $0, reason: $1)) })
+        #expect(swiftTerm.kind == .swiftTerm)
+        #expect(fallbacks.isEmpty, "a SwiftTerm request reported a fallback: \(fallbacks)")
     }
 
     // MARK: - Helpers
 
-    /// The delegate methods only click routing and paste interception reach.
-    private static let routedCalls: Set<String> = ["mouseDownClaimsFocus", "focusChanged", "controlModePaste"]
+    /// The delegate methods only click routing reaches.
+    private static let clickRoutedCalls: Set<String> = ["mouseDownClaimsFocus", "focusChanged"]
 
     /// Puts `view` in a borderless window far off every display, never ordered
     /// front: the window exists so the view has one, not so anything is seen.
@@ -468,10 +515,10 @@ struct TerminalEngineContractTests {
         return window
     }
 
-    /// One click, one focus change each way, and one dropped path, then a
-    /// settle. Events go straight to the view's overrides: nothing dispatches
-    /// events to a window that is never key.
-    private func clickFocusAndDrop(on engine: any TerminalEngine, in window: NSWindow) async throws {
+    /// One click, then one focus change each way, then a settle. Events go
+    /// straight to the view's overrides: nothing dispatches events to a window
+    /// that is never key.
+    private func clickAndMoveFocus(on engine: any TerminalEngine, in window: NSWindow) async throws {
         let view = engine.view
         let location = view.convert(CGPoint(x: 10, y: 10), to: nil)
         let down = try #require(NSEvent.mouseEvent(
@@ -488,12 +535,6 @@ struct TerminalEngineContractTests {
         window.makeFirstResponder(nil)
         window.makeFirstResponder(view)
         window.makeFirstResponder(nil)
-
-        // The drop's headless entry is `TBDTerminalView.deliverDroppedText`. An
-        // engine whose view is not a `TBDTerminalView` needs one of its own here.
-        let terminalView = try #require(
-            view as? TBDTerminalView, "this engine's view has no headless drop entry for the contract to drive")
-        terminalView.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
         await settle()
     }
 
