@@ -9,81 +9,104 @@ import Testing
 /// the daemon's SwiftTerm preamble when it attaches, possibly after an earlier life, and on detach
 /// it hands its own screen back for the daemon's SwiftTerm emulator to read.
 ///
-/// The first three tests run every corpus state through one crossing and compare what a reader
-/// sees: text, widths, colours, attributes, links, the cursor's cell and the active screen. A state
-/// may differ only where the two engines hold different screens for the same bytes. Those states
-/// are listed with the reason, and each list is exact: a new difference fails, and so does a
-/// listed state that stops differing, which means the list is stale. The lists are the proof of
-/// concept's misses on its generated states; CI confirms them against the pinned SwiftTerm fork.
-/// The tests after them hold the handback's four reorderings and its scrollback cap.
-@Suite(.fastPassBounded)
+/// The first three tests run every state, the corpus's and the review's, through one crossing and
+/// compare everything `handoverCompare` reads: the screen and its scrollback, the cursor, the
+/// modes, the mouse modes in effect, the region, the pen and the kitty flags. A state may differ
+/// only where the two engines hold different screens for the same bytes, and only in the
+/// categories its entry names. Each list is exact: a new difference fails, a difference outside a
+/// listed state's categories fails, and so does a listed state that stops differing, which means
+/// the list is stale. The lists are the proof of concept's misses on its generated states; CI
+/// confirms them against the pinned SwiftTerm fork. The tests after them hold the handback's
+/// reorderings, its scrollback cap and a detach inside a sequence.
+///
+/// Every body runs on a thread the tests own, one at a time: see `onHandoverThread`.
+@Suite(.serialized, .fastPassBounded)
 struct HandoverCorpusTests {
-    static let freshMisses: [String: String] = [
-        "combining-marks": "with grapheme clustering on, libghostty joins क्ष and กำ into one wide cell each, where SwiftTerm keeps their parts in separate cells",
-        "vs16-at-edge": "libghostty widens a heart with VS16 to two columns, so in the last column it wraps to the next row; SwiftTerm keeps it one column wide in the last column",
+    static let clustering = HandoverMiss(
+        reason: "with grapheme clustering on, libghostty joins क्ष and กำ into one wide cell each, where SwiftTerm keeps their parts in separate cells",
+        categories: ["text", "wide"])
+
+    static let heartAtTheEdge = HandoverMiss(
+        reason: "libghostty widens a heart with VS16 to two columns, so in the last column it wraps to the next row; SwiftTerm keeps it one column wide in the last column",
+        categories: ["text", "wide"])
+
+    static let freshMisses: [String: HandoverMiss] = [
+        "combining-marks": clustering,
+        "vs16-at-edge": heartAtTheEdge,
     ]
 
-    static let handbackMisses: [String: String] = [
-        "combining-marks": "with grapheme clustering on, libghostty joins क्ष and กำ into one wide cell each, where SwiftTerm keeps their parts in separate cells",
-        "overline": "SwiftTerm has no overline, so the overlined cells arrive without it",
-        "vs16-at-edge": "libghostty widens a heart with VS16 to two columns, so in the last column it wraps to the next row; SwiftTerm keeps it one column wide in the last column",
+    static let handbackMisses: [String: HandoverMiss] = [
+        "combining-marks": clustering,
+        "overline": HandoverMiss(
+            reason: "SwiftTerm has no overline, so the overlined cells arrive without it", categories: ["attrs"]),
+        "vs16-at-edge": heartAtTheEdge,
     ]
 
-    // MARK: - The corpus through each crossing
+    // MARK: - Every state through each crossing
 
     /// The daemon's SwiftTerm preamble, read by a fresh libghostty viewer, against the same
     /// preamble read by a fresh SwiftTerm one.
-    @Test(arguments: HandoverCorpus.names)
-    func swiftTermWriterIntoFreshGhosttyMatches(_ name: String) throws {
-        let state = HandoverCorpus.state(named: name)
-        let preamble = state.swiftTerm().writerBytes()
-        let swiftTerm = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
-        swiftTerm.feed(preamble)
-        let ghostty = try Self.freshGhostty(state)
-        ghostty.feed(preamble[...])
+    @Test(arguments: HandoverFixtures.names)
+    func swiftTermWriterIntoFreshGhosttyMatches(_ name: String) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let preamble = HandoverFixtures.preamble(named: name)
+            let swiftTerm = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
+            swiftTerm.feed(preamble)
+            let ghostty = try Self.freshGhostty(state)
+            ghostty.feed(preamble[...])
 
-        let tally = handoverCompare(swiftTerm.handoverScreen(), ghostty.handoverSnap(history: false), history: false)
-            .filtered(to: handoverScreenCategories)
-        Self.expectOutcome(name, tally: tally, misses: Self.freshMisses, crossing: "SwiftTerm preamble into a fresh libghostty")
+            let tally = handoverCompare(swiftTerm.handoverSnap(), ghostty.handoverSnap())
+                .excluding(handoverInertCategories)
+            Self.expectOutcome(
+                name, tally: tally, misses: Self.freshMisses, crossing: "SwiftTerm preamble into a fresh libghostty")
+        }
     }
 
     /// The same preamble, read by a libghostty viewer that had an earlier life and was reset, must
     /// leave it exactly as a fresh one: every category, scrollback included. No state may differ.
-    @Test(arguments: HandoverCorpus.names)
-    func swiftTermWriterIntoReusedGhosttyAfterResetMatches(_ name: String) throws {
-        let state = HandoverCorpus.state(named: name)
-        let preamble = state.swiftTerm().writerBytes()
-        let fresh = try Self.freshGhostty(state)
-        fresh.feed(preamble[...])
-        let expected = fresh.handoverSnap()
-        fresh.close()
+    @Test(arguments: HandoverFixtures.names)
+    func swiftTermWriterIntoReusedGhosttyAfterResetMatches(_ name: String) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let preamble = HandoverFixtures.preamble(named: name)
+            let fresh = try Self.freshGhostty(state)
+            fresh.feed(preamble[...])
+            let expected = fresh.handoverSnap()
+            fresh.close()
 
-        for life in HandoverCorpus.priorLives {
-            let reused = try Self.freshGhostty(state)
-            reused.feed(life.bytes[...])
-            reused.reset()
-            reused.feed(preamble[...])
-            let tally = handoverCompare(expected, reused.handoverSnap())
-            #expect(tally.isEmpty, "\(name), after a \(life.name) life and a reset: \(tally.summary)")
+            for life in HandoverCorpus.priorLives {
+                let reused = try Self.freshGhostty(state)
+                reused.feed(life.bytes[...])
+                reused.reset()
+                reused.feed(preamble[...])
+                let tally = handoverCompare(expected, reused.handoverSnap())
+                #expect(tally.isEmpty, "\(name), after a \(life.name) life and a reset: \(tally.summary)")
+            }
         }
     }
 
-    /// A libghostty viewer's handback, read by a fresh SwiftTerm emulator, against the viewer.
-    @Test(arguments: HandoverCorpus.names)
-    func ghosttyHandbackIntoSwiftTermMatches(_ name: String) throws {
-        let state = HandoverCorpus.state(named: name)
-        let source = try state.ghostty()
-        let receiver = try Self.handedBack(source, state: state)
+    /// A libghostty viewer's handback, read by a fresh SwiftTerm emulator, against the viewer. The
+    /// viewer's scrollback is cut to the newest rows the handback carries.
+    @Test(arguments: HandoverFixtures.names)
+    func ghosttyHandbackIntoSwiftTermMatches(_ name: String) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let source = try state.ghostty()
+            let receiver = try Self.handedBack(source, state: state)
 
-        let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverScreen(), history: false)
-            .filtered(to: handoverScreenCategories)
-        Self.expectOutcome(name, tally: tally, misses: Self.handbackMisses, crossing: "libghostty handback into SwiftTerm")
+            let expected = source.handoverSnap().keepingNewestHistory(handoverScrollback)
+            let tally = handoverCompare(expected, receiver.handoverSnap()).excluding(handoverInertCategories)
+            Self.expectOutcome(
+                name, tally: tally, misses: Self.handbackMisses, crossing: "libghostty handback into SwiftTerm")
+        }
     }
 
-    @Test func handoverMissesNameCorpusStates() {
-        let names = Set(HandoverCorpus.names)
-        for name in Self.freshMisses.keys.sorted() + Self.handbackMisses.keys.sorted() {
-            #expect(names.contains(name), "\(name) is listed as a miss but is not a corpus state")
+    @Test func handoverMissesNameStatesAndCategories() {
+        let names = Set(HandoverFixtures.names)
+        for (name, miss) in Array(Self.freshMisses) + Array(Self.handbackMisses) {
+            #expect(names.contains(name), "\(name) is listed as a miss but is not a state")
+            #expect(!miss.categories.isEmpty, "\(name) is listed as a miss with no category it may differ in")
         }
     }
 
@@ -92,14 +115,18 @@ struct HandoverCorpusTests {
     /// SwiftTerm shows the cursor on every switch to the alternate screen, so a hidden cursor is
     /// hidden after the switch.
     @Test(arguments: ["hidden-then-alt", "alt-tui-full"])
-    func handbackKeepsCursorHiddenOnAlternateScreen(_ name: String) throws {
-        let state = HandoverCorpus.state(named: name)
-        let source = try state.ghostty()
-        #expect(source.withLocked { !$0.isCursorVisible && $0.isAlternateScreen }, "\(name) must leave a hidden cursor on the alternate screen")
+    func handbackKeepsCursorHiddenOnAlternateScreen(_ name: String) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let source = try state.ghostty()
+            #expect(
+                source.withLocked { !$0.isCursorVisible && $0.isAlternateScreen },
+                "\(name) must leave a hidden cursor on the alternate screen")
 
-        let receiver = try Self.handedBack(source, state: state)
-        #expect(receiver.locked { $0.isCurrentBufferAlternate })
-        #expect(receiver.mode(25) == false, "\(name): the receiver shows a cursor the viewer hid")
+            let receiver = try Self.handedBack(source, state: state)
+            #expect(receiver.locked { $0.isCurrentBufferAlternate })
+            #expect(receiver.mode(25) == false, "\(name): the receiver shows a cursor the viewer hid")
+        }
     }
 
     struct MouseCase: Sendable, CustomTestStringConvertible {
@@ -113,6 +140,7 @@ struct HandoverCorpusTests {
 
     static let mouseCases: [MouseCase] = [
         MouseCase(state: "mouse-downgrade", mode: 1000, swiftTerm: .vt200),
+        MouseCase(state: "mouse-crossterm", mode: 1003, swiftTerm: .anyEvent),
         MouseCase(state: "mouse-1000", mode: 1000, swiftTerm: .vt200),
         MouseCase(state: "mouse-1002-sgr", mode: 1002, swiftTerm: .buttonEventTracking),
         MouseCase(state: "mouse-1003-sgr", mode: 1003, swiftTerm: .anyEvent),
@@ -123,41 +151,146 @@ struct HandoverCorpusTests {
     /// After `?1003h ?1000h` libghostty tracks clicks only, but keeps both modes set in its table.
     /// The handback writes only the mode in effect, so the receiver does not track every motion.
     @Test(arguments: HandoverCorpusTests.mouseCases)
-    func handbackWritesOnlyTheEffectiveMouseMode(_ mouse: MouseCase) throws {
-        let state = HandoverCorpus.state(named: mouse.state)
-        let source = try state.ghostty()
-        let text = try Self.handbackText(source)
-        let written = [9, 1000, 1002, 1003].filter { text.contains("\u{1b}[?\($0)h") }
-        #expect(written == (mouse.mode == 0 ? [] : [mouse.mode]), "\(mouse.state) wrote mouse modes \(written)")
+    func handbackWritesOnlyTheEffectiveMouseMode(_ mouse: MouseCase) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: mouse.state)
+            let source = try state.ghostty()
+            let text = try Self.handbackText(source)
+            let written = handoverMouseTrackingModes.sorted().filter { text.contains("\u{1b}[?\($0)h") }
+            #expect(written == (mouse.mode == 0 ? [] : [mouse.mode]), "\(mouse.state) wrote mouse modes \(written)")
 
-        let receiver = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
-        receiver.feed(Array(text.utf8))
-        #expect(receiver.locked { $0.mouseMode } == mouse.swiftTerm)
+            let receiver = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
+            receiver.feed(Array(text.utf8))
+            #expect(receiver.locked { $0.mouseMode } == mouse.swiftTerm)
+        }
     }
 
-    /// SwiftTerm refuses reverse wrap while autowrap is off, so `?45h` goes ahead of `?7l`.
-    @Test func handbackTurnsReverseWrapOnBeforeAutowrapOff() throws {
-        let state = HandoverCorpus.state(named: "reverse-wrap-no-autowrap")
-        let source = try state.ghostty()
-        #expect(source.withLocked { $0.mode(45) && !$0.mode(7) })
-        let text = try Self.handbackText(source)
-        let reverseOn = text.range(of: "\u{1b}[?45h")
-        let wrapOff = text.range(of: "\u{1b}[?7l")
-        #expect(reverseOn != nil && wrapOff != nil, "the handback must write both modes")
-        if let reverseOn, let wrapOff {
-            #expect(reverseOn.lowerBound < wrapOff.lowerBound, "?45h must precede ?7l")
-        }
+    struct EncodingCase: Sendable, CustomTestStringConvertible {
+        let state: String
+        /// The one encoding the handback may set, or 0 for X10's.
+        let encoding: Int
 
-        let receiver = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
-        receiver.feed(Array(text.utf8))
-        #expect(receiver.mode(45) == true)
-        #expect(receiver.mode(7) == false)
+        var testDescription: String { state }
+    }
+
+    static let encodingCases: [EncodingCase] = [
+        EncodingCase(state: "mouse-crossterm", encoding: 1006),
+        EncodingCase(state: "mouse-urxvt", encoding: 1015),
+        EncodingCase(state: "mouse-utf8", encoding: 1005),
+        EncodingCase(state: "mouse-sgr-pixels", encoding: 1016),
+        EncodingCase(state: "mouse-1002-sgr", encoding: 1006),
+        EncodingCase(state: "mouse-1000", encoding: 0),
+    ]
+
+    /// libghostty reports in the encoding set last and keeps the others set in its table, and
+    /// SwiftTerm uses the last one written. crossterm sets `?1015h` and then `?1006h`, so in the
+    /// formatter's number order the receiver would report in urxvt's encoding, which cannot name
+    /// a column past 223 to every reader. The handback writes only the encoding in effect.
+    @Test(arguments: HandoverCorpusTests.encodingCases)
+    func handbackWritesOnlyTheEffectiveMouseEncoding(_ mouse: EncodingCase) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: mouse.state)
+            let source = try state.ghostty()
+            #expect(source.withLocked { $0.mouseEncodingInEffect } == mouse.encoding)
+            let text = try Self.handbackText(source)
+            let written = handoverMouseEncodingModes.sorted().filter { text.contains("\u{1b}[?\($0)h") }
+            #expect(written == (mouse.encoding == 0 ? [] : [mouse.encoding]), "\(mouse.state) wrote encodings \(written)")
+
+            let receiver = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
+            receiver.feed(Array(text.utf8))
+            #expect(receiver.handoverSnap(history: false).mouseEncoding == mouse.encoding)
+        }
+    }
+
+    /// The review's case end to end: after crossterm's `?1015h ?1006h`, a click in column 251 that
+    /// the receiver reports is an SGR report.
+    @Test func handbackReceiverReportsAClickInSGRAfterCrosstermsModes() async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: "mouse-crossterm")
+            let receiver = try Self.handedBack(try state.ghostty(), state: state)
+            let report = receiver.locked { terminal in
+                receiver.collector.bytes.removeAll()
+                terminal.sendEvent(buttonFlags: 0, x: 250, y: 5)
+                return receiver.collector.bytes
+            }
+            #expect(String(bytes: report, encoding: .utf8) == "\u{1b}[<0;251;6M")
+        }
+    }
+
+    /// SwiftTerm refuses reverse wrap while autowrap is off, so `?45h` must land while autowrap is
+    /// still on. The handback writes `?7l` last.
+    @Test func handbackTurnsReverseWrapOnBeforeAutowrapOff() async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: "reverse-wrap-no-autowrap")
+            let source = try state.ghostty()
+            #expect(source.withLocked { $0.mode(45) && !$0.mode(7) })
+            let text = try Self.handbackText(source)
+            let reverseOn = text.range(of: "\u{1b}[?45h")
+            let wrapOff = text.range(of: "\u{1b}[?7l")
+            #expect(reverseOn != nil && wrapOff != nil, "the handback must write both modes")
+            if let reverseOn, let wrapOff {
+                #expect(reverseOn.lowerBound < wrapOff.lowerBound, "?45h must precede ?7l")
+            }
+
+            let receiver = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
+            receiver.feed(Array(text.utf8))
+            #expect(receiver.mode(45) == true)
+            #expect(receiver.mode(7) == false)
+        }
+    }
+
+    /// The formatter writes a soft-wrapped line as one run, which lays out only while autowrap is
+    /// on. Written in the formatter's order, `?7l` came before the rows, and the receiver wrote
+    /// the rest of each wrapped line over its last column. It now comes after every row.
+    @Test func handbackLaysOutWrappedLinesBeforeTurningAutowrapOff() async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: "wrapped-history-then-nowrap")
+            let source = try state.ghostty()
+            #expect(source.withLocked { !$0.mode(7) && $0.historyRowCount > 0 })
+            let text = try Self.handbackText(source)
+            let wrapOff = text.range(of: "\u{1b}[?7l")
+            let lastRow = text.range(of: "v", options: .backwards)
+            #expect(wrapOff != nil && lastRow != nil, "the handback must write autowrap off and the wrapped row")
+            if let wrapOff, let lastRow {
+                #expect(lastRow.lowerBound < wrapOff.lowerBound, "?7l must follow the rows")
+            }
+
+            let receiver = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
+            receiver.feed(Array(text.utf8))
+            #expect(receiver.mode(7) == false)
+            let tally = handoverCompare(source.handoverSnap(), receiver.handoverSnap()).excluding(handoverInertCategories)
+            #expect(tally.isEmpty, "the wrapped rows arrive changed: \(tally.summary)")
+        }
+    }
+
+    /// SwiftTerm's `?1049h` saves autowrap, reverse wrap and DECLRMM with the cursor, and its
+    /// `?1049l` puts them back. libghostty keeps one of each for both screens and saves none, so
+    /// the handback writes the alternate screen's values after the switch and the receiver saves
+    /// the defaults for the primary. Written before the switch, autowrap off would be saved as the
+    /// primary's, and a program that turns it back on as it leaves would leave it off.
+    @Test func handbackLeavesAutowrapOnWhenTheProgramTurnsItBackOnAndLeaves() async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: "alt-tui-nowrap")
+            let source = try state.ghostty()
+            #expect(source.withLocked { $0.isAlternateScreen && !$0.mode(7) })
+            let receiver = try Self.handedBack(source, state: state)
+            #expect(receiver.mode(7) == false, "the alternate screen's autowrap must arrive off")
+
+            let leave = Array("\u{1b}[?7h\u{1b}[?1049l".utf8)
+            source.feed(leave[...])
+            receiver.feed(leave)
+            #expect(source.withLocked { $0.mode(7) })
+            #expect(receiver.mode(7) == true, "autowrap is off after the program turned it on and left")
+            let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
+                .filtered(to: handoverScreenCategories)
+            #expect(tally.isEmpty, "the primary screen differs after the program left: \(tally.summary)")
+        }
     }
 
     /// Two alternate screens whose origin mode differs from the primary's saved one: set only on
     /// the alternate screen, and set only on the primary before the switch.
     static let originStates: [HandoverState] = [
-        HandoverCorpus.state(named: "region-origin-alt"),
+        HandoverFixtures.state(named: "region-origin-alt"),
         HandoverState(
             name: "primary-origin-then-alt",
             bytes: Array("\u{1b}[5;20r\u{1b}[?6h\u{1b}[2;2H\u{1b}[?1049h\u{1b}[?6lx".utf8),
@@ -170,82 +303,198 @@ struct HandoverCorpusTests {
     /// the live one. Written in the formatter's order, the alternate screen's `?6h` would come
     /// before the switch and be saved with the primary's cursor.
     @Test(arguments: HandoverCorpusTests.originStates)
-    func handbackRestoresThePrimaryOriginModeOnLeavingTheAlternateScreen(_ state: HandoverState) throws {
-        let source = try state.ghostty()
-        #expect(source.withLocked { $0.isAlternateScreen })
-        let receiver = try Self.handedBack(source, state: state)
-        #expect(receiver.locked { $0.isCurrentBufferAlternate })
+    func handbackRestoresThePrimaryOriginModeOnLeavingTheAlternateScreen(_ state: HandoverState) async throws {
+        try await onHandoverThread {
+            let source = try state.ghostty()
+            #expect(source.withLocked { $0.isAlternateScreen })
+            let receiver = try Self.handedBack(source, state: state)
+            #expect(receiver.locked { $0.isCurrentBufferAlternate })
 
-        let leave = Array("\u{1b}[?1049l".utf8)
-        for leaving in [false, true] {
-            if leaving {
-                source.feed(leave[...])
-                receiver.feed(leave)
+            let leave = Array("\u{1b}[?1049l".utf8)
+            for leaving in [false, true] {
+                if leaving {
+                    source.feed(leave[...])
+                    receiver.feed(leave)
+                }
+                let screen = leaving ? "after leaving the alternate screen" : "on the alternate screen"
+                let sourceOrigin = source.withLocked { $0.mode(6) }
+                #expect(receiver.mode(6) == sourceOrigin, "\(state.name), \(screen): origin mode differs")
+                let expected = source.withLocked { GhosttyScreenProjection.project($0, maxLines: 0) }
+                let actual = receiver.locked { TerminalScreenProjection.project($0, maxLines: 0) }
+                #expect(
+                    actual.cursorColumn == expected.cursorColumn && actual.cursorRow == expected.cursorRow,
+                    "\(state.name), \(screen): cursor \(actual.cursorColumn),\(actual.cursorRow) vs \(expected.cursorColumn),\(expected.cursorRow) (x,y)")
             }
-            let screen = leaving ? "after leaving the alternate screen" : "on the alternate screen"
-            let sourceOrigin = source.withLocked { $0.mode(6) }
-            #expect(receiver.mode(6) == sourceOrigin, "\(state.name), \(screen): origin mode differs")
-            let expected = source.withLocked { GhosttyScreenProjection.project($0, maxLines: 0) }
-            let actual = receiver.locked { TerminalScreenProjection.project($0, maxLines: 0) }
-            #expect(
-                actual.cursorColumn == expected.cursorColumn && actual.cursorRow == expected.cursorRow,
-                "\(state.name), \(screen): cursor \(actual.cursorColumn),\(actual.cursorRow) vs \(expected.cursorColumn),\(expected.cursorRow) (x,y)")
+        }
+    }
+
+    struct LeaveCase: Sendable, CustomTestStringConvertible {
+        let state: String
+        /// The reset that matches the mode the state entered the alternate screen with.
+        let leave: String
+
+        var testDescription: String { state }
+    }
+
+    static let leaveCases: [LeaveCase] = [
+        LeaveCase(state: "alt-47-cursor-moved", leave: "\u{1b}[?47l"),
+        LeaveCase(state: "alt-1047-cursor-moved", leave: "\u{1b}[?1047l"),
+        LeaveCase(state: "alt-legacy-47", leave: "\u{1b}[?47l"),
+        LeaveCase(state: "alt-1047", leave: "\u{1b}[?1047l"),
+        LeaveCase(state: "alt-saved-cursor", leave: "\u{1b}[?1049l"),
+    ]
+
+    /// The handback writes the primary screen from a clone that left the alternate screen. Only
+    /// `?1049h` saves a cursor for its reset to put back. `?47l` and `?1047l` carry the alternate
+    /// screen's cursor over to the primary, in both engines, so the clone leaves with the reset
+    /// that matches the mode set. Left with `?1049l`, the primary's cursor went home. After the
+    /// program leaves the way it entered, the receiver must show what the viewer shows.
+    @Test(arguments: HandoverCorpusTests.leaveCases)
+    func handbackLeavesTheAlternateScreenTheWayItWasEntered(_ leave: LeaveCase) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: leave.state)
+            let source = try state.ghostty()
+            #expect(source.withLocked { $0.isAlternateScreen })
+            let receiver = try Self.handedBack(source, state: state)
+
+            let bytes = Array(leave.leave.utf8)
+            source.feed(bytes[...])
+            receiver.feed(bytes)
+            #expect(source.withLocked { !$0.isAlternateScreen })
+            #expect(receiver.locked { !$0.isCurrentBufferAlternate })
+            let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
+                .filtered(to: handoverScreenCategories)
+            #expect(tally.isEmpty, "\(leave.state), after \(leave.leave.debugDescription): \(tally.summary)")
         }
     }
 
     // MARK: - The scrollback cap
 
-    /// 5,000 lines with a cap of 1,000 replay to 1,000 lines of scrollback, the newest ones.
-    @Test func handbackRespectsScrollbackCap() throws {
-        let cols = 80, rows = 24, cap = 1_000, kept = 10_000
-        let source = try GhosttyTerminal(cols: cols, rows: rows, scrollbackLines: kept, callbacks: GhosttyTerminalCallbacks())
-        source.feed(Array((0..<5_000).map { "line \($0)\r\n" }.joined().utf8)[...])
-        let sourceHistory = source.withLocked { $0.scrollbackRows }
-        #expect(sourceHistory > cap, "the source must hold more scrollback than the cap, not \(sourceHistory) rows")
+    struct CapCase: Sendable, CustomTestStringConvertible {
+        let name: String
+        /// What follows the 5,000 lines: nothing, or a switch to the alternate screen.
+        let tail: String
+        /// What leaves the alternate screen before the scrollback is compared, or nothing.
+        let leave: String
 
-        let handback = try GhosttySnapshotWriter.snapshot(of: source, maxScrollbackLines: cap)
-        let receiver = HandoverSwiftTerm(cols: cols, rows: rows, scrollback: kept)
-        receiver.feed([UInt8](handback))
-        let replayed = receiver.locked { TerminalScreenProjection.project($0, maxLines: kept + rows) }
-        #expect(replayed.viewportStart <= cap, "the receiver holds \(replayed.viewportStart) rows of scrollback")
+        var testDescription: String { name }
+    }
 
-        // The newest scrollback and the screen arrive intact.
-        let expected = source.withLocked { GhosttyScreenProjection.project($0, maxLines: cap + rows) }
-        let actual = receiver.locked { TerminalScreenProjection.project($0, maxLines: cap + rows) }
-        #expect(actual.viewportStart == expected.viewportStart)
-        #expect(actual.lines == expected.lines, "\(handoverFirstDifference(expected.lines, actual.lines))")
-        #expect(actual.cursorRow == expected.cursorRow && actual.cursorColumn == expected.cursorColumn)
+    static let capCases: [CapCase] = [
+        CapCase(name: "on the primary screen", tail: "", leave: ""),
+        CapCase(name: "on the alternate screen", tail: "\u{1b}[?1049h\u{1b}[2;3Hin alt", leave: "\u{1b}[?1049l"),
+    ]
+
+    /// 5,000 lines with a cap of 1,000 replay to 1,000 lines of scrollback, the newest ones. On the
+    /// alternate screen the primary's scrollback comes from the clone, and it is compared once
+    /// both have left the alternate screen.
+    @Test(arguments: HandoverCorpusTests.capCases)
+    func handbackRespectsScrollbackCap(_ capCase: CapCase) async throws {
+        try await onHandoverThread {
+            let cols = 80, rows = 24, cap = 1_000, kept = 10_000
+            let source = try GhosttyTerminal(
+                cols: cols, rows: rows, scrollbackLines: kept, callbacks: GhosttyTerminalCallbacks())
+            source.feed(Array(((0..<5_000).map { "line \($0)\r\n" }.joined() + capCase.tail).utf8)[...])
+
+            let handback = try GhosttySnapshotWriter.snapshot(of: source, maxScrollbackLines: cap)
+            let receiver = HandoverSwiftTerm(cols: cols, rows: rows, scrollback: kept)
+            receiver.feed([UInt8](handback))
+            #expect(receiver.locked { $0.isCurrentBufferAlternate } == !capCase.leave.isEmpty)
+            let leave = Array(capCase.leave.utf8)
+            source.feed(leave[...])
+            receiver.feed(leave)
+
+            let sourceHistory = source.withLocked { $0.scrollbackRows }
+            #expect(sourceHistory > cap, "the source must hold more scrollback than the cap, not \(sourceHistory) rows")
+            let replayed = receiver.locked { TerminalScreenProjection.project($0, maxLines: kept + rows) }
+            #expect(replayed.viewportStart <= cap, "the receiver holds \(replayed.viewportStart) rows of scrollback")
+
+            // The newest scrollback and the screen arrive intact.
+            let expected = source.withLocked { GhosttyScreenProjection.project($0, maxLines: cap + rows) }
+            let actual = receiver.locked { TerminalScreenProjection.project($0, maxLines: cap + rows) }
+            #expect(actual.viewportStart == expected.viewportStart)
+            #expect(actual.lines == expected.lines, "\(handoverFirstDifference(expected.lines, actual.lines))")
+            #expect(actual.cursorRow == expected.cursorRow && actual.cursorColumn == expected.cursorColumn)
+        }
     }
 
     // MARK: - A detach inside a sequence
 
     struct UnfinishedTail: Sendable, CustomTestStringConvertible {
         let name: String
-        let bytes: [UInt8]
+        /// What the viewer's terminal read before it detached.
+        let head: [UInt8]
+        /// The rest of the sequence and what follows it, which arrive after the handback.
+        let rest: [UInt8]
+        /// What the rest writes at the cursor, and the colour of its first cell.
+        let written: String
+        let foreground: HandoverColor
 
         var testDescription: String { name }
     }
 
     static let unfinishedTails: [UnfinishedTail] = [
-        UnfinishedTail(name: "half an SGR colour", bytes: Array("\u{1b}[38;5".utf8)),
-        UnfinishedTail(name: "half a UTF-8 character", bytes: [0xe2, 0x94]),
-        UnfinishedTail(name: "half a window title", bytes: Array("\u{1b}]2;half a ti".utf8)),
+        UnfinishedTail(
+            name: "half an SGR colour", head: Array("\u{1b}[38;5".utf8), rest: Array(";196mX\u{1b}[0m".utf8),
+            written: "X", foreground: .palette(196)),
+        UnfinishedTail(
+            name: "half a UTF-8 character", head: [0xe2, 0x94], rest: [0x80] + Array("X".utf8),
+            written: "─X", foreground: .standard),
+        UnfinishedTail(
+            name: "half a window title", head: Array("\u{1b}]2;half a ti".utf8), rest: Array("tle\u{07}X".utf8),
+            written: "X", foreground: .standard),
     ]
 
-    /// A viewer can detach while its terminal is inside a sequence. libghostty cannot clone such a
-    /// terminal, so on the alternate screen the handback has no primary to write, but it must
-    /// still be written and still rebuild the screen in view: a primary one and an alternate one.
+    /// A viewer can detach while its terminal is inside a sequence. The handback ends with the
+    /// sequence's unfinished bytes, so the receiver's parser is left inside it and the live bytes
+    /// that follow finish it. Fed the handback and then the rest, the receiver must match a
+    /// SwiftTerm emulator that read the whole stream: the screen in view, the primary screen under
+    /// an alternate one, and the cells the finished sequence wrote.
     @Test(arguments: ["sgr-colors", "alt-tui-full"], HandoverCorpusTests.unfinishedTails)
-    func handbackRebuildsTheScreenWhenTheTerminalStoppedMidSequence(_ name: String, _ tail: UnfinishedTail) throws {
-        let state = HandoverCorpus.state(named: name)
-        let source = try state.ghostty()
-        source.feed(tail.bytes[...])
-        #expect(source.withLocked { !$0.isAtGround }, "\(name) must be left inside \(tail.name)")
+    func handbackFinishesTheSequenceTheTerminalStoppedInside(_ name: String, _ tail: UnfinishedTail) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let source = try state.ghostty()
+            source.feed(tail.head[...])
+            #expect(source.withLocked { !$0.isAtGround }, "\(name) must be left inside \(tail.name)")
 
-        let receiver = try Self.handedBack(source, state: state)
-        let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverScreen(), history: false)
-            .filtered(to: handoverScreenCategories)
-        #expect(tally.isEmpty, "\(name), stopped inside \(tail.name): the handback differs on screen: \(tally.summary)")
+            let receiver = try Self.handedBack(source, state: state)
+            receiver.feed(tail.rest)
+            let reference = HandoverSwiftTerm(cols: state.cols, rows: state.rows)
+            reference.feed(state.bytes + tail.head + tail.rest)
+
+            for terminal in [reference, receiver] {
+                let (text, foreground) = Self.writtenBeforeCursor(terminal, count: tail.written.unicodeScalars.count)
+                #expect(text == tail.written, "\(name), \(tail.name): the rest wrote \(text.debugDescription)")
+                #expect(foreground == tail.foreground, "\(name), \(tail.name): its first cell is \(foreground)")
+            }
+            Self.expectSameScreen(reference, receiver, "\(name), stopped inside \(tail.name)")
+            if reference.locked({ $0.isCurrentBufferAlternate }) {
+                let leave = Array("\u{1b}[?1049l".utf8)
+                reference.feed(leave)
+                receiver.feed(leave)
+                Self.expectSameScreen(reference, receiver, "\(name), stopped inside \(tail.name), on the primary screen")
+            }
+        }
+    }
+
+    /// A sequence longer than the 64 KiB libghostty keeps of one cannot be handed on. The handback
+    /// then ends without it and still rebuilds the screen in view. On the alternate screen that
+    /// screen comes alone, because a terminal inside such a sequence cannot be cloned for its
+    /// primary.
+    @Test(arguments: ["sgr-colors", "alt-tui-full"])
+    func handbackRebuildsTheScreenWhenTheUnfinishedSequenceOutgrewItsBound(_ name: String) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: name)
+            let source = try state.ghostty()
+            source.feed(Array(("\u{1b}]2;" + String(repeating: "t", count: 70_000)).utf8)[...])
+            #expect(source.withLocked { !$0.isAtGround && $0.pendingContinuationBytes() == nil })
+
+            let receiver = try Self.handedBack(source, state: state)
+            let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
+                .filtered(to: handoverScreenCategories)
+            #expect(tally.isEmpty, "\(name), inside an overlong title: the handback differs on screen: \(tally.summary)")
+        }
     }
 
     // MARK: - Helpers
@@ -269,13 +518,31 @@ struct HandoverCorpusTests {
         return String(bytes: handback, encoding: .utf8) ?? ""
     }
 
-    private static func expectOutcome(_ name: String, tally: HandoverTally, misses: [String: String], crossing: String) {
-        if let reason = misses[name] {
+    /// The text of the `count` cells before the cursor on its row, and the first one's colour.
+    private static func writtenBeforeCursor(_ terminal: HandoverSwiftTerm, count: Int) -> (String, HandoverColor) {
+        let snap = terminal.handoverSnap(history: false)
+        let end = snap.pending ? snap.cursorX + 1 : snap.cursorX
+        let cells = snap.grid[snap.cursorY][max(0, end - count)..<end]
+        return (cells.map(\.text).joined(), cells.first?.foreground ?? .standard)
+    }
+
+    private static func expectSameScreen(_ expected: HandoverSwiftTerm, _ actual: HandoverSwiftTerm, _ what: String) {
+        let tally = handoverCompare(expected.handoverSnap(history: false), actual.handoverSnap(history: false), history: false)
+            .filtered(to: handoverScreenCategories)
+        #expect(tally.isEmpty, "\(what): the receiver differs from SwiftTerm fed the whole stream: \(tally.summary)")
+    }
+
+    private static func expectOutcome(_ name: String, tally: HandoverTally, misses: [String: HandoverMiss], crossing: String) {
+        if let miss = misses[name] {
             #expect(
                 !tally.isEmpty,
-                "\(name) is a known miss for the \(crossing) (\(reason)) but now matches: remove it from the list")
+                "\(name) is a known miss for the \(crossing) (\(miss.reason)) but now matches: remove it from the list")
+            let unexplained = tally.excluding(miss.categories)
+            #expect(
+                unexplained.isEmpty,
+                "\(name): the \(crossing) differs beyond its known miss (\(miss.reason)): \(unexplained.summary)")
         } else {
-            #expect(tally.isEmpty, "\(name): the \(crossing) differs on screen: \(tally.summary)")
+            #expect(tally.isEmpty, "\(name): the \(crossing) differs: \(tally.summary)")
         }
     }
 }

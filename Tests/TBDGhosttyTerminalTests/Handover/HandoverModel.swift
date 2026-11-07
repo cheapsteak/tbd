@@ -2,7 +2,8 @@
 // from the libghostty proof of concept's Model.swift, with its readers from GTerm.swift and
 // STerm.swift (spikes/libghostty-vt/check/Sources/vtcheck/ on branch spike/libghostty-vt-poc).
 // The comparison and its category names are the proof of concept's, so a miss here names the
-// same category its handover.json does.
+// same category its handover.json does, except `mouseTracking` and `mouseEncoding`, which across
+// the engines take the place of its per-bit mouse modes.
 import Foundation
 import SwiftTerm
 @testable import TBDGhosttyTerminal
@@ -79,10 +80,30 @@ struct HandoverSnap {
     var cursorVisible = true
     var alt = false
     var modes: [String: Bool] = [:]
+    /// The mouse tracking mode in effect: 9, 1000, 1002 or 1003, or 0 for none. nil when unread.
+    var mouseTracking: Int?
+    /// The mouse report encoding in effect: 1005, 1006, 1015 or 1016, or 0 for X10's. nil when unread.
+    var mouseEncoding: Int?
     var top = 0, bottom = 0, left = 0, right = 0
     var pen = HandoverCell()
     var kitty = 0
+
+    /// This snap with only its newest `count` rows of scrollback, which is what a writer capped at
+    /// `count` rows carries.
+    func keepingNewestHistory(_ count: Int) -> HandoverSnap {
+        guard history.count > count else { return self }
+        var snap = self
+        snap.history = Array(history.suffix(count))
+        snap.historyWrap = Array(historyWrap.suffix(count))
+        return snap
+    }
 }
+
+/// The mouse modes, tracking then encoding. libghostty keeps a bit for each in its mode table and
+/// SwiftTerm keeps one tracking mode and one encoding, so across the two engines they are
+/// compared as `mouseTracking` and `mouseEncoding`, the ones in effect.
+let handoverMouseTrackingModes: Set<Int> = [9, 1000, 1002, 1003]
+let handoverMouseEncodingModes: Set<Int> = [1005, 1006, 1015, 1016]
 
 /// The DEC private and ANSI modes compared. `decPrivate` false is ANSI.
 let handoverComparedModes: [(name: String, value: Int, decPrivate: Bool)] = [
@@ -96,11 +117,21 @@ let handoverComparedModes: [(name: String, value: Int, decPrivate: Bool)] = [
 ]
 
 /// What a reader sees on the screen: text, width, colours, attributes, links, the cursor's cell
-/// and which screen is active. Modes, the region, the pen, cursor visibility and scrollback are
-/// left to the suites that test them, as in the proof of concept's per-state pass counts.
+/// and which screen is active.
 let handoverScreenCategories: Set<String> = [
     "text", "wide", "fg", "bg", "attrs", "ulColor", "link", "cursorPos", "activeScreen",
 ]
+
+/// Left and right margins while DECLRMM is off. They do nothing, and SwiftTerm keeps its right
+/// margin at column 80 on a wider grid, so a crossing between the engines does not compare them.
+let handoverInertCategories: Set<String> = ["inertMargins"]
+
+/// A state listed as differing in one crossing: why, and the only categories it may differ in.
+/// A difference in any other category fails, as a difference in an unlisted state does.
+struct HandoverMiss: Sendable {
+    let reason: String
+    let categories: Set<String>
+}
 
 /// Counts of differing things, by category, with the first example of each.
 struct HandoverTally {
@@ -114,9 +145,15 @@ struct HandoverTally {
 
     var isEmpty: Bool { counts.isEmpty }
 
-    func filtered(to keep: Set<String>) -> HandoverTally {
+    var categories: Set<String> { Set(counts.keys) }
+
+    func filtered(to keep: Set<String>) -> HandoverTally { filtered { keep.contains($0) } }
+
+    func excluding(_ drop: Set<String>) -> HandoverTally { filtered { !drop.contains($0) } }
+
+    private func filtered(_ keep: (String) -> Bool) -> HandoverTally {
         var tally = HandoverTally()
-        for (category, count) in counts where keep.contains(category) {
+        for (category, count) in counts where keep(category) {
             tally.counts[category] = count
             tally.examples[category] = examples[category]
         }
@@ -160,6 +197,26 @@ private func compareCells(
 
 /// Compares two snaps, `expected` the reference. History rows are aligned at the newest row,
 /// because the two engines trim scrollback at different granularity.
+///
+/// What is compared: every cell of the screen and the scrollback, soft wraps, the cursor's cell,
+/// pending wrap and visibility, the active screen, the modes in `handoverComparedModes`, the
+/// mouse tracking mode and encoding in effect, the scrolling region and margins, the pen and the
+/// kitty keyboard flags. What SwiftTerm cannot expose, and so is not compared:
+///
+/// - **Character sets and tab stops** – SwiftTerm keeps its G0 to G3 designations, the shift
+///   state and the tab stops private.
+/// - **The pen's hyperlink** – SwiftTerm's pen has none. An open link shows on the cells printed
+///   after it, which are compared.
+/// - **Protection (DECSCA) and modifyOtherKeys** – SwiftTerm implements neither.
+/// - **The title** – SwiftTerm hands it to its delegate and keeps no copy.
+///
+/// And what libghostty cannot expose, or nothing sets:
+///
+/// - **Cursor shape and blink** – libghostty gives the shape only to a render state, and neither
+///   handover writer writes DECSCUSR.
+/// - **The saved cursor** – libghostty has no getter for it. The origin-mode test checks the
+///   cursor that `?1049h` saved, by leaving the alternate screen.
+/// - **The working directory** – no corpus state sets one.
 func handoverCompare(_ expected: HandoverSnap, _ actual: HandoverSnap, history: Bool = true) -> HandoverTally {
     var tally = HandoverTally()
     if expected.alt != actual.alt { tally.add("activeScreen", "alt \(expected.alt) vs \(actual.alt)") }
@@ -190,6 +247,13 @@ func handoverCompare(_ expected: HandoverSnap, _ actual: HandoverSnap, history: 
     }
     for (name, value) in expected.modes.sorted(by: { $0.key < $1.key }) {
         if let other = actual.modes[name], other != value { tally.add("mode." + name, "\(value) vs \(other)") }
+    }
+    let unread = "unread"
+    if expected.mouseTracking != actual.mouseTracking {
+        tally.add("mouseTracking", "\(expected.mouseTracking.map(String.init) ?? unread) vs \(actual.mouseTracking.map(String.init) ?? unread)")
+    }
+    if expected.mouseEncoding != actual.mouseEncoding {
+        tally.add("mouseEncoding", "\(expected.mouseEncoding.map(String.init) ?? unread) vs \(actual.mouseEncoding.map(String.init) ?? unread)")
     }
     let lhsPen = expected.pen, rhsPen = actual.pen
     if lhsPen.foreground != rhsPen.foreground || lhsPen.background != rhsPen.background || lhsPen.flags != rhsPen.flags
@@ -284,6 +348,8 @@ extension GhosttyTerminal {
             for mode in handoverComparedModes {
                 snap.modes[mode.name] = state.mode(UInt16(mode.value), ansi: !mode.decPrivate)
             }
+            snap.mouseTracking = state.mouseTrackingInEffect
+            snap.mouseEncoding = state.mouseEncodingInEffect
             (snap.top, snap.bottom, snap.left, snap.right) = Self.region(state)
             snap.pen = HandoverCell(style: state.cursorStyle)
             snap.kitty = Int(state.kittyKeyboardFlags)
@@ -344,11 +410,19 @@ extension HandoverColor {
 
 extension HandoverCell {
     init(_ data: CharData) {
+        self.init(attribute: data.attribute)
         let scalars = data.getCharacter().unicodeScalars
         code = scalars.first?.value ?? 0
         if scalars.count > 1 { more = scalars.dropFirst().map(\.value) }
         width = UInt8(max(0, data.width))
-        let attribute = data.attribute
+        // SwiftTerm keeps an OSC 8 link's whole body, "params;uri".
+        if let payload = data.getPayload() as? String {
+            link = payload.firstIndex(of: ";").map { String(payload[payload.index(after: $0)...]) } ?? payload
+        }
+    }
+
+    /// A pen, or the style half of a cell.
+    init(attribute: Attribute) {
         foreground = HandoverColor(attribute.fg)
         background = HandoverColor(attribute.bg)
         underlineColor = HandoverColor(attribute.underlineColor)
@@ -367,18 +441,15 @@ extension HandoverCell {
         case .dotted: underline = 4
         case .dashed: underline = 5
         }
-        // SwiftTerm keeps an OSC 8 link's whole body, "params;uri".
-        if let payload = data.getPayload() as? String {
-            link = payload.firstIndex(of: ";").map { String(payload[payload.index(after: $0)...]) } ?? payload
-        }
     }
 }
 
 extension HandoverSwiftTerm {
-    /// The screen as a reader sees it: the grid, the cursor and which screen is active. The suites
-    /// compare a SwiftTerm terminal only on `handoverScreenCategories`, so its modes, region, pen
-    /// and scrollback are not read.
-    func handoverScreen() -> HandoverSnap {
+    /// Everything the comparison reads, in one locked reading. The modes are read with DECRQM,
+    /// which this fork answers for every compared mode. For the mouse modes it answers with the
+    /// one tracking mode and the one encoding in effect, so those fill `mouseTracking` and
+    /// `mouseEncoding` and stay out of `modes`.
+    func handoverSnap(history: Bool = true) -> HandoverSnap {
         locked { terminal in
             var snap = HandoverSnap()
             snap.cols = terminal.cols
@@ -392,11 +463,43 @@ extension HandoverSwiftTerm {
                 snap.grid.append((0..<terminal.cols).map { HandoverCell(line[$0]) })
                 snap.wrap.append(line.isWrapped)
             }
+            if history {
+                // Scroll-invariant rows count the trimmed ones, so the oldest kept row is the
+                // first one not trimmed and the screen starts `yDisp` rows after it.
+                let oldest = terminal.buffer.totalLinesTrimmed
+                var row = oldest
+                while row < oldest + terminal.buffer.yDisp, let line = terminal.getScrollInvariantLine(row: row) {
+                    snap.history.append((0..<min(terminal.cols, line.count)).map { HandoverCell(line[$0]) })
+                    snap.historyWrap.append(line.isWrapped)
+                    row += 1
+                }
+            }
             // SwiftTerm marks a pending wrap by putting the cursor one past the last column.
             snap.cursorX = min(terminal.buffer.x, terminal.cols - 1)
             snap.cursorY = terminal.buffer.y
             snap.pending = terminal.buffer.x >= terminal.cols
             snap.alt = terminal.isCurrentBufferAlternate
+            var tracking = 0, encoding = 0
+            for mode in handoverComparedModes {
+                guard let answer = collector.requestMode(mode.value, decPrivate: mode.decPrivate),
+                      answer == 1 || answer == 2 else { continue }
+                if mode.decPrivate, handoverMouseTrackingModes.contains(mode.value) {
+                    if answer == 1 { tracking = mode.value }
+                } else if mode.decPrivate, handoverMouseEncodingModes.contains(mode.value) {
+                    if answer == 1 { encoding = mode.value }
+                } else {
+                    snap.modes[mode.name] = answer == 1
+                }
+            }
+            snap.mouseTracking = tracking
+            snap.mouseEncoding = encoding
+            snap.cursorVisible = snap.modes["DECTCEM"] ?? true
+            snap.top = terminal.buffer.scrollTop
+            snap.bottom = terminal.buffer.scrollBottom
+            snap.left = terminal.buffer.marginLeft
+            snap.right = terminal.buffer.marginRight
+            snap.pen = HandoverCell(attribute: terminal.currentAttribute)
+            snap.kitty = terminal.keyboardEnhancementFlags.rawValue
             return snap
         }
     }
