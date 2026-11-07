@@ -71,9 +71,11 @@ final class TerminalInputController {
         _ = view.inputContext?.handleEvent(event)
     }
 
-    /// How the Option key behaves. `.never` is the macOS-native default and the only setting under
-    /// which dead keys work (Option+u, u → `ü`). The view's `optionAsMeta` drives it.
-    var optionAsAlt: OptionAsAlt = .never
+    /// How the Option key behaves. `.both` by default, as in SwiftTerm, which the app's terminals
+    /// have always used: Option-b sends `ESC b` and Option-Backspace deletes a word. `.never` types
+    /// the layout's character instead, and is the only setting under which dead keys work
+    /// (Option+u, u → `ü`). The view's `optionAsMeta` drives it.
+    var optionAsAlt: OptionAsAlt = .both
 
     /// The keyboard layout keys are read through. A test seam; the app uses the system's.
     var layout: KeyboardLayout = .system

@@ -284,12 +284,13 @@ struct KeyAndIMETests {
         #expect(line.hasPrefix("abcに"), "after the echo row 0 reads \(line.debugDescription)")
     }
 
-    /// Option-E is a dead key: it composes the accent and sends nothing, and the next e commits é.
+    /// With Option typing the layout's characters, Option-E is a dead key: it composes the accent
+    /// and sends nothing, and the next e commits é.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func deadKeySequenceCommitsComposedCharacter() throws {
         let fixture = try KeyViewFixture()
         let view = fixture.view
-        #expect(!view.optionAsMeta, "Option is Meta by default, which leaves no dead keys")
+        view.optionAsMeta = false
         let input = ScriptedInputMethod([ScriptedInputMethod.mark("´"), ScriptedInputMethod.commit("é")])
         input.install(on: view)
 
@@ -305,8 +306,8 @@ struct KeyAndIMETests {
         #expect(view.preeditLayer == nil, "the commit left the accent on screen")
     }
 
-    /// With Option as Meta, Option-b sends ESC b, and the input method sees the key without
-    /// Option. Without it, Option-b types the layout's character.
+    /// Option is Meta by default, as in SwiftTerm: Option-b sends ESC b, and the input method sees
+    /// the key without Option. With the setting off, Option-b types the layout's character.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func optionAsMetaFollowsSetting() throws {
         let fixture = try KeyViewFixture()
@@ -317,8 +318,7 @@ struct KeyAndIMETests {
         input.install(on: view)
         let optionB = try keyDown(0x0B, characters: "∫", ignoringModifiers: "b", flags: .option)
 
-        view.optionAsMeta = true
-        #expect(view.optionAsMeta, "the setting did not stick")
+        #expect(view.optionAsMeta, "Option is not Meta by default, so Option-b would type ∫")
         view.keyDown(with: optionB)
         #expect(fixture.recorder.sent == [[0x1B, UInt8(ascii: "b")]], "Option-b as Meta sent \(fixture.recorder.sent)")
         #expect(input.eventsSeen.last?.modifierFlags.contains(.option) == false,
@@ -326,6 +326,7 @@ struct KeyAndIMETests {
 
         fixture.recorder.sent = []
         view.optionAsMeta = false
+        #expect(!view.optionAsMeta, "the setting did not stick")
         view.keyDown(with: optionB)
         #expect(fixture.recorder.sent == [Array("∫".utf8)], "Option-b without Meta sent \(fixture.recorder.sent)")
     }

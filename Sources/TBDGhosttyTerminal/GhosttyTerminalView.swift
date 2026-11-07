@@ -274,7 +274,8 @@ public final class GhosttyTerminalView: NSView {
     public var onFocusChanged: (@MainActor (Bool) -> Void)?
 
     /// Whether Option acts as Meta (Option-b sends `ESC b`) rather than typing the layout's
-    /// character (`∫`). Off is the macOS default, and the only setting under which dead keys work.
+    /// character (`∫`). On by default, as in SwiftTerm, so Option-Backspace deletes a word. Off is
+    /// the macOS text default, and the only setting under which dead keys work.
     public var optionAsMeta: Bool {
         get { inputController.optionAsAlt != .never }
         set { inputController.optionAsAlt = newValue ? .both : .never }
