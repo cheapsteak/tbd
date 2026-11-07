@@ -39,6 +39,11 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     public var terminal: String?
     /// Uppercase paired-device UUID string, for `kind == "phone"`: which
     /// pairing the gesture came through. Never the phone's name.
+    ///
+    /// Self-declared, like `kind`, when it arrives in an `RPCRequest`. Only an
+    /// actor the phone bridge builds in-process with `.phone(deviceID:)` from
+    /// a verified pairing is evidence of a device, so take a device ID from
+    /// the bridge's peer, never from a request's actor.
     public var device: String?
 
     public init(
