@@ -57,4 +57,36 @@ struct TerminalSnapshotAltScreenWrapModeTests {
         // itself does on exit and not a guess at a default.
         #expect(isSet(wrap.mode, in: pair.sourceReply) == wrap.primaryValue)
     }
+
+    @Test("Origin mode set on the alt screen stays there, and exiting restores the primary's")
+    func altOriginModeDoesNotLeakIntoThePrimary() {
+        let pair = SnapshotPair()
+        // The primary cursor is parked at row 7, col 20 so its restore on exit
+        // is visible. On the alt screen the region is rows 5-15, and under
+        // `?6h` the CUP to 3;9 is region-relative: row 7 absolute, col 9, and
+        // the text moves the cursor on to col 28.
+        pair.transfer(
+            "primary text\u{1b}[7;20H\u{1b}[?1049h\u{1b}[5;15r\u{1b}[?6h\u{1b}[3;9H"
+                + "full-screen program")
+        #expect(isSet(6, in: pair.sourceReply) == true)
+
+        #expect(pair.fresh.isCurrentBufferAlternate)
+        #expect(isSet(6, in: pair.freshReply) == true, "the alt screen lost the program's ?6h")
+        #expect(pair.fresh.buffer.x == pair.source.buffer.x)
+        #expect(pair.fresh.buffer.y == pair.source.buffer.y)
+        // Pin the cell too. The comparison alone would still hold if both
+        // terminals agreed on the wrong one.
+        #expect(pair.fresh.buffer.x == 27)
+        #expect(pair.fresh.buffer.y == 6)
+
+        pair.fresh.feed(text: "\u{1b}[?1049l")
+        pair.source.feed(text: "\u{1b}[?1049l")
+        #expect(isSet(6, in: pair.freshReply) == false,
+                "the program's ?6h leaked into the primary on exit")
+        #expect(isSet(6, in: pair.sourceReply) == false)
+        #expect(pair.fresh.buffer.x == 19)
+        #expect(pair.fresh.buffer.y == 6)
+        #expect(pair.fresh.buffer.x == pair.source.buffer.x)
+        #expect(pair.fresh.buffer.y == pair.source.buffer.y)
+    }
 }

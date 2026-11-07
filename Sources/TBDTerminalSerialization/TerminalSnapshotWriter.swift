@@ -7,8 +7,9 @@ import SwiftTerm
 /// cursor, and every step of it was learned by `ReplayWriter` on the tmux path.
 /// On an alt screen, cursor visibility moves from the modes step to just after
 /// the switch, because the receiver shows the cursor on every `?1049h`. The
-/// wrap modes split in two: the modes step carries defaults for the primary,
-/// and the alt program's own values follow the alt content.
+/// modes that switch saves with the cursor (DECOM and the wrap modes) split in
+/// two: the modes step carries defaults for the primary, and the alt
+/// program's own values follow the alt content.
 /// Two orderings inside are counter-intuitive and are called out where they
 /// happen: SGR reset precedes the erase, and the scroll region follows the alt
 /// content.
@@ -100,20 +101,22 @@ public enum TerminalSnapshotWriter {
 
         emit(resetPrelude)
         emit(history)   // already joined, wrap-aware — see Task 2
-        // `?1049h` saves DECAWM, reverse wraparound and DECLRMM along with the
-        // cursor (`cmdSaveCursor`), and `?1049l` restores them, so what is
-        // current at the switch is what the receiver's primary gets back when
-        // the program exits. On an alt screen `state` holds the program's
-        // values, and sending them here leaves the primary with autowrap off
-        // after a program that turned it off quits — long output then
-        // overwrites the last column. The primary's own values sit in the
-        // source's saved cursor, which SwiftTerm keeps internal, and a DECRQM
-        // after the history walk's toggle would read them in the daemon only:
-        // the app answers from replies it recorded before the walk. So the
-        // primary gets the defaults here, and the program's values follow the
-        // alt content below.
+        // `?1049h` saves DECOM, DECAWM, reverse wraparound and DECLRMM along
+        // with the cursor (`cmdSaveCursor`), and `?1049l` restores them, so
+        // what is current at the switch is what the receiver's primary gets
+        // back when the program exits. On an alt screen `state` holds the
+        // program's values, and sending them here leaves the primary with
+        // autowrap off after a program that turned it off quits — long output
+        // then overwrites the last column — or with every CUP read relative to
+        // a scroll region. The primary's own values sit in the source's saved
+        // cursor, which SwiftTerm keeps internal, and a DECRQM after the
+        // history walk's toggle would read them in the daemon only: the app
+        // answers from replies it recorded before the walk. So the primary
+        // gets the defaults here, and the program's values follow the alt
+        // content below.
         var beforeSwitch = state
         if state.alternateOn {
+            beforeSwitch.originMode = false
             beforeSwitch.wraparound = true
             beforeSwitch.reverseWraparound = false
             beforeSwitch.marginMode = false
@@ -138,10 +141,13 @@ public enum TerminalSnapshotWriter {
             // Visibility is the only mode the switch changes.
             emit(cursorVisibilityEscape(for: state))
             emit(altScreen ?? "")
-            // The program's wrap modes AFTER the content: the content paints
-            // under the primary's autowrap, as the history does, and `?7h` is
-            // still current, so `wrapModeEscapes`' `?45h` lands.
-            emit(wrapModeEscapes(for: state))
+            // The program's saved-cursor modes AFTER the content: the content
+            // paints under the primary's autowrap, as the history does, and
+            // `?7h` is still current, so `?45h` lands. They still precede the
+            // region and the cursor, the order `restoreAlternateScreen` keeps:
+            // DECSTBM homes the cursor, and under DECOM the final CUP is read
+            // relative to the region, which `cursorEscape` allows for.
+            emit(savedCursorModeEscapes(for: state))
             // Region AFTER the content: SwiftTerm's region is per-buffer, and
             // painting rows through an active one scrolls inside it.
             if let region { emit(region) }
@@ -219,8 +225,7 @@ public enum TerminalSnapshotWriter {
         }
         mode(1, state.applicationCursor)
         out += state.applicationKeypad ? "\(esc)=" : "\(esc)>"
-        mode(6, state.originMode)
-        out += wrapModeEscapes(for: state)
+        out += savedCursorModeEscapes(for: state)
         mode(4, state.insertMode, decPrivate: false)
         if includeCursorVisibility { out += cursorVisibilityEscape(for: state) }
         mode(2004, state.bracketedPaste)
@@ -232,9 +237,9 @@ public enum TerminalSnapshotWriter {
         return out
     }
 
-    /// Reverse wraparound, DECAWM and DECLRMM: the modes `?1049h` saves with
-    /// the cursor and `?1049l` restores.
-    private static func wrapModeEscapes(for state: CapturedTerminalState) -> String {
+    /// DECOM, reverse wraparound, DECAWM and DECLRMM: the modes `?1049h` saves
+    /// with the cursor and `?1049l` restores.
+    private static func savedCursorModeEscapes(for state: CapturedTerminalState) -> String {
         // 45 BEFORE 7, and the order is load-bearing. This fork only lets
         // reverse wraparound turn on while autowrap is currently on, so
         // emitting `?7l` first makes a following `?45h` silently no-op — and
@@ -242,7 +247,8 @@ public enum TerminalSnapshotWriter {
         // turning 7 off afterwards does not clear 45. The prelude leaves 7 on,
         // and so do the primary's values `assemble` sends before an alt-screen
         // switch, so 45 lands here and 7 is then set to its real value.
-        "\(esc)[?45\(state.reverseWraparound ? "h" : "l")"
+        "\(esc)[?6\(state.originMode ? "h" : "l")"
+            + "\(esc)[?45\(state.reverseWraparound ? "h" : "l")"
             + "\(esc)[?7\(state.wraparound ? "h" : "l")"
             + "\(esc)[?69\(state.marginMode ? "h" : "l")"
     }
