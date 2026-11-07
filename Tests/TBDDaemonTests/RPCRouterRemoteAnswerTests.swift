@@ -385,6 +385,75 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect((try actuationRows().last?["error"] as? String)?.hasPrefix("outcome unknown") == true)
     }
 
+    // MARK: - A paired phone answers through the core
+
+    /// Answers as a paired phone: through the core, with no socket peer.
+    private func phoneAnswer(_ r: RPCRouter, promptID: String = "p-1", device: UUID) async throws -> RPCResponse {
+        try await r.answerRemotePrompt(
+            RemoteAnswerParams(provider: "agentbox", sessionID: "s-1", promptID: promptID, answer: Self.allowAnswer),
+            actor: .phone(deviceID: device), authority: .pairedPhone(deviceID: device))
+    }
+
+    /// A paired phone has no socket peer, so the core skips the socket check
+    /// that refuses a nil connection, and its answer is delivered.
+    @Test func aPairedPhoneAnswersARemotePrompt() async throws {
+        try await enable()
+        let (invoker, r) = await primed([.result(providerOK("{}"))])
+        let d = UUID()
+        let response = try await phoneAnswer(r, device: d)
+        #expect(response.success, "error: \(response.error ?? "none")")
+        #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .delivered)
+        #expect(Self.answers(invoker) == [["answer", "s-1", "p-1"]])
+
+        let rows = ActuationRecordReader(activePath: logPath).readRows()
+        let request = try #require(rows.first { $0.method == RPCMethod.remoteAnswer })
+        #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
+    }
+
+    @Test func aPairedPhoneIsRefusedWithoutTheAnswerCapability() async throws {
+        try await enable()
+        let invoker = FakeProviderInvoker(script: [describeDeclaring(["send"]), listing()])
+        let m = await manager(invoker)
+        await poll(m)
+        let response = try await phoneAnswer(router(m), device: UUID())
+        #expect(response.success == false)
+        #expect(response.error?.contains("has not declared capability '\(RemoteCapability.answer)'") == true)
+        #expect(Self.answers(invoker).isEmpty)
+        #expect(try actuationRows().isEmpty)
+    }
+
+    /// The prompt the phone named was replaced or answered elsewhere.
+    @Test func aPairedPhoneOnAMismatchedPromptIDGetsAlreadyResolved() async throws {
+        try await enable()
+        let (invoker, r) = await primed([])
+        let response = try await phoneAnswer(r, promptID: "p-0", device: UUID())
+        #expect(response.success)
+        #expect(try response.decodeResult(PromptAnswerResult.self).outcome == .alreadyResolved)
+        #expect(Self.answers(invoker).isEmpty)
+        #expect(try actuationRows().isEmpty)
+    }
+
+    /// The phone has no handler to run the remote gate first, so the core
+    /// runs it.
+    @Test func aPairedPhoneIsRefusedWhileRemoteBackendsAreOff() async throws {
+        try await db.config.setTranscriptPromptAnswerEnabled(true)
+        let invoker = FakeProviderInvoker(script: [])
+        let r = router(await manager(invoker, describe: false))
+        #expect(try await phoneAnswer(r, device: UUID()).error == "remote backends disabled")
+        #expect(invoker.callsSnapshot().isEmpty)
+    }
+
+    /// The phone obeys the same flag the app's prompt card does.
+    @Test func aPairedPhoneStillObeysTheAnswerFlag() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setTranscriptPromptAnswerEnabled(false)
+        let (invoker, r) = await primed([])
+        let response = try await phoneAnswer(r, device: UUID())
+        #expect(response.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(Self.answers(invoker).isEmpty)
+        #expect(try actuationRows().isEmpty)
+    }
+
     // MARK: - Serialization with remote.sendMessage
 
     /// An answer and a typed message to one session never overlap: the message

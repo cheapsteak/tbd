@@ -55,17 +55,52 @@ extension RPCRouter {
     func handleRemoteAnswer(
         _ paramsData: Data, actor: ActuationActor? = nil, connection: RPCConnectionContext?
     ) async throws -> RPCResponse {
+        // The gate runs before the decode, so an undecodable request still
+        // answers `remote backends disabled` while remote backends are off.
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
         let params = try decoder.decode(RemoteAnswerParams.self, from: paramsData)
+        return try await answerGatedRemotePrompt(
+            params, manager: manager, actor: actor, authority: .socket(connection))
+    }
+
+    /// The core of `remote.answer` for a caller with no socket edge, such as
+    /// the phone bridge. It runs `remoteGate()` itself, then the same checks
+    /// as `handleRemoteAnswer` in the same order. Same results and errors as
+    /// `handleRemoteAnswer`, except that it never throws a decode error (the
+    /// handler decodes) and, under `.pairedPhone`, never returns
+    /// `promptAnswerNotFromAppRefusal`. `authority` decides only whether the
+    /// socket peer check runs, and it runs right after the flag check.
+    func answerRemotePrompt(
+        _ params: RemoteAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        return try await answerGatedRemotePrompt(
+            params, manager: manager, actor: actor, authority: authority)
+    }
+
+    /// Every check after `remoteGate()`, in order, then the serialized answer.
+    /// The socket handler enters here with the manager it gated before
+    /// decoding; `answerRemotePrompt` with the one it gated itself.
+    private func answerGatedRemotePrompt(
+        _ params: RemoteAnswerParams, manager: RemoteProviderManager,
+        actor: ActuationActor?, authority: AnswerAuthority
+    ) async throws -> RPCResponse {
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         guard try await db.config.get().transcriptPromptAnswerEnabled else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
         }
-        if let refusal = await promptAnswerPeerRefusal(
-            connection: connection, method: RPCMethod.remoteAnswer) {
-            return refusal
+        switch authority {
+        case .socket(let connection):
+            if let refusal = await promptAnswerPeerRefusal(
+                connection: connection, method: RPCMethod.remoteAnswer) {
+                return refusal
+            }
+        case .pairedPhone:
+            break
         }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.answer) else {
