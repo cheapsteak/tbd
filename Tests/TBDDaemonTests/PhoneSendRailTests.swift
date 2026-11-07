@@ -304,7 +304,7 @@ struct PhoneSendRailTests {
     /// zero-width space, a word joiner, a byte-order mark) is empty, in `text`
     /// and in a text part. The shape check counts such a part as content, so
     /// the phone's refusal is what stops it, and the refusal is recorded.
-    @Test(arguments: ["\u{200B}", "\u{2060}", "\u{FEFF}", " \u{200B}\n"])
+    @Test(arguments: ["\u{200B}", "\u{2060}", "\u{FEFF}", " \u{200B}\n", "\u{3164}", "\u{FE0F}"])
     func aPairedPhoneSendOfInvisibleCharactersIsRefusedAsEmpty(text: String) async throws {
         let textHarness = try await SendHarness.make()
         let partsHarness = try await SendHarness.make()
@@ -339,6 +339,20 @@ struct PhoneSendRailTests {
 
         #expect(response.success, "error was: \(response.error ?? "none")")
         #expect(harness.tmux.pastedBodies == ["a\u{200B}b"])
+    }
+
+    /// A zero width joiner inside an emoji sequence is part of a visible
+    /// message, so the message is delivered as written.
+    @Test func aPairedPhoneSendKeepsAZeroWidthJoinerInAnEmojiSequence() async throws {
+        let harness = try await SendHarness.make()
+        let text = "\u{1F469}\u{200D}\u{1F4BB}"
+
+        let response = try await harness.router.sendFromPairedPhone(
+            TerminalSendParams(terminalID: harness.terminal.id, text: text, submit: true),
+            deviceID: UUID())
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(harness.tmux.pastedBodies == [text])
     }
 
     /// The rail drops keys, but text can carry a key's byte. A pane whose

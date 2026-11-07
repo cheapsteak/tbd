@@ -4012,14 +4012,19 @@ extension RPCRouter {
     }
 
     /// Whether `text`, a phone message's `text` or one of its text parts,
-    /// types nothing a person could see: every scalar is whitespace or a
+    /// types nothing a person could see: every scalar is whitespace, a
     /// format character (general category Cf, such as U+200B ZERO WIDTH
-    /// SPACE, U+2060 WORD JOINER or U+FEFF, the byte-order mark). Empty text
-    /// is blank. Whitespace is the set the shape check trims.
+    /// SPACE, U+2060 WORD JOINER or U+FEFF, the byte-order mark), or a
+    /// default-ignorable code point (such as U+3164 HANGUL FILLER, U+034F
+    /// COMBINING GRAPHEME JOINER or a variation selector). Empty text is
+    /// blank. Whitespace is the set the shape check trims. One visible scalar
+    /// makes the text non-blank, so a ZWJ inside an emoji sequence or a
+    /// variation selector after a visible character keeps it.
     private static func phoneTextIsBlank(_ text: String) -> Bool {
         text.unicodeScalars.allSatisfy { scalar in
             CharacterSet.whitespacesAndNewlines.contains(scalar)
                 || scalar.properties.generalCategory == .format
+                || scalar.properties.isDefaultIgnorableCodePoint
         }
     }
 
