@@ -198,6 +198,29 @@ struct RendererTests {
                 "surface A draws its A from atlas position \(drawnAt), but the A is now at (\(freshA.x), \(freshA.y))")
     }
 
+    /// A block cursor on a wide character's tail cell covers the lead cell too, and the character's
+    /// glyph is anchored on the lead, so that glyph is the one drawn in the cursor's text colour.
+    /// Built without a GPU: the frame builder and the atlas's staging need none.
+    @Test func aBlockCursorOnAWideTailMarksTheWideGlyph() throws {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let builder = FrameBuilder(glyphCache: GlyphCache(fontSet: FontSet(font: font, scale: 2), device: nil))
+        let terminal = try GhosttyTerminal(cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        // A wide character in columns 0 and 1, then the cursor back onto column 1, its tail.
+        terminal.feed(text: "中\u{1b}[2G")
+        let surface = TerminalSurface()
+        try surface.attach(terminal)
+        try builder.update(surface)
+
+        let cursor = surface.cursor
+        try #require(cursor.isWideTail, "the cursor at column \(cursor.column) is not on a wide tail")
+        try #require(cursor.style == .block, "the cursor is a \(cursor.style), not a block")
+        let anchored = surface.glyphInstances().first { $0.gridPos.x == 0 && $0.gridPos.y == 0 }
+        let glyph = try #require(anchored, "no glyph was built for the wide character")
+        #expect(glyph.flags & UInt32(TKZ_GLYPH_FLAG_UNDER_CURSOR) != 0,
+                "the wide glyph under the block cursor is not marked: flags \(glyph.flags)")
+    }
+
     /// A frame that acquires a slot and bails before committing must not move the ring on: the
     /// next frame takes the same slot. Only committed frames advance it.
     @Test func frameRingAdvancesOnlyOnCommit() {

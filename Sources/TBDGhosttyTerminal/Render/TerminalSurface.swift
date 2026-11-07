@@ -394,10 +394,11 @@ final class TerminalSurface {
     }
 
     /// The cell whose glyph must be drawn in `cursorTextColor`: only a *filled block* cursor covers
-    /// its glyph completely.
+    /// its glyph completely. On a wide grapheme's tail cell that is the lead cell: the block covers
+    /// both (see `cursorRect`), and the grapheme's glyph is anchored on the lead.
     var filledCursorCell: (column: Int, row: Int)? {
         guard isCursorDrawn, isFocused, cursor.style == .block else { return nil }
-        return (cursor.column, cursor.row)
+        return (cursor.isWideTail ? max(0, cursor.column - 1) : cursor.column, cursor.row)
     }
 
     /// Suppresses the cursor entirely, whatever the terminal's own modes say.
