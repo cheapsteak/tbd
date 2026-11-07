@@ -363,6 +363,31 @@ struct KeyAndIMETests {
                 "with the cursor below the viewport the candidate window goes to \(below), not to the bottom row at \(bottomRow)")
     }
 
+    /// The composition follows the cursor when program output moves it, and goes, with the marked
+    /// text, when the view stops being first responder.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func compositionFollowsOutputAndEndsWhenFocusLeaves() throws {
+        let fixture = try KeyViewFixture()
+        let view = fixture.view
+        let window = try windowHolding(view)
+        defer { window.contentView = nil }
+        ScriptedInputMethod([ScriptedInputMethod.mark("n")]).install(on: view)
+        view.keyDown(with: try keyDown(0x2D, characters: "n", ignoringModifiers: "n"))
+        let cell = view.cellSize
+        let before = try #require(view.preeditLayer, "composing left no overlay").frame.minX
+
+        fixture.terminal.feed(text: "ab")
+        view.renderTick()
+        let after = try #require(view.preeditLayer, "a frame took the overlay away").frame.minX
+        #expect(abs(after - before - cell.width * 2) < 0.01,
+                "two characters of output moved the overlay from x \(before) to \(after) (cell \(cell.width))")
+
+        try #require(window.makeFirstResponder(nil), "the view would not give up focus")
+        #expect(view.preeditLayer == nil, "losing focus left the composition on screen")
+        #expect(!view.hasMarkedText(), "losing focus left marked text")
+        #expect(fixture.recorder.sent.isEmpty, "discarding the composition sent \(fixture.recorder.sent)")
+    }
+
     /// Typing brings a viewport the user scrolled back down to the cursor, as SwiftTerm does. A
     /// modifier on its own and a ⌘ shortcut leave it where it is.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

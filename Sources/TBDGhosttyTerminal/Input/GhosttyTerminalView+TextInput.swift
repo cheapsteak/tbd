@@ -16,7 +16,9 @@
 // over the Metal frame, like the link underline, not terminal content: the program never sees the
 // composition, only the text the input method commits, so nothing of it belongs in the grid. A
 // commit or a cancel takes the layer away, and the committed text reaches the program as typed
-// input, which it echoes into the grid.
+// input, which it echoes into the grid. Between input method calls the layer follows the cursor
+// and the cell size: each frame, resize, font change and backing-scale change moves it again. A
+// view that loses focus discards the composition, so no stale text stays on an unfocused pane.
 
 import AppKit
 import Foundation
@@ -228,6 +230,20 @@ extension GhosttyTerminalView {
         let thickness = max(1, (overlayFrame.height * scale / 14).rounded()) / scale
         underline.frame = CGRect(x: 0, y: overlayFrame.height - thickness, width: overlayFrame.width, height: thickness)
         underline.backgroundColor = foreground
+    }
+
+    /// Moves or redraws the composition after something under it changed: program output, a
+    /// resize, a new font or a new backing scale. Nothing to do while no input method composes.
+    func refreshPreeditOverlay() {
+        guard inputController.hasMarkedText else { return }
+        updatePreeditOverlay()
+    }
+
+    /// Drops a composition in progress: the input method forgets it, and the overlay goes.
+    func discardComposition() {
+        guard inputController.hasMarkedText else { return }
+        inputContext?.discardMarkedText()
+        unmarkText()
     }
 
     /// The overlay's container, text and underline layers, made on first use.
