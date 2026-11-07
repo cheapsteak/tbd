@@ -617,8 +617,8 @@ Research: `phone-app-stack.md`.
 - The runner checks the hash, creates a `blob:` URL inside the frame, and starts the bundle as one
   classic script.
 - The runner's security policy, set by its own `<meta>` tag:
-  - names the loader's origin explicitly (stamped at deploy), never `'self'`, because WebKit changed what `'self'`
-    means in a sandboxed document twice in 2026;
+  - names the loader's origin explicitly (stamped at deploy), never `'self'`, because WebKit
+    changed what `'self'` means in a sandboxed document twice in 2026;
   - allows scripts only from that origin and from `blob:`;
   - sets `connect-src 'none'`, so the frame has no network and reaches the laptop only through its
     message port;
