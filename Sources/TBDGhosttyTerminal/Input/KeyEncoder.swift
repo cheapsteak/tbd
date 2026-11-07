@@ -229,8 +229,8 @@ final class KeyEncoder {
     /// breaks every Option binding.
     ///
     /// The result then goes through ``legacyControlBytes(replacing:kittyFlags:)``, which turns
-    /// Ctrl-I, Ctrl-M and Ctrl-[ back into Tab, Return and Esc for a program that never asked for
-    /// CSI u.
+    /// Ctrl-I, Ctrl-M, Ctrl-[ and Ctrl-Shift-letter back into control bytes for a program that never
+    /// asked for CSI u.
     ///
     /// - Returns: the bytes to write to the pty. **An empty array is a normal result**, not an
     ///   error: bare modifier presses, releases in legacy mode, and composing keys produce nothing.
@@ -282,20 +282,23 @@ final class KeyEncoder {
         return flags
     }
 
-    /// Ctrl-I, Ctrl-M and Ctrl-[ as Tab, Return and Esc, in place of the CSI u that libghostty
-    /// encoded them as for a program that never asked for CSI u.
+    /// Control bytes in place of the CSI u that libghostty encoded some Ctrl keys as, for a program
+    /// that never asked for CSI u.
     ///
-    /// libghostty's legacy encoder follows the fixterms spec, and leaves these three keys out of
-    /// its control-character table on purpose (`key_encode.zig`: "purposely NOT handled here").
-    /// So with no Kitty keyboard flags it still sends `CSI 105;5u`, `CSI 109;5u` and `CSI 91;5u`.
-    /// A shell reads none of them: in zsh, Ctrl-M prints `09;5u`, and a later Return runs `5u` as
-    /// a command. xterm, Terminal.app and SwiftTerm send the C0 byte, and so does this.
+    /// libghostty's legacy encoder follows the fixterms spec in two places a shell cannot read:
+    ///   * It leaves Ctrl-I, Ctrl-M and Ctrl-[ out of its control-character table on purpose
+    ///     (`key_encode.zig`: "purposely NOT handled here"), and sends `CSI 105;5u`, `CSI 109;5u`
+    ///     and `CSI 91;5u`. In zsh, Ctrl-M prints `09;5u`, and a later Return runs `5u` as a
+    ///     command. These go out as Tab, Return and Esc.
+    ///   * It sends Ctrl-Shift-letter as CSI u (`CSI 118;6u` for Ctrl-Shift-V), so a program can
+    ///     tell it from Ctrl-letter. Only a program that set Kitty flags reads that form, so these go
+    ///     out as the letter's control byte, which every program reads.
     ///
-    /// Only that exact form is replaced, and only while the program has set no Kitty flags:
+    /// xterm, Terminal.app and SwiftTerm send the control byte in both cases, and so does this.
+    /// Only those exact forms are replaced, and only while the program has set no Kitty flags:
     ///   * Under Kitty flags, the CSI u is what the program asked for.
     ///   * Under xterm's modifyOtherKeys 2, libghostty sends `CSI 27;5;105~`, which the program
     ///     also asked for. It does not match the form.
-    ///   * Ctrl-Shift-I (`CSI 105;6u`) stays as it is, so a program can still tell it apart.
     ///
     /// Caps Lock gives `CSI 73;5u` (an upper-case I), and maps the same way. With Alt held as
     /// Meta (`;7u`), the C0 byte follows an ESC, as libghostty does for every other control key.
@@ -311,17 +314,23 @@ final class KeyEncoder {
         guard fields.count == 2, let codepoint = decimal(fields[0]), let modifiers = decimal(fields[1])
         else { return nil }
 
-        let control: UInt8
-        switch codepoint {
-        case 0x69, 0x49: control = 0x09  // i, or I under Caps Lock: Tab
-        case 0x6D, 0x4D: control = 0x0D  // m, or M under Caps Lock: Return
-        case 0x5B: control = 0x1B        // [: Esc
-        default: return nil
-        }
         switch modifiers {
-        case 5: return [control]        // Ctrl
-        case 7: return [0x1B, control]  // Ctrl and Alt
-        default: return nil
+        case 5, 7:
+            // Ctrl, or Ctrl and Alt: the three keys missing from libghostty's table.
+            let control: UInt8
+            switch codepoint {
+            case 0x69, 0x49: control = 0x09  // i, or I under Caps Lock: Tab
+            case 0x6D, 0x4D: control = 0x0D  // m, or M under Caps Lock: Return
+            case 0x5B: control = 0x1B        // [: Esc
+            default: return nil
+            }
+            return modifiers == 7 ? [0x1B, control] : [control]
+        case 6:
+            // Ctrl and Shift: any letter, as its control byte.
+            guard (0x41...0x5A).contains(codepoint) || (0x61...0x7A).contains(codepoint) else { return nil }
+            return [UInt8(codepoint) & 0x1F]
+        default:
+            return nil
         }
     }
 

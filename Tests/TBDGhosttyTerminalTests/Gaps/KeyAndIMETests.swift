@@ -167,8 +167,8 @@ struct KeyAndIMETests {
     // MARK: - Ctrl-I, Ctrl-M, Ctrl-[
 
     /// With no Kitty keyboard flags, the three keys libghostty encodes as CSI u go out as the C0
-    /// bytes a shell reads. Caps Lock does not change that; Alt as Meta puts an ESC first.
-    /// Ctrl-Shift-I stays CSI u, and a control key libghostty already sends as C0 is untouched.
+    /// bytes a shell reads. Caps Lock does not change that; Alt as Meta puts an ESC first. A
+    /// control key libghostty already sends as C0 is untouched.
     @Test func ctrlIMBracketMapToTabReturnEscWithoutCsiU() throws {
         let terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
         defer { terminal.close() }
@@ -188,12 +188,25 @@ struct KeyAndIMETests {
         let meta = bytes(for: try ctrlI([.control, .option]), on: terminal, optionAsAlt: .both)
         #expect(meta == [0x1B, 0x09], "Ctrl-Option-I with Option as Meta sent \(describe(meta))")
 
-        let shifted = bytes(for: try ctrlI([.control, .shift]), on: terminal)
-        #expect(shifted != [0x09], "Ctrl-Shift-I was sent as a plain Tab")
-        #expect(shifted.starts(with: [0x1B, UInt8(ascii: "[")]), "Ctrl-Shift-I sent \(describe(shifted))")
-
         let ctrlJ = bytes(for: try keyDown(0x26, characters: "\n", ignoringModifiers: "j", flags: .control), on: terminal)
         #expect(ctrlJ == [0x0A], "Ctrl-J sent \(describe(ctrlJ))")
+    }
+
+    /// With no Kitty keyboard flags, Ctrl-Shift-letter sends the letter's control byte, as SwiftTerm
+    /// does: Ctrl-Shift-V is 0x16. A program that pushed Kitty flags gets the CSI u it asked for.
+    @Test func ctrlShiftLetterSendsTheControlByteWithoutCsiU() throws {
+        let terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let ctrlShiftV = try keyDown(0x09, characters: "\u{16}", ignoringModifiers: "V", flags: [.control, .shift])
+
+        let paste = bytes(for: ctrlShiftV, on: terminal)
+        #expect(paste == [0x16], "Ctrl-Shift-V sent \(describe(paste))")
+        let tab = bytes(for: try ctrlI([.control, .shift]), on: terminal)
+        #expect(tab == [0x09], "Ctrl-Shift-I sent \(describe(tab))")
+
+        terminal.feed(text: "\u{1b}[>1u")
+        let csiU = bytes(for: ctrlShiftV, on: terminal)
+        #expect(csiU == Array("\u{1b}[118;6u".utf8), "under Kitty flags Ctrl-Shift-V sent \(describe(csiU))")
     }
 
     /// A program that pushes Kitty keyboard flags asked for CSI u, and gets it; popping the flags
