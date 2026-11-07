@@ -1,0 +1,25 @@
+{
+  "data": {
+    "page": {
+      "items": [
+        {
+          "at": 1762500000000,
+          "id": "c6ef929b-6689-569a-a3ae-a81e27f57be9",
+          "kind": "user",
+          "text": "Carry on from the summary.",
+          "truncated": false
+        }
+      ],
+      "omittedItems": 0,
+      "reachedStart": true
+    },
+    "reason": "rollover",
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "event": "transcript.reset",
+  "kind": "event",
+  "seq": 14
+}

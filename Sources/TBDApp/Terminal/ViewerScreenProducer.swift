@@ -1,9 +1,8 @@
 import Foundation
-import SwiftTerm
 import TBDShared
 import TBDTerminalSerialization
 
-/// Turns a viewer's live SwiftTerm into the answer the daemon asked for.
+/// Turns a viewer's live terminal into the answer the daemon asked for.
 ///
 /// While a panel is attached to a holder-backed session it holds that session's
 /// pty master, so its terminal is the live store and the daemon's retained
@@ -13,14 +12,14 @@ import TBDTerminalSerialization
 /// ## One lock hold, for the same reason the daemon takes one
 ///
 /// Lines, the viewport offset, the cursor, the size, the three child modes and
-/// the styled capture are all taken inside a **single** `withTerminal`, which
+/// the styled capture are all taken inside a **single** `withScreen`, which
 /// is what makes them one observation rather than several. Taken separately, an
 /// IO-thread feed landing between two of them would produce a screen that never
 /// existed — modes from after a mode change beside lines from before it, which
 /// is exactly the pairing the input path must not compose against.
 ///
-/// `withTerminal`'s discipline applies in full: nothing in the closure calls a
-/// `TerminalView` API (the lock is not recursive and re-entry traps), nothing
+/// `withScreen`'s discipline applies in full: nothing in the closure calls back
+/// into the engine (the lock is not recursive and re-entry traps), nothing
 /// feeds the terminal, and only values come out.
 ///
 /// ## What it answers with, and what it refuses to invent
@@ -64,7 +63,7 @@ enum ViewerScreenProducer {
         let styled: String?
     }
 
-    /// Project `terminalView`'s terminal for one request.
+    /// Project `engine`'s terminal for one request.
     ///
     /// - Parameter lastByteAt: when this store last consumed a byte from the
     ///   pty, from `TerminalViewHolder.feedReading`, or nil if it never has.
@@ -73,26 +72,25 @@ enum ViewerScreenProducer {
     ///   viewer arrived reports the age of the store itself rather than zero.
     /// - Parameter now: the same monotonic clock `lastByteAt` was read from.
     ///
-    /// Total: a live `TerminalView` always has a terminal to lock, so there is
+    /// Total: a live engine always has a terminal to lock, so there is
     /// no "could not read it" outcome here. Whether this store exists at all is
     /// the caller's question, and the caller answers it with `.noTerminal`
     /// before asking.
     static func answer(
         for request: SidecarScreenRequest,
-        terminalView: TerminalView,
+        engine: any TerminalEngine,
         lastByteAt: ContinuousClock.Instant?,
         attachedAt: ContinuousClock.Instant,
         now: ContinuousClock.Instant
     ) -> Answer {
-        let observed = terminalView.withTerminal { terminal -> ViewerObservation in
-            let projected = TerminalScreenProjection.project(terminal, maxLines: request.lines)
+        let observed = engine.withScreen { screen -> ViewerObservation in
+            let projected = screen.projection(maxLines: request.lines)
             guard request.wantStyledCapture else {
                 return ViewerObservation(projected: projected, styled: nil)
             }
             return ViewerObservation(
                 projected: projected,
-                styled: TerminalCellWalk.styledCapture(
-                    of: terminal, maxScrollbackLines: request.styledScrollbackLines))
+                styled: screen.styledCapture(maxScrollbackLines: request.styledScrollbackLines))
         }
         let projected = observed.projected
 

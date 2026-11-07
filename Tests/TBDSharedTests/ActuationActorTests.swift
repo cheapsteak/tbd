@@ -87,6 +87,35 @@ struct ActuationActorTests {
         let actor = try JSONDecoder().decode(ActuationActor.self, from: Data(json.utf8))
         #expect(actor.kind == "daemon")
     }
+
+    @Test("a phone actor carries its device and nothing else, and round-trips")
+    func phoneActorCarriesItsDevice() throws {
+        let id = UUID()
+        let actor = ActuationActor.phone(deviceID: id)
+        #expect(actor.kind == "phone")
+        #expect(actor.kind == ActuationActor.Kind.phone)
+        #expect(actor.device == id.uuidString)
+        let object = try encodedObject(actor)
+        #expect(Set(object.keys) == ["device", "kind"])
+        #expect(object["device"] as? String == id.uuidString)
+        let back = try JSONDecoder().decode(ActuationActor.self, from: JSONEncoder().encode(actor))
+        #expect(back == actor)
+    }
+
+    @Test("an actor stored before the device field decodes unchanged")
+    func anActorWithoutDeviceDecodesFromOldJSON() throws {
+        #expect(try JSONDecoder().decode(
+            ActuationActor.self, from: Data(#"{"kind":"app"}"#.utf8)) == .app)
+        let daemon = try JSONDecoder().decode(
+            ActuationActor.self, from: Data(#"{"kind":"daemon","rail":"limit-resume"}"#.utf8))
+        #expect(daemon == .daemon(rail: "limit-resume"))
+        #expect(daemon.device == nil)
+    }
+
+    @Test("a phone actor's dispatch label is its bare kind, with no device in it")
+    func phoneDispatchLabel() {
+        #expect(ActuationActor.phone(deviceID: UUID()).dispatchLabel == "phone")
+    }
 }
 
 @Suite("RPCRequest actor field")

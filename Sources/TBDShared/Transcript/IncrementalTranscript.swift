@@ -30,10 +30,24 @@ public struct IncrementalTranscript: Sendable {
     public struct Change: Sendable, Equatable {
         public let appended: Range<Int>
         public let updated: [Int]
-        public init(appended: Range<Int>, updated: [Int]) {
+        /// Every `tool_use_id` whose `tool_result` arrived in this batch, in
+        /// arrival order without duplicates — including ids whose call this
+        /// transcript never ingested (the call sits in a page it never saw).
+        /// `isEmpty` does not read this field, so a batch whose only news is
+        /// here, as when each result's call was never ingested, reads as
+        /// empty. A consumer that needs result-only news must read this field
+        /// itself.
+        public let resolvedToolUseIDs: [String]
+        public init(appended: Range<Int>, updated: [Int], resolvedToolUseIDs: [String] = []) {
             self.appended = appended
             self.updated = updated
+            self.resolvedToolUseIDs = resolvedToolUseIDs
         }
+        /// No item was appended and none was updated. Deliberately blind to
+        /// `resolvedToolUseIDs`: a batch whose only news is resolved tool-use
+        /// IDs, as when each result's call was never ingested, reads as
+        /// empty. A consumer that needs result-only news must read
+        /// `resolvedToolUseIDs` itself.
         public var isEmpty: Bool { appended.isEmpty && updated.isEmpty }
     }
 
@@ -107,6 +121,13 @@ public struct IncrementalTranscript: Sendable {
         rowUUIDs.contains(uuid)
     }
 
+    /// The result recorded for a `tool_use_id`, whether or not a call for it
+    /// was ever ingested. Storage follows `toolResultsByID`, which the type
+    /// already keeps unbounded.
+    public func toolResult(for toolUseID: String) -> ToolResult? {
+        toolResultsByID[toolUseID]
+    }
+
     @discardableResult
     public mutating func ingest(lines: [String]) -> Change {
         guard !lines.isEmpty else { return Change(appended: items.count..<items.count, updated: []) }
@@ -115,6 +136,8 @@ public struct IncrementalTranscript: Sendable {
         var rawText: [String] = []
         var stableIDs: [String] = []
         var newlyResolved: [String] = []
+        var resolvedToolUseIDs: [String] = []
+        var seenResolved: Set<String> = []
 
         for line in lines where !line.isEmpty {
             defer { lineCursor += 1 }
@@ -130,17 +153,14 @@ public struct IncrementalTranscript: Sendable {
                 rowUUIDs.insert(uuid)
             }
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                for block in array where (block["type"] as? String) == "tool_result" {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    toolResultsByID[id] = TranscriptParser.extractToolResult(from: block)
-                    // A result for a call built in an EARLIER ingest must patch
-                    // that item. One for a call in THIS batch is picked up by
-                    // buildItems below and needs no patch.
-                    if toolCallIndexByID[id] != nil { newlyResolved.append(id) }
-                }
+            for entry in TranscriptParser.toolResults(fromLine: json) {
+                let id = entry.id
+                toolResultsByID[id] = entry.result
+                if seenResolved.insert(id).inserted { resolvedToolUseIDs.append(id) }
+                // A result for a call built in an EARLIER ingest must patch
+                // that item. One for a call in THIS batch is picked up by
+                // buildItems below and needs no patch.
+                if toolCallIndexByID[id] != nil { newlyResolved.append(id) }
             }
         }
 
@@ -193,7 +213,9 @@ public struct IncrementalTranscript: Sendable {
         // needs its own rebuild.
         for id in newlyResolved { toolCallRowByID.removeValue(forKey: id) }
 
-        return Change(appended: start..<items.count, updated: updated)
+        return Change(
+            appended: start..<items.count, updated: updated,
+            resolvedToolUseIDs: resolvedToolUseIDs)
     }
 
     /// Every `tool_use` id an assistant row declares.

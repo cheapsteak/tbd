@@ -75,6 +75,9 @@ struct TerminalMouseRoutingTests {
     @MainActor
     private final class Fixture {
         let view: TBDTerminalView
+        /// The panel's handle on `view`, for `applyMouseRouting`. Not the
+        /// view's delegate: the recorder is.
+        let engine: SwiftTermEngine
         let window: NSWindow
         let recorder = SendRecorder()
         private let defaults: UserDefaults
@@ -94,6 +97,7 @@ struct TerminalMouseRoutingTests {
                 frame: CGRect(x: 0, y: 0, width: width, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
                 appearance: AppearanceSettings(defaults: defaults))
+            engine = SwiftTermEngine(view: view)
 
             // Borderless, far off every plausible display, never ordered front
             // and never made key: the window exists so the view has one.
@@ -105,7 +109,9 @@ struct TerminalMouseRoutingTests {
             ground.addSubview(view)
             window.contentView = ground
 
-            // `terminalDelegate` is weak; the fixture holds the recorder.
+            // `terminalDelegate` is weak; the fixture holds the recorder. Set
+            // after the engine, which makes itself the delegate when it is
+            // built.
             view.terminalDelegate = recorder
             view.onMouseDownClaimFocus = { true }
         }
@@ -157,7 +163,7 @@ struct TerminalMouseRoutingTests {
         /// Routing for a panel on `transport`, a program holding the mouse, and
         /// a clean recorder — the state every Cmd test starts from.
         func takeTheMouse(transport: TerminalTransport = .holder, reportingDrags: Bool = false) async {
-            TerminalPanelRepresentable.applyMouseRouting(to: view, transport: transport)
+            TerminalPanelRepresentable.applyMouseRouting(to: engine, transport: transport)
             programTakesTheMouse(reportingDrags: reportingDrags)
             await mainQueueTurn()
             recorder.sent.removeAll()
@@ -247,15 +253,15 @@ struct TerminalMouseRoutingTests {
         defer { fixture.tearDown() }
         let view = fixture.view
 
-        TerminalPanelRepresentable.applyMouseRouting(to: view, transport: .tmux)
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.engine, transport: .tmux)
         #expect(!view.allowMouseReporting, "a tmux panel took the mouse; tmux holds a mouse mode permanently")
         #expect(view.optionBypassesMouseReporting)
 
-        TerminalPanelRepresentable.applyMouseRouting(to: view, transport: .holder)
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.engine, transport: .holder)
         #expect(view.allowMouseReporting, "the panel's row loaded as holder and reporting stayed off")
         #expect(view.optionBypassesMouseReporting)
 
-        TerminalPanelRepresentable.applyMouseRouting(to: view, transport: .tmux)
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.engine, transport: .tmux)
         #expect(!view.allowMouseReporting, "re-applying a tmux transport left an open panel reporting")
         #expect(view.optionBypassesMouseReporting)
     }
@@ -270,7 +276,7 @@ struct TerminalMouseRoutingTests {
         let fixture = Fixture()
         defer { fixture.tearDown() }
 
-        TerminalPanelRepresentable.applyMouseRouting(to: fixture.view, transport: transport)
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.engine, transport: transport)
         // Which forwarder is live, so the holder case cannot pass through
         // the passthrough instead of SwiftTerm.
         #expect(fixture.view.allowMouseReporting == (transport == .holder))
@@ -301,7 +307,7 @@ struct TerminalMouseRoutingTests {
         var opened: [String] = []
         fixture.view.onFilePathClicked = { opened.append($0) }
         try fixture.showClickablePath()
-        TerminalPanelRepresentable.applyMouseRouting(to: fixture.view, transport: .holder)
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.engine, transport: .holder)
         fixture.programTakesTheMouse()
         await fixture.mainQueueTurn()
         fixture.recorder.sent.removeAll()

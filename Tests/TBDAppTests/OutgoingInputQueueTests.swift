@@ -367,7 +367,8 @@ struct OutgoingInputQueueTests {
 /// Five of the seven tests above call `beginUserPaste()`/`endUserPaste()`
 /// directly and so never exercise what actually decides a paste is open: a
 /// whole-payload equality test against SwiftTerm's bracketed-paste markers,
-/// inside `Coordinator.send(source:data:)`. That decision depends on a
+/// inside `Coordinator.deliverOutgoing(_:)`, which the engine's
+/// `send(source:data:)` hands every outgoing chunk. That decision depends on a
 /// vendored fork's chunking behaviour, so it gets its own coverage on the real
 /// path — `makeCoordinatorHarness()` builds a `Coordinator` on production
 /// wiring with a real pty child.
@@ -378,7 +379,7 @@ struct OutgoingInputQueueTests {
 /// `NSPasteboard.general` — the developer's real clipboard. What happens if
 /// that chunking ever coalesces a marker with its payload is therefore
 /// recorded where it can be acted on — the comment in
-/// `Coordinator.send(source:data:)` — and not as a test: no assertion here
+/// `Coordinator.deliverOutgoing(_:)` — and not as a test: no assertion here
 /// could tell a coalescing fork from a chunking one, since the classifier
 /// behaves the same either way.
 @MainActor
@@ -394,14 +395,14 @@ struct OutgoingInputQueuePasteMarkerTests {
         let queue = harness.coordinator.outgoingQueueForTesting
         #expect(queue.isPasteOpenForTesting == false)
 
-        harness.coordinator.send(source: harness.terminalView, data: Self.start)
+        harness.engine.send(source: harness.terminalView, data: Self.start)
         #expect(queue.isPasteOpenForTesting == true)
 
         // The payload between the markers must not close the paste.
-        harness.coordinator.send(source: harness.terminalView, data: ArraySlice("hello".utf8))
+        harness.engine.send(source: harness.terminalView, data: ArraySlice("hello".utf8))
         #expect(queue.isPasteOpenForTesting == true)
 
-        harness.coordinator.send(source: harness.terminalView, data: Self.end)
+        harness.engine.send(source: harness.terminalView, data: Self.end)
         #expect(queue.isPasteOpenForTesting == false)
     }
 
@@ -417,13 +418,13 @@ struct OutgoingInputQueuePasteMarkerTests {
         // value, so without a send that provably drives the getter to `true`
         // and back this test would pass identically if `send` early-returned
         // and never reached the queue at all.
-        harness.coordinator.send(source: harness.terminalView, data: Self.start)
+        harness.engine.send(source: harness.terminalView, data: Self.start)
         #expect(queue.isPasteOpenForTesting == true)
-        harness.coordinator.send(source: harness.terminalView, data: Self.end)
+        harness.engine.send(source: harness.terminalView, data: Self.end)
         #expect(queue.isPasteOpenForTesting == false)
 
         for chunk in ["h", "i", "\r"] {
-            harness.coordinator.send(source: harness.terminalView, data: ArraySlice(chunk.utf8))
+            harness.engine.send(source: harness.terminalView, data: ArraySlice(chunk.utf8))
             #expect(queue.isPasteOpenForTesting == false)
         }
     }

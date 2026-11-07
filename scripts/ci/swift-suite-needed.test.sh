@@ -126,6 +126,14 @@ test_markdown_under_sources_runs() {
   expect "Markdown under Tests/ runs" true Tests/CLAUDE.md
 }
 
+# Swift tests read `phone/protocol/` and `phone/test-vectors/`, so the `*.md`
+# rule must not skip Markdown there; elsewhere under `phone/` it skips.
+test_markdown_under_the_swift_read_phone_dirs_runs() {
+  expect "Markdown under phone/protocol/ runs"     true phone/protocol/README.md
+  expect "Markdown under phone/test-vectors/ runs" true phone/test-vectors/notes.md
+  expect "Markdown under phone/loader/ skips"      false phone/loader/README.md
+}
+
 # ---------------------------------------------------------------------------
 # 2. Each skip rule, alone
 # ---------------------------------------------------------------------------
@@ -141,13 +149,20 @@ test_each_skip_rule_skips_alone() {
   expect "SessionMod/** skips"                    false SessionMod/src/index.ts
   expect "recipe/** skips"                        false recipe/x
   expect "tools/** skips"                         false tools/x
+  expect "relay/** skips"                         false relay/cloudflare/src/index.ts
+  expect "phone/** skips (loader)"                false phone/loader/index.html
+  expect "phone/** skips (app)"                   false phone/app/src/main.tsx
+  expect "phone/** skips (workspace tooling)"     false phone/package.json
+  expect "phone/** skips (dotfile)"               false phone/.nvmrc
+  expect "phone/** skips (near-miss of a subdir)" false phone/loaderx/a.js
   expect "an unused Python script skips"          false scripts/flake-pr.py
   expect "a git hook skips"                       false scripts/git-hooks/pre-push
   expect "a restart library's harness skips"      false scripts/restart-build-lib.test.sh
   expect "a sibling of scripts/ci/ skips"         false scripts/ci.sh
   expect "every rule at once skips"               false \
     docs/x.md README.md .claude/settings.json .github/workflows/flake-fixer.yml \
-    SessionMod/package.json recipe/x tools/x scripts/update.sh
+    SessionMod/package.json recipe/x tools/x scripts/update.sh \
+    relay/cloudflare/src/index.ts phone/loader/index.html
 }
 
 # ---------------------------------------------------------------------------
@@ -205,6 +220,14 @@ test_unnamed_paths_run() {
   expect "a near-miss of docs/ runs"          true docsy/x.txt
   expect "a near-miss of .claude/ runs"       true .claude-plugin/plugin.json
   expect "a file named docs runs"             true docs
+  expect "phone/test-vectors/** runs"        true phone/test-vectors/noise-cacophony.json
+  expect "phone/protocol/** runs"             true phone/protocol/sessions.subscribe.request.json
+  expect "the committed phone app bundle runs" true Sources/TBDDaemon/Resources/phone-app/app.js
+  expect "a near-miss of relay/ runs"         true relayx/a
+  expect "a file named relay runs"            true relay
+  expect "a near-miss of phone/ runs"         true phones/x
+  expect "a file named phone runs"            true phone
+  expect "a skipped phone path beside a read one runs" true phone/loader/a.js phone/test-vectors/x.json
 }
 
 # ---------------------------------------------------------------------------
@@ -472,6 +495,26 @@ test_git_merge_commit_checkout() {
   )
   run_gate "$d" pull_request main
   assert_eq "a docs-only PR's merge commit skips" "run=false" "$GATE_OUT"
+}
+
+# Moving a file out of phone/test-vectors/ into a skipped directory still runs:
+# only --no-renames lists the old path.
+test_git_rename_out_of_test_vectors_runs() {
+  local d; d="$(mkrepo)"
+  (
+    cd "$d/repo" || exit 1
+    git checkout -q main
+    mkdir -p phone/test-vectors phone/loader
+    echo '{}' > phone/test-vectors/a.json
+    git add -A
+    git commit -q -m "add a vector"
+    git update-ref refs/remotes/origin/main HEAD
+    git checkout -q -B feature
+    git mv phone/test-vectors/a.json phone/loader/a.json
+    git commit -q -m "move a vector into the loader"
+  )
+  run_gate "$d" pull_request main
+  assert_eq "a file moved out of phone/test-vectors/ runs" "run=true" "$GATE_OUT"
 }
 
 # ---------------------------------------------------------------------------

@@ -2,17 +2,24 @@ import AppKit
 import Foundation
 import TBDShared
 
+/// A weak reference to a mounted terminal's view, for focus. An `NSView`
+/// rather than a concrete terminal view type, because a panel's view is
+/// whatever its terminal engine draws with.
 @MainActor
 final class TerminalFocusTarget {
-    weak var view: TBDTerminalView?
+    weak var view: NSView?
+    /// Puts back the view's own window hook, which a remote attach
+    /// registration chains in front of. Nil for a panel's terminal, whose
+    /// registration takes no hook.
+    var restoreWindowHook: (() -> Void)?
 
-    init(_ view: TBDTerminalView) {
+    init(_ view: NSView) {
         self.view = view
     }
 }
 
 extension AppState {
-    func registerTerminalView(_ view: TBDTerminalView, for terminalID: UUID) {
+    func registerTerminalView(_ view: NSView, for terminalID: UUID) {
         terminalFocusTargets[terminalID] = TerminalFocusTarget(view)
     }
 
@@ -24,7 +31,7 @@ extension AppState {
         }
     }
 
-    func unregisterTerminalView(_ view: TBDTerminalView, for terminalID: UUID) {
+    func unregisterTerminalView(_ view: NSView, for terminalID: UUID) {
         guard terminalFocusTargets[terminalID]?.view === view else { return }
         terminalFocusTargets.removeValue(forKey: terminalID)
         terminalTabCloseContexts.removeValue(forKey: terminalID)
@@ -56,7 +63,7 @@ extension AppState {
         if terminalFocusTargets.isEmpty {
             return lastFocused
         }
-        guard let terminalView = NSApp.keyWindow?.firstResponder as? TBDTerminalView else {
+        guard let terminalView = NSApp.keyWindow?.firstResponder as? NSView else {
             return nil
         }
         guard let terminalID = terminalFocusTargets.first(where: { $0.value.view === terminalView })?.key else {
@@ -107,9 +114,23 @@ extension AppState {
     /// (the pagers are `NSTabViewController`s); the selected session's own
     /// pane can be in its window but transparent, which the claim's
     /// `remoteAttachSlotShownSelection` check covers.
+    ///
+    /// The view's `onMovedToWindow` already belongs to the terminal engine
+    /// that owns the view, which forwards it to its delegate. The claim is
+    /// chained after that hook, never in place of it, and unregistering puts
+    /// the hook back. A registration that supersedes another for the same
+    /// selection puts the superseded view's hook back first, so hooks never
+    /// stack and a superseded view never claims for its replacement.
     func registerRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
-        remoteTerminalFocusTargets[selection] = TerminalFocusTarget(view)
+        remoteTerminalFocusTargets[selection]?.restoreWindowHook?()
+        let target = TerminalFocusTarget(view)
+        let ownHook = view.onMovedToWindow
+        target.restoreWindowHook = { [weak view] in
+            view?.onMovedToWindow = ownHook
+        }
+        remoteTerminalFocusTargets[selection] = target
         view.onMovedToWindow = { [weak self] in
+            ownHook?()
             self?.focusRemoteTerminalAfterSelectionChange(selection)
         }
     }
@@ -136,9 +157,12 @@ extension AppState {
         }
     }
 
+    /// Identity-guarded: a superseded view's dismantle, which can land after
+    /// its replacement registered, leaves the replacement alone. Its own hook
+    /// was put back when it was superseded.
     func unregisterRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
-        view.onMovedToWindow = nil
-        guard remoteTerminalFocusTargets[selection]?.view === view else { return }
+        guard let target = remoteTerminalFocusTargets[selection], target.view === view else { return }
+        target.restoreWindowHook?()
         remoteTerminalFocusTargets.removeValue(forKey: selection)
     }
 

@@ -1,5 +1,4 @@
 import Foundation
-import TBDShared
 
 /// Pure logic behind starting a remote session: resolving the generic
 /// create-form fields `describe.create_params` describes, deciding whether the
@@ -19,15 +18,15 @@ import TBDShared
 ///    unanswered.
 ///  - `launch` — create outright, or open the form prefilled with what is
 ///    known. Creating on a guess is never an option.
-enum RemoteCreateFormLogic {
+public enum RemoteCreateFormLogic {
     /// A field failed local validation. Carries the field's raw `name` (the
     /// key the provider knows it by), so the view can look up its `label`
     /// for display.
-    enum FieldError: LocalizedError, Equatable {
+    public enum FieldError: LocalizedError, Equatable {
         case missingRequired(fieldName: String)
         case invalidInt(fieldName: String)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .missingRequired(let fieldName):
                 return "\(fieldName) is required"
@@ -40,7 +39,7 @@ enum RemoteCreateFormLogic {
     /// The well-known create-param naming the repository the session is
     /// created against (`docs/remote-provider-contract.md` § `describe`). It
     /// is the one field resolution treats as special — see `resolveString`.
-    static let repoFieldName = "repo"
+    public static let repoFieldName = "repo"
 
     /// Derives the `repo` create-param prefill from a repo's `remoteURL`,
     /// using `RemoteRepoMatching.displayKey` — the SAME segment parsing
@@ -54,7 +53,7 @@ enum RemoteCreateFormLogic {
     /// not the lowercase comparison key. Returns nil when there's no ambient
     /// repo (the sheet was opened from the Remote section header, not a
     /// repo) or the repo has no parseable remote URL.
-    static func repoPrefill(remoteURL: String?) -> String? {
+    public static func repoPrefill(remoteURL: String?) -> String? {
         guard let remoteURL else { return nil }
         return RemoteRepoMatching.displayKey(remoteURL)
     }
@@ -64,7 +63,7 @@ enum RemoteCreateFormLogic {
     /// parameter past `repoPrefill` is defaulted, so a caller with no stored
     /// defaults and no generated slug gets exactly the ambient-prefill-only
     /// behavior this function has always had.
-    static func prefillStrings(
+    public static func prefillStrings(
         fields: [ProviderCreateParamField],
         repoPrefill: String?,
         repoDefaults: [String: String] = [:],
@@ -131,7 +130,7 @@ enum RemoteCreateFormLogic {
     /// `Picker` (the control renders blank even for a required field) and the
     /// provider rejects it at `create` time; degrading is strictly better than
     /// either. Never an invented selection.
-    static func resolveString(
+    public static func resolveString(
         field: ProviderCreateParamField,
         repoPrefill: String?,
         repoDefaults: [String: String],
@@ -174,7 +173,7 @@ enum RemoteCreateFormLogic {
     /// branch name that exists nowhere, while the provider knows what its
     /// backend does with an absent branch. `prompt` and `title` have no
     /// ambient source at all.
-    static func ambientPrefill(
+    public static func ambientPrefill(
         for fieldName: String, repoPrefill: String?, generatedSlug: String?
     ) -> String? {
         switch fieldName {
@@ -205,7 +204,7 @@ enum RemoteCreateFormLogic {
     /// allowed values sharing a last component are ambiguous, and ambiguity
     /// resolves to "no match" (the caller then falls back to the declared
     /// default) rather than to whichever happened to be listed first.
-    static func matchAllowedValue(_ candidate: String, in allowed: [String]) -> String? {
+    public static func matchAllowedValue(_ candidate: String, in allowed: [String]) -> String? {
         if allowed.contains(candidate) { return candidate }
         if let caseInsensitive = allowed.first(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
             return caseInsensitive
@@ -234,7 +233,7 @@ enum RemoteCreateFormLogic {
     /// "Session slug", "Branch" and "Command". `text` already had the
     /// caption; this generalizes it to the other text-shaped types instead
     /// of leaving it special-cased in one switch arm.
-    static func rendersCaptionLabel(forType type: String) -> Bool {
+    public static func rendersCaptionLabel(forType type: String) -> Bool {
         type != "bool" && type != "enum"
     }
 
@@ -248,7 +247,7 @@ enum RemoteCreateFormLogic {
     /// No `required` handling here on purpose: a checkbox always has a value,
     /// so `false` is a real answer rather than a missing one (same rule
     /// `buildParamsJSON` applies).
-    static func prefillBools(
+    public static func prefillBools(
         fields: [ProviderCreateParamField],
         repoDefaults: [String: String] = [:],
         globalDefaults: [String: String] = [:]
@@ -280,11 +279,11 @@ enum RemoteCreateFormLogic {
     /// unanswered. Produced by `plan`, consumed both by `RemoteCreateSheet`
     /// (which renders it) and by `launch` (which decides whether the sheet
     /// needs to be rendered at all).
-    struct Plan: Equatable {
-        let stringValues: [String: String]
-        let boolValues: [String: Bool]
+    public struct Plan: Equatable {
+        public let stringValues: [String: String]
+        public let boolValues: [String: Bool]
         /// Required fields no level could answer, in `fields` order.
-        let missingRequired: [String]
+        public let missingRequired: [String]
         /// The provider asks which repository to work in, and no repo-scoped
         /// level could say (see `resolveString`): either the `+` carried no
         /// repo at all, or the repo it carried matches nothing the provider
@@ -295,9 +294,20 @@ enum RemoteCreateFormLogic {
         /// optional field is omitted from the params, and an omitted `repo` is
         /// answered by the provider's own default — the same wrong repository,
         /// reached by the other door.
-        let repoUnanswered: Bool
+        public let repoUnanswered: Bool
+
+        public init(
+            stringValues: [String: String], boolValues: [String: Bool],
+            missingRequired: [String], repoUnanswered: Bool
+        ) {
+            self.stringValues = stringValues
+            self.boolValues = boolValues
+            self.missingRequired = missingRequired
+            self.repoUnanswered = repoUnanswered
+        }
+
         /// Every required field is answered, so nothing needs asking.
-        var isComplete: Bool { missingRequired.isEmpty }
+        public var isComplete: Bool { missingRequired.isEmpty }
     }
 
     /// Resolve every field through the precedence chain and report which
@@ -305,7 +315,7 @@ enum RemoteCreateFormLogic {
     ///
     /// `required` is applied only to non-bool fields, matching
     /// `buildParamsJSON`: a checkbox always has a value.
-    static func plan(
+    public static func plan(
         fields: [ProviderCreateParamField],
         repoPrefill: String?,
         repoDefaults: [String: String],
@@ -329,7 +339,7 @@ enum RemoteCreateFormLogic {
     }
 
     /// What selecting "New remote session…" should actually do.
-    enum Launch: Equatable {
+    public enum Launch: Equatable {
         /// Every required answer was already knowable — create straight away.
         case createNow(paramsJSON: String)
         /// Something still needs a human: render the form, prefilled with
@@ -356,7 +366,7 @@ enum RemoteCreateFormLogic {
     /// Otherwise every answer is known and the session is created with no
     /// sheet. A provider with no create params at all lands here too: an empty
     /// form has nothing to ask.
-    static func launch(
+    public static func launch(
         describe: ProviderDescribe?,
         repoPrefill: String?,
         repoDefaults: [String: String],
@@ -390,7 +400,7 @@ enum RemoteCreateFormLogic {
     /// It asks with a placeholder slug rather than minting a real lane name
     /// for a label, which changes no answer: what a `slug` field needs is a
     /// non-blank value, and both a placeholder and a generated name are that.
-    static func willCreateImmediately(
+    public static func willCreateImmediately(
         describe: ProviderDescribe?,
         repoPrefill: String?,
         repoDefaults: [String: String],
@@ -406,7 +416,7 @@ enum RemoteCreateFormLogic {
 
     /// Stands in for a generated slug when only the DECISION is wanted, not a
     /// name anything will be created under.
-    static let slugPreviewPlaceholder = "slug-preview"
+    public static let slugPreviewPlaceholder = "slug-preview"
 
     /// Validates and assembles the create-form values into the JSON object
     /// string `remote.create` expects as `paramsJSON`. Fields are checked in
@@ -420,7 +430,7 @@ enum RemoteCreateFormLogic {
     /// - An `int` field is parsed with `Int(_:)`; a non-blank value that
     ///   doesn't parse is `.invalidInt`, checked BEFORE the field is written,
     ///   so a bad value never reaches the request.
-    static func buildParamsJSON(
+    public static func buildParamsJSON(
         fields: [ProviderCreateParamField],
         stringValues: [String: String],
         boolValues: [String: Bool]

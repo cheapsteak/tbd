@@ -50,7 +50,10 @@ class TBDTerminalView: TerminalView {
     ///
     /// Named `appearanceSettings` (not `appearance`) to avoid collision with
     /// `NSView.appearance: NSAppearance?` inherited from AppKit.
-    let appearanceSettings: AppearanceSettings
+    ///
+    /// Replaced only by `applyAppearance(_:)`, which moves the subscription
+    /// with it.
+    private(set) var appearanceSettings: AppearanceSettings
     /// Holds the Combine subscription that reapplies appearance when settings change.
     private var appearanceCancellable: AnyCancellable?
 
@@ -117,15 +120,33 @@ class TBDTerminalView: TerminalView {
         // Answer the OSC 7501 probe synchronously, inside the parse.
         installProgramStatusProbeAnswerer(terminalID: terminalID)
 
-        // Reapply on any AppearanceSettings change. `objectWillChange` fires
-        // *before* the property mutation lands on the published value, so we
-        // dispatch async to main — by the time the sink runs, the new value
-        // has been committed and `appearanceSettings.*` reads the right thing.
-        self.appearanceCancellable = appearance.objectWillChange
+        followAppearanceChanges()
+    }
+
+    /// Reapply on any AppearanceSettings change. `objectWillChange` fires
+    /// *before* the property mutation lands on the published value, so we
+    /// dispatch async to main — by the time the sink runs, the new value
+    /// has been committed and `appearanceSettings.*` reads the right thing.
+    private func followAppearanceChanges() {
+        self.appearanceCancellable = appearanceSettings.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.applyAll()
             }
+    }
+
+    /// Applies `appearance` now rather than on the next change notification.
+    ///
+    /// The terminal engine's `apply(appearance:)`. A settings object other than
+    /// the one this view follows replaces it, and the view follows the new one
+    /// from then on. Applying the same object again only re-reads it, which is
+    /// what the change subscription does a main turn later anyway.
+    func applyAppearance(_ appearance: AppearanceSettings) {
+        if appearance !== appearanceSettings {
+            appearanceSettings = appearance
+            followAppearanceChanges()
+        }
+        applyAll()
     }
 
     @available(*, unavailable)
@@ -195,9 +216,13 @@ class TBDTerminalView: TerminalView {
     /// draw hook below then does one nil-check.
     var latencyTap: TerminalLatencyTap?
 
+    /// Called as each frame begins drawing, before either instrument below.
+    /// The terminal engine's `onDrawStart`; nil unless something installed it.
+    var onDrawStart: (@MainActor () -> Void)?
+
     /// Instrumented only while a terminal diagnostic is on. With both flags
-    /// off this is `super.viewWillDraw()` plus two nil-checks: no timestamps,
-    /// no completion block, no logging.
+    /// off this is `super.viewWillDraw()` plus three nil-checks (the third is
+    /// `onDrawStart`): no timestamps, no completion block, no logging.
     ///
     /// The two instruments are independent and neither gates the other. The
     /// latency tap reports the wait BEFORE this draw (how long the oldest
@@ -213,6 +238,7 @@ class TBDTerminalView: TerminalView {
     /// for what the wait before it does and does not include.
     override func viewWillDraw() {
         super.viewWillDraw()
+        onDrawStart?()
         if let tap = latencyTap {
             // The screen check walks the view hierarchy, so it is taken FIRST
             // and the tap is called last. The tap stamps the draw itself, under

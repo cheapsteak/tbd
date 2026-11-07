@@ -36,18 +36,19 @@ The script lists the PR's changed files with `git diff --name-only --no-renames 
 The suite is skipped only when the list is non-empty and every path on it matches one of these:
 
 - **`docs/**`**
-- **`*.md` outside `Sources/` and `Tests/`** – Markdown inside those trees still runs the suite, because a target can bundle it as a resource: `Sources/TBDApp/Resources/markdown-stylesheets.md` ships in the app. Elsewhere Markdown skips even beside a suite script, as in `scripts/ci/README.md`, since no script loads it.
+- **`*.md` outside `Sources/`, `Tests/`, `phone/protocol/` and `phone/test-vectors/`** – Markdown inside `Sources/` and `Tests/` still runs the suite, because a target can bundle it as a resource: `Sources/TBDApp/Resources/markdown-stylesheets.md` ships in the app. Markdown inside `phone/protocol/` and `phone/test-vectors/` runs it as well, like every other path there, because Swift tests read those directories. Elsewhere Markdown skips even beside a suite script, as in `scripts/ci/README.md`, since no script loads it.
 - **`.claude/**`**
 - **`.github/**` except `.github/workflows/test.yml`** – the workflow that runs the suite is a suite input.
 - **`SessionMod/**`** – the daemon ships the copy embedded in `Sources/TBDShared/SessionModContent.swift`, and the `Session mod` job checks that the copy is current. A PR that changes the embedded copy changes `Sources/` and runs the suite.
 - **`recipe/**` and `tools/**`**
+- **`relay/**` and `phone/**` except `phone/protocol/**` and `phone/test-vectors/**`** – no Swift target reads them, and the `Phone` workflow tests them. `phone/protocol/` and `phone/test-vectors/` run the suite because Swift tests read them. The phone app bundle the daemon ships lives under `Sources/`, so it runs the suite.
 - **`scripts/**` except the suite's own scripts** – the suite's own scripts are:
   - `scripts/test.sh`, `scripts/swift-safe` and everything under `scripts/ci/`, which run the suite;
   - `scripts/dsym-prune-lib.sh`, `scripts/tbd-home-fingerprint.sh` and `scripts/remote-verify.sh`, which `test.sh` loads or runs;
   - `scripts/repair-spm-workspace.sh`, which the `test` job runs;
   - `scripts/restart.sh` and `scripts/restart-*-lib.sh`. `DaemonBuildSkewTests` reads `restart.sh`, `restart.sh` loads the libraries, and `swift-safe` names `restart-build-lib.sh`.
 
-Every other path runs the suite: `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, `Resources/`, `rust/`, and any top-level directory or file the list does not name. The list names what is safe to skip, never what is risky, so a path nobody thought about runs the suite.
+Every other path runs the suite: `Sources/`, `Tests/`, `Package.swift`, `Package.resolved`, `Resources/`, `rust/`, `phone/protocol/`, `phone/test-vectors/`, and any top-level directory or file the list does not name. The list names what is safe to skip, never what is risky, so a path nobody thought about runs the suite.
 
 The script also runs the suite whenever it cannot answer honestly:
 
@@ -69,6 +70,12 @@ The skip list is only as good as its list of suite scripts. If the suite comes t
 - `scripts/restart.sh` → run
 - an unused script → skip
 - a Markdown file under `Sources/` → run
+- `relay/cloudflare/src/index.ts` → skip
+- `phone/package.json` → skip
+- `phone/test-vectors/x.json` → run
+- a Markdown file under `phone/protocol/` or `phone/test-vectors/` → run
+- a Markdown file under `phone/loader/` → skip
+- the committed phone app bundle under `Sources/` → run
 - a rename from `Sources/` into `docs/` → run, because only `--no-renames` lists the `Sources/` side
 - an empty diff → run
 - a `push` event → run

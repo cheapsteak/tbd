@@ -1,0 +1,18 @@
+{
+  "kind": "request",
+  "method": "remote.create",
+  "params": {
+    "bools": {
+      "draft": true
+    },
+    "message": "Migrate the billing tables to the new schema.",
+    "provider": "acme-cloud",
+    "repoID": "16E7737E-5C20-548E-81FC-5DD3F9A51D36",
+    "strings": {
+      "branch": "main",
+      "size": "small",
+      "timeout": "30"
+    }
+  },
+  "requestID": "E9FE3A3E-2A2F-5C22-B232-69D283673D6B"
+}

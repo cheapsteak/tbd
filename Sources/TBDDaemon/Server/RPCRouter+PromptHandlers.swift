@@ -4,6 +4,20 @@ import TBDShared
 
 private let promptLog = Logger(subsystem: "com.tbd.daemon", category: "pendingPrompt")
 
+/// Where an answer's authority to decide a prompt in a person's name comes
+/// from. The answer's flag is checked first either way.
+enum AnswerAuthority: Sendable {
+    /// A request on the daemon socket. `promptAnswerPeerRefusal` must find
+    /// that the connection is the TBD app's own; a nil context is refused.
+    case socket(RPCConnectionContext?)
+    /// A gesture from a paired phone, which the phone bridge has verified
+    /// against its pairing. There is no socket peer, so no socket check runs.
+    /// The answer's actuation row records `ActuationActor.phone(deviceID:)`
+    /// with this device, whatever actor the caller passes, so the recorded
+    /// device and the authority cannot disagree.
+    case pairedPhone(deviceID: UUID)
+}
+
 /// Answering prompts from the transcript
 /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
 ///
@@ -31,7 +45,8 @@ extension RPCRouter {
     /// envelope suppression does, through the same check: the kernel-named
     /// peer pid must be the recorded app identity, re-verified
     /// (`authenticatesEnvelopeSuppression`). A nil context — every non-socket
-    /// caller — is refused, as is any other process on the socket.
+    /// caller — is refused, as is any other process on the socket. A paired
+    /// phone's `.pairedPhone` authority never reaches this check.
     func promptAnswerPeerRefusal(
         connection: RPCConnectionContext?, method: String
     ) async -> RPCResponse? {
@@ -73,19 +88,40 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor?, connection: RPCConnectionContext?
     ) async throws -> RPCResponse {
         let p = try decoder.decode(PromptAnswerParams.self, from: paramsData)
+        return try await answerPrompt(p, actor: actor, authority: .socket(connection))
+    }
+
+    /// The core of `prompt.answer`, for every caller past its own edge: the
+    /// socket handler above and the phone bridge. Same results and errors as
+    /// `handlePromptAnswer`, except that it never throws a decode error (the
+    /// handler decodes) and, under `.pairedPhone`, never returns
+    /// `promptAnswerNotFromAppRefusal`. `authority` decides whether the socket
+    /// peer check runs, right after the flag check, and whose answer the row
+    /// records: `actor` under `.socket`, and under `.pairedPhone` the phone
+    /// that authority names, whatever `actor` says.
+    func answerPrompt(
+        _ p: PromptAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
+    ) async throws -> RPCResponse {
         guard try await promptAnswerEnabled() else {
             return RPCResponse(error: Self.promptAnswerDisabledRefusal)
         }
-        if let refusal = await promptAnswerPeerRefusal(
-            connection: connection, method: RPCMethod.promptAnswer) {
-            return refusal
+        let recordedActor: ActuationActor?
+        switch authority {
+        case .socket(let connection):
+            if let refusal = await promptAnswerPeerRefusal(
+                connection: connection, method: RPCMethod.promptAnswer) {
+                return refusal
+            }
+            recordedActor = actor
+        case .pairedPhone(let deviceID):
+            recordedActor = ActuationActor.phone(deviceID: deviceID)
         }
         let terminal = try? await db.terminals.get(id: p.terminalID)
         let target = ActuationTarget(
             worktree: terminal?.worktreeID.uuidString, terminal: p.terminalID.uuidString)
         let answerJSON = (try? JSONEncoder().encode(p.answer)).flatMap { String(data: $0, encoding: .utf8) }
         let actuationID = try await beginActuation(
-            .promptAnswer, actor: actor, target: target, message: answerJSON)
+            .promptAnswer, actor: recordedActor, target: target, message: answerJSON)
 
         guard terminal != nil else {
             await finishActuation(actuationID, .refused(.notFound), error: "terminal not found")

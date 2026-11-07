@@ -23,6 +23,7 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     public enum Kind {
         public static let daemon = "daemon"
         public static let app = "app"
+        public static let phone = "phone"
         public static let session = "session"
         public static let anonymous = "anonymous"
     }
@@ -36,17 +37,27 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     public var worktree: String?
     /// Uppercase terminal UUID string, for `kind == "session"`.
     public var terminal: String?
+    /// Uppercase paired-device UUID string, for `kind == "phone"`: which
+    /// pairing the gesture came through. Never the phone's name.
+    ///
+    /// Self-declared, like `kind`, when it arrives in an `RPCRequest`. Only an
+    /// actor the phone bridge builds in-process with `.phone(deviceID:)` from
+    /// a verified pairing is evidence of a device, so take a device ID from
+    /// the bridge's peer, never from a request's actor.
+    public var device: String?
 
     public init(
         kind: String,
         rail: String? = nil,
         worktree: String? = nil,
-        terminal: String? = nil
+        terminal: String? = nil,
+        device: String? = nil
     ) {
         self.kind = kind
         self.rail = rail
         self.worktree = worktree
         self.terminal = terminal
+        self.device = device
     }
 
     /// The daemon acting on its own behalf, optionally naming the internal rail.
@@ -56,6 +67,12 @@ public struct ActuationActor: Codable, Sendable, Equatable {
 
     /// The macOS app's RPC client — the operator's hand.
     public static let app = ActuationActor(kind: Kind.app)
+
+    /// A person's gesture on a paired phone, which the daemon's phone bridge
+    /// declares after the phone's channel has verified its pairing.
+    public static func phone(deviceID: UUID) -> ActuationActor {
+        ActuationActor(kind: Kind.phone, device: deviceID.uuidString)
+    }
 
     /// No identity was declared. Explicit rather than an absent field: the
     /// record must say plainly that the caller was anonymous.

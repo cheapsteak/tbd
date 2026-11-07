@@ -385,6 +385,7 @@ struct TerminalViewSessionReclamationTests {
             font: TBDTerminalView.defaultMonospaceFont,
             appearance: AppearanceSettings(defaults: suite.defaults)
         )
+        let engine = SwiftTermEngine(view: terminalView)
         let coordinator = TerminalPanelRepresentable.Coordinator()
         coordinator.tmuxBridge = bridge
         coordinator.tmuxServer = "tbd-repo"
@@ -392,7 +393,7 @@ struct TerminalViewSessionReclamationTests {
 
         let preparing = Task { @MainActor in
             await coordinator.startTmuxClient(
-                terminalView: terminalView,
+                engine: engine,
                 bridge: bridge,
                 server: "tbd-repo",
                 windowID: "@147",

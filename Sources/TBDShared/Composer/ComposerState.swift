@@ -1,5 +1,4 @@
 import Foundation
-import TBDShared
 
 /// What the composer offers for one terminal.
 ///
@@ -14,7 +13,7 @@ import TBDShared
 /// running outranks a standing prompt deliberately — a parked session cannot be
 /// sitting on a dialog, and telling somebody to answer it in the terminal would
 /// send them to a pane with a shell in it.
-enum ComposerState: Equatable {
+public enum ComposerState: Equatable {
     /// No composer at all: the worktree is remote, or this is not a Claude
     /// session. Scope is Claude sessions on local worktrees; Codex,
     /// shell and remote are out, and the archived transcript view never gets one.
@@ -39,14 +38,14 @@ enum ComposerState: Equatable {
     /// `.notRunning`, which sending resumes.
     case unavailable(message: String)
 
-    var isEnabled: Bool {
+    public var isEnabled: Bool {
         switch self {
         case .running, .notRunning: return true
         case .blocked, .hidden, .unavailable: return false
         }
     }
 
-    static func resolve(
+    public static func resolve(
         terminal: Terminal?, isRemoteWorktree: Bool
     ) -> ComposerState {
         guard !isRemoteWorktree,

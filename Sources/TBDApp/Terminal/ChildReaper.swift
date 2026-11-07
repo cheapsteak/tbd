@@ -23,8 +23,8 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// runs on the activating thread rather than being dispatched to
 /// `dispatchQueue`. That is still main here, because both call sites start the
 /// process from main-isolated code — `TerminalPanelRepresentable.Coordinator`'s
-/// `startTmuxClient(terminalView:bridge:server:windowID:)` and
-/// `LocalPTYTerminalRepresentable.Coordinator.start(terminalView:argv:environment:)`,
+/// `startTmuxClient(engine:bridge:server:windowID:panelID:)` and
+/// `LocalPTYTerminalRepresentable.Coordinator.start(engine:argv:environment:)`,
 /// both `@MainActor` — so do not "simplify" either call site off the main
 /// actor without revisiting this. (Both `Coordinator`s are nested in the
 /// `NSViewRepresentable`, not in the `View`/file of the same name.) The *reader* side: both `cleanup()` implementations are

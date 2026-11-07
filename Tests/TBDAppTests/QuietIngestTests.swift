@@ -9,10 +9,10 @@ import TestSupport
 
 /// A snapshot preamble is *replayed history*, but its bytes look live to the
 /// emulator. This suite drives `Coordinator.feedSnapshot` on the production
-/// wiring — a real `TBDTerminalView` whose `terminalDelegate` is a real
-/// `Coordinator`, exactly as `makeNSView` wires one — and asserts on **what did
-/// not happen**: no bytes reached the child, no ring, no pasteboard write, no
-/// `TIOCSWINSZ`, no notification.
+/// wiring — a real `TBDTerminalView` inside a real `SwiftTermEngine` whose
+/// delegate is a real `Coordinator`, exactly as `makeNSView` wires one — and
+/// asserts on **what did not happen**: no bytes reached the child, no ring, no
+/// pasteboard write, no `TIOCSWINSZ`, no notification.
 ///
 /// Every one of those is an assertion about an absence, so every test carries a
 /// positive control on the same path: the same bytes fed **live** must produce
@@ -55,7 +55,7 @@ struct QuietIngestTests {
         #expect(harness.childPID > 0, "no child means no observable outgoing path")
         // DA1, DSR cursor-position and a DECRQM — all reply-producing.
         let snapshot = Data("\u{1b}[c\u{1b}[6n\u{1b}[?7$p".utf8)
-        harness.coordinator.feedSnapshot(snapshot, into: harness.terminalView)
+        harness.coordinator.feedSnapshot(snapshot, into: harness.engine)
         await harness.settle()
         #expect(harness.sentBytes.isEmpty, "replies escaped into the child's stdin")
     }
@@ -64,7 +64,7 @@ struct QuietIngestTests {
     func bellIsSilent() async {
         let harness = makeCoordinatorHarness()
         defer { harness.tearDown() }
-        harness.coordinator.feedSnapshot(Data("hello\u{07}".utf8), into: harness.terminalView)
+        harness.coordinator.feedSnapshot(Data("hello\u{07}".utf8), into: harness.engine)
         await harness.settle()
         #expect(harness.beepCount == 0)
 
@@ -102,9 +102,9 @@ struct QuietIngestTests {
         let coordinator = harness.coordinator
         spy.onBell = { spy.flagWhenBellArrived = coordinator.isIngestingSnapshot }
         harness.terminalView.terminalDelegate = spy
-        harness.coordinator.feedSnapshot(Data("hello\u{07}".utf8), into: harness.terminalView)
+        harness.coordinator.feedSnapshot(Data("hello\u{07}".utf8), into: harness.engine)
         let rang = await harness.waitUntil { spy.bells == 1 }
-        harness.terminalView.terminalDelegate = harness.coordinator
+        harness.terminalView.terminalDelegate = harness.engine
         #expect(rang, "the BEL fixture must reach the delegate at all")
         #expect(spy.flagWhenBellArrived == true,
                 "the flag was already down when the bell landed")
@@ -122,7 +122,7 @@ struct QuietIngestTests {
         let marker = "tbd-quiet-ingest-\(UUID().uuidString)"
         let osc52 = Data(
             "\u{1b}]52;c;\(Data(marker.utf8).base64EncodedString())\u{07}".utf8)
-        harness.coordinator.feedSnapshot(osc52, into: harness.terminalView)
+        harness.coordinator.feedSnapshot(osc52, into: harness.engine)
         await harness.settle()
         #expect(NSPasteboard.general.string(forType: .string) != marker,
                 "a replayed OSC 52 overwrote the user's pasteboard")
@@ -136,7 +136,7 @@ struct QuietIngestTests {
         harness.terminalView.terminalDelegate = spy
         harness.terminalView.feed(byteArray: [UInt8](osc52)[...])
         let copied = await harness.waitUntil { spy.clipboardCopies == 1 }
-        harness.terminalView.terminalDelegate = harness.coordinator
+        harness.terminalView.terminalDelegate = harness.engine
         #expect(copied, "the OSC 52 fixture must reach clipboardCopy at all")
         #expect(NSPasteboard.general.string(forType: .string) != marker,
                 "the spy arm must not write either")
@@ -161,7 +161,7 @@ struct QuietIngestTests {
         #expect(baseline != 80, "the control below needs a column count to move to")
 
         harness.coordinator.feedSnapshot(
-            Data("\u{1b}[?40h\u{1b}[?3h".utf8), into: harness.terminalView)
+            Data("\u{1b}[?40h\u{1b}[?3h".utf8), into: harness.engine)
         await harness.settle()
         #expect(harness.ptyColumns() == baseline,
                 "a replayed DECCOLM issued a real TIOCSWINSZ")
@@ -178,7 +178,7 @@ struct QuietIngestTests {
         let harness = makeCoordinatorHarness()
         defer { harness.tearDown() }
         let osc777 = Data("\u{1b}]777;notify;Title;Body\u{07}".utf8)
-        harness.coordinator.feedSnapshot(osc777, into: harness.terminalView)
+        harness.coordinator.feedSnapshot(osc777, into: harness.engine)
         await harness.settle()
         #expect(harness.notificationCount == 0)
 
@@ -193,7 +193,7 @@ struct QuietIngestTests {
     func flagIsRestored() async {
         let harness = makeCoordinatorHarness()
         defer { harness.tearDown() }
-        harness.coordinator.feedSnapshot(Data("x".utf8), into: harness.terminalView)
+        harness.coordinator.feedSnapshot(Data("x".utf8), into: harness.engine)
         await harness.settle()
         #expect(!harness.coordinator.isIngestingSnapshot)
         harness.terminalView.feed(text: "\u{1b}[6n")
@@ -218,6 +218,7 @@ final class QuietIngestHarness {
 
     let appState: AppState
     let coordinator: TerminalPanelRepresentable.Coordinator
+    let engine: SwiftTermEngine
     let terminalView: TBDTerminalView
     let terminalID: UUID
     let childPID: pid_t
@@ -231,7 +232,7 @@ final class QuietIngestHarness {
     init(
         appState: AppState,
         coordinator: TerminalPanelRepresentable.Coordinator,
-        terminalView: TBDTerminalView,
+        engine: SwiftTermEngine,
         process: LocalProcess,
         outgoing: OutgoingRecorder,
         terminalID: UUID,
@@ -239,14 +240,17 @@ final class QuietIngestHarness {
     ) {
         self.appState = appState
         self.coordinator = coordinator
-        self.terminalView = terminalView
+        self.engine = engine
+        self.terminalView = engine.terminalView
         self.process = process
         self.outgoing = outgoing
         self.terminalID = terminalID
         self.defaultsSuite = defaultsSuite
         self.childPID = process.shellPid
+        // Counted where production delivers a notification, the coordinator's
+        // own hook, so the count rides view -> engine -> coordinator.
         let counter = notifications
-        terminalView.onNotification = { _, _ in counter.increment() }
+        coordinator.onTerminalNotification = { _, _ in counter.increment() }
         let bells = beeps
         coordinator.ringBell = { bells.increment() }
     }
@@ -309,7 +313,7 @@ final class QuietIngestHarness {
     }
 
     func tearDown() {
-        terminalView.onNotification = nil
+        coordinator.onTerminalNotification = nil
         terminalView.terminalDelegate = nil
         coordinator.localProcess = nil
         // The child never exits on its own; end it now. `LocalProcess`'s own
@@ -340,7 +344,8 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
     let coordinator = TerminalPanelRepresentable.Coordinator()
     coordinator.appState = appState
     coordinator.panelID = terminalID
-    coordinator.terminalView = view
+    let engine = SwiftTermEngine(view: view)
+    coordinator.engine = engine
 
     // A real PTY child, for the reason the suite comment gives. The delegate is
     // the recorder rather than the coordinator: the coordinator would feed the
@@ -360,12 +365,12 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
     process.startProcess(executable: "/bin/cat", args: [], environment: nil, execName: nil)
     coordinator.localProcess = process
 
-    view.terminalDelegate = coordinator
+    engine.delegate = coordinator
 
     return QuietIngestHarness(
         appState: appState,
         coordinator: coordinator,
-        terminalView: view,
+        engine: engine,
         process: process,
         outgoing: outgoing,
         terminalID: terminalID,

@@ -1,11 +1,15 @@
 import AppKit
 import SwiftUI
-import SwiftTerm
+// Scoped, not a whole-module import: this host reaches its terminal through
+// `TerminalEngine`. What it still takes from SwiftTerm is the pty its child
+// runs on.
+import class SwiftTerm.LocalProcess
+import protocol SwiftTerm.LocalProcessDelegate
 import os
 
 private let ptyLogger = Logger(subsystem: "com.tbd.app", category: "localPTY")
 
-/// A minimal SwiftTerm host for ONE locally-spawned process on a plain PTY.
+/// A minimal terminal host for ONE locally-spawned process on a plain PTY.
 /// Modeled on `TerminalPanelView`'s `Coordinator` (same `LocalProcess(delegate:)`
 /// + `startProcess` path) but deliberately WITHOUT any of the tmux
 /// window-recreate, hibernation, or control-mode machinery — this is the
@@ -47,7 +51,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// Called with the terminal view when it is made, and again when it is
     /// dismantled — the attach pane registers it as its selection's focus
     /// target (`AppState.registerRemoteTerminalView`). Optional for the same
-    /// reason as `onStarted`.
+    /// reason as `onStarted`. Typed on `TBDTerminalView`, the SwiftTerm
+    /// engine's view, because the registry it feeds is.
     var onViewMounted: ((TBDTerminalView) -> Void)?
     var onViewDismantled: ((TBDTerminalView) -> Void)?
     /// Replaces the spawn-time focus claim. The attach pane routes it through
@@ -58,62 +63,71 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// is always visible while it runs — claims unconditionally.
     var onClaimFocus: (() -> Void)?
 
-    func makeNSView(context: Context) -> TBDTerminalView {
-        let tv = TBDTerminalView(
-            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+    func makeNSView(context: Context) -> NSView {
+        let coordinator = context.coordinator
+        let engine = TerminalEngineFactory.make(
+            kind: .swiftTerm,
             font: appearance.font,
-            appearance: appearance
-        )
-        // Unlike `TerminalPanelView`, this view installs no scroll monitor of
-        // its own, so SwiftTerm's native mouse reporting is the ONLY path
-        // that can deliver wheel events to the child app at all. The far
-        // side decides whether an event actually gets consumed there;
-        // SwiftTerm still falls back to local scrollback scrolling whenever
-        // the app hasn't requested mouse mode. Clicks are handled natively
-        // too — `TBDTerminalView`'s shared click-passthrough monitor stands
-        // down whenever `allowMouseReporting` is true (see
-        // `handleClickPassthrough`), so this doesn't double-forward.
-        tv.allowMouseReporting = true
-        // Option-drag selects locally instead of reaching the app, as
-        // Shift-drag already does — the iTerm2 convention, matching the
-        // holder panels in `TerminalPanelView`.
-        tv.optionBypassesMouseReporting = true
+            appearance: appearance,
+            configuration: TerminalEngineConfiguration(
+                // Unlike `TerminalPanelView`, this view installs no scroll
+                // monitor of its own, so SwiftTerm's native mouse reporting is
+                // the ONLY path that can deliver wheel events to the child app
+                // at all. The far side decides whether an event actually gets
+                // consumed there; SwiftTerm still falls back to local
+                // scrollback scrolling whenever the app hasn't requested mouse
+                // mode. Clicks are handled natively too — `TBDTerminalView`'s
+                // shared click-passthrough monitor stands down whenever
+                // `allowMouseReporting` is true (see
+                // `handleClickPassthrough`), so this doesn't double-forward.
+                allowMouseReporting: true,
+                // Option-drag selects locally instead of reaching the app, as
+                // Shift-drag already does — the iTerm2 convention, matching
+                // the holder panels in `TerminalPanelView`.
+                optionBypassesMouseReporting: true))
         // The GPU draw path applies to every terminal surface, not just the
         // tmux panes. Leaving this one out would silently mix renderers inside
         // a single A/B — a user evaluating the flag would open a remote-attach
         // terminal, find it still stutters, and blame the renderer.
-        tv.applyMetalRendererPreference(enabled: AppState.metalTerminalRendererEnabled())
-        tv.terminalDelegate = context.coordinator
-        context.coordinator.terminalView = tv
-        context.coordinator.onExit = onExit
-        context.coordinator.onStarted = onStarted
-        context.coordinator.onViewDismantled = onViewDismantled
-        context.coordinator.onClaimFocus = onClaimFocus
-        onViewMounted?(tv)
-
-        // TBDTerminalView fires `onReady` exactly once, the first time it's
-        // laid out with non-zero bounds — the same hook TerminalPanelView
-        // uses to defer starting the child process until SwiftTerm can
-        // report real (not placeholder) column/row counts for the initial
-        // PTY size.
-        tv.onReady = { [weak tv, weak coordinator = context.coordinator] in
-            guard let tv, let coordinator else { return }
-            coordinator.start(terminalView: tv, argv: argv, environment: environment)
+        engine.applyRendererPreference(metalEnabled: AppState.metalTerminalRendererEnabled())
+        engine.delegate = coordinator
+        coordinator.engine = engine
+        coordinator.onExit = onExit
+        coordinator.onStarted = onStarted
+        coordinator.onViewDismantled = onViewDismantled
+        coordinator.onClaimFocus = onClaimFocus
+        if let terminalView = engine.view as? TBDTerminalView {
+            onViewMounted?(terminalView)
         }
-        return tv
+
+        // The engine reports itself ready exactly once, the first time its
+        // view is laid out with non-zero bounds — the same hook
+        // TerminalPanelView uses to defer starting the child process until
+        // the engine can report real (not placeholder) column/row counts for
+        // the initial PTY size.
+        coordinator.onEngineReady = { [weak coordinator] engine in
+            guard let coordinator else { return }
+            coordinator.start(engine: engine, argv: argv, environment: environment)
+        }
+        return engine.view
     }
 
-    func updateNSView(_ nsView: TBDTerminalView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {}
 
-    static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
-        coordinator.onViewDismantled?(nsView)
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let terminalView = nsView as? TBDTerminalView {
+            coordinator.onViewDismantled?(terminalView)
+        }
         coordinator.cleanup()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
-        weak var terminalView: TerminalView?
+    final class Coordinator: NSObject, TerminalEngineDelegate, LocalProcessDelegate, @unchecked Sendable {
+        /// The terminal this host runs, and the owner of its view. Set by
+        /// `makeNSView` and held for the coordinator's life: SwiftUI holds the
+        /// view, this holds the engine, and the engine holds the view.
+        var engine: (any TerminalEngine)?
         var onExit: ((Int32?) -> Void)?
         /// Mirrors `onExit`'s storage for the spawn side — see the
         /// representable's `onStarted`.
@@ -121,14 +135,17 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         var onViewDismantled: ((TBDTerminalView) -> Void)?
         /// See the representable's `onClaimFocus`.
         var onClaimFocus: (() -> Void)?
+        /// What runs once the engine has its real size: starting the child.
+        /// Set by `makeNSView`, and cleared as it runs, so it runs once.
+        var onEngineReady: ((any TerminalEngine) -> Void)?
         /// Internal rather than private so `TerminalTeardownReapTests` can hand
         /// this coordinator a real `LocalProcess` and drive `cleanup()`
         /// headlessly — the reap wiring is otherwise unreachable from a test,
-        /// since `start()` needs a live `TerminalView`.
+        /// since `start()` needs a live terminal engine.
         var localProcess: LocalProcess?
-        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the view
+        /// The IO-thread feed path (`dataReceived` → `feed`) reaches the engine
         /// through this lock-guarded holder rather than the main-confined
-        /// `terminalView` weak var. Written before `startProcess`, cleared by
+        /// `engine` var. Written before `startProcess`, cleared by
         /// `cleanup()` before `terminate()`.
         private let viewHolder = TerminalViewHolder()
         private var started = false
@@ -144,7 +161,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         private let childExitObservation = ChildExitObservation()
 
         @MainActor
-        func start(terminalView: TerminalView, argv: [String], environment: [String: String]) {
+        func start(engine: any TerminalEngine, argv: [String], environment: [String: String]) {
             guard !started, !tornDown else { return }
             started = true
 
@@ -164,7 +181,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             self.localProcess = process
             // Written before startProcess; the IO thread reads it from
             // `dataReceived`. Cleared by `cleanup()` before `terminate()`.
-            viewHolder.set(terminalView)
+            viewHolder.set(engine)
             process.startProcess(executable: executable, args: args, environment: envPairs, execName: nil)
             // Reported from here (already `@MainActor`) rather than from the
             // exit side, because the whole point is to date a child that may
@@ -183,7 +200,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
                 onStarted?(Date())
             }
 
-            let dims = terminalView.terminalDimensions
+            let dims = engine.gridSize
             let cols = dims.cols
             let rows = dims.rows
             if cols > 0, rows > 0, process.childfd >= 0 {
@@ -191,14 +208,14 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
                 _ = ioctl(process.childfd, TIOCSWINSZ, &size)
             }
 
-            claimSpawnFocus(terminalView)
+            claimSpawnFocus(engine.view)
         }
 
         /// The claim `start` makes once its child is spawned. Separate from
         /// `start` so `RemoteAttachFocusTests` can fire it without spawning a
         /// child.
         @MainActor
-        func claimSpawnFocus(_ terminalView: TerminalView) {
+        func claimSpawnFocus(_ terminalView: NSView) {
             if let onClaimFocus {
                 onClaimFocus()
                 return
@@ -237,7 +254,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // unaffected (docs/remote-provider-contract.md § attach).
             //
             // Clear the holder BEFORE terminate(): a late IO batch then reads
-            // nil and drops instead of feeding a view whose session is being
+            // nil and drops instead of feeding an engine whose session is being
             // torn down.
             viewHolder.clear()
             // SIGTERM goes out HERE, before terminate(), because terminate()
@@ -282,7 +299,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
 
         // MARK: - LocalProcessDelegate
         //
-        // `nonisolated`: the Coordinator's `TerminalViewDelegate` conformance
+        // `nonisolated`: the Coordinator's `TerminalEngineDelegate` conformance
         // makes the class MainActor-isolated, but `LocalProcess` calls
         // `dataReceived` inline on the IO thread (`directDelivery: true`) and
         // the exit monitor's callback contract is queue-, not actor-based.
@@ -310,17 +327,17 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         nonisolated func dataReceived(slice: ArraySlice<UInt8>) {
             // Feed synchronously on the calling (IO) thread — this is the
             // off-main parse the 2.0 bump exists for; `feed` is thread-safe
-            // (the parse runs under SwiftTerm's terminal lock) and the view
+            // (the parse runs under the engine's lock) and the engine
             // reference is owned by the holder, so a batch racing teardown
-            // either completes against a live view or reads nil and drops.
-            viewHolder.withView { $0.feed(byteArray: slice) }
+            // either completes against a live engine or reads nil and drops.
+            viewHolder.withEngine { $0.feed(slice) }
         }
 
         nonisolated func getWindowSize() -> winsize {
             // `assumeIsolated` is sound: the only callers are `LocalProcess`'s
             // `startProcess` paths, which TBD invokes from main.
             MainActor.assumeIsolated {
-                let dims = terminalView?.terminalDimensions
+                let dims = engine?.gridSize
                 if let dims, dims.cols > 0, dims.rows > 0 {
                     return winsize(
                         ws_row: UInt16(dims.rows), ws_col: UInt16(dims.cols),
@@ -330,13 +347,13 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             }
         }
 
-        // MARK: - TerminalViewDelegate
+        // MARK: - TerminalEngineDelegate
 
-        func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        func engine(_ e: any TerminalEngine, send data: ArraySlice<UInt8>) {
             localProcess?.send(data: data)
         }
 
-        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        func engine(_ e: any TerminalEngine, sizeChanged newCols: Int, rows newRows: Int) {
             MainActor.assumeIsolated {
                 guard newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 else { return }
                 var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
@@ -344,26 +361,39 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             }
         }
 
-        func setTerminalTitle(source: TerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func scrolled(source: TerminalView, position: Double) {}
-
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        func engine(_ e: any TerminalEngine, openLink link: String, params: [String: String]) {
             guard link.contains("://"), let url = URL(string: link) else { return }
             NSWorkspace.shared.open(url)
         }
 
-        func bell(source: TerminalView) { NSSound.beep() }
+        func engineBell(_ e: any TerminalEngine) { NSSound.beep() }
 
-        func clipboardCopy(source: TerminalView, content: Data) {
+        func engine(_ e: any TerminalEngine, clipboardCopy content: Data) {
             guard let text = String(data: content, encoding: .utf8) else { return }
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.setString(text, forType: .string)
         }
 
-        func clipboardRead(source: TerminalView) -> Data? { nil }
-        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+        func engineReady(_ e: any TerminalEngine) {
+            let ready = onEngineReady
+            onEngineReady = nil
+            ready?(e)
+        }
+
+        // What this host does not use. It has no notification, Program
+        // Status, file-click or close-tab handling, and it never turns on
+        // click routing or paste interception, so no focus change, mouse-down
+        // claim or paste is ever reported. `engineMovedToWindow` stays empty
+        // because the attach pane's focus claim is chained onto the view's
+        // window hook, after the engine's own (`registerRemoteTerminalView`).
+        func engine(_ e: any TerminalEngine, notification title: String, body: String) {}
+        func engine(_ e: any TerminalEngine, programStatusPayload payload: [UInt8], observedAt: Date) {}
+        func engine(_ e: any TerminalEngine, filePathClicked path: String) {}
+        func engineRequestsCloseTab(_ e: any TerminalEngine) {}
+        func engine(_ e: any TerminalEngine, focusChanged focused: Bool) {}
+        func engineMouseDownClaimsFocus(_ e: any TerminalEngine) -> Bool { false }
+        func engineMovedToWindow(_ e: any TerminalEngine) {}
+        func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool { false }
     }
 }

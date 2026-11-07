@@ -1,0 +1,59 @@
+{
+  "kind": "reply",
+  "requestID": "53A0DDBB-E08B-508F-B757-504971EBB962",
+  "result": {
+    "providers": [
+      {
+        "acceptsPrompt": true,
+        "available": true,
+        "fields": [
+          {
+            "label": "Branch",
+            "name": "branch",
+            "prefill": "main",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "label": "Notes",
+            "name": "notes",
+            "required": false,
+            "type": "text"
+          },
+          {
+            "label": "Open as draft",
+            "name": "draft",
+            "required": false,
+            "type": "bool"
+          },
+          {
+            "label": "Timeout (minutes)",
+            "name": "timeout",
+            "prefill": "30",
+            "required": false,
+            "type": "int"
+          },
+          {
+            "label": "Machine size",
+            "name": "size",
+            "prefill": "small",
+            "required": true,
+            "type": "enum",
+            "values": [
+              "small",
+              "large"
+            ]
+          }
+        ],
+        "name": "acme-cloud"
+      },
+      {
+        "acceptsPrompt": false,
+        "available": false,
+        "fields": [],
+        "name": "acme-batch",
+        "reason": "Not signed in"
+      }
+    ]
+  }
+}

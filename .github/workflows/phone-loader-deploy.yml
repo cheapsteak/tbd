@@ -1,0 +1,115 @@
+name: Phone loader deploy
+
+# Deploys the phone loader, `phone/loader/`, when a change to it reaches
+# main. This workflow does not publish anything itself. It tests the loader,
+# then asks the loader repo's own `deploy.yml` to publish this commit; that
+# workflow checks out `phone/loader/` from this public repo, exactly as
+# committed, and publishes it only when the commit is on main and its loader
+# is still the newest. The setup, the names below and the loader repo's
+# workflow: docs/phone-control-loader-repo.md. Design:
+# docs/specs/2026-11-07-phone-control-design.md, section 15.
+#
+# Off by default. The dispatch job runs only while the repository variable
+# PHONE_LOADER_DEPLOY_ENABLED is exactly `true`; unset, as it is in every
+# fresh fork and in this repo until the maintainer sets it, the workflow
+# verifies the loader and stops.
+#
+# No org or repo is named here. The target comes from repository variables,
+# so a fork deploys its own loader by setting its own.
+#
+# The wiring is pinned by `scripts/ci/phone-parts-needed.test.sh`.
+
+on:
+  # Only these two triggers, so no pull request event, and no
+  # `pull_request_target` above all, can start this workflow. A path filter is
+  # safe here, unlike in phone.yml: this workflow is never a required check,
+  # so a run that never starts holds nothing pending.
+  push:
+    branches: [main]
+    paths:
+      - 'phone/loader/**'
+      - '.github/workflows/phone-loader-deploy.yml'
+  workflow_dispatch:
+
+# No job gets a permission it does not name.
+permissions: {}
+
+# One run at a time per ref, newest wins. The group is keyed on the ref
+# because a run from any other branch never dispatches, and in a group shared
+# across refs it would cancel an in-flight run on main, leaving the merged
+# loader unpublished until the next loader change. Within main, a newer push
+# supersedes an older run: it dispatches its own, newer commit, and the loader
+# repo's deploy refuses a commit whose loader is not the newest anyway.
+concurrency:
+  group: phone-loader-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify the loader
+    runs-on: ubuntu-latest
+    # 10: `npm ci`, a type check and the loader's tests, a few minutes cold.
+    timeout-minutes: 10
+    # Read the checkout and nothing else.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: phone
+    steps:
+      # `persist-credentials: false`: `npm ci` runs third-party install
+      # scripts, and nothing later needs the token in the git config.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: phone/.nvmrc
+          cache: npm
+          cache-dependency-path: phone/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  dispatch:
+    name: Dispatch the loader deploy
+    # With no status function in `if:`, GitHub adds `success()`, so a loader
+    # that failed verification is never dispatched.
+    needs: verify
+    # Both halves are needed. The variable is the on switch. The ref keeps a
+    # dispatch from any other branch out, before the environment below would.
+    if: ${{ vars.PHONE_LOADER_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    # 5: two API calls.
+    timeout-minutes: 5
+    # The App's private key is an environment secret of `phone-loader`, whose
+    # deployment branches admit only main, so a run from a PR branch never
+    # reaches the key, whatever its `if:` says.
+    environment: phone-loader
+    # The job's own token needs nothing; the App token does the work.
+    permissions: {}
+    steps:
+      # The token's only permission is Actions: write, which is what the
+      # workflow dispatch endpoint needs
+      # (https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps),
+      # and it is scoped to the one loader repo. It can start, cancel, re-run
+      # or disable that repo's workflow runs, and none of those changes what
+      # the loader repo serves: its workflow publishes only what this public
+      # repo holds on main.
+      - name: Mint a token that can only start the loader repo's workflows
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PHONE_LOADER_APP_ID }}
+          private-key: ${{ secrets.PHONE_LOADER_APP_PRIVATE_KEY }}
+          owner: ${{ vars.PHONE_LOADER_OWNER }}
+          repositories: ${{ vars.PHONE_LOADER_REPO }}
+          permission-actions: write
+      # Every value reaches the shell through `env`, never spliced into the
+      # script.
+      - name: Ask the loader repo to deploy this commit
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          TARGET: ${{ vars.PHONE_LOADER_OWNER }}/${{ vars.PHONE_LOADER_REPO }}
+          COMMIT: ${{ github.sha }}
+        run: gh workflow run deploy.yml --repo "$TARGET" --ref main -f commit="$COMMIT"

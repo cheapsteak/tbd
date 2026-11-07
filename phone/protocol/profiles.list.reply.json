@@ -1,0 +1,20 @@
+{
+  "kind": "reply",
+  "requestID": "3F594844-A531-5898-B338-7F71779DF811",
+  "result": {
+    "profiles": [
+      {
+        "id": "6C2471BC-B073-5CE4-B694-F648094C061D",
+        "isDefault": true,
+        "kind": "oauth",
+        "name": "Personal"
+      },
+      {
+        "id": "8DFEE22E-09D8-5BE1-B331-221F570DC1C6",
+        "isDefault": false,
+        "kind": "apiKey",
+        "name": "Work"
+      }
+    ]
+  }
+}

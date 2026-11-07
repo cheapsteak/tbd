@@ -63,14 +63,8 @@ public enum TranscriptParser {
             rawLines.append(json)
             stableIDs.append((json["uuid"] as? String) ?? "line-\(lineIndex)")
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
-                for block in toolResultBlocks {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    toolResultsByID[id] = extractToolResult(from: block)
-                }
+            for toolResult in toolResults(fromLine: json) {
+                toolResultsByID[toolResult.id] = toolResult.result
             }
         }
 
@@ -151,14 +145,17 @@ public enum TranscriptParser {
 
     /// Whether `itemID` comes from a line with no `uuid`, whose stable ID is a
     /// positional fallback: `line-<n>` in the full parse (and
-    /// `IncrementalTranscript`), `tail-<n>` in a tail read, with an item's
-    /// `#<block>` suffix when it has one. `<n>` counts lines in whatever was
-    /// read, so a tail read numbers its window from zero each time, and the
-    /// same such ID can name different lines in two reads. Real Claude lines
-    /// always carry a `uuid`, so their items never match.
+    /// `IncrementalTranscript`), `tail-<n>` in a tail read, `at-<n>` in a
+    /// `parseWindow` read, with an item's `#<block>` suffix when it has one.
+    /// For `line-` and `tail-`, `<n>` counts lines in whatever was read, so a
+    /// tail read numbers its window from zero each time, and the same such ID
+    /// can name different lines in two reads. For `at-`, `<n>` is the line's
+    /// absolute byte offset in the file, so every window names a line the
+    /// same way, but the full parse names that line differently. Real Claude
+    /// lines always carry a `uuid`, so their items never match.
     public static func isPositionalFallbackID(_ itemID: String) -> Bool {
         let lineID = itemID.prefix(while: { $0 != "#" })
-        guard let prefix = ["line-", "tail-"].first(where: { lineID.hasPrefix($0) }) else { return false }
+        guard let prefix = ["line-", "tail-", "at-"].first(where: { lineID.hasPrefix($0) }) else { return false }
         let position = lineID.dropFirst(prefix.count)
         return !position.isEmpty && position.allSatisfy { ("0"..."9").contains($0) }
     }
@@ -187,14 +184,8 @@ public enum TranscriptParser {
             rawLines.append(json)
             stableIDs.append((json["uuid"] as? String) ?? "tail-\(lineIndex)")
 
-            if json["type"] as? String == "user",
-               let message = json["message"] as? [String: Any],
-               let array = message["content"] as? [[String: Any]] {
-                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
-                for block in toolResultBlocks {
-                    guard let id = block["tool_use_id"] as? String else { continue }
-                    toolResultsByID[id] = extractToolResult(from: block)
-                }
+            for toolResult in toolResults(fromLine: json) {
+                toolResultsByID[toolResult.id] = toolResult.result
             }
         }
 
@@ -217,7 +208,25 @@ public enum TranscriptParser {
         stableIDs: [String],
         toolResultsByID: [String: ToolResult]
     ) -> [TranscriptItem] {
+        buildItemsWithLineIndices(
+            rawLines: rawLines, stableIDs: stableIDs, toolResultsByID: toolResultsByID
+        ).items
+    }
+
+    /// `buildItems`, plus the index into `rawLines` of the line each item came
+    /// from. `lineIndices` is parallel to `items` and never decreases, since
+    /// lines are visited in order; one line can yield several items.
+    ///
+    /// Subagent (sidechain) lines are dropped unless `includeSidechain` is
+    /// true, in which case they build items like any other line.
+    static func buildItemsWithLineIndices(
+        rawLines: [[String: Any]],
+        stableIDs: [String],
+        toolResultsByID: [String: ToolResult],
+        includeSidechain: Bool = false
+    ) -> (items: [TranscriptItem], lineIndices: [Int]) {
         var items: [TranscriptItem] = []
+        var lineIndices: [Int] = []
 
         // Local, not shared. This was a `nonisolated(unsafe)` static justified
         // by a comment claiming `ISO8601DateFormatter` "is documented as
@@ -245,9 +254,14 @@ public enum TranscriptParser {
         iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         for (i, json) in rawLines.enumerated() {
+            // Every item this iteration appends came from line `i`, whichever
+            // branch below appends it or `continue`s past the rest.
+            let itemsBefore = items.count
+            defer { lineIndices.append(contentsOf: repeatElement(i, count: items.count - itemsBefore)) }
+
             // Subagent (sidechain) lines belong to a nested agent's own
             // conversation; the parent transcript drops them entirely.
-            if json["isSidechain"] as? Bool == true { continue }
+            if !includeSidechain, json["isSidechain"] as? Bool == true { continue }
 
             let lineUUID = stableIDs[i]
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
@@ -396,7 +410,7 @@ public enum TranscriptParser {
             }
         }
 
-        return items
+        return (items, lineIndices)
     }
 
     /// The item one prompt renders as, given its body and its classification.
@@ -673,7 +687,7 @@ public enum TranscriptParser {
     /// that identifies it. Intentionally a small local summarizer: the richer
     /// app-side one lives in `ActivityRowFormatter` (module `TBDApp`) and is
     /// not reachable from the daemon.
-    static func toolInputSummary(name: String, input: [String: Any]) -> String {
+    public static func toolInputSummary(name: String, input: [String: Any]) -> String {
         func short(_ s: String, limit: Int = 40) -> String {
             let oneLine = s.replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
@@ -695,6 +709,23 @@ public enum TranscriptParser {
 
     public static let bodyCharCap = 2000
     static let bodyLineCap = 20
+
+    /// The `tool_result` blocks of a user line's `message.content`, in block
+    /// order, each with its `tool_use_id` and its result from
+    /// `extractToolResult(from:)`. A block with no string `tool_use_id` is
+    /// skipped. Any other line, or a user line whose content is not an array
+    /// of blocks, has none. Sidechain lines are not told apart.
+    static func toolResults(fromLine json: [String: Any]) -> [(id: String, result: ToolResult)] {
+        guard json["type"] as? String == "user",
+              let message = json["message"] as? [String: Any],
+              let blocks = message["content"] as? [[String: Any]] else { return [] }
+        var results: [(id: String, result: ToolResult)] = []
+        for block in blocks where (block["type"] as? String) == "tool_result" {
+            guard let id = block["tool_use_id"] as? String else { continue }
+            results.append((id: id, result: extractToolResult(from: block)))
+        }
+        return results
+    }
 
     public static func extractToolResult(from block: [String: Any]) -> ToolResult {
         let isError = (block["is_error"] as? Bool) ?? false
@@ -778,6 +809,9 @@ public enum TranscriptParser {
     ///    or the Nth injected payload of a multi-payload attachment row
     ///  - bare `lineUUID` → returns the user message content, or the sole
     ///    injected payload of an attachment row
+    ///  - `at-<offset>` and `at-<offset>#<blockIndex>` → the same, for the
+    ///    line with no `uuid` that starts at byte `offset`, as `parseWindow`
+    ///    names it
     static func lookupFullBody(filePath: String, itemID: String) -> String? {
         lookupDetail(filePath: filePath, itemID: itemID).text
     }
@@ -792,10 +826,40 @@ public enum TranscriptParser {
     /// `lookupFullBody` plus the injection metadata. Same single pass, same id
     /// forms — see `lookupFullBody` for the id grammar.
     public static func lookupDetail(filePath: String, itemID: String) -> ItemDetail {
-        guard let data = FileManager.default.contents(atPath: filePath),
-              let content = String(data: data, encoding: .utf8) else {
+        lookupDetail(filePath: filePath, itemID: itemID, startingAt: 0)
+    }
+
+    /// How much `lookupDetail`'s forward scan reads from the file at a time.
+    static let detailChunkBytes = 1 << 20
+
+    /// How much `lookupDetail` reads at a time for an `at-<n>` ID, which
+    /// fetches one line. Most lines fit in the first read; a longer one is
+    /// carried across reads and still returned whole.
+    static let positionalDetailChunkBytes = 64 * 1024
+
+    /// `lookupDetail`, scanning forward from `offset` and stopping at the
+    /// first match. Same id forms as `lookupFullBody`.
+    ///
+    /// The file is read in `detailChunkBytes` chunks and split on `"\n"`, each
+    /// line decoded on its own, so a lookup near the end of a large file
+    /// touches only the bytes after `offset`. `offset` should be a line start,
+    /// such as `TranscriptWindow.Entry.lineOffset`; bytes before the first
+    /// `"\n"` of a mid-line offset are a fragment that fails to decode and is
+    /// skipped. An attachment row's `triggeredBy` resolves only through
+    /// `tool_use` lines the scan passed, so a scan that starts after the
+    /// triggering call reports it as nil.
+    ///
+    /// An `at-<n>` ID names its line by position, so it skips the scan and
+    /// whatever `offset` says: it reads the line that starts at byte `n` and
+    /// resolves it as a `uuid` match would. That line must have no `uuid`,
+    /// as the line the ID was made from had none; otherwise the ID is stale
+    /// and resolves to nothing. No `tool_use` line is passed on the way, so an
+    /// attachment row found this way reports `triggeredBy` as nil.
+    public static func lookupDetail(filePath: String, itemID: String, startingAt offset: UInt64) -> ItemDetail {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else {
             return ItemDetail(text: nil, attachment: nil)
         }
+        defer { try? handle.close() }
 
         // Detect the `#input` suffix variant first — when present, we ONLY scan
         // assistant tool_use blocks for a matching id and return their full input
@@ -818,15 +882,22 @@ public enum TranscriptParser {
             blockIndex = nil
         }
 
+        if !isInputLookup, let lineOffset = windowLineOffset(fromLineID: lineUUID) {
+            return windowLineDetail(handle: handle, lineOffset: lineOffset, blockIndex: blockIndex)
+        }
+
+        guard var lines = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
+            return ItemDetail(text: nil, attachment: nil)
+        }
+
         // `tool_use.id` → short summary, for resolving an attachment row's
         // `toolUseID`. Accumulated as the scan walks down: a hook fires after
         // the assistant emitted the tool call, so the triggering `tool_use`
         // line is always already behind us when its attachment row appears.
         var toolSummaries: [String: String] = [:]
 
-        for line in content.components(separatedBy: "\n") where !line.isEmpty {
-            guard let lineData = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+        while let lineData = lines.next() {
+            guard let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
 
@@ -874,52 +945,100 @@ public enum TranscriptParser {
             }
 
             // line UUID match.
-            if (json["uuid"] as? String) == lineUUID {
-                // Attachment rows carry no `message`, so the branches below
-                // can never recover their (truncated) body. Re-run the same
-                // extraction `buildItems` used and return it whole, alongside
-                // the injection metadata the overlay renders.
-                // A queued prompt is an attachment row too, but it renders as
-                // the user's own bubble rather than an injected-context row.
-                if let queued = queuedCommandText(from: json) {
-                    return ItemDetail(text: queued, attachment: nil)
-                }
-
-                let payloads = attachmentPayloads(from: json)
-                if !payloads.isEmpty {
-                    let meta = attachmentMetadata(from: json, toolSummaries: toolSummaries)
-                    if payloads.count > 1 {
-                        guard let blockIndex, blockIndex < payloads.count else {
-                            return ItemDetail(text: nil, attachment: meta)
-                        }
-                        return ItemDetail(text: payloads[blockIndex].text, attachment: meta)
-                    }
-                    return ItemDetail(text: payloads[0].text, attachment: meta)
-                }
-
-                if let blockIndex,
-                   let message = json["message"] as? [String: Any],
-                   let blocks = message["content"] as? [[String: Any]],
-                   blockIndex < blocks.count {
-                    let block = blocks[blockIndex]
-                    return ItemDetail(
-                        text: (block["text"] as? String) ?? (block["thinking"] as? String),
-                        attachment: nil)
-                }
-                if let message = json["message"] as? [String: Any] {
-                    if let s = message["content"] as? String {
-                        return ItemDetail(text: s, attachment: nil)
-                    }
-                    if let array = message["content"] as? [[String: Any]] {
-                        return ItemDetail(
-                            text: array.first(where: { $0["type"] as? String == "text" })
-                                .flatMap { $0["text"] as? String },
-                            attachment: nil)
-                    }
-                }
+            if (json["uuid"] as? String) == lineUUID,
+               let detail = lineDetail(json, blockIndex: blockIndex, toolSummaries: toolSummaries) {
+                return detail
             }
         }
         return ItemDetail(text: nil, attachment: nil)
+    }
+
+    /// What the line an item ID names holds for that item: `blockIndex` picks
+    /// an assistant block, or a payload of a multi-payload attachment row.
+    /// Nil when the line holds nothing this can recover.
+    private static func lineDetail(
+        _ json: [String: Any], blockIndex: Int?, toolSummaries: [String: String]
+    ) -> ItemDetail? {
+        // Attachment rows carry no `message`, so the branches below
+        // can never recover their (truncated) body. Re-run the same
+        // extraction `buildItems` used and return it whole, alongside
+        // the injection metadata the overlay renders.
+        // A queued prompt is an attachment row too, but it renders as
+        // the user's own bubble rather than an injected-context row.
+        if let queued = queuedCommandText(from: json) {
+            return ItemDetail(text: queued, attachment: nil)
+        }
+
+        let payloads = attachmentPayloads(from: json)
+        if !payloads.isEmpty {
+            let meta = attachmentMetadata(from: json, toolSummaries: toolSummaries)
+            if payloads.count > 1 {
+                guard let blockIndex, blockIndex < payloads.count else {
+                    return ItemDetail(text: nil, attachment: meta)
+                }
+                return ItemDetail(text: payloads[blockIndex].text, attachment: meta)
+            }
+            return ItemDetail(text: payloads[0].text, attachment: meta)
+        }
+
+        if let blockIndex,
+           let message = json["message"] as? [String: Any],
+           let blocks = message["content"] as? [[String: Any]],
+           blockIndex < blocks.count {
+            let block = blocks[blockIndex]
+            return ItemDetail(
+                text: (block["text"] as? String) ?? (block["thinking"] as? String),
+                attachment: nil)
+        }
+        if let message = json["message"] as? [String: Any] {
+            if let s = message["content"] as? String {
+                return ItemDetail(text: s, attachment: nil)
+            }
+            if let array = message["content"] as? [[String: Any]] {
+                return ItemDetail(
+                    text: array.first(where: { $0["type"] as? String == "text" })
+                        .flatMap { $0["text"] as? String },
+                    attachment: nil)
+            }
+        }
+        return nil
+    }
+
+    /// `lookupDetail` for an `at-<lineOffset>` ID: the line with no `uuid`
+    /// that starts at byte `lineOffset`, resolved as a `uuid` match is. Nil
+    /// text and attachment when no line starts there, when it does not
+    /// decode, or when it has a `uuid`, since then it is not the line the ID
+    /// was made from.
+    private static func windowLineDetail(handle: FileHandle, lineOffset: UInt64, blockIndex: Int?) -> ItemDetail {
+        guard let lineData = lineBytes(startingAt: lineOffset, in: handle),
+              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+              (json["uuid"] as? String) == nil,
+              let detail = lineDetail(json, blockIndex: blockIndex, toolSummaries: [:]) else {
+            return ItemDetail(text: nil, attachment: nil)
+        }
+        return detail
+    }
+
+    /// The non-empty line that starts at byte `offset`, without its newline.
+    /// Nil when `offset` is past the end, inside a line, or on an empty line.
+    /// Reads `positionalDetailChunkBytes` at a time, so a short line costs
+    /// one small read and a long one is carried across reads.
+    private static func lineBytes(startingAt offset: UInt64, in handle: FileHandle) -> Data? {
+        // A line starts at `offset` when it is the first byte or the byte
+        // before it is "\n", and it is not empty when its own first byte is
+        // not "\n". The reader skips empty lines, so it cannot tell this.
+        let probeStart = offset == 0 ? 0 : offset - 1
+        let probeLength = Int(offset - probeStart) + 1
+        guard (try? handle.seek(toOffset: probeStart)) != nil,
+              let probe = try? handle.read(upToCount: probeLength),
+              probe.count == probeLength,
+              offset == 0 || probe.first == UInt8(ascii: "\n"),
+              probe.last != UInt8(ascii: "\n"),
+              var reader = ForwardLineReader(
+                  handle: handle, from: offset, chunkSize: positionalDetailChunkBytes) else {
+            return nil
+        }
+        return reader.next()
     }
 
     /// Parse `<command-name>foo</command-name><command-args>bar</command-args>` envelopes.
@@ -938,5 +1057,83 @@ public enum TranscriptParser {
         let name = raw.hasPrefix("/") ? String(raw.dropFirst()) : raw
         let args = extract("command-args")
         return (name, args?.isEmpty == true ? nil : args)
+    }
+}
+
+/// Reads a file forward from an offset one line at a time, `chunkSize` bytes
+/// per read, so a scan holds the line it is decoding and about one chunk
+/// rather than the whole file. Lines are split on `"\n"` and returned without
+/// it. Empty lines are skipped, and a last line with no trailing newline is
+/// returned like any other.
+///
+/// Linear in the bytes read, however long a line is. A line that spans many
+/// chunks stays in `buffer` as each chunk is appended, and the search for its
+/// newline resumes where the last one stopped instead of rescanning the line.
+/// The consumed bytes at the front of `buffer` are dropped only once they are
+/// more than half of it, so each byte is copied a bounded number of times.
+///
+/// A read that throws ends the scan as end of file does, after one `.error`
+/// log line naming the error, so a scan cut short by an I/O failure is not
+/// silent.
+struct ForwardLineReader {
+    private static let log = Logger(subsystem: "com.tbd.daemon", category: "transcript")
+
+    private let handle: FileHandle
+    private let chunkSize: Int
+    /// Zero-based: indices are offsets from the first byte `buffer` holds.
+    private var buffer = Data()
+    /// The first byte not yet returned.
+    private var cursor = 0
+    /// Where the newline search resumes. No byte in `cursor..<scanned` is
+    /// `"\n"`.
+    private var scanned = 0
+    private var reachedEnd = false
+
+    init?(handle: FileHandle, from offset: UInt64, chunkSize: Int) {
+        guard (try? handle.seek(toOffset: offset)) != nil else { return nil }
+        self.handle = handle
+        self.chunkSize = chunkSize
+    }
+
+    mutating func next() -> Data? {
+        while true {
+            if let newline = buffer[scanned...].firstIndex(of: UInt8(ascii: "\n")) {
+                let line = buffer[cursor..<newline]
+                cursor = newline + 1
+                scanned = cursor
+                if line.isEmpty { continue }
+                return Data(line)
+            }
+            scanned = buffer.endIndex
+            if reachedEnd {
+                guard cursor < buffer.endIndex else { return nil }
+                let line = Data(buffer[cursor...])
+                cursor = buffer.endIndex
+                scanned = cursor
+                return line
+            }
+            // The unread tail of `buffer` is a partial line; the next chunk
+            // goes after it so the line comes out whole.
+            let readChunk: Data?
+            do {
+                readChunk = try handle.read(upToCount: chunkSize)
+            } catch {
+                // Logged once: `reachedEnd` is set below, so this reader never
+                // reads again.
+                Self.log.error(
+                    "transcript read failed, ending the scan: \(String(describing: error), privacy: .public)")
+                readChunk = nil
+            }
+            guard let chunk = readChunk, !chunk.isEmpty else {
+                reachedEnd = true
+                continue
+            }
+            if cursor > buffer.count / 2 {
+                buffer = Data(buffer[cursor...])
+                scanned -= cursor
+                cursor = 0
+            }
+            buffer.append(chunk)
+        }
     }
 }

@@ -496,7 +496,7 @@ struct TerminalLatencyTapTests {
 
     // MARK: - The seam
 
-    @Test("with no tap installed, feed reaches the view exactly as withView did")
+    @Test("with no tap installed, feed reaches the view exactly as withEngine did")
     func feedWithNoTapReachesTheView() {
         let suite = TestDefaultsSuite("TBDAppTests.LatencySeam")
         let defaults = suite.defaults
@@ -507,7 +507,7 @@ struct TerminalLatencyTapTests {
             appearance: AppearanceSettings(defaults: defaults))
 
         let holder = TerminalViewHolder()
-        holder.set(view)
+        holder.set(SwiftTermEngine(view: view))
         holder.feed(Array("SEAM-MARKER-4c1\r\n".utf8)[...])
 
         let text = String(data: view.getBufferAsData(), encoding: .utf8) ?? ""
@@ -526,7 +526,7 @@ struct TerminalLatencyTapTests {
 
         let (tap, clock, lines) = makeTap()
         let holder = TerminalViewHolder()
-        holder.set(view)
+        holder.set(SwiftTermEngine(view: view))
         holder.setTap(tap)
         holder.feed(Array("TAPPED-MARKER-9b2\r\n".utf8)[...])
         clock.advance(ms: 6)

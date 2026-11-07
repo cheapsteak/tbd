@@ -1,0 +1,12 @@
+{
+  "kind": "request",
+  "method": "session.setModel",
+  "params": {
+    "model": "opus",
+    "session": {
+      "kind": "local",
+      "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
+    }
+  },
+  "requestID": "0A0A385C-EAC4-5394-8964-0EAFEF87A493"
+}
