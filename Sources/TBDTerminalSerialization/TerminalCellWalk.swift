@@ -187,7 +187,8 @@ public enum TerminalCellWalk {
     /// screen does not show, would still stretch the row out to the edge
     /// with blanks. So when the last character lies past the width, this
     /// counts through the last one within it instead. A wide character that
-    /// starts in the last column counts to the edge.
+    /// starts in the last column counts as that one cell, which `render`
+    /// sends as a space because the character has no room there.
     private static func trimmedLength(of line: BufferLine, cols: Int) -> Int {
         let width = min(line.count, cols)
         let trimmed = line.getTrimmedLength()
@@ -407,6 +408,18 @@ public enum TerminalCellWalk {
             if openAttribute != cell.attribute {
                 out += SGREncoder.sequence(for: cell.attribute)
                 openAttribute = cell.attribute
+            }
+            // A wide character that starts in the last column, which only a
+            // row wider than the screen holds (see `visibleLength`), has no
+            // room for its second half. Printed there, it would wrap onto the
+            // next row, and the extra row would scroll the screen up by one:
+            // the receiver's, and the source's too when the source repaints
+            // its alternate screen from the same rendering. A space under the
+            // cell's SGR holds the column instead.
+            if column + Int(cell.width) > cols {
+                out.append(" ")
+                column += 1
+                continue
             }
             // An unwritten or erased cell carries code 0, and
             // `CharData.getCharacter()` renders that literally as

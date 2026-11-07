@@ -431,6 +431,28 @@ struct TerminalSnapshotBlankRowTests {
         #expect(pair.fresh.getLine(row: 0)?.getTrimmedLength() == 1,
                 "the receiver's row runs past its `x`")
     }
+
+    @Test("A wide character with no room in the last column does not scroll the alternate screen")
+    func wideCharacterInTheLastColumn() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // `中` starts in column 69, which the 70-column screen leaves as its
+        // last, so its second half lies past the edge. As in
+        // `cellsPastTheLastColumn`, the alternate screen keeps the row's
+        // old width when the terminal narrows.
+        pair.source.feed(text: "\u{1b}[?1049htitle\u{1b}[1;70H中")
+        pair.source.resize(cols: 70, rows: 24)
+        pair.fresh.resize(cols: 70, rows: 24)
+        #expect(pair.source.getLine(row: 0)?[69].width == 2,
+                "the fixture must leave a wide character in the last column")
+
+        // Printed in the last column, the character wraps onto row 1, and
+        // the extra row scrolls `title` off the top. The source repaints its
+        // own alt screen from the same rendering.
+        pair.transfer("")
+        #expect(Self.text(pair.fresh.getLine(row: 0)) == "title", "the receiver's screen scrolled")
+        #expect(Self.text(pair.fresh.getLine(row: 1)) == "")
+        #expect(Self.text(pair.source.getLine(row: 0)) == "title", "the source's screen scrolled")
+    }
 }
 
 /// The viewer's half of the Closed Terminals capture, through the production
