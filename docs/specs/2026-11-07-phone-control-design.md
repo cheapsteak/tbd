@@ -179,6 +179,11 @@ Durable Object time.
 - **`GET /v1/rooms/<roomID>?role=laptop|phone`** – opens a WebSocket. A room ID is 43 base64url
   characters (32 bytes), and anything else gets 404. Each role has one socket per room. A new socket
   for a role closes the old one with code 4000.
+- **`GET /v1/rooms/<roomID>/presence`** – returns `{"laptop":true}` while the room has an open
+  laptop socket and `{"laptop":false}` otherwise, with `Access-Control-Allow-Origin: *` and
+  `Cache-Control: no-store`. The room ID rule is the same. It opens no socket and displaces no one,
+  so the loader's laptops list asks it whether each paired laptop is online: joining the room as a
+  phone would close another tab's phone socket with code 4000.
 - **Forwarded frames are binary,** at most 64 KiB, and pass to the other role unchanged. When the
   other role is not connected, the relay drops the frame. It never queues.
 - **Relay signals are text,** so they cannot be confused with forwarded frames: `peer-joined`,

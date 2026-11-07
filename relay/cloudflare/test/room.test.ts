@@ -1,7 +1,17 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { CLOSE_REPLACED, CLOSE_TOO_LARGE, MAX_FRAME_BYTES, PING, PONG, SIGNAL, type Role } from "../src/api";
-import { bytes, connect, marker, newRoomID, stub, type TestSocket } from "./helpers";
+import {
+  LAPTOP_OFFLINE,
+  LAPTOP_ONLINE,
+  bytes,
+  connect,
+  marker,
+  newRoomID,
+  presence,
+  stub,
+  type TestSocket,
+} from "./helpers";
 
 const OPEN = 1;
 
@@ -286,5 +296,72 @@ describe("room", () => {
     roomB.phone.send(mB);
     expect(await roomA.laptop.until(mA)).toEqual([SIGNAL.peerJoined]);
     expect(await roomB.laptop.until(mB)).toEqual([SIGNAL.peerJoined]);
+  });
+});
+
+describe("presence", () => {
+  it("is false in a fresh room and in a room with only a phone", async () => {
+    const room = newRoomID();
+    expect(await presence(room)).toBe(LAPTOP_OFFLINE);
+    // Asking accepted no socket.
+    await runInDurableObject(stub(room), (_, state) => {
+      expect(state.getWebSockets()).toHaveLength(0);
+    });
+
+    const phone = await connect(room, "phone");
+    expect(await phone.next()).toBe(SIGNAL.peerAbsent);
+    expect(await presence(room)).toBe(LAPTOP_OFFLINE);
+  });
+
+  it("is true while a laptop socket is open", async () => {
+    const room = newRoomID();
+    await connect(room, "laptop");
+    expect(await presence(room)).toBe(LAPTOP_ONLINE);
+  });
+
+  it("is false again once the laptop leaves", async () => {
+    const room = newRoomID();
+    const { laptop, phone } = await pair(room);
+    laptop.close(1000);
+    // The phone's peer-left shows the room has handled the laptop's close.
+    expect(await phone.next()).toBe(SIGNAL.peerLeft);
+    expect(await presence(room)).toBe(LAPTOP_OFFLINE);
+  });
+
+  it("does not count a laptop socket the relay is closing", async () => {
+    const room = newRoomID();
+    await connect(room, "laptop");
+    await runInDurableObject(stub(room), (instance, state) => {
+      expect(instance.presence()).toEqual({ laptop: true });
+      state.getWebSockets("laptop")[0]!.close(CLOSE_REPLACED.code, CLOSE_REPLACED.reason);
+      expect(instance.presence()).toEqual({ laptop: false });
+    });
+  });
+
+  it("disturbs neither socket of a pair", async () => {
+    const room = newRoomID();
+    const { laptop, phone } = await pair(room);
+    expect(await presence(room)).toBe(LAPTOP_ONLINE);
+
+    // Both sockets are still open and hear no signal: frames flow both ways.
+    const fromPhone = marker();
+    phone.send(fromPhone);
+    expect(await laptop.until(fromPhone)).toEqual([]);
+    const fromLaptop = marker();
+    laptop.send(fromLaptop);
+    expect(await phone.until(fromLaptop)).toEqual([]);
+  });
+
+  it("leaves no trace for the next laptop", async () => {
+    const room = newRoomID();
+    const phone = await connect(room, "phone");
+    expect(await phone.next()).toBe(SIGNAL.peerAbsent);
+    expect(await presence(room)).toBe(LAPTOP_OFFLINE);
+
+    const laptop = await connect(room, "laptop");
+    expect(await laptop.next()).toBe(SIGNAL.peerJoined);
+    const m = marker();
+    laptop.send(m);
+    expect(await phone.until(m)).toEqual([SIGNAL.peerJoined]);
   });
 });

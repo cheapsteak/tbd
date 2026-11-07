@@ -42,6 +42,17 @@ export function stub(room: string) {
   return env.ROOM.get(env.ROOM.idFromName(room));
 }
 
+export const LAPTOP_ONLINE = '{"laptop":true}';
+export const LAPTOP_OFFLINE = '{"laptop":false}';
+
+/** The body of `GET /v1/rooms/<room>/presence` through the Worker; fails the test unless it is a 200. */
+export async function presence(room: string): Promise<string> {
+  const res = await exports.default.fetch(`${BASE_URL}/v1/rooms/${room}/presence`);
+  const body = await res.text();
+  expect(res.status).toBe(200);
+  return body;
+}
+
 /** The bytes of a binary message; fails the test on a text message. */
 export function bytes(message: Message): Uint8Array {
   if (!(message instanceof ArrayBuffer)) throw new Error(`expected a binary frame, got text ${JSON.stringify(message)}`);

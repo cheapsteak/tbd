@@ -2,7 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { RELAY_VERSION } from "../src/api";
 import worker from "../src/index";
-import { BASE_URL, connect, newRoomID } from "./helpers";
+import { BASE_URL, LAPTOP_OFFLINE, connect, newRoomID } from "./helpers";
 
 interface Drained {
   status: number;
@@ -111,5 +111,49 @@ describe("routes", () => {
     // `connect` asserts the 101.
     const socket = await connect(newRoomID(), "laptop");
     socket.close();
+  });
+});
+
+describe("presence route", () => {
+  it("answers with JSON a page on any origin can read", async () => {
+    const res = await request(`/v1/rooms/${newRoomID()}/presence`);
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(LAPTOP_OFFLINE);
+    expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+  });
+
+  it("ignores the role and the upgrade", async () => {
+    const res = await request(`/v1/rooms/${newRoomID()}/presence?role=admin`, upgrade);
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(LAPTOP_OFFLINE);
+  });
+
+  it("malformed room IDs and near-miss paths are 404", async () => {
+    const id = newRoomID();
+    const paths = [
+      `/v1/rooms/${id.slice(0, 42)}/presence`,
+      `/v1/rooms/${id}A/presence`,
+      `/v1/rooms/${id.slice(0, 42)}+/presence`,
+      `/v1/rooms/${id}/presence/`,
+      `/v1/rooms/${id}/presencex`,
+      `/v1/rooms/${id}/x`,
+      "/v1/rooms/presence",
+    ];
+    for (const path of paths) {
+      expect((await request(path)).status, path).toBe(404);
+    }
+    // 404 before 405, as on the WebSocket route.
+    expect((await request(`/v1/rooms/${id.slice(0, 42)}/presence`, { method: "POST" })).status).toBe(404);
+  });
+
+  it("refuses other methods in a way a page on any origin can read", async () => {
+    for (const method of ["POST", "HEAD"]) {
+      const res = await request(`/v1/rooms/${newRoomID()}/presence`, { method });
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow"), method).toBe("GET");
+      expect(res.headers.get("access-control-allow-origin"), method).toBe("*");
+    }
   });
 });

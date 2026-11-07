@@ -29,6 +29,7 @@ const OPEN = 1;
  *   runtime's auto-response. A larger frame closes its sender with 1009, and
  *   the other role gets `peer-left` at once.
  * - Leave: when the last open socket of a role goes, the other role gets `peer-left`.
+ * - Presence: says whether a laptop socket is open, without joining.
  */
 export class Room extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -84,6 +85,15 @@ export class Room extends DurableObject<Env> {
     const role = this.roleOf(ws);
     if (role === null) return;
     for (const peer of this.openSockets(otherRole(role))) send(peer, message);
+  }
+
+  /**
+   * Whether the room's laptop is online, by the same rule signalling uses. An
+   * RPC from the Worker: it accepts, closes, tags and sends to no socket, so
+   * asking displaces no one.
+   */
+  presence(): { laptop: boolean } {
+    return { laptop: this.openSockets("laptop").length > 0 };
   }
 
   // Neither handler calls `ws.close()`: the runtime answers the Close frame
