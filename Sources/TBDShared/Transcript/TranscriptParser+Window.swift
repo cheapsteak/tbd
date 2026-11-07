@@ -254,6 +254,22 @@ extension TranscriptParser {
 
     // MARK: - window helpers
 
+    /// The stable ID of a window line with no `uuid`: `at-<offset>`, where
+    /// `offset` is the line's first byte.
+    static func windowLineID(offset: UInt64) -> String {
+        "at-\(offset)"
+    }
+
+    /// The offset an `at-<offset>` line ID names, or nil for any other ID.
+    /// Takes a line ID without an item's `#<block>` suffix.
+    static func windowLineOffset(fromLineID lineID: String) -> UInt64? {
+        let prefix = "at-"
+        guard lineID.hasPrefix(prefix) else { return nil }
+        let digits = lineID.dropFirst(prefix.count)
+        guard !digits.isEmpty, digits.allSatisfy({ ("0"..."9").contains($0) }) else { return nil }
+        return UInt64(digits)
+    }
+
     /// The decoded lines of one read, each with its absolute offset, and the
     /// per-line facts a window reports.
     private struct WindowLines {
@@ -297,7 +313,7 @@ extension TranscriptParser {
             }
             lines.rawLines.append(json)
             lines.offsets.append(offset)
-            lines.stableIDs.append((json["uuid"] as? String) ?? "at-\(offset)")
+            lines.stableIDs.append((json["uuid"] as? String) ?? windowLineID(offset: offset))
 
             for toolResult in toolResults(fromLine: json) {
                 lines.toolResultsByID[toolResult.id] = toolResult.result

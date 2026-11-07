@@ -343,6 +343,89 @@ struct TranscriptParserWindowTests {
         #expect(bigResultIsWhole, "the whole-file scan returns a result that spans read chunks")
         #expect(pastTheCall == nil, "a scan that starts after the call cannot find it")
     }
+
+    @Test func aPositionalIDResolvesItsLineInFull() throws {
+        // Two long lines with no `uuid`: a reply, whose item ID carries a
+        // block suffix, and a prompt, whose item ID is the bare line ID.
+        let longReply = String(repeating: "w", count: 20_000)
+        let longPrompt = String(repeating: "p", count: 20_000)
+        var reply = WindowLine.assistantText("unused", longReply)
+        reply.removeValue(forKey: "uuid")
+        let fixture = try WindowFixture([
+            WindowLine.prompt("m1", "placeholder prompt 1"),
+            reply,
+            WindowLine.prompt(nil, longPrompt),
+            WindowLine.prompt("m2", "placeholder prompt 2"),
+        ])
+        defer { fixture.remove() }
+
+        let w = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: nil, messageLimit: 10, itemLimit: 256))
+        let replyEntry = try #require(w.entries.first(where: { entry in entry.lineOffset == fixture.offsets[1] }))
+        let promptEntry = try #require(w.entries.first(where: { entry in entry.lineOffset == fixture.offsets[2] }))
+
+        #expect(replyEntry.item.id == "at-\(fixture.offsets[1])#0")
+        #expect(promptEntry.item.id == "at-\(fixture.offsets[2])")
+        for (entry, text) in [(replyEntry, longReply), (promptEntry, longPrompt)] {
+            let id = entry.item.id
+            let whole = TranscriptParser.lookupDetail(filePath: fixture.path, itemID: id).text
+            let fromItsLine = TranscriptParser.lookupDetail(
+                filePath: fixture.path, itemID: id, startingAt: entry.lineOffset).text
+            let fromTheEnd = TranscriptParser.lookupDetail(
+                filePath: fixture.path, itemID: id, startingAt: fixture.size).text
+            let wholeIsFull = whole == text
+            let fromItsLineIsFull = fromItsLine == text
+            let fromTheEndIsFull = fromTheEnd == text
+
+            #expect(wholeIsFull, "the whole-file lookup resolves \(id) to its full text")
+            #expect(fromItsLineIsFull, "the lookup from the line's offset resolves \(id) to its full text")
+            #expect(fromTheEndIsFull, "a positional ID resolves whatever offset the lookup starts at")
+        }
+    }
+
+    @Test func aPositionalIDNamingALineWithAUUIDResolvesNothing() throws {
+        let fixture = try WindowFixture([
+            WindowLine.prompt("m1", "placeholder prompt 1"),
+            WindowLine.assistantText("a1", "placeholder reply"),
+            WindowLine.prompt(nil, "placeholder prompt 2"),
+        ])
+        defer { fixture.remove() }
+
+        let onAPrompt = TranscriptParser.lookupDetail(filePath: fixture.path, itemID: "at-\(fixture.offsets[0])")
+        let onAReply = TranscriptParser.lookupDetail(
+            filePath: fixture.path, itemID: "at-\(fixture.offsets[1])#0", startingAt: fixture.offsets[1])
+        let onTheUUIDLessLine = TranscriptParser.lookupDetail(
+            filePath: fixture.path, itemID: "at-\(fixture.offsets[2])")
+
+        #expect(onAPrompt.text == nil, "a stale ID never resolves a line that has a uuid")
+        #expect(onAPrompt.attachment == nil)
+        #expect(onAReply.text == nil, "a stale ID never resolves a line that has a uuid")
+        #expect(onTheUUIDLessLine.text == "placeholder prompt 2", "the same file resolves its uuid-less line")
+    }
+
+    @Test func aPositionalIDOnAnEmptyLineResolvesNothing() throws {
+        // A line, an empty line, then a line with no `uuid`. An ID naming the
+        // empty line must not resolve the line after it.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcript-window-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try JSONSerialization.data(withJSONObject: WindowLine.prompt("m1", "placeholder prompt 1"))
+        let second = try JSONSerialization.data(withJSONObject: WindowLine.prompt(nil, "placeholder prompt 2"))
+        var bytes = first
+        bytes.append(contentsOf: [UInt8(ascii: "\n"), UInt8(ascii: "\n")])
+        bytes.append(second)
+        bytes.append(UInt8(ascii: "\n"))
+        let path = directory.appendingPathComponent("session.jsonl").path
+        try bytes.write(to: URL(fileURLWithPath: path))
+        let emptyLine = UInt64(first.count + 1)
+
+        let onTheEmptyLine = TranscriptParser.lookupDetail(filePath: path, itemID: "at-\(emptyLine)").text
+        let onTheNextLine = TranscriptParser.lookupDetail(filePath: path, itemID: "at-\(emptyLine + 1)").text
+
+        #expect(onTheEmptyLine == nil, "an ID naming an empty line resolves nothing")
+        #expect(onTheNextLine == "placeholder prompt 2")
+    }
 }
 
 // MARK: - fixtures

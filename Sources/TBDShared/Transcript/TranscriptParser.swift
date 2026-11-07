@@ -809,6 +809,9 @@ public enum TranscriptParser {
     ///    or the Nth injected payload of a multi-payload attachment row
     ///  - bare `lineUUID` → returns the user message content, or the sole
     ///    injected payload of an attachment row
+    ///  - `at-<offset>` and `at-<offset>#<blockIndex>` → the same, for the
+    ///    line with no `uuid` that starts at byte `offset`, as `parseWindow`
+    ///    names it
     static func lookupFullBody(filePath: String, itemID: String) -> String? {
         lookupDetail(filePath: filePath, itemID: itemID).text
     }
@@ -840,14 +843,18 @@ public enum TranscriptParser {
     /// skipped. An attachment row's `triggeredBy` resolves only through
     /// `tool_use` lines the scan passed, so a scan that starts after the
     /// triggering call reports it as nil.
+    ///
+    /// An `at-<n>` ID names its line by position, so it skips the scan and
+    /// whatever `offset` says: it reads the line that starts at byte `n` and
+    /// resolves it as a `uuid` match would. That line must have no `uuid`,
+    /// as the line the ID was made from had none; otherwise the ID is stale
+    /// and resolves to nothing. No `tool_use` line is passed on the way, so an
+    /// attachment row found this way reports `triggeredBy` as nil.
     public static func lookupDetail(filePath: String, itemID: String, startingAt offset: UInt64) -> ItemDetail {
         guard let handle = FileHandle(forReadingAtPath: filePath) else {
             return ItemDetail(text: nil, attachment: nil)
         }
         defer { try? handle.close() }
-        guard var lines = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
-            return ItemDetail(text: nil, attachment: nil)
-        }
 
         // Detect the `#input` suffix variant first — when present, we ONLY scan
         // assistant tool_use blocks for a matching id and return their full input
@@ -868,6 +875,14 @@ public enum TranscriptParser {
         } else {
             lineUUID = itemID
             blockIndex = nil
+        }
+
+        if !isInputLookup, let lineOffset = windowLineOffset(fromLineID: lineUUID) {
+            return windowLineDetail(handle: handle, lineOffset: lineOffset, blockIndex: blockIndex)
+        }
+
+        guard var lines = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
+            return ItemDetail(text: nil, attachment: nil)
         }
 
         // `tool_use.id` → short summary, for resolving an attachment row's
@@ -925,52 +940,97 @@ public enum TranscriptParser {
             }
 
             // line UUID match.
-            if (json["uuid"] as? String) == lineUUID {
-                // Attachment rows carry no `message`, so the branches below
-                // can never recover their (truncated) body. Re-run the same
-                // extraction `buildItems` used and return it whole, alongside
-                // the injection metadata the overlay renders.
-                // A queued prompt is an attachment row too, but it renders as
-                // the user's own bubble rather than an injected-context row.
-                if let queued = queuedCommandText(from: json) {
-                    return ItemDetail(text: queued, attachment: nil)
-                }
-
-                let payloads = attachmentPayloads(from: json)
-                if !payloads.isEmpty {
-                    let meta = attachmentMetadata(from: json, toolSummaries: toolSummaries)
-                    if payloads.count > 1 {
-                        guard let blockIndex, blockIndex < payloads.count else {
-                            return ItemDetail(text: nil, attachment: meta)
-                        }
-                        return ItemDetail(text: payloads[blockIndex].text, attachment: meta)
-                    }
-                    return ItemDetail(text: payloads[0].text, attachment: meta)
-                }
-
-                if let blockIndex,
-                   let message = json["message"] as? [String: Any],
-                   let blocks = message["content"] as? [[String: Any]],
-                   blockIndex < blocks.count {
-                    let block = blocks[blockIndex]
-                    return ItemDetail(
-                        text: (block["text"] as? String) ?? (block["thinking"] as? String),
-                        attachment: nil)
-                }
-                if let message = json["message"] as? [String: Any] {
-                    if let s = message["content"] as? String {
-                        return ItemDetail(text: s, attachment: nil)
-                    }
-                    if let array = message["content"] as? [[String: Any]] {
-                        return ItemDetail(
-                            text: array.first(where: { $0["type"] as? String == "text" })
-                                .flatMap { $0["text"] as? String },
-                            attachment: nil)
-                    }
-                }
+            if (json["uuid"] as? String) == lineUUID,
+               let detail = lineDetail(json, blockIndex: blockIndex, toolSummaries: toolSummaries) {
+                return detail
             }
         }
         return ItemDetail(text: nil, attachment: nil)
+    }
+
+    /// What the line an item ID names holds for that item: `blockIndex` picks
+    /// an assistant block, or a payload of a multi-payload attachment row.
+    /// Nil when the line holds nothing this can recover.
+    private static func lineDetail(
+        _ json: [String: Any], blockIndex: Int?, toolSummaries: [String: String]
+    ) -> ItemDetail? {
+        // Attachment rows carry no `message`, so the branches below
+        // can never recover their (truncated) body. Re-run the same
+        // extraction `buildItems` used and return it whole, alongside
+        // the injection metadata the overlay renders.
+        // A queued prompt is an attachment row too, but it renders as
+        // the user's own bubble rather than an injected-context row.
+        if let queued = queuedCommandText(from: json) {
+            return ItemDetail(text: queued, attachment: nil)
+        }
+
+        let payloads = attachmentPayloads(from: json)
+        if !payloads.isEmpty {
+            let meta = attachmentMetadata(from: json, toolSummaries: toolSummaries)
+            if payloads.count > 1 {
+                guard let blockIndex, blockIndex < payloads.count else {
+                    return ItemDetail(text: nil, attachment: meta)
+                }
+                return ItemDetail(text: payloads[blockIndex].text, attachment: meta)
+            }
+            return ItemDetail(text: payloads[0].text, attachment: meta)
+        }
+
+        if let blockIndex,
+           let message = json["message"] as? [String: Any],
+           let blocks = message["content"] as? [[String: Any]],
+           blockIndex < blocks.count {
+            let block = blocks[blockIndex]
+            return ItemDetail(
+                text: (block["text"] as? String) ?? (block["thinking"] as? String),
+                attachment: nil)
+        }
+        if let message = json["message"] as? [String: Any] {
+            if let s = message["content"] as? String {
+                return ItemDetail(text: s, attachment: nil)
+            }
+            if let array = message["content"] as? [[String: Any]] {
+                return ItemDetail(
+                    text: array.first(where: { $0["type"] as? String == "text" })
+                        .flatMap { $0["text"] as? String },
+                    attachment: nil)
+            }
+        }
+        return nil
+    }
+
+    /// `lookupDetail` for an `at-<lineOffset>` ID: the line with no `uuid`
+    /// that starts at byte `lineOffset`, resolved as a `uuid` match is. Nil
+    /// text and attachment when no line starts there, when it does not
+    /// decode, or when it has a `uuid`, since then it is not the line the ID
+    /// was made from.
+    private static func windowLineDetail(handle: FileHandle, lineOffset: UInt64, blockIndex: Int?) -> ItemDetail {
+        guard let lineData = lineBytes(startingAt: lineOffset, in: handle),
+              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+              (json["uuid"] as? String) == nil,
+              let detail = lineDetail(json, blockIndex: blockIndex, toolSummaries: [:]) else {
+            return ItemDetail(text: nil, attachment: nil)
+        }
+        return detail
+    }
+
+    /// The non-empty line that starts at byte `offset`, without its newline.
+    /// Nil when `offset` is past the end, inside a line, or on an empty line.
+    private static func lineBytes(startingAt offset: UInt64, in handle: FileHandle) -> Data? {
+        // A line starts at `offset` when it is the first byte or the byte
+        // before it is "\n", and it is not empty when its own first byte is
+        // not "\n". The reader skips empty lines, so it cannot tell this.
+        let probeStart = offset == 0 ? 0 : offset - 1
+        let probeLength = Int(offset - probeStart) + 1
+        guard (try? handle.seek(toOffset: probeStart)) != nil,
+              let probe = try? handle.read(upToCount: probeLength),
+              probe.count == probeLength,
+              offset == 0 || probe.first == UInt8(ascii: "\n"),
+              probe.last != UInt8(ascii: "\n"),
+              var reader = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
+            return nil
+        }
+        return reader.next()
     }
 
     /// Parse `<command-name>foo</command-name><command-args>bar</command-args>` envelopes.
