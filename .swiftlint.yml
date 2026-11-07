@@ -21,6 +21,7 @@ included:
   - Tests/TBDCLITests
   - Tests/TBDHolderTests
   - Tests/TBDPeerHelperTests
+  - Tests/TBDGhosttyTerminalTests
   - Tests/TestSupport
   - Tests/DaemonTestSupport
 
@@ -67,7 +68,7 @@ custom_rules:
     name: "No print() in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     regex: '\b(?:Swift\.|Foundation\.)?print\s*\('
     match_kinds:
       - identifier
@@ -78,7 +79,7 @@ custom_rules:
     name: "No raw Task.sleep in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     regex: 'Task\.sleep\s*\('
     match_kinds:
       - identifier
