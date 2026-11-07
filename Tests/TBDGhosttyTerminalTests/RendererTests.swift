@@ -152,7 +152,10 @@ struct RendererTests {
         let surfaceA = TerminalSurface()
         try surfaceA.attach(terminalA)
         let textureA = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
-        try renderer.render(surface: surfaceA, to: textureA).commandBuffer?.waitUntilCompleted()
+        let first = try renderer.render(surface: surfaceA, to: textureA)
+        first.commandBuffer?.waitUntilCompleted()
+        // The attach left the surface's stamp stale, which forces the rows once, not twice.
+        #expect(first.update.rowsRebuilt == 3, "the first frame did \(first.update.rowsRebuilt) row rebuilds for 3 rows")
         let idle = try renderer.render(surface: surfaceA, to: textureA)
         try #require(!idle.didEncode, "surface A drew again with nothing changed, so it never went idle")
 
@@ -191,7 +194,7 @@ struct RendererTests {
         #expect(blink.didEncode, "the blink drew no frame")
         #expect(blink.update.dirty == .full,
                 "the blink after the atlas was cleared was a \(blink.update.dirty) frame, not a full rebuild")
-        #expect(blink.update.rowsRebuilt == 3, "the blink rebuilt \(blink.update.rowsRebuilt) of 3 rows")
+        #expect(blink.update.rowsRebuilt == 3, "the blink did \(blink.update.rowsRebuilt) row rebuilds for 3 rows")
         let freshA = try #require(glyphCache.glyph(forScalar: "A", cellSpan: 1)?.slot)
         let drawnAt = surfaceA.withGlyphInstances { instances in instances.map { $0.atlasPos } }
         #expect(drawnAt == [SIMD2<UInt16>(UInt16(freshA.x), UInt16(freshA.y))],

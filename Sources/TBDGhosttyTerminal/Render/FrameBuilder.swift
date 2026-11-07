@@ -38,6 +38,8 @@ import TBDGhosttyShaderTypes
 /// What one `FrameBuilder.update` did.
 struct FrameUpdate: Sendable, Hashable {
     var dirty: SurfaceDirty
+    /// Row rebuilds the update did. A row rebuilt twice, as when the update's own glyphs cleared
+    /// the atlas, counts twice, so this is the update's row work, not a count of distinct rows.
     var rowsRebuilt: Int
     var glyphCount: Int
     var rectCount: Int
@@ -174,18 +176,21 @@ final class FrameBuilder {
         // every `atlasPos` ever handed out, including the ones sitting in rows this tick is not
         // going to visit. `GlyphCache` drops its own entries, but only a full re-iteration can fix
         // the row caches — so the stamp is checked before the loop (a rebuild during another
-        // surface's frame) and again after it (a rebuild caused by this very tick).
+        // surface's frame) and again after it (a rebuild caused by this very tick). The second
+        // check compares with the stamp the loop started from, not the surface's: the surface's is
+        // still the stale one when the first check forced the loop, and would force a second pass.
         var effectiveDirty = dirty
         if atlasIsStale {
             effectiveDirty = .full
         }
+        let stampBeforeRows = atlasRebuildStamp
         var rowsRebuilt = try iterateRows(rs, surface: surface, colors: colors,
                                           forceFull: effectiveDirty == .full && dirty != .full)
-        if surface.atlasRebuildStamp != atlasRebuildStamp {
+        if atlasRebuildStamp != stampBeforeRows {
             // The atlas was cleared while this frame was being built: redo every row against the
             // repacked atlas before anything is drawn.
             effectiveDirty = .full
-            rowsRebuilt = try iterateRows(rs, surface: surface, colors: colors, forceFull: true)
+            rowsRebuilt += try iterateRows(rs, surface: surface, colors: colors, forceFull: true)
         }
         surface.setAtlasRebuildStamp(atlasRebuildStamp)
 
