@@ -181,4 +181,119 @@ struct GhosttyTerminalTests {
         #expect(size.0 == last.cols)
         #expect(size.1 == last.rows)
     }
+
+    /// The IO thread feeds probes while the main thread resizes with mode 2048 on, so both threads
+    /// produce replies at once. Each probe asks for the text area size (`CSI 18 t`) and for DA1, so
+    /// every reply but the DA answer carries the row count in force when it was produced. The
+    /// resizes only ever grow the grid, so in production order those row counts never go down: a
+    /// reply delivered out of order shows up as a drop.
+    @Test @MainActor func repliesFromTwoThreadsNeverOverlapAndKeepProductionOrder() async throws {
+        let recorder = OrderedWriteRecorder()
+        let terminal = try GhosttyTerminal(
+            cols: 80, rows: 10, scrollbackLines: 100,
+            callbacks: GhosttyTerminalCallbacks(writePty: { recorder.record($0) }))
+        terminal.feed(text: "\u{1b}[?2048h")
+        let (started, startedContinuation) = AsyncStream<Void>.makeStream()
+        let probeCount = 2000
+
+        let feeder = Task.detached {
+            for index in 0..<probeCount {
+                terminal.feed(text: "\u{1b}[18t\u{1b}[c")
+                if index == 0 { startedContinuation.yield() }
+            }
+            startedContinuation.finish()
+        }
+
+        for await _ in started { break }
+        let resizeCount = 200
+        for step in 1...resizeCount {
+            terminal.resize(cols: 80, rows: 10 + step)
+        }
+        await feeder.value
+
+        let stream = recorder.stream
+        let reports = sizeReports(in: stream)
+        let textAreaReports = reports.filter { $0.kind == 8 }.count
+        let inBandReports = reports.filter { $0.kind == 48 }.count
+        let daReplies = occurrences(of: Array("\u{1b}[?".utf8), in: stream)
+        #expect(recorder.overlaps == 0, "writePty ran \(recorder.overlaps) times while another call was inside it")
+        #expect(textAreaReports == probeCount, "\(textAreaReports) of \(probeCount) size queries were answered")
+        #expect(daReplies == probeCount, "\(daReplies) of \(probeCount) DA1 queries were answered")
+        #expect(inBandReports >= resizeCount, "only \(inBandReports) in-band size reports for \(resizeCount) resizes")
+
+        let rows = reports.map(\.rows)
+        let drops = zip(rows, rows.dropFirst()).filter { $0.0 > $0.1 }
+        #expect(drops.isEmpty, "row counts went down \(drops.count) times, first at \(String(describing: drops.first))")
+        // The last reply produced reports the last size, whichever thread produced it.
+        #expect(rows.last == 10 + resizeCount, "the last size reply gave \(String(describing: rows.last)) rows")
+    }
+}
+
+/// Records every `writePty` call into one stream, and counts calls that ran while another was
+/// still inside the callback. Sendable through its lock: `writePty` may run on any thread.
+private final class OrderedWriteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inside = 0
+    private var overlapCount = 0
+    private var bytes: [UInt8] = []
+
+    var stream: [UInt8] { lock.withLock { bytes } }
+    var overlaps: Int { lock.withLock { overlapCount } }
+
+    func record(_ reply: [UInt8]) {
+        lock.withLock {
+            inside += 1
+            if inside > 1 { overlapCount += 1 }
+        }
+        // Stay inside the callback a little, so a second caller that is not held off lands here.
+        for _ in 0..<32 { _ = lock.withLock { inside } }
+        lock.withLock {
+            bytes += reply
+            inside -= 1
+        }
+    }
+}
+
+/// Every `CSI 8 ; rows ; cols t` (text area size) and `CSI 48 ; rows ; cols ; … t` (in-band size
+/// report) in `stream`, in order, with its row count.
+private func sizeReports(in stream: [UInt8]) -> [(kind: Int, rows: Int)] {
+    var reports: [(kind: Int, rows: Int)] = []
+    var index = 0
+    func number(at start: Int) -> (value: Int, end: Int)? {
+        var end = start
+        var value = 0
+        while end < stream.count, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(stream[end]) {
+            value = value * 10 + Int(stream[end] - UInt8(ascii: "0"))
+            end += 1
+        }
+        return end > start ? (value, end) : nil
+    }
+    while index + 1 < stream.count {
+        guard stream[index] == 0x1B, stream[index + 1] == UInt8(ascii: "[") else {
+            index += 1
+            continue
+        }
+        index += 2
+        guard let kind = number(at: index), kind.end < stream.count, stream[kind.end] == UInt8(ascii: ";"),
+              kind.value == 8 || kind.value == 48,
+              let rows = number(at: kind.end + 1) else { continue }
+        reports.append((kind.value, rows.value))
+        index = rows.end
+    }
+    return reports
+}
+
+private func occurrences(of needle: [UInt8], in haystack: [UInt8]) -> Int {
+    guard !needle.isEmpty, haystack.count >= needle.count else { return 0 }
+    var count = 0
+    var index = 0
+    while index + needle.count <= haystack.count {
+        if haystack[index..<(index + needle.count)].elementsEqual(needle) {
+            count += 1
+            index += needle.count
+        } else {
+            index += 1
+        }
+    }
+    return count
 }

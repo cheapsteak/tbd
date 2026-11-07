@@ -4,7 +4,13 @@
 //
 // - **Effects** (`writePty`, `bell`, `clipboardWrite`, `desktopNotification`, `programStatus`) are
 //   collected while the terminal parses and delivered after its lock drops, but before the
-//   `feed` (or other call) that produced them returns. They may call back into the terminal.
+//   `feed`, `resize`, `reset` or appearance change that produced them returns. They are delivered
+//   in the order the terminal produced them, and never two at once, even when several threads
+//   call into the terminal: a delivery may run on whichever of those threads is delivering at
+//   that moment. They may call back into the terminal; what such a nested call produces is
+//   delivered after the callback returns, not inside it. They must not wait on another thread
+//   that may itself be calling into the terminal, because that thread may be waiting for this
+//   delivery to finish.
 // - **Queries** (`deviceAttributes`, `xtversion`) are asked *during* the parse, with the terminal's
 //   lock held, because the answer has to go into the reply the parser is writing. They must return
 //   at once and must not call into the terminal: that would deadlock.
@@ -15,8 +21,13 @@
 
 /// The callbacks one `GhosttyTerminal` uses. Set once, at `GhosttyTerminal.init`.
 public struct GhosttyTerminalCallbacks: Sendable {
-    /// Bytes the terminal writes back to the program: query replies, mode reports, paste output.
-    /// Dropped while the terminal is muted.
+    /// Bytes the terminal writes back to the program: query replies and mode reports, such as a DA
+    /// answer or a mode 2048 size report. Dropped while the terminal is muted.
+    ///
+    /// May be called on any thread that calls `feed`, `resize`, `reset` or the appearance setter,
+    /// but never concurrently with itself, and always in the order the terminal produced the
+    /// replies. A size report from a resize on the main thread and a DA reply from a feed on the
+    /// IO thread arrive one after the other, in the terminal's order, whichever thread runs them.
     public var writePty: (@Sendable ([UInt8]) -> Void)?
     /// BEL (0x07). Dropped while muted.
     public var bell: (@Sendable () -> Void)?

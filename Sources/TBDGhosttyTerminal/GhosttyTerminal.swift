@@ -15,9 +15,20 @@
 //     `GhosttyTerminal`. A C callback has no way to reach the lock.
 //   * A C callback only appends to `IOContext`'s buffers. It runs under the lock (its caller holds
 //     it), so that access is exclusive by construction.
-//   * After `vt_write` returns, still under the lock, the terminal *harvests* the buffers. The lock
-//     is released, and only then are the owner's callbacks run. So owner code never runs while the
-//     lock is held, and may call back into the terminal.
+//   * After `vt_write` returns, still under the lock, the terminal *harvests* the buffers into one
+//     delivery and appends it to an outbox. The lock is released, and only then are the owner's
+//     callbacks run. So owner code never runs while the lock is held, and may call back into the
+//     terminal.
+//
+// ## Deliveries go out in order, one at a time
+//
+// The IO thread feeds while the main thread resizes, and both produce replies: a DA answer from
+// one, a mode 2048 size report from the other. Run straight from each caller after its unlock,
+// they could reach `writePty` at the same moment, or in the opposite order from the one the
+// terminal produced them in. So deliveries are appended to a FIFO under the terminal lock, which
+// fixes production order, and drained under a second lock, the delivery lock, which makes them
+// one at a time. Every call that can produce output drains before it returns, so a `feed`'s own
+// replies have gone out by the time it returns, whichever thread ran them.
 //
 // The two query callbacks (`deviceAttributes`, `xtversion`) are the exception: their answer goes
 // into the reply being parsed, so they are asked under the lock. `GhosttyTerminalCallbacks` says
@@ -268,6 +279,8 @@ final class TerminalCore {
     /// Called after the lock drops whenever what is on screen may have changed. Set by the view.
     var renderSignal: (@Sendable () -> Void)?
     var bound: (any TerminalBoundObject)?
+    /// Deliveries produced under the lock and not yet run, oldest first.
+    var outbox: [Delivery] = []
 
     init(raw: VtTerminal, context: IOContext, cols: UInt16, rows: UInt16) {
         self.raw = raw
@@ -288,14 +301,15 @@ final class TerminalCore {
         return object
     }
 
-    /// Takes everything the callbacks accumulated. Called under the lock.
-    func harvest(signal: Bool) -> Delivery {
+    /// Takes everything the callbacks accumulated and appends it to the outbox, so it goes out
+    /// after everything produced before it. Called under the lock.
+    func harvest(signal: Bool) {
         let delivery = Delivery(
             pty: context.pendingPty, effects: context.pendingEffects,
             renderSignal: signal ? renderSignal : nil)
         context.pendingPty.removeAll(keepingCapacity: true)
         context.pendingEffects.removeAll(keepingCapacity: true)
-        return delivery
+        if !delivery.isEmpty { outbox.append(delivery) }
     }
 }
 
@@ -305,7 +319,7 @@ struct Delivery: Sendable {
     var effects: [PendingEffect]
     var renderSignal: (@Sendable () -> Void)?
 
-    static let none = Delivery(pty: [], effects: [], renderSignal: nil)
+    var isEmpty: Bool { pty.isEmpty && effects.isEmpty && renderSignal == nil }
 
     func run(_ callbacks: GhosttyTerminalCallbacks) {
         if !pty.isEmpty { callbacks.writePty?(pty) }
@@ -333,6 +347,13 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// Guarded by `lock`.
     private let core: TerminalCore
     private let callbacks: GhosttyTerminalCallbacks
+    /// Held while the outbox is drained, so deliveries run one at a time. Taken only with `lock`
+    /// released, and `lock` is taken inside it only briefly, to take the outbox: the order is
+    /// always delivery lock, then terminal lock. Recursive so that an owner callback calling back
+    /// into the terminal does not deadlock: see `drainOutbox`.
+    private let deliveryLock = NSRecursiveLock()
+    /// True while a drain runs. Guarded by `deliveryLock`.
+    private var isDraining = false
 
     /// - Parameters:
     ///   - cols: Width in cells, at least 1.
@@ -453,19 +474,43 @@ public final class GhosttyTerminal: @unchecked Sendable {
         return try body(core)
     }
 
+    /// Runs every queued delivery, oldest first, one at a time. Called by every method that can
+    /// produce output, after its lock drops, so what it produced has gone out before it returns:
+    /// either this drain runs it, or a drain already running on another thread does, and this one
+    /// waits for that drain to finish before finding the outbox empty.
+    ///
+    /// A callback that calls back into the terminal re-enters here on the same thread. The nested
+    /// call only queues its delivery and returns; the drain already running delivers it after the
+    /// current callback returns, so callbacks never nest and the order still holds.
+    private func drainOutbox() {
+        deliveryLock.lock()
+        defer { deliveryLock.unlock() }
+        guard !isDraining else { return }
+        isDraining = true
+        defer { isDraining = false }
+        while true {
+            let batch = locked { core -> [Delivery] in
+                var batch: [Delivery] = []
+                swap(&batch, &core.outbox)
+                return batch
+            }
+            guard !batch.isEmpty else { return }
+            for delivery in batch { delivery.run(callbacks) }
+        }
+    }
+
     /// Runs `body` with the live C terminal under the lock, then delivers whatever the terminal
     /// produced after the lock drops. Returns nil, without running `body`, once the terminal is
     /// closed. `body` must not call back into this terminal.
     @discardableResult
     func withRaw<T>(signalsRender: Bool = false, _ body: (VtTerminal) throws -> T) rethrows -> T? {
-        var delivery = Delivery.none
         let value: T? = try locked { core in
             guard let raw = core.raw else { return nil }
             let value = try body(raw)
-            delivery = core.harvest(signal: signalsRender)
+            core.harvest(signal: signalsRender)
             return value
         }
-        delivery.run(callbacks)
+        drainOutbox()
         return value
     }
 
@@ -477,14 +522,13 @@ public final class GhosttyTerminal: @unchecked Sendable {
         make: (VtTerminal) throws -> Object,
         _ body: (VtTerminal, Object) throws -> T
     ) rethrows -> T? {
-        var delivery = Delivery.none
         let value: T? = try locked { core in
             guard let raw = core.raw else { return nil }
             let value = try body(raw, try core.boundObject(raw, make: make))
-            delivery = core.harvest(signal: signalsRender)
+            core.harvest(signal: signalsRender)
             return value
         }
-        delivery.run(callbacks)
+        drainOutbox()
         return value
     }
 
@@ -497,16 +541,15 @@ public final class GhosttyTerminal: @unchecked Sendable {
         make: (VtTerminal) throws -> Object,
         _ body: (VtTerminal, Object) throws -> T
     ) rethrows -> (value: T, pty: [UInt8])? {
-        var delivery = Delivery.none
         let result: (value: T, pty: [UInt8])? = try locked { core in
             guard let raw = core.raw else { return nil }
             let value = try body(raw, try core.boundObject(raw, make: make))
             let pty = core.context.pendingPty
             core.context.pendingPty.removeAll(keepingCapacity: true)
-            delivery = core.harvest(signal: false)
+            core.harvest(signal: false)
             return (value, pty)
         }
-        delivery.run(callbacks)
+        drainOutbox()
         return result
     }
 
@@ -551,30 +594,32 @@ public final class GhosttyTerminal: @unchecked Sendable {
     func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?) {
         let columns = UInt16(clamping: max(cols, 1))
         let lines = UInt16(clamping: max(rows, 1))
-        var delivery = Delivery.none
         var failure: GhosttyResult?
         locked { core in
             guard let raw = core.raw else { return }
+            let previousSize = core.context.reportedSize
             if let cellWidthPx { core.cellWidthPx = cellWidthPx }
             if let cellHeightPx { core.cellHeightPx = cellHeightPx }
+            // Set before the resize: a size report sent from inside it must give the new size.
+            core.context.reportedSize = GhosttySizeReportSize(
+                rows: lines, columns: columns,
+                cell_width: core.cellWidthPx, cell_height: core.cellHeightPx)
             let result = ghostty_terminal_resize(raw, columns, lines, core.cellWidthPx, core.cellHeightPx)
             if result == GHOSTTY_SUCCESS {
                 core.cols = columns
                 core.rows = lines
-                core.context.reportedSize = GhosttySizeReportSize(
-                    rows: lines, columns: columns,
-                    cell_width: core.cellWidthPx, cell_height: core.cellHeightPx)
             } else {
+                core.context.reportedSize = previousSize
                 failure = result
             }
-            delivery = core.harvest(signal: true)
+            core.harvest(signal: true)
         }
         if let failure {
             let error = GhosttyCallError(result: failure, operation: "ghostty_terminal_resize")
             terminalEngineLog.error(
                 "resize to \(columns, privacy: .public)x\(lines, privacy: .public) failed: \(error.description, privacy: .public)")
         }
-        delivery.run(callbacks)
+        drainOutbox()
     }
 
     /// Runs `body` with a read-only view of the terminal, under the lock. The state is valid only
