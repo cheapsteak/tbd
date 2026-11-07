@@ -61,36 +61,69 @@ struct TerminalEngineContractTests {
 
     // MARK: - Threads
 
-    @Test("Feeding from a background task while main reads the screen stays consistent",
+    /// Main reads row 0 under `withScreen` while a detached task feeds, and
+    /// every read must be one whole line some feed wrote. Each feed is
+    /// `ESC[H ESC[2K` then `line N`, so a read that lands between the erase and
+    /// the text, or part way through the text, comes back torn.
+    ///
+    /// The overlap is built in rather than hoped for. Main starts reading only
+    /// once the first feed has finished, and the feeder keeps going until it
+    /// has fed 1,000 times **and** main has read 50 times while it was still
+    /// feeding. A lock that works can therefore never fail this test.
+    ///
+    /// A missing lock is likely to fail it, with a torn read or a crash, but
+    /// not certain to: whether an unlocked read lands inside a parse is up to
+    /// the scheduler.
+    @Test("Every screen read made while a background task feeds sees a whole line",
           arguments: TerminalEngineFactory.availableKinds)
     func feedFromBackgroundWhileReadingIsConsistent(kind: TerminalEngineKind) async {
         let fixture = await makeFixture(kind: kind)
         defer { fixture.tearDown() }
         let engine = fixture.engine
-        let finished = OSAllocatedUnfairLock(initialState: false)
+        let progress = OSAllocatedUnfairLock(initialState: FeedProgress())
+        let end = ContinuousClock.now + TestDeadlines.saturatedPass
 
-        // Only the engine, which is `Sendable`, and the lock cross into the
-        // task; `feed` is the one requirement callable off main.
-        let feeder = Task.detached { [engine, finished] in
-            for index in 0..<1_000 {
+        // Only the engine, which is `Sendable`, the lock and the deadline
+        // cross into the task; `feed` is the one requirement callable off main.
+        let feeder = Task.detached { [engine, progress, end] in
+            var index = 0
+            while ContinuousClock.now < end {
+                guard index < 1_000 || progress.withLock({ $0.overlappingReads }) < 50 else { break }
                 engine.feed(Array("\u{1b}[H\u{1b}[2Kline \(index)".utf8)[...])
+                let fed = index
+                progress.withLock { $0.lastFed = fed }
+                index += 1
             }
-            finished.withLock { $0 = true }
+            progress.withLock { $0.finished = true }
+        }
+
+        // The start barrier: until the first feed is in, row 0 is blank.
+        while progress.withLock({ $0.lastFed == nil }), ContinuousClock.now < end {
+            await mainQueueTurn()
         }
 
         var reads = 0
-        let end = ContinuousClock.now + TestDeadlines.saturatedPass
-        while !finished.withLock({ $0 }), ContinuousClock.now < end {
-            _ = engine.withScreen { $0.lineText(row: 0) }
-            reads += 1
+        var torn: [String] = []
+        while !progress.withLock({ $0.finished }), ContinuousClock.now < end {
+            for _ in 0..<10 {
+                let text = engine.withScreen { $0.lineText(row: 0) } ?? "<no row 0>"
+                if !Self.isWholeLine(text) { torn.append(text) }
+                reads += 1
+                progress.withLock { state in
+                    if !state.finished { state.overlappingReads += 1 }
+                }
+            }
             await mainQueueTurn()
         }
         await feeder.value
 
-        let didFinish = finished.withLock { $0 }
-        #expect(didFinish, "the feeder did not finish; main read \(reads) times")
+        let outcome = progress.withLock { $0 }
+        #expect(outcome.overlappingReads >= 50,
+                "main read only \(outcome.overlappingReads) times while the feeder ran, so the reads did not overlap the feeds")
+        #expect(torn.isEmpty, "\(torn.count) of \(reads) reads were torn, for example \(torn.prefix(3))")
         let last = engine.withScreen { $0.lineText(row: 0) }
-        #expect(last == "line 999", "after \(reads) concurrent reads")
+        let expected = outcome.lastFed.map { "line \($0)" }
+        #expect(last == expected, "the screen must end on the last line fed")
     }
 
     // MARK: - Snapshot ingest
@@ -143,16 +176,15 @@ struct TerminalEngineContractTests {
 
     // MARK: - Parser replies
 
-    /// The name states the requirement on the answer's *writing*: it is written
-    /// inside the parse, so it is queued ahead of the DA1 reply that follows the
-    /// probe in the same chunk. Its *delivery* is pinned here as it is today:
-    /// SwiftTerm hops every reply through `TerminalView.onMain`, an unconditional
-    /// `DispatchQueue.main.async`, so nothing has reached `send` when `feed`
-    /// returns, and both replies, probe first, have reached it one main-queue
-    /// turn later.
+    /// The answer is written inside the parse, so it is queued ahead of the DA1
+    /// reply that follows the probe in the same chunk. Its delivery is pinned as
+    /// it is today: SwiftTerm hops every reply through `TerminalView.onMain`, an
+    /// unconditional `DispatchQueue.main.async`, so nothing has reached `send`
+    /// when `feed` returns, and both replies, probe first, have reached it one
+    /// main-queue turn later.
     @Test("The OSC 7501 probe is answered inside the parse, ahead of DA1, and reaches send one main-queue turn after feed returns",
           arguments: TerminalEngineFactory.availableKinds)
-    func programStatusProbeIsAnsweredBeforeFeedReturns(kind: TerminalEngineKind) async {
+    func programStatusProbeIsAnsweredInsideTheParseAndDeliveredOneMainTurnLater(kind: TerminalEngineKind) async {
         let fixture = await makeFixture(kind: kind)
         defer { fixture.tearDown() }
         fixture.engine.setProgramStatusReporting(enabled: true)
@@ -282,6 +314,13 @@ struct TerminalEngineContractTests {
 
     // MARK: - Helpers
 
+    /// `line N`, exactly: what one whole feed leaves on row 0.
+    private static func isWholeLine(_ text: String) -> Bool {
+        guard text.hasPrefix("line ") else { return false }
+        let number = text.dropFirst("line ".count)
+        return Int(number) != nil
+    }
+
     private func feed(_ text: String, into engine: any TerminalEngine) {
         engine.feed(Array(text.utf8)[...])
     }
@@ -324,6 +363,14 @@ struct TerminalEngineContractTests {
 }
 
 // MARK: - Fixture
+
+/// What the background feed test's two sides share: the last line fed, whether
+/// the feeder is done, and how many of main's reads it overlapped.
+private struct FeedProgress: Sendable {
+    var lastFed: Int?
+    var finished = false
+    var overlappingReads = 0
+}
 
 /// One engine built the way the coordinators build theirs, with a recorder as
 /// its delegate and isolated defaults behind its appearance.
