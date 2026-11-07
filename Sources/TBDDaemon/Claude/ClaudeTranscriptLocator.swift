@@ -32,11 +32,11 @@ enum ClaudeTranscriptLocator {
     /// When neither holds the file, the answer is the host root's.
     ///
     /// - Parameters:
-    ///   - projectsBase: the host `projects/` root, or `nil` for the host
-    ///     Claude store's as `ClaudeProjectDirectory.resolve` finds it. The
-    ///     router passes `RPCRouter.claudeProjectsRoot(forProfileID: nil)`, so
-    ///     its injected config-dir manager decides; tests pass a temporary
-    ///     root.
+    ///   - projectsBase: the host `projects/` root. It is required, so the
+    ///     caller's injected root always decides and the locator never looks
+    ///     up the host store itself. The router passes
+    ///     `RPCRouter.claudeProjectsRoot(forProfileID: nil)`, its injected
+    ///     config-dir manager's root; tests pass a temporary root.
     ///   - profileProjectsBase: the `projects/` root of the terminal's model
     ///     profile, tried before `projectsBase` when it is a different
     ///     directory, or `nil` for a terminal with no profile. The router
@@ -44,7 +44,7 @@ enum ClaudeTranscriptLocator {
     static func filePath(
         terminal: TBDShared.Terminal,
         worktreePath: String,
-        projectsBase: URL? = nil,
+        projectsBase: URL,
         profileProjectsBase: URL? = nil
     ) -> String? {
         guard let sessionID = terminal.claudeSessionID else { return nil }
@@ -55,11 +55,8 @@ enum ClaudeTranscriptLocator {
         let hostPath = ClaudeProjectDirectory.resolve(
             worktreePath: worktreePath, projectsBase: projectsBase
         )?.appendingPathComponent(fileName).path
-        guard let profileProjectsBase else { return hostPath }
-
-        let hostRoot = projectsBase ?? ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
-            .appendingPathComponent("projects", isDirectory: true)
-        guard resolvedPath(profileProjectsBase) != resolvedPath(hostRoot) else { return hostPath }
+        guard let profileProjectsBase,
+              resolvedPath(profileProjectsBase) != resolvedPath(projectsBase) else { return hostPath }
 
         let profilePath = ClaudeProjectDirectory.resolve(
             worktreePath: worktreePath, projectsBase: profileProjectsBase

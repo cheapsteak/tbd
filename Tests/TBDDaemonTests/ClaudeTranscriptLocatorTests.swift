@@ -11,14 +11,22 @@ struct ClaudeTranscriptLocatorTests {
             claudeSessionID: sessionID, transcriptPath: transcriptPath)
     }
 
+    /// A host root no test creates. The tests that pass it return before any
+    /// root is read.
+    private static let unreadHostRoot = URL(fileURLWithPath: "/acme/host/projects", isDirectory: true)
+
     @Test func aStoredPathWins() {
         let t = terminal(sessionID: "sess-1", transcriptPath: "/acme/stored/sess-1.jsonl")
-        #expect(ClaudeTranscriptLocator.filePath(terminal: t, worktreePath: "/acme/wt") == "/acme/stored/sess-1.jsonl")
+        let path = ClaudeTranscriptLocator.filePath(
+            terminal: t, worktreePath: "/acme/wt", projectsBase: Self.unreadHostRoot)
+        #expect(path == "/acme/stored/sess-1.jsonl")
     }
 
     @Test func aMissingSessionIDGivesNil() {
         let t = terminal(sessionID: nil, transcriptPath: nil)
-        #expect(ClaudeTranscriptLocator.filePath(terminal: t, worktreePath: "/acme/wt") == nil)
+        let path = ClaudeTranscriptLocator.filePath(
+            terminal: t, worktreePath: "/acme/wt", projectsBase: Self.unreadHostRoot)
+        #expect(path == nil)
     }
 
     @Test func theFallbackJoinsTheProjectDirAndSessionID() throws {
@@ -163,7 +171,7 @@ struct ClaudeTranscriptLocatorTests {
     @Test func aStoredPathWinsOverAProfileRoot() {
         let t = terminal(sessionID: "sess-1", transcriptPath: "/acme/stored/sess-1.jsonl")
         let path = ClaudeTranscriptLocator.filePath(
-            terminal: t, worktreePath: "/acme/wt",
+            terminal: t, worktreePath: "/acme/wt", projectsBase: Self.unreadHostRoot,
             profileProjectsBase: URL(fileURLWithPath: "/acme/profile/projects", isDirectory: true))
         #expect(path == "/acme/stored/sess-1.jsonl")
     }
