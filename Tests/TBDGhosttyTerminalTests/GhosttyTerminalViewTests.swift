@@ -301,6 +301,12 @@ struct GhosttyTerminalViewTests {
                 "the last report was \(String(describing: sent.last)), not the left release")
         #expect(view.mouseController.pendingReportReleases.isEmpty,
                 "\(view.mouseController.pendingReportReleases) still wait for a release")
+
+        // The button's own release can still arrive later. It was already sent, so nothing goes
+        // out again.
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: NSPoint(x: 80, y: 100), in: window))
+        let afterMouseUp = recorder.sent.dropFirst(sent.count)
+        #expect(afterMouseUp.isEmpty, "the mouseUp after the focus-loss release sent \(Array(afterMouseUp))")
     }
 
     /// After `?1000h ?1003h ?1003l` the 1000 bit is still set, but resetting any tracking mode turns
