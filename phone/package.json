@@ -1,0 +1,14 @@
+{
+  "name": "tbd-phone",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"loader/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json",
+    "vectors": "node test-vectors/generate.mjs",
+    "vectors:check": "node test-vectors/generate.mjs --check"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}
