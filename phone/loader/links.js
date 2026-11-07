@@ -46,8 +46,12 @@ export function takePairingFragment(href) {
  * @param {number} nowMs
  * @returns {PairingLinkData}
  * @throws {PairingLinkError} unchanged from `parsePairingLink`
+ * @throws {TypeError} when `nowMs` is not a finite number, which would skip the expiry check
  */
 export function readPairingLink(text, nowMs) {
+  if (!Number.isFinite(nowMs)) {
+    throw new TypeError('readPairingLink needs a finite nowMs');
+  }
   const fields = parsePairingLink(text, { now: nowMs - PAIRING_EXPIRY_GRACE_MS });
   return {
     fields,

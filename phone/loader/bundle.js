@@ -34,6 +34,7 @@ const STRICT_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 // how far past `maxBytes` one step can go: raw deflate expands at most about 1,032 times, so
 // 4 KiB yields at most about 4 MiB.
 const INFLATE_SLICE_BYTES = 4096;
+const EMPTY = new Uint8Array(0);
 
 export class BundleError extends Error {
   /** @param {BundleErrorReason} reason */
@@ -48,8 +49,10 @@ export class BundleError extends Error {
 export class BundleAssembler {
   #sha256;
   #size;
-  /** @type {Uint8Array[]} */
-  #chunks = [];
+  // The compressed bundle, allocated once at `size` (at most MAX_BUNDLE_COMPRESSED) and
+  // filled chunk by chunk, so many small chunks cost no more than one large one.
+  /** @type {Uint8Array} */
+  #bytes;
   #received = 0;
   #total = 0;
   /** @type {number | null} */
@@ -68,10 +71,11 @@ export class BundleAssembler {
     }
     this.#sha256 = sha256;
     this.#size = size;
+    this.#bytes = new Uint8Array(size);
   }
 
   /**
-   * Adds the next chunk. Any failure leaves the assembler failed, holding no chunks.
+   * Adds the next chunk. Any failure leaves the assembler failed, holding no bytes.
    * @param {ChunkMessage} chunk a parsed `bundle.chunk`
    * @returns {boolean} true when this was the last chunk
    * @throws {BundleError}
@@ -99,7 +103,8 @@ export class BundleAssembler {
     if (last && total !== this.#size) throw this.#fail('size');
 
     this.#count = chunk.count;
-    this.#chunks.push(bytes);
+    // `total <= size` was checked above, so the chunk fits.
+    this.#bytes.set(bytes, this.#total);
     this.#received += 1;
     this.#total = total;
     if (last) {
@@ -119,8 +124,8 @@ export class BundleAssembler {
       throw this.#fail(this.#state === 'receiving' ? 'incomplete' : 'state');
     }
     this.#state = 'finishing';
-    const compressed = concat(this.#chunks, this.#total);
-    this.#chunks = [];
+    const compressed = this.#bytes;
+    this.#bytes = EMPTY;
     try {
       const inflated = await inflateRaw(compressed);
       if (await sha256Hex(inflated) !== this.#sha256) {
@@ -151,7 +156,7 @@ export class BundleAssembler {
    */
   #fail(reason) {
     this.#state = 'failed';
-    this.#chunks = [];
+    this.#bytes = EMPTY;
     return new BundleError(reason);
   }
 }

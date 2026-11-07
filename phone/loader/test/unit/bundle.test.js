@@ -80,6 +80,29 @@ test('a one-chunk bundle and a one-byte-per-chunk bundle assemble', async () => 
   assert.equal(await assemble(bundle).finish(), text);
 });
 
+test('many small chunks of uneven sizes assemble to the bundle', async () => {
+  // Random text barely compresses, so this is thousands of chunks.
+  const text = randomBytes(12_000).toString('base64');
+  const raw = new Uint8Array(deflateRawSync(text));
+  const hash = sha256(text);
+  /** @type {Uint8Array[]} */
+  const pieces = [];
+  for (let at = 0, size = 1; at < raw.length; at += size, size = (size % 7) + 1) {
+    pieces.push(raw.subarray(at, at + size));
+  }
+  assert.ok(pieces.length > 2_000, `${pieces.length} chunks`);
+  const chunks = pieces.map((piece, index) => ({
+    type: /** @type {const} */ ('bundle.chunk'), sha256: hash, index, count: pieces.length,
+    data: Buffer.from(piece).toString('base64'),
+  }));
+  assert.equal(await assemble({ welcome: { sha256: hash, size: raw.length }, chunks, raw }).finish(), text);
+
+  const ones = makeBundle(text, { chunkSize: 1 });
+  assert.equal(ones.chunks.length, ones.welcome.size);
+  assert.ok(ones.chunks.length > 2_000);
+  assert.equal(await assemble(ones).finish(), text);
+});
+
 test('a bundle that starts with a byte-order mark keeps it, so the runner\'s hash matches', async () => {
   const text = '﻿globalThis.app = 1;\n';
   const bundle = makeBundle(text);

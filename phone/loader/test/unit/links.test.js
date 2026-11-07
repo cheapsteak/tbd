@@ -94,6 +94,16 @@ test('expiry grace is 120 s past exp', () => {
   assert.doesNotThrow(() => readPairingLink(at(file.now + 1), NOW));
 });
 
+test('a clock that is not a finite number is refused, never read as "not expired"', () => {
+  const expired = file.loaderURL + '#p=' + base64urlEncode(encode({ ...V1.link, exp: file.now - 3600 }));
+  assert.throws(() => readPairingLink(expired, NOW), { code: 'expired' });
+  for (const now of [NaN, undefined, null, Infinity, -Infinity, String(NOW), BigInt(NOW)]) {
+    for (const url of [expired, V1.url]) {
+      assert.throws(() => readPairingLink(url, /** @type {any} */ (now)), TypeError, String(now));
+    }
+  }
+});
+
 test('each error code has its screen', () => {
   /** @param {any} code */
   const m = (code) => linkErrorMessage(new PairingLinkError(code));
