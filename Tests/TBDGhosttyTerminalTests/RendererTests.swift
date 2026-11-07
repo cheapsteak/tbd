@@ -80,13 +80,21 @@ struct RendererTests {
 
     @Test func shaderSourceGuardsItsInclude() {
         let source = TerminalShaderSource.source
-        let headerEnd = source.range(of: TerminalShaderSource.header)?.upperBound
-        let guardStart = source.range(of: "#if !defined(TKZ_SHADER_TYPES_H)")?.lowerBound
-        #expect(headerEnd != nil, "the source does not start with the header")
-        #expect(guardStart != nil, "the shader's include is not guarded")
-        if let headerEnd, let guardStart {
-            #expect(headerEnd <= guardStart, "the header must come before the shader's guarded include")
+        // The directives themselves, matched as whole lines. The header's own comments quote the
+        // guard condition in prose, so a bare search for `#if !defined(...)` finds that first.
+        let guardedInclude = "\n#if !defined(TKZ_SHADER_TYPES_H)\n#include \"TBDGhosttyShaderTypes.h\"\n#endif\n"
+        #expect(source.hasPrefix(TerminalShaderSource.header), "the source does not start with the header")
+        let guardRange = source.range(of: guardedInclude)
+        #expect(guardRange != nil, "the shader's include of TBDGhosttyShaderTypes.h is not guarded")
+        if let guardRange {
+            let headerBytes = TerminalShaderSource.header.utf8.count
+            let guardOffset = source.utf8.distance(from: source.startIndex, to: guardRange.lowerBound)
+            #expect(headerBytes <= guardOffset, "the header must come before the shader's guarded include")
         }
+        // The guarded include must be the only one: an unguarded include asks the runtime
+        // compiler for a file it has no search path to find.
+        let includes = source.components(separatedBy: "\n#include \"TBDGhosttyShaderTypes.h\"").count - 1
+        #expect(includes == 1, "the source includes TBDGhosttyShaderTypes.h \(includes) times; only the guarded include may")
     }
 
     /// The same sizes the header's `_Static_assert`s pin. Swift sees the structs through the C
