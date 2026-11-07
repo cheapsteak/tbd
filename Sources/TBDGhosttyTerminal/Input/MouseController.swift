@@ -145,6 +145,9 @@ final class MouseController: NSObject {
     private var accumulator = ScrollAccumulator()
     private var autoscrollTask: Task<Void, Never>?
     private var autoscrollPosition = SurfacePoint(x: 0, y: 0)
+    /// Where the last reported press or drag was. A release sent on focus loss, with no event of
+    /// its own, goes out there.
+    private var lastReportPosition = SurfacePoint(x: 0, y: 0)
     /// The last move handled, and whether it was consumed. The tracking area and the responder
     /// chain both deliver a move, as the same `NSEvent`; whichever comes second is a repeat.
     private var lastMoved: (event: NSEvent, consumed: Bool)?
@@ -294,6 +297,7 @@ final class MouseController: NSObject {
         switch route {
         case .report:
             pendingReportReleases.insert(button)
+            lastReportPosition = position
             send(terminal.encodeMouse(
                 MousePress(action: .press, button: button, mods: mods, position: position)))
             return true
@@ -322,6 +326,7 @@ final class MouseController: NSObject {
            pendingReportReleases.contains(button) {
             // Motion must carry the *held* button: button-event tracking (1002) encodes it into
             // the drag report, and a nil button there makes the whole drag silent.
+            lastReportPosition = position
             send(terminal.encodeMouse(
                 MousePress(action: .motion, button: button, mods: mods, position: position)))
             return true
@@ -480,10 +485,18 @@ final class MouseController: NSObject {
     // MARK: - Focus
 
     /// Losing focus must reset the encoder: held buttons are embedder state, and a drag that ends
-    /// while another window is key would otherwise leave a button held forever.
+    /// while another window is key would otherwise leave a button held forever. Every reported
+    /// button still down is released first, so the program sees its release too: without it, a
+    /// program under button-event tracking (1002) goes on treating the button as held.
     func focusDidChange(_ isFocused: Bool) {
         guard !isFocused else { return }
-        view?.terminal.resetMouseEncoder()
+        if let view {
+            for button in pendingReportReleases {
+                send(view.terminal.encodeMouse(
+                    MousePress(action: .release, button: button, mods: [], position: lastReportPosition)))
+            }
+            view.terminal.resetMouseEncoder()
+        }
         pendingReportReleases.removeAll()
         accumulator.reset()
         if isSelecting {

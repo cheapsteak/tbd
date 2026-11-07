@@ -263,6 +263,39 @@ struct GhosttyTerminalViewTests {
                 "\(view.mouseController.pendingReportReleases) still wait for a release")
     }
 
+    /// Focus can leave in the middle of a drag, and the button's own release may then never reach
+    /// the view. The reported button is released as focus goes, so a program under button-event
+    /// tracking does not go on treating it as held.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func focusLossReleasesAReportedButton() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        view.windowVisibility = { _ in true }
+        view.setFrameSize(NSSize(width: 400, height: 200))
+        content.addSubview(view)
+        view.onSend = { recorder.sent.append($0) }
+        fixture.terminal.feed(text: "\u{1b}[?1002h\u{1b}[?1006h")
+        view.setFocused(true)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: NSPoint(x: 20, y: 100), in: window))
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: NSPoint(x: 80, y: 100), in: window))
+        view.setFocused(false)
+
+        let sent = recorder.sent
+        let releases = sent.filter { isSGRReport($0, button: 0, final: "m") }
+        #expect(sent.first.map { isSGRReport($0, button: 0, final: "M") } == true,
+                "the first report was \(String(describing: sent.first)), not a left press")
+        #expect(releases.count == 1, "focus loss sent \(releases.count) left releases; all reports: \(sent)")
+        #expect(sent.last.map { isSGRReport($0, button: 0, final: "m") } == true,
+                "the last report was \(String(describing: sent.last)), not the left release")
+        #expect(view.mouseController.pendingReportReleases.isEmpty,
+                "\(view.mouseController.pendingReportReleases) still wait for a release")
+    }
+
     /// Left and right come from the event's type, every phase of it. An event built with
     /// `NSEvent.mouseEvent(with:…)` has `buttonNumber` 0 whatever its type, so a mapping that read
     /// the number would call these right-button events left. Only an "other" event is read by its
