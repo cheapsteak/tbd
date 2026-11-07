@@ -34,7 +34,11 @@ struct Base64URLTests {
     }
 
     @Test func rejectsSpareBitsThatFoundationAccepts() {
-        #expect(Data(base64Encoded: "AB==") != nil)   // why the strict check exists
+        // Why the strict check exists: Foundation's decoder may accept
+        // non-zero spare bits, and reads the same byte as "AA==" when it does.
+        if let lenient = Data(base64Encoded: "AB==") {
+            #expect(lenient == Data([0]))
+        }
         #expect(Base64URL.decode("AB") == nil)
     }
 }

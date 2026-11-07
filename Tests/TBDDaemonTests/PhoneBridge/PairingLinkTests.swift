@@ -34,7 +34,7 @@ struct PairingLinkTests {
         let file = try PhoneTestVectors.load("pairing-link.json", as: PairingLinkFile.self)
         let now = Date(timeIntervalSince1970: file.now)
         let loaderURL = try #require(URL(string: file.loaderURL))
-        #expect(file.valid.count == 3)
+        #expect(file.valid.count == 9)
         for c in file.valid {
             let url = try #require(URL(string: c.url), "\(c.description)")
             #expect(try PairingLink.parse(url, now: now) == c.link, "\(c.description)")
@@ -47,7 +47,7 @@ struct PairingLinkTests {
     @Test func invalidVectors() throws {
         let file = try PhoneTestVectors.load("pairing-link.json", as: PairingLinkFile.self)
         let now = Date(timeIntervalSince1970: file.now)
-        #expect(file.invalid.count == 20)
+        #expect(file.invalid.count == 38)
         for c in file.invalid {
             let url = try #require(URL(string: c.url), "\(c.description)")
             do {
@@ -86,6 +86,40 @@ struct PairingLinkTests {
         #expect(try PairingLink.parse(url, now: Date(timeIntervalSince1970: 1_800_000_299)) == link)
         #expect(throws: PairingLinkError.expired) {
             _ = try PairingLink.parse(url, now: Date(timeIntervalSince1970: 1_800_000_300))
+        }
+    }
+
+    /// The loader's `TextDecoder` drops one leading byte order mark and
+    /// `JSON.parse` refuses a second, which `JSONDecoder` would skip.
+    @Test func refusesASecondByteOrderMark() throws {
+        let link = Self.link(exp: 2_000_000_000)
+        let now = Date(timeIntervalSince1970: 1_999_999_999)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let json = try encoder.encode(link)
+        let mark = Data([0xEF, 0xBB, 0xBF])
+        let oneMark = try #require(URL(string: "https://acme-loader.github.io/#p=" + Base64URL.encode(mark + json)))
+        let twoMarks = try #require(
+            URL(string: "https://acme-loader.github.io/#p=" + Base64URL.encode(mark + mark + json))
+        )
+        #expect(try PairingLink.parse(oneMark, now: now) == link)
+        #expect(throws: PairingLinkError.badJSON) {
+            _ = try PairingLink.parse(twoMarks, now: now)
+        }
+    }
+
+    /// No vector pins the relay host's 253-byte limit, so this checks both
+    /// sides of it.
+    @Test func relayHostIsAtMost253Bytes() throws {
+        let now = Date(timeIntervalSince1970: 1_999_999_999)
+        let longestHost = String(repeating: "a.", count: 126) + "a"
+        var link = Self.link(exp: 2_000_000_000)
+        link.relay = "https://" + longestHost
+        #expect(try PairingLink.parse(link.url(loaderURL: Self.loaderURL), now: now) == link)
+        link.relay = "https://" + longestHost + "a"
+        let tooLong = link.url(loaderURL: Self.loaderURL)
+        #expect(throws: PairingLinkError.badField("relay")) {
+            _ = try PairingLink.parse(tooLong, now: now)
         }
     }
 

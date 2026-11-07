@@ -102,9 +102,28 @@ const linkPayload = (object) => textPayload(sortedJSON(object));
 const linkURL = (payload) => `${loaderURL}#p=${payload}`;
 /** The main link with some fields replaced. @param {Record<string, unknown>} fields */
 const changedLinkURL = (fields) => linkURL(linkPayload({ ...mainLink, ...fields }));
+/** A link whose payload is exactly these bytes. @param {Uint8Array} bytes */
+const bytesLinkURL = (bytes) => linkURL(base64url(bytes));
+
+/**
+ * `text` with its one occurrence of `from` replaced by `to`. Builds JSON text
+ * that `JSON.stringify` never writes, such as another spelling of a number.
+ * @param {string} text @param {string} from @param {string} to
+ */
+function replaceOnce(text, from, to) {
+  const at = text.indexOf(from);
+  if (at === -1 || text.includes(from, at + 1)) throw new Error(`expected exactly one ${from} in ${text}`);
+  return text.slice(0, at) + to + text.slice(at + from.length);
+}
 
 function pairingLinkVectors() {
   const mainPayload = linkPayload(mainLink);
+  const mainJSON = sortedJSON(mainLink);
+  const mainBytes = encoder.encode(mainJSON);
+  const mainExp = `"exp":${mainLink.exp}`;
+  /** The main link's JSON text with one piece of text replaced. @param {string} from @param {string} to */
+  const respelledLinkURL = (from, to) => linkURL(textPayload(replaceOnce(mainJSON, from, to)));
+  if (!mainJSON.endsWith('"v":1}')) throw new Error('the main JSON no longer ends with "v":1}; revisit the v cases');
 
   let truncatedLength = mainPayload.length - 1;
   while (truncatedLength % 4 !== 1) truncatedLength -= 1;
@@ -113,6 +132,17 @@ function pairingLinkVectors() {
   if (!mainLink.room.endsWith('8')) throw new Error('the room no longer ends in 8; revisit the spare-bits case');
 
   const v2Link = { ...mainLink, relay: 'http://localhost:8787', name: 'a', exp: now + 1 };
+  const v4Link = { ...mainLink, name: `${'’'.repeat(85)}x` };
+  const v5Link = { ...mainLink, relay: 'http://127.0.0.1:8787' };
+  const v6Link = { ...mainLink, exp: Number.MAX_SAFE_INTEGER };
+  const v8Link = { ...mainLink, relay: 'https://acme-relay.acme.workers.dev:8443' };
+  /** The main link with another relay, which fails. @param {string} description @param {string} relay */
+  const relayCase = (description, relay) => ({
+    description,
+    url: changedLinkURL({ relay }),
+    error: 'badField',
+    field: 'relay',
+  });
 
   const invalid = [
     { description: 'no fragment', url: loaderURL, error: 'missingFragment' },
@@ -182,14 +212,74 @@ function pairingLinkVectors() {
     },
     { description: 'exp is 0', url: changedLinkURL({ exp: 0 }), error: 'badField', field: 'exp' },
     { description: 'exp equals now', url: changedLinkURL({ exp: now }), error: 'expired' },
+    {
+      description: 'the name is U+2019 repeated 86 times: 258 UTF-8 bytes, though only 86 UTF-16 units',
+      url: changedLinkURL({ name: '’'.repeat(86) }),
+      error: 'badField',
+      field: 'name',
+    },
+    {
+      description: 'the payload is the main JSON text encoded as UTF-16LE with no byte order mark (built from bytes)',
+      url: bytesLinkURL(new Uint8Array(Buffer.from(mainJSON, 'utf16le'))),
+      error: 'badJSON',
+    },
+    {
+      description: 'the payload is ff fe followed by the main JSON text encoded as UTF-16LE (built from bytes)',
+      url: bytesLinkURL(Uint8Array.from([0xff, 0xfe, ...Buffer.from(mainJSON, 'utf16le')])),
+      error: 'badJSON',
+    },
+    {
+      description: 'the payload is the main JSON bytes with one 00 byte after the opening { (built from bytes)',
+      url: bytesLinkURL(Uint8Array.from([...mainBytes.subarray(0, 1), 0x00, ...mainBytes.subarray(1)])),
+      error: 'badJSON',
+    },
+    relayCase('the relay is plain http on 127.1, a loopback address but not the spelling 127.0.0.1', 'http://127.1:8787'),
+    relayCase('the relay has no // after https:', 'https:acme-relay.acme.workers.dev'),
+    relayCase('the relay port is 99999, above 65535', 'https://acme-relay.acme.workers.dev:99999'),
+    relayCase('the relay port is 0', 'https://acme-relay.acme.workers.dev:0'),
+    relayCase('the relay scheme is uppercase', 'HTTPS://acme-relay.acme.workers.dev'),
+    relayCase('the relay has a path, /', 'https://acme-relay.acme.workers.dev/'),
+    relayCase('the relay host is the dotted address 256.0.0.1', 'https://256.0.0.1'),
+    relayCase('the relay host has a label that starts with xn--', 'https://xn--acme.workers.dev'),
+    relayCase('the relay ends in a newline, the JSON escape \\n', `${mainLink.relay}\n`),
+    {
+      description: 'v is written as 1e20 (the main JSON text respelled)',
+      url: respelledLinkURL('"v":1}', '"v":1e20}'),
+      error: 'unsupportedVersion',
+    },
+    {
+      description: 'exp is written as 1e20 (the main JSON text respelled)',
+      url: respelledLinkURL(mainExp, '"exp":1e20'),
+      error: 'badField',
+      field: 'exp',
+    },
+    {
+      description: 'exp is 9007199254740992, one above the largest exact integer a double holds',
+      url: changedLinkURL({ exp: Number.MAX_SAFE_INTEGER + 1 }),
+      error: 'badField',
+      field: 'exp',
+    },
+    {
+      description: 'exp is written as 1800000300.5, not a whole number (the main JSON text respelled)',
+      url: respelledLinkURL(mainExp, `${mainExp}.5`),
+      error: 'badJSON',
+    },
+    {
+      description: 'the name is the JSON escape \\ud800, a lone surrogate (the main JSON text respelled)',
+      url: respelledLinkURL(`"name":${JSON.stringify(mainLink.name)}`, '"name":"\\ud800"'),
+      error: 'badJSON',
+    },
   ];
 
   return {
     description:
       'Pairing links: <loaderURL>#p=<base64url(UTF-8 JSON)>, base64url without padding, JSON keys sorted. ' +
       'Each valid url parses at now (unix seconds) to link, ignoring unknown fields; a canonical link also ' +
-      'encodes back to url. Each invalid url fails with error, and with field for badField. Field checks run ' +
-      'in the order relay, room, secret, key, name, exp. base64url lists strict decoder cases: valid text ' +
+      'encodes back to url. Each invalid url fails with error, and with field for badField. The payload holds ' +
+      'no 00 byte and may start with one UTF-8 byte order mark; v and exp are read as doubles and must be ' +
+      'whole. Field checks run in the order relay, room, secret, key, name, exp. relay is lowercase ' +
+      'https://HOST[:PORT], http://localhost[:PORT] or http://127.0.0.1[:PORT], with nothing after the host ' +
+      'or port. base64url lists strict decoder cases: valid text ' +
       `decodes to hex, and each invalid text decodes to nothing. ${generatedNote}`,
     loaderURL,
     now,
@@ -209,6 +299,42 @@ function pairingLinkVectors() {
         description: 'V3: an unknown field is ignored',
         link: mainLink,
         url: changedLinkURL({ future: true }),
+        canonical: false,
+      },
+      {
+        description: 'V4: a name of U+2019 repeated 85 times and x, exactly 256 UTF-8 bytes',
+        link: v4Link,
+        url: linkURL(linkPayload(v4Link)),
+        canonical: true,
+      },
+      {
+        description: 'V5: a loopback http relay spelled 127.0.0.1, with a port',
+        link: v5Link,
+        url: linkURL(linkPayload(v5Link)),
+        canonical: true,
+      },
+      {
+        description: 'V6: exp is 9007199254740991, the largest exact integer a double holds',
+        link: v6Link,
+        url: linkURL(linkPayload(v6Link)),
+        canonical: true,
+      },
+      {
+        description: 'V7: the payload is a UTF-8 byte order mark (ef bb bf) followed by the main JSON bytes (built from bytes)',
+        link: mainLink,
+        url: bytesLinkURL(Uint8Array.from([0xef, 0xbb, 0xbf, ...mainBytes])),
+        canonical: false,
+      },
+      {
+        description: 'V8: an https relay with a port',
+        link: v8Link,
+        url: linkURL(linkPayload(v8Link)),
+        canonical: true,
+      },
+      {
+        description: 'V9: exp is written as 1800000300.0, a whole number (the main JSON text respelled)',
+        link: mainLink,
+        url: respelledLinkURL(mainExp, `${mainExp}.0`),
         canonical: false,
       },
     ],
