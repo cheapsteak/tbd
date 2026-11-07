@@ -210,20 +210,30 @@ public enum GhosttySnapshotWriter {
         var liveOrigin: Bool
     }
 
-    /// The four reorderings, applied to the modes run at the head of the formatter's output.
+    /// The modes run at the head of the formatter's output, reordered for a SwiftTerm receiver.
     ///
     /// The formatter writes every mode that differs from its default, in its own enum order, before
     /// the tab stops (`CSI 3 g`) and the contents. A SwiftTerm receiver reads four things in that
     /// run differently from libghostty:
-    /// 1. Only one mouse tracking mode is in effect, but a mode stays set in libghostty's table when
-    ///    a later one replaces it, so after `?1003h ?1000h` the run holds both, lowest first, and
-    ///    the receiver would track any motion. Only the mode in effect is written.
-    /// 2. SwiftTerm refuses `?45h` while autowrap is off, and the run writes `?7l` first. `?45h`
-    ///    moves ahead of `?7l`.
+    /// 1. One mouse tracking mode and one report encoding are in effect, the ones set last, but
+    ///    libghostty's table keeps a mode set when a later one replaces it, and the run writes them
+    ///    in number order. After `?1003h ?1000h` the receiver would track any motion, and after
+    ///    `?1015h ?1006h` it would report in urxvt's encoding. Only the one of each in effect is
+    ///    written.
+    /// 2. Autowrap off and insert mode change how the contents print. The formatter writes a soft
+    ///    wrapped line as one run, which lays out only with autowrap on, and its contents and its
+    ///    pending-wrap cursor assume a printed character replaces the cell under it. So `?7l` and
+    ///    `CSI 4 h` go after everything the formatter writes. That also lands `?45h` while
+    ///    autowrap is on, which SwiftTerm needs: it refuses reverse wrap while autowrap is off.
     /// 3. On an alternate screen, SwiftTerm shows the cursor on every switch, so `?25l` moves after
     ///    the switch.
-    /// 4. On an alternate screen, origin mode written before the switch would be saved with the
-    ///    primary's cursor, so it moves after the switch, and the primary's own is put back.
+    /// 4. On an alternate screen, SwiftTerm saves origin mode, autowrap, reverse wrap and DECLRMM
+    ///    with the cursor on `?1049h` and puts them back on `?1049l`. libghostty keeps one value of
+    ///    each for both screens and saves only origin mode with its cursor, so it has no record of
+    ///    the primary's other three. Written before the switch, the alternate screen's values would
+    ///    be saved as the primary's, and stay after the program left. So all four take the
+    ///    alternate screen's values after the switch: the receiver saves the primary's origin mode,
+    ///    put back from libghostty's saved cursor, and the prelude's defaults for the other three.
     /// A run that does not parse as mode tokens is written as the formatter wrote it.
     static func reorderModes(_ formatted: [UInt8], live: VtTerminal, alternate: AlternateEntry?) -> [UInt8] {
         let tabClear: [UInt8] = Array("\u{1b}[3g".utf8)
@@ -236,32 +246,26 @@ public enum GhosttySnapshotWriter {
             return formatted
         }
 
-        // 1. Only the mouse tracking mode in effect.
-        let mouseModes: Set<Int> = [9, 1000, 1002, 1003]
-        if let first = tokens.firstIndex(where: { $0.decPrivate && mouseModes.contains($0.value) }),
-           let effective = effectiveMouseMode(live) {
-            tokens.removeAll { $0.decPrivate && mouseModes.contains($0.value) }
-            if effective != 0 { tokens.insert(.dec(effective, true), at: first) }
-        }
+        // 1. Only the mouse tracking mode and the report encoding in effect.
+        keepOnlyInEffect(&tokens, of: [9, 1000, 1002, 1003], inEffect: effectiveMouseMode(live))
+        keepOnlyInEffect(&tokens, of: [1005, 1006, 1015, 1016], inEffect: effectiveMouseEncoding(live))
 
-        // 2. Reverse wrap before autowrap goes off.
-        if let wrapOff = tokens.firstIndex(of: .dec(7, false)),
-           let reverseOn = tokens.firstIndex(of: .dec(45, true)), reverseOn > wrapOff {
-            let reverse = tokens.remove(at: reverseOn)
-            tokens.insert(reverse, at: wrapOff)
-        }
+        // 2. Autowrap off and insert mode after everything else.
+        let printing: [ModeToken] = [.dec(7, false), ModeToken(value: 4, decPrivate: false, isSet: true)]
+        let trailer = printing.filter { tokens.contains($0) }.flatMap(\.bytes)
+        tokens.removeAll { printing.contains($0) }
 
-        guard let alternate else { return tokens.flatMap(\.bytes) + formatted[end...] }
+        guard let alternate else { return tokens.flatMap(\.bytes) + formatted[end...] + trailer }
         let switches: Set<Int> = [47, 1047, 1049]
         guard let enter = tokens.lastIndex(where: { $0.decPrivate && $0.isSet && switches.contains($0.value) }) else {
             terminalEngineLog.error("libghostty handback: alternate screen with no switch mode in the formatter output")
-            return tokens.flatMap(\.bytes) + formatted[end...]
+            return tokens.flatMap(\.bytes) + formatted[end...] + trailer
         }
         var before = Array(tokens[..<enter])
-        var moved: [ModeToken] = []
-        // 3. The cursor is hidden after the switch shows it.
-        if before.contains(.dec(25, false)) { moved.append(.dec(25, false)) }
-        before.removeAll { $0 == .dec(25, false) || $0 == .dec(6, true) }
+        // 3. The cursor is hidden after the switch shows it. 4. Reverse wrap and DECLRMM are the
+        // alternate screen's, after the receiver saved the defaults; autowrap is already last.
+        var moved = [ModeToken.dec(25, false), .dec(45, true), .dec(69, true)].filter { before.contains($0) }
+        before.removeAll { moved.contains($0) || $0 == .dec(6, true) }
         // 4. Origin mode for the alternate screen, after the primary's is saved.
         if alternate.liveOrigin {
             moved.append(.dec(6, true))
@@ -274,7 +278,15 @@ public enum GhosttySnapshotWriter {
         let defaults = Array("\u{1b}[0m\u{1b}[0\"q\u{1b}(B\u{0f}".utf8)
         let head = (before + [tokens[enter]] + moved).flatMap(\.bytes)
         let tail = tokens[(enter + 1)...].flatMap(\.bytes)
-        return head + defaults + tail + formatted[end...]
+        return head + defaults + tail + formatted[end...] + trailer
+    }
+
+    /// Replaces the tokens that set any of `modes` with one that sets `inEffect`, at the first
+    /// one's place, or with none for 0. Left alone when the probe that read `inEffect` failed.
+    private static func keepOnlyInEffect(_ tokens: inout [ModeToken], of modes: Set<Int>, inEffect: Int?) {
+        guard let inEffect, let first = tokens.firstIndex(where: { $0.decPrivate && modes.contains($0.value) }) else { return }
+        tokens.removeAll { $0.decPrivate && modes.contains($0.value) }
+        if inEffect != 0 { tokens.insert(.dec(inEffect, true), at: first) }
     }
 
     /// Parses a run of `ESC [ [?] digits h|l`. nil when anything else is in it.
@@ -334,6 +346,69 @@ public enum GhosttySnapshotWriter {
             return 0
         } catch {
             terminalEngineLog.error("libghostty handback: mouse mode probe failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// The mouse report encoding the terminal reports in: 1005, 1006, 1015 or 1016, or 0 for
+    /// X10's. libghostty reports in the encoding set last, and has no getter for it. So one motion
+    /// is encoded with the terminal's encoding under any-motion tracking, whatever the terminal
+    /// tracks, in a cell and at a pixel whose numbers tell the five apart. nil when the probe fails.
+    static func effectiveMouseEncoding(_ terminal: VtTerminal) -> Int? {
+        do {
+            let encoder = try GhosttyMouseEncoderHandle()
+            var event: GhosttyMouseEvent?
+            try ghosttyCheck(ghostty_mouse_event_new(nil, &event), "ghostty_mouse_event_new")
+            guard let event else {
+                throw GhosttyCallError(result: GHOSTTY_OUT_OF_MEMORY, operation: "ghostty_mouse_event_new")
+            }
+            defer { ghostty_mouse_event_free(event) }
+            try ghosttyCheck(
+                ghostty_mouse_encoder_set_from_terminal(encoder.raw, terminal), "ghostty_mouse_encoder_set_from_terminal")
+            var tracking = GHOSTTY_MOUSE_TRACKING_ANY
+            try ghosttyCheck(
+                ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &tracking), "MOUSE_ENCODER_OPT_EVENT")
+            // 300 columns of 10-pixel cells. The probe is in column 151, past the 95 in which X10's
+            // single bytes and UTF-8's characters still agree, at pixel 1505.
+            var size = TerminalPixelGeometry(screenWidth: 3_000, screenHeight: 100, cellWidth: 10, cellHeight: 10).ghostty
+            try ghosttyCheck(
+                ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size), "MOUSE_ENCODER_OPT_SIZE")
+            _ = ghostty_mouse_event_set_action(event, GHOSTTY_MOUSE_ACTION_MOTION)
+            _ = ghostty_mouse_event_clear_button(event)
+            _ = ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: 1_505, y: 5))
+            var report = [UInt8](repeating: 0, count: 64)
+            var written = 0
+            let result = report.withUnsafeMutableBufferPointer { buffer in
+                ghostty_mouse_encoder_encode(encoder.raw, event, buffer.baseAddress, buffer.count, &written)
+            }
+            try ghosttyCheck(result, "ghostty_mouse_encoder_encode")
+            guard let encoding = mouseEncoding(ofReport: report.prefix(written)) else {
+                terminalEngineLog.error("libghostty handback: the mouse encoding probe wrote \(written, privacy: .public) unreadable bytes")
+                return nil
+            }
+            return encoding
+        } catch {
+            terminalEngineLog.error("libghostty handback: mouse encoding probe failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Which encoding wrote the probe's report of column 151, row 1, pixel 1505: `ESC [ M` and
+    /// three single bytes for X10, with the column as two UTF-8 bytes for 1005; `ESC [ <` and the
+    /// column for 1006, or the pixel for 1016; `ESC [` and decimal fields for 1015.
+    static func mouseEncoding(ofReport report: ArraySlice<UInt8>) -> Int? {
+        let fields = Array(report)
+        guard fields.count > 3, fields[0] == 0x1b, fields[1] == 0x5b else { return nil }
+        switch fields[2] {
+        case 0x4d:
+            return fields.count > 6 ? 1005 : 0
+        case 0x3c:
+            let numbers = fields[3...].split(separator: 0x3b)
+            guard numbers.count >= 2 else { return nil }
+            return Array(numbers[1]) == Array("151".utf8) ? 1006 : 1016
+        case 0x30...0x39:
+            return 1015
+        default:
             return nil
         }
     }

@@ -136,6 +136,15 @@ extension GhosttyTerminalState {
         return ground
     }
 
+    /// The mouse tracking mode the terminal reports with: 9, 1000, 1002 or 1003, or 0 for none.
+    /// libghostty's mode table keeps a replaced mode set, so this, not `mode(_:)`, says which one
+    /// is in effect. nil when closed or when the probe fails.
+    var mouseTrackingInEffect: Int? { raw.flatMap { GhosttySnapshotWriter.effectiveMouseMode($0) } }
+
+    /// The mouse report encoding in effect: 1005, 1006, 1015 or 1016, or 0 for X10's. nil when
+    /// closed or when the probe fails.
+    var mouseEncodingInEffect: Int? { raw.flatMap { GhosttySnapshotWriter.effectiveMouseEncoding($0) } }
+
     /// The pen: the style the next printed character gets.
     var cursorStyle: GhosttyCellStyle {
         guard let raw else { return GhosttyCellStyle() }
