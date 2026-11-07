@@ -610,7 +610,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
     }
 
     /// Installs the view's frame request, replacing any other. It is called after the lock drops
-    /// whenever the screen may have changed. Returns the token that takes it off again.
+    /// whenever the screen may have changed, and once more by `close()`. Returns the token that
+    /// takes it off again.
     @discardableResult
     func setRenderSignal(_ signal: @escaping @Sendable () -> Void) -> RenderSignalToken {
         let (token, previous) = locked { core -> (RenderSignalToken, (@Sendable () -> Void)?) in
@@ -726,6 +727,10 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
     /// Frees the C terminal, under the lock, after what is bound to it. Idempotent. Every later
     /// call does nothing.
+    ///
+    /// A close calls the installed render signal one last time, after the lock, and takes it off.
+    /// That is how a view over the terminal hears the close: it stops its cursor blink, and it
+    /// never draws again.
     public func close() {
         let released = locked { core -> (bound: (any TerminalBoundObject)?, signal: (@Sendable () -> Void)?) in
             let bound = core.bound
@@ -741,6 +746,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
             core.context.pendingEffects.removeAll()
             return (bound, signal)
         }
+        // After the lock, as every render signal runs: a view reads `isClosed` from it.
+        released.signal?()
         // Dropped here, after the lock, so no deinit they trigger can run under it.
         _ = released
     }

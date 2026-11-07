@@ -448,9 +448,16 @@ public final class GhosttyTerminalView: NSView {
 
     // MARK: - Visibility and attachment
 
-    /// True while the view can be seen: in a window, not hidden, and the window not occluded.
+    /// True while the view can be seen and its terminal is open: in a window, not hidden, and the
+    /// window not occluded.
+    ///
+    /// A closed terminal never draws again, and the layer keeps the last frame it presented. Its
+    /// render state still holds that frame's rows, but their atlas positions point into a glyph
+    /// atlas shared with every view in the same font, which another view can clear. A new frame
+    /// would draw from whatever was packed there since.
     var canBuildFrames: Bool {
         surface.isAttached && window != nil && !isHiddenOrHasHiddenAncestor && !frameDriver.demand.isOccluded
+            && !terminal.isClosed
     }
 
     /// Attaches the surface while the view has a window and is not hidden, and detaches it
@@ -483,7 +490,7 @@ public final class GhosttyTerminalView: NSView {
         surface.isFocused = isTerminalFocused
         surface.cursorBlinkOn = true
         let target = selfRef
-        let relay = RenderSignalRelay { target.object?.frameDriver.requestFrame() }
+        let relay = RenderSignalRelay { target.object?.renderSignalled() }
         self.relay = relay
         renderSignalToken = terminal.setRenderSignal { [weak relay] in relay?.signal() }
         // While detached the view took no frames, so the watchdog's record of when mode 2026
@@ -554,6 +561,17 @@ public final class GhosttyTerminalView: NSView {
 
     /// Asks for a frame on the next display tick.
     func requestFrame() {
+        frameDriver.requestFrame()
+    }
+
+    /// The terminal's render signal, on the main thread. `close()` signals one last time, and the
+    /// view stops its cursor blink then and asks for no frame, so nothing keeps waking a view that
+    /// will never draw again.
+    private func renderSignalled() {
+        guard !terminal.isClosed else {
+            stopBlink()
+            return
+        }
         frameDriver.requestFrame()
     }
 
@@ -844,10 +862,10 @@ public final class GhosttyTerminalView: NSView {
 
     /// The blink is a timer on the injected clock, not a display-link demand: it flips
     /// `surface.cursorBlinkOn`, which marks the surface dirty, which wakes the link for one frame.
-    /// It runs only while the view is attached and focused.
+    /// It runs only while the view is attached and focused, and never once the terminal is closed.
     private func startBlinkIfNeeded() {
         stopBlink()
-        guard surface.isAttached, isTerminalFocused, !surface.isCursorSuppressed else { return }
+        guard surface.isAttached, isTerminalFocused, !surface.isCursorSuppressed, !terminal.isClosed else { return }
         let clock = self.clock
         let target = selfRef
         blinkTask = Task { @MainActor in
@@ -877,6 +895,11 @@ public final class GhosttyTerminalView: NSView {
     /// program stops the blink — a steady style, or the cursor hidden — this puts the phase back
     /// on instead of toggling, so the cursor does not stay hidden in the off phase.
     func blinkTick() {
+        // The close's own signal stops the blink. This catches a tick already due when it lands.
+        guard !terminal.isClosed else {
+            stopBlink()
+            return
+        }
         guard surface.isAttached, isTerminalFocused else { return }
         guard surface.cursor.isBlinking, surface.cursor.isVisible else {
             if !surface.cursorBlinkOn {

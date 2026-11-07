@@ -16,17 +16,18 @@ private final class ViewRecorder {
     var terminalSizesSeen: [[Int]] = []
 }
 
-/// An 80×24 terminal and a view over it in a 13 pt monospaced font.
+/// An 80×24 terminal and a view over it in a monospaced font, 13 pt unless a test needs a render
+/// context, and so a glyph atlas, that no other test's view shares.
 @MainActor
 private struct ViewFixture {
     let terminal: GhosttyTerminal
     let view: GhosttyTerminalView
     let appearance: GhosttyAppearance
 
-    init(clock: any Clock<Duration> = ContinuousClock()) throws {
+    init(clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13) throws {
         terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
         appearance = GhosttyAppearance(
-            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
             foreground: .init(r: 0xDD, g: 0xDD, b: 0xDD),
             background: .init(r: 0x10, g: 0x10, b: 0x10),
             cursor: .init(r: 0xFF, g: 0xFF, b: 0xFF))
@@ -444,6 +445,70 @@ struct GhosttyTerminalViewTests {
         try await clock.requireAdvanceWhenArmed(by: GhosttyTerminalView.blinkInterval, timeout: TestDeadlines.saturatedPass)
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         #expect(view.surface.cursorBlinkOn, "the tick after the cursor went steady left the blink phase off")
+    }
+
+    /// A closed terminal never draws again. Its rows still hold positions in the glyph atlas,
+    /// which every view in the same font shares and another view can clear. So the close stops
+    /// the blink timer, and no frame asked for afterwards is drawn: the layer keeps the last one.
+    @Test(.clockDriven, .enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aClosedTerminalDrawsNoNewFrames() async throws {
+        let clock = EventDrivenTestClock()
+        // A size no other test uses, so the atlas this test clears is this view's alone.
+        let fixture = try ViewFixture(clock: clock, fontSize: 11.5)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+
+        // Drawn once, with a blinking cursor and the blink timer running.
+        fixture.terminal.feed(text: "\u{1b}[1 qabout to close")
+        view.renderTick()
+        try #require(view.framesCommitted >= 1, "the view committed no frame before the close")
+        view.setFocused(true)
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+
+        fixture.terminal.close()
+        let stopped = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { !clock.hasSleeper }
+        if stopped == .timedOut { Issue.record("the blink timer was still running after the close") }
+        let committedAtClose = view.framesCommitted
+
+        // Another surface on the shared renderer clears the atlas. A block the size of the atlas
+        // clears it once and fills it, so the other surface's "B" fits nowhere and clears it again.
+        let renderer = view.renderContext.renderer
+        let atlas = renderer.glyphCache.grayscale
+        let edge = atlas.size
+        try #require(atlas.insert(pixels: [UInt8](repeating: 0, count: edge * edge),
+                                  width: edge, height: edge, bytesPerRow: edge) != nil)
+        let rebuildsBeforeOther = atlas.rebuildCount
+        let otherTerminal = try GhosttyTerminal(
+            cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { otherTerminal.close() }
+        otherTerminal.feed(text: "B")
+        let other = TerminalSurface()
+        try other.attach(otherTerminal)
+        let size = renderer.drawableSize(columns: 10, rows: 3)
+        let texture = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
+        try renderer.render(surface: other, to: texture).commandBuffer?.waitUntilCompleted()
+        try #require(atlas.rebuildCount == rebuildsBeforeOther + 1,
+                     "the other surface's frame cleared the atlas \(atlas.rebuildCount - rebuildsBeforeOther) times, not once")
+
+        // Several blink periods pass. Each one also delivers the tick and every kind of frame
+        // request by hand, so a timer that did not stop, or a guard that let a frame through,
+        // shows up as a commit.
+        for _ in 0..<4 {
+            await clock.advance(by: GhosttyTerminalView.blinkInterval)
+            view.blinkTick()
+            view.requestFrame()
+            view.renderTick()
+            view.renderNow()
+        }
+        #expect(!clock.hasSleeper, "the blink timer is running again after the close")
+        #expect(view.framesCommitted == committedAtClose,
+                "the closed view committed \(view.framesCommitted - committedAtClose) frames")
     }
 
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
