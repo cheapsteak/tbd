@@ -175,21 +175,40 @@ Durable Object time.
 
 **API v1.** This is a stable contract. TBD supports it for good.
 
-- **`GET /v1/info`** – returns `{"name":"tbd-relay","version":"<semver>","api":[1]}`.
+- **`GET /v1/info`** – returns `{"name":"tbd-relay","version":"<semver>","api":[1]}` with
+  `Content-Type: application/json` and `Cache-Control: no-store`.
 - **`GET /v1/rooms/<roomID>?role=laptop|phone`** – opens a WebSocket. A room ID is 43 base64url
-  characters (32 bytes), and anything else gets 404. Each role has one socket per room. A new socket
-  for a role closes the old one with code 4000.
+  characters (32 bytes). Each role has one socket per room. A new socket for a role closes the old
+  one with code 4000 and reason `replaced`.
 - **`GET /v1/rooms/<roomID>/presence`** – returns `{"laptop":true}` while the room has an open
-  laptop socket and `{"laptop":false}` otherwise, with `Access-Control-Allow-Origin: *` and
-  `Cache-Control: no-store`. The room ID rule is the same. It opens no socket and displaces no one,
-  so the loader's laptops list asks it whether each paired laptop is online: joining the room as a
-  phone would close another tab's phone socket with code 4000.
-- **Forwarded frames are binary,** at most 64 KiB, and pass to the other role unchanged. When the
-  other role is not connected, the relay drops the frame. It never queues.
-- **Relay signals are text,** so they cannot be confused with forwarded frames: `peer-joined`,
-  `peer-left`, and `peer-absent`. The last is sent to a joining phone when no laptop is connected.
-- **Keepalive** uses Cloudflare's WebSocket auto-response for a `ping` text frame, so a keepalive
-  never wakes the Durable Object. Both sides send one every 30 seconds.
+  laptop socket and `{"laptop":false}` otherwise, with `Content-Type: application/json`,
+  `Access-Control-Allow-Origin: *` and `Cache-Control: no-store`. The room ID rule is the same. It
+  opens no socket and displaces no one, so the loader's laptops list asks it whether each paired
+  laptop is online: joining the room as a phone would close another tab's phone socket with code
+  4000. Its 405 response carries the same `Access-Control-Allow-Origin` header.
+- **HTTP status codes.** A path that is not `/`, `/v1/info`, `/v1/rooms/<roomID>` or
+  `/v1/rooms/<roomID>/presence` gets 404, and a malformed room ID is checked first, whatever the
+  method. A method other than GET gets 405 with `Allow: GET`. A room URL without exactly one `role`
+  parameter equal to `laptop` or `phone` gets 400. A room URL without `Upgrade: websocket` gets 426.
+  `GET /` answers 200 with a one-line text page and is not part of the API.
+- **Forwarded frames are binary,** at most 65,536 bytes, and pass to the other role unchanged. When
+  the other role is not connected, the relay drops the frame. It never queues. A larger frame is
+  not forwarded: the relay closes the sender with code 1009 and reason `frame too large`, and the
+  other role gets `peer-left`. A socket the relay is closing sends nothing more, so a replaced
+  socket's last frames never reach the new session.
+- **Text frames from clients are never forwarded,** so no client can forge a relay signal. The one
+  exception is the keepalive below, which the runtime answers.
+- **Relay signals are text,** so they cannot be confused with forwarded frames.
+  - `peer-joined` goes to both sockets when a socket joins and the other role has an open socket.
+    It always means a new peer socket, so the receiver resets its channel: any Noise session with
+    the previous peer socket is over.
+  - `peer-absent` goes to a joining phone when no laptop socket is open. A laptop that joins an
+    empty room gets no signal.
+  - `peer-left` goes to the other role when a socket closes or errors and no open socket of its
+    role remains. A socket closed with 4000 because a new one replaced it causes no `peer-left`. A
+    `peer-left` can repeat in rare races, so receivers treat it as idempotent.
+- **Keepalive** uses Cloudflare's WebSocket auto-response: the text frame `ping` gets the answer
+  `pong`, and a keepalive never wakes the Durable Object. Both sides send one every 30 seconds.
 
 **Versions and updates.**
 
