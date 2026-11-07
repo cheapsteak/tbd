@@ -1883,20 +1883,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 viewHolder.clear()
                 return
             }
-            // The engine is captured, but its absence does **not** cancel the
-            // detach. A panel with no engine would otherwise skip the handback
-            // entirely — and with it the release of the daemon's viewer claim,
-            // which is the bricked session this whole path exists to prevent.
-            // Losing the screen costs a repaint; losing the release costs the
-            // session.
+            // The coordinator holds its engine strongly from `makeNSView`, which
+            // sets it before any attach can start, and never clears it, so a
+            // panel handing its session back always has the screen it drew.
+            // The engine is optional only because the property is; were it
+            // missing, the detach would still go out with an empty preamble,
+            // since releasing the daemon's viewer claim matters more than the
+            // screen.
             let engine = self.engine
-            if engine == nil {
-                logger.error("""
-                    terminal \(self.panelID, privacy: .public) is handing its session back with \
-                    no screen: it has no terminal engine, so the daemon resumes \
-                    from whatever it last saw
-                    """)
-            }
             let client = resolvedHolderAttachClient(appState)
             let panelID = self.panelID
             let ledger = handbackLedger(appState)
