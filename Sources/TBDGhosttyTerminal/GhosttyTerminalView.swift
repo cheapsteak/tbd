@@ -251,8 +251,8 @@ public final class GhosttyTerminalView: NSView {
     /// The terminal this view draws.
     public let terminal: GhosttyTerminal
 
-    /// The appearance last applied.
-    public private(set) var appearance: GhosttyAppearance
+    /// The appearance last applied. Not `appearance`: that is `NSView`'s light or dark appearance.
+    public private(set) var terminalAppearance: GhosttyAppearance
 
     /// Bytes the user produced: keys, paste, focus reports and mouse reports. Main thread.
     public var onSend: (@MainActor ([UInt8]) -> Void)?
@@ -342,7 +342,7 @@ public final class GhosttyTerminalView: NSView {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         renderContext = try TerminalRenderContext.shared(font: appearance.font, scale: scale, device: device)
         self.terminal = terminal
-        self.appearance = appearance
+        terminalAppearance = appearance
         self.clock = clock
         mouseController = MouseController(clock: clock)
         let size = terminal.withLocked { (cols: $0.cols, rows: $0.rows) }
@@ -400,8 +400,8 @@ public final class GhosttyTerminalView: NSView {
     /// colours change under any a program set, and a new font rebuilds the glyph atlas and
     /// re-fits the grid.
     public func apply(_ appearance: GhosttyAppearance) {
-        let fontChanged = appearance.font != self.appearance.font
-        self.appearance = appearance
+        let fontChanged = appearance.font != terminalAppearance.font
+        terminalAppearance = appearance
         terminal.apply(appearance)
         if fontChanged { useRenderContext(font: appearance.font, scale: renderContext.scale) }
         surface.markNeedsDisplay()
@@ -657,7 +657,7 @@ public final class GhosttyTerminalView: NSView {
     private func applyBackingScale(_ scale: CGFloat) {
         metalLayer?.contentsScale = scale
         updateDrawableSize()
-        useRenderContext(font: appearance.font, scale: scale)
+        useRenderContext(font: terminalAppearance.font, scale: scale)
         pendingGridResize = true
         applyPendingGridResize()
         requestFrame()
@@ -775,8 +775,13 @@ public final class GhosttyTerminalView: NSView {
         }
         framesBuilt += 1
         let target = selfRef
-        let presented: (@Sendable () -> Void)? = onFramePresented == nil ? nil : {
-            Task { @MainActor in target.object?.onFramePresented?() }
+        // A statement body, not a bare `Task {}`: as a single expression the closure would return
+        // the Task and no longer be a `() -> Void`.
+        var presented: (@Sendable () -> Void)?
+        if onFramePresented != nil {
+            presented = { @Sendable in
+                _ = Task { @MainActor in target.object?.onFramePresented?() }
+            }
         }
         do {
             try renderContext.renderer.render(

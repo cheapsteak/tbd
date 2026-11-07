@@ -129,7 +129,11 @@ private struct TextPayload {
 
 /// `GhosttyMimeReaderFn`: hand the whole representation to the writer in one call.
 /// Must not capture context — userdata carries it (see the contract at the top of this file).
-private let readTextPayload: GhosttyMimeReaderFn = { userdata, _, writer in
+/// A function rather than a global closure constant, like the terminal's own callbacks, so there
+/// is no global state for strict concurrency checking to question.
+private func readTextPayload(
+    _ userdata: UnsafeMutableRawPointer?, _ mime: GhosttyString, _ writer: GhosttyWriter
+) -> Bool {
     guard let userdata, let write = writer.write else { return false }
     let payload = userdata.assumingMemoryBound(to: TextPayload.self).pointee
     guard let base = payload.base, payload.count > 0 else { return true }
