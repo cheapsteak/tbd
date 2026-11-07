@@ -1,7 +1,13 @@
+import AppKit
 import Foundation
 import SwiftTerm
+// Scoped, not a whole-module import: `TBDShared.Terminal` is the DB row model,
+// and every bare `Terminal` in this file means SwiftTerm's emulator.
+import struct TBDShared.SidecarScreenRequest
 import Testing
+@testable import TBDApp
 @testable import TBDTerminalSerialization
+import TestSupport
 
 /// Snapshots of screens that end in blank rows or hold blank cells with a
 /// background colour, round-tripped through the `SnapshotPair` fixture from
@@ -148,6 +154,26 @@ struct TerminalSnapshotBlankRowTests {
                 "a screen with no history walks as its text alone")
     }
 
+    // MARK: - Captures
+
+    @Test("A capture drops the blank rows below a cleared screen's text, and a replay keeps them")
+    func captureDropsTrailingBlankRows() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        pair.source.feed(
+            text: Self.numberedLines(60) + "\u{1b}[H\u{1b}[2J$ ls\r\na  b  c\r\n$ ")
+
+        // 37 rows of history and three of text, with nothing after the prompt:
+        // a revive prints this, so a blank row here pushes its prompt down.
+        let capture = TerminalCellWalk.styledCapture(of: pair.source, maxScrollbackLines: 500)
+        #expect(capture.components(separatedBy: "\r\n").count == 40)
+        #expect(capture.hasSuffix("$ \u{1b}[0m"))
+
+        // A replay of the same screen keeps all 61 rows, because the receiver's
+        // scroll depends on them.
+        let replay = TerminalCellWalk.styledHistory(of: pair.source, maxScrollbackLines: 500)
+        #expect(replay.components(separatedBy: "\r\n").count == 61)
+    }
+
     // MARK: - Blank cells with a background colour
 
     @Test("Erasing under a background colour keeps the colour", arguments: [
@@ -210,5 +236,43 @@ struct TerminalSnapshotBlankRowTests {
         #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0)
         Self.expectSameScreen(pair)
         #expect(Self.history(of: pair.fresh).count == 6)
+    }
+}
+
+/// The viewer's half of the Closed Terminals capture, through the production
+/// path a `screenRequest` takes. The daemon's half calls the same capture walk
+/// (`HolderReader.closedTerminalCapture`), which this target cannot import.
+@Suite("Closed-terminal capture of a cleared screen")
+@MainActor
+struct TerminalCaptureBlankRowTests {
+    @Test("A viewer's capture of a cleared screen ends at the prompt")
+    func viewerCaptureEndsAtThePrompt() throws {
+        // Isolated defaults, per `Tests/CLAUDE.md`, as `ViewerScreenProducerTests` does.
+        let suite = TestDefaultsSuite("TBDAppTests.CaptureBlankRows")
+        defer { suite.tearDown() }
+        let view = TBDTerminalView(
+            frame: CGRect(x: 0, y: 0, width: 600, height: 300),
+            font: TBDTerminalView.defaultMonospaceFont,
+            appearance: AppearanceSettings(defaults: suite.defaults))
+        // Enough lines to scroll whatever grid this frame gives, then `clear`
+        // and a short exchange, which leaves blank rows below the prompt.
+        let input = (1...200).map { "line \($0)\r\n" }.joined()
+            + "\u{1b}[H\u{1b}[2J$ ls\r\na  b  c\r\n$ "
+        view.withTerminal { $0.feed(text: input) }
+
+        let request = SidecarScreenRequest(
+            terminalID: UUID(), requestID: UUID(), requestedLines: 50,
+            retainedScrollbackLines: 5_000, wantStyledCapture: true)
+        let now = ContinuousClock.now
+        let answer = ViewerScreenProducer.answer(
+            for: request, terminalView: view, lastByteAt: nil, attachedAt: now, now: now)
+        let capture = try #require(answer.styledCapture)
+
+        // The shape ends in one `\n`, so the last component is empty and the
+        // one before it is the capture's last line, which must be the prompt.
+        let lines = capture.components(separatedBy: "\n")
+        #expect(lines.last == "")
+        #expect(lines.dropLast().last?.contains("$ ") == true,
+                "the capture ends in blank rows, which a revive prints above its prompt")
     }
 }

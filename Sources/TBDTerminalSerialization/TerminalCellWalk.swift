@@ -22,8 +22,27 @@ import SwiftTerm
 /// scrollback (the same rule `ReplayWriter.assemble` follows for the same
 /// reason).
 public enum TerminalCellWalk {
+    /// The retained scrollback plus viewport, for replaying into a fresh
+    /// terminal: the history half of `TerminalSnapshotWriter`'s preamble.
+    /// Trailing blank rows stay whenever the walk holds history, because the
+    /// receiver's scroll depends on them (see `lines`).
     public static func styledHistory(of terminal: Terminal, maxScrollbackLines: Int) -> String {
-        join(lines(of: terminal, maxScrollbackLines: maxScrollbackLines), cols: terminal.cols)
+        join(
+            lines(of: terminal, maxScrollbackLines: maxScrollbackLines, purpose: .replay),
+            cols: terminal.cols)
+    }
+
+    /// The same walk for a capture that is printed rather than replayed: the
+    /// Closed Terminals file that `HolderReader.closedTerminalCapture` and
+    /// `ViewerScreenProducer` both write, which a revive `cat`s under its own
+    /// banner. No receiver scrolls through it, so trailing blank rows always
+    /// go: kept, each would push the revived prompt one more line below the
+    /// session's last line. Both stores call this, so their captures stay
+    /// identical.
+    public static func styledCapture(of terminal: Terminal, maxScrollbackLines: Int) -> String {
+        join(
+            lines(of: terminal, maxScrollbackLines: maxScrollbackLines, purpose: .capture),
+            cols: terminal.cols)
     }
 
     public static func styledViewport(of terminal: Terminal) -> String {
@@ -54,7 +73,16 @@ public enum TerminalCellWalk {
         return out
     }
 
-    private static func lines(of terminal: Terminal, maxScrollbackLines: Int) -> [BufferLine] {
+    /// What a walk is for, which decides whether its trailing blank rows may
+    /// go.
+    private enum Purpose {
+        case replay
+        case capture
+    }
+
+    private static func lines(
+        of terminal: Terminal, maxScrollbackLines: Int, purpose: Purpose
+    ) -> [BufferLine] {
         // `Buffer.lines` is internal and there is no public line count, so the
         // only way to enumerate is to walk from the oldest retained row until
         // the accessor stops answering. See HolderReader.swift:893-906.
@@ -74,7 +102,7 @@ public enum TerminalCellWalk {
 
         var walked = rows.compactMap { terminal.getScrollInvariantLine(row: $0) }
 
-        // Trailing blank rows are dropped only when the walk holds no row
+        // A replay drops trailing blank rows only when the walk holds no row
         // above the viewport. The receiver starts on an erased screen with
         // the cursor at home, and once it reaches its bottom row, every
         // further row it is sent scrolls one row into its scrollback. So a
@@ -94,10 +122,13 @@ public enum TerminalCellWalk {
         // wrapped continuation is never dropped, and a blank row earlier in
         // the walk is real content and stays.
         //
+        // A capture always drops them: it is printed, not replayed, so there
+        // is no scroll to protect (see `styledCapture`).
+        //
         // `styledViewport` does not apply this trim: on the alt screen a blank
         // trailing row is the application's own layout, not unused padding.
         let holdsHistory = walked.count > viewportRows
-        if !holdsHistory {
+        if purpose == .capture || !holdsHistory {
             while let last = walked.last, !last.isWrapped, visibleLength(of: last) == 0 {
                 walked.removeLast()
             }
