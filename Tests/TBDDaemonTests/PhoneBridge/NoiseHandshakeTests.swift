@@ -4,6 +4,8 @@ import Testing
 
 @testable import TBDDaemonLib
 
+/// Tier 1 — pure computation over random keys; no files, no daemon, no
+/// clock, no subprocesses, no network.
 @Suite("Phone channel: handshakes")
 struct NoiseHandshakeTests {
     private static let devicePayload = Data(#"{"deviceName":"iPhone"}"#.utf8)

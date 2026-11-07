@@ -26,6 +26,9 @@ struct PairingLinkFile: Decodable {
     let invalid: [Invalid]
 }
 
+/// Tier 1 — pure computation over the committed vectors in
+/// `phone/test-vectors/pairing-link.json`, with fixed dates passed as `now`;
+/// no daemon, no clock, no subprocesses, no network.
 @Suite("Phone channel: pairing link")
 struct PairingLinkTests {
     private static let loaderURL = URL(string: "https://acme-loader.github.io/")!

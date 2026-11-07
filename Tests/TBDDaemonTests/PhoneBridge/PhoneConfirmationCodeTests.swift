@@ -14,6 +14,9 @@ struct ConfirmationCodeFile: Decodable {
     let cases: [Case]
 }
 
+/// Tier 1 — pure computation over the committed vectors in
+/// `phone/test-vectors/confirmation-code.json`; no daemon, no clock,
+/// no subprocesses, no network.
 @Suite("Phone channel: confirmation code")
 struct PhoneConfirmationCodeTests {
     @Test func sharedVectors() throws {

@@ -3,6 +3,9 @@ import Foundation
 /// Loads the phone channel's shared vectors from `phone/test-vectors/`, the
 /// files the loader's Node tests read too, and makes the bytes the phone
 /// channel's tests feed it.
+///
+/// Tier 1 — it reads only those committed files and makes bytes in memory;
+/// no daemon, no clock, no subprocesses, no network.
 enum PhoneTestVectors {
     static func load<T: Decodable>(_ fileName: String, as type: T.Type) throws -> T {
         // This file sits in Tests/TBDDaemonTests/PhoneBridge, four levels

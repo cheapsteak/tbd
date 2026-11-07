@@ -18,6 +18,9 @@ struct Base64URLVectors: Decodable {
     let invalid: [String]
 }
 
+/// Tier 1 — pure computation over the committed vectors in
+/// `phone/test-vectors/pairing-link.json`; no daemon, no clock,
+/// no subprocesses, no network.
 @Suite("Phone channel: base64url")
 struct Base64URLTests {
     @Test func sharedVectors() throws {

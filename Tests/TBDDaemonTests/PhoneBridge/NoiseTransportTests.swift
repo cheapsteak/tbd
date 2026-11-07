@@ -23,6 +23,9 @@ struct FramingFile: Decodable {
     let prologue: Prologue
 }
 
+/// Tier 1 — pure computation over the committed vectors in
+/// `phone/test-vectors/framing.json`; no daemon, no clock,
+/// no subprocesses, no network.
 @Suite("Phone channel: transport")
 struct NoiseTransportTests {
     private static let p = Data(repeating: 0x50, count: 32)

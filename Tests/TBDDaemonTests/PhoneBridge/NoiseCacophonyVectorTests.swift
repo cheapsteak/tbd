@@ -96,6 +96,9 @@ extension CacophonyFile.Vector {
     }
 }
 
+/// Tier 1 — pure computation over the committed vectors in
+/// `phone/test-vectors/noise-cacophony.json`; no daemon, no clock,
+/// no subprocesses, no network.
 @Suite("Phone channel: cacophony vectors")
 struct NoiseCacophonyVectorTests {
     private static func vectors() throws -> [CacophonyFile.Vector] {
