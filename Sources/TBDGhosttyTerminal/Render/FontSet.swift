@@ -49,8 +49,13 @@ final class FontSet {
 
     /// True when the family has no real bold face and bold must be synthesized (fill + stroke).
     let needsSyntheticBold: Bool
-    /// True when the family has no real italic face and italics must be synthesized (skew).
+    /// True when an italic face had to be made by slanting an upright one by
+    /// `syntheticItalicSkew`, because the family has no such face.
     let needsSyntheticItalic: Bool
+
+    /// The slant of a synthesized italic, in radians from the vertical: the shear a face's
+    /// matrix gets when the family has no italic of its own.
+    static let syntheticItalicSkew: CGFloat = 0.2
 
     private let faces: [FontStyle: CTFont]
     private let regular: CTFont
@@ -85,14 +90,32 @@ final class FontSet {
         var faces: [FontStyle: CTFont] = [.regular: base]
         var syntheticBold = false
         var syntheticItalic = false
+        // `allCases` runs bold and italic before bold italic, which builds on them.
         for style in FontStyle.allCases where style != .regular {
             if let face = CTFontCreateCopyWithSymbolicTraits(
                 base, pixelSize, nil, style.symbolicTraits, style.symbolicTraits) {
                 faces[style] = face
-            } else {
+                continue
+            }
+            // The family has no such face.
+            switch style {
+            case .regular:
+                break
+            case .bold:
+                // The regular face, which the rasterizer strokes heavier.
+                syntheticBold = true
                 faces[style] = base
-                if style.isBold { syntheticBold = true }
-                if style.isItalic { syntheticItalic = true }
+            case .italic:
+                syntheticItalic = true
+                faces[style] = FontSet.slanted(base, pixelSize: pixelSize)
+            case .boldItalic:
+                if syntheticBold {
+                    // No bold to slant: the italic face, real or slanted, stroked heavier.
+                    faces[style] = faces[.italic] ?? base
+                } else {
+                    syntheticItalic = true
+                    faces[style] = FontSet.slanted(faces[.bold] ?? base, pixelSize: pixelSize)
+                }
             }
         }
         let family = CTFontCopyFamilyName(base) as String
@@ -105,10 +128,17 @@ final class FontSet {
         self.needsSyntheticItalic = syntheticItalic
     }
 
+    /// `face` sheared by `syntheticItalicSkew`: the top of each glyph leans right. Caller holds
+    /// `coreTextLock`.
+    private static func slanted(_ face: CTFont, pixelSize: CGFloat) -> CTFont {
+        var skew = CGAffineTransform(a: 1, b: 0, c: tan(syntheticItalicSkew), d: 1, tx: 0, ty: 0)
+        return CTFontCreateCopyWithAttributes(face, pixelSize, &skew, nil)
+    }
+
     // MARK: - Lookup
 
-    /// The face for `style` (may be the regular face when the family lacks that face — see
-    /// `needsSyntheticBold` / `needsSyntheticItalic`).
+    /// The face for `style`. When the family lacks that face this is the regular face, or a
+    /// slanted copy of an upright one; see `needsSyntheticBold` and `needsSyntheticItalic`.
     func font(for style: FontStyle) -> CTFont {
         faces[style] ?? regular
     }
