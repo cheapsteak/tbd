@@ -32,14 +32,20 @@ Anyone who knows the address can send requests to it. Enough requests use up the
 When TBD says "Relay update available", copy this folder from TBD's repository into your copy.
 
 1. Clone the repository the button made in your GitHub account.
-2. Inside the clone, run:
+2. Inside the clone, delete every file Git tracks except `wrangler.jsonc`. Do this so a file that TBD removed or renamed does not stay behind and break your copy:
+
+   ```sh
+   git ls-files | grep -v '^wrangler\.jsonc$' | xargs git rm -q --
+   ```
+
+3. Still inside the clone, download the new version:
 
    ```sh
    curl -L https://codeload.github.com/cheapsteak/tbd/tar.gz/main | tar -xz --strip-components=3 tbd-main/relay/cloudflare
    ```
 
-3. If you renamed the Worker when you deployed, keep your own `name` line in `wrangler.jsonc`. Run `git diff wrangler.jsonc` and put your name back if it changed.
-4. Run `git add -A`, commit, and push to the production branch (usually `main`). Cloudflare deploys the new version.
+4. If you renamed the Worker when you deployed, keep your own `name` line in `wrangler.jsonc`. Run `git diff wrangler.jsonc` and put your name back if it changed.
+5. Run `git add -A`, commit, and push to the production branch (usually `main`). Cloudflare deploys the new version.
 
 ## Deploy from the command line instead
 
