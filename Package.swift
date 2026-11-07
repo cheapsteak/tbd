@@ -222,7 +222,9 @@ let package = Package(
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],
-            resources: [.copy("Database/Migrations")],
+            // `Resources` holds the phone app bundle the phone bridge serves,
+            // at `Resources/phone-app/app.js` inside the resource bundle.
+            resources: [.copy("Database/Migrations"), .copy("Resources")],
             // Swift 6.2 WMO-debug OOM workaround — see noWMODebugWorkaround above.
             swiftSettings: noWMODebugWorkaround
         ),
@@ -232,7 +234,7 @@ let package = Package(
                 "TBDDaemonLib",
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["Actuation", "Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Keychain", "Claude", "Codex", "ModelProfile", "AskUserQuestion", "Diagnostics", "Process", "Mock", "Daemon.swift", "PIDFile.swift"],
+            exclude: ["Actuation", "Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Keychain", "Claude", "Codex", "ModelProfile", "AskUserQuestion", "Diagnostics", "Process", "Mock", "PhoneBridge", "Resources", "Daemon.swift", "PIDFile.swift"],
             sources: ["main.swift"]
         ),
         .executableTarget(
