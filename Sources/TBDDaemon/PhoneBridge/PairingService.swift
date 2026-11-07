@@ -74,19 +74,18 @@ actor PairingService {
     }
 
     /// A handshake whose message 2 has gone out, waiting for the phone's
-    /// first transport message.
+    /// first transport message. Its transport is the service's `channel`.
     private struct Attempt {
         let id: UUID
-        var transport: NoiseTransport
         let code: String
         let deviceName: String
         /// The phone's 32-byte X25519 public key.
         let phoneKey: Data
     }
 
-    /// A phone whose `hello` decrypted, waiting for Allow or Deny.
+    /// A phone whose `hello` decrypted, waiting for Allow or Deny. Its
+    /// transport is the service's `channel` until Allow seals `paired`.
     private struct Confirmed {
-        var transport: NoiseTransport
         let code: String
         let deviceName: String
         let phoneKey: Data
@@ -176,6 +175,12 @@ actor PairingService {
     private var offer: Offer?
     /// The live offer's socket and tasks; nil once it is closing or ended.
     private var session: Session?
+    /// The transport of the live offer's handshake: the attempt's while it
+    /// waits for its first message, then the confirmed phone's until Allow
+    /// seals `paired` or the offer ends; nil otherwise. `NoiseTransport` is a
+    /// value, and this is its one place: every encrypt and decrypt mutates it
+    /// here, so no copy ever reuses a nonce.
+    private var channel: NoiseTransport?
     /// The timer of the offer's attempt. A fired timer stays here until the
     /// next attempt or the close, which wait for it.
     private var handshakeTimer: Task<Void, Never>?
@@ -227,24 +232,23 @@ actor PairingService {
     /// Ends any offer, live or not, closing its room without a word to the
     /// phone, and starts a new one in a new room. Returns its status, the
     /// link included.
+    ///
+    /// Throws `.invalidPairingLink` when the link is one a phone would
+    /// refuse, which leaves no offer and opens no room.
     func start(loaderURL: URL) async throws -> PhonePairingStatus {
-        await discardOffer()
+        let discarded = await discardOffer()
         // Nothing below suspends, so no other offer can begin meanwhile.
-        let roomID = try PhoneRoom.newToken()
-        let secret = try PhoneRoom.newToken()
-        guard let roomBytes = PhoneRoom.roomBytes(roomID) else { throw NoiseError.invalidRoomID }
-        guard let secretBytes = PhoneRoom.roomBytes(secret) else { throw NoiseError.invalidPSK }
-        let prologue = try PhoneChannelPrologue.make(roomID: roomBytes)
-        let expiresAt = now().addingTimeInterval(Self.seconds(PhoneBridgeConstants.pairingOfferLifetime))
-        let link = PairingLink(
-            v: PairingLink.currentVersion, relay: relayURL.absoluteString, room: roomID, secret: secret,
-            key: Base64URL.encode(laptopKey.publicKey.rawRepresentation), name: laptopName,
-            exp: Int(expiresAt.timeIntervalSince1970))
-        let created = Offer(
-            id: UUID(), roomID: roomID, prologue: prologue, psk: SymmetricKey(data: secretBytes),
-            link: link.url(loaderURL: loaderURL).absoluteString, expiresAt: expiresAt, phase: .waiting(nil))
+        let created: Offer
+        do {
+            created = try makeOffer(loaderURL: loaderURL)
+        } catch {
+            if discarded {
+                onChange()
+            }
+            throw error
+        }
         offer = created
-        session = openSession(offerID: created.id, roomID: roomID)
+        session = openSession(offerID: created.id, roomID: created.roomID)
         logger.notice("Created a phone pairing offer")
         onChange()
         return created.status
@@ -290,8 +294,8 @@ actor PairingService {
         switch current.phase {
         case .waiting:
             last = nil
-        case .awaitingApproval(var confirmed):
-            last = encrypt(LoaderHandler.pairDenied(.denied), with: &confirmed.transport)
+        case .awaitingApproval:
+            last = seal(LoaderHandler.pairDenied(.denied))
         case .ended(.expired):
             throw PhoneBridgeError.offerExpired
         case .allowing, .paired, .ended:
@@ -309,14 +313,52 @@ actor PairingService {
     /// phone, and waits until every task of every offer has finished. An
     /// Allow in progress finishes first. `status` is nil afterwards.
     func cancel() async {
-        let hadOffer = offer != nil
-        await discardOffer()
-        if hadOffer {
+        // Asked of the discard rather than read on entry: a `start` that
+        // lands while this waits makes an offer that is discarded too.
+        if await discardOffer() {
             onChange()
         }
     }
 
     // MARK: - The room
+
+    /// A new offer in a new room, waiting for a phone, with its link built
+    /// and then read back the way the phone reads it. A link the phone would
+    /// refuse is never shown as a QR code: it throws `.invalidPairingLink`.
+    private func makeOffer(loaderURL: URL) throws -> Offer {
+        let roomID = try PhoneRoom.newToken()
+        let secret = try PhoneRoom.newToken()
+        guard let roomBytes = PhoneRoom.roomBytes(roomID) else { throw NoiseError.invalidRoomID }
+        guard let secretBytes = PhoneRoom.roomBytes(secret) else { throw NoiseError.invalidPSK }
+        let prologue = try PhoneChannelPrologue.make(roomID: roomBytes)
+        let createdAt = now()
+        let expiresAt = createdAt.addingTimeInterval(Self.seconds(PhoneBridgeConstants.pairingOfferLifetime))
+        let link = PairingLink(
+            v: PairingLink.currentVersion, relay: relayURL.absoluteString, room: roomID, secret: secret,
+            key: Base64URL.encode(laptopKey.publicKey.rawRepresentation), name: laptopName,
+            exp: Int(expiresAt.timeIntervalSince1970))
+        let url = link.url(loaderURL: loaderURL)
+        // `url(loaderURL:)` checks nothing, and the relay address comes from
+        // config, so read the link back with the phone's own rules.
+        let parsed: PairingLink
+        do {
+            parsed = try PairingLink.parse(url, now: createdAt)
+        } catch {
+            // The error names the check that failed, never the secret or a
+            // field's text.
+            logger.error(
+                "Refused to show a pairing link a phone could not read: \(error.localizedDescription, privacy: .public)"
+            )
+            throw PhoneBridgeError.invalidPairingLink
+        }
+        guard parsed == link else {
+            logger.error("Refused to show a pairing link that does not read back as it was built")
+            throw PhoneBridgeError.invalidPairingLink
+        }
+        return Offer(
+            id: UUID(), roomID: roomID, prologue: prologue, psk: SymmetricKey(data: secretBytes),
+            link: url.absoluteString, expiresAt: expiresAt, phase: .waiting(nil))
+    }
 
     private func openSession(offerID: UUID, roomID: String) -> Session {
         let link = RelayLink(url: PhoneRoom.socketURL(relay: relayURL, roomID: roomID), transport: transport,
@@ -374,9 +416,8 @@ actor PairingService {
     private func receiveFrame(_ frame: Data, offerID: UUID) async {
         guard let current = offer, current.id == offerID, session != nil else { return }
         switch current.phase {
-        case .waiting(.some(let pending)):
-            var attempt = pending
-            guard let plaintext = try? attempt.transport.decrypt(frame) else {
+        case .waiting(.some(let attempt)):
+            guard let plaintext = try? channel?.decrypt(frame) else {
                 // Nothing has decrypted on the attempt, so it may be a
                 // replayed message 1's and this frame the phone's real one.
                 await answerMessage1(frame, offerID: offerID)
@@ -389,10 +430,10 @@ actor PairingService {
             }
         case .waiting(.none):
             await answerMessage1(frame, offerID: offerID)
-        case .awaitingApproval(var confirmed):
-            if (try? confirmed.transport.decrypt(frame)) != nil {
-                offer?.phase = .awaitingApproval(confirmed)
-            } else {
+        case .awaitingApproval:
+            // A frame that decrypts is ignored; decrypting it moved the
+            // receive counter on, in place.
+            if (try? channel?.decrypt(frame)) == nil {
                 interrupt(because: "a frame failed to decrypt")
             }
         case .allowing, .paired, .ended:
@@ -439,10 +480,11 @@ actor PairingService {
             return
         }
         let attempt = Attempt(
-            id: UUID(), transport: reply.transport,
-            code: PhoneConfirmationCode.make(handshakeHash: reply.handshakeHash),
+            id: UUID(), code: PhoneConfirmationCode.make(handshakeHash: reply.handshakeHash),
             deviceName: deviceName, phoneKey: read.remoteStatic.rawRepresentation)
         offer?.phase = .waiting(attempt)
+        // The replaced attempt's transport, if any, goes with it.
+        channel = reply.transport
         outbox.yield(Outgoing(frame: reply.message, onLeft: nil))
         armHandshakeTimer(offerID: offerID, attemptID: attempt.id)
         if replaced == nil {
@@ -459,9 +501,9 @@ actor PairingService {
     private func confirm(_ attempt: Attempt) async {
         // Cancelling takes the timer's sleep off the clock at once.
         handshakeTimer?.cancel()
+        // `channel` stays: the attempt's transport is the confirmed phone's.
         offer?.phase = .awaitingApproval(Confirmed(
-            transport: attempt.transport, code: attempt.code, deviceName: attempt.deviceName,
-            phoneKey: attempt.phoneKey))
+            code: attempt.code, deviceName: attempt.deviceName, phoneKey: attempt.phoneKey))
         logger.notice("a phone completed the pairing handshake; waiting for Allow")
         onChange()
         await cancelHandshakeTimer()
@@ -471,6 +513,7 @@ actor PairingService {
     private func dropAttempt(because reason: String) async {
         guard case .waiting(.some) = offer?.phase else { return }
         offer?.phase = .waiting(nil)
+        channel = nil
         logger.notice("Dropped a phone pairing handshake: \(reason, privacy: .public)")
         await cancelHandshakeTimer()
     }
@@ -496,6 +539,7 @@ actor PairingService {
         guard let current = offer, current.id == offerID,
               case .waiting(.some(let attempt)) = current.phase, attempt.id == attemptID else { return }
         offer?.phase = .waiting(nil)
+        channel = nil
         logger.notice("Dropped a phone pairing handshake: no first message within the handshake timeout")
     }
 
@@ -509,25 +553,28 @@ actor PairingService {
     // MARK: - Ending
 
     /// Checks that `offerID` is awaiting approval, mints its device room and
-    /// seals `paired`, then marks the offer as being allowed, so nothing else
-    /// can end it.
+    /// seals `paired` on `channel`, then marks the offer as being allowed, so
+    /// nothing else can end it. `paired` is the last message the channel
+    /// carries, so the channel goes once it is sealed.
     private func claimApproval(_ offerID: UUID) throws -> Claim {
-        guard var current = offer, current.id == offerID else {
+        guard let current = offer, current.id == offerID else {
             throw PhoneBridgeError.noSuchOffer
         }
         switch current.phase {
-        case .awaitingApproval(var confirmed):
-            // A live offer always has its session; this only guards the
-            // invariant.
-            guard session != nil else { throw PhoneBridgeError.noSuchOffer }
+        case .awaitingApproval(let confirmed):
+            // A live offer always has its session and, while awaiting
+            // approval, its channel; this only guards the invariant.
+            guard session != nil, channel != nil else { throw PhoneBridgeError.noSuchOffer }
             // Never the pairing room: everyone who saw the QR code knows it.
             var deviceRoom = try PhoneRoom.newToken()
             while deviceRoom == current.roomID {
                 deviceRoom = try PhoneRoom.newToken()
             }
-            let frame = try confirmed.transport.encrypt(LoaderHandler.paired(room: deviceRoom))
-            current.phase = .allowing(confirmed)
-            offer = current
+            guard let frame = try channel?.encrypt(LoaderHandler.paired(room: deviceRoom)) else {
+                throw PhoneBridgeError.noSuchOffer
+            }
+            channel = nil
+            offer?.phase = .allowing(confirmed)
             return Claim(confirmed: confirmed, deviceRoom: deviceRoom, pairedFrame: frame)
         case .waiting:
             throw PhoneBridgeError.notAwaitingApproval
@@ -573,8 +620,8 @@ actor PairingService {
         switch current.phase {
         case .waiting:
             last = nil
-        case .awaitingApproval(var confirmed):
-            last = encrypt(LoaderHandler.pairDenied(.expired), with: &confirmed.transport)
+        case .awaitingApproval:
+            last = seal(LoaderHandler.pairDenied(.expired))
         case .allowing, .paired, .ended:
             return
         }
@@ -589,7 +636,8 @@ actor PairingService {
 
     /// Moves the live offer to `outcome` and closes its room in a task of
     /// its own, which the caller may await. Returns nil when no offer is
-    /// live.
+    /// live. `last`, if any, was sealed on `channel` before this call, and
+    /// the channel goes with the offer.
     ///
     /// The close never runs inline, because the inbound task and the expiry
     /// task end offers too, and the close waits for both.
@@ -598,26 +646,35 @@ actor PairingService {
         guard let ending = session, offer != nil else { return nil }
         session = nil
         offer?.phase = .ended(outcome)
+        channel = nil
         let task = retire(ending, sending: last)
         onChange()
         return task
     }
 
     /// Ends any offer and waits until no session, closing or Allow remains.
-    private func discardOffer() async {
+    /// Returns whether it discarded an offer, live or ended, counting one
+    /// that a `start` made while it waited.
+    @discardableResult
+    private func discardOffer() async -> Bool {
+        var discarded = false
         while true {
             if let pending = commit {
                 _ = try? await pending.task.value
                 if commit?.id == pending.id { commit = nil }
                 continue
             }
-            offer = nil
+            if offer != nil {
+                discarded = true
+                offer = nil
+            }
+            channel = nil
             if let ending = session {
                 session = nil
                 retire(ending, sending: nil)
             }
             let running = Array(closings.values)
-            if running.isEmpty { return }
+            if running.isEmpty { return discarded }
             for task in running {
                 await task.value
             }
@@ -696,11 +753,12 @@ actor PairingService {
         }
     }
 
-    /// `plaintext` sealed on `transport`, or nil when it cannot be, in which
-    /// case the phone simply sees the room close.
-    private func encrypt(_ plaintext: Data, with transport: inout NoiseTransport) -> Data? {
+    /// `plaintext` sealed on `channel`, in place, or nil when there is no
+    /// channel or it cannot seal, in which case the phone simply sees the
+    /// room close.
+    private func seal(_ plaintext: Data) -> Data? {
         do {
-            return try transport.encrypt(plaintext)
+            return try channel?.encrypt(plaintext)
         } catch {
             logger.error("Could not encrypt a pairing message: \(error.localizedDescription, privacy: .public)")
             return nil

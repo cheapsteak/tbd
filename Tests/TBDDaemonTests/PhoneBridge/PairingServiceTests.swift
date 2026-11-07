@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import GRDB
 import TBDShared
 import Testing
 import TestSupport
@@ -117,19 +118,23 @@ private struct PairingHarness {
 }
 
 /// Builds a pairing service on a fake relay, runs `body`, and cancels the
-/// service whatever happens, so no task outlives the test.
-private func withPairing(laptopName: String = "acme-laptop",
+/// service whatever happens, so no task outlives the test. The service links
+/// to `relayAddress` and opens its sockets through `transport`, `relay`
+/// itself when nil.
+private func withPairing(laptopName: String = "acme-laptop", relayAddress: URL = relayURL,
+                         relay: FakeRelay = FakeRelay(), transport: (any RelayTransport)? = nil,
+                         preflight: @escaping @Sendable () async -> RelayPreflight = { .proceed },
                          _ body: (PairingHarness) async throws -> Void) async throws {
     let db = try TBDDatabase(inMemory: true)
     let dates = TestDateSource()
     let laptopKey = Curve25519.KeyAgreement.PrivateKey()
-    let relay = FakeRelay()
+    let sockets: any RelayTransport = transport ?? (relay as any RelayTransport)
     let clock = EventDrivenTestClock()
     let states = PairingStateLog()
     let paired = FireRecorder<PhoneDevice>()
     let service = PairingService(
-        relayURL: relayURL, transport: relay, laptopKey: laptopKey, laptopName: laptopName,
-        devices: db.phoneDevices, preflight: { .proceed },
+        relayURL: relayAddress, transport: sockets, laptopKey: laptopKey, laptopName: laptopName,
+        devices: db.phoneDevices, preflight: preflight,
         onChange: { Task { await states.capture() } },
         onPaired: { paired.record($0) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
@@ -176,6 +181,38 @@ struct PairingServiceTests {
             let phone = try await h.joinedPhone(link)
             let (_, laptopName) = try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
             #expect(laptopName == link.name)
+        }
+    }
+
+    @Test func aLaptopNameEmptyAfterTrimmingBecomesMac() async throws {
+        try await withPairing(laptopName: " \n\t ") { h in
+            // `startOffer` reads the link back as the phone does.
+            let (_, link) = try await h.startOffer()
+            #expect(link.name == "Mac")
+            let phone = try await h.joinedPhone(link)
+            let (_, laptopName) = try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
+            #expect(laptopName == "Mac")
+        }
+    }
+
+    @Test(arguments: [
+        "https://acme-relay.acme.workers.dev/",
+        "https://acme-relay.acme.workers.dev/relay",
+        "http://acme-relay.acme.workers.dev",
+        "https://10.0.0.1",
+    ])
+    func aRelayThePairingLinkCannotCarryMakesNoOffer(relay: String) async throws {
+        let address = try #require(URL(string: relay))
+        try await withPairing(relayAddress: address) { h in
+            await #expect(throws: PhoneBridgeError.invalidPairingLink) {
+                _ = try await h.service.start(loaderURL: loaderURL)
+            }
+            let status = await h.service.status
+            #expect(status == nil)
+            // No room was opened, and no expiry armed.
+            #expect(h.relay.connectAttempts.isEmpty)
+            #expect(h.relay.openLaptopRooms().isEmpty)
+            #expect(!h.clock.hasSleeper)
         }
     }
 
@@ -305,6 +342,70 @@ struct PairingServiceTests {
             #expect(after?.link == nil)
             await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: status.offerID) }
             #expect(h.relay.connectAttempts.count == 1)
+        }
+    }
+
+    @Test func allowAndDenyWhileAnAllowIsInProgressAreRefused() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withPairing(relay: relay, transport: transport) { h in
+            // However the test ends, nothing stays held for `cancel()` to
+            // wait on.
+            defer { transport.release() }
+            let (status, link) = try await h.startOffer()
+            let (phone, _) = try await h.phoneAwaitingApproval(link)
+
+            // `paired` cannot leave, so the Allow waits up to the flush
+            // limit, which the test clock never reaches.
+            transport.hold()
+            let service = h.service
+            let offerID = status.offerID
+            let allowing = Task { try await service.allow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+
+            // The prompt still shows while the Allow finishes, and nothing
+            // else can take the offer.
+            let during = await h.service.status
+            #expect(during?.state == .awaitingApproval)
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: offerID) }
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.deny(offerID: offerID) }
+
+            transport.release()
+            let device = try await allowing.value
+            let message = try await phone.next()
+            #expect(message["type"] as? String == "paired")
+            #expect(message["room"] as? String == device.roomID)
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows == [device])
+            #expect(h.paired.values == [device])
+            let after = await h.service.status
+            #expect(after?.state == .paired)
+        }
+    }
+
+    @Test func aStoreFailureOnAllowInterruptsTheOfferAndThrows() async throws {
+        try await withPairing { h in
+            let (status, link) = try await h.startOffer()
+            let (phone, _) = try await h.phoneAwaitingApproval(link)
+            try await h.db.writerForTests.write { conn in
+                try conn.execute(sql: """
+                    CREATE TRIGGER induced_phone_device_insert_failure
+                    BEFORE INSERT ON phone_device
+                    BEGIN SELECT RAISE(ABORT, 'induced phone_device insert failure'); END
+                    """)
+            }
+            await #expect(throws: DatabaseError.self) { try await h.service.allow(offerID: status.offerID) }
+            let after = await h.service.status
+            #expect(after?.state == .interrupted)
+            #expect(after?.link == nil && after?.deviceName == nil && after?.confirmationCode == nil)
+            // The phone heard no `paired`: the room just closed.
+            let left = try await phone.nextSignal()
+            #expect(left == "peer-left")
+            #expect(h.relay.laptopFrames(room: link.room).count == 1)
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            #expect(h.paired.values.isEmpty)
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: status.offerID) }
         }
     }
 
@@ -660,6 +761,22 @@ struct PairingServiceTests {
             await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: status.offerID) }
             let rows = try await h.db.phoneDevices.list()
             #expect(rows.isEmpty)
+        }
+    }
+
+    @Test func aRelayRefusalInterruptsTheOffer() async throws {
+        try await withPairing(preflight: { .refuse("not a TBD relay") }) { h in
+            let status = try await h.service.start(loaderURL: loaderURL)
+            #expect(status.state == .waitingForPhone)
+            // The link stops for good, so no phone can reach the offer.
+            try await h.waitForState(.interrupted)
+            let after = await h.service.status
+            #expect(after?.offerID == status.offerID)
+            #expect(after?.link == nil)
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: status.offerID) }
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.deny(offerID: status.offerID) }
+            // The relay check refused before any connect.
+            #expect(h.relay.connectAttempts.isEmpty)
         }
     }
 
