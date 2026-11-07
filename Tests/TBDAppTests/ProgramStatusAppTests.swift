@@ -449,8 +449,8 @@ struct ProgramStatusAppTests {
         harness.terminalView.terminalDelegate = spy
         harness.terminalView.programStatusGate.set(true)
         let reports = ReportBox()
-        harness.terminalView.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
-        defer { harness.terminalView.onProgramStatusReport = nil }
+        harness.coordinator.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
+        defer { harness.coordinator.onProgramStatusReport = nil }
 
         harness.terminalView.feed(text: Self.probe + Self.report)
         let delivered = await harness.waitUntil { reports.payloads.count >= 1 }
@@ -464,8 +464,8 @@ struct ProgramStatusAppTests {
         let harness = makeCoordinatorHarness()
         defer { harness.tearDown() }
         let reports = ReportBox()
-        harness.terminalView.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
-        defer { harness.terminalView.onProgramStatusReport = nil }
+        harness.coordinator.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
+        defer { harness.coordinator.onProgramStatusReport = nil }
 
         harness.terminalView.feed(text: Self.report)
         await harness.settle()
@@ -484,8 +484,8 @@ struct ProgramStatusAppTests {
         defer { harness.tearDown() }
         harness.terminalView.programStatusGate.set(true)
         let reports = ReportBox()
-        harness.terminalView.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
-        defer { harness.terminalView.onProgramStatusReport = nil }
+        harness.coordinator.onProgramStatusReport = { payload, _ in reports.payloads.append(payload) }
+        defer { harness.coordinator.onProgramStatusReport = nil }
 
         harness.coordinator.feedSnapshot(
             Data((Self.probe + Self.report).utf8), into: harness.engine)
@@ -523,7 +523,8 @@ final class SendRecordingDelegate: TerminalViewDelegate {
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 }
 
-/// Collects `onProgramStatusReport` payloads, which arrive on main.
+/// Collects the coordinator's `onProgramStatusReport` payloads, which arrive
+/// on main through the view, the engine and the coordinator.
 @MainActor
 final class ReportBox {
     var payloads: [[UInt8]] = []

@@ -247,8 +247,10 @@ final class QuietIngestHarness {
         self.terminalID = terminalID
         self.defaultsSuite = defaultsSuite
         self.childPID = process.shellPid
+        // Counted where production delivers a notification, the coordinator's
+        // own hook, so the count rides view -> engine -> coordinator.
         let counter = notifications
-        engine.terminalView.onNotification = { _, _ in counter.increment() }
+        coordinator.onTerminalNotification = { _, _ in counter.increment() }
         let bells = beeps
         coordinator.ringBell = { bells.increment() }
     }
@@ -311,7 +313,7 @@ final class QuietIngestHarness {
     }
 
     func tearDown() {
-        terminalView.onNotification = nil
+        coordinator.onTerminalNotification = nil
         terminalView.terminalDelegate = nil
         coordinator.localProcess = nil
         // The child never exits on its own; end it now. `LocalProcess`'s own
