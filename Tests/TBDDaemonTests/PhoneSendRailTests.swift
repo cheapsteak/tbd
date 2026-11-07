@@ -138,6 +138,30 @@ struct PhoneSendRailTests {
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
     }
 
+    /// The core's shape check runs before the phone's refusals, so a payload
+    /// that is malformed and aimed at a shell gets the shape error
+    /// `terminal.send` gives, not the shell refusal, and leaves no row.
+    @Test func aPairedPhoneSendToAShellWithAMalformedPayloadGetsTheShapeError() async throws {
+        let harness = try await SendHarness.make(kind: .shell)
+        let textBesideParts = TerminalSendParams(
+            terminalID: harness.terminal.id, text: "ls", submit: true, parts: [.text("ls")])
+        guard case .malformed(let shapeError) = RPCRouter.validateSendShape(textBesideParts) else {
+            Issue.record("the send core's shape check must call text beside parts malformed")
+            return
+        }
+
+        let response = try await harness.router.sendFromPairedPhone(textBesideParts, deviceID: UUID())
+
+        #expect(response.error == shapeError, "a malformed payload gets the core's shape error")
+        #expect(response.error != RPCRouter.phoneShellSendRefusal)
+        #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
+        #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
+        let logPath = await harness.router.actuationLog.path
+        let sendRows = ActuationRecordReader(activePath: logPath).readRows()
+            .filter { row in row.method == RPCMethod.terminalSend }
+        #expect(sendRows.isEmpty, "a malformed payload leaves no row")
+    }
+
     /// A row with no recorded kind and no Claude session id is a shell to the
     /// send core: the foreground rail skips it, so nothing else would stop the
     /// paste. The phone's refusal reads it the same way and types nothing.
