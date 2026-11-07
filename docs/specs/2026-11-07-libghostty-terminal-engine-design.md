@@ -98,15 +98,24 @@ split by direction and by thread.
   - `feed(_:)` – live bytes from the session.
   - `prepareForPreamble()` – called before a preamble goes into a view that has been used
     before.
-  - `ingestSnapshot(_:)` – feeds a preamble with callbacks and OSC observers muted, and
-    with replies to the pty dropped.
+  - `ingestSnapshot(_:)` – feeds a preamble so that no callback, OSC event or reply to
+    the pty it provokes reaches the coordinator. The rule is about that outcome, not
+    timing. SwiftTerm delivers its callbacks a main-queue turn later, so its engine lowers
+    the mute a turn later. libghostty fires them inside the parse, so its engine lowers
+    the mute when the parse returns.
 - **Locked reads** – one closure, `withScreen { reader in … }`, which runs under the
   engine's lock. Everything that reads the model goes through it, so no read can race
   `feed` or take the lock more than once. The reader offers:
   - the mouse mode and whether the alternate screen is shown
-  - the text and hyperlink of the cell at a grid position
-  - the screen projection that `ViewerScreenProducer` sends to the daemon
-  - the handback preamble for detach
+  - a line's text, and the hyperlink of the cell at a grid position
+  - the screen projection and styled capture that `ViewerScreenProducer` sends to the
+    daemon
+  - wheel reports, sent inside the same lock hold that read the mouse mode, as the scroll
+    monitor does today
+- **Handback** – `handbackPreamble(maxScrollbackLines:)`, an async call on the engine
+  itself. It is not a locked read, because SwiftTerm's handback first sends a DECRQM
+  probe and waits a main-queue turn for the replies. libghostty reads modes directly and
+  needs no probe.
 - **Outbound** – a TBD-owned `TerminalEngineDelegate`, which the coordinator implements.
   Its methods are:
   - `send` – keys and paste. Called on the main thread.
@@ -216,9 +225,8 @@ The same coordinator code runs for both engines.
   leads to `TIOCSWINSZ` and the daemon resize, in the same order as with SwiftTerm.
 - **Screen requests** – `answerScreenRequest`, then `ViewerScreenProducer`, then
   `withScreen`. The libghostty reader walks the grid through the C API.
-- **Detach** – `captureHandbackPreamble` calls `withScreen` and asks the reader for the
-  handback preamble. The daemon then resets its terminal and replays the preamble, as
-  today.
+- **Detach** – `captureHandbackPreamble` awaits the engine's `handbackPreamble`. The
+  daemon then resets its terminal and replays the preamble, as today.
   - The SwiftTerm engine keeps today's DECRQM probe and `TerminalSnapshotWriter`.
   - The libghostty engine's `GhosttySnapshotWriter`:
     1. clones the terminal in process;
