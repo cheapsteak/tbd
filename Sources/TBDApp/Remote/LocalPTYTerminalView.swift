@@ -385,8 +385,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         // Status, file-click or close-tab handling, and it never turns on
         // click routing or paste interception, so no focus change, mouse-down
         // claim or paste is ever reported. `engineMovedToWindow` stays empty
-        // because the attach pane installs its own window hook on the view
-        // (`registerRemoteTerminalView`).
+        // because the attach pane's focus claim is chained onto the view's
+        // window hook, after the engine's own (`registerRemoteTerminalView`).
         func engine(_ e: any TerminalEngine, notification title: String, body: String) {}
         func engine(_ e: any TerminalEngine, programStatusPayload payload: [UInt8], observedAt: Date) {}
         func engine(_ e: any TerminalEngine, filePathClicked path: String) {}
