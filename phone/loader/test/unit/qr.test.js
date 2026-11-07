@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { chooseDecoder, startScanner } from '../../qr.js';
 import { QR_INTERVAL_MS } from '../../constants.js';
 import { FakeDocument } from '../support/fake-dom.js';
+import { FakeClock } from '../support/fake-clock.js';
 
 /** A BarcodeDetector stand-in whose static getSupportedFormats is given per test. */
 function detectorWith(getSupportedFormats) {
@@ -33,45 +34,6 @@ test('chooseDecoder picks jsQR when asking for formats fails', async () => {
 });
 
 // --- startScanner, with a fake camera and a fake native detector -------------------------
-
-class FakeClock {
-  #now = 0;
-  #nextID = 1;
-  /** @type {Map<number, {due: number, fn: () => void}>} */
-  #timers = new Map();
-
-  now() { return this.#now; }
-
-  setTimeout(fn, ms) {
-    const id = this.#nextID++;
-    this.#timers.set(id, { due: this.#now + Math.max(0, ms), fn });
-    return id;
-  }
-
-  clearTimeout(id) { this.#timers.delete(id); }
-
-  get pending() { return this.#timers.size; }
-
-  async advance(ms) {
-    const target = this.#now + ms;
-    for (;;) {
-      let nextID = null;
-      let next = null;
-      for (const [id, timer] of this.#timers) {
-        if (timer.due <= target && (next === null || timer.due < next.due)) {
-          nextID = id;
-          next = timer;
-        }
-      }
-      if (next === null) break;
-      this.#timers.delete(nextID);
-      this.#now = next.due;
-      next.fn();
-      await flush();
-    }
-    this.#now = target;
-  }
-}
 
 async function flush() {
   for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));

@@ -2,47 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RelaySocket, reconnectDelay } from '../../relay.js';
 import { KEEPALIVE_MS, RESUME_PONG_TIMEOUT_MS } from '../../constants.js';
-
-// A minimal fake clock. Task 5's shared test/support/fake-clock.js replaces it.
-class FakeClock {
-  #now = 0;
-  #nextID = 1;
-  /** @type {Map<number, {due: number, fn: () => void}>} */
-  #timers = new Map();
-
-  now() { return this.#now; }
-
-  setTimeout(fn, ms) {
-    const id = this.#nextID++;
-    this.#timers.set(id, { due: this.#now + Math.max(0, ms), fn });
-    return id;
-  }
-
-  clearTimeout(id) { this.#timers.delete(id); }
-
-  get pending() { return this.#timers.size; }
-
-  /** Runs every timer due within `ms`, in time order, flushing microtasks after each. */
-  async advance(ms) {
-    const target = this.#now + ms;
-    for (;;) {
-      let nextID = null;
-      let next = null;
-      for (const [id, timer] of this.#timers) {
-        if (timer.due <= target && (next === null || timer.due < next.due)) {
-          nextID = id;
-          next = timer;
-        }
-      }
-      if (next === null) break;
-      this.#timers.delete(nextID);
-      this.#now = next.due;
-      next.fn();
-      await new Promise((resolve) => setImmediate(resolve));
-    }
-    this.#now = target;
-  }
-}
+import { FakeClock } from '../support/fake-clock.js';
 
 // A hand-driven WebSocketLike: the test plays the relay through the server* methods.
 class FakeSocket {
