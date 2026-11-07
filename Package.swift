@@ -464,13 +464,15 @@ let package = Package(
             ]
         ),
         // The libghostty engine's own suites. They need only the engine
-        // target and the generic test helpers (`TestSupport`, for the
-        // fast-pass time limit), so they compile against nothing in the app
-        // or the daemon.
+        // target, its shader-types header (the renderer tests check the
+        // struct sizes the shaders rely on), and the generic test helpers
+        // (`TestSupport`, for the fast-pass time limit), so they compile
+        // against nothing in the app or the daemon.
         .testTarget(
             name: "TBDGhosttyTerminalTests",
             dependencies: [
                 "TBDGhosttyTerminal",
+                "TBDGhosttyShaderTypes",
                 "TestSupport",
             ]
         ),
