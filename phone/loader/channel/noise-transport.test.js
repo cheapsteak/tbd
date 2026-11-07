@@ -2,7 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { MAX_MESSAGE_LENGTH, MAX_PLAINTEXT_LENGTH, NoiseError, createTransport, phonePrologue } from './noise.js';
+import {
+  CipherState,
+  MAX_MESSAGE_LENGTH,
+  MAX_PLAINTEXT_LENGTH,
+  NoiseError,
+  createTransport,
+  phonePrologue,
+} from './noise.js';
 import { base64urlDecode } from './pairingLink.js';
 
 const file = JSON.parse(readFileSync(new URL('../../test-vectors/framing.json', import.meta.url), 'utf8'));
@@ -169,6 +176,60 @@ test('transport: a failed decrypt does not stall the queue', async () => {
   const next = b.decrypt(message);
   await rejectsWith(failing, 'decryptFailed');
   assert.deepEqual(await next, p);
+});
+
+// A transport imports its keys before it is returned, so these tests drive a
+// cipher state directly to fail an import the state then has to recover from.
+
+/**
+ * Makes the next `crypto.subtle.importKey` call reject; later calls import as
+ * usual. The test's mock tracker restores the method when the test ends.
+ * @param {import('node:test').TestContext} t
+ */
+function failNextImport(t) {
+  const failure = new Error('transient import failure');
+  const importKey = t.mock.method(crypto.subtle, 'importKey', () => Promise.reject(failure), { times: 1 });
+  return { failure, importKey };
+}
+
+test('cipher state: an encrypt whose key import fails spends no nonce, and the next encrypt imports again', async (t) => {
+  const key = randomKey();
+  const state = new CipherState(key);
+  const { failure, importKey } = failNextImport(t);
+
+  await assert.rejects(state.encrypt(new Uint8Array(0), p0), (error) => error === failure);
+  assert.deepEqual(importKey.mock.calls[0].arguments[2], { name: 'AES-GCM' }, 'the cipher key import failed');
+  assert.equal(state.nonce, 0n);
+  const message = await state.encrypt(new Uint8Array(0), p0);
+  assert.equal(state.nonce, 1n);
+
+  // The peer reads it at nonce 0.
+  const peer = await createTransport({ sendKey: randomKey(), receiveKey: key });
+  assert.deepEqual(await peer.decrypt(message), p0);
+});
+
+test('cipher state: a decrypt queued behind a failed key import imports again', async (t) => {
+  const key = randomKey();
+  const sender = await createTransport({ sendKey: key, receiveKey: randomKey() });
+  const message = await sender.encrypt(p1);
+  const state = new CipherState(key);
+  const { failure } = failNextImport(t);
+
+  const failing = state.decrypt(new Uint8Array(0), message);
+  const next = state.decrypt(new Uint8Array(0), message);
+  await assert.rejects(failing, (error) => error === failure);
+  assert.deepEqual(await next, p1);
+  assert.equal(state.nonce, 1n);
+});
+
+test('cipher state: a failed prepare is not cached', async (t) => {
+  const key = randomKey();
+  const state = new CipherState(key);
+  const { failure } = failNextImport(t);
+
+  await assert.rejects(state.prepare('encrypt'), (error) => error === failure);
+  const peer = await createTransport({ sendKey: randomKey(), receiveKey: key });
+  assert.deepEqual(await peer.decrypt(await state.encrypt(new Uint8Array(0), p)), p);
 });
 
 test('transport: a queued encrypt sends the bytes as they were when it was called', async () => {

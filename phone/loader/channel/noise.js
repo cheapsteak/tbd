@@ -369,8 +369,12 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
  * writing into an array never changes the key in use. `nonce` is a plain
  * field. Save and restore the pair only while no operation is in flight,
  * because a running operation writes `nonce + 1n` when it finishes.
+ *
+ * Exported for the tests only. Phone code gets cipher states through
+ * `createTransport` and `createInitiator`, never directly: a state built
+ * with a null key passes data through unencrypted.
  */
-class CipherState {
+export class CipherState {
   /** @type {Uint8Array<ArrayBuffer> | null} 32 raw bytes, or null for no key */
   #key = null;
   /** @type {bigint} the counter the next operation uses */
@@ -484,6 +488,10 @@ class CipherState {
    * The key imported non-extractable for one usage, cached until `key` is
    * set or another usage is asked for. `key` is the private copy, which
    * nothing writes into, so its identity names its bytes.
+   *
+   * An import that fails leaves the cache, so the next call imports again:
+   * the calls already waiting on it reject with its error, and later ones
+   * retry. A newer import that replaced it in the meantime stays cached.
    * @param {Uint8Array} key
    * @param {KeyUsage} usage
    * @returns {Promise<CryptoKey>}
@@ -491,6 +499,13 @@ class CipherState {
   #cryptoKey(key, usage) {
     if (this.#imported === null || this.#imported.key !== key || this.#imported.usage !== usage) {
       const cryptoKey = subtle.importKey('raw', copyBytes(key), { name: 'AES-GCM' }, false, [usage]);
+      // Registered before any caller awaits the import, so the cache is
+      // clear by the time a queued operation behind a failed one starts.
+      cryptoKey.catch(() => {
+        if (this.#imported?.cryptoKey === cryptoKey) {
+          this.#imported = null;
+        }
+      });
       this.#imported = { key, usage, cryptoKey };
     }
     return this.#imported.cryptoKey;
