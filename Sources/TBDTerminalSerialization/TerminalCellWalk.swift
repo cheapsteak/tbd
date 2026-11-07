@@ -89,15 +89,16 @@ public enum TerminalCellWalk {
         // last row sent is already blank, and the closing cursor address puts
         // the cursor back wherever it was. There a trailing blank row adds
         // only a line ending, so dropping it lets a short screen walk as its
-        // text instead of its text plus a run of empty lines. A wrapped
-        // continuation is never dropped, and a blank row earlier in the walk
-        // is real content and stays.
+        // text instead of its text plus a run of empty lines. A row is blank
+        // when `visibleLength` is 0, so a row of coloured blanks stays. A
+        // wrapped continuation is never dropped, and a blank row earlier in
+        // the walk is real content and stays.
         //
         // `styledViewport` does not apply this trim: on the alt screen a blank
         // trailing row is the application's own layout, not unused padding.
         let holdsHistory = walked.count > viewportRows
         if !holdsHistory {
-            while let last = walked.last, !last.isWrapped, last.getTrimmedLength() == 0 {
+            while let last = walked.last, !last.isWrapped, visibleLength(of: last) == 0 {
                 walked.removeLast()
             }
         }
@@ -105,11 +106,66 @@ public enum TerminalCellWalk {
         return walked
     }
 
+    /// How many leading cells a receiver needs to show `line` as the source
+    /// does: through the last character, or through the last blank that
+    /// `isVisibleWhenBlank` says can be seen, whichever is further.
+    ///
+    /// `getTrimmedLength()` alone is not enough. It stops after the last cell
+    /// with a character, and erasing under a background colour (BCE, such as
+    /// `ESC[44m ESC[2J`, `ESC[41m ESC[K`, ECH or DCH) leaves blanks with no
+    /// character that still carry the colour. A receiver that is not sent
+    /// them shows the default background there.
+    ///
+    /// When a line's coloured blanks run to the last column, the receiver is
+    /// left in pending wrap, as it is after a line of text that long. Nothing
+    /// that follows prints before the cursor moves: `join` sends `\r\n` next,
+    /// whose CR clears the pending wrap before the LF moves down, and after
+    /// the last line the writer sends only mode escapes and cursor moves
+    /// before anything prints again. So no extra row wraps.
+    private static func visibleLength(of line: BufferLine) -> Int {
+        let trimmed = line.getTrimmedLength()
+        // Every cell from `trimmed` on has no character, so only attributes
+        // can make one of them visible.
+        var length = line.count
+        while length > trimmed {
+            if isVisibleWhenBlank(line[length - 1].attribute) { return length }
+            length -= 1
+        }
+        return trimmed
+    }
+
+    /// Whether a cell with no character looks different from the erased cells
+    /// a receiver starts with, which the prelude erased under SGR 0.
+    ///
+    /// A background colour fills the cell, and inverse fills it with the
+    /// foreground colour. Underline and strikethrough are lines a terminal
+    /// draws across the cell whether or not it holds a glyph. Bold, dim,
+    /// italic, blink, invisible and a foreground colour change only how a
+    /// glyph is drawn, and a blank has none, so they do not count. SwiftTerm's
+    /// erase keeps only the background, so the background is the case erasing
+    /// produces; the other three count because a blank that carried them would
+    /// be just as visible. Both default background cases count as default,
+    /// because `SGREncoder` writes neither and the receiver cannot tell them
+    /// apart.
+    private static func isVisibleWhenBlank(_ attribute: Attribute) -> Bool {
+        switch attribute.bg {
+        case .defaultColor, .defaultInvertedColor:
+            break
+        case .ansi256, .trueColor:
+            return true
+        }
+        let style = attribute.style
+        return style.contains(.inverse)
+            || style.contains(.underline) || attribute.underlineStyle != .none
+            || style.contains(.crossedOut)
+    }
+
     private static func render(line: BufferLine, cols: Int, fullWidth: Bool) -> String {
         // A line the next one wraps from is emitted at full width; `join` is
         // what withholds its line ending so DECAWM re-wraps it in the
-        // receiver. Otherwise the line is trimmed, so a mostly-empty screen
-        // does not cost `cols` bytes/row.
+        // receiver. Otherwise the line ends at its `visibleLength`, so a
+        // mostly-empty screen does not cost `cols` bytes/row and a coloured
+        // blank at the end of a line still arrives.
         //
         // The full-width branch caps at `line.count`, not just `cols`: a
         // scrollback line shorter than the terminal's current column count
@@ -117,7 +173,7 @@ public enum TerminalCellWalk {
         // storage — `BufferLine`'s subscript clamps an out-of-range index to
         // its last cell instead of trapping, which would silently repeat
         // that cell out to `cols`.
-        let limit = fullWidth ? min(cols, line.count) : min(line.getTrimmedLength(), cols)
+        let limit = fullWidth ? min(cols, line.count) : min(visibleLength(of: line), cols)
         guard limit > 0 else { return "" }
 
         var out = ""

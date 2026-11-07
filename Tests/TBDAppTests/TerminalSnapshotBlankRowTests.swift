@@ -3,13 +3,15 @@ import SwiftTerm
 import Testing
 @testable import TBDTerminalSerialization
 
-/// Snapshots of screens that end in blank rows, round-tripped through the
-/// `Pair` fixture from `TerminalSnapshotRoundTripTests`.
+/// Snapshots of screens that end in blank rows or hold blank cells with a
+/// background colour, round-tripped through the `Pair` fixture from
+/// `TerminalSnapshotRoundTripTests`.
 ///
 /// The oracle is the screen a person sees: the receiver's viewport row by row,
-/// its history and its cursor must all match the source's. A blank row only
-/// shows when something is wrong around it, so every test here compares whole
-/// screens rather than the rows it set up.
+/// its history and its cursor must all match the source's, and where colour
+/// is the point, so must every cell's attribute. A blank row only shows when
+/// something is wrong around it, so every test here compares whole screens
+/// rather than the rows it set up.
 @Suite("Terminal snapshot blank rows")
 struct TerminalSnapshotBlankRowTests {
 
@@ -64,6 +66,26 @@ struct TerminalSnapshotBlankRowTests {
                 "the cursor column differs", sourceLocation: sourceLocation)
         #expect(pair.fresh.buffer.y == pair.source.buffer.y,
                 "the cursor row differs", sourceLocation: sourceLocation)
+    }
+
+    /// Every viewport cell's attribute, row by row.
+    private static func attributes(of terminal: Terminal) -> [[Attribute?]] {
+        (0..<terminal.rows).map { row in
+            (0..<terminal.cols).map { terminal.getCharData(col: $0, row: row)?.attribute }
+        }
+    }
+
+    /// How many cells hold a different attribute in one grid than the other.
+    private static func differingCells(_ a: [[Attribute?]], _ b: [[Attribute?]]) -> Int {
+        zip(a, b).reduce(0) { count, rows in
+            count + zip(rows.0, rows.1).filter { cells in cells.0 != cells.1 }.count
+        }
+    }
+
+    /// How many cells have a background other than the default, so a test
+    /// can show its fixture made the cells it is about.
+    private static func colouredCells(_ grid: [[Attribute?]]) -> Int {
+        grid.joined().compactMap { $0 }.filter { $0.bg != .defaultColor }.count
     }
 
     // MARK: - Trailing blank rows
@@ -124,5 +146,69 @@ struct TerminalSnapshotBlankRowTests {
         let walk = TerminalCellWalk.styledHistory(of: pair.source, maxScrollbackLines: 500)
         #expect(walk.components(separatedBy: "\r\n").count == 3,
                 "a screen with no history walks as its text alone")
+    }
+
+    // MARK: - Blank cells with a background colour
+
+    @Test("Erasing under a background colour keeps the colour", arguments: [
+        // EL, EL 2 and ED under three colours. Rows 0 and 1 are coloured to
+        // the last column, so each ends in pending wrap ahead of its line
+        // ending. Row 2 is coloured from column 4 and every row below it in
+        // full, so the screen's last row holds nothing but coloured blanks.
+        "\u{1b}[41m\u{1b}[K\u{1b}[2;1H\u{1b}[42m\u{1b}[2K\u{1b}[3;5H\u{1b}[43m\u{1b}[J\u{1b}[0m",
+        // ECH in the middle of a row: coloured blanks with plain ones after
+        // them, so the last cell of the row says nothing about the rest.
+        "ab\u{1b}[45m\u{1b}[3X\u{1b}[0m",
+        // DCH fills the end of the row it shifts left under the background,
+        // past a run of plain blanks.
+        "abcdefgh\u{1b}[1;3H\u{1b}[45m\u{1b}[2P\u{1b}[0m",
+    ])
+    func eraseUnderABackgroundKeepsTheColour(input: String) {
+        let pair = Pair(cols: 80, rows: 24)
+        pair.source.feed(text: input)
+        let expected = Self.attributes(of: pair.source)
+        #expect(Self.colouredCells(expected) > 0, "the fixture must leave coloured blanks")
+
+        pair.transfer("")
+        #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0)
+        Self.expectSameScreen(pair)
+        #expect(Self.history(of: pair.fresh).isEmpty,
+                "a row coloured to its last column wrapped an extra row")
+    }
+
+    @Test("A coloured alternate screen keeps its colour on the receiver and the source")
+    func colouredAlternateScreen() {
+        let pair = Pair(cols: 80, rows: 24)
+        pair.source.feed(text: "\u{1b}[?1049h\u{1b}[44m\u{1b}[2Jx\u{1b}[0m")
+        let expected = Self.attributes(of: pair.source)
+        #expect(Self.colouredCells(expected) == 80 * 24, "the fixture must colour every cell")
+
+        pair.transfer("")
+        #expect(pair.fresh.isCurrentBufferAlternate)
+        #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0)
+        // The snapshot leaves the source's alt screen to walk the primary and
+        // repaints it from the same rendering it sends, so the source loses
+        // whatever the receiver loses. Compare it with what it held before.
+        #expect(pair.source.isCurrentBufferAlternate)
+        #expect(Self.differingCells(Self.attributes(of: pair.source), expected) == 0,
+                "the snapshot changed the source's own alt screen")
+        Self.expectSameScreen(pair)
+    }
+
+    @Test("A coloured last row under history arrives whole, with no extra row after it")
+    func colouredLastRowUnderHistory() {
+        let pair = Pair(cols: 20, rows: 5)
+        // Ten lines scroll six into history and leave the cursor on the last
+        // row, which `ESC[2K` then colours out to the last column. That row
+        // is the last one the walk sends, so the receiver ends it in pending
+        // wrap with only mode escapes and the cursor address to follow.
+        pair.source.feed(text: Self.numberedLines(10) + "\u{1b}[44m\u{1b}[2K\u{1b}[0m")
+        let expected = Self.attributes(of: pair.source)
+        #expect(Self.colouredCells(expected) == 20, "the fixture must colour the last row")
+
+        pair.transfer("")
+        #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0)
+        Self.expectSameScreen(pair)
+        #expect(Self.history(of: pair.fresh).count == 6)
     }
 }
