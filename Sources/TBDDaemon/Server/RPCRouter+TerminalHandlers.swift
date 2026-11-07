@@ -3920,6 +3920,14 @@ extension RPCRouter {
     /// refused whole. The check reads the message after the CRLF rebuild
     /// above, so only a lone CR is refused.
     ///
+    /// **A multi-line message submits line by line when bracketed paste is
+    /// off.** On the tmux transport the paste is `paste-buffer -p` without
+    /// `-r`, so tmux turns each LF into a CR, which a child with bracketed
+    /// paste off reads as Enter, submitting each line on its own; a tab
+    /// likewise arrives as the Tab key. The laptop composer's sends reach the
+    /// pane the same way, so this is parity with the laptop, not a hole only
+    /// a phone opens.
+    ///
     /// **These refusals are recorded as the send core records its own.** A
     /// well-formed act the daemon declined gets a `terminal.send` row naming
     /// the phone and a `refused(.notEligible)` outcome carrying the refusal,
