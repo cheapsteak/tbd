@@ -8,7 +8,7 @@ choices rather than measured rendering cost, and it deliberately does not
 decide anything. Its statements describe TBD and the engines as of that date.
 The companion record
 [`docs/research/2026-10-28-terminal-engine-libghostty.md`](../research/2026-10-28-terminal-engine-libghostty.md)
-examines the same question against both as of 2026-10-28 and makes a
+examines the same question against both as of 2026-11-06 and makes a
 recommendation.
 
 Claims below are marked where confidence is less than direct observation.
