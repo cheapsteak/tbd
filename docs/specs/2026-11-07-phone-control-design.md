@@ -109,8 +109,10 @@ Research: `transports.md` section 7, `phone-clients.md` sections 1.3–1.5.
   owner-only files the same way (`ModelProfileKeychain` stores tokens under `~/tbd/claude-tokens/`).
 - **Phone:** one X25519 key pair per paired laptop, made with Web Crypto (iOS 17 and later). WebKit
   bug 312279 loses a non-extractable X25519 key stored in IndexedDB, while non-extractable AES-GCM
-  keys survive. So the loader stores each private key wrapped by a non-extractable AES-GCM key. This
-  gives up nothing real: any code on the loader origin could use a stored key anyway.
+  keys survive. So the loader stores each private key wrapped by a non-extractable AES-GCM key. Each
+  laptop's key has its own wrap key, stored with it. This gives up nothing real: any code on the
+  loader origin could unwrap and export a stored key anyway, so the loader origin is the trust
+  boundary.
 - **The laptop stores only each phone's public key.** It keeps no per-phone secret.
 
 **Pairing, once per phone per laptop.**
@@ -591,8 +593,15 @@ Research: `phone-app-stack.md`.
 
 **Folders.**
 
-- `phone/loader/` – the loader and the runner. Plain JavaScript ES modules with JSDoc types, served
-  exactly as committed, with no build step. `tsc --noEmit` checks the types in CI.
+- `phone/loader/` – the loader and the runner. Plain JavaScript ES modules with JSDoc types, with no
+  build step. `tsc --noEmit` checks the types in CI.
+  - The deploy publishes the served files as committed. A staging script,
+    `phone/scripts/stage-loader.sh`, names them with an allowlist, so tests, fixtures, the vendor
+    lock and Markdown never reach the key-holding origin.
+  - The deploy stamps one string, the loader's origin, into `runner.html`'s policy, and changes
+    nothing else. The runner's sandboxed frame has an opaque origin, so its policy must name the
+    loader's origin explicitly. The repo cannot know which origin a deploy serves from, because
+    forks differ. An unstamped runner names a placeholder origin and fails closed.
 - `phone/app/` – the app bundle's sources. TypeScript and React.
 - `phone/protocol/` – the app-protocol fixtures (section 4.4).
 - `phone/test-vectors/` – the Noise vectors and TBD's framing vectors, read by Swift and
@@ -608,7 +617,7 @@ Research: `phone-app-stack.md`.
 - The runner checks the hash, creates a `blob:` URL inside the frame, and starts the bundle as one
   classic script.
 - The runner's security policy, set by its own `<meta>` tag:
-  - names the loader's origin explicitly, never `'self'`, because WebKit changed what `'self'`
+  - names the loader's origin explicitly (stamped at deploy), never `'self'`, because WebKit changed what `'self'`
     means in a sandboxed document twice in 2026;
   - allows scripts only from that origin and from `blob:`;
   - sets `connect-src 'none'`, so the frame has no network and reaches the laptop only through its
@@ -647,8 +656,9 @@ which includes iPhone Safari. It loads only on the pairing screen. jsQR has had 
 `shasum`) updates them. CI verifies the checksums. A scheduled job checks every pinned version, in
 the loader and in the app's lockfile, against the OSV advisory database.
 
-**Review.** A CODEOWNERS entry requires the maintainer's review for `phone/loader/**` and
-`relay/**`. Merging to `main` deploys the loader, and the loader holds the keys.
+**Review.** A CODEOWNERS entry requires the maintainer's review for `phone/loader/**`,
+`phone/scripts/**` (the staging and vendor scripts decide what the loader serves) and `relay/**`.
+Merging to `main` deploys the loader, and the loader holds the keys.
 
 ## 10. Laptop UI
 
