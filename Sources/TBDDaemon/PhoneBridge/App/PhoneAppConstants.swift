@@ -43,6 +43,9 @@ enum PhoneAppConstants {
     /// The most requests one device may have running at once. A new request
     /// past it is refused, so a phone cannot start runs without bound.
     static let requestsInFlightPerDevice = 32
+    /// The longest request ID the service accepts, in UTF-8 bytes. A longer
+    /// one is refused before it reaches the request memory.
+    static let requestIDMaxBytes = 128
     /// The most rows one `sessions.subscribe` snapshot carries.
     static let snapshotMaxRows = 1_000
     /// The most items one first page carries.

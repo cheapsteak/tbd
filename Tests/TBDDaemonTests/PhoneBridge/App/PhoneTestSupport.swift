@@ -1,0 +1,303 @@
+import Foundation
+import TBDShared
+import TestSupport
+
+@testable import TBDDaemonLib
+
+// Fakes and helpers for the phone app service's tests. Tier 1: everything here
+// is in-process state, and nothing touches the disk or the network.
+
+// MARK: - FakeSessionActions
+
+/// A `PhoneSessionActions` that records every call and answers each method
+/// with a canned `RPCResponse`: `RPCResponse.ok()` unless a test sets one with
+/// `respond(to:with:)`.
+///
+/// `calls` lists every call in order with the device it acted for. Each method
+/// that takes params also keeps them, typed, in its own list (`sends`,
+/// `answers`, …), so a test can compare exactly what reached the daemon.
+final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
+    /// The protocol's methods, one case each.
+    enum Method: String, CaseIterable, Sendable {
+        case sessionStates
+        case answerPrompt
+        case answerRemotePrompt
+        case send
+        case wake
+        case swapProfile
+        case createWorktree
+        case remoteProviders
+        case remoteSessions
+        case remoteCreate
+        case remoteSendMessage
+        case remoteTranscriptSync
+        case remoteTranscriptLoadEarlier
+    }
+
+    /// One call: the method, and the device it acted for (nil for a read).
+    struct Call: Equatable, Sendable {
+        let method: Method
+        let deviceID: UUID?
+    }
+
+    private struct Log {
+        var calls: [Call] = []
+        var answers: [PromptAnswerParams] = []
+        var remoteAnswers: [RemoteAnswerParams] = []
+        var sends: [TerminalSendParams] = []
+        var wakes: [TerminalWakeParams] = []
+        var swaps: [TerminalSwapProfileParams] = []
+        var worktreeCreates: [WorktreeCreateParams] = []
+        var remoteCreates: [RemoteCreateParams] = []
+        var remoteSends: [RemoteSendMessageParams] = []
+        var remoteSyncs: [RemoteTranscriptSyncParams] = []
+        var remoteLoadEarliers: [RemoteTranscriptLoadEarlierParams] = []
+    }
+
+    private let lock = NSLock()
+    private var log = Log()
+    private var responses: [Method: RPCResponse] = [:]
+
+    init() {}
+
+    var calls: [Call] { lock.withLock { log.calls } }
+    var answers: [PromptAnswerParams] { lock.withLock { log.answers } }
+    var remoteAnswers: [RemoteAnswerParams] { lock.withLock { log.remoteAnswers } }
+    var sends: [TerminalSendParams] { lock.withLock { log.sends } }
+    var wakes: [TerminalWakeParams] { lock.withLock { log.wakes } }
+    var swaps: [TerminalSwapProfileParams] { lock.withLock { log.swaps } }
+    var worktreeCreates: [WorktreeCreateParams] { lock.withLock { log.worktreeCreates } }
+    var remoteCreates: [RemoteCreateParams] { lock.withLock { log.remoteCreates } }
+    var remoteSends: [RemoteSendMessageParams] { lock.withLock { log.remoteSends } }
+    var remoteSyncs: [RemoteTranscriptSyncParams] { lock.withLock { log.remoteSyncs } }
+    var remoteLoadEarliers: [RemoteTranscriptLoadEarlierParams] { lock.withLock { log.remoteLoadEarliers } }
+
+    /// Every later call of `method` answers `response`.
+    func respond(to method: Method, with response: RPCResponse) {
+        lock.withLock { responses[method] = response }
+    }
+
+    private func record(_ method: Method, deviceID: UUID?, keep: (inout Log) -> Void = { _ in }) -> RPCResponse {
+        lock.withLock {
+            log.calls.append(Call(method: method, deviceID: deviceID))
+            keep(&log)
+            return responses[method] ?? .ok()
+        }
+    }
+
+    func phoneSessionStates() async throws -> RPCResponse {
+        record(.sessionStates, deviceID: nil)
+    }
+
+    func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.answerPrompt, deviceID: deviceID) { $0.answers.append(p) }
+    }
+
+    func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.answerRemotePrompt, deviceID: deviceID) { $0.remoteAnswers.append(p) }
+    }
+
+    func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.send, deviceID: deviceID) { $0.sends.append(p) }
+    }
+
+    func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.wake, deviceID: deviceID) { $0.wakes.append(p) }
+    }
+
+    func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.swapProfile, deviceID: deviceID) { $0.swaps.append(p) }
+    }
+
+    func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.createWorktree, deviceID: deviceID) { $0.worktreeCreates.append(p) }
+    }
+
+    func phoneRemoteProviders() async throws -> RPCResponse {
+        record(.remoteProviders, deviceID: nil)
+    }
+
+    func phoneRemoteSessions() async throws -> RPCResponse {
+        record(.remoteSessions, deviceID: nil)
+    }
+
+    func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.remoteCreate, deviceID: deviceID) { $0.remoteCreates.append(p) }
+    }
+
+    func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
+        record(.remoteSendMessage, deviceID: deviceID) { $0.remoteSends.append(p) }
+    }
+
+    func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse {
+        record(.remoteTranscriptSync, deviceID: nil) { $0.remoteSyncs.append(p) }
+    }
+
+    func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
+        record(.remoteTranscriptLoadEarlier, deviceID: nil) { $0.remoteLoadEarliers.append(p) }
+    }
+}
+
+// MARK: - CapturingOutbox
+
+/// A `PhoneAppOutbox` that keeps every app body sent through it, in order.
+/// `send` returns true unless `phoneGone` is set; the body is kept either way.
+final class CapturingOutbox: PhoneAppOutbox, @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent: [Data] = []
+    private var gone = false
+
+    init() {}
+
+    var bodies: [Data] { lock.withLock { sent } }
+
+    var phoneGone: Bool {
+        get { lock.withLock { gone } }
+        set { lock.withLock { gone = newValue } }
+    }
+
+    func send(appBody: Data) async -> Bool {
+        lock.withLock {
+            sent.append(appBody)
+            return !gone
+        }
+    }
+
+    /// The body sent `index`th (from 0), once it has arrived. The service
+    /// sends from tasks of its own, so a test waits here rather than reading
+    /// `bodies` straight away. Throws a `BoundedWaitTimeout` when the body
+    /// has not arrived within `TestDeadlines.saturatedPass`, so a missing
+    /// reply fails the test instead of hanging it.
+    func body(at index: Int) async throws -> Data {
+        let deadline = TestDeadlines.saturatedPass
+        switch await pollUntilTrue(timeout: deadline, { self.bodies.count > index }) {
+        case .satisfied:
+            return bodies[index]
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            throw BoundedWaitTimeout(what: "app body #\(index)", observed: "\(bodies.count) bodies", deadline: deadline)
+        }
+    }
+}
+
+// MARK: - CapturingRecorder
+
+/// A `PhoneActionRecording` that keeps every record, in order.
+final class CapturingRecorder: PhoneActionRecording, @unchecked Sendable {
+    private let lock = NSLock()
+    private var kept: [PhoneActionRecord] = []
+
+    init() {}
+
+    var records: [PhoneActionRecord] { lock.withLock { kept } }
+
+    func record(_ r: PhoneActionRecord) {
+        lock.withLock { kept.append(r) }
+    }
+}
+
+// MARK: - PhoneTestGate
+
+/// Holds a stand-in handler until the test opens the gate, or until the
+/// handler's task is cancelled. Each waiter gets an `AsyncStream` of its own,
+/// so any number can wait at once.
+final class PhoneTestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [AsyncStream<Void>.Continuation] = []
+
+    init() {}
+
+    /// Returns once the gate is open or the calling task is cancelled.
+    func wait() async {
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        let alreadyOpen = lock.withLock { () -> Bool in
+            if !isOpen { waiters.append(continuation) }
+            return isOpen
+        }
+        if alreadyOpen { return }
+        for await _ in stream {}
+    }
+
+    func open() {
+        let pending = lock.withLock { () -> [AsyncStream<Void>.Continuation] in
+            isOpen = true
+            let pending = waiters
+            waiters = []
+            return pending
+        }
+        for continuation in pending { continuation.finish() }
+    }
+}
+
+// MARK: - Requests and replies
+
+/// A reply as a test reads it: its request ID, and its error when it has one.
+struct PhoneTestReply: Decodable, Equatable {
+    let kind: String
+    let requestID: String
+    let error: PhoneAppError?
+}
+
+enum PhoneTestRequests {
+    /// The app body of a request.
+    static func body<P: Codable>(_ method: PhoneAppMethod, id: String, params: P) throws -> Data {
+        try PhoneAppCoding.makeEncoder().encode(
+            PhoneRequestEnvelope(requestID: id, method: method.rawValue, params: params))
+    }
+}
+
+// MARK: - PhoneServiceHarness
+
+/// A `PhoneAppService` over an in-memory database with phone control on and
+/// one paired phone named "Acme Phone", with fakes for everything it calls
+/// and an `EventDrivenTestClock` for its timers.
+struct PhoneServiceHarness: Sendable {
+    let db: TBDDatabase
+    let actions: FakeSessionActions
+    let recorder: CapturingRecorder
+    let clock: EventDrivenTestClock
+    let service: PhoneAppService
+    let peer: PhonePeer
+
+    static func make() async throws -> PhoneServiceHarness {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPhoneControlEnabled(true)
+        let peer = PhonePeer(deviceID: UUID(), deviceName: "Acme Phone")
+        try await db.phoneDevices.insert(PhoneDevice(
+            id: peer.deviceID, name: peer.deviceName, publicKey: Data(repeating: 7, count: 32),
+            roomID: UUID().uuidString, pairedAt: Date(timeIntervalSince1970: 1_800_000_000)))
+        let actions = FakeSessionActions()
+        let recorder = CapturingRecorder()
+        let clock = EventDrivenTestClock()
+        let service = PhoneAppService(
+            db: db, actions: actions, subscriptions: StateSubscriptionManager(),
+            pendingPrompts: PendingPromptStore(), recorder: recorder, clock: clock)
+        return PhoneServiceHarness(
+            db: db, actions: actions, recorder: recorder, clock: clock, service: service, peer: peer)
+    }
+
+    /// Connects the phone through a fresh outbox and returns it.
+    func connect() async -> CapturingOutbox {
+        let outbox = CapturingOutbox()
+        await service.phoneConnected(peer, outbox: outbox)
+        return outbox
+    }
+
+    /// Hands the service one request and returns the reply, which must be the
+    /// next body `outbox` receives.
+    func request<P: Codable>(_ method: PhoneAppMethod, id: String = UUID().uuidString, params: P,
+                             on outbox: CapturingOutbox) async throws -> (reply: PhoneTestReply, bytes: Data) {
+        try await send(PhoneTestRequests.body(method, id: id, params: params), on: outbox)
+    }
+
+    /// Hands the service one raw app body and returns the reply, which must be
+    /// the next body `outbox` receives.
+    func send(_ body: Data, on outbox: CapturingOutbox) async throws -> (reply: PhoneTestReply, bytes: Data) {
+        let index = outbox.bodies.count
+        await service.handleAppMessage(body, from: peer)
+        let bytes = try await outbox.body(at: index)
+        return (try JSONDecoder().decode(PhoneTestReply.self, from: bytes), bytes)
+    }
+}
