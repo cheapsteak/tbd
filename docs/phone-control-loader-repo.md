@@ -13,7 +13,7 @@ The design is in [`docs/specs/2026-11-07-phone-control-design.md`](specs/2026-11
 ## How a deploy flows
 
 - **A merge to `main` that touches `phone/loader/`** runs [`.github/workflows/phone-loader-deploy.yml`](../.github/workflows/phone-loader-deploy.yml) in this repo.
-- **Its `verify` job** type-checks and tests the loader.
+- **Its `verify` job** installs the loader's dependencies with `npm ci`, then runs `npm run typecheck` and `npm test`.
 - **Its `dispatch` job** runs only after `verify` passed, only while `PHONE_LOADER_DEPLOY_ENABLED` is `true`, and only from `main`. It mints a short-lived token from the GitHub App and dispatches the loader repo's `deploy.yml` with the commit ID.
 - **The loader repo's `deploy.yml`** checks out that commit from this public repo and publishes `phone/loader/` exactly as committed, but only if the commit is on `main` and its `phone/loader` tree is still the newest one on `main`.
 - **What a leaked token can do.** It can start a deploy, but it cannot change what is served: the loader repo publishes only what this repo holds on `main`. A re-run, or an out-of-order dispatch of an older commit, exits without deploying. The token's one permission, Actions: write, also lets it cancel, re-run or disable the loader repo's workflow runs; none of those changes the served files.

@@ -810,9 +810,10 @@ Research: `ci-layout.md`.
 - **Loader deploy, `phone-loader-deploy.yml`:**
   - runs on pushes to `main` that touch `phone/loader/**` or the workflow itself, and on dispatch.
     No pull request event can start it;
-  - a `verify` job tests the loader as `phone.yml`'s `loader` job does. A PR that edits only this
-    workflow runs no phone part, so the classifier's harness pins `verify`'s Node setup, working
-    directory and npm commands to the `loader` job's;
+  - a `verify` job runs `npm ci`, `npm run typecheck` and `npm test` in `phone/`. It does not run
+    `vectors:check`, which only `phone.yml`'s `loader` job runs. A PR that edits only this workflow
+    runs no phone part, so the classifier's harness pins `verify`'s Node setup and working directory
+    to the `loader` job's, and requires each of its npm commands to be one the `loader` job runs;
   - a `dispatch` job runs only after `verify` passed, only while the repository variable
     `PHONE_LOADER_DEPLOY_ENABLED` is `true`, and only from `main`, in an environment whose
     deployment branches admit only `main`;
