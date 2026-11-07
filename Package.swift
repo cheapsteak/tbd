@@ -410,6 +410,13 @@ let package = Package(
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
+                // The loopback relay the URLSession relay transport's tests
+                // connect to: a real HTTP and WebSocket server on 127.0.0.1
+                // (PhoneBridge/LoopbackRelayServer.swift). Test-only; the
+                // daemon itself never serves a WebSocket.
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
             ]
         ),
         // Tier 3 (docs/specs/2026-07-24-test-hardening-design.md §3): suites whose
