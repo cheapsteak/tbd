@@ -1056,6 +1056,65 @@ test_deploy_token_can_only_dispatch() {
     "          private-key: \${{ secrets.PHONE_LOADER_APP_PRIVATE_KEY }}"
 }
 
+# The npm commands that job JOB of workflow FILE runs, one per line and
+# sorted: `npm` and its subcommand, plus the script's name for `npm run`.
+# Every code line counts, so a multi-line `run: |` block is read too, and
+# `cache: npm` is not a command.
+npm_commands() {
+  job_lines "$1" "$2" |
+    grep -oE '(^|[^[:alnum:]_.-])npm[[:space:]]+[[:alnum:]-]+([[:space:]]+[[:alnum:]:_.-]+)?' |
+    sed -E 's/^[^n]?npm/npm/' |
+    awk '{ if ($2 == "run" || $2 == "run-script") print $1, $2, $3; else print $1, $2 }' |
+    sort -u
+}
+
+# The `with:` line KEY of the setup-node step in job JOB of workflow FILE.
+setup_node_with() {
+  step_lines "$1" "$2" 'uses: actions/setup-node@' prefix | grep -E "^          $3:"
+}
+
+# The deploy's `verify` job tests the loader the way phone.yml's `loader` job
+# does. A PR that edits only the deploy workflow runs no phone part, since
+# `.github/` maps to none, so a `verify` that drifted from `loader` (another
+# Node, a script `phone/package.json` no longer has) would first fail after
+# merge, on main, where the deploy then silently stops. Nothing else here
+# runs `verify`, so its setup and its commands are pinned to `loader`'s, which
+# every phone PR runs: the same Node setup, in `phone/`, and no npm command
+# that `loader` does not run too.
+test_deploy_verify_matches_loader_job() {
+  local key want got dirs verify_npm loader_npm cmd
+  phone_workflow_exists phone-loader-deploy.yml || return
+  for key in node-version-file cache cache-dependency-path; do
+    want="$(setup_node_with "$PHONE_YML" loader "$key")"
+    got="$(setup_node_with "$DEPLOY_YML" verify "$key")"
+    if [ -z "$want" ]; then
+      echo "FAIL - phone.yml's loader job sets no setup-node $key to compare the deploy's verify job with"
+      FAIL=1
+      continue
+    fi
+    assert_eq "the deploy's verify job sets up Node with the loader job's $key" "$want" "$got"
+  done
+
+  assert_eq "the deploy's verify job runs its commands in phone/" "        working-directory: phone" \
+    "$(job_lines "$DEPLOY_YML" verify | under '    defaults:' | under '      run:')"
+  assert_eq "the deploy's verify job runs them where the loader job does" \
+    "$(job_lines "$PHONE_YML" loader | under '    defaults:' | under '      run:')" \
+    "$(job_lines "$DEPLOY_YML" verify | under '    defaults:' | under '      run:')"
+  dirs="$(job_lines "$DEPLOY_YML" verify | grep -E '^[[:space:]]+(- )?working-directory:')"
+  assert_eq "no step of the deploy's verify job runs in another directory" "        working-directory: phone" "$dirs"
+
+  verify_npm="$(npm_commands "$DEPLOY_YML" verify)"
+  loader_npm="$(npm_commands "$PHONE_YML" loader)"
+  if [ -z "$verify_npm" ]; then
+    echo "FAIL - the deploy's verify job runs no npm command, so this check would check nothing"
+    FAIL=1
+    return
+  fi
+  while read -r cmd; do
+    assert_line "the deploy's verify job runs \`$cmd\`, and so does phone.yml's loader job" "$loader_npm" "$cmd"
+  done <<< "$verify_npm"
+}
+
 # ---------------------------------------------------------------------------
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
