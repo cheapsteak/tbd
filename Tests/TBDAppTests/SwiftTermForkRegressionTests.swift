@@ -102,7 +102,9 @@ struct SwiftTermForkRegressionTests {
     /// cells that erases paint. Reclaiming style identifiers can release that
     /// erase style while a cell keeps the pen. Selecting the pen again must
     /// still erase with its background, as `ESC[31;44m ESC[K` does in a shell
-    /// that has run long enough to fill the style table.
+    /// that has run long enough to fill the style table. This guards the
+    /// erase-style reclaim. It also passes on `c6b544f`, which never reclaims,
+    /// because there the erase style keeps its identifier.
     @Test
     func erasingWithAReselectedPenKeepsItsBackground() {
         let cols = 80
