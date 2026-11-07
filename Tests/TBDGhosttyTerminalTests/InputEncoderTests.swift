@@ -173,6 +173,52 @@ struct MouseEncoderTests {
         #expect(afterRelease == report, "after a release the move encoded as \(String(describing: afterRelease))")
     }
 
+    /// Tracking can go off and on again with no mode bit changing: `?1000l` with 1000 never set
+    /// turns it off, and `?1003h` with 1003 still set turns it back on. Across two writes with no
+    /// event between, the encoder still forgets the last motion, so the same move is reported
+    /// again rather than dropped as a repeat.
+    @Test func aRepeatedMoveIsReportedAgainAfterTrackingWentOffAndOnWithNoBitChanging() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        let move = Self.motion(toX: 5)
+        let report = Array("\u{1b}[<35;1;1M".utf8)
+
+        let first = terminal.encodeMouse(move)
+        let repeated = terminal.encodeMouse(move)
+        #expect(first == report, "the first move encoded as \(String(describing: first))")
+        #expect(repeated == nil, "a repeated move encoded as \(String(describing: repeated))")
+
+        terminal.feed(text: "\u{1b}[?1000l")
+        #expect(!terminal.isMouseReporting, "resetting 1000, never set, left tracking on")
+        terminal.feed(text: "\u{1b}[?1003h")
+        #expect(terminal.isMouseReporting, "setting 1003 again left tracking off")
+        let afterToggle = terminal.encodeMouse(move)
+        #expect(afterToggle == report,
+                "after tracking went off and on, the move encoded as \(String(describing: afterToggle))")
+    }
+
+    /// After `?1000h ?1003h ?1003l` the 1000 bit is still set but nothing is reported. The wheel
+    /// then scrolls the primary screen's viewport, as with no mode set, rather than go to a report
+    /// that is never sent.
+    @Test func theWheelScrollsTheViewportAfterTrackingWasReset() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 5, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: (0..<30).map { "line \($0)\r\n" }.joined())
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1003h\u{1b}[?1003l")
+        let bitStillSet = terminal.withLocked { $0.isMouseTrackingEnabled }
+        try #require(bitStillSet, "the 1000 bit is not set, so this proves nothing")
+
+        let before = terminal.withLocked { state in state.raw.map { TerminalScrollMetrics.read($0) } }
+        let outcome = terminal.mouseWheel(rows: -2, at: Self.point, mods: [])
+        let after = terminal.withLocked { state in state.raw.map { TerminalScrollMetrics.read($0) } }
+        #expect(outcome == .scrolledViewport(rows: -2), "two rows of wheel up gave \(outcome)")
+        #expect(after?.offset != before?.offset,
+                "the viewport stayed at \(String(describing: after?.offset)) of \(String(describing: after?.total))")
+    }
+
     /// A button-less move to `x` on the first row.
     private static func motion(toX x: Double) -> MousePress {
         MousePress(action: .motion, button: nil, position: SurfacePoint(x: x, y: 5))

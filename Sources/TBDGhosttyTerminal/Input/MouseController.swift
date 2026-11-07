@@ -286,8 +286,7 @@ final class MouseController: NSObject {
             return true
         }
 
-        let route = terminalMouseRoute(
-            trackingEnabled: terminal.withLocked { $0.isMouseTrackingEnabled }, shiftHeld: mods.contains(.shift))
+        let route = terminalMouseRoute(trackingEnabled: terminal.isMouseReporting, shiftHeld: mods.contains(.shift))
         lastRoute = route
 
         guard let button = terminalMouseButton(for: event) else {
@@ -296,10 +295,13 @@ final class MouseController: NSObject {
 
         switch route {
         case .report:
-            pendingReportReleases.insert(button)
             lastReportPosition = position
-            send(terminal.encodeMouse(
-                MousePress(action: .press, button: button, mods: mods, position: position)))
+            let report = terminal.encodeMouse(
+                MousePress(action: .press, button: button, mods: mods, position: position))
+            // Only a press that went out earns a release, as in the encoder. One dropped here
+            // would otherwise send a release on its own once the program turns reporting on.
+            if report != nil { pendingReportReleases.insert(button) }
+            send(report)
             return true
 
         case .select:
@@ -395,7 +397,7 @@ final class MouseController: NSObject {
             clearLinkOverlay()
         }
 
-        guard terminal.withLocked({ $0.isMouseTrackingEnabled }) else { return false }
+        guard terminal.isMouseReporting else { return false }
         // A hover carries no button under any-event tracking (1003); under button-event tracking
         // the encoder answers `nil` and nothing is sent.
         send(terminal.encodeMouse(

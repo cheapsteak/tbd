@@ -81,7 +81,11 @@ public struct GhosttyTerminalState {
     /// The current Kitty keyboard protocol flags. Zero means the program asked for none.
     public var kittyKeyboardFlags: UInt8 { fetch(GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, UInt8(0)) }
 
-    /// True while any mouse tracking mode (X10, normal, button or any) is on.
+    /// True while any mouse tracking mode bit (X10, normal, button or any) is set.
+    ///
+    /// The bits, not what libghostty reports: it encodes under the mode set last, so after
+    /// `?1000h ?1003h ?1003l` this is true and no click is reported. Route input by
+    /// `GhosttyTerminal.isMouseReporting`.
     public var isMouseTrackingEnabled: Bool { fetch(GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, false) }
 
     /// Rows of scrollback above the active area.

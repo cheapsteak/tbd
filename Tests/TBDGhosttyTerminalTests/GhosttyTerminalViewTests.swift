@@ -297,6 +297,60 @@ struct GhosttyTerminalViewTests {
                 "\(view.mouseController.pendingReportReleases) still wait for a release")
     }
 
+    /// After `?1000h ?1003h ?1003l` the 1000 bit is still set, but resetting any tracking mode turns
+    /// tracking off, and libghostty reports nothing. A click must then select, as in xterm and
+    /// Ghostty, not go to a report that is never sent.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aClickAfterTrackingWasResetSelectsAndSendsNothing() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.onSend = { recorder.sent.append($0) }
+        fixture.terminal.feed(text: "\u{1b}[?1006h\u{1b}[?1000h\u{1b}[?1003h\u{1b}[?1003l")
+        let bitStillSet = fixture.terminal.withLocked { $0.isMouseTrackingEnabled }
+        try #require(bitStillSet, "the 1000 bit is not set, so this proves nothing")
+        let point = NSPoint(x: 20, y: 100)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window))
+        #expect(view.mouseController.lastRoute == .select,
+                "the click took the \(String(describing: view.mouseController.lastRoute)) route")
+        #expect(view.mouseController.isSelecting, "the click started no selection")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: point, in: window))
+        #expect(recorder.sent.isEmpty, "the click sent \(recorder.sent)")
+        #expect(view.mouseController.pendingReportReleases.isEmpty,
+                "\(view.mouseController.pendingReportReleases) wait for a release")
+    }
+
+    /// A press made while nothing is reported goes to the selection. If the program sets 1000 again
+    /// before the button comes up, the release must not go out on its own: the program never saw
+    /// the press.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aPressWithTrackingResetSendsNoReleaseOnceTrackingIsBack() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.onSend = { recorder.sent.append($0) }
+        fixture.terminal.feed(text: "\u{1b}[?1006h\u{1b}[?1000h\u{1b}[?1003h\u{1b}[?1003l")
+        let point = NSPoint(x: 20, y: 100)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window))
+        fixture.terminal.feed(text: "\u{1b}[?1000h")
+        try #require(fixture.terminal.isMouseReporting, "setting 1000 again did not turn reporting on")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: point, in: window))
+
+        #expect(recorder.sent.isEmpty, "the press and release sent \(recorder.sent)")
+        #expect(view.mouseController.pendingReportReleases.isEmpty,
+                "\(view.mouseController.pendingReportReleases) wait for a release")
+    }
+
     /// Left and right come from the event's type, every phase of it. An event built with
     /// `NSEvent.mouseEvent(with:…)` has `buttonNumber` 0 whatever its type, so a mapping that read
     /// the number would call these right-button events left. Only an "other" event is read by its

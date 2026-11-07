@@ -196,6 +196,12 @@ enum WheelOutcome: Sendable, Equatable {
 /// the flags; there is no getter. So the encoder is set from the terminal on every event, and the
 /// encoding a press went out under is kept as a second encoder, set from the terminal at the press.
 ///
+/// The same goes for deciding whether to report at all. `GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING`
+/// reads the bits, so the view would route a click to "report" that libghostty then drops: no
+/// report and no selection. What the flags leave in force is found instead by encoding a few
+/// probe events (`ReportProbe`) after every write that may have changed them, and the view routes
+/// clicks, hovers and the wheel by that.
+///
 /// Not `Sendable`: the C objects are not thread-safe. Only used under the terminal's lock.
 final class MouseEncoder {
     private let handle: GhosttyMouseEncoderHandle
@@ -209,50 +215,42 @@ final class MouseEncoder {
     /// format, while the button was down still gets the release, in the press's encoding.
     private(set) var pressEncodings: [MouseButton: GhosttyMouseEncoderHandle] = [:]
 
-    /// The DEC private mouse modes a program has set: four tracking modes and four report formats.
-    /// Not what the encoder encodes under (see the type's documentation): a change in them only
-    /// tells the encoder to forget `lastMotion`.
-    struct MouseModes: OptionSet, Sendable {
-        let rawValue: UInt8
+    /// What libghostty reports under the terminal's mouse flags, read back the only way they can
+    /// be: by encoding one event of each kind with an encoder set from the terminal. A left press
+    /// is reported under any tracking mode, its release under all but X10, a move with the button
+    /// held under button- and any-event tracking, and a bare move under any-event tracking alone.
+    /// The probe sits in cell 200, where the five report formats all encode differently, so two
+    /// probes are equal exactly when the tracking mode and the format are.
+    struct ReportProbe: Equatable, Sendable {
+        var press: [UInt8]?
+        var release: [UInt8]?
+        var drag: [UInt8]?
+        var hover: [UInt8]?
 
-        init(rawValue: UInt8) { self.rawValue = rawValue }
+        /// Tracking is on: a press is reported, so a click goes to the program, not the selection.
+        var reportsPresses: Bool { press != nil }
 
-        static let x10 = MouseModes(rawValue: 1 << 0)
-        static let normal = MouseModes(rawValue: 1 << 1)
-        static let button = MouseModes(rawValue: 1 << 2)
-        static let any = MouseModes(rawValue: 1 << 3)
-        static let utf8 = MouseModes(rawValue: 1 << 4)
-        static let sgr = MouseModes(rawValue: 1 << 5)
-        static let urxvt = MouseModes(rawValue: 1 << 6)
-        static let sgrPixels = MouseModes(rawValue: 1 << 7)
-
-        private static let numbers: [(mode: MouseModes, number: UInt16)] = [
-            (.x10, 9), (.normal, 1000), (.button, 1002), (.any, 1003),
-            (.utf8, 1005), (.sgr, 1006), (.urxvt, 1015), (.sgrPixels, 1016),
-        ]
-
-        /// The modes `terminal` has set. Caller holds the lock.
-        init(of terminal: VtTerminal) {
-            var modes: MouseModes = []
-            for entry in Self.numbers {
-                var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(entry.number, false), value: false)
-                if ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS,
-                   config.value {
-                    modes.insert(entry.mode)
-                }
-            }
-            self = modes
-        }
+        /// Tracking is off.
+        static let silent = ReportProbe()
     }
 
-    /// The mouse modes last seen, so a change in them is noticed.
-    private var observedModes: MouseModes?
+    /// Encodes the probes. Set from the terminal before each probe, with a fixed geometry of its
+    /// own, so a probe reads the flags alone.
+    private let probeHandle: GhosttyMouseEncoderHandle
+    /// One pixel per cell, wide enough for the probe's cell 200.
+    private static let probeGeometry = TerminalPixelGeometry(
+        screenWidth: 400, screenHeight: 10, cellWidth: 1, cellHeight: 1)
+    private static let probePoint = SurfacePoint(x: 199.5, y: 0.5)
 
-    /// The last motion report sent since the last press, release, mode change or resize. A motion
-    /// whose report repeats it is dropped: the bytes carry the cell, the button bits and the
-    /// modifiers, and the modes have not changed since, so the program would learn nothing from
-    /// it. SGR-Pixels reports carry pixels, so every pixel of motion still goes out there, as the
-    /// mode asks.
+    /// The flags as of the terminal's last write or reset. nil until first needed. Kept up to date
+    /// by `terminalModesMayHaveChanged`, so an event reads it and never probes.
+    private var probe: ReportProbe?
+
+    /// The last motion report sent since the last press, release, change of mouse flags or resize.
+    /// A motion whose report repeats it is dropped: the bytes carry the cell, the button bits and
+    /// the modifiers, and the flags have not changed since, so the program would learn nothing
+    /// from it. SGR-Pixels reports carry pixels, so every pixel of motion still goes out there, as
+    /// the mode asks.
     // libghostty-vt drops repeats only with OPT_TRACK_LAST_CELL, off by default and keyed on the cell alone.
     private var lastMotion: [UInt8]?
 
@@ -267,6 +265,9 @@ final class MouseEncoder {
 
     init(geometry: TerminalPixelGeometry) throws {
         handle = try GhosttyMouseEncoderHandle()
+        probeHandle = try GhosttyMouseEncoderHandle()
+        var probeSize = Self.probeGeometry.ghostty
+        _ = ghostty_mouse_encoder_set(probeHandle.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &probeSize)
         var event: GhosttyMouseEvent?
         try ghosttyCheck(ghostty_mouse_event_new(nil, &event), "ghostty_mouse_event_new")
         guard let event else {
@@ -297,38 +298,66 @@ final class MouseEncoder {
         _ = ghostty_mouse_encoder_reset(handle.raw)
     }
 
-    /// Is any mouse tracking mode (X10 / normal / button / any-event) set?
+    /// Will libghostty report a press? That is, is a mouse tracking mode in force?
     ///
-    /// Read from the mode bits, so after `?1000h ?1003h ?1003l` it is true although libghostty
-    /// reports nothing: see the type's documentation. The view layer uses it to decide
-    /// reporting-vs-selection, and the wheel to decide reporting-vs-scrolling.
-    /// Caller holds the terminal lock.
-    static func isTrackingEnabled(_ terminal: VtTerminal) -> Bool {
-        var tracking = false
-        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &tracking) == GHOSTTY_SUCCESS
-        else { return false }
-        return tracking
+    /// Read from the flags, as the encoder encodes, not from the mode bits: after
+    /// `?1000h ?1003h ?1003l` the bits still say 1000, but nothing is reported, so this is false
+    /// and a click selects. The view routes clicks and hovers by it, and the wheel decides
+    /// between reporting and scrolling by it. Caller holds the terminal lock.
+    func isReporting(terminal: VtTerminal) -> Bool {
+        currentProbe(terminal).reportsPresses
     }
 
-    /// Sets the encoder from the terminal's current mouse flags, and forgets the last motion if
-    /// the mouse modes changed. Every event runs this first. Caller holds the lock.
+    /// The probe as of the last write, made now if there has been none since this encoder was.
+    private func currentProbe(_ terminal: VtTerminal) -> ReportProbe {
+        if let probe { return probe }
+        return refreshProbe(terminal)
+    }
+
+    /// Probes the flags again, and forgets the last motion if they changed.
+    @discardableResult
+    private func refreshProbe(_ terminal: VtTerminal) -> ReportProbe {
+        let fresh = probeReports(terminal)
+        if fresh != probe {
+            probe = fresh
+            lastMotion = nil
+        }
+        return fresh
+    }
+
+    /// Encodes the four probe events under the terminal's flags. An event the encoder fails on is
+    /// one it would not report, so it counts as unreported.
+    private func probeReports(_ terminal: VtTerminal) -> ReportProbe {
+        _ = ghostty_mouse_encoder_set_from_terminal(probeHandle.raw, terminal)
+        let point = Self.probePoint
+        let press = try? encodeEvent(
+            MousePress(action: .press, button: .left, position: point), with: probeHandle, anyPressed: true)
+        // No tracking mode reports a release or a move without reporting the press.
+        guard press != nil else { return .silent }
+        let release = try? encodeEvent(
+            MousePress(action: .release, button: .left, position: point), with: probeHandle, anyPressed: false)
+        let drag = try? encodeEvent(
+            MousePress(action: .motion, button: .left, position: point), with: probeHandle, anyPressed: true)
+        let hover = try? encodeEvent(
+            MousePress(action: .motion, button: nil, position: point), with: probeHandle, anyPressed: false)
+        return ReportProbe(press: press, release: release, drag: drag, hover: hover)
+    }
+
+    /// Sets the encoder from the terminal's current mouse flags. Every event runs this first.
+    /// Caller holds the lock.
     private func syncFromTerminal(_ terminal: VtTerminal) {
         _ = ghostty_mouse_encoder_set_from_terminal(handle.raw, terminal)
-        noteModes(MouseModes(of: terminal))
+        _ = currentProbe(terminal)
     }
 
-    private func noteModes(_ modes: MouseModes) {
-        guard modes != observedModes else { return }
-        observedModes = modes
-        lastMotion = nil
-    }
-
-    /// Re-reads the terminal's mouse modes. The binding calls this after the terminal has parsed
-    /// program output or been reset, so a mode the program turns off and on again in two writes
-    /// between events still forgets the last motion. The view sends the encoder no events while
-    /// tracking is off, so the events alone would never see the gap. Caller holds the lock.
+    /// Probes the terminal's mouse flags again. The binding calls this after the terminal has
+    /// parsed program output or been reset, so tracking that goes off and on again in two writes
+    /// between events still forgets the last motion, even when no mode bit changes:
+    /// `?1000l` with 1000 never set turns tracking off, and `?1003h` with 1003 still set turns it
+    /// back on. The view sends the encoder no events while tracking is off, so the events alone
+    /// would never see the gap. Caller holds the lock.
     func terminalModesMayHaveChanged(_ terminal: VtTerminal) {
-        noteModes(MouseModes(of: terminal))
+        refreshProbe(terminal)
     }
 
     /// A new encoder set from `terminal` as it is now, with this encoder's size: the record of
@@ -351,8 +380,9 @@ final class MouseEncoder {
     ///
     /// Returns `nil` when the terminal wants no report at all — tracking off, a motion event in a
     /// mode that only reports buttons, or a motion whose report repeats the last one (see
-    /// `lastMotion`). A release of a press that was reported is encoded as the press was, so it
-    /// goes out even if the program has since turned reporting off.
+    /// `lastMotion`), or a release whose press was not reported. A release of a press that was
+    /// reported is encoded as the press was, so it goes out even if the program has since turned
+    /// reporting off.
     ///
     /// Every report goes through here, the view's and `GhosttyTerminal.encodeMouse`'s alike, so
     /// this is the one place repeated motion is dropped. Caller holds the terminal lock.
@@ -366,15 +396,19 @@ final class MouseEncoder {
             heldButtons.insert(button)
             pressEncodings[button] = nil
             let bytes = try encodeEvent(press, with: handle)
-            // Only a reported press earns a release.
-            if bytes != nil { pressEncodings[button] = pressEncoder(from: terminal) }
+            // Only a reported press earns a release. Without its own encoder, the release goes
+            // out under the flags in force when it comes.
+            if bytes != nil { pressEncodings[button] = pressEncoder(from: terminal) ?? handle }
             return bytes
 
         case .release:
             lastMotion = nil
             guard let button = press.button else { return try encodeEvent(press, with: handle) }
             heldButtons.remove(button)
-            let encoder = pressEncodings.removeValue(forKey: button) ?? handle
+            // A press that went out unreported has nothing to close, even if the program has
+            // turned reporting on since: a release alone would tell it a button came up that it
+            // never saw go down.
+            guard let encoder = pressEncodings.removeValue(forKey: button) else { return nil }
             return try encodeEvent(press, with: encoder)
 
         case .motion:
@@ -442,7 +476,7 @@ final class MouseEncoder {
     ) throws -> WheelOutcome {
         guard rows != 0 else { return .none }
 
-        guard Self.isTrackingEnabled(terminal) else {
+        guard isReporting(terminal: terminal) else {
             var behavior = GhosttyTerminalScrollViewport()
             behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
             behavior.value.delta = rows

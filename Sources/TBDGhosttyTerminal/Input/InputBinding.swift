@@ -175,6 +175,16 @@ extension GhosttyTerminal {
         }
     }
 
+    /// Whether libghostty will report a mouse press under the program's mouse modes as they stand
+    /// now. The view routes clicks, hovers and the wheel by it. Not the same as a mode bit being
+    /// set: after `?1000h ?1003h ?1003l` the 1000 bit is still set and nothing is reported. See
+    /// `MouseEncoder`. False once the terminal is closed.
+    var isMouseReporting: Bool {
+        input("reading the mouse modes", fallback: false) { raw, binding in
+            binding.mouseEncoder.isReporting(terminal: raw)
+        }
+    }
+
     /// Whole rows of wheel scrolling. With tracking on the reports are returned in `.report`; with
     /// tracking off the viewport is scrolled under the lock and the caller should ask for a frame.
     func mouseWheel(rows: Int, at position: SurfacePoint, mods: TerminalModifiers) -> WheelOutcome {
