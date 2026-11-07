@@ -179,6 +179,45 @@ struct TerminalSnapshotBlankRowTests {
         #expect(pair.fresh.getLine(row: 23)?.getTrimmedLength() == 0)
     }
 
+    @Test("A continuation the receiver wraps onto at its bottom row takes no colour from its first cell")
+    func colouredContinuationAtTheBottomRow() {
+        let pair = SnapshotPair(cols: 20, rows: 5)
+        // Six rows of history, then a cleared screen and 25 red `E`s: five
+        // wrap onto row 1, and its other 15 cells keep the default
+        // background. The receiver gets to row 1 by wrapping at its bottom
+        // row, so the wrap scrolls.
+        pair.source.feed(
+            text: Self.numberedLines(10) + "\u{1b}[H\u{1b}[2J\u{1b}[41m"
+                + String(repeating: "E", count: 25) + "\u{1b}[0m")
+        let expected = Self.attributes(of: pair.source)
+        #expect(Self.colouredCells(expected) == 25, "the fixture must colour only the `E`s")
+        #expect(pair.source.getLine(row: 1)?.isWrapped == true)
+
+        pair.transfer("")
+        #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0,
+                "the rest of the continuation took the red its first cell wrapped under")
+        Self.expectSameScreen(pair)
+    }
+
+    @Test("An erased wrapped row with one coloured blank arrives with only that blank coloured")
+    func erasedContinuationWithOneColouredBlank() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // The input `erasedWrappedRowKeepsItsPlace` replays, with column 0
+        // of the erased continuation then erased again under blue. The
+        // receiver wraps onto that row at its bottom row.
+        pair.source.feed(
+            text: Self.numberedLines(30) + String(repeating: "a", count: 100)
+                + "\r\u{1b}[2K\u{1b}[44m\u{1b}[X\u{1b}[0m")
+        let expected = Self.attributes(of: pair.source)
+        #expect(Self.colouredCells(expected) == 1, "the fixture must colour one cell")
+
+        pair.transfer("")
+        #expect(Self.differingCells(Self.attributes(of: pair.fresh), expected) == 0,
+                "the whole continuation took the blue its first cell wrapped under")
+        Self.expectSameScreen(pair)
+        #expect(pair.fresh.getLine(row: 23)?.isWrapped == true)
+    }
+
     // MARK: - Captures
 
     @Test("A capture drops the blank rows below a cleared screen's text, and a replay keeps them")
