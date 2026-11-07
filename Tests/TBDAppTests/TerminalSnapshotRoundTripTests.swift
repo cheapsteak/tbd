@@ -19,9 +19,10 @@ private final class ReplyCollector: TerminalDelegate, ModeReplyReader {
     }
 }
 
-private final class Pair {
-    let sourceReply = ReplyCollector()
-    let freshReply = ReplyCollector()
+/// Internal rather than private so `TerminalSnapshotBlankRowTests` can reuse it.
+final class Pair {
+    fileprivate let sourceReply = ReplyCollector()
+    fileprivate let freshReply = ReplyCollector()
     let source: Terminal
     let fresh: Terminal
 

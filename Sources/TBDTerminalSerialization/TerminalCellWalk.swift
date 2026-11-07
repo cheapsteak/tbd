@@ -74,16 +74,32 @@ public enum TerminalCellWalk {
 
         var walked = rows.compactMap { terminal.getScrollInvariantLine(row: $0) }
 
-        // Rows below the cursor that were never written to carry no
-        // information — an attaching viewer's screen is already blank there —
-        // and each one is a hard break (never a wrap continuation), so walking
-        // them fragments an otherwise-unbroken line into several pieces that
-        // still render identically on screen. Drop them from the tail only; a
-        // blank line earlier in the buffer is real content and stays.
+        // Trailing blank rows are dropped only when the walk holds no row
+        // above the viewport. The receiver starts on an erased screen with
+        // the cursor at home, and once it reaches its bottom row, every
+        // further row it is sent scrolls one row into its scrollback. So a
+        // walk that holds history must arrive whole: each trailing row
+        // dropped is a scroll the receiver never makes, so the viewport lands
+        // that many rows low, the history comes up that many rows short, and
+        // the absolute cursor address that ends the snapshot points at the
+        // wrong line. The cap above changes only how much history there is,
+        // so the same test holds for a capped walk.
+        //
+        // Without history the receiver never scrolls, its screen below the
+        // last row sent is already blank, and the closing cursor address puts
+        // the cursor back wherever it was. There a trailing blank row adds
+        // only a line ending, so dropping it lets a short screen walk as its
+        // text instead of its text plus a run of empty lines. A wrapped
+        // continuation is never dropped, and a blank row earlier in the walk
+        // is real content and stays.
+        //
         // `styledViewport` does not apply this trim: on the alt screen a blank
         // trailing row is the application's own layout, not unused padding.
-        while let last = walked.last, !last.isWrapped, last.getTrimmedLength() == 0 {
-            walked.removeLast()
+        let holdsHistory = walked.count > viewportRows
+        if !holdsHistory {
+            while let last = walked.last, !last.isWrapped, last.getTrimmedLength() == 0 {
+                walked.removeLast()
+            }
         }
 
         return walked
