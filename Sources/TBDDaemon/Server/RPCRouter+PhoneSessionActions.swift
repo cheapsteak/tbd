@@ -4,12 +4,13 @@ import TBDShared
 /// The router behind the phone bridge's one door (`PhoneSessionActions`).
 ///
 /// Every method is one call to an existing core function or handler. It adds
-/// only three things: the params a phone may set, rebuilt from those fields
+/// only four things: the params a phone may set, rebuilt from those fields
 /// alone; the encoding of params for a handler that decodes them, with the
-/// router's own `encoder` to match the router's own `decoder`; and the phone's
-/// identity, built from the one `deviceID` it is given. So each runs the
-/// checks of the RPC it mirrors, in that RPC's order, and returns that RPC's
-/// response.
+/// router's own `encoder` to match the router's own `decoder`; the phone's
+/// identity, built from the one `deviceID` it is given; and, in
+/// `phoneSessionStates`, the removal of every report on a shell. So each runs
+/// the checks of the RPC it mirrors, in that RPC's order, and returns that
+/// RPC's response.
 ///
 /// **The rebuild names what a phone keeps, never what it loses.** Every params
 /// value the bridge passes is rebuilt field by field into fresh params holding
@@ -24,8 +25,25 @@ import TBDShared
 /// `prompt.answer`, `remote.answer` and a send without the dispatch marker,
 /// are reached through the cores split out beneath their socket checks.
 extension RPCRouter: PhoneSessionActions {
+    /// `session.states` over every worktree, less every report on a shell.
+    ///
+    /// The handler keeps every kindless row, because the app's reader would
+    /// rather see a real agent than lose one, and a kindless row with no
+    /// Claude session id is a shell to the send core and to the send rail
+    /// (`effectiveKind(kind:claudeSessionID:)`). A report carries neither the
+    /// kind nor the session id, so the terminal rows are read once, in one
+    /// query, and a report is kept only when its terminal's row is there and
+    /// is not a shell by that reading. The handler is left as it is: the app
+    /// reads it too.
     func phoneSessionStates() async throws -> RPCResponse {
-        try await handleSessionStates(encoder.encode(SessionStatesParams()))
+        let response = try await handleSessionStates(encoder.encode(SessionStatesParams()))
+        guard response.success else { return response }
+        let reports = try response.decodeResult(SessionStatesResult.self).reports
+        let agentTerminalIDs = Set(try await db.terminals.list()
+            .filter { Self.effectiveKind(kind: $0.kind, claudeSessionID: $0.claudeSessionID) != .shell }
+            .map(\.id))
+        return try RPCResponse(result: SessionStatesResult(
+            reports: reports.filter { agentTerminalIDs.contains($0.terminalID) }))
     }
 
     func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {

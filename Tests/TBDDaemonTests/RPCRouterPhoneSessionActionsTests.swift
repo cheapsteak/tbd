@@ -95,6 +95,33 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(!reported.contains(shell.id), "a shell terminal is never reported on")
     }
 
+    /// A row with no recorded kind is a shell when it carries no Claude
+    /// session id, as the send rail reads it, so the phone never hears of it.
+    /// A kindless row with a session id is Claude's and is reported. The app's
+    /// `session.states` still reports both.
+    @Test func phoneSessionStatesHidesAKindlessRowWithNoSession() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-kindless")
+        let kindlessShell = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%3")
+        let kindlessClaude = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@4", tmuxPaneID: "%4",
+            claudeSessionID: "sess-kindless")
+
+        let response = try await f.actions.phoneSessionStates()
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        let reported = Set(try response.decodeResult(SessionStatesResult.self).reports.map(\.terminalID))
+        #expect(reported == [kindlessClaude.id])
+        #expect(!reported.contains(kindlessShell.id), "a kindless row with no session is a shell")
+
+        let appResponse = try await f.router.handleSessionStates(
+            JSONEncoder().encode(SessionStatesParams()))
+        let appReported = Set(
+            try appResponse.decodeResult(SessionStatesResult.self).reports.map(\.terminalID))
+        #expect(appReported == [kindlessShell.id, kindlessClaude.id], "the app's handler is unchanged")
+    }
+
     // MARK: - The answer core runs under the phone's pairing
 
     /// The socket check refuses every caller on this router, so an answer that

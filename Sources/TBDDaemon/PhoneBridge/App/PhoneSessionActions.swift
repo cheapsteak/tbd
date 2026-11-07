@@ -13,8 +13,10 @@ import TBDShared
 /// `RPCResponse` that RPC returns, refusal text included, so the phone hears a
 /// refusal in the words the app hears. It runs exactly the checks the matching
 /// core function or handler runs, in the same order. The only checks it adds
-/// are the send rail's: it refuses a shell, which spec section 6 hides from
-/// the phone, and a message part that is not text.
+/// keep shells, which spec section 6 hides from the phone, out of its reach,
+/// and keep its messages to text: `phoneSessionStates` drops every report on
+/// a shell, and the send rail refuses a shell, a message part that is not
+/// text and an empty message.
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -46,8 +48,8 @@ protocol PhoneSessionActions: Sendable {
     /// The paired-phone send rail: the terminal, the message (`text` or
     /// `parts`) and `submit`, with no dispatch marker, always gated on
     /// awaiting input, never verified and never keys, whatever `p` asks for.
-    /// A shell terminal, or a part that is not text, is refused before
-    /// anything is typed.
+    /// A shell terminal, a part that is not text or an empty message is
+    /// refused before anything is typed.
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.wake` with only the terminal and the message the wake
