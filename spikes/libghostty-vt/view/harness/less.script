@@ -1,0 +1,15 @@
+wait 1
+shot t-less-1.png
+key space space
+wait 0.3
+shot t-less-2.png
+wheel -5 10 10
+wait 0.4
+shot t-less-3-wheel.png
+key shift+g
+wait 0.3
+type /Filler
+key return
+wait 0.2
+key q
+wait 0.3

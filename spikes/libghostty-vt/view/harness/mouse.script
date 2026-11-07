@@ -1,0 +1,21 @@
+wait 0.6
+mouse down 10 5
+mouse up 10 5
+mouse down 20 6 right
+mouse up 20 6 right
+mouse down 30 7 middle
+mouse up 30 7 middle
+mouse down 5 3
+mouse drag 6 3
+mouse drag 7 4
+mouse up 7 4
+mouse move 12 8
+mouse move 13 8
+mouse down 2 2 left shift
+mouse up 2 2 left shift
+wheel 3 15 9
+wheel -3 15 9
+focus out
+wait 0.1
+focus in
+wait 0.3

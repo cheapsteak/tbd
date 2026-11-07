@@ -1,0 +1,10 @@
+wait 1
+key i
+type hello
+key ctrl+[
+wait 0.4
+shot k-vim-1.png
+type :echo "left insert mode"
+key return
+wait 0.4
+shot k-vim-2.png

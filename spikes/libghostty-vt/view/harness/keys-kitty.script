@@ -1,0 +1,6 @@
+wait 0.6
+type aA
+key ctrl+a shift+return ctrl+return esc up shift+up f1 f5 backspace tab shift+tab opt+b
+type é
+wait 0.3
+shot i-keys-kitty.png

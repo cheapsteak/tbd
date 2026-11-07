@@ -1,0 +1,6 @@
+wait 2.5
+shot t-top-1.png
+wait 1.5
+shot t-top-2.png
+type q
+wait 0.3

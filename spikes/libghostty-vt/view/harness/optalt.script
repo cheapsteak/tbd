@@ -1,0 +1,3 @@
+wait 0.6
+key opt+b opt+f opt+d opt+left opt+return
+wait 0.3

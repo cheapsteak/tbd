@@ -1,0 +1,5 @@
+wait 0.8
+shot c-focus.png
+focus out
+wait 0.3
+shot c-unfocused.png

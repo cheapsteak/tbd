@@ -1,0 +1,7 @@
+wait 0.6
+paste single line
+wait 0.2
+paste two\nlines
+wait 0.2
+paste tricky\x1b[201~tail
+wait 0.3

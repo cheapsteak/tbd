@@ -1,0 +1,27 @@
+# The real claude TUI on the stub API. Sends a prompt through the PTY as key events.
+wait 5
+shot claude-1-start.png
+text claude-1-start.txt
+type Say hello from the stub
+wait 0.5
+shot claude-2-typed.png
+key return
+wait 5
+shot claude-3-answer.png
+text claude-3-answer.txt
+key shift+return
+wait 0.5
+type multi
+key shift+return
+type line
+wait 0.5
+shot claude-4-multiline.png
+text claude-4-multiline.txt
+wait 0.2
+key ctrl+u ctrl+u
+wait 0.3
+type /exit
+wait 0.3
+key return
+wait 2
+shot claude-5-exit.png

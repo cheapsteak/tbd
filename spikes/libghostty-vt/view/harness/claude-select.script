@@ -1,0 +1,28 @@
+# Selection on the claude TUI: plain drag is Claude's own and leaves by OSC 52; Shift-drag is the host's.
+wait 5
+type Say hello from the stub
+wait 0.3
+key return
+wait 5
+log plain drag
+mouse down 4 12 left none 1
+wait 0.1
+mouse drag 30 12
+wait 0.1
+mouse drag 40 13
+wait 0.2
+mouse up 40 13
+wait 1
+shot u-9-plain-drag.png
+copy
+log shift drag
+mouse down 4 14 left shift 1
+wait 0.1
+mouse drag 30 14 left shift
+wait 0.1
+mouse drag 40 15 left shift
+wait 0.2
+mouse up 40 15 left shift
+wait 0.3
+shot u-10-shift-drag.png
+copy

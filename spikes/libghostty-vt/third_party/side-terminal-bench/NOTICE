@@ -1,0 +1,11 @@
+side-terminal-bench
+Copyright 2026 Gazi Shahi
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+TermBench/Sources/Harness/AlloyGlyphAtlas.swift is vendored from Alloy
+(https://github.com/gazishahi/alloy), Apache License 2.0.
+
+Not included, fetched when built: Ghostty and libghostty-vt (https://github.com/ghostty-org/ghostty,
+MIT) by scripts/build-ghostty.sh, and SwiftTerm (https://github.com/migueldeicaza/SwiftTerm, MIT)
+by Swift Package Manager.

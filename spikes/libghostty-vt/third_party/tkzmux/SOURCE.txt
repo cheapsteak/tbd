@@ -1,0 +1,3 @@
+Adapted from tkzmux (MIT, see LICENSE in this directory).
+Upstream commit: c961533ffc452e67d4e79d83b535bf50f83b5433
+Adapted files carry a one-line source note at the top.

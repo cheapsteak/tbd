@@ -1,0 +1,39 @@
+wait 0.8
+mouse down 4 1
+mouse drag 10 1
+mouse drag 19 1
+mouse up 19 1
+wait 0.2
+shot i-select-drag.png
+copy
+mouse down 2 3
+mouse drag 30 3
+mouse drag 30 5
+mouse up 30 5
+wait 0.2
+copy
+shot i-select-multi.png
+mouse down 8 1 left none 1
+mouse up 8 1 left none 1
+wait 0.05
+mouse down 8 1 left none 2
+mouse up 8 1 left none 2
+wait 0.2
+copy
+shot i-select-word.png
+mouse down 8 1
+mouse up 8 1
+mouse down 8 1
+mouse up 8 1
+mouse down 8 1
+mouse up 8 1
+wait 0.2
+copy
+shot i-select-line.png
+mouse down 3 7 left opt
+mouse drag 14 9 left opt
+mouse up 14 9 left opt
+wait 0.2
+copy
+shot i-select-rect.png
+wait 0.2

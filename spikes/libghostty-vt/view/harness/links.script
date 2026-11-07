@@ -1,0 +1,14 @@
+wait 0.8
+mouse move 3 0 left cmd
+wait 0.2
+shot l-hover.png
+mouse down 3 0 left cmd
+mouse up 3 0 left cmd
+wait 0.2
+mouse down 3 1 left cmd
+mouse up 3 1 left cmd
+wait 0.2
+mouse down 3 2 left cmd
+mouse up 3 2 left cmd
+wait 0.2
+log links done

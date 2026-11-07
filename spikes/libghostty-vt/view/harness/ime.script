@@ -1,0 +1,11 @@
+wait 0.6
+marked にほんご
+wait 0.3
+shot i-ime-marked.png
+text i-ime-marked.txt
+unmark
+wait 0.1
+marked にほ
+commit 日本語
+wait 0.3
+shot i-ime-commit.png

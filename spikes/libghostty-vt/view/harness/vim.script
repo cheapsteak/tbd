@@ -1,0 +1,29 @@
+wait 1.5
+shot t-vim-1.png
+key i
+type # typed through key events
+key esc
+wait 0.3
+type :vsplit
+key return
+wait 0.3
+key shift+g
+wait 0.3
+shot t-vim-2.png
+type :set mouse=a
+key return
+wait 0.2
+mouse down 60 10
+mouse up 60 10
+wheel -3 60 10
+wait 0.3
+shot t-vim-3-mouse.png
+type :set mouse=
+key return
+wait 0.2
+wheel 3 60 10
+wait 0.4
+shot t-vim-4-altscroll.png
+type :qa!
+key return
+wait 0.5

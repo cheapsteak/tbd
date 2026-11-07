@@ -1,0 +1,36 @@
+# Real-use pass over the claude TUI: scroll, paste, resize, selection, on the same session.
+wait 5
+type Say hello from the stub
+wait 0.3
+key return
+wait 5
+shot u-1-answer.png
+wheel 12 10 10
+wait 0.4
+shot u-2-wheel-up.png
+wheel -30 10 10
+wait 0.4
+shot u-3-wheel-down.png
+paste first pasted line\nsecond pasted line\nthird pasted line
+wait 0.6
+shot u-4-paste.png
+resize 70 24
+wait 1
+shot u-5-narrow.png
+text u-5-narrow.txt
+resize 150 44
+wait 1
+shot u-6-wide.png
+text u-6-wide.txt
+resizeloop 30 40
+resize 110 34
+wait 1
+shot u-7-after-loop.png
+text u-7-after-loop.txt
+mouse down 4 4 left none 1
+mouse drag 30 4
+mouse drag 40 6
+wait 0.2
+shot u-8-select.png
+mouse up 40 6
+copy

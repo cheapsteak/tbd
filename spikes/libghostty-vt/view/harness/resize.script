@@ -1,0 +1,21 @@
+wait 1.5
+stats-reset
+resizeloop 80 60
+shot rs-1-during.png
+resizeloop 40 25
+wait 0.2
+resize 100 30
+wait 0.5
+shot rs-2-after.png
+waittext STREAM-DONE 25
+wait 0.5
+shot rs-3-done.png
+text rs-3-done.txt
+resize 70 25
+wait 0.5
+shot rs-4-narrow.png
+text rs-4-narrow.txt
+resize 130 25
+wait 0.5
+shot rs-5-wide.png
+text rs-5-wide.txt

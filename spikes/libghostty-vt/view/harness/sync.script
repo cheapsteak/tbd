@@ -1,0 +1,17 @@
+# Timings follow sync.py: hold 2.0 to 2.6 s, unterminated hold from 4.1 s, watchdog about 5.1 s.
+wait 1.9
+frames before-hold
+wait 0.3
+frames mid-hold-a
+wait 0.25
+frames mid-hold-b
+wait 0.5
+frames after-release
+wait 1.25
+frames unterminated-a
+wait 0.5
+frames unterminated-b
+wait 1.0
+frames after-watchdog
+wait 0.5
+frames after-watchdog-later

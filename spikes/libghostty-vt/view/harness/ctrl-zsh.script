@@ -1,0 +1,13 @@
+wait 0.8
+type echo one
+key ctrl+m
+wait 0.5
+key return
+wait 0.2
+type echo two
+key ctrl+i
+wait 0.3
+key return
+wait 0.5
+shot k-zsh.png
+text k-zsh.txt

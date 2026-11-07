@@ -1,0 +1,22 @@
+wait 1.2
+shot i-scroll-bottom.png
+wheel 20 10 10
+wait 0.3
+shot i-scroll-up20.png
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wheel 1000 10 10
+wait 0.3
+shot i-scroll-top.png
+wheel -15 10 10
+wait 0.3
+shot i-scroll-down15.png

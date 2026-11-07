@@ -1,0 +1,21 @@
+wait 0.6
+log letters
+type aA1 
+log controls
+key ctrl+a ctrl+c ctrl+z ctrl+[ ctrl+\\ ctrl+space
+log editing
+key return tab shift+tab esc backspace delete
+log arrows
+key up down left right shift+up ctrl+right opt+left
+log nav
+key home end pgup pgdn
+log fn
+key f1 f2 f5 f12 shift+f5
+log modified
+key shift+return ctrl+return opt+return
+log option
+key opt+b opt+f opt+d
+log punctuation
+type ~!@#$%^&*()_+{}|:"<>?
+wait 0.3
+shot i-keys-legacy.png
