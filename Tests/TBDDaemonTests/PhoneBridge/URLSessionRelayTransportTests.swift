@@ -47,6 +47,16 @@ private func closedLoopbackURL() async throws -> URL {
     return url
 }
 
+/// A transport whose requests outlive every bounded wait in a test.
+/// URLSession's default request timeout, 60 seconds without data, would
+/// otherwise close an unanswered connection inside a 120-second wait, and a
+/// connect that leaked its task would look as if it had released it.
+private func transportOutlivingEveryWait() -> URLSessionRelayTransport {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = TestDeadlines.saturatedPassSeconds * 5
+    return URLSessionRelayTransport(configuration: configuration)
+}
+
 /// `url` with its scheme mapped to the WebSocket one, and `path` as its path.
 private func socketURL(_ url: URL, path: String) throws -> URL {
     var parts = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
@@ -179,7 +189,7 @@ struct URLSessionRelayTransportTests {
         try await withLoopbackRelay { server in
             let url = try socketURL(server.baseURL, path: "/v1/silent")
             let connect = Task {
-                try await URLSessionRelayTransport().connect(url: url, userAgent: PhoneBridgeConstants.userAgent)
+                try await transportOutlivingEveryWait().connect(url: url, userAgent: PhoneBridgeConstants.userAgent)
             }
             let deadline = TestDeadlines.saturatedPass
             switch await pollUntilTrue(timeout: deadline, { server.silentConnections == 1 }) {
@@ -196,7 +206,9 @@ struct URLSessionRelayTransportTests {
             connect.cancel()
             await #expect(throws: CancellationError.self) { _ = try await connect.value }
             // The cancelled connect cancelled its task, which closes the
-            // connection rather than leaving it open in a live session.
+            // connection rather than leaving it open in a live session. The
+            // request timeout outlasts this wait, so only that cancel can
+            // close it in time.
             switch await pollUntilTrue(timeout: deadline, { server.silentConnections == 0 }) {
             case .satisfied, .cancelled:
                 break

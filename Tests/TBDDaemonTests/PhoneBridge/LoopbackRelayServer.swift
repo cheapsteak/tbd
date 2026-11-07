@@ -24,7 +24,8 @@ struct LoopbackRelayRequest: Sendable, Equatable {
 ///   frames, answers the text `ping` with `pong`, and closes with code 4000
 ///   on the text `close-4000`.
 /// - `GET /v1/silent` is never answered; the connection stays open until the
-///   client gives up. `silentConnections` counts those still open.
+///   client closes it. `silentConnections` counts those still open, and the
+///   server keeps reading so that it sees the client's close.
 /// - Every other request gets 404.
 ///
 /// Test-only. Start one with `withLoopbackRelay`, which shuts it down
@@ -125,7 +126,15 @@ final class LoopbackRelayServer: Sendable {
                 context.pipeline.syncOperations.removeHandler(name: LoopbackHTTPHandler.name, promise: nil)
             }
         )
-        try channel.pipeline.syncOperations.configureHTTPServerPipeline(withServerUpgrade: upgrade)
+        // No pipelining assistance. Its handler stops reading from the socket
+        // while a response is pending, and on Darwin NIO learns that the peer
+        // closed only by reading: it registers no kqueue filter for EOF
+        // without read interest. An unanswered `/v1/silent` request would
+        // then never see its client close, and `silentConnections` would
+        // never fall. Every answer closes its connection, so there is no
+        // second request to pipeline.
+        try channel.pipeline.syncOperations.configureHTTPServerPipeline(
+            withPipeliningAssistance: false, withServerUpgrade: upgrade)
         try channel.pipeline.syncOperations.addHandler(LoopbackHTTPHandler(state: state), name: LoopbackHTTPHandler.name)
     }
 }
