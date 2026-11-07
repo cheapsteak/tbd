@@ -272,9 +272,14 @@ between engines. So both engines must look the same to the program.
     `.notice`. That line, not the absence of an error, is the evidence that the engine
     engaged.
 - **The flag changes while terminals are open** – it takes effect only when a terminal is
-  created. Open terminals keep their engine until they close. Mixed engines are safe,
-  because the daemon is always SwiftTerm and every handover is VT text. Turning the flag
-  off and reopening terminals is a full rollback.
+  created. Open terminals keep their engine until they close, or until the per-terminal
+  switch below moves them. Mixed engines are safe, because the daemon is always SwiftTerm
+  and every handover is VT text. Turning the flag off and reopening terminals is a full
+  rollback.
+- **A switch fails part way** – if the other engine cannot start, the terminal reattaches
+  on SwiftTerm and logs the fallback notice, as at creation. If the detach's handback
+  fails, the switch takes the handback failure path above, and the new engine then
+  attaches as usual.
 - **The handback fails** (the writer throws) – the detach takes today's failure path: no
   preamble, and the daemon heals by the SIGWINCH jiggle. The failure is logged with its
   reason. Like the SwiftTerm writer, the libghostty writer keeps at most
@@ -305,6 +310,30 @@ between engines. So both engines must look the same to the program.
   applies to terminals opened after the change, and it names ligatures and BiDi as known
   gaps. It also says that the Metal toggle affects SwiftTerm terminals only, because
   libghostty always draws with Metal.
+
+### Comparing the engines by feel
+
+The best comparison is the same live session on both engines, flipped back and forth in a
+second or two. Two sessions opened at different times differ in content and in load.
+
+- **Switch engine** – a command in the app's terminal commands menu, next to Close Tab,
+  with a keyboard shortcut. It acts on the focused terminal, and it appears only while the
+  experiment is on, which means the flag is on.
+  - It runs the orderly detach, so the current engine hands its snapshot back to the
+    daemon. Then it rebuilds the panel on the other engine, which attaches to the same
+    session through the ordinary attach path. No new handover code is involved.
+  - The choice lives in memory, as a per-terminal override in `AppState`. After a restart,
+    every terminal follows the flag again. Nothing is stored, so nothing needs a
+    reconciler.
+  - It applies to holder panels only. Remote and auth terminals have no handback, so a
+    switch would lose their screen. They follow the flag when they are created, and the
+    command is disabled on them.
+- **Engine label** – while the experiment is on, each terminal's tab shows a small label
+  naming its engine ("libghostty" or "SwiftTerm"). That way a comparison is never a guess.
+
+Engines that run side by side also give better numbers. TBD's latency instruments measure
+each terminal separately, so two terminals on different engines, measured at the same
+time, are a pair under the same load.
 
 ### Instruments
 
@@ -350,6 +379,16 @@ between engines. So both engines must look the same to the program.
   builds libghostty. With an injected init failure, it falls back to SwiftTerm and logs
   the notice. The key's three states are distinguishable. The Settings toggle is absent
   before step 4 and present after it.
+- **Switch** – these behaviours are tested:
+  - Switching a holder terminal runs the orderly detach with a handback, then attaches
+    the other engine to the same session.
+  - The override survives a panel rebuild, and it is gone after `AppState` is created
+    again.
+  - The command is absent while the experiment is off, and disabled on remote and auth
+    terminals.
+  - A failed engine start during a switch lands on SwiftTerm.
+  - The engine label names the engine in use, and it is hidden while the experiment is
+    off.
 - **No Metal device** – if a CI runner has none, render tests skip with an explicit
   reason. They never pass silently.
 
@@ -357,7 +396,8 @@ between engines. So both engines must look the same to the program.
 
 **The A/B** runs in step 6, on TBD's existing instruments pointed at both engines. Runs go
 A/B/B/A under matched load, and each window is checked to confirm it captured the action
-before its numbers count. SwiftTerm is measured in its default CoreGraphics path and with
+before its numbers count. Where a measure allows it, both engines are measured at the same
+time, in side-by-side terminals, as a pair under the same load. SwiftTerm is measured in its default CoreGraphics path and with
 the Metal flag on, because libghostty always draws with Metal. The measures are:
 
 - typed echo latency at p90, from `terminal-latency-probe.py`
@@ -395,7 +435,8 @@ Each step is its own PR. Nothing appears in Settings until step 4 is done.
    the reset before a reused preamble, and the handover corpus tests.
 4. **The daily-use gaps**, then the Settings toggle.
 5. **Remote and auth terminals** – `LocalPTYTerminalView` builds through the factory.
-6. **Instruments for both engines, then the A/B.**
+6. **Instruments for both engines, the Switch engine command and the engine label, then
+   the A/B.**
 
 Estimated size, before tests:
 - about 9,400 lines of view, renderer and input code adapted from tkzmux
