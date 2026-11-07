@@ -213,6 +213,10 @@ final class KeyEncoder {
 
     deinit { ghostty_key_event_free(event) }
 
+    /// How many bytes of text the reusable event still points at. Zero between calls: `encode`
+    /// clears the text before the buffer it lent goes away. Tests read it.
+    var eventTextLength: Int { ghostty_key_event_get_utf8(event).len }
+
     /// Encode one key press against a terminal's current state.
     ///
     /// The encoder's protocol options (DECCKM, keypad application mode, mode 1036 alt-escape
@@ -242,13 +246,16 @@ final class KeyEncoder {
         _ = ghostty_key_event_set_unshifted_codepoint(event, press.unshiftedCodepoint)
 
         // `set_utf8` does not copy: the pointer must stay valid until `encode` has run, so the
-        // whole option/encode sequence happens inside `withUTF8`.
+        // whole option/encode sequence happens inside `withUTF8`. The event outlives this call,
+        // so its text is cleared before `withUTF8` ends, on every path out. Otherwise the event
+        // would hold a pointer into a buffer Swift has already freed.
         var text = Self.filteredText(press.text)
         return try text.withUTF8 { buffer -> [UInt8] in
             // PORT: set_utf8 takes one GhosttyString, not (ptr, len). Every setter now returns a result.
             try ghosttyCheck(
                 ghostty_key_event_set_utf8(event, GhosttyString(ptr: buffer.baseAddress, len: buffer.count)),
                 "ghostty_key_event_set_utf8")
+            defer { _ = ghostty_key_event_set_utf8(event, GhosttyString(ptr: nil, len: 0)) }
 
             // PORT: setopt* became set*. set_from_terminal resets option-as-alt, so re-apply it after.
             try ghosttyCheck(ghostty_key_encoder_set_from_terminal(encoder.raw, terminal), "key_encoder_set_from_terminal")
