@@ -217,4 +217,34 @@ struct NoiseCacophonyVectorTests {
             try v.checkTransport(second.transport, asInitiator: true)
         }
     }
+
+    /// A write out of turn is refused and changes nothing: each side still
+    /// writes and reads the vector's messages byte for byte, and reaches its
+    /// handshake hash.
+    @Test func wrongPhaseWritesChangeNothing() throws {
+        for v in try Self.vectors() {
+            var initiator = try v.makeInitiator()
+            var responder = try v.makeResponder()
+            #expect(throws: NoiseError.invalidState, "\(v.protocolName): writeMessage2 before message 1") {
+                try responder.writeMessage2(payload: v.payload(1))
+            }
+            let first = try initiator.writeMessage1(payload: v.payload(0))
+            #expect(first == v.ciphertext(0), "\(v.protocolName)")
+            #expect(throws: NoiseError.invalidState, "\(v.protocolName): writeMessage1 twice") {
+                try initiator.writeMessage1(payload: v.payload(0))
+            }
+
+            let received = try responder.readMessage1(first)
+            #expect(received.payload == v.payload(0), "\(v.protocolName)")
+            let second = try responder.writeMessage2(payload: v.payload(1))
+            #expect(second.message == v.ciphertext(1), "\(v.protocolName)")
+            #expect(second.handshakeHash == v.expectedHash, "\(v.protocolName)")
+            try v.checkTransport(second.transport, asInitiator: false)
+
+            let done = try initiator.readMessage2(second.message)
+            #expect(done.payload == v.payload(1), "\(v.protocolName)")
+            #expect(done.handshakeHash == v.expectedHash, "\(v.protocolName)")
+            try v.checkTransport(done.transport, asInitiator: true)
+        }
+    }
 }

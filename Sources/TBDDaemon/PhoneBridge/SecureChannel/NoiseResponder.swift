@@ -3,6 +3,16 @@ import Foundation
 
 /// The laptop's side of the phone channel's handshake: it reads message 1 and
 /// writes message 2.
+///
+/// What a throw does:
+/// - **A call out of turn** throws `invalidState` and changes nothing:
+///   `writeMessage2` before `readMessage1`, a `readMessage1` after one has
+///   succeeded, or any call once the handshake has completed or failed.
+/// - **A `writeMessage2` that fails in its turn**, for a payload too long or
+///   a failed key agreement, ends the handshake: every later call throws
+///   `invalidState`.
+/// - **A `readMessage1` that fails** changes nothing, so the caller can drop
+///   a frame that fails to read and still read the real message 1.
 struct NoiseResponder: Sendable {
     private var state: NoiseHandshakeState
 
@@ -27,12 +37,11 @@ struct NoiseResponder: Sendable {
 
     /// Reads message 1 and returns the phone's static key with the payload.
     ///
-    /// A throw leaves the handshake as it was, so the caller can drop a frame
-    /// that fails to read and still read the real message 1. A stale frame
-    /// that is a valid message 1 does not fail: a replay, or the phone's
-    /// previous attempt in the same room, reads successfully, and the real
-    /// message 1 after it then throws `invalidState`. Nothing here tells such
-    /// a frame from the real one, so the caller's rule is: when the completed
+    /// Only a frame that fails to read can be dropped. A stale frame that is
+    /// a valid message 1 does not fail: a replay, or the phone's previous
+    /// attempt in the same room, reads successfully, and the real message 1
+    /// after it then throws `invalidState`. Nothing here tells such a frame
+    /// from the real one, so the caller's rule is: when the completed
     /// handshake's first transport message fails to decrypt, or the handshake
     /// times out, discard this responder and start a new one.
     ///
@@ -53,8 +62,7 @@ struct NoiseResponder: Sendable {
     }
 
     /// Message 2, which carries `payload` encrypted and completes the
-    /// handshake. A throw ends this handshake, and so does a success: every
-    /// later call throws `invalidState`.
+    /// handshake.
     mutating func writeMessage2(payload: Data) throws -> (message: Data, transport: NoiseTransport, handshakeHash: Data) {
         let message = try state.writeMessage(payload: payload)
         let finished = try state.finish()

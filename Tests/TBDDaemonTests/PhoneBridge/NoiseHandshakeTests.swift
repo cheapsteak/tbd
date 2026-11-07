@@ -224,49 +224,85 @@ struct NoiseHandshakeTests {
         #expect(read2.payload == Data(count: 65_487))
     }
 
+    /// A call out of turn, read or write, is refused and changes nothing, so
+    /// the handshake it interrupted still completes.
     @Test func misuseThrowsInvalidState() throws {
         let setup = try Setup(pattern: .ikpsk2)
         var initiator = try setup.initiator()
+        var responder = try setup.responder()
 
-        // readMessage2 before writeMessage1 is refused and changes nothing.
-        // The phase is checked before the length, so 10 bytes are refused
-        // for the phase, not as too short.
+        // readMessage2 before writeMessage1. The phase is checked before the
+        // length, so 10 bytes are refused for the phase, not as too short.
         #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(Data(count: 48)) }
         #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(Data(count: 10)) }
+        // writeMessage2 before readMessage1.
+        #expect(throws: NoiseError.invalidState) { try responder.writeMessage2(payload: Self.laptopPayload) }
+
         let first = try initiator.writeMessage1(payload: Self.devicePayload)
+        // writeMessage1 twice.
+        #expect(throws: NoiseError.invalidState) { try initiator.writeMessage1(payload: Self.devicePayload) }
 
-        // writeMessage1 twice: the second is refused, and a failed write ends
-        // that handshake, so even a read is refused afterwards.
-        var twice = try setup.initiator()
-        _ = try twice.writeMessage1(payload: Self.devicePayload)
-        #expect(throws: NoiseError.invalidState) { try twice.writeMessage1(payload: Self.devicePayload) }
-        #expect(throws: NoiseError.invalidState) { try twice.readMessage2(Data(count: 48)) }
-
-        // writeMessage2 before readMessage1 is refused, and ends that
-        // handshake too.
-        var early = try setup.responder()
-        #expect(throws: NoiseError.invalidState) { try early.writeMessage2(payload: Self.laptopPayload) }
-        #expect(throws: NoiseError.invalidState) { try early.readMessage1(first) }
-
-        // readMessage1 twice: the second is refused and changes nothing, so
-        // message 2 still completes the handshake.
-        var responder = try setup.responder()
         _ = try responder.readMessage1(first)
+        // readMessage1 twice.
         #expect(throws: NoiseError.invalidState) { try responder.readMessage1(first) }
         #expect(throws: NoiseError.invalidState) { try responder.readMessage1(Data(count: 10)) }
+
+        // None of the refusals changed anything, so the handshake completes.
         let second = try responder.writeMessage2(payload: Self.laptopPayload)
         let done = try initiator.readMessage2(second.message)
+        #expect(done.payload == Self.laptopPayload)
         #expect(done.handshakeHash == second.handshakeHash)
 
         // A finished handshake takes no more messages.
         #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(second.message) }
         #expect(throws: NoiseError.invalidState) { try responder.writeMessage2(payload: Self.laptopPayload) }
+    }
 
-        // A failed writeMessage1 ends the handshake.
-        var poisoned = try setup.initiator()
-        #expect(throws: NoiseError.messageTooLong) { try poisoned.writeMessage1(payload: Data(count: 65_440)) }
-        #expect(throws: NoiseError.invalidState) { try poisoned.writeMessage1(payload: Self.devicePayload) }
-        #expect(throws: NoiseError.invalidState) { try poisoned.readMessage2(Data(count: 48)) }
+    /// A write that fails in its turn ends the handshake, unlike a call out
+    /// of turn: every later call is refused, the write it would have been
+    /// in turn for too.
+    @Test func failedWriteInItsTurnEndsTheHandshake() throws {
+        let setup = try Setup(pattern: .ikpsk2)
+
+        var initiator = try setup.initiator()
+        #expect(throws: NoiseError.messageTooLong) { try initiator.writeMessage1(payload: Data(count: 65_440)) }
+        #expect(throws: NoiseError.invalidState) { try initiator.writeMessage1(payload: Self.devicePayload) }
+        #expect(throws: NoiseError.invalidState) { try initiator.readMessage2(Data(count: 48)) }
+
+        var phone = try setup.initiator()
+        let first = try phone.writeMessage1(payload: Self.devicePayload)
+        var responder = try setup.responder()
+        _ = try responder.readMessage1(first)
+        #expect(throws: NoiseError.messageTooLong) { try responder.writeMessage2(payload: Data(count: 65_488)) }
+        #expect(throws: NoiseError.invalidState) { try responder.writeMessage2(payload: Self.laptopPayload) }
+        #expect(throws: NoiseError.invalidState) { try responder.readMessage1(first) }
+    }
+
+    /// A write made out of turn on either side, before or after a step of
+    /// the handshake, leaves both sides able to finish it and agree.
+    @Test(arguments: [NoisePattern.ikpsk2, .ik]) func wrongPhaseWritesLeaveTheHandshakeAbleToComplete(pattern: NoisePattern) throws {
+        let setup = try Setup(pattern: pattern)
+        var initiator = try setup.initiator()
+        var responder = try setup.responder()
+
+        #expect(throws: NoiseError.invalidState) { try responder.writeMessage2(payload: Self.laptopPayload) }
+        let first = try initiator.writeMessage1(payload: Self.devicePayload)
+        #expect(throws: NoiseError.invalidState) { try initiator.writeMessage1(payload: Self.devicePayload) }
+        #expect(throws: NoiseError.invalidState) { try responder.writeMessage2(payload: Self.laptopPayload) }
+        let received = try responder.readMessage1(first)
+        #expect(received.payload == Self.devicePayload)
+        #expect(throws: NoiseError.invalidState) { try initiator.writeMessage1(payload: Self.devicePayload) }
+
+        let second = try responder.writeMessage2(payload: Self.laptopPayload)
+        let done = try initiator.readMessage2(second.message)
+        #expect(done.payload == Self.laptopPayload)
+        #expect(done.handshakeHash == second.handshakeHash)
+
+        var phone = done.transport
+        var laptop = second.transport
+        let sealed = try phone.encrypt(Self.devicePayload)
+        let opened = try laptop.decrypt(sealed)
+        #expect(opened == Self.devicePayload)
     }
 
     /// `finish()` hands out the transport once. A second transport would

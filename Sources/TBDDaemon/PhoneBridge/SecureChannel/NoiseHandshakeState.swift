@@ -15,6 +15,10 @@ import Foundation
 /// Message 1 goes from the initiator (the phone) to the responder (the
 /// laptop), and message 2 back, which completes the handshake.
 ///
+/// **A call out of turn changes nothing.** A read, a write or `finish()`
+/// made in the wrong role or phase throws `invalidState` and leaves the state
+/// exactly as it was, so the handshake can still complete.
+///
 /// **Reads are atomic.** The relay can deliver frames meant for a replaced
 /// peer before the real handshake message, so each side drops a frame it
 /// cannot use and keeps waiting. A read therefore works on a copy and keeps
@@ -23,8 +27,9 @@ import Foundation
 /// be dropped: a stale frame that reads successfully, such as a replayed
 /// message 1, is taken as the real message (see `NoiseResponder.readMessage1`).
 ///
-/// **Writes poison.** When `writeMessage` throws, the handshake is over, and
-/// every later call throws `invalidState`.
+/// **A write that fails in its turn ends the handshake.** When `writeMessage`
+/// throws in its own phase, for a payload too long or a failed key agreement,
+/// the handshake is over, and every later call throws `invalidState`.
 ///
 /// **`finish()` works once.** It hands out the transport, and every later
 /// call throws `invalidState`.
@@ -155,10 +160,14 @@ struct NoiseHandshakeState: Sendable {
     }
 
     /// Writes the next message: the initiator's message 1 or the responder's
-    /// message 2. Any throw ends the handshake.
+    /// message 2. The phase is checked before anything changes, so only a
+    /// write in its turn can end the handshake.
     mutating func writeMessage(payload: Data) throws -> Data {
+        guard let message = messageToWrite else {
+            throw NoiseError.invalidState
+        }
         do {
-            return try write(payload: payload)
+            return try write(message, payload: payload)
         } catch {
             phase = .failed
             throw error
@@ -166,8 +175,8 @@ struct NoiseHandshakeState: Sendable {
     }
 
     /// Reads the next message, the responder's message 1 or the initiator's
-    /// message 2, and returns its payload. A throw leaves the state as it
-    /// was, so a frame that fails to read cannot spoil the real message.
+    /// message 2, and returns its payload. It runs on a copy, so a frame
+    /// that fails to read cannot spoil the real message.
     mutating func readMessage(_ message: Data) throws -> Data {
         var next = self
         let payload = try next.read(message)
@@ -226,10 +235,9 @@ struct NoiseHandshakeState: Sendable {
         }
     }
 
-    private mutating func write(payload: Data) throws -> Data {
-        guard let message = messageToWrite else {
-            throw NoiseError.invalidState
-        }
+    /// Writes in place; `writeMessage` has checked that `message` is the
+    /// one to write.
+    private mutating func write(_ message: Message, payload: Data) throws -> Data {
         guard payload.count <= message.maxPayloadLength else {
             throw NoiseError.messageTooLong
         }

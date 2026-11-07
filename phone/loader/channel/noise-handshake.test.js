@@ -263,12 +263,16 @@ test('handshake: readMessage2 before writeMessage1 is invalidState and changes n
   await assertCompletes(vectorIKpsk2, initiator);
 });
 
-test('handshake: a second writeMessage1 is invalidState, and every later call is too', async () => {
-  const initiator = await afterMessage1(vectorIKpsk2);
-  const payload = fromHex(vectorIKpsk2.messages[0].payload);
-  await rejectsWith(initiator.writeMessage1(payload), 'invalidState');
-  await rejectsWith(initiator.readMessage2(realMessage2(vectorIKpsk2)), 'invalidState');
-  await rejectsWith(initiator.writeMessage1(payload), 'invalidState');
+// A call out of turn changes nothing, whatever else is in flight. With no
+// read pending, nothing else is.
+test('handshake: a second writeMessage1 with no read pending is invalidState and changes nothing', async () => {
+  for (const vector of vectors) {
+    const initiator = await afterMessage1(vector);
+    const payload = fromHex(vector.messages[0].payload);
+    await rejectsWith(initiator.writeMessage1(payload), 'invalidState', `${vector.protocol_name}: second`);
+    await rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', `${vector.protocol_name}: third`);
+    await assertCompletes(vector, initiator);
+  }
 });
 
 test('handshake: a writeMessage1 started before the first resolved is invalidState and leaves the first alone', async () => {
@@ -282,13 +286,6 @@ test('handshake: a writeMessage1 started before the first resolved is invalidSta
   await rejectsWith(read, 'invalidState');
   assert.deepEqual(await first, fromHex(m0.ciphertext));
   await assertCompletes(vectorIKpsk2, initiator);
-});
-
-test('handshake: a refused writeMessage1 leaves every later call invalidState', async () => {
-  const initiator = await vectorInitiator(vectorIK);
-  await rejectsWith(initiator.writeMessage1(new Uint8Array(65440)), 'messageTooLong');
-  await rejectsWith(initiator.writeMessage1(fromHex(vectorIK.messages[0].payload)), 'invalidState');
-  await rejectsWith(initiator.readMessage2(realMessage2(vectorIK)), 'invalidState');
 });
 
 test('handshake: a remote static key of low order fails message 1, and the initiator stays failed', async () => {
@@ -320,18 +317,42 @@ test('handshake: a read that starts while writeMessage1 is running is invalidSta
   }
 });
 
-// A stray writeMessage1 is refused, and while a read is queued or running it
-// changes nothing, so the reads go on as if it had not been made.
+// The same with reads pending: the stray writeMessage1 is refused, and the
+// reads go on as if it had not been made.
 test('handshake: a writeMessage1 made while reads are pending is invalidState and disturbs none of them', async () => {
-  const initiator = await afterMessage1(vectorIKpsk2);
-  const stale = initiator.readMessage2(flipped(vectorIKpsk2, -1));
-  const queuedWrite = rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', 'before the read starts');
-  // The stale read has started by the time this continues.
-  await null;
-  const runningWrite = rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', 'while the read runs');
-  const real = initiator.readMessage2(realMessage2(vectorIKpsk2));
-  const [, , , result] = await Promise.all([queuedWrite, runningWrite, rejectsWith(stale, 'decryptFailed'), real]);
-  await assertResult(vectorIKpsk2, result);
+  for (const vector of vectors) {
+    const name = vector.protocol_name;
+    const initiator = await afterMessage1(vector);
+    const stale = initiator.readMessage2(flipped(vector, -1));
+    const queuedWrite = rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', `${name}: before the read starts`);
+    // The stale read has started by the time this continues.
+    await null;
+    const runningWrite = rejectsWith(initiator.writeMessage1(new Uint8Array(0)), 'invalidState', `${name}: while the read runs`);
+    const real = initiator.readMessage2(realMessage2(vector));
+    const [, , , result] = await Promise.all([queuedWrite, runningWrite, rejectsWith(stale, 'decryptFailed', name), real]);
+    await assertResult(vector, result);
+  }
+});
+
+// A failure in writeMessage1's own turn is not a call out of turn: it ends
+// the handshake, even with a read waiting behind it.
+test('handshake: a too-long payload on the first writeMessage1 fails the initiator, with or without a read pending', async () => {
+  for (const vector of vectors) {
+    const name = vector.protocol_name;
+    const alone = await vectorInitiator(vector);
+    await rejectsWith(alone.writeMessage1(new Uint8Array(65440)), 'messageTooLong', `${name}: alone`);
+    await rejectsWith(alone.writeMessage1(fromHex(vector.messages[0].payload)), 'invalidState', `${name}: write after`);
+    await rejectsWith(alone.readMessage2(realMessage2(vector)), 'invalidState', `${name}: read after`);
+
+    const withRead = await vectorInitiator(vector);
+    const write = withRead.writeMessage1(new Uint8Array(65440));
+    const read = withRead.readMessage2(realMessage2(vector));
+    await Promise.all([
+      rejectsWith(write, 'messageTooLong', `${name}: with a read pending`),
+      rejectsWith(read, 'invalidState', `${name}: the pending read`),
+    ]);
+    await rejectsWith(withRead.writeMessage1(fromHex(vector.messages[0].payload)), 'invalidState', `${name}: write after`);
+  }
 });
 
 test('handshake: after completion, every call is invalidState', async () => {

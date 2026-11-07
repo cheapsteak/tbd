@@ -108,6 +108,8 @@ struct NoiseSymmetricState: Sendable {
     /// X25519 between `privateKey` and `publicKey`, as raw bytes. A public
     /// key of low order gives the all-zero secret, which CryptoKit refuses
     /// and which this also checks, so a peer cannot force a known secret.
+    /// The check ORs every byte together rather than stopping at the first
+    /// non-zero one, as the loader's does.
     static func dh(
         _ privateKey: Curve25519.KeyAgreement.PrivateKey,
         _ publicKey: Curve25519.KeyAgreement.PublicKey
@@ -118,7 +120,7 @@ struct NoiseSymmetricState: Sendable {
         } catch {
             throw NoiseError.invalidPublicKey
         }
-        guard secret.contains(where: { $0 != 0 }) else {
+        guard secret.reduce(0, |) != 0 else {
             throw NoiseError.invalidPublicKey
         }
         return secret

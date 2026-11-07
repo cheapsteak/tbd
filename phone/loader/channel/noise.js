@@ -157,30 +157,35 @@ export async function createTransport({ sendKey, receiveKey, sendNonce = 0n, rec
  *
  * Arguments are checked first, when a call is made: a byte array that is not
  * a `Uint8Array` rejects `TypeError` and changes nothing. Every byte array is
- * copied when it is passed in. Past that check:
+ * copied when it is passed in. Past that check, what a rejection does:
+ * - **A call out of turn** rejects `invalidState` and changes nothing,
+ *   whatever else is in flight: a second `writeMessage1`, including one made
+ *   while the first is still running or while reads are pending; a read
+ *   before `writeMessage1` has resolved; any call once the handshake has
+ *   completed or failed.
+ * - **A `writeMessage1` that fails in its turn**, for a payload too long or
+ *   a failed key agreement, fails the initiator: every later call rejects
+ *   `invalidState`.
+ * - **A `readMessage2` that fails** changes nothing, so the next read starts
+ *   from the same state.
  *
  * Writing message 1:
  * - `writeMessage1` works once, from the start. Its phase advances when it
- *   is called, before its first await.
- * - If it rejects, the initiator fails.
- * - A second `writeMessage1` rejects `invalidState`. Made while the first is
- *   still running, or while a read is queued or running, it changes nothing,
- *   so it never disturbs that call; otherwise it fails the initiator.
- * - Once the initiator has failed, every call rejects `invalidState`.
+ *   is called, before its first await, so a call made while it runs is out
+ *   of turn.
  *
  * Reading message 2:
  * - Reads are queued. The caller may call `readMessage2` once per relay
  *   frame without awaiting: each read starts once the read before it has
  *   settled, so a stale frame still being read cannot shadow the real
  *   message 2 behind it.
- * - A read checks the phase when it starts, not when it is called, and
- *   reads only once `writeMessage1` has resolved. A read that starts before
- *   then, with no `writeMessage1` made or one still running, rejects
- *   `invalidState` and changes nothing; it is not held back for the write.
- *   Message 2 answers message 1, which the caller sends only after
- *   `writeMessage1` resolves, so any frame that comes earlier is stale.
- * - A read that starts after another read has succeeded rejects
- *   `invalidState` and changes nothing.
+ * - A read checks its turn when it starts, not when it is called, and reads
+ *   only once `writeMessage1` has resolved. A read that starts before then,
+ *   with no `writeMessage1` made or one still running, is out of turn; it is
+ *   not held back for the write. Message 2 answers message 1, which the
+ *   caller sends only after `writeMessage1` resolves, so any frame that comes
+ *   earlier is stale. A read that starts after another read has succeeded is
+ *   out of turn too.
  * - Each read is atomic. It runs on a copy of the symmetric state (`h`,
  *   `ck`, the cipher's key and nonce) and keeps the copy only on success, so
  *   a rejected frame (a stale one from a replaced peer, say) leaves the
@@ -241,9 +246,6 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
   let phase = 'initial';
   // Reads run one at a time, in call order.
   const reads = new SerialQueue();
-  // Reads called and not yet settled. While there are any, a stray
-  // `writeMessage1` changes nothing.
-  let pendingReads = 0;
 
   /**
    * One read of message 2, run from the queue. Nothing else changes the
@@ -298,10 +300,8 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
     async writeMessage1(payload) {
       requireBytes(payload, 'the message 1 payload');
       if (phase !== 'initial') {
-        // A second write, which must not disturb a call still pending.
-        if (phase !== 'writing1' && pendingReads === 0) {
-          phase = 'failed';
-        }
+        // Out of turn: refused before anything changes, so a call still
+        // pending carries on undisturbed.
         throw new NoiseError('invalidState');
       }
       phase = 'writing1';
@@ -341,12 +341,7 @@ export async function createInitiator({ pattern, localStatic, remoteStatic, psk 
     async readMessage2(message) {
       requireBytes(message, 'message 2');
       const input = copyBytes(message);
-      pendingReads += 1;
-      try {
-        return await reads.run(() => readAttempt(input));
-      } finally {
-        pendingReads -= 1;
-      }
+      return reads.run(() => readAttempt(input));
     },
   });
 }
