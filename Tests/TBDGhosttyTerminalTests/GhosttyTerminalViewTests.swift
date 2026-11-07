@@ -97,6 +97,12 @@ private func otherButtonEvent(_ type: CGEventType, number: Int64) throws -> NSEv
     return event
 }
 
+/// Draws `surface` offscreen with `renderer` and waits for the GPU. Synchronous on purpose: an
+/// async test cannot call `waitUntilCompleted` itself, which is unavailable in an async context.
+private func drawAndWait(_ surface: TerminalSurface, with renderer: TerminalRenderer, into texture: MTLTexture) throws {
+    try renderer.render(surface: surface, to: texture).commandBuffer?.waitUntilCompleted()
+}
+
 /// True when `bytes` is one SGR mouse report for `button`: `ESC [ < button ; … final`.
 private func isSGRReport(_ bytes: [UInt8], button: Int, final: Character) -> Bool {
     bytes.starts(with: Array("\u{1b}[<\(button);".utf8)) && bytes.last == final.asciiValue
@@ -546,7 +552,7 @@ struct GhosttyTerminalViewTests {
         try other.attach(otherTerminal)
         let size = renderer.drawableSize(columns: 10, rows: 3)
         let texture = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
-        try renderer.render(surface: other, to: texture).commandBuffer?.waitUntilCompleted()
+        try drawAndWait(other, with: renderer, into: texture)
         try #require(atlas.rebuildCount == rebuildsBeforeOther + 1,
                      "the other surface's frame cleared the atlas \(atlas.rebuildCount - rebuildsBeforeOther) times, not once")
 
