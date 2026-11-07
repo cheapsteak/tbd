@@ -218,6 +218,30 @@ struct TerminalSnapshotBlankRowTests {
         #expect(pair.fresh.getLine(row: 23)?.isWrapped == true)
     }
 
+    @Test("A coloured continuation under insert mode arrives with nothing after its text")
+    func colouredContinuationUnderInsertMode() {
+        let pair = SnapshotPair(cols: 80, rows: 24)
+        // Insert mode on the alternate screen, which the snapshot replays
+        // under the session's modes into the receiver and back into the
+        // source. Five red `E`s wrap onto row 1, so the walk starts that row
+        // with a space, and each `E` it then prints inserts at the cursor.
+        pair.source.feed(
+            text: "\u{1b}[?1049h\u{1b}[4h" + String(repeating: "a", count: 80)
+                + "\u{1b}[41mEEEEE\u{1b}[0m")
+        let sourceLength = pair.source.getLine(row: 1)?.getTrimmedLength()
+        #expect(sourceLength == 5, "the fixture must leave five cells on row 1")
+        #expect(pair.source.getLine(row: 1)?.isWrapped == true)
+
+        pair.transfer("")
+        #expect(pair.fresh.getCharData(col: 5, row: 1)?.getCharacter()
+                    == Character(Unicode.Scalar(0)),
+                "the receiver holds the pushed-along space after the `E`s")
+        #expect(pair.fresh.getLine(row: 1)?.getTrimmedLength() == sourceLength)
+        // The source's alt screen is repainted from the same rendering.
+        #expect(pair.source.getLine(row: 1)?.getTrimmedLength() == sourceLength,
+                "the snapshot left a space in the source's own alt screen")
+    }
+
     // MARK: - Captures
 
     @Test("A capture drops the blank rows below a cleared screen's text, and a replay keeps them")

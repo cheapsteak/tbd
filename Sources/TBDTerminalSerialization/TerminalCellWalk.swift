@@ -330,19 +330,19 @@ public enum TerminalCellWalk {
         // that cell out to `cols`.
         //
         // In a replay, a continuation always sends at least its first cell,
-        // which also overwrites or erases the space a continuation may start
-        // with (below). The receiver reaches a continuation only by printing
-        // past the edge of the row above, because SwiftTerm wraps when it
-        // prints and at no other time, so a continuation that sent nothing
-        // would leave the receiver one row short, with the viewport one row
-        // low and the closing cursor address on the row above. EL never
-        // clears a row's wrap flag, so `ESC[2K` on a wrapped row leaves
-        // exactly that: a continuation with nothing in it. Sending a line
-        // break there instead would land the receiver on the row too, but as
-        // a hard break: reflow on a resize and selection would then split a
-        // line the source keeps whole, and a handback would carry that split
-        // to the daemon. A capture has no receiver to keep in step, so an
-        // empty continuation sends nothing there.
+        // and with it the space a continuation may start with (below). The
+        // receiver reaches a continuation only by printing past the edge of
+        // the row above, because SwiftTerm wraps when it prints and at no
+        // other time, so a continuation that sent nothing would leave the
+        // receiver one row short, with the viewport one row low and the
+        // closing cursor address on the row above. EL never clears a row's
+        // wrap flag, so `ESC[2K` on a wrapped row leaves exactly that: a
+        // continuation with nothing in it. Sending a line break there instead
+        // would land the receiver on the row too, but as a hard break: reflow
+        // on a resize and selection would then split a line the source keeps
+        // whole, and a handback would carry that split to the daemon. A
+        // capture has no receiver to keep in step, so an empty continuation
+        // sends nothing there.
         var limit = fullWidth
             ? min(cols, line.count)
             : sentLength(of: line, cols: cols, purpose: purpose)
@@ -361,18 +361,27 @@ public enum TerminalCellWalk {
         // In a replay, a continuation whose first cell is a character on the
         // default background starts with that character, and printing it
         // wraps the receiver onto the row (see above). Any other continuation
-        // starts with a space and a BS. The space does the wrapping under
-        // SGR 0, which the row above always ends in, and BS backs over it for
-        // the first cell to overwrite or erase. A blank needs the space
-        // because it may go as ECH, which does not print and so cannot wrap.
-        // A background colour needs it because at the receiver's bottom row
-        // the wrap scrolls, and SwiftTerm fills the new row with the erase
-        // cell of the SGR open at that moment, so if the first cell did the
-        // wrapping, every cell of the row the walk does not send would take
-        // its colour. BS lands on column 0 whether reverse wraparound is on
-        // or not, because SwiftTerm only reverse-wraps from the left edge.
+        // starts with a space, a BS and an ECH. The space does the wrapping
+        // under SGR 0, which the row above always ends in. BS backs over it,
+        // landing on column 0 whether reverse wraparound is on or not,
+        // because SwiftTerm only reverse-wraps from the left edge. ECH then
+        // erases the space under SGR 0, so column 0 holds a blank with no
+        // character before the first cell is sent. Printing the first cell
+        // over the space is not enough: the alternate screen replays under
+        // the session's modes, and under insert mode each cell printed
+        // inserts at the cursor and pushes the space one column right,
+        // leaving it after the row's last character. ECH erases in place
+        // whether insert mode is on or not, so what the cells push along is
+        // a blank.
         //
-        // A capture sends no space and BS, so a continuation there wraps under
+        // A blank needs the space because it may go as ECH, which does not
+        // print and so cannot wrap. A background colour needs it because at
+        // the receiver's bottom row the wrap scrolls, and SwiftTerm fills the
+        // new row with the erase cell of the SGR open at that moment, so if
+        // the first cell did the wrapping, every cell of the row the walk
+        // does not send would take its colour.
+        //
+        // A capture sends none of this, so a continuation there wraps under
         // its first cell's SGR, and when a revive prints it at the bottom of
         // a tab, the rest of the row takes that cell's background. That is
         // accepted for a printed copy: a BS would land in the viewer's text
@@ -380,7 +389,9 @@ public enum TerminalCellWalk {
         // the capture at its own width anyway.
         if purpose == .replay && continuation {
             let first = line[0]
-            if isBlank(first) || hasColouredBackground(first.attribute) { out += " \u{8}" }
+            if isBlank(first) || hasColouredBackground(first.attribute) {
+                out += " \u{8}\u{1b}[X"
+            }
         }
 
         var openAttribute: Attribute?
