@@ -61,7 +61,8 @@ public struct TranscriptWindow: Sendable {
 }
 
 extension TranscriptParser {
-    /// The first read size of `parseWindow`. Each retry doubles it.
+    /// The first read size of `parseWindow`, unless its `scanLimit` is
+    /// smaller. Each retry doubles it.
     static let windowInitialChunkBytes: UInt64 = 64 * 1024
 
     /// The newest whole lines before `end`, built into items, holding at most
@@ -82,15 +83,29 @@ extension TranscriptParser {
     /// The read goes backwards from `end`, `windowInitialChunkBytes` at first.
     /// A read that starts inside the file drops its bytes up to and including
     /// the first `"\n"`, since they may be the tail of a line that began
-    /// earlier; a read with no `"\n"` at all holds none of a line, and is
-    /// retried. Every whole line is decoded as JSON, and lines that fail to
+    /// earlier. Every whole line is decoded as JSON, and lines that fail to
     /// decode are skipped. A line's item ID comes from its `uuid`, or from
     /// `at-<lineOffset>` when it has none, so two windows that hold the same
-    /// line give it the same ID. The read is accepted when its items hold
-    /// `messageLimit` messages (`.userPrompt`, `.assistantText`,
-    /// `.peerMessage`), or reach `itemLimit` items, or the read starts at the
-    /// first byte of the file. Otherwise the read size doubles, never past
-    /// `end`, and the lines are read again.
+    /// line give it the same ID. The read is accepted when any of these holds:
+    /// - its items hold `messageLimit` messages (`.userPrompt`,
+    ///   `.assistantText`, `.peerMessage`);
+    /// - its items reach `itemLimit`;
+    /// - it starts at the first byte of the file;
+    /// - it spans `scanLimit` bytes and holds at least one whole line.
+    ///
+    /// Otherwise the read size doubles, stopping at `scanLimit` on the way and
+    /// never going past `end`, and the read reaches further back. Each pass
+    /// reads and decodes only the bytes before the lines it already holds, and
+    /// builds the items of every held line again.
+    ///
+    /// `scanLimit` bounds the bytes one call reads back from `end` when the
+    /// lines there hold few items, such as a few huge tool results between
+    /// two messages. The window then holds fewer than `messageLimit` messages
+    /// and `reachedStart` is false, and the next older window carries on from
+    /// `startOffset`. A line longer than `scanLimit` is still read whole, so
+    /// the window holds at least one line whenever there is one before `end`.
+    /// Such a window can hold no items, when none of its lines builds one;
+    /// its `startOffset` still moves back past them.
     ///
     /// Then the front is trimmed, by whole lines only:
     /// - Everything from the line that holds the `messageLimit`-th message
@@ -110,7 +125,7 @@ extension TranscriptParser {
     /// only when `includeSidechain` is true. Limits below 1 count as 1.
     public static func parseWindow(
         filePath: String, endingBefore requestedEnd: UInt64?, messageLimit: Int,
-        itemLimit: Int, includeSidechain: Bool = false
+        itemLimit: Int, includeSidechain: Bool = false, scanLimit: Int = 8 * 1024 * 1024
     ) -> TranscriptWindow? {
         guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
         defer { try? handle.close() }
@@ -129,35 +144,50 @@ extension TranscriptParser {
         }
         let messageLimit = max(1, messageLimit)
         let itemLimit = max(1, itemLimit)
+        let scanLimit = UInt64(max(1, scanLimit))
 
-        var chunk = min(windowInitialChunkBytes, end)
+        // The whole lines decoded so far, from `keptStart` to `end`. Each pass
+        // reads only the bytes before `keptStart`. `start < keptStart` on every
+        // pass after the first, since `keptStart` is never before the previous
+        // pass's start and the read size grows.
+        var lines = WindowLines()
+        var keptStart = end
+        var chunk = min(windowInitialChunkBytes, scanLimit, end)
         while true {
             let start = end - chunk
-            guard let bytes = readBytes(handle, in: start..<end) else { return nil }
+            guard let bytes = readBytes(handle, in: start..<keptStart) else { return nil }
 
-            var kept = bytes
-            var keptStart = start
-            if start > 0 {
-                guard let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) else {
-                    chunk = min(chunk * 2, end)
-                    continue
-                }
-                kept = bytes[(newline + 1)...]
-                keptStart = start + UInt64(newline + 1 - bytes.startIndex)
+            let fresh: Data
+            let freshStart: UInt64
+            if start == 0 {
+                fresh = bytes
+                freshStart = 0
+            } else if let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) {
+                fresh = bytes[(newline + 1)...]
+                freshStart = start + UInt64(newline + 1 - bytes.startIndex)
+            } else {
+                // No new whole line. Unreachable while the byte before
+                // `keptStart` is "\n", which `end` and every line start
+                // guarantee, but harmless: the held lines stay as they are.
+                fresh = Data()
+                freshStart = keptStart
             }
+            lines.prepend(decodeWindowLines(fresh, firstLineOffset: freshStart))
+            keptStart = freshStart
 
-            let lines = decodeWindowLines(kept, firstLineOffset: keptStart)
             let built = buildItemsWithLineIndices(
                 rawLines: lines.rawLines, stableIDs: lines.stableIDs,
                 toolResultsByID: lines.toolResultsByID, includeSidechain: includeSidechain)
             let messageCount = built.items.filter(isWindowMessage).count
+            // `keptStart < end`: at least one whole line is held.
+            let scannedEnough = chunk >= scanLimit && keptStart < end
 
-            if messageCount >= messageLimit || built.items.count >= itemLimit || start == 0 {
+            if messageCount >= messageLimit || built.items.count >= itemLimit || start == 0 || scannedEnough {
                 return trimmedWindow(
                     lines: lines, items: built.items, lineIndices: built.lineIndices,
                     keptStart: keptStart, end: end, messageLimit: messageLimit, itemLimit: itemLimit)
             }
-            chunk = min(chunk * 2, end)
+            chunk = nextWindowChunk(after: chunk, scanLimit: scanLimit, end: end)
         }
     }
 
@@ -235,6 +265,18 @@ extension TranscriptParser {
         var toolResultsByID: [String: ToolResult] = [:]
         var fileEdits: [String: FileEditStats] = [:]
         var subagentAgentIDs: [String: String] = [:]
+
+        /// Puts `older`, the lines just before these, in front of them. Where
+        /// both name the same id, the later line wins, as it does within one
+        /// decode.
+        mutating func prepend(_ older: WindowLines) {
+            rawLines = older.rawLines + rawLines
+            offsets = older.offsets + offsets
+            stableIDs = older.stableIDs + stableIDs
+            toolResultsByID.merge(older.toolResultsByID) { later, _ in later }
+            fileEdits.merge(older.fileEdits) { later, _ in later }
+            subagentAgentIDs.merge(older.subagentAgentIDs) { later, _ in later }
+        }
     }
 
     /// Splits `bytes`, which start at a line start whose file offset is
@@ -313,6 +355,13 @@ extension TranscriptParser {
             toolResultsByID: lines.toolResultsByID,
             fileEdits: lines.fileEdits,
             subagentAgentIDs: lines.subagentAgentIDs)
+    }
+
+    /// `parseWindow`'s read size after `chunk`: twice it, but no more than
+    /// `scanLimit` while below it, and never past `end`.
+    private static func nextWindowChunk(after chunk: UInt64, scanLimit: UInt64, end: UInt64) -> UInt64 {
+        let doubled = chunk * 2
+        return min(chunk < scanLimit ? min(doubled, scanLimit) : doubled, end)
     }
 
     /// Whether `item` counts toward `parseWindow`'s `messageLimit`.

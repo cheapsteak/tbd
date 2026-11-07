@@ -140,6 +140,62 @@ struct TranscriptParserWindowTests {
         #expect(w.reachedStart)
     }
 
+    @Test func aSparseTailStopsAtTheScanLimit() throws {
+        // Two messages with five ~1 MiB tool results between them: about
+        // 5 MB, more than the 4 MiB limit and less than the default 8 MiB.
+        let scanLimit = 4 * 1024 * 1024
+        let bigResult = String(repeating: "z", count: 1 << 20)
+        var objects = [WindowLine.prompt("m1", "placeholder prompt 1")]
+        for n in 1...5 {
+            objects.append(WindowLine.toolUse("a\(n)", id: "toolu_\(n)", name: "Bash", input: ["command": "echo \(n)"]))
+            objects.append(WindowLine.toolResult("r\(n)", toolUseID: "toolu_\(n)", text: bigResult))
+        }
+        objects.append(WindowLine.prompt("m2", "placeholder prompt 2"))
+        let fixture = try WindowFixture(objects)
+        defer { fixture.remove() }
+
+        let w = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: nil, messageLimit: 4, itemLimit: 256, scanLimit: scanLimit))
+        let unbounded = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: nil, messageLimit: 4, itemLimit: 256))
+        let ids = w.entries.map(\.item.id)
+
+        #expect(w.endOffset == fixture.size)
+        #expect(w.endOffset - w.startOffset <= UInt64(scanLimit), "the read stops at the limit")
+        #expect(w.endOffset - w.startOffset > UInt64(scanLimit / 2), "the read grows to the limit")
+        #expect(!w.reachedStart)
+        #expect(ids.last == "m2", "the newest line is kept")
+        #expect(!ids.contains("m1"))
+        #expect(unbounded.reachedStart, "the default limit reads this file back to its start")
+    }
+
+    @Test func aLineLongerThanTheScanLimitIsReadWhole() throws {
+        let huge = String(repeating: "x", count: 2_000_000)
+        let fixture = try WindowFixture([
+            WindowLine.prompt("m1", "placeholder prompt 1"),
+            WindowLine.assistantText("filler", String(repeating: "f", count: 3_000_000)),
+            WindowLine.prompt("m2", "placeholder prompt 2"),
+            WindowLine.assistantText("big", huge),
+        ])
+        defer { fixture.remove() }
+        let big = try #require(fixture.offset(ofUUID: "big"))
+
+        let w = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: nil, messageLimit: 4, itemLimit: 256, scanLimit: 64 * 1024))
+        let ids = w.entries.map(\.item.id)
+        let bigItem = try #require(w.entries.last?.item)
+        guard case .assistantText(_, let text, _, _) = bigItem else {
+            Issue.record("expected the huge assistant line last, got \(bigItem)")
+            return
+        }
+
+        #expect(ids.last == "big#0")
+        #expect(text.count == 2_000_000)
+        #expect(w.startOffset <= big)
+        #expect(!w.reachedStart)
+        #expect(!ids.contains("m1"))
+    }
+
     @Test func lineIDsAreStableAcrossWindows() throws {
         // Large enough that neither window's read starts at byte 0, so an
         // offset counted from the read's start would differ between them.
