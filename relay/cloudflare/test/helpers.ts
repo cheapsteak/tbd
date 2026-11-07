@@ -65,6 +65,9 @@ export async function connect(room: string, role: Role): Promise<TestSocket> {
   expect(res.status).toBe(101);
   const ws = res.webSocket;
   if (ws === null) throw new Error("a 101 response carried no WebSocket");
+  // From compatibility date 2026-03-17 (`websocket_standard_binary_type`) a
+  // runtime WebSocket delivers binary frames as Blob unless asked otherwise.
+  ws.binaryType = "arraybuffer";
 
   const queue: Message[] = [];
   const waiters: Waiter[] = [];
