@@ -27,8 +27,13 @@
 // they could reach `writePty` at the same moment, or in the opposite order from the one the
 // terminal produced them in. So deliveries are appended to a FIFO under the terminal lock, which
 // fixes production order, and drained under a second lock, the delivery lock, which makes them
-// one at a time. Every call that can produce output drains before it returns, so a `feed`'s own
+// one at a time. Every call that queued a delivery drains before it returns, so a `feed`'s own
 // replies have gone out by the time it returns, whichever thread ran them.
+//
+// A call that queued nothing does not touch the delivery lock, and neither does the render
+// signal, which runs straight after its call. So a key, a click, or a feed with no reply never
+// waits on a delivery running on another thread. A feed that does produce a reply waits for any
+// drain in progress, which is why `writePty` must not block: see `GhosttyTerminalCallbacks`.
 //
 // The two query callbacks (`deviceAttributes`, `xtversion`) are the exception: their answer goes
 // into the reply being parsed, so they are asked under the lock. `GhosttyTerminalCallbacks` says
@@ -307,15 +312,27 @@ final class TerminalCore {
     }
 
     /// Takes everything the callbacks accumulated and appends it to the outbox, so it goes out
-    /// after everything produced before it. Called under the lock.
-    func harvest(signal: Bool) {
-        let delivery = Delivery(
-            pty: context.pendingPty, effects: context.pendingEffects,
-            renderSignal: signal ? renderSignal : nil)
+    /// after everything produced before it. Returns whether it appended anything; only then must
+    /// the caller drain. Called under the lock.
+    func harvest() -> Bool {
+        guard !context.pendingPty.isEmpty || !context.pendingEffects.isEmpty else { return false }
+        outbox.append(Delivery(pty: context.pendingPty, effects: context.pendingEffects))
         context.pendingPty.removeAll(keepingCapacity: true)
         context.pendingEffects.removeAll(keepingCapacity: true)
-        if !delivery.isEmpty { outbox.append(delivery) }
+        return true
     }
+
+    /// What a locked call leaves to do once the lock drops: whether to drain the outbox, and the
+    /// render signal to run, if the call changed the screen. Called under the lock.
+    func aftermath(signalsRender: Bool) -> Aftermath {
+        Aftermath(drain: harvest(), renderSignal: signalsRender ? renderSignal : nil)
+    }
+}
+
+/// See `TerminalCore.aftermath(signalsRender:)`.
+struct Aftermath {
+    var drain: Bool
+    var renderSignal: (@Sendable () -> Void)?
 }
 
 /// Names one `setRenderSignal` call, so only the view that installed a signal can clear it.
@@ -323,13 +340,12 @@ struct RenderSignalToken: Equatable, Sendable {
     fileprivate let id: UInt64
 }
 
-/// What one locked call produced, to run after the lock drops.
+/// What one locked call produced for the owner's callbacks, to run after the lock drops. The
+/// render signal is not part of it: a frame request needs no place in the reply order, so it runs
+/// straight after the call and never waits behind another thread's delivery.
 struct Delivery: Sendable {
     var pty: [UInt8]
     var effects: [PendingEffect]
-    var renderSignal: (@Sendable () -> Void)?
-
-    var isEmpty: Bool { pty.isEmpty && effects.isEmpty && renderSignal == nil }
 
     func run(_ callbacks: GhosttyTerminalCallbacks) {
         if !pty.isEmpty { callbacks.writePty?(pty) }
@@ -341,7 +357,6 @@ struct Delivery: Sendable {
             case .programStatus(let report): callbacks.programStatus?(report)
             }
         }
-        renderSignal?()
     }
 }
 
@@ -502,10 +517,15 @@ public final class GhosttyTerminal: @unchecked Sendable {
         return try body(core)
     }
 
-    /// Runs every queued delivery, oldest first, one at a time. Called by every method that can
-    /// produce output, after its lock drops, so what it produced has gone out before it returns:
+    /// Runs every queued delivery, oldest first, one at a time. Called, after its lock drops, by
+    /// every method that queued a delivery, so what it produced has gone out before it returns:
     /// either this drain runs it, or a drain already running on another thread does, and this one
     /// waits for that drain to finish before finding the outbox empty.
+    ///
+    /// A call that queued nothing does not drain, and so never waits for another thread's
+    /// delivery. That keeps a key, a click or a feed with no reply from waiting on a `writePty`
+    /// running on another thread. Nothing it produced is left behind: everything queued was
+    /// queued by a call that drains, or by a nested call inside a drain that is still running.
     ///
     /// A callback that calls back into the terminal re-enters here on the same thread. The nested
     /// call only queues its delivery and returns; the drain already running delivers it after the
@@ -527,6 +547,13 @@ public final class GhosttyTerminal: @unchecked Sendable {
         }
     }
 
+    /// Finishes a locked call once its lock has dropped: drains if it queued a delivery, then
+    /// asks for a frame if it changed the screen.
+    private func finish(_ aftermath: Aftermath) {
+        if aftermath.drain { drainOutbox() }
+        aftermath.renderSignal?()
+    }
+
     /// Runs `body` with the live C terminal under the lock, then delivers whatever the terminal
     /// produced after the lock drops. Returns nil, without running `body`, once the terminal is
     /// closed. `body` must not call back into this terminal. With `changesModes`, the bound
@@ -535,14 +562,13 @@ public final class GhosttyTerminal: @unchecked Sendable {
     func withRaw<T>(
         signalsRender: Bool = false, changesModes: Bool = false, _ body: (VtTerminal) throws -> T
     ) rethrows -> T? {
-        let value: T? = try locked { core in
-            guard let raw = core.raw else { return nil }
+        let (value, aftermath): (T?, Aftermath?) = try locked { core in
+            guard let raw = core.raw else { return (nil, nil) }
             let value = try body(raw)
             if changesModes { core.bound?.terminalModesMayHaveChanged(raw) }
-            core.harvest(signal: signalsRender)
-            return value
+            return (value, core.aftermath(signalsRender: signalsRender))
         }
-        drainOutbox()
+        if let aftermath { finish(aftermath) }
         return value
     }
 
@@ -554,13 +580,12 @@ public final class GhosttyTerminal: @unchecked Sendable {
         make: (VtTerminal) throws -> Object,
         _ body: (VtTerminal, Object) throws -> T
     ) rethrows -> T? {
-        let value: T? = try locked { core in
-            guard let raw = core.raw else { return nil }
+        let (value, aftermath): (T?, Aftermath?) = try locked { core in
+            guard let raw = core.raw else { return (nil, nil) }
             let value = try body(raw, try core.boundObject(raw, make: make))
-            core.harvest(signal: signalsRender)
-            return value
+            return (value, core.aftermath(signalsRender: signalsRender))
         }
-        drainOutbox()
+        if let aftermath { finish(aftermath) }
         return value
     }
 
@@ -573,15 +598,14 @@ public final class GhosttyTerminal: @unchecked Sendable {
         make: (VtTerminal) throws -> Object,
         _ body: (VtTerminal, Object) throws -> T
     ) rethrows -> (value: T, pty: [UInt8])? {
-        let result: (value: T, pty: [UInt8])? = try locked { core in
-            guard let raw = core.raw else { return nil }
+        let (result, aftermath): ((value: T, pty: [UInt8])?, Aftermath?) = try locked { core in
+            guard let raw = core.raw else { return (nil, nil) }
             let value = try body(raw, try core.boundObject(raw, make: make))
             let pty = core.context.pendingPty
             core.context.pendingPty.removeAll(keepingCapacity: true)
-            core.harvest(signal: false)
-            return (value, pty)
+            return ((value: value, pty: pty), core.aftermath(signalsRender: false))
         }
-        drainOutbox()
+        if let aftermath { finish(aftermath) }
         return result
     }
 
@@ -647,8 +671,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
         let columns = UInt16(clamping: max(cols, 1))
         let lines = UInt16(clamping: max(rows, 1))
         var failure: GhosttyResult?
-        locked { core in
-            guard let raw = core.raw else { return }
+        let aftermath = locked { core -> Aftermath? in
+            guard let raw = core.raw else { return nil }
             let previousSize = core.context.reportedSize
             if let cellWidthPx { core.cellWidthPx = cellWidthPx }
             if let cellHeightPx { core.cellHeightPx = cellHeightPx }
@@ -664,14 +688,14 @@ public final class GhosttyTerminal: @unchecked Sendable {
                 core.context.reportedSize = previousSize
                 failure = result
             }
-            core.harvest(signal: true)
+            return core.aftermath(signalsRender: true)
         }
         if let failure {
             let error = GhosttyCallError(result: failure, operation: "ghostty_terminal_resize")
             terminalEngineLog.error(
                 "resize to \(columns, privacy: .public)x\(lines, privacy: .public) failed: \(error.description, privacy: .public)")
         }
-        drainOutbox()
+        if let aftermath { finish(aftermath) }
     }
 
     /// Runs `body` with a read-only view of the terminal, under the lock. `body` must not call back

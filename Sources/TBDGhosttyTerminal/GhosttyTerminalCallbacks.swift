@@ -28,6 +28,13 @@ public struct GhosttyTerminalCallbacks: Sendable {
     /// but never concurrently with itself, and always in the order the terminal produced the
     /// replies. A size report from a resize on the main thread and a DA reply from a feed on the
     /// IO thread arrive one after the other, in the terminal's order, whichever thread runs them.
+    ///
+    /// **Must not block.** Hand the bytes to a queue and return; do not write them to the pty
+    /// here. While this runs, every other call that produced a reply waits for it, and that
+    /// includes the IO thread's `feed`. If the pty's input queue is full, a write here waits for
+    /// the program to read, while the program may be blocked writing output that only that `feed`
+    /// would read: a deadlock. The engine that supplies this callback, in the app, owns that
+    /// queue.
     public var writePty: (@Sendable ([UInt8]) -> Void)?
     /// BEL (0x07). Dropped while muted.
     public var bell: (@Sendable () -> Void)?
