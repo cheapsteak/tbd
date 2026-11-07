@@ -409,8 +409,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
     private static let scrollbackBytesPerLine = 4096
     /// The longest unfinished sequence kept for replay. A longer one still parses, but a clone taken
     /// in the middle of it fails.
-    /// 1 MiB: the header recommends no value; this covers long OSC 8 and OSC 52, and caps the kept buffer.
-    static let continuationMaxBytes = 1 << 20
+    /// 64 KiB: the tracker allocates 4 KiB up front, grows on demand, and keeps its largest size.
+    static let continuationMaxBytes = 64 << 10
 
     /// Sets every option a new terminal needs. Runs before any byte is fed.
     private static func configure(_ terminal: VtTerminal, context: IOContext, scrollbackLines: Int) throws {
