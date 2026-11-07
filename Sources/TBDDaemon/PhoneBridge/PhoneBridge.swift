@@ -14,6 +14,12 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     /// The relay is a TBD relay whose `api` list lacks the version this
     /// laptop speaks. The payload is the list it offered.
     case unsupportedRelayAPI([Int])
+    /// A message for the phone would not fit one transport message:
+    /// serialized, envelope included, it is over
+    /// `NoiseTransport.maxPlaintextLength` bytes.
+    case messageTooLarge
+    /// An `app` body handed to the bridge is not exactly one JSON object.
+    case notAJSONObject
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +30,10 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
         case .unsupportedRelayAPI(let offered):
             return "This relay offers API \(offered), but this TBD needs API \(PhoneBridgeConstants.relayAPIVersion). "
                 + "Deploy the relay again from the guide."
+        case .messageTooLarge:
+            return "A message for the phone is larger than one encrypted frame can carry."
+        case .notAJSONObject:
+            return "A message for the phone app is not one JSON object."
         }
     }
 }
