@@ -7,7 +7,7 @@
 //   * own the terminal's `TerminalSurface`, attached only while the view can be seen,
 //   * drive frames from a display link that is paused unless there is work,
 //   * coalesce resizes into one grid resize per pass and present transactionally while live,
-//   * rebuild the glyph atlas when the backing scale or the font changes,
+//   * rebuild the glyph atlas when the backing scale, the font or the stroke weight changes,
 //   * hand input events to `TerminalInputController` and `MouseController`, which encode them.
 //
 // ## Hidden views cost nothing
@@ -188,26 +188,30 @@ final class DisplayLinkDriver {
 
 // MARK: - Render context
 
-/// One font at one backing scale: the `FontSet`, `GlyphCache` and `TerminalRenderer` built from it.
+/// One font at one backing scale and stroke weight: the `FontSet`, `GlyphCache` and
+/// `TerminalRenderer` built from it.
 ///
-/// Views with the same font and scale share one context, so they share one glyph atlas and one
-/// compiled pipeline. A view whose scale or font changes takes another context and re-attaches its
-/// surface: an attach always produces a full rebuild, so no row keeps an atlas position from the
-/// old atlas. A context lives while a view holds it.
+/// Views with the same font, scale and stroke weight share one context, so they share one glyph
+/// atlas and one compiled pipeline. A view whose scale, font or stroke weight changes takes another
+/// context and re-attaches its surface: an attach always produces a full rebuild, so no row keeps
+/// an atlas position from the old atlas. A context lives while a view holds it.
 @MainActor
 final class TerminalRenderContext {
     let renderer: TerminalRenderer
     let font: NSFont
     /// The backing scale the atlas was rasterized at.
     let scale: CGFloat
+    /// Whether the atlas's glyphs were drawn with stem darkening (`GlyphRasterizer.thicken`).
+    let thicken: Bool
 
     var metrics: CellMetrics { renderer.glyphCache.metrics }
     var device: MTLDevice { renderer.device }
 
-    private init(font: NSFont, scale: CGFloat, device: MTLDevice) throws(GhosttyError) {
+    private init(font: NSFont, scale: CGFloat, thicken: Bool, device: MTLDevice) throws(GhosttyError) {
         let fontSet = FontSet(font: font, scale: scale)
         do {
-            renderer = try TerminalRenderer(device: device, glyphCache: GlyphCache(fontSet: fontSet, device: device))
+            let glyphCache = GlyphCache(fontSet: fontSet, device: device, thicken: thicken)
+            renderer = try TerminalRenderer(device: device, glyphCache: glyphCache)
         } catch let error as GhosttyError {
             throw error
         } catch {
@@ -215,23 +219,28 @@ final class TerminalRenderContext {
         }
         self.font = font
         self.scale = scale
+        self.thicken = thicken
     }
 
     private struct Key: Hashable {
         let fontName: String
         let pointSize: CGFloat
         let scale: CGFloat
+        /// In the key so a change of stroke weight takes a new atlas. One atlas never holds glyphs
+        /// drawn at both weights, which is what an atlas keyed without it would end up with.
+        let thicken: Bool
     }
 
     private static var cache: [Key: WeakRef<TerminalRenderContext>] = [:]
 
-    /// The context for `font` at `scale`, built on first use.
-    static func shared(font: NSFont, scale: CGFloat, device: MTLDevice) throws(GhosttyError) -> TerminalRenderContext {
+    /// The context for `font` at `scale`, with or without stem darkening, built on first use.
+    static func shared(font: NSFont, scale: CGFloat, thicken: Bool, device: MTLDevice) throws(GhosttyError)
+        -> TerminalRenderContext {
         let scale = max(1, scale)
-        let key = Key(fontName: font.fontName, pointSize: font.pointSize, scale: scale)
+        let key = Key(fontName: font.fontName, pointSize: font.pointSize, scale: scale, thicken: thicken)
         cache = cache.filter { $0.value.object != nil }
         if let existing = cache[key]?.object { return existing }
-        let context = try TerminalRenderContext(font: font, scale: scale, device: device)
+        let context = try TerminalRenderContext(font: font, scale: scale, thicken: thicken, device: device)
         cache[key] = WeakRef(context)
         return context
     }
@@ -395,7 +404,8 @@ public final class GhosttyTerminalView: NSView {
     ) throws(GhosttyError) {
         guard let device = MTLCreateSystemDefaultDevice() else { throw .metalUnavailable }
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        renderContext = try TerminalRenderContext.shared(font: appearance.font, scale: scale, device: device)
+        renderContext = try TerminalRenderContext.shared(
+            font: appearance.font, scale: scale, thicken: !appearance.thinStrokes, device: device)
         self.terminal = terminal
         terminalAppearance = appearance
         self.clock = clock
@@ -455,27 +465,33 @@ public final class GhosttyTerminalView: NSView {
 
     // MARK: - Appearance
 
-    /// Applies new colours, cursor and font. What is on screen stays; the terminal's default
-    /// colours change under any a program set, and a new font rebuilds the glyph atlas and
-    /// re-fits the grid.
+    /// Applies new colours, cursor, font and stroke weight. What is on screen stays; the terminal's
+    /// default colours change under any a program set, and a new font or stroke weight rebuilds the
+    /// glyph atlas and re-fits the grid.
     public func apply(_ appearance: GhosttyAppearance) {
-        let fontChanged = appearance.font != terminalAppearance.font
+        let glyphsChanged = appearance.font != terminalAppearance.font
+            || appearance.thinStrokes != terminalAppearance.thinStrokes
         terminalAppearance = appearance
         terminal.apply(appearance)
-        if fontChanged { useRenderContext(font: appearance.font, scale: renderContext.scale) }
+        if glyphsChanged {
+            useRenderContext(font: appearance.font, thicken: !appearance.thinStrokes, scale: renderContext.scale)
+        }
         surface.markNeedsDisplay()
         startBlinkIfNeeded()
         refreshPreeditOverlay()
         requestFrame()
     }
 
-    /// Switches to the context for `font` at `scale` and re-attaches the surface, so every row is
-    /// rebuilt against the new atlas. Keeps the current context if the new one cannot be built.
-    private func useRenderContext(font: NSFont, scale: CGFloat) {
-        guard font != renderContext.font || max(1, scale) != renderContext.scale else { return }
+    /// Switches to the context for `font` at `scale`, with or without stem darkening, and
+    /// re-attaches the surface, so every row is rebuilt against the new atlas. Keeps the current
+    /// context if the new one cannot be built.
+    private func useRenderContext(font: NSFont, thicken: Bool, scale: CGFloat) {
+        guard font != renderContext.font || thicken != renderContext.thicken
+            || max(1, scale) != renderContext.scale else { return }
         let next: TerminalRenderContext
         do {
-            next = try TerminalRenderContext.shared(font: font, scale: scale, device: renderContext.device)
+            next = try TerminalRenderContext.shared(
+                font: font, scale: scale, thicken: thicken, device: renderContext.device)
         } catch {
             terminalEngineLog.error("rebuilding the renderer failed: \(String(describing: error), privacy: .public)")
             return
@@ -783,7 +799,7 @@ public final class GhosttyTerminalView: NSView {
     private func applyBackingScale(_ scale: CGFloat) {
         metalLayer?.contentsScale = scale
         updateDrawableSize()
-        useRenderContext(font: terminalAppearance.font, scale: scale)
+        useRenderContext(font: terminalAppearance.font, thicken: !terminalAppearance.thinStrokes, scale: scale)
         pendingGridResize = true
         applyPendingGridResize()
         refreshPreeditOverlay()

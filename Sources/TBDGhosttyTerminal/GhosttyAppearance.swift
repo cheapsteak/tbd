@@ -1,12 +1,13 @@
-// How a libghostty terminal looks: its font, colours and cursor.
+// How a libghostty terminal looks: its font, stroke weight, colours and cursor.
 //
 // The view hands the colours and cursor to the terminal as its defaults, beneath anything a
-// program sets with OSC 4, 10, 11 or 12, and builds its glyph atlas from the font. Applying a new
-// appearance to a live view keeps what is on screen; only the defaults and the cell size change.
+// program sets with OSC 4, 10, 11 or 12, and builds its glyph atlas from the font and the stroke
+// weight. Applying a new appearance to a live view keeps what is on screen; only the defaults, the
+// glyphs and the cell size change.
 import AppKit
 import GhosttyVt
 
-/// The font, colours and cursor a `GhosttyTerminalView` draws with.
+/// The font, stroke weight, colours and cursor a `GhosttyTerminalView` draws with.
 ///
 /// `@unchecked Sendable` because of `font`: `NSFont` is immutable, and Apple documents font
 /// objects as safe to use from any thread, but the SDK does not mark the class `Sendable`. The
@@ -32,6 +33,10 @@ public struct GhosttyAppearance: @unchecked Sendable, Equatable {
 
     /// The terminal font. Bold and italic come from its family.
     public var font: NSFont
+    /// Draws glyphs at the font's own stroke weight, as SwiftTerm does with font smoothing off.
+    /// False draws them heavier, with CoreText's stem darkening (`GlyphRasterizer.thicken`), as
+    /// SwiftTerm does with font smoothing on. Changing it rebuilds the glyph atlas.
+    public var thinStrokes: Bool
     public var foreground: RGB
     public var background: RGB
     public var cursor: RGB
@@ -48,9 +53,11 @@ public struct GhosttyAppearance: @unchecked Sendable, Equatable {
         cursor: RGB,
         palette: [RGB] = GhosttyAppearance.defaultPalette,
         cursorStyle: CursorStyle = .block,
-        cursorBlink: Bool = true
+        cursorBlink: Bool = true,
+        thinStrokes: Bool = true
     ) {
         self.font = font
+        self.thinStrokes = thinStrokes
         self.foreground = foreground
         self.background = background
         self.cursor = cursor
