@@ -153,3 +153,25 @@ test('the strip shows Reconnecting… only while the channel is down', async ({ 
   await hostCall(page, 'setChannel', false);
   await expect(strip.locator('[data-state="reconnect"]')).toBeVisible();
 });
+
+test("the host refuses setSendResult('offline'), which the loader answers only while the channel is down", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await waitForSubscribed(page);
+  /** What `setSendResult(result)` throws, or null. */
+  const refusal = (/** @type {string} */ result) => page.evaluate((r) => {
+    try {
+      /** @type {any} */ (window).__host.setSendResult(r);
+      return null;
+    } catch (error) {
+      return /** @type {Error} */ (error).message;
+    }
+  }, result);
+  const offline = /^setSendResult\('offline'\): the loader answers offline only while the channel is down\. Take the channel down with setChannel\(false\)/;
+  expect(await refusal('offline')).toMatch(offline);
+  // Down, every send is offline already, so there is nothing for it to set.
+  await hostCall(page, 'setChannel', false);
+  expect(await refusal('offline')).toMatch(offline);
+  // The answers a phone can see while the channel is up are taken, for the sends after the next up.
+  expect(await refusal('tooLarge')).toBeNull();
+  expect(await refusal('sent')).toBeNull();
+});

@@ -24,8 +24,9 @@
 // - `setReply(method, reply | (params, state) => reply | null)`, `hold(name)`,
 //   `release(name)`: see fake-laptop-app.js. `state`: what the laptop holds.
 // - `setChannel(up)`: the channel comes up (a new connection) or goes down.
-// - `setSendResult('sent' | 'offline' | 'tooLarge')`: what the loader answers each later send
-//   that fits a frame while the channel is up.
+// - `setSendResult('sent' | 'tooLarge')`: what the loader answers each later send that fits a
+//   frame while the channel is up. It refuses `offline`, which the loader answers only while the
+//   channel is down, to every send: a test takes the channel down with `setChannel(false)`.
 // - `sendEnv(partial)`: posts the env the page reads with `partial` laid over it, one level
 //   deep, and keeps laying it over every later env until `sendEnv(null)`.
 // - `loadScenario(nameOrObject)`: replaces the laptop's data.
@@ -38,10 +39,11 @@ import { decodeMessage, encodeMessage } from '/protocol.js';
 import { renderStrip } from '/ui.js';
 import { createFakeLaptop } from '/__app/fake-laptop-app.js';
 
-/** @typedef {'sent' | 'offline' | 'tooLarge'} SendResult */
+/** What the loader's `sendApp` answers. @typedef {'sent' | 'offline' | 'tooLarge'} SendResult */
+/** What a test may have it answer while the channel is up. @typedef {'sent' | 'tooLarge'} UpSendResult */
 
 const LAPTOP_NAME = 'acme-laptop';
-const SEND_RESULTS = new Set(['sent', 'offline', 'tooLarge']);
+const SEND_RESULTS = new Set(['sent', 'tooLarge']);
 const SCENARIO_NAME = /^[A-Za-z0-9_-]+$/;
 /** As the laptop reads a frame's plaintext: UTF-8, nothing else. */
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -59,7 +61,7 @@ const links = [];
 const faults = [];
 
 let up = false;
-/** @type {SendResult} */
+/** @type {UpSendResult} */
 let sendResult = 'sent';
 /** @type {Record<string, unknown> | null} */
 let envOverride = null;
@@ -128,10 +130,10 @@ Object.defineProperty(window, '__host', {
 
 /**
  * The loader's `sendApp`, with the fake laptop for the relay: offline while the channel is
- * down, and the loader's own size check (`sendApp` in phone/loader/connection.js) before
- * anything else. A body that passes both, while the send result is `sent`, reaches the laptop
- * on a later task, as a message through the relay would: parsed from the bytes the loader
- * encoded, and only while the connection it was sent on lasts.
+ * down and only then, and the loader's own size check (`sendApp` in phone/loader/connection.js)
+ * before anything else. A body that passes both, while the send result is `sent`, reaches the
+ * laptop on a later task, as a message through the relay would: parsed from the bytes the
+ * loader encoded, and only while the connection it was sent on lasts.
  * @param {object} body
  * @returns {SendResult}
  */
@@ -165,8 +167,19 @@ function setChannel(next) {
   drawStrip();
 }
 
-/** @param {SendResult} result */
+/**
+ * Sets what `sendApp` answers each later send that fits a frame while the channel is up. It
+ * refuses `offline`: the real loader answers that only between a `down` and the next `up`
+ * (`sendApp` in phone/loader/connection.js), so a phone never sees it while the channel is up.
+ * @param {UpSendResult} result
+ */
 function setSendResult(result) {
+  if (result === 'offline') {
+    throw new RangeError(
+      "setSendResult('offline'): the loader answers offline only while the channel is down. " +
+        'Take the channel down with setChannel(false) instead: every send is offline then.',
+    );
+  }
   if (!SEND_RESULTS.has(result)) throw new RangeError(`no send result ${result}`);
   sendResult = result;
 }
