@@ -19,8 +19,9 @@
  * 3. It posts every other unanswered request again, in the order each was first sent, with
  *    the very body it first posted, then drains the queue. An acting request posted on an
  *    earlier connection waits, though, until this connection's `sessions.subscribe` reply
- *    shows the daemon still remembers it (below), and a queued action waits behind it, so a
- *    session gets its actions in the order they were made.
+ *    shows the daemon still remembers it, or rejects it when the reply cannot show that
+ *    (below). A queued action waits behind it, so a session gets its actions in the order they
+ *    were made.
  *
  * A resend is safe because of what the daemon does with a request ID (`PhoneAppService.swift`):
  * - **A resend of a request still running** starts nothing, and the running request's one
@@ -36,9 +37,10 @@
  *     each phone it starts keeping state for (`PhoneEventStream.swift`). So an acting resend
  *     waits for the subscribe reply, and goes out only when that reply replays the stream or
  *     names the stream the client already had. A new stream, or no stream known before,
- *     rejects it with `not_confirmed`. A new stream can also mean only that the daemon's
- *     120 s grace for an absent phone ran out while it still remembered the request; refusing
- *     then is the cautious reading.
+ *     rejects it with `not_confirmed`. So does an error reply to the subscribe, or a reply
+ *     that does not decode: the client cannot learn then whether the daemon remembers it. A
+ *     new stream can also mean only that the daemon's 120 s grace for an absent phone ran out
+ *     while it still remembered the request; refusing then is the cautious reading.
  * - **A resend of a read** that finished runs again, which is harmless at any age, so reads
  *   go out at once.
  * - **An ID reused for another method** is answered `bad_request`. So a resend posts the very
@@ -295,8 +297,9 @@ export class AppClient {
    * - `bad_reply` for a reply that does not decode;
    * - `superseded` for a state request still unanswered when the channel comes back up;
    * - `not_confirmed` for an acting request still unanswered when the channel comes back up,
-   *   when it is more than 540 s past its first send or the new connection's subscribe reply
-   *   names a new stream, and for a repost of one that the daemon answers `refused`.
+   *   when it is more than 540 s past its first send, or when the new connection's subscribe
+   *   reply names a new stream, is an error or does not decode; and for a repost of one that
+   *   the daemon answers `refused`.
    *
    * It has no timeout: the daemon answers every request it runs. The request goes out at once
    * when the channel is up and fewer than 32 requests are posted and unanswered, and, for an
@@ -539,21 +542,19 @@ export class AppClient {
         // The daemon checks its cap on running requests before its request memory, so a
         // repost of an action that already ran can be refused as "too many in progress".
         // Shown as is, it invites the user to try again under a new ID, which would act twice.
-        this.#fail(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
+        this.#failOnReply(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
       } else {
         // A code outside the closed list is a reply this build cannot fully read. Its message
         // is the daemon's own words for the phone, so it is kept.
-        this.#fail(pending, isErrorCode(code) ? code : 'bad_reply', message);
+        this.#failOnReply(pending, isErrorCode(code) ? code : 'bad_reply', message);
       }
-      this.#pump();
       return;
     }
     let result: unknown;
     try {
       result = decodeResult(pending.method, reply.result);
     } catch {
-      this.#fail(pending, 'bad_reply', BAD_REPLY_TEXT);
-      this.#pump();
+      this.#failOnReply(pending, 'bad_reply', BAD_REPLY_TEXT);
       return;
     }
     // Before the promise resolves, so the numbering holds for the very next port message.
@@ -570,7 +571,8 @@ export class AppClient {
    * It also settles the acting reposts waiting for it. A replay, or a snapshot of the stream
    * the client already had, shows the daemon is the one that numbered that stream, so it still
    * remembers their IDs: they go out, still held to the horizon. Any other stream may come from
-   * a daemon that restarted and forgot them, so each is rejected `not_confirmed`.
+   * a daemon that restarted and forgot them, so each is rejected `not_confirmed`. A subscribe
+   * reply that is an error, or does not decode, rejects them too (`#failOnReply`).
    */
   #subscribed(result: SessionsSubscribeResult): void {
     const before = this.#stream;
@@ -599,7 +601,22 @@ export class AppClient {
     if (body.kind !== 'reply' || typeof requestID !== 'string') return;
     const pending = this.#sentRequest(requestID);
     if (pending === undefined) return;
-    this.#fail(pending, 'bad_reply', BAD_REPLY_TEXT);
+    this.#failOnReply(pending, 'bad_reply', BAD_REPLY_TEXT);
+  }
+
+  /**
+   * Fails `pending` on its reply: the daemon's error, or a reply that does not decode. When it
+   * is a `sessions.subscribe`, which is always this connection's (a channel up supersedes any
+   * other), the acting reposts waiting for its reply are rejected `not_confirmed` first: the
+   * client cannot learn whether the daemon still remembers them, so it never sends them again.
+   * Then the queue moves on, and the actions that waited behind them go out. Events stay
+   * dropped until a subscribe reply decodes.
+   */
+  #failOnReply(pending: Pending, code: ErrorCode | LocalErrorCode, message: string): void {
+    if (pending.method === 'sessions.subscribe') {
+      for (const waiting of [...this.#unconfirmed]) this.#fail(waiting, 'not_confirmed', NOT_CONFIRMED_TEXT);
+    }
+    this.#fail(pending, code, message);
     this.#pump();
   }
 

@@ -967,25 +967,65 @@ test('with no stream known before, a snapshot rejects a held action', async () =
   assert.equal(sends(h, id), 1);
 });
 
-test('a subscribe that fails keeps a held action held, across drops, until a good reply releases it', async () => {
+test('an error reply to the subscribe rejects a held action, never resent, and the action behind it goes', async () => {
   const h = harness({ whenUp: subscribe });
   connect(h);
-  const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const held = track(h.c.request('message.send', { session: REF, text: 'A' }));
   const id = last(h, 'message.send')!.requestID;
   h.down();
+  const queued = track(h.c.request('message.send', { session: REF, text: 'B' }));
   h.up();
-  h.fail(last(h, 'sessions.subscribe'), 'internal', 'The sessions list changed while it was read. Try again.');
-  h.down();
-  h.clock.now = 200_000;
-  h.up();
-  h.reply(last(h, 'sessions.subscribe'), { stream: 's1', seq: -0.5, replayed: true, omittedRows: 0, more: false });
+  assert.equal(h.posted.at(-1)!.method, 'sessions.subscribe');
+  h.fail(last(h, 'sessions.subscribe'), 'phone_control_off', 'Phone control is off on this laptop.');
   await flush();
-  assert.equal(p.state, 'pending');
+  assert.equal(held.state, 'rejected');
+  assert.deepEqual([(held.error as AppError).code, (held.error as AppError).message], ['not_confirmed', NOT_CONFIRMED_TEXT]);
   assert.equal(sends(h, id), 1);
-  // Try again, on the same connection.
+  // B was never sent, so it goes now, and the laptop answers it.
+  assert.equal(h.posted.at(-1)!.params.text, 'B');
+  h.fail(h.posted.at(-1), 'phone_control_off', 'Phone control is off on this laptop.');
+  await flush();
+  assert.equal((queued.error as AppError | undefined)?.code, 'phone_control_off');
+  // A later good reply has nothing left to release.
   track(h.c.request('sessions.subscribe', { stream: 's1', sinceSeq: 0 }));
   confirm(h);
-  assert.equal(sends(h, id), 2);
+  assert.equal(sends(h, id), 1);
+});
+
+test('a subscribe reply whose result or envelope does not decode rejects a held action too', async () => {
+  const unreadable: Array<(h: Harness, subscribeBody: Body) => void> = [
+    (h, s) => h.reply(s, { stream: 's1', seq: -0.5, replayed: true, omittedRows: 0, more: false }),
+    (h, s) => h.app({ kind: 'reply', requestID: s.requestID, result: replay('s1', 0), error: { code: 'internal', message: 'x' } }),
+  ];
+  for (const send of unreadable) {
+    const h = harness({ whenUp: subscribe });
+    connect(h);
+    const held = track(h.c.request('session.fork', { session: REF }));
+    const id = last(h, 'session.fork')!.requestID;
+    h.down();
+    h.up();
+    send(h, last(h, 'sessions.subscribe')!);
+    await flush();
+    assert.equal((held.error as AppError | undefined)?.code, 'not_confirmed');
+    assert.equal(sends(h, id), 1);
+    // Events stay dropped until a subscribe reply decodes.
+    event(h, 1);
+    assert.deepEqual(h.events, []);
+  }
+});
+
+test('a failed subscribe rejects only acting reposts: reads and never-sent actions stay', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const read = track(h.c.request('profiles.list', {}));
+  h.down();
+  const fresh = track(h.c.request('session.fork', { session: REF }));
+  h.up();
+  h.fail(last(h, 'sessions.subscribe'), 'internal', 'Something went wrong on the laptop.');
+  await flush();
+  assert.deepEqual([read.state, fresh.state], ['pending', 'pending']);
+  assert.equal(sends(h, 'r2'), 2);
+  assert.equal(sends(h, 'r3'), 1);
 });
 
 test('reads go out at once, a new action waits behind a held one, and a new stream leaves reads alone', async () => {
