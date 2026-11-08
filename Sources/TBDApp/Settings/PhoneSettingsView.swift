@@ -33,6 +33,13 @@ struct PhoneSettingsView: View {
         .task { await appState.refreshPhone() }
         .onChange(of: appState.phoneDevices, initial: true) { rebuildDeviceRows() }
         .onChange(of: appState.phoneStatus?.connectedDeviceIDs) { rebuildDeviceRows() }
+        // "Last seen" is relative to now, so the rows are rebuilt once a
+        // minute as well; the timeline only hands its date to the rebuild.
+        .background {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                Color.clear.onChange(of: context.date) { _, date in rebuildDeviceRows(now: date) }
+            }
+        }
         .onChange(of: appState.phoneStatus?.loaderURLOverride, initial: true) { _, override in
             loaderURLDraft = override ?? ""
         }
@@ -179,9 +186,9 @@ struct PhoneSettingsView: View {
 
     // MARK: - Actions
 
-    private func rebuildDeviceRows() {
+    private func rebuildDeviceRows(now: Date = Date()) {
         let rows = PhonePresentation.deviceRows(
-            appState.phoneDevices, connected: Set(appState.phoneStatus?.connectedDeviceIDs ?? []))
+            appState.phoneDevices, connected: Set(appState.phoneStatus?.connectedDeviceIDs ?? []), now: now)
         if rows != deviceRows { deviceRows = rows }
     }
 

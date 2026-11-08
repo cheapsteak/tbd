@@ -108,6 +108,22 @@ struct PhonePresentationTests {
         #expect(rows[2].pairedText.hasPrefix("Paired "))
     }
 
+    /// The pane rebuilds its rows once a minute and keeps them only when they
+    /// differ, so a later `now` must give a different "Last seen".
+    @Test func lastSeenMovesOnWithNow() throws {
+        let lastSeen = Date(timeIntervalSince1970: 1_800_000_000)
+        let phone = PhoneDevice(id: UUID(), name: "Pixel", publicKey: Data(count: 32),
+                                roomID: String(repeating: "A", count: 43), pairedAt: lastSeen, lastSeenAt: lastSeen)
+        let soon = PhonePresentation.deviceRows([phone], connected: [], now: lastSeen.addingTimeInterval(60))
+        let later = PhonePresentation.deviceRows([phone], connected: [], now: lastSeen.addingTimeInterval(3 * 3600))
+        #expect(soon != later)
+        let soonText = try #require(soon.first).seenText
+        let laterText = try #require(later.first).seenText
+        #expect(soonText.hasPrefix("Last seen "))
+        #expect(laterText.hasPrefix("Last seen "))
+        #expect(soonText != laterText)
+    }
+
     @Test func theQRCodeReadsBack() throws {
         let link = "https://tbd-phone.github.io/#p=" + String(repeating: "A", count: 420)
         let image = try #require(PhoneQRCode.image(for: link))

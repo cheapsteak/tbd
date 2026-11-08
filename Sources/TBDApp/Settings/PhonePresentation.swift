@@ -138,9 +138,10 @@ enum PhonePresentation {
     }
 
     /// The paired-phones list for `devices`, `connected` being the phones
-    /// connected now. Built when the devices or the connected set change,
-    /// never in a view body.
-    static func deviceRows(_ devices: [PhoneDevice], connected: Set<UUID>, now: Date = Date()) -> [DeviceRow] {
+    /// connected at `now`, which "Last seen" is relative to. Built when the
+    /// devices or the connected set change and once a minute, never in a
+    /// view body.
+    static func deviceRows(_ devices: [PhoneDevice], connected: Set<UUID>, now: Date) -> [DeviceRow] {
         let relative = RelativeDateTimeFormatter()
         relative.unitsStyle = .full
         return devices.map { device in
