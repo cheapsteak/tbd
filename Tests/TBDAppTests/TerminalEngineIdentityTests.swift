@@ -142,7 +142,7 @@ struct TerminalEngineIdentityTests {
         ]
         for (name, query, expected) in pairs {
             writes.withLock { $0 = [] }
-            terminal.feed(text: query)
+            Self.feed(query, into: terminal)
             let answer = writes.withLock { $0 }
             #expect(!expected.isEmpty, "SwiftTerm gave no \(name) reply")
             #expect(answer == expected,
@@ -163,7 +163,7 @@ struct TerminalEngineIdentityTests {
                 programStatus: { _ in }))
         defer { terminal.close() }
 
-        terminal.feed(text: Self.probe)
+        Self.feed(Self.probe, into: terminal)
         let answer = writes.withLock { $0 }
         #expect(answer.starts(with: Self.libghosttyAnswerStart),
                 "libghostty's probe answer changed shape: \(EngineTestSupport.describe(answer))")
@@ -224,7 +224,7 @@ struct TerminalEngineIdentityTests {
 
         for data in Self.claudeReports {
             received.withLock { $0 = [] }
-            terminal.feed(text: "\u{1b}]7501;\(data)\u{1b}\\")
+            Self.feed("\u{1b}]7501;\(data)\u{1b}\\", into: terminal)
             let statuses = received.withLock { $0 }
             #expect(statuses.count == 1, "libghostty delivered \(statuses.count) reports for \(data)")
             guard let status = statuses.first else { continue }
@@ -238,6 +238,12 @@ struct TerminalEngineIdentityTests {
     }
 
     // MARK: - Helpers
+
+    /// Feeds `text` to a headless libghostty terminal, whose `feed` takes
+    /// bytes.
+    nonisolated private static func feed(_ text: String, into terminal: TBDGhosttyTerminal.GhosttyTerminal) {
+        terminal.feed(Array(text.utf8)[...])
+    }
 
     nonisolated private static func base64(_ text: String) -> String {
         Data(text.utf8).base64EncodedString()
