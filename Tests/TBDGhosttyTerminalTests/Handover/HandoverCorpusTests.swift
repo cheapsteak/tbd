@@ -72,7 +72,7 @@ struct HandoverCorpusTests {
             let crossing = "SwiftTerm preamble into a fresh libghostty"
             Self.expectOutcome(name, tally: tally, misses: Self.freshMisses, crossing: crossing)
 
-            guard let leave = Self.leave(ghostty) else { return }
+            guard let leave = Self.leave(state, on: ghostty) else { return }
             swiftTerm.feed(leave)
             ghostty.feed(leave[...])
             let left = handoverCompare(swiftTerm.handoverSnap(), ghostty.handoverSnap())
@@ -92,7 +92,7 @@ struct HandoverCorpusTests {
             fresh.feed(preamble[...])
             let expected = fresh.handoverSnap()
             // On an alternate screen, the same again once the program has left it.
-            let leave = Self.leave(fresh)
+            let leave = Self.leave(state, on: fresh)
             var expectedLeft: HandoverSnap?
             if let leave {
                 fresh.feed(leave[...])
@@ -139,7 +139,7 @@ struct HandoverCorpusTests {
             let crossing = "libghostty handback into SwiftTerm"
             Self.expectOutcome(name, tally: tally, misses: Self.handbackMisses, crossing: crossing)
 
-            guard let leave = Self.leave(source) else { return }
+            guard let leave = Self.leave(state, on: source) else { return }
             let direct = state.swiftTerm()
             source.feed(leave[...])
             receiver.feed(leave)
@@ -164,6 +164,52 @@ struct HandoverCorpusTests {
         for (name, miss) in Array(Self.freshMisses) + Array(Self.handbackMisses) {
             #expect(names.contains(name), "\(name) is listed as a miss but is not a state")
             #expect(!miss.categories.isEmpty, "\(name) is listed as a miss with no category it may differ in")
+        }
+    }
+
+    // MARK: - A program that leaves while a viewer is attached
+
+    struct ProgramLeave: Sendable, CustomTestStringConvertible {
+        let state: String
+        /// The reset the program leaves with, the one that matches how the state entered.
+        let leave: String
+
+        var testDescription: String { "\(state), then \(leave.debugDescription)" }
+    }
+
+    static let programLeaves: [ProgramLeave] = [
+        ProgramLeave(state: "alt-legacy-47", leave: "\u{1b}[?47l"),
+        ProgramLeave(state: "alt-47-cursor-moved", leave: "\u{1b}[?47l"),
+        ProgramLeave(state: "alt-1047", leave: "\u{1b}[?1047l"),
+        ProgramLeave(state: "alt-1047-cursor-moved", leave: "\u{1b}[?1047l"),
+        ProgramLeave(state: "alt-saved-cursor", leave: "\u{1b}[?1049l"),
+    ]
+
+    /// A viewer attaches on an alternate screen, the program leaves it, and the viewer detaches.
+    /// The daemon's preamble enters with `?1049h`, and libghostty sets or resets only the bit of
+    /// the mode it is given, so after `?47l` or `?1047l` the `?1049` bit stays set on the primary
+    /// screen. A handback that took the switch from the mode table would switch the receiver to its
+    /// alternate screen and write the primary there. Fed the handback, the receiver must match
+    /// SwiftTerm fed the program's own bytes and its leave, in every category.
+    @Test(arguments: HandoverCorpusTests.programLeaves)
+    func handbackAfterTheProgramLeftTheAlternateScreenMatches(_ program: ProgramLeave) async throws {
+        try await onHandoverThread {
+            let state = HandoverFixtures.state(named: program.state)
+            let leave = Array(program.leave.utf8)
+            let viewer = try Self.freshGhostty(state)
+            viewer.feed(HandoverFixtures.preamble(named: program.state)[...])
+            #expect(viewer.withLocked { $0.isAlternateScreen }, "\(program.state) must attach on the alternate screen")
+            viewer.feed(leave[...])
+            #expect(viewer.withLocked { !$0.isAlternateScreen }, "\(program.testDescription) must leave the alternate screen")
+
+            let receiver = try Self.handedBack(viewer, state: state)
+            #expect(receiver.locked { !$0.isCurrentBufferAlternate }, "\(program.testDescription): the receiver is on its alternate screen")
+            let direct = state.swiftTerm()
+            direct.feed(leave)
+            let tally = handoverCompare(direct.handoverSnap(), receiver.handoverSnap()).excluding(handoverInertCategories)
+            #expect(
+                tally.isEmpty,
+                "\(program.testDescription), with a viewer attached, then handed back: the receiver differs from SwiftTerm fed the program's bytes: \(tally.summary)")
         }
     }
 
@@ -557,14 +603,22 @@ struct HandoverCorpusTests {
 
     // MARK: - Helpers
 
-    /// The reset that leaves the alternate screen the way `terminal` entered it, as the program
-    /// would send it. nil on the primary screen.
-    private static func leave(_ terminal: GhosttyTerminal) -> [UInt8]? {
-        terminal.withLocked { state in
-            guard state.isAlternateScreen else { return nil }
-            let entered = [UInt16(1049), 1047].first { state.mode($0) } ?? 47
-            return Array("\u{1b}[?\(entered)l".utf8)
+    /// The reset that leaves the alternate screen the way the state's own bytes last entered it,
+    /// as the program would send it. nil when `terminal` is on the primary screen. It is read from
+    /// the bytes, not from a terminal's mode table: libghostty keeps a bit for each switch mode, and
+    /// a terminal that read the daemon's preamble has `?1049` set whichever mode the program used.
+    private static func leave(_ state: HandoverState, on terminal: GhosttyTerminal) -> [UInt8]? {
+        guard terminal.withLocked({ $0.isAlternateScreen }) else { return nil }
+        let entries = [47, 1047, 1049].compactMap { mode in
+            lastIndex(of: Array("\u{1b}[?\(mode)h".utf8), in: state.bytes).map { (mode: mode, at: $0) }
         }
+        let entered = entries.max { $0.at < $1.at }?.mode ?? 1049
+        return Array("\u{1b}[?\(entered)l".utf8)
+    }
+
+    private static func lastIndex(of needle: [UInt8], in haystack: [UInt8]) -> Int? {
+        guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
+        return (0...(haystack.count - needle.count)).last { haystack[$0..<($0 + needle.count)].elementsEqual(needle) }
     }
 
     private static func describe(_ bytes: [UInt8]) -> String { String(decoding: bytes, as: UTF8.self).debugDescription }

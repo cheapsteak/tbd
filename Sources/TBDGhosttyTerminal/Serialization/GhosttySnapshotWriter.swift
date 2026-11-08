@@ -244,15 +244,22 @@ public enum GhosttySnapshotWriter {
     ///    pending-wrap cursor assume a printed character replaces the cell under it. So `?7l` and
     ///    `CSI 4 h` go after everything the formatter writes. That also lands `?45h` while
     ///    autowrap is on, which SwiftTerm needs: it refuses reverse wrap while autowrap is off.
-    /// 3. On an alternate screen, SwiftTerm shows the cursor on every switch, so `?25l` moves after
-    ///    the switch.
-    /// 4. On an alternate screen, SwiftTerm saves origin mode, autowrap, reverse wrap and DECLRMM
-    ///    with the cursor on `?1049h` and puts them back on `?1049l`. libghostty keeps one value of
-    ///    each for both screens and saves only origin mode with its cursor, so it has no record of
-    ///    the primary's other three. Written before the switch, the alternate screen's values would
-    ///    be saved as the primary's, and stay after the program left. So all four take the
-    ///    alternate screen's values after the switch: the receiver saves the primary's origin mode,
-    ///    put back from libghostty's saved cursor, and the prelude's defaults for the other three.
+    /// 3. The switch modes say nothing about which screen is active. libghostty's `?47`, `?1047`
+    ///    and `?1049` each set or reset only their own bit, so a `?1049h` from the daemon's
+    ///    preamble stays set after the program leaves with `?47l` or `?1047l`, and the run would
+    ///    switch a receiver whose viewer is on the primary screen. So the run's switch modes are
+    ///    dropped, and on an alternate screen, as libghostty's active-screen data says, the run
+    ///    starts with one `?1049h`. Whichever mode the program entered with, `?1049h` is the one to
+    ///    write: it saves the primary cursor the handback wrote for a `?1049l` to put back, and a
+    ///    receiver's `?47l` and `?1047l` carry its alternate cursor over whatever it saved.
+    /// 4. On an alternate screen, SwiftTerm shows the cursor on every switch, and it saves origin
+    ///    mode, autowrap, reverse wrap and DECLRMM with the cursor on `?1049h` and puts them back on
+    ///    `?1049l`. libghostty keeps one value of each of the last three for both screens and saves
+    ///    only origin mode with its cursor, so it has no record of the primary's other three.
+    ///    Written before the switch, the alternate screen's values would be saved as the primary's,
+    ///    and stay after the program left. So every mode comes after the switch: `?25l` hides the
+    ///    cursor the switch showed, and the receiver saves the primary's origin mode, put back from
+    ///    libghostty's saved cursor, and the prelude's defaults for the other three.
     /// A run that does not parse as mode tokens is written as the formatter wrote it.
     static func reorderModes(_ formatted: [UInt8], live: VtTerminal, alternate: AlternateEntry?) -> [UInt8] {
         let tabClear: [UInt8] = Array("\u{1b}[3g".utf8)
@@ -274,30 +281,23 @@ public enum GhosttySnapshotWriter {
         let trailer = printing.filter { tokens.contains($0) }.flatMap(\.bytes)
         tokens.removeAll { printing.contains($0) }
 
+        // 3. No switch mode from the table: the active screen decides.
+        tokens.removeAll { $0.decPrivate && [47, 1047, 1049].contains($0.value) }
         guard let alternate else { return tokens.flatMap(\.bytes) + formatted[end...] + trailer }
-        let switches: Set<Int> = [47, 1047, 1049]
-        guard let enter = tokens.lastIndex(where: { $0.decPrivate && $0.isSet && switches.contains($0.value) }) else {
-            terminalEngineLog.error("libghostty handback: alternate screen with no switch mode in the formatter output")
-            return tokens.flatMap(\.bytes) + formatted[end...] + trailer
-        }
-        var before = Array(tokens[..<enter])
-        // 3. The cursor is hidden after the switch shows it. 4. Reverse wrap and DECLRMM are the
-        // alternate screen's, after the receiver saved the defaults; autowrap is already last.
-        var moved = [ModeToken.dec(25, false), .dec(45, true), .dec(69, true)].filter { before.contains($0) }
-        before.removeAll { moved.contains($0) || $0 == .dec(6, true) }
-        // 4. Origin mode for the alternate screen, after the primary's is saved.
+
+        // 4. Origin mode for the alternate screen, after the primary's is saved. Autowrap is
+        // already last, and the cursor, reverse wrap and DECLRMM follow the switch with the rest.
+        tokens.removeAll { $0 == .dec(6, true) }
         if alternate.liveOrigin {
-            moved.append(.dec(6, true))
+            tokens.append(.dec(6, true))
         } else if alternate.primaryOrigin {
-            moved.append(.dec(6, false))
+            tokens.append(.dec(6, false))
         }
         // The primary's pen, protection and charset are saved by now. The formatter writes the
         // alternate screen's contents for a terminal at its defaults and puts that screen's own
-        // pen back after them, so the defaults are restored before the rest of the run.
+        // pen back after them, so the defaults are restored before the contents.
         let defaults = Array("\u{1b}[0m\u{1b}[0\"q\u{1b}(B\u{0f}".utf8)
-        let head = (before + [tokens[enter]] + moved).flatMap(\.bytes)
-        let tail = tokens[(enter + 1)...].flatMap(\.bytes)
-        return head + defaults + tail + formatted[end...] + trailer
+        return ModeToken.dec(1049, true).bytes + tokens.flatMap(\.bytes) + defaults + formatted[end...] + trailer
     }
 
     /// Replaces the tokens that set any of `modes` with one that sets `inEffect`, at the first
