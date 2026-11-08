@@ -8,8 +8,15 @@
 // - `agent-open`: Login redirect fix with its Explore agent open to its items, the agent's row
 //   scrolled to the top of the transcript, as the mock's "Subagent open" scrolls it there, or as
 //   near as the transcript's end allows.
+// - `pill`: Checkout v2's Claude tab read from its top while a row arrives below, so the "New
+//   messages" pill shows, as the mock's "New messages pill" shows it. The rows that arrive are
+//   the mock's live stream (`LIVE`, mock 671-677). The mock's transcript just outgrows its screen
+//   above the Working line and the composer, which this branch does not draw yet (Task 6c-8 and
+//   part 6d), so here the transcript is taller than its rows until all five of the mock's live
+//   rows are in. They arrive while the view keeps to the bottom; then the view is scrolled to the
+//   top and the stream's next row, its first again, arrives below.
 
-import { app, capture, expect, openApp, openSessionByName, test } from './fixtures.js';
+import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Locator} Locator */
 
@@ -52,4 +59,33 @@ test('agent-open', async ({ page, appHost }) => {
   await expect(app(page).locator('.tx .nest .say')).toBeVisible();
   await scrollToTop(agent);
   await capture(page, 'agent-open', app(page).locator('.tx .nest'));
+});
+
+/** Checkout v2's Claude session. */
+const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
+
+/** The mock's live stream (mock 671-677) as items, with the fields the wire has. */
+const LIVE = [
+  { kind: 'fileEdit', toolName: 'Write', target: 'PaymentStep.tsx', toolStatus: 'ok', added: 121, removed: 0 },
+  { kind: 'tool', toolName: 'Read', target: 'src/checkout/SavedCards.tsx', toolStatus: 'ok' },
+  { kind: 'assistant', text: 'The payment step now shows the saved-card list first, then the form for a new card.' },
+  { kind: 'tool', toolName: 'Bash', target: 'npm test -- checkout', toolStatus: 'ok' },
+  { kind: 'fileEdit', toolName: 'Edit', target: 'CheckoutSteps.tsx', toolStatus: 'ok', added: 18, removed: 5 },
+];
+
+test('pill', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  const live = (/** @type {number} */ i) => ({ id: `co-live-${i}`, truncated: false, ...LIVE[i % LIVE.length] });
+  await hostCall(page, 'emit', 'transcript.append', { session: CHECKOUT_REF, items: LIVE.map((_, i) => live(i)) });
+  await expect(tx.locator('div.tool', { hasText: 'CheckoutSteps.tsx' })).toBeInViewport();
+  await tx.evaluate(async (el) => {
+    el.scrollTop = 0;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
+  await expect(tx.locator('.me')).toBeInViewport();
+  expect(await tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(30);
+  await hostCall(page, 'emit', 'transcript.append', { session: CHECKOUT_REF, items: [live(LIVE.length)] });
+  await capture(page, 'pill', app(page).locator('.pill'));
 });
