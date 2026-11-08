@@ -4,7 +4,9 @@ import {
   AppFrame, FRAME_SANDBOX, isRunnerReady, frameInsets, openableURL, appPortMessage,
 } from '../../frame.js';
 import { RUNNER_START_TIMEOUT_MS } from '../../constants.js';
+import { FakeClock } from '../support/fake-clock.js';
 import { FakeDocument } from '../support/fake-dom.js';
+import { fakeVisibility } from '../support/helpers.js';
 
 test('isRunnerReady', () => {
   const w = {};
@@ -117,53 +119,20 @@ test('appPortMessage keeps only the known fields', () => {
 
 test('the sandbox is exactly allow-scripts', () => assert.equal(FRAME_SANDBOX, 'allow-scripts'));
 
-// --- AppFrame, in a fake DOM with a real MessageChannel and a manual clock --------------
+// --- AppFrame, in a fake DOM with a real MessageChannel, a fake clock and a fake page ----
 
 const RUNNER_URL = 'https://acme.example/runner.html';
 const TEXT = 'globalThis.answer = 42;';
 const SHA256 = 'a'.repeat(64);
 
-/** A clock whose timers run only when advance() passes their due time. */
-class ManualClock {
-  #now = 0;
-  #nextID = 1;
-  /** @type {Map<number, {due: number, fn: () => void}>} */
-  #timers = new Map();
-
-  now() { return this.#now; }
-
-  setTimeout(fn, ms) {
-    const id = this.#nextID++;
-    this.#timers.set(id, { due: this.#now + ms, fn });
-    return id;
-  }
-
-  clearTimeout(id) { this.#timers.delete(id); }
-
-  get pending() { return this.#timers.size; }
-
-  advance(ms) {
-    const target = this.#now + ms;
-    for (;;) {
-      const due = [...this.#timers].filter(([, timer]) => timer.due <= target)
-        .sort((a, b) => a[1].due - b[1].due)[0];
-      if (due === undefined) break;
-      this.#timers.delete(due[0]);
-      this.#now = due[1].due;
-      due[1].fn();
-    }
-    this.#now = target;
-  }
-}
-
 /**
  * Opens an AppFrame in a fresh fake DOM, destroyed when the test ends. `reply` decides what
- * sendApp returns, or throws, for each body.
+ * sendApp returns, or throws, for each body; `page` is the page's visibility.
  */
-function openFrame(t, { reply = () => 'sent' } = {}) {
+function openFrame(t, { reply = () => 'sent', page = fakeVisibility() } = {}) {
   const doc = new FakeDocument();
   const host = doc.createElement('div');
-  const clock = new ManualClock();
+  const clock = new FakeClock();
   const faults = [];
   const sent = [];
   const links = [];
@@ -178,6 +147,7 @@ function openFrame(t, { reply = () => 'sent' } = {}) {
     },
     onOpenLink: (url) => links.push(url),
     onFault: (reason) => faults.push(reason),
+    visibility: page,
     clock,
   });
   t.after(() => frame.destroy());
@@ -188,7 +158,7 @@ function openFrame(t, { reply = () => 'sent' } = {}) {
   const ready = (fields = {}) => doc.defaultView.message({
     data: { type: 'ready', nonce }, source: frameWindow, origin: 'null', ...fields,
   });
-  return { win: doc.defaultView, host, iframe, frameWindow, clock, frame, faults, sent, links, nonce, ready };
+  return { win: doc.defaultView, host, iframe, frameWindow, clock, page, frame, faults, sent, links, nonce, ready };
 }
 
 /**
@@ -228,6 +198,7 @@ test('AppFrame sandboxes the iframe and listens before it sets src, then appends
   assert.match(f.nonce, /^[A-Za-z0-9_-]{22}$/);
   assert.deepEqual(f.host.children, [f.iframe]);
   assert.equal(f.clock.pending, 1);
+  assert.equal(f.page.listeners(), 1);
   assert.notEqual(openFrame(t).nonce, f.nonce);
 });
 
@@ -281,7 +252,8 @@ test('AppFrame clears the start timeout on started, and ignores a fault after it
   const { port } = connect(t, f);
   port.postMessage({ t: 'started' });
   await until(() => f.clock.pending === 0, 'the start timer to clear');
-  f.clock.advance(RUNNER_START_TIMEOUT_MS * 2);
+  assert.equal(f.page.listeners(), 0, 'nor does it watch the page any more');
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS * 2);
   // The runner sends one of started or fault. A fault after started is the app's.
   port.postMessage({ t: 'fault', reason: 'script' });
   port.postMessage({ t: 'app', body: { after: true } });
@@ -290,15 +262,67 @@ test('AppFrame clears the start timeout on started, and ignores a fault after it
   assert.deepEqual(f.host.children, [f.iframe]);
 });
 
-test('AppFrame faults timeout when the runner does not start in time', (t) => {
+test('AppFrame faults timeout when the runner does not start in time', async (t) => {
   const f = openFrame(t);
   connect(t, f);
-  f.clock.advance(RUNNER_START_TIMEOUT_MS - 1);
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS - 1);
   assert.deepEqual(f.faults, []);
-  f.clock.advance(1);
+  await f.clock.advance(1);
   assert.deepEqual(f.faults, ['timeout']);
   assert.deepEqual(f.host.children, []);
   assert.equal(f.win.listenerCount('message'), 0);
+  assert.equal(f.page.listeners(), 0);
+});
+
+test('AppFrame does not count time while the page is hidden toward the start timeout', async (t) => {
+  const f = openFrame(t);
+  const { port } = connect(t, f);
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS - 1);
+  // The phone locks while a large bundle starts, and stays locked a long while.
+  f.page.hide();
+  assert.equal(f.clock.pending, 0, 'hidden, the timer stops');
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS * 10);
+  assert.deepEqual(f.faults, []);
+
+  // Back on the page, a fresh full window: the runner starts within it, and the app stays.
+  f.page.show();
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS - 1);
+  assert.deepEqual(f.faults, []);
+  port.postMessage({ t: 'started' });
+  await until(() => f.clock.pending === 0, 'the start timer to clear');
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS * 2);
+  assert.deepEqual(f.faults, []);
+  assert.deepEqual(f.host.children, [f.iframe]);
+  assert.equal(f.page.listeners(), 0);
+});
+
+test('AppFrame ignores a start timer that falls due while the page is hidden, before word of it', async (t) => {
+  const f = openFrame(t);
+  connect(t, f);
+  // Frozen: the timer runs on the page's return, before its visibilitychange is dispatched.
+  f.page.freeze();
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS);
+  assert.deepEqual(f.faults, []);
+  assert.deepEqual(f.host.children, [f.iframe]);
+
+  // The return gives a full window, and a runner that never starts still faults at its end.
+  f.page.show();
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS - 1);
+  assert.deepEqual(f.faults, []);
+  await f.clock.advance(1);
+  assert.deepEqual(f.faults, ['timeout']);
+  assert.deepEqual(f.host.children, []);
+});
+
+test('AppFrame opened on a hidden page starts counting only once the page is visible', async (t) => {
+  const f = openFrame(t, { page: fakeVisibility(false) });
+  connect(t, f);
+  assert.equal(f.clock.pending, 0);
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS * 3);
+  assert.deepEqual(f.faults, []);
+  f.page.show();
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS);
+  assert.deepEqual(f.faults, ['timeout']);
 });
 
 test('AppFrame ends on a runner fault before started, with the runner reason only', async (t) => {
@@ -395,13 +419,16 @@ test('AppFrame destroy removes the frame, its listeners and its timer, and nothi
   assert.equal(f.win.listenerCount('message'), 0);
   assert.equal(f.iframe.listenerCount('load'), 0);
   assert.equal(f.clock.pending, 0);
+  assert.equal(f.page.listeners(), 0);
   await until(() => closed, 'the channel to close');
 
   f.iframe.load();
   f.iframe.load();
   port.postMessage({ t: 'app', body: { late: true } });
   port.postMessage({ t: 'fault', reason: 'hash' });
-  f.clock.advance(RUNNER_START_TIMEOUT_MS * 2);
+  f.page.hide();
+  f.page.show();
+  await f.clock.advance(RUNNER_START_TIMEOUT_MS * 2);
   f.frame.deliver({ late: true });
   f.frame.setChannel(true);
   await settle();

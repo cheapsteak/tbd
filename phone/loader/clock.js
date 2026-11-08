@@ -31,13 +31,53 @@ export class TimeoutError extends Error {
 }
 
 /**
+ * Calls `onExpire` once the page has been visible for `ms` on end, on `clock`. iOS freezes a
+ * hidden page, so time while hidden never counts: the timer stops when the page is hidden, a
+ * timer that fires while it is hidden (before its `visibilitychange` arrives) does nothing,
+ * and each return to visible starts a fresh `ms`. The timer and the listener go when it
+ * expires or is cancelled, whichever comes first.
+ * @param {number} ms
+ * @param {Visibility} visibility
+ * @param {() => void} onExpire called at most once, and never after `cancel`
+ * @param {Clock} [clock]
+ * @returns {() => void} cancel: idempotent
+ */
+export function startVisibleTimer(ms, visibility, onExpire, clock = systemClock) {
+  /** @type {unknown} */
+  let timer = null;
+  let done = false;
+  const disarm = () => {
+    if (timer !== null) clock.clearTimeout(timer);
+    timer = null;
+  };
+  // On every change: hidden stops the timer, visible starts a fresh one.
+  const rearm = () => {
+    disarm();
+    if (!done && visibility.isVisible()) timer = clock.setTimeout(expire, ms);
+  };
+  const expire = () => {
+    timer = null;
+    // Hidden without word of it yet: the change to visible that follows re-arms.
+    if (done || !visibility.isVisible()) return;
+    cancel();
+    onExpire();
+  };
+  const stopWatching = visibility.onChange(rearm);
+  const cancel = () => {
+    if (done) return;
+    done = true;
+    stopWatching();
+    disarm();
+  };
+  rearm();
+  return cancel;
+}
+
+/**
  * Settles as `promise` does, or rejects with a TimeoutError once the page has been visible for
- * `ms` on end, on `clock`, without an answer. iOS freezes a hidden page, and a request in
- * flight then may answer only after the page is back, so time while hidden never counts: the
- * timer stops when the page is hidden, a timer that fires while it is hidden (before its
- * `visibilitychange` arrives) does nothing, and each return to visible starts a fresh `ms`.
- * The timer and the listener go as soon as either settles. `promise` itself is not cancelled:
- * a late answer is ignored.
+ * `ms` on end, on `clock`, without an answer: `startVisibleTimer` counts the time. The timer
+ * and the listener go as soon as either settles. `promise` itself is not cancelled: a late
+ * answer is ignored.
  * @template T
  * @param {Promise<T>} promise
  * @param {number} ms
@@ -47,33 +87,12 @@ export class TimeoutError extends Error {
  */
 export function withVisibleTimeout(promise, ms, visibility, clock = systemClock) {
   return new Promise((resolve, reject) => {
-    /** @type {unknown} */
-    let timer = null;
-    const disarm = () => {
-      if (timer !== null) clock.clearTimeout(timer);
-      timer = null;
-    };
-    // On every change: hidden stops the timer, visible starts a fresh one.
-    const rearm = () => {
-      disarm();
-      if (visibility.isVisible()) timer = clock.setTimeout(expire, ms);
-    };
-    const expire = () => {
-      timer = null;
-      // Hidden without word of it yet: the change to visible that follows re-arms.
-      if (!visibility.isVisible()) return;
-      stopWatching();
-      reject(new TimeoutError(ms));
-    };
-    const stopWatching = visibility.onChange(rearm);
-    rearm();
+    const cancel = startVisibleTimer(ms, visibility, () => reject(new TimeoutError(ms)), clock);
     promise.then((value) => {
-      stopWatching();
-      disarm();
+      cancel();
       resolve(value);
     }, (error) => {
-      stopWatching();
-      disarm();
+      cancel();
       reject(error);
     });
   });

@@ -113,8 +113,9 @@ function takeLinkFromAddress(win) {
 }
 
 /**
- * The document's visibility, for the store timeouts: only time while the page is visible
- * counts, because iOS freezes a hidden page with its store requests in flight.
+ * The document's visibility, for the store timeouts and the app frame's start timeout: only
+ * time while the page is visible counts, because iOS freezes a hidden page with its store
+ * requests, or a bundle starting, in flight.
  * @param {Document} doc
  * @returns {Visibility}
  */
@@ -840,6 +841,7 @@ class LoaderPage {
       sendApp: (body) => connection.sendApp(/** @type {Record<string, unknown>} */ (body)),
       onOpenLink: (url) => this.#showLinkSheet(url),
       onFault: () => this.#endConnection('reload'),
+      visibility: this.#visibility,
       clock: this.#clock,
     });
     this.#frameSha = sha256;

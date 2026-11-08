@@ -1,5 +1,5 @@
-// Small helpers the node:test suites share: JSON bytes, base64url, waits, and sockets that
-// never connect. Node only.
+// Small helpers the node:test suites share: JSON bytes, base64url, waits, sockets that never
+// connect, and a page visibility a test flips. Node only.
 
 import assert from 'node:assert/strict';
 
@@ -73,5 +73,36 @@ export function hangingSockets() {
       sockets.push(ws);
       return ws;
     },
+  };
+}
+
+/**
+ * A page's visibility that a test flips. `show()` and `hide()` change it and tell the
+ * listeners, as `visibilitychange` does; `freeze()` hides it without telling them yet, as when
+ * a timer runs on the page's return before its `visibilitychange` is dispatched.
+ * @param {boolean} [visible]
+ */
+export function fakeVisibility(visible = true) {
+  /** @type {Set<() => void>} */
+  const listeners = new Set();
+  const change = (/** @type {boolean} */ next) => {
+    visible = next;
+    for (const listener of [...listeners]) listener();
+  };
+  return {
+    isVisible: () => visible,
+    /** @param {() => void} listener */
+    onChange(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    show: () => change(true),
+    hide: () => change(false),
+    freeze: () => {
+      visible = false;
+    },
+    listeners: () => listeners.size,
   };
 }

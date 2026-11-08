@@ -3,10 +3,11 @@
 // over that channel. The runner's half of the handshake is runner.js.
 
 import { RUNNER_START_TIMEOUT_MS } from './constants.js';
-import { systemClock } from './clock.js';
+import { startVisibleTimer, systemClock } from './clock.js';
 import { base64urlEncode } from './channel/pairingLink.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
+/** @typedef {import('./clock.js').Visibility} Visibility */
 /** @typedef {import('./types.js').EnvMessage} EnvMessage */
 
 /** @typedef {'navigated' | 'hash' | 'script' | 'timeout'} FaultReason */
@@ -23,6 +24,9 @@ import { base64urlEncode } from './channel/pairingLink.js';
  * @property {(url: string) => void} onOpenLink Gets a URL that passed `openableURL`.
  * @property {(reason: FaultReason) => void} onFault Called at most once. The frame is already
  *   destroyed when it is called.
+ * @property {Visibility} visibility The page's visibility. Only time while the page is visible
+ *   counts toward RUNNER_START_TIMEOUT_MS: a large bundle that starts as the phone locks gets
+ *   its full time once the page is back.
  * @property {Clock} [clock]
  */
 
@@ -42,7 +46,6 @@ export class AppFrame {
   #sendApp;
   #onOpenLink;
   #onFault;
-  #clock;
   #text;
   #sha256;
   #nonce;
@@ -57,15 +60,16 @@ export class AppFrame {
   /** The runner reported `started`. */
   #started = false;
   #destroyed = false;
-  /** @type {unknown} */
-  #timer = null;
+  /** @type {(() => void) | null} Cancels the start timeout, until `started` or the end. */
+  #cancelStartTimer = null;
 
   /** @param {AppFrameOptions} options */
-  constructor({ host, runnerURL, text, sha256, sendApp, onOpenLink, onFault, clock = systemClock }) {
+  constructor({
+    host, runnerURL, text, sha256, sendApp, onOpenLink, onFault, visibility, clock = systemClock,
+  }) {
     this.#sendApp = sendApp;
     this.#onOpenLink = onOpenLink;
     this.#onFault = onFault;
-    this.#clock = clock;
     this.#text = text;
     this.#sha256 = sha256;
 
@@ -94,10 +98,10 @@ export class AppFrame {
 
     host.append(iframe);
     if (this.#destroyed) return;
-    this.#timer = clock.setTimeout(() => {
-      this.#timer = null;
+    this.#cancelStartTimer = startVisibleTimer(RUNNER_START_TIMEOUT_MS, visibility, () => {
+      this.#cancelStartTimer = null;
       this.#fault('timeout');
-    }, RUNNER_START_TIMEOUT_MS);
+    }, clock);
   }
 
   /**
@@ -128,10 +132,7 @@ export class AppFrame {
   destroy() {
     if (this.#destroyed) return;
     this.#destroyed = true;
-    if (this.#timer !== null) {
-      this.#clock.clearTimeout(this.#timer);
-      this.#timer = null;
-    }
+    this.#stopStartTimer();
     this.#win.removeEventListener('message', this.#handleWindowMessage);
     this.#iframe.removeEventListener('load', this.#handleLoad);
     this.#channel.port1.removeEventListener('message', this.#handlePortMessage);
@@ -139,6 +140,11 @@ export class AppFrame {
     if (!this.#bundleSent) this.#channel.port2.close();
     this.#iframe.remove();
     this.#text = '';
+  }
+
+  #stopStartTimer() {
+    this.#cancelStartTimer?.();
+    this.#cancelStartTimer = null;
   }
 
   /** @param {import('./types.js').PortMessage} message */
@@ -197,10 +203,7 @@ export class AppFrame {
       if (this.#started) return;
       if (data.t === 'started') {
         this.#started = true;
-        if (this.#timer !== null) {
-          this.#clock.clearTimeout(this.#timer);
-          this.#timer = null;
-        }
+        this.#stopStartTimer();
       } else if (typeof data.reason === 'string' && RUNNER_FAULTS.has(data.reason)) {
         this.#fault(/** @type {'hash' | 'script'} */ (data.reason));
       }

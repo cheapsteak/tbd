@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { TimeoutError, withVisibleTimeout } from '../../clock.js';
+import { TimeoutError, startVisibleTimer, withVisibleTimeout } from '../../clock.js';
 import { STORE_TIMEOUT_MS } from '../../constants.js';
 import { FakeClock } from '../support/fake-clock.js';
+import { fakeVisibility } from '../support/helpers.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -33,37 +34,6 @@ function watch(promise) {
   const seen = { state: 'pending' };
   promise.then((value) => Object.assign(seen, { state: 'resolved', value }), (value) => Object.assign(seen, { state: 'rejected', value }));
   return seen;
-}
-
-/**
- * A page's visibility that a test flips. `show()` and `hide()` change it and tell the
- * listeners, as `visibilitychange` does; `freeze()` hides it without telling them yet, as when
- * a timer runs on the page's return before its `visibilitychange` is dispatched.
- * @param {boolean} [visible]
- */
-function fakeVisibility(visible = true) {
-  /** @type {Set<() => void>} */
-  const listeners = new Set();
-  const change = (/** @type {boolean} */ next) => {
-    visible = next;
-    for (const listener of [...listeners]) listener();
-  };
-  return {
-    isVisible: () => visible,
-    /** @param {() => void} listener */
-    onChange(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    show: () => change(true),
-    hide: () => change(false),
-    freeze: () => {
-      visible = false;
-    },
-    listeners: () => listeners.size,
-  };
 }
 
 test('an answer in time passes through and clears the timer and the listener', async () => {
@@ -181,4 +151,35 @@ test('a request that never answers rejects after STORE_TIMEOUT_MS of visible tim
   assert.ok(seen.value instanceof TimeoutError);
   assert.equal(page.listeners(), 0);
   assert.equal(clock.pending, 0);
+});
+
+test('startVisibleTimer fires once after visible time on end, and never after cancel', async () => {
+  const clock = new FakeClock();
+  const page = fakeVisibility();
+  let fired = 0;
+  const cancel = startVisibleTimer(1000, page, () => { fired += 1; }, clock);
+  await clock.advance(600);
+  page.hide();
+  page.show();
+  await clock.advance(999);
+  assert.equal(fired, 0, 'the return to the page started a fresh 1000');
+  await clock.advance(1);
+  assert.equal(fired, 1);
+  assert.equal(clock.pending, 0);
+  assert.equal(page.listeners(), 0);
+  page.hide();
+  page.show();
+  await clock.advance(5000);
+  assert.equal(fired, 1);
+  assert.doesNotThrow(cancel);
+
+  const cancelled = startVisibleTimer(1000, page, () => { fired += 1; }, clock);
+  cancelled();
+  cancelled();
+  assert.equal(clock.pending, 0);
+  assert.equal(page.listeners(), 0);
+  page.hide();
+  page.show();
+  await clock.advance(5000);
+  assert.equal(fired, 1);
 });
