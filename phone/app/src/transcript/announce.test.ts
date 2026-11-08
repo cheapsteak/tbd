@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneItem } from '../protocol/types.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
-import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, announcement, spoken } from './announce.ts';
+import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, ANNOUNCE_SOURCE_CHARS, announcement, spoken } from './announce.ts';
 
 let nextKey = 1;
 
@@ -47,6 +47,21 @@ test('a long row is cut to ANNOUNCE_CHARS, never inside a surrogate pair', () =>
   assert.equal(emoji, 'a'.repeat(ANNOUNCE_CHARS - 1));
   const whole = 'b'.repeat(ANNOUNCE_CHARS);
   assert.equal(spoken(row({ kind: 'user', text: whole })), whole);
+});
+
+test('a message’s words come from its first ANNOUNCE_SOURCE_CHARS characters only', () => {
+  assert.equal(ANNOUNCE_SOURCE_CHARS, 1_000);
+  // Forty links of 25 characters each fill the characters read; the ones after them are not read.
+  const link = '[x](https://acme.ex/a/b) ';
+  assert.equal(link.length * 40, ANNOUNCE_SOURCE_CHARS);
+  const said = Array.from({ length: 40 }, () => 'x').join(' ');
+  assert.equal(spoken(row({ kind: 'assistant', text: link.repeat(400) })), said);
+  assert.equal(spoken(row({ kind: 'user', text: link.repeat(400) })), said);
+  assert.equal(spoken(row({ kind: 'peer', text: link.repeat(400) })), said);
+  // Ordinary text still says ANNOUNCE_CHARS, and a cut of what is read never parts a surrogate pair.
+  assert.equal(spoken(row({ kind: 'assistant', text: 'Fixed **both** cases. '.repeat(300) }))?.length, ANNOUNCE_CHARS);
+  const parted = `${link.repeat(39)}${'b'.repeat(24)}${'😀'.repeat(10)}`;
+  assert.equal(spoken(row({ kind: 'user', text: parted })), `${Array.from({ length: 39 }, () => 'x').join(' ')} ${'b'.repeat(24)}`);
 });
 
 test('an announcement says the last ANNOUNCE_ROWS rows that say something, oldest first', () => {

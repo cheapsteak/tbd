@@ -12,6 +12,10 @@
  *   other row (a file edit, a subagent, a slash command, thinking, a system note) says nothing.
  * - **How much.** The last `ANNOUNCE_ROWS` rows that say something, each cut to
  *   `ANNOUNCE_CHARS` characters, so a burst of rows or a long message cannot flood the reader.
+ * - **What it costs.** A message's words come from its first `ANNOUNCE_SOURCE_CHARS` characters
+ *   only, read as markdown, since the list works out an announcement as it lays its rows out.
+ *   Read whole, a message would cost up to `MAX_MARKDOWN_LENGTH` characters of markdown, whose
+ *   time can grow with the square of a paragraph's length (`markdown/mdTree.ts`), to keep 500.
  *
  * Everything here is pure.
  */
@@ -25,6 +29,13 @@ export const ANNOUNCE_ROWS = 3;
 /** The most characters one row says. */
 export const ANNOUNCE_CHARS = 500;
 
+/**
+ * The most characters of a message read for its words: twice what a row says, so the marks of
+ * ordinary markdown still leave about `ANNOUNCE_CHARS` of words, while heavy markup, such as a
+ * run of links, says less. Marks that close past them show as typed.
+ */
+export const ANNOUNCE_SOURCE_CHARS = 2 * ANNOUNCE_CHARS;
+
 /** The words a screen reader hears for `row`, cut to `ANNOUNCE_CHARS`, or null for a row that says nothing. */
 export function spoken(row: TranscriptRow): string | null {
   let words: string;
@@ -32,7 +43,7 @@ export function spoken(row: TranscriptRow): string | null {
     words = row.text;
   } else {
     const it = row.item;
-    const text = it.text ?? '';
+    const text = cut(it.text ?? '', ANNOUNCE_SOURCE_CHARS);
     switch (it.kind) {
       case 'assistant':
         words = plainText(mdTree(text));
