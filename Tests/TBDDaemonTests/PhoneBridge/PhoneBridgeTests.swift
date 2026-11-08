@@ -82,6 +82,47 @@ private enum KeyFile {
     case loose
 }
 
+/// Holds the first read of the paired phones list (`PhoneDeviceStore.list`)
+/// that starts after `install(on:)`, until `release()`. It holds inside the
+/// database's own queue, a dispatch queue, so the hold blocks no thread of
+/// the cooperative pool, and every other access to the database waits too.
+private final class PhoneListReadGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasHeld = false
+    private let gate = DispatchSemaphore(value: 0)
+
+    /// Whether a read is held, or was.
+    var holding: Bool {
+        lock.withLock { hasHeld }
+    }
+
+    func install(on db: TBDDatabase) async throws {
+        try await db.writerForTests.write { database in
+            database.trace(options: .statement) { event in
+                guard case .statement(let statement) = event else { return }
+                let sql = statement.sql
+                guard sql.hasPrefix("SELECT"), sql.contains("phone_device"), sql.contains("ORDER BY") else { return }
+                self.hold()
+            }
+        }
+    }
+
+    /// Lets the held read go. Safe to call twice.
+    func release() {
+        gate.signal()
+    }
+
+    private func hold() {
+        let first: Bool = lock.withLock {
+            guard !hasHeld else { return false }
+            hasHeld = true
+            return true
+        }
+        guard first else { return }
+        _ = gate.waitForGate("a reconcile's read of the paired phones")
+    }
+}
+
 /// A phone the harness paired by writing its row, with its key.
 private struct PairedPhone: Sendable {
     let device: PhoneDevice
@@ -1378,6 +1419,41 @@ struct PhoneBridgeTests {
             #expect(!openedTheRoom)
             let status = try await bridge.status()
             #expect(status.running == false)
+        }
+    }
+
+    /// `stop()` takes effect while a reconcile waits for the paired phones'
+    /// read: once the read returns, that reconcile ends without reading the
+    /// key file or starting a check or a link. The proof that the key file
+    /// was not read is a stale temporary key file, which every key load
+    /// removes and which is still there.
+    @Test func aReconcileThatStopOvertakesReadsNoKeyAndOpensNoLink() async throws {
+        try await withBridge(devices: 1) { h in
+            let stale = h.keyPath.deletingLastPathComponent().appendingPathComponent(".laptop.key.held.tmp")
+            try Data("x".utf8).write(to: stale)
+            try FileManager.default.setAttributes(
+                [.modificationDate: h.dates.now.addingTimeInterval(-3_600)], ofItemAtPath: stale.path)
+
+            let gate = PhoneListReadGate()
+            // However the test ends, the database is let go.
+            defer { gate.release() }
+            try await gate.install(on: h.db)
+            let bridge = h.bridge
+            let reconciling = Task { await bridge.reconcile() }
+            try await h.waitUntil("the reconcile to read the paired phones") { gate.holding }
+            let stopping = Task { await bridge.stop() }
+            try await h.waitUntil("stop() to take effect") { await bridge.hasStopped }
+            gate.release()
+            await reconciling.value
+            await stopping.value
+
+            let keyWasRead = !FileManager.default.fileExists(atPath: stale.path)
+            #expect(!keyWasRead)
+            let checks = await h.info.calls
+            #expect(checks == 0)
+            #expect(h.relay.connectAttempts.isEmpty)
+            let links = await bridge.linkCount
+            #expect(links == 0)
         }
     }
 

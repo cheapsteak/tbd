@@ -1854,10 +1854,11 @@ public final class Daemon: Sendable {
             // with an fsync, and compresses the phone app bundle, and nothing
             // later in startup needs the bridge running. Phone RPCs have been
             // served since step 9 either way, and `pairStart` reconciles on its
-            // own. Shutdown's `stop()` needs no handle on this task: the bridge
-            // runs `reconcile` and `stop` one at a time, in call order, so a
-            // reconcile already in line finishes first, and one that arrives
-            // after `stop` changes nothing. Any `await
+            // own. Shutdown's `stop()` needs no handle on this task: `stop()`
+            // is immediate and final. From the moment it is called the bridge
+            // loads no key and starts nothing, this reconcile, if still in
+            // progress, ends at its next check, and `stop()` waits for it; a
+            // reconcile that arrives after `stop` changes nothing. Any `await
             // phoneBridge?.setAppHandler(...)` belongs before this task, so
             // the first channels already use the real handler.
             if let phoneBridge {

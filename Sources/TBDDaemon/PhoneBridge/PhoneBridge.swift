@@ -117,7 +117,9 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// interleave a start with a stop, and whichever reconcile runs last acts on
 /// the settings as they are by then. `pairAllow` and `pairDeny` are not in
 /// that line, because Allow reconciles when it ends, paired or undone, and
-/// so waits on it.
+/// so waits on it. `stop()` also takes effect the moment it is called: a
+/// reconcile in progress, or one ahead of it in the line, ends at its next
+/// check, after whatever it is waiting on, and starts nothing.
 ///
 /// **Reconciling.**
 /// 1. With phone control off or no relay set, everything stops.
@@ -183,9 +185,9 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// heard `paired`, would stay paired and get a link. If that delete fails too,
 /// the failure is logged and the row stays until the user revokes it.
 ///
-/// `stop()` is final: no task or socket outlives it, and a later
-/// `reconcile()`, such as the one a late Allow makes, changes nothing but
-/// that delete.
+/// `stop()` is immediate and final: no task or socket outlives it, and a
+/// later `reconcile()`, such as the one a late Allow makes, changes nothing
+/// but that delete.
 actor PhoneBridge: PhoneBridgeControlling {
     /// The latest answer of the relay check (`GET /v1/info`).
     enum RelayCheck: Sendable, Equatable {
@@ -327,6 +329,11 @@ actor PhoneBridge: PhoneBridgeControlling {
         links.count
     }
 
+    /// Whether `stop()` has been called. For tests and diagnostics.
+    var hasStopped: Bool {
+        isStopped
+    }
+
     /// Waits until the relay check a reconcile last started, and every one
     /// before it, has answered. For tests and diagnostics.
     func waitForRelayCheck() async {
@@ -418,6 +425,12 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// Stops every link and the pairing service, sending nothing, and waits
     /// for every task. Final: the bridge never runs again.
+    ///
+    /// It takes effect the moment it is called, ahead of the line of
+    /// changes: from then on the bridge loads no key and starts no link,
+    /// check or pairing room. A reconcile in progress ends at its next check,
+    /// after whatever it is waiting on, and `stop()` waits for it, in the
+    /// line, before it stops everything.
     func stop() async {
         isStopped = true
         loadedKey = nil
@@ -516,6 +529,9 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// nothing: its caller sends the one delta once it is done. A `seed` for
     /// the saved relay stands as its check.
     private func reconcileNow(seed: RelaySeed? = nil) async {
+        // `stop()` takes effect at once, outside the line of changes, so a
+        // reconcile it overtakes checks after each await and ends there,
+        // before it reads the key or starts anything.
         await removeUndoneRows()
         guard !isStopped else { return }
         startPump()
@@ -527,6 +543,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             PhoneBridgeLog.record(.failed("Could not read the phone control settings: \(error.localizedDescription)"))
             return
         }
+        guard !isStopped else { return }
         guard config.phoneControlEnabled else {
             await halt(reason: "phone control is off", problem: nil)
             return
@@ -541,10 +558,12 @@ actor PhoneBridge: PhoneBridgeControlling {
         do {
             devices = try await db.phoneDevices.list()
         } catch {
+            guard !isStopped else { return }
             await halt(reason: "the paired phones could not be read",
                        problem: "TBD could not read the paired phones: \(error.localizedDescription)")
             return
         }
+        guard !isStopped else { return }
         let key: Curve25519.KeyAgreement.PrivateKey
         if let loadedKey {
             key = loadedKey
@@ -573,6 +592,7 @@ actor PhoneBridge: PhoneBridgeControlling {
 
         if let current = running, current.relayURL != relayURL {
             await stopEverything(reason: "the relay address changed")
+            guard !isStopped else { return }
         }
         let current: Running
         if let running {
@@ -606,7 +626,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             // finds it usable again reconciles. And `devices` was read before
             // this pass's awaits: a link the relay refused meanwhile has left
             // `links`, and starting it from that list would undo the refusal.
-            guard refusal == nil, relayRefusals == refusalsAtStart else { break }
+            guard !isStopped, refusal == nil, relayRefusals == refusalsAtStart else { break }
             await startLink(for: device, in: current)
         }
     }
@@ -623,7 +643,9 @@ actor PhoneBridge: PhoneBridgeControlling {
                 // Not started yet, or started on another relay.
                 await reconcileAndAnnounce()
             }
-            guard let current = running else {
+            // A `stop()` that overtook this call while it waited opens no
+            // pairing room.
+            guard let current = running, !isStopped else {
                 throw PhoneBridgeError.notRunning(problem ?? (isStopped ? "TBD is stopping." : "it has not started."))
             }
             if let refusal {
