@@ -83,6 +83,55 @@ test('raw HTML stays text', () => {
   assert.deepEqual(mdTree('x <b>bold</b> y'), [{ t: 'p', children: [t('x '), t('<b>'), t('bold'), t('</b>'), t(' y')] }]);
 });
 
+/** Markup characters and character references, as an author writes them in a message. */
+const MARKED = `& < > " ' &amp; &lt; &quot; &copy; &#39; &#x27; &#38;`;
+/** `MARKED` as the reader sees it in text: every reference decoded. */
+const READ = `& < > " ' & < " © ' ' &`;
+
+test('text shows as the author meant it: its characters as typed and its character references decoded', () => {
+  // marked writes each bare & as &amp; once a text holds a numeric reference; the tree never shows that.
+  assert.deepEqual(mdInline("it&#39;s a & b"), [t("it's a & b")]);
+  assert.deepEqual(mdTree("it&#39;s a & b"), [{ t: 'p', children: [t("it's a & b")] }]);
+  assert.deepEqual(mdTree(MARKED), [{ t: 'p', children: [t(READ)] }]);
+  assert.deepEqual(mdInline(MARKED), [t(READ)]);
+  assert.deepEqual(mdTree(`## ${MARKED}`), [{ t: 'h', children: [t(READ)] }]);
+  assert.deepEqual(mdTree(`Plan\n===\n\n${MARKED}`)[1], { t: 'p', children: [t(READ)] });
+  assert.deepEqual(mdTree(`- ${MARKED}\n- b`), [{ t: 'ul', children: [{ t: 'li', children: [t(READ)] }, { t: 'li', children: [t('b')] }] }]);
+  assert.deepEqual(mdTree(`> ${MARKED}`), [{ t: 'blockquote', children: [{ t: 'p', children: [t(READ)] }] }]);
+  assert.deepEqual(mdTree(`**${MARKED}**`), [{ t: 'p', children: [{ t: 'strong', children: [t(READ)] }] }]);
+  assert.deepEqual(mdTree(`[${MARKED}](https://acme.example/)`), [
+    { t: 'p', children: [{ t: 'link', url: 'https://acme.example/', children: [t(READ)] }] },
+  ]);
+  // A link that fails shows its text, decoded too.
+  assert.equal(flatText(mdTree(`[${MARKED}](/relative)`)), READ);
+  // An image shows its alt text: its description's plain words, escapes and references read.
+  assert.deepEqual(mdTree(`![${MARKED} *em* \\* \`c\`](https://acme.example/i.png)`), [{ t: 'p', children: [t(`${READ} em * c`)] }]);
+  // A backslash escape shows the character it escapes, and the text after it reads as text.
+  assert.deepEqual(flatText(mdTree('\\& \\< \\> \\" \\\' \\&amp; \\&#39;')), `& < > " ' &amp; &#39;`);
+});
+
+test('code, raw HTML and a table show their source as written, references included', () => {
+  assert.deepEqual(mdTree(`\`${MARKED}\``), [{ t: 'p', children: [{ t: 'code', text: MARKED }] }]);
+  assert.deepEqual(mdInline(`\`${MARKED}\``), [{ t: 'code', text: MARKED }]);
+  assert.deepEqual(mdTree(`\`\`\`\n${MARKED}\n\`\`\``), [{ t: 'pre', text: MARKED }]);
+  assert.deepEqual(mdTree(`    ${MARKED}`), [{ t: 'pre', text: MARKED }]);
+  assert.deepEqual(mdTree(`<div>\n${MARKED}\n</div>`), [{ t: 'p', children: [t('<div>'), { t: 'br' }, t(MARKED), { t: 'br' }, t('</div>')] }]);
+  assert.deepEqual(mdTree('x <b title="&amp; &#39;">y &amp;</b>'), [
+    { t: 'p', children: [t('x '), t('<b title="&amp; &#39;">'), t('y &'), t('</b>')] },
+  ]);
+  // Inside raw HTML's code, marked keeps the text as written, and so does the tree.
+  assert.deepEqual(mdTree('<code>&amp; &#39;</code> &amp;'), [{ t: 'p', children: [t('<code>'), t('&amp; &#39;'), t('</code>'), t(' &')] }]);
+  const table = `| ${MARKED} | b |\n|---|---|\n| &amp; | &#39; |`;
+  assert.deepEqual(mdTree(table), [{ t: 'pre', text: table }]);
+});
+
+test('a decoded character is text, never markup, and a link destination keeps its references as written', () => {
+  const tree = mdTree(`&lt;b&gt;bold&lt;/b&gt; &#60;img src=x&#62; &#42;not em&#42; &#91;a&#93;&#40;acme&#41; &#96;c&#96;`);
+  assert.deepEqual(tree, [{ t: 'p', children: [t('<b>bold</b> <img src=x> *not em* [a](acme) `c`')] }]);
+  assert.deepEqual(mdTree('&lt;script&gt;alert(1)&lt;/script&gt;'), [{ t: 'p', children: [t(`${open('script')}>alert(1)</script>`)] }]);
+  assert.deepEqual(links(mdTree('[a](https://acme.example/?a=1&amp;b=2)')), ['https://acme.example/?a=1&amp;b=2']);
+});
+
 test('only http and https links become links', () => {
   assert.equal(links(mdTree(`[a](${JS}alert(1))`)).length, 0);
   assert.equal(links(mdTree('[a](https://u:p@acme.example)')).length, 0);
@@ -199,8 +248,8 @@ test('a link never holds another', () => {
   ]);
 });
 
-test('an image becomes its alt text', () => {
-  assert.deepEqual(mdTree('![a chart of *sales*](https://acme.example/c.png)'), [{ t: 'p', children: [t('a chart of *sales*')] }]);
+test('an image becomes its alt text: the plain words of its description', () => {
+  assert.deepEqual(mdTree('![a chart of *sales*](https://acme.example/c.png)'), [{ t: 'p', children: [t('a chart of sales')] }]);
   assert.deepEqual(mdInline('see ![the logo](https://acme.example/l.png)'), [t('see '), t('the logo')]);
   assert.deepEqual(mdTree('![](https://acme.example/c.png)'), [{ t: 'p', children: [] }]);
 });

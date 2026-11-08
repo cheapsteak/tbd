@@ -16,6 +16,9 @@
  *   source text, never markup.
  * - **Links pass only through `safeLink`**, which is at least as strict as the loader's own check,
  *   so the app never offers a link the loader would refuse. A link that fails shows its text.
+ * - **Text shows as the author wrote it.** A text token shows its own source, with its character
+ *   references decoded (`shownText`), never marked's `text`, which marked writes for an HTML
+ *   renderer. Code, raw HTML and a table show their source as written.
  * - **Only the first `MAX_MARKDOWN_LENGTH` characters are read as markdown.** The rest shows as
  *   plain lines. See there.
  * - **Nesting stops at `MAX_DEPTH`.** See there.
@@ -27,6 +30,7 @@
  */
 
 import { Lexer, getDefaults, type MarkedOptions, type Token, type Tokens, type TokensList } from 'marked';
+import { decodeReferences } from './references.ts';
 
 export type MdNode =
   | { t: 'p' | 'ul' | 'li' | 'blockquote' | 'strong' | 'em' | 'del' | 'h'; children: MdNode[] }
@@ -338,9 +342,27 @@ function text(walk: Walk, value: string): MdNode {
   return count(walk, { t: 'text', text: value });
 }
 
+/** A token's source, or `''` when it has none. */
+function rawOf(token: Token): string {
+  return typeof token.raw === 'string' ? token.raw : '';
+}
+
 /** A token's source, or nothing when it has none. */
 function source(token: Token, walk: Walk): MdNode[] {
-  return typeof token.raw === 'string' && token.raw !== '' ? [text(walk, token.raw)] : [];
+  const raw = rawOf(token);
+  return raw === '' ? [] : [text(walk, raw)];
+}
+
+/**
+ * What a text token shows: its source with its character references decoded
+ * (`decodeReferences`), or as written inside raw HTML's `pre`, `code`, `kbd` or `script`, where
+ * marked keeps it so (`escaped`). Never marked's `text`, which marked writes for an HTML
+ * renderer: once a text holds a numeric reference, marked writes each other `&` in it as
+ * `&amp;`, so `it&#39;s a & b` would show as `it's a &amp; b`.
+ */
+function shownText(token: Token): string {
+  const raw = rawOf(token);
+  return (token as { escaped?: unknown }).escaped === true ? raw : decodeReferences(raw);
 }
 
 /** A token's child tokens, or null when it has none, in which case it shows as its source. */
@@ -357,7 +379,7 @@ function each(tokens: readonly Token[], walk: Walk, rule: (token: Token) => MdNo
   const out: MdNode[] = [];
   for (let i = 0; i < tokens.length; i += 1) {
     if (walk.nodes >= walk.max) {
-      out.push(text(walk, tokens.slice(i).map((t) => (typeof t.raw === 'string' ? t.raw : '')).join('')));
+      out.push(text(walk, tokens.slice(i).map(rawOf).join('')));
       break;
     }
     for (const node of rule(tokens[i] as Token)) out.push(node);
@@ -421,7 +443,7 @@ function block(token: Token, level: number, walk: Walk): MdNode[] {
       return children === null ? source(token, walk) : [count(walk, { t: 'h', children: inlines(children, level, false, walk) })];
     case 'text':
       // The text of a list item with no blank lines between its items, holding inline tokens.
-      return children === null ? [text(walk, (token as Tokens.Text).text)] : inlines(children, level, false, walk);
+      return children === null ? [text(walk, shownText(token))] : inlines(children, level, false, walk);
     case 'blockquote':
       if (children === null) return source(token, walk);
       return nest(token, level, walk, (inner) => ({ t: 'blockquote', children: blocks(children, inner, walk) }));
@@ -467,7 +489,7 @@ function inline(token: Token, level: number, inLink: boolean, walk: Walk): MdNod
   const children = kids(token);
   switch (token.type) {
     case 'text':
-      return children === null ? [text(walk, (token as Tokens.Text).text)] : inlines(children, level, inLink, walk);
+      return children === null ? [text(walk, shownText(token))] : inlines(children, level, inLink, walk);
     case 'escape':
       return [text(walk, (token as Tokens.Escape).text)];
     case 'codespan':
@@ -484,8 +506,8 @@ function inline(token: Token, level: number, inLink: boolean, walk: Walk): MdNod
     case 'link':
       return children === null ? source(token, walk) : link(token as Tokens.Link, children, level, inLink, walk);
     case 'image': {
-      // No image loads from a transcript: it shows its alt text, as written.
-      const alt = (token as Tokens.Image).text;
+      // No image loads from a transcript: it shows its alt text, one text child.
+      const alt = children === null ? (token as Tokens.Image).text : plain(children);
       return alt === '' ? [] : [text(walk, alt)];
     }
     case 'html':
@@ -495,6 +517,41 @@ function inline(token: Token, level: number, inLink: boolean, walk: Walk): MdNod
       // A checkbox, the lexer's cut, and any type marked adds later.
       return source(token, walk);
   }
+}
+
+/**
+ * The plain text of `tokens`, as CommonMark takes an image's alt text from its description: the
+ * words, with escapes and character references read and the marks of spans and links gone, and
+ * a line break for each `br`. Any other token gives its source. The lexer capped the nesting, so
+ * the recursion is at most `MAX_DEPTH` deep.
+ */
+function plain(tokens: readonly Token[]): string {
+  let out = '';
+  for (const token of tokens) {
+    const children = kids(token);
+    switch (token.type) {
+      case 'text':
+        out += children === null ? shownText(token) : plain(children);
+        break;
+      case 'escape':
+      case 'codespan':
+        out += (token as Tokens.Escape | Tokens.Codespan).text;
+        break;
+      case 'br':
+        out += '\n';
+        break;
+      case 'strong':
+      case 'em':
+      case 'del':
+      case 'link':
+      case 'image':
+        out += children === null ? rawOf(token) : plain(children);
+        break;
+      default:
+        out += rawOf(token);
+    }
+  }
+  return out;
 }
 
 /** A link when it is not inside one and `safeLink` passes its destination; otherwise its text. */

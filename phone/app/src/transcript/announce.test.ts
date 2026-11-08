@@ -26,6 +26,12 @@ test("each row that says something says its own words, and its markdown's marks 
   assert.equal(spoken(row({ kind: 'tool', toolName: 'Bash', target: 'npm test -- auth', toolStatus: 'running' })), 'Bash npm test -- auth');
 });
 
+test('a message says the text its author meant: its characters as typed and its character references decoded', () => {
+  assert.equal(spoken(row({ kind: 'assistant', text: "it&#39;s a & b, &lt;tag&gt; &amp; `a &amp; b`" })), "it's a & b, <tag> & a &amp; b");
+  assert.equal(spoken(row({ kind: 'user', text: "it&#39;s a & b &quot;q&quot;" })), 'it\'s a & b "q"');
+  assert.equal(spoken(row({ kind: 'peer', text: 'a &#38; b &copy; &nope;' })), 'a & b © &nope;');
+});
+
 test('a file edit, a subagent, a slash command, thinking, a system note and an empty message say nothing', () => {
   for (const r of [
     row({ kind: 'fileEdit', toolName: 'Edit', target: 'CheckoutForm.tsx' }),
