@@ -56,9 +56,12 @@ enum PhoneAppConstants {
     static let firstPageItemLimit = 256
     /// The most items one older page carries.
     static let olderPageItemLimit = 1_024
-    /// Prompt and question text is cut at this many bytes.
+    /// A permission prompt's summary and target are cut at this many bytes,
+    /// and a deny reason may be at most this long. A question's text is never
+    /// cut, since an answer is keyed on it.
     static let promptTextCap = 4_096
-    /// An option's label or description is cut at this many bytes.
+    /// An option's description and a suggestion line are cut at this many
+    /// bytes. An option's label is never cut, since it is an answer value.
     static let promptOptionCap = 1_024
     /// The most bytes read back from an offset to find a page's start.
     static let anchorScanLimit = 8_388_608

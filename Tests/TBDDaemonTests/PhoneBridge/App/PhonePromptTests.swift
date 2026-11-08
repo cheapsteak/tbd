@@ -436,6 +436,21 @@ struct PhonePromptTests {
         #expect(full.answeredBy(key("p-\(count - 1)")) == device)
     }
 
+    /// A prompt opened again under the same ID: an answer that settled
+    /// before its latest opening answered an earlier one and does not count.
+    @Test func anAnswerToAnEarlierOpeningOfAPromptDoesNotCount() {
+        var ledger = PhonePromptAnswerLedger()
+        let key = PhonePromptAnswerLedger.Key(session: .local(terminalID: UUID()), promptID: "toolu-1")
+        let device = UUID()
+        let opened = Date(timeIntervalSince1970: 1_800_000_000)
+        ledger.begin(key, token: 1, deviceID: device, now: opened.addingTimeInterval(5))
+        _ = ledger.finish(key, token: 1, keep: true, now: opened.addingTimeInterval(6))
+
+        #expect(ledger.answeredBy(key) == device)
+        #expect(ledger.answeredBy(key, openedAt: opened) == device)
+        #expect(ledger.answeredBy(key, openedAt: opened.addingTimeInterval(60)) == nil)
+    }
+
     // MARK: - Who answered
 
     @Test func aLocalPromptsResolutionSaysWhoAnswered() {
@@ -579,21 +594,49 @@ struct PhonePromptTests {
             suggestions: nil, allowAlways: false))
     }
 
-    /// An option whose label is over `promptOptionCap` is left out, since a
-    /// cut label would answer with words that are not the option's; a long
-    /// question text is cut.
-    @Test func aLabelOverTheCapIsLeftOutAndLongTextIsCut() throws {
+    /// A question's text and an option's label go whole however long they
+    /// are, since an answer is keyed on them; a long option description is
+    /// cut.
+    @Test func aQuestionsTextAndLabelsGoWholeAndALongDescriptionIsCut() throws {
         let longLabel = String(repeating: "x", count: PhoneAppConstants.promptOptionCap + 1)
         let longText = String(repeating: "q", count: PhoneAppConstants.promptTextCap + 10)
+        let longDescription = String(repeating: "d", count: PhoneAppConstants.promptOptionCap + 10)
         let questions: [[String: Any]] = [
-            ["question": longText, "options": [["label": longLabel], ["label": "Fine"]]],
+            ["question": longText,
+             "options": [["label": longLabel, "description": longDescription], ["label": "Fine"]]],
         ]
 
         let prompt = PhonePromptShaper.local(Self.payload("toolu-q", tool: "AskUserQuestion", input: try Self.askInput(questions)))
 
         let question = try #require(prompt.questions?.first)
-        #expect(question.options == [PhoneOption(label: "Fine", description: nil)])
-        #expect(question.text == String(repeating: "q", count: PhoneAppConstants.promptTextCap))
+        #expect(question.text == longText)
+        #expect(question.options == [
+            PhoneOption(label: longLabel, description: String(repeating: "d", count: PhoneAppConstants.promptOptionCap)),
+            PhoneOption(label: "Fine", description: nil),
+        ])
+    }
+
+    /// A permission shows at most `suggestionLimit` suggestion lines, the
+    /// last saying how many more there are, and still offers allow-always.
+    @Test func aPermissionShowsAtMostTheSuggestionLimit() throws {
+        let rules: [[String: String]] = (0..<40).map { ["toolName": "Bash", "ruleContent": "cmd\($0):*"] }
+        let suggestion: [String: Any] = [
+            "type": "addRules", "behavior": "allow", "destination": "localSettings", "rules": rules,
+        ]
+        let suggestions = String(
+            decoding: try JSONSerialization.data(withJSONObject: [suggestion], options: [.sortedKeys]), as: UTF8.self)
+
+        let prompt = PhonePromptShaper.local(Self.payload(
+            "toolu-1", tool: "Bash", input: Self.bashInput, suggestions: suggestions))
+
+        let lines = try #require(prompt.suggestions)
+        try #require(lines.count == PhonePromptShaper.suggestionLimit)
+        #expect(lines.first == "allows Bash(cmd0:*)")
+        #expect(lines[30] == "allows Bash(cmd30:*)")
+        #expect(lines.last == "and 9 more")
+        #expect(prompt.allowAlways)
+        let atTheLimit = (0..<PhonePromptShaper.suggestionLimit).map { "line \($0)" }
+        #expect(PhonePromptShaper.limited(atTheLimit) == atTheLimit)
     }
 
     @Test func aRemotePromptIsShapedLikeALocalOne() {
@@ -619,18 +662,23 @@ struct PhonePromptTests {
 
     // MARK: - One frame
 
-    /// Four questions of four options, every text at its cap and made of
-    /// characters that take the most bytes once encoded, plus 64
+    /// Four questions of four options, made of characters that take the
+    /// most bytes once encoded, with each question's text at
+    /// `promptTextCap` and each label at `promptOptionCap` (the shaper cuts
+    /// neither, so the test does), every other text over its cap, plus 64
     /// resolutions, fit one frame with nothing left out.
-    @Test func theLargestPromptFitsOneFrame() throws {
+    @Test func fourQuestionsOfFourOptionsAtTheCapsFitOneFrame() throws {
         // 2 + 2 + 6 + 3 bytes once encoded.
         let unit = "\u{E9}\"\u{1}\u{540D}"
         let long = String(repeating: unit, count: 1_000)
         let label: (Int) -> String = { index in
             PhonePromptShaper.cut("\(index)" + long, to: PhoneAppConstants.promptOptionCap).text
         }
+        let text: (Int) -> String = { index in
+            PhonePromptShaper.cut("\(index)" + long, to: PhoneAppConstants.promptTextCap).text
+        }
         let questions: [[String: Any]] = (0..<4).map { index -> [String: Any] in
-            ["question": "\(index)" + long, "header": long, "multiSelect": true,
+            ["question": text(index), "header": long, "multiSelect": true,
              "options": (0..<4).map { option -> [String: String] in ["label": label(option), "description": long] }]
         }
         let prompt = PhonePromptShaper.local(Self.payload(
@@ -639,11 +687,13 @@ struct PhonePromptTests {
         let shaped = try #require(prompt.questions)
         #expect(shaped.count == 4)
         let labels = (0..<4).map(label)
+        let texts = shaped.map(\.text)
+        let expectedTexts = (0..<4).map(text)
+        #expect(texts == expectedTexts, "question text goes whole")
         for question in shaped {
             let shapedLabels = question.options.map(\.label)
             #expect(shapedLabels == labels)
-            #expect(PhonePromptShaper.escapedLength(question.text) <= PhoneAppConstants.promptTextCap)
-            #expect(PhonePromptShaper.escapedLength(question.text) > PhoneAppConstants.promptTextCap - 13)
+            #expect(PhonePromptShaper.escapedLength(question.text) == PhoneAppConstants.promptTextCap)
             #expect(PhonePromptShaper.escapedLength(question.header ?? "") <= PhoneText.fieldLimit)
             for option in question.options {
                 #expect(PhonePromptShaper.escapedLength(option.label) <= PhoneAppConstants.promptOptionCap)
@@ -682,6 +732,34 @@ struct PhonePromptTests {
         #expect(try PhoneAppCoding.makeEncoder().encode(fitted).count <= PhoneFrameBudget.eventDataBytes)
     }
 
+    /// A prompt too large for any frame is left out, and the newer prompts
+    /// after it still show. It was never sent, so its closing is never
+    /// reported.
+    @Test func aPromptTooLargeForAnyFrameIsLeftOutAndNewerOnesShow() throws {
+        let session = PhoneSessionRef.local(terminalID: UUID())
+        func prompt(_ id: String, target: String) -> PhonePrompt {
+            PhonePrompt(
+                id: id, kind: "permission", toolName: "Bash", summary: nil, target: target, targetTruncated: false,
+                questions: nil, suggestions: nil, allowAlways: false)
+        }
+        let huge = prompt("toolu-1", target: String(repeating: "a", count: PhoneFrameBudget.eventDataBytes))
+        let small = prompt("toolu-2", target: "make")
+        let later = prompt("toolu-3", target: "make test")
+
+        let fitted = PhonePromptShaper.fitted(PromptChangedData(
+            session: session, prompts: [huge, small, later], resolved: nil))
+
+        let keptIDs = fitted.prompts.map(\.id)
+        #expect(keptIDs == ["toolu-2", "toolu-3"])
+        #expect(try PhoneAppCoding.makeEncoder().encode(fitted).count <= PhoneFrameBudget.eventDataBytes)
+
+        var set = PhonePromptSet(session: session)
+        let first = try #require(set.advance(to: [huge, small], attribution: PhonePromptAttribution()))
+        let firstIDs = first.prompts.map(\.id)
+        #expect(firstIDs == ["toolu-2"])
+        #expect(set.advance(to: [small], attribution: PhonePromptAttribution()) == nil, "nothing the phone has changed")
+    }
+
     /// Resolutions past the budget are left out, the newest first, and the
     /// result fills the budget exactly when one fits exactly.
     @Test func fittingLeavesOutResolutionsThatDoNotFit() throws {
@@ -712,6 +790,22 @@ struct PhonePromptTests {
         #expect(set.advance(to: [], attribution: closed) == PromptChangedData(
             session: session, prompts: [],
             resolved: [PhonePromptResolution(promptID: "toolu-a", answeredBy: .laptop, deviceID: nil)]))
+    }
+
+    /// The set keeps when each prompt it sent was opened, and updates it
+    /// even when the prompts themselves are unchanged.
+    @Test func aPromptSetKeepsWhenEachSentPromptWasOpened() {
+        let session = PhoneSessionRef.local(terminalID: UUID())
+        let prompt = PhonePromptShaper.local(Self.payload("toolu-a", tool: "Bash", input: Self.bashInput))
+        let first = Date(timeIntervalSince1970: 1_800_000_000)
+        let again = first.addingTimeInterval(30)
+        var set = PhonePromptSet(session: session)
+
+        #expect(set.advance(to: [prompt], openedAt: ["toolu-a": first, "toolu-x": first],
+                            attribution: PhonePromptAttribution()) != nil)
+        #expect(set.openedAt(of: ["toolu-a", "toolu-x"]) == ["toolu-a": first], "only prompts sent are kept")
+        #expect(set.advance(to: [prompt], openedAt: ["toolu-a": again], attribution: PhonePromptAttribution()) == nil)
+        #expect(set.openedAt(of: ["toolu-a"]) == ["toolu-a": again])
     }
 
     // MARK: - prompt.changed through the service
@@ -792,6 +886,47 @@ struct PhonePromptTests {
         #expect(closed.data == PromptChangedData(
             session: .local(terminalID: terminalID), prompts: [],
             resolved: [PhonePromptResolution(promptID: "toolu-1", answeredBy: .phone, deviceID: deviceID)]))
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// A prompt the phone answered, opened again under the same ID and then
+    /// answered from the laptop's TBD app, says `laptop`: the phone's answer
+    /// was to its earlier opening.
+    @Test func aReopenedPromptAnsweredOnTheLaptopSaysLaptop() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let terminalID = try await h.seedTerminal().id
+        let session = PhoneSessionRef.local(terminalID: terminalID)
+        h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
+        await h.pendingPrompts.open(
+            terminalID: terminalID, sessionID: nil, toolUseID: "toolu-1", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: nil)
+        let outbox = try await Self.liveConnection(h)
+        await h.service.openPrompts(session, for: deviceID)
+        _ = try await Self.promptEvent(0, in: outbox)
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
+        #expect(reply.error == nil)
+        await h.pendingPrompts.receipt(terminalID: terminalID, toolUseID: "toolu-1")
+        await h.subscriptions.broadcastPendingPrompts(terminalID: terminalID, from: h.pendingPrompts)
+        let byPhone = try await Self.promptEvent(1, in: outbox)
+        #expect(byPhone.data.resolved == [
+            PhonePromptResolution(promptID: "toolu-1", answeredBy: .phone, deviceID: deviceID),
+        ])
+
+        await h.pendingPrompts.open(
+            terminalID: terminalID, sessionID: nil, toolUseID: "toolu-1", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: nil)
+        await h.subscriptions.broadcastPendingPrompts(terminalID: terminalID, from: h.pendingPrompts)
+        let reopened = try await Self.promptEvent(2, in: outbox)
+        let reopenedIDs = reopened.data.prompts.map(\.id)
+        #expect(reopenedIDs == ["toolu-1"])
+        await h.pendingPrompts.receipt(terminalID: terminalID, toolUseID: "toolu-1")
+        await h.subscriptions.broadcastPendingPrompts(terminalID: terminalID, from: h.pendingPrompts)
+
+        let byLaptop = try await Self.promptEvent(3, in: outbox)
+        #expect(byLaptop.data == PromptChangedData(
+            session: session, prompts: [],
+            resolved: [PhonePromptResolution(promptID: "toolu-1", answeredBy: .laptop, deviceID: nil)]))
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 

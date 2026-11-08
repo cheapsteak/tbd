@@ -22,31 +22,31 @@ import TBDShared
 /// Turns an open prompt into what the phone shows: the fields the laptop's
 /// prompt cards draw (`PermissionPromptCard`, `InteractiveQuestionCard`).
 ///
-/// **Caps are on encoded bytes.** Each text is cut, at a character boundary,
-/// so its JSON string body under `PhoneAppCoding.makeEncoder()` is at most its
-/// cap: question text and a permission's summary and target at
-/// `PhoneAppConstants.promptTextCap`, an option's description and a suggestion
-/// line at `promptOptionCap`, a header and a tool name at
+/// **What an answer is keyed on goes whole.** An answer names a question by
+/// its text, which `PromptDecisionEncoder` checks against the prompt's, and
+/// picks an option by its label, which it carries through as written. So a
+/// question's text and an option's label are never cut: a cut text names no
+/// question the prompt has, so the core refuses the answer, and a cut label
+/// would answer with words that are not the option's.
+///
+/// **Everything else is capped on encoded bytes.** Each other text is cut, at
+/// a character boundary, so its JSON string body under
+/// `PhoneAppCoding.makeEncoder()` is at most its cap: a permission's summary
+/// and target at `PhoneAppConstants.promptTextCap`, an option's description
+/// and a suggestion line at `promptOptionCap`, a header and a tool name at
 /// `PhoneText.fieldLimit`. Measuring the escaped length rather than the UTF-8
 /// length is what bounds a frame: a quote takes two bytes once encoded, and a
-/// control character six.
+/// control character six. A permission shows at most `suggestionLimit`
+/// suggestion lines, the last of them saying how many more there are.
 ///
-/// **What an answer is keyed on is never rewritten.** An answer names a
-/// question by its text and picks an option by its label.
-/// `PromptDecisionEncoder` checks the text against the prompt, but carries a
-/// value through as written. So:
-/// - a question whose text was cut is still shown, and an answer keyed on the
-///   cut text is refused by the core as naming a question the prompt does not
-///   have, so nothing is delivered;
-/// - an option whose label is over `promptOptionCap` is left out rather than
-///   cut, because a cut label sent back would answer with words that are not
-///   the option's. The phone can still type it as "Other".
-///
-/// No count is capped: a prompt with more questions, options or suggestions
-/// than one frame holds is left out of `prompt.changed` whole
-/// (`fitted(_:budget:)`), never shown in part.
+/// No count of questions or options is capped: a prompt too large for one
+/// frame is left out of `prompt.changed` whole (`fitted(_:budget:)`), never
+/// shown in part.
 enum PhonePromptShaper {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
+
+    /// The most suggestion lines a permission prompt shows.
+    static let suggestionLimit = 32
 
     /// A local prompt from `PendingPromptStore`. Its questions are the ones
     /// `PromptQuestionParser.questions(fromAskUserQuestionInput:)` reads, the
@@ -89,14 +89,15 @@ enum PhonePromptShaper {
             questions: questions.map(shaped), suggestions: nil, allowAlways: false)
     }
 
+    /// A question with its text and every option's label whole, since an
+    /// answer is keyed on them, and its header and option descriptions cut.
     private static func shaped(_ question: PromptQuestion) -> PhoneQuestion {
         PhoneQuestion(
-            text: cut(question.text, to: PhoneAppConstants.promptTextCap).text,
+            text: question.text,
             header: question.header.map { cut($0, to: PhoneText.fieldLimit).text },
             multiSelect: question.multiSelect,
-            options: question.options.compactMap { option in
-                guard escapedLength(option.label) <= PhoneAppConstants.promptOptionCap else { return nil }
-                return PhoneOption(
+            options: question.options.map { option in
+                PhoneOption(
                     label: option.label,
                     description: option.description.map { cut($0, to: PhoneAppConstants.promptOptionCap).text })
             })
@@ -107,7 +108,8 @@ enum PhonePromptShaper {
     /// - `target` is `target(input:toolInputJSON:)`, cut to `promptTextCap`,
     ///   with `targetTruncated` when it was cut or the provider cut the input;
     /// - `suggestions` is `PermissionSuggestionSummary.lines(fromJSON:)`,
-    ///   omitted when there are none;
+    ///   at most `suggestionLimit` of them (`limited(_:)`), omitted when there
+    ///   are none;
     /// - `allowAlways` is whether there are suggestions: the laptop card's
     ///   "Yes, and don't ask again this session", and exactly when the core
     ///   accepts `allow_always`.
@@ -118,7 +120,7 @@ enum PhonePromptShaper {
         let summary = TranscriptParser.toolInputSummary(name: toolName ?? "", input: input ?? [:])
         let preview = Self.target(input: input, toolInputJSON: toolInputJSON)
             .map { cut($0, to: PhoneAppConstants.promptTextCap) }
-        let suggestions = PermissionSuggestionSummary.lines(fromJSON: suggestionsJSON)
+        let suggestions = limited(PermissionSuggestionSummary.lines(fromJSON: suggestionsJSON))
             .map { cut($0, to: PhoneAppConstants.promptOptionCap).text }
         return PhonePrompt(
             id: id, kind: PendingPromptKind.permission.rawValue,
@@ -129,6 +131,15 @@ enum PhonePromptShaper {
             questions: nil,
             suggestions: suggestions.isEmpty ? nil : suggestions,
             allowAlways: !suggestions.isEmpty)
+    }
+
+    /// `lines` as they are when there are at most `suggestionLimit`;
+    /// otherwise the first `suggestionLimit - 1` and a last line saying how
+    /// many more there are, so an ordinary prompt never outgrows a frame.
+    static func limited(_ lines: [String]) -> [String] {
+        guard lines.count > suggestionLimit else { return lines }
+        let kept = suggestionLimit - 1
+        return Array(lines.prefix(kept)) + ["and \(lines.count - kept) more"]
     }
 
     /// What the laptop's permission card previews: the input's `command`,
@@ -183,28 +194,44 @@ enum PhonePromptShaper {
     /// `data` as it fits `budget` bytes of encoded event data, so the event
     /// fits one frame.
     ///
-    /// Data that fits is returned as it is. Otherwise the prompts are kept in
-    /// order, oldest first, up to the first that does not fit, and then the
-    /// resolutions likewise: a prompt is never shown in part, and the newest
-    /// are left out until an older one closes. A prompt left out was never
-    /// sent, so its closing is never reported. A resolution left out is
-    /// lost; the phone still sees its prompt leave the set.
+    /// Data that fits is returned as it is. Otherwise:
+    /// - a prompt too large to fit even alone is left out, and the prompts
+    ///   after it are still tried, so it cannot hide every newer prompt;
+    /// - the other prompts are kept in order, oldest first, up to the first
+    ///   that does not fit, and the newer ones are left out until an older one
+    ///   closes;
+    /// - then the resolutions likewise.
     ///
-    /// The shaper's caps keep one prompt of four questions with four options
-    /// each, every text at its cap, well inside `PhoneFrameBudget.eventDataBytes`
-    /// with room for dozens of resolutions; only a prompt larger than the
-    /// AskUserQuestion tool accepts, or several large ones at once, comes here.
+    /// A prompt is never shown in part. A prompt left out was never sent, so
+    /// its closing is never reported. A resolution left out is lost; the
+    /// phone still sees its prompt leave the set. Only how many were left out
+    /// is logged, never what they say.
+    ///
+    /// Only an unusual set comes here: several large prompts open at once, or
+    /// one whose question text, labels or tool input run to tens of kilobytes.
     static func fitted(_ data: PromptChangedData, budget: Int = PhoneFrameBudget.eventDataBytes) -> PromptChangedData {
         let encoder = PhoneAppCoding.makeEncoder()
         func size<T: Encodable>(_ value: T) -> Int {
             (try? encoder.encode(value).count) ?? Int.max / 4
         }
         if size(data) <= budget { return data }
-        var used = size(PromptChangedData(session: data.session, prompts: [], resolved: nil))
+        let empty = size(PromptChangedData(session: data.session, prompts: [], resolved: nil))
+        var used = empty
         var prompts: [PhonePrompt] = []
+        var tooLarge = 0
+        var full = false
         for prompt in data.prompts {
-            let cost = size(prompt) + (prompts.isEmpty ? 0 : 1)
-            guard used + cost <= budget else { break }
+            let bytes = size(prompt)
+            if empty + bytes > budget {
+                tooLarge += 1
+                continue
+            }
+            guard !full else { continue }
+            let cost = bytes + (prompts.isEmpty ? 0 : 1)
+            guard used + cost <= budget else {
+                full = true
+                continue
+            }
             prompts.append(prompt)
             used += cost
         }
@@ -218,7 +245,7 @@ enum PhonePromptShaper {
         let leftOutPrompts = data.prompts.count - prompts.count
         let leftOutResolutions = (data.resolved?.count ?? 0) - resolved.count
         logger.notice(
-            "Phone prompts: left out \(leftOutPrompts, privacy: .public) prompts and \(leftOutResolutions, privacy: .public) resolutions to fit a prompt.changed into one frame")
+            "Phone prompts: left out \(leftOutPrompts, privacy: .public) prompts (\(tooLarge, privacy: .public) too large for any frame) and \(leftOutResolutions, privacy: .public) resolutions to fit a prompt.changed into one frame")
         return PromptChangedData(session: data.session, prompts: prompts, resolved: resolved.isEmpty ? nil : resolved)
     }
 }
@@ -237,9 +264,12 @@ enum PhonePromptShaper {
 ///
 /// **Bounded.** Running attempts are bounded by the requests a device may have
 /// in flight. A kept attempt is dropped `lifetime` after it settled, and at
-/// most `settledLimit` are kept, the oldest dropped first. A prompt ID names
-/// one dialog for its life, so an attempt kept a while after its prompt
-/// closed matches no later prompt.
+/// most `settledLimit` are kept, the oldest dropped first.
+///
+/// **A prompt ID can come back.** `PendingPromptStore.open` can open a prompt
+/// again under the same ID after it closed, with a new `createdAt`. So a read
+/// may pass the time the prompt it asks about was opened, and an attempt that
+/// settled before then answered an earlier opening and does not count.
 struct PhonePromptAnswerLedger: Sendable {
     struct Key: Hashable, Sendable {
         let session: PhoneSessionRef
@@ -299,9 +329,14 @@ struct PhonePromptAnswerLedger: Sendable {
         attempts[key]?.contains { $0.settledAt == nil } ?? false
     }
 
-    /// The phone whose answer to the prompt under `key` was kept.
-    func answeredBy(_ key: Key) -> UUID? {
-        attempts[key]?.first { $0.settledAt != nil }?.deviceID
+    /// The phone whose answer to the prompt under `key` was kept, counting
+    /// only an answer that settled at or after `openedAt` when it is given.
+    func answeredBy(_ key: Key, openedAt: Date? = nil) -> UUID? {
+        attempts[key]?.first { attempt in
+            guard let settledAt = attempt.settledAt else { return false }
+            guard let openedAt else { return true }
+            return settledAt >= openedAt
+        }?.deviceID
     }
 
     /// Waits on `key`'s running attempts. Call only while `isAnswering(key)`.
@@ -375,9 +410,21 @@ struct PhonePromptSet: Sendable {
     /// The prompts last sent, as fitted into their frame; nil before the
     /// first `prompt.changed`.
     private(set) var sent: [PhonePrompt]?
+    /// When each prompt in `sent` was opened, as its source last read it, by
+    /// prompt ID. Empty for a remote session, whose prompts carry no time.
+    private var openedTimes: [String: Date] = [:]
 
     init(session: PhoneSessionRef) {
         self.session = session
+    }
+
+    /// When each of `ids`, prompts last sent, was opened, as far as known.
+    func openedAt(of ids: [String]) -> [String: Date] {
+        var times: [String: Date] = [:]
+        for id in ids {
+            times[id] = openedTimes[id]
+        }
+        return times
     }
 
     /// The IDs of the prompts last sent that `current` no longer holds, in
@@ -392,10 +439,19 @@ struct PhonePromptSet: Sendable {
     /// every prompt that closed; or nil when the phone has that set already.
     /// The first call always returns data, an empty set included, so the
     /// phone learns the set as soon as the session opens.
-    mutating func advance(to current: [PhonePrompt], attribution: PhonePromptAttribution) -> PromptChangedData? {
+    ///
+    /// `openedAt` is when each prompt in `current` was opened, by prompt ID.
+    /// It is kept for the prompts sent even when nothing else changed, since
+    /// a prompt that closed and opened again between two reads looks the
+    /// same but for it.
+    mutating func advance(
+        to current: [PhonePrompt], openedAt: [String: Date] = [:], attribution: PhonePromptAttribution
+    ) -> PromptChangedData? {
         let resolved = closedIDs(in: current).map { attribution.resolution(of: $0) }
         let data = PhonePromptShaper.fitted(PromptChangedData(
             session: session, prompts: current, resolved: resolved.isEmpty ? nil : resolved))
+        let sentIDs = Set(data.prompts.map(\.id))
+        openedTimes = openedAt.filter { sentIDs.contains($0.key) }
         if let sent, sent == data.prompts {
             return nil
         }
@@ -639,14 +695,22 @@ extension PhoneAppService {
     }
 
     /// The phone whose answer the ledger kept for each closed prompt in
-    /// `keys`, by prompt ID.
+    /// `keys`, by prompt ID. With a prompt's time in `openedAt`, an answer
+    /// that settled before it answered an earlier opening of the prompt and
+    /// does not count.
     ///
     /// It first waits for every phone's answer to those prompts still
     /// running, so a race is told right: a phone whose answer lost to the
     /// laptop's finishes `already_resolved` and is dropped, rather than being
-    /// read as the winner while its call was in flight. The wait is short, as
-    /// the core returns at once for a prompt that has closed.
-    func phoneAnswers(for keys: [PhonePromptAnswerLedger.Key]) async -> [String: UUID] {
+    /// read as the winner while its call was in flight. For a local prompt
+    /// the wait is short, as the core returns at once for a prompt that has
+    /// closed. For a remote prompt it can last as long as the provider's
+    /// answer timeout, 30 seconds, plus the time the answer waits in the
+    /// session's queue behind other calls, and the device's next
+    /// `prompt.changed` waits with it.
+    func phoneAnswers(
+        for keys: [PhonePromptAnswerLedger.Key], openedAt: [String: Date] = [:]
+    ) async -> [String: UUID] {
         var answers: [String: UUID] = [:]
         for key in keys {
             while phoneAnswerLedger.isAnswering(key) {
@@ -654,7 +718,7 @@ extension PhoneAppService {
                     phoneAnswerLedger.wait(key, continuation)
                 }
             }
-            if let deviceID = phoneAnswerLedger.answeredBy(key) {
+            if let deviceID = phoneAnswerLedger.answeredBy(key, openedAt: openedAt[key.promptID]) {
                 answers[key.promptID] = deviceID
             }
         }
@@ -715,31 +779,40 @@ extension PhoneAppService {
     func remotePromptsRead(_ prompts: [RemotePendingPrompt], session: PhoneSessionRef, deviceID: UUID) async {
         guard let feed = devices[deviceID]?.prompts, feed.set.session == session else { return }
         await promptsRead(
-            prompts.map(PhonePromptShaper.remote), localResolutions: nil, deviceID: deviceID, token: feed.token)
+            prompts.map(PhonePromptShaper.remote), openedAt: [:], localResolutions: nil,
+            deviceID: deviceID, token: feed.token)
     }
 
     private func localPromptsRead(
         _ open: [PendingPromptPayload], resolved: [String: PendingPromptStore.Resolution], deviceID: UUID, token: UInt64
     ) async {
+        var openedAt: [String: Date] = [:]
+        for payload in open {
+            openedAt[payload.id] = payload.createdAt
+        }
         await promptsRead(
-            open.map(PhonePromptShaper.local), localResolutions: resolved, deviceID: deviceID, token: token)
+            open.map(PhonePromptShaper.local), openedAt: openedAt, localResolutions: resolved,
+            deviceID: deviceID, token: token)
     }
 
     /// Emits the `prompt.changed` that brings the device from the set it was
     /// last sent to `current`, if anything changed, unless a later feed
-    /// replaced the one `token` names.
+    /// replaced the one `token` names. `openedAt` is when each prompt in
+    /// `current` was opened, by prompt ID, where known.
     private func promptsRead(
-        _ current: [PhonePrompt], localResolutions: [String: PendingPromptStore.Resolution]?,
-        deviceID: UUID, token: UInt64
+        _ current: [PhonePrompt], openedAt: [String: Date],
+        localResolutions: [String: PendingPromptStore.Resolution]?, deviceID: UUID, token: UInt64
     ) async {
         guard let feed = devices[deviceID]?.prompts, feed.token == token else { return }
         let session = feed.set.session
-        let closed = feed.set.closedIDs(in: current).map { PhonePromptAnswerLedger.Key(session: session, promptID: $0) }
-        let answers = await phoneAnswers(for: closed)
+        let closedIDs = feed.set.closedIDs(in: current)
+        let closed = closedIDs.map { PhonePromptAnswerLedger.Key(session: session, promptID: $0) }
+        let answers = await phoneAnswers(for: closed, openedAt: feed.set.openedAt(of: closedIDs))
         guard var latest = devices[deviceID]?.prompts, latest.token == token else { return }
         let attribution = PhonePromptAttribution(phoneAnswers: answers, localResolutions: localResolutions)
-        guard let data = latest.set.advance(to: current, attribution: attribution) else { return }
+        let changed = latest.set.advance(to: current, openedAt: openedAt, attribution: attribution)
         devices[deviceID]?.prompts = latest
+        guard let data = changed else { return }
         emit(.promptChanged, data: data, to: deviceID)
     }
 
