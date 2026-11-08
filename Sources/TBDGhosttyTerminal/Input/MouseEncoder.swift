@@ -513,11 +513,12 @@ final class MouseEncoder {
 
         switch wheelRoute(terminal: terminal) {
         case .alternateScroll:
-            // Arrow keys here match SwiftTerm's own view, and are what makes the wheel work
-            // in less and vim. TBD's holder panels drop these wheel events instead, because
-            // arrow keys typed into an agent's composer recall its history; they get that
-            // policy from the app's scroll monitor (`ScrollWheelAccumulator`) in front of
-            // this view, so this view does not repeat it.
+            // Arrow keys here match SwiftTerm's own view, and are what makes the wheel work in
+            // less and vim. The app has its own policy for these events, which drops them where
+            // arrow keys typed into an agent's composer would recall its history. Its scroll
+            // monitor (`ScrollWheelAccumulator`) sits in front of the terminal view on every
+            // transport, and once this engine is wired in it will sit in front of this view
+            // too, so the app's policy applies there and this path is the view's own fallback.
             let state = GhosttyTerminalState(raw: terminal)
             guard state.mode(Self.alternateScrollMode) else { return .none }
             let key = Self.alternateScrollKey(
