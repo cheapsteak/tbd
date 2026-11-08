@@ -99,7 +99,6 @@ export class AppFrame {
     this.#iframe = iframe;
 
     host.append(iframe);
-    if (this.#destroyed) return;
     this.#cancelStartTimer = startVisibleTimer(RUNNER_START_TIMEOUT_MS, visibility, () => {
       this.#cancelStartTimer = null;
       this.#fault('timeout');
