@@ -498,6 +498,33 @@ struct PhoneBridgeTests {
         }
     }
 
+    @Test func theRelayIsNotShownAsConnectedWhileEveryRoomSocketIsDown() async throws {
+        try await withBridge(devices: 1) { h in
+            await h.bridge.reconcile()
+            let room = h.phones[0].device.roomID
+            try await h.waitUntil("the room to open") { h.relay.laptopPresent(room: room) }
+            try await h.waitUntil("the relay to show as connected") {
+                await h.bridge.status().relay.state == .connected
+            }
+
+            // The relay drops the only room socket; the link backs off on the
+            // test clock, so it stays down until the clock moves.
+            h.relay.closeLaptop(room: room, code: 1011)
+            try await h.waitUntil("the relay to show as connecting again") {
+                await h.bridge.status().relay.state == .checking
+            }
+            let down = await h.bridge.status()
+            #expect(down.running && down.relay.version == currentRelay.version)
+
+            try await h.clock.advanceUntil("the room to open again", by: .seconds(1)) {
+                h.relay.laptopPresent(room: room)
+            }
+            try await h.waitUntil("the relay to show as connected again") {
+                await h.bridge.status().relay.state == .connected
+            }
+        }
+    }
+
     @Test func turningTheFlagOffClosesEverySocketWithoutRevoked() async throws {
         try await withBridge(devices: 1) { h in
             await h.bridge.reconcile()
@@ -1054,6 +1081,7 @@ struct PhoneBridgeTests {
         let check: PhoneBridge.RelayCheck?
         var linksOpen = 0
         var linksFailing = 0
+        var linksConnecting = 0
         let state: PhoneRelayState
         var version: String?
         var detail: String?
@@ -1076,6 +1104,16 @@ struct PhoneBridgeTests {
                         state: .unreachable, version: "1.0.0", detail: "cannot open a room socket"),
         RelayStatusCase(label: "one room socket opens", check: .ok(currentRelay), linksOpen: 1, linksFailing: 1,
                         state: .connected, version: "1.0.0"),
+        RelayStatusCase(label: "every room socket connecting", check: .ok(currentRelay), linksConnecting: 2,
+                        state: .checking, version: "1.0.0"),
+        RelayStatusCase(label: "an older relay with every room socket connecting",
+                        check: .ok(PhoneRelayInfo(name: "tbd-relay", version: "0.9.0", api: [1])), linksConnecting: 1,
+                        state: .checking, version: "0.9.0"),
+        RelayStatusCase(label: "one room socket open, one connecting", check: .ok(currentRelay), linksOpen: 1,
+                        linksConnecting: 1, state: .connected, version: "1.0.0"),
+        RelayStatusCase(label: "one room socket failing, one connecting", check: .ok(currentRelay), linksFailing: 1,
+                        linksConnecting: 1, state: .unreachable, version: "1.0.0",
+                        detail: "cannot open a room socket"),
         RelayStatusCase(label: "no phones", check: .ok(currentRelay), state: .connected, version: "1.0.0"),
         RelayStatusCase(label: "newer relay", check: .ok(PhoneRelayInfo(name: "tbd-relay", version: "1.1.0", api: [1])),
                         state: .connected, version: "1.1.0"),
@@ -1086,7 +1124,7 @@ struct PhoneBridgeTests {
     @Test(arguments: PhoneBridgeTests.relayStatusCases)
     func relayStatusDerivation(_ c: RelayStatusCase) {
         let status = PhoneBridge.relayStatus(relayURL: c.relayURL, check: c.check, linksOpen: c.linksOpen,
-                                             linksFailing: c.linksFailing)
+                                             linksFailing: c.linksFailing, linksConnecting: c.linksConnecting)
         #expect(status.state == c.state)
         #expect(status.version == c.version)
         #expect(status.detail == c.detail)

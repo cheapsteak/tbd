@@ -157,7 +157,8 @@ actor PhoneBridge: PhoneBridgeControlling {
         /// Tells this connection's events from those of one it replaced.
         let token: UUID
         /// Whether its room socket is open (`true`), failing to open
-        /// (`false`), or neither yet.
+        /// (`false`), or neither: connecting for the first time, or again
+        /// after the socket closed.
         var isOpen: Bool?
         /// Whether the phone's channel is established.
         var isConnected = false
@@ -290,7 +291,8 @@ actor PhoneBridge: PhoneBridgeControlling {
         let relay = Self.relayStatus(
             relayURL: relayURL, check: running == nil ? nil : check,
             linksOpen: states.filter { $0 == true }.count,
-            linksFailing: states.filter { $0 == false }.count)
+            linksFailing: states.filter { $0 == false }.count,
+            linksConnecting: states.filter { $0 == nil }.count)
         let connected = links.filter { $0.value.isConnected }.map { $0.key }.sorted { $0.uuidString < $1.uuidString }
         return PhoneStatusResult(
             enabled: config?.phoneControlEnabled ?? Config.phoneControlEnabledDefault,
@@ -349,10 +351,18 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// The relay's status for the Phone pane, from the saved relay URL, the
     /// relay check's latest answer, and how many links have their room
-    /// socket open or are failing to open it. With no answer, as always
-    /// while the bridge is stopped, the state is `checking`.
-    static func relayStatus(relayURL: String?, check: RelayCheck?, linksOpen: Int, linksFailing: Int)
-        -> PhoneRelayStatus {
+    /// socket open, are failing to open it, or are connecting it, for the
+    /// first time or again. With no answer, as always while the bridge is
+    /// stopped, the state is `checking`.
+    ///
+    /// A usable answer means `connected` only while a room socket is open or
+    /// no phone is paired. With every link failing to open its socket, the
+    /// relay is `unreachable`; with none open and some connecting, such as
+    /// while the relay has dropped every socket and the links back off, it
+    /// is `checking`, because each link checks the relay before it connects
+    /// again.
+    static func relayStatus(relayURL: String?, check: RelayCheck?, linksOpen: Int, linksFailing: Int,
+                            linksConnecting: Int) -> PhoneRelayStatus {
         let bundled = PhoneBridgeConstants.bundledRelayVersion
         guard relayURL != nil else {
             return PhoneRelayStatus(state: .notSetUp, bundledVersion: bundled)
@@ -368,6 +378,9 @@ actor PhoneBridge: PhoneBridgeControlling {
             if linksOpen == 0 && linksFailing > 0 {
                 return PhoneRelayStatus(state: .unreachable, version: info.version, bundledVersion: bundled,
                                         detail: "cannot open a room socket")
+            }
+            if linksOpen == 0 && linksConnecting > 0 {
+                return PhoneRelayStatus(state: .checking, version: info.version, bundledVersion: bundled)
             }
             if PhoneRelayVersion.isOlder(info.version, than: bundled) == true {
                 return PhoneRelayStatus(state: .updateAvailable, version: info.version, bundledVersion: bundled)

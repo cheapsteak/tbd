@@ -75,9 +75,11 @@ public struct PhoneRelayInfo: Codable, Sendable, Equatable {
 public enum PhoneRelayState: String, Codable, Sendable {
     /// No relay URL is set.
     case notSetUp
-    /// The relay has not answered a check yet. While the bridge runs, its
-    /// check is under way. A stopped bridge (`PhoneStatusResult.running` is
-    /// false) checks nothing and reports this state throughout.
+    /// The relay has not answered a check yet, or every paired phone's room
+    /// socket is down and connecting again: each link checks the relay before
+    /// it connects. While the bridge runs, a check is under way. A stopped
+    /// bridge (`PhoneStatusResult.running` is false) checks nothing and
+    /// reports this state throughout.
     case checking
     case connected
     /// The relay could not be reached; the bridge keeps retrying.
