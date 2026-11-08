@@ -30,7 +30,10 @@ async function waitForSubscribed(page) {
 test("the bundle starts under the runner's policy with no console error, and subscribes", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await waitForSubscribed(page);
-  await expect(app(page).locator('button[data-row]')).toHaveText(['main', 'Login redirect fix', 'Rate limit retry']);
+  await expect(app(page).locator('button[data-row]')).toHaveText([
+    'main', 'Login redirect fix', 'Checkout v2', 'Docs refresh', 'Rate limit retry', 'Bulk import', 'SSE reconnect',
+    'Schema migration', 'Triage flaky test', 'Onboarding copy', 'Settings screen', 'Legacy pane',
+  ]);
   const [first] = await hostRequests(page);
   expect(first).toEqual({ requestID: expect.any(String), method: 'sessions.subscribe', params: {} });
 });

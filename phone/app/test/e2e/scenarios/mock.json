@@ -1,27 +1,70 @@
 {
   "layout": [
     {
-      "id": "repo:00000000-0000-4000-8000-0000000000a1",
+      "id": "repo:00000000-0000-4000-8000-0000000000A1",
       "kind": "repo",
       "name": "acme-web",
       "rows": [
         {
-          "id": "00000000-0000-4000-8000-0000000000c1",
+          "id": "00000000-0000-4000-8000-0000000000C1",
           "depth": 0
         },
         {
-          "id": "00000000-0000-4000-8000-0000000000c2",
+          "id": "00000000-0000-4000-8000-0000000000C2",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000C3",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000C4",
           "depth": 0
         }
       ]
     },
     {
-      "id": "repo:00000000-0000-4000-8000-0000000000a2",
+      "id": "repo:00000000-0000-4000-8000-0000000000A2",
       "kind": "repo",
       "name": "acme-api",
       "rows": [
         {
-          "id": "00000000-0000-4000-8000-0000000000c3",
+          "id": "00000000-0000-4000-8000-0000000000C5",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000C6",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000C7",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000C8",
+          "depth": 0
+        },
+        {
+          "id": "remote:acme-cloud/triage-1",
+          "depth": 0
+        }
+      ]
+    },
+    {
+      "id": "repo:00000000-0000-4000-8000-0000000000A3",
+      "kind": "repo",
+      "name": "acme-mobile",
+      "rows": [
+        {
+          "id": "00000000-0000-4000-8000-0000000000C9",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000CA",
+          "depth": 0
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000000CB",
           "depth": 0
         }
       ]
@@ -29,7 +72,7 @@
   ],
   "rows": [
     {
-      "id": "00000000-0000-4000-8000-0000000000c1",
+      "id": "00000000-0000-4000-8000-0000000000C1",
       "kind": "worktree",
       "name": "main",
       "remote": false,
@@ -46,7 +89,7 @@
             "agoMinutes": 1500
           },
           "profileName": "Personal",
-          "profileID": "00000000-0000-4000-8000-0000000000f1",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
           "model": "opus",
           "capabilities": {
             "transcript": {
@@ -72,7 +115,7 @@
       ]
     },
     {
-      "id": "00000000-0000-4000-8000-0000000000c2",
+      "id": "00000000-0000-4000-8000-0000000000C2",
       "kind": "worktree",
       "name": "Login redirect fix",
       "remote": false,
@@ -89,7 +132,7 @@
             "agoMinutes": 2
           },
           "profileName": "Personal",
-          "profileID": "00000000-0000-4000-8000-0000000000f1",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
           "model": "opus",
           "capabilities": {
             "transcript": {
@@ -111,14 +154,14 @@
               "available": true
             }
           },
-          "openPromptID": "prompt-login"
+          "openPromptID": "00000000-0000-4000-8000-0000000000E1"
         }
       ]
     },
     {
-      "id": "00000000-0000-4000-8000-0000000000c3",
+      "id": "00000000-0000-4000-8000-0000000000C3",
       "kind": "worktree",
-      "name": "Rate limit retry",
+      "name": "Checkout v2",
       "remote": false,
       "sessions": [
         {
@@ -129,12 +172,478 @@
           "agent": "claude",
           "tabName": "Claude",
           "status": {
+            "chip": "working",
+            "agoMinutes": 0.2
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "sonnet",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          }
+        },
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-000000000104"
+          },
+          "agent": "claude",
+          "tabName": "Review",
+          "status": {
+            "chip": "idle",
+            "agoMinutes": 20
+          },
+          "profileName": "acme-work",
+          "profileID": "00000000-0000-4000-8000-0000000000F2",
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          }
+        },
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-000000000105"
+          },
+          "agent": "codex",
+          "tabName": "Codex",
+          "status": {
+            "chip": "working",
+            "agoMinutes": 4
+          },
+          "capabilities": {
+            "transcript": {
+              "available": false,
+              "reason": "Codex transcripts arrive in a later TBD release"
+            },
+            "send": {
+              "available": false,
+              "reason": "Codex sessions show status only."
+            },
+            "answer": {
+              "available": false,
+              "reason": "Codex sessions show status only."
+            },
+            "switchProfile": {
+              "available": false,
+              "reason": "Codex sessions show status only."
+            },
+            "fork": {
+              "available": false,
+              "reason": "Codex sessions show status only."
+            },
+            "model": {
+              "available": false,
+              "reason": "Codex sessions show status only."
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000C4",
+      "kind": "worktree",
+      "name": "Docs refresh",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-000000000106"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "parked",
+            "agoMinutes": 180
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "sonnet",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": false,
+              "reason": "This session is parked. Send it a message to wake it, then fork it."
+            },
+            "model": {
+              "available": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000C5",
+      "kind": "worktree",
+      "name": "Rate limit retry",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-000000000107"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
             "chip": "error",
             "agoMinutes": 12,
             "reason": "API error 529: the model is overloaded. The turn stopped."
           },
           "profileName": "Personal",
-          "profileID": "00000000-0000-4000-8000-0000000000f1",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000C6",
+      "kind": "worktree",
+      "name": "Bulk import",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-000000000108"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "rateLimited",
+            "agoMinutes": 40,
+            "reason": "Usage limit reached. It resets at 3:00 pm."
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000C7",
+      "kind": "worktree",
+      "name": "SSE reconnect",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-000000000109"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "waitingForYou",
+            "agoMinutes": 6
+          },
+          "profileName": "acme-work",
+          "profileID": "00000000-0000-4000-8000-0000000000F2",
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          },
+          "openPromptID": "00000000-0000-4000-8000-0000000000E2"
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000C8",
+      "kind": "worktree",
+      "name": "Schema migration",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-00000000010A"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "exited",
+            "agoMinutes": 120
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "remote:acme-cloud/triage-1",
+      "kind": "remoteSession",
+      "name": "Triage flaky test",
+      "remote": true,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "remote",
+            "provider": "acme-cloud",
+            "sessionID": "triage-1"
+          },
+          "agent": "remote",
+          "tabName": "acme-cloud",
+          "status": {
+            "chip": "working",
+            "agoMinutes": 5
+          },
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": false,
+              "reason": "Not available for remote sessions."
+            },
+            "fork": {
+              "available": false,
+              "reason": "Not available for remote sessions."
+            },
+            "model": {
+              "available": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000C9",
+      "kind": "worktree",
+      "name": "Onboarding copy",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-00000000010B"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "waitingForYou",
+            "agoMinutes": 25
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "opus",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          },
+          "openPromptID": "00000000-0000-4000-8000-0000000000E3"
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000CA",
+      "kind": "worktree",
+      "name": "Settings screen",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-00000000010C"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "waitingForYou",
+            "agoMinutes": 52
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
+          "model": "sonnet",
+          "capabilities": {
+            "transcript": {
+              "available": true
+            },
+            "send": {
+              "available": true
+            },
+            "answer": {
+              "available": true
+            },
+            "switchProfile": {
+              "available": true
+            },
+            "fork": {
+              "available": true
+            },
+            "model": {
+              "available": true
+            }
+          },
+          "openPromptID": "00000000-0000-4000-8000-0000000000E4"
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-4000-8000-0000000000CB",
+      "kind": "worktree",
+      "name": "Legacy pane",
+      "remote": false,
+      "sessions": [
+        {
+          "ref": {
+            "kind": "local",
+            "terminalID": "00000000-0000-4000-8000-00000000010D"
+          },
+          "agent": "claude",
+          "tabName": "Claude",
+          "status": {
+            "chip": "unknown",
+            "agoMinutes": 420
+          },
+          "profileName": "Personal",
+          "profileID": "00000000-0000-4000-8000-0000000000F1",
           "model": "opus",
           "capabilities": {
             "transcript": {
@@ -165,8 +674,8 @@
       {
         "id": "main-1",
         "kind": "user",
-        "truncated": false,
-        "text": "What changed on main this week?"
+        "text": "What changed on main this week?",
+        "truncated": false
       },
       {
         "id": "main-2",
@@ -179,25 +688,35 @@
       {
         "id": "main-3",
         "kind": "assistant",
-        "truncated": false,
-        "text": "Twelve commits landed. The biggest three: the `checkout_v1` flag, a rate limiter for webhooks, and the docs move."
+        "text": "Twelve commits landed. The biggest three: the `checkout_v1` flag, a rate limiter for webhooks, and the docs move.",
+        "truncated": false
       }
     ],
     "local:00000000-0000-4000-8000-000000000102": [
       {
         "id": "login-1",
         "kind": "user",
-        "truncated": false,
-        "text": "After sign-in we always land on /home, even when someone came from a deep link. Send people back to where they started."
+        "text": "After sign-in we always land on /home, even when someone came from a deep link. Send people back to where they started.",
+        "truncated": false
       },
       {
         "id": "login-2",
         "kind": "thinking",
-        "truncated": false,
-        "text": "The redirect target is probably lost in the sign-in callback. Look at finishLogin first."
+        "text": "The redirect target is probably lost in the sign-in callback. Look at finishLogin first.",
+        "truncated": false
       },
       {
         "id": "login-3",
+        "kind": "subagent",
+        "truncated": false,
+        "toolName": "Agent",
+        "target": "Find where the post-login redirect is decided",
+        "toolStatus": "ok",
+        "agentType": "Explore",
+        "itemCount": 14
+      },
+      {
+        "id": "login-4",
         "kind": "tool",
         "truncated": false,
         "toolName": "Read",
@@ -205,13 +724,13 @@
         "toolStatus": "ok"
       },
       {
-        "id": "login-4",
+        "id": "login-5",
         "kind": "assistant",
-        "truncated": false,
-        "text": "Found it. `finishLogin` gets the `next` value from the sign-in link, then ignores it and always opens `/home`."
+        "text": "Found it. `finishLogin` gets the `next` value from the sign-in link, then ignores it and always opens `/home`.",
+        "truncated": false
       },
       {
-        "id": "login-5",
+        "id": "login-6",
         "kind": "fileEdit",
         "truncated": false,
         "toolName": "Edit",
@@ -219,17 +738,238 @@
         "toolStatus": "ok",
         "added": 12,
         "removed": 3
+      },
+      {
+        "id": "login-7",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Write",
+        "target": "isLocalPath.ts",
+        "toolStatus": "ok",
+        "added": 18,
+        "removed": 0
+      },
+      {
+        "id": "login-8",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "npm test -- auth",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "login-9",
+        "kind": "systemNote",
+        "text": "PostToolUse: eslint src/auth passed.",
+        "truncated": false
+      },
+      {
+        "id": "login-10",
+        "kind": "assistant",
+        "text": "Fixed. Here is what changed:\n\n- `finishLogin` now keeps the `next` value from the sign-in link.\n- A new `isLocalPath` check refuses any link to another site, so `next=https://evil.example` falls back to `/home`.\n- The auth tests pass, 9 of 9.",
+        "truncated": true
       }
     ],
     "local:00000000-0000-4000-8000-000000000103": [
       {
+        "id": "co-1",
+        "kind": "user",
+        "text": "Split the checkout form into three steps: address, shipping and payment. Keep the old form behind the checkout_v1 flag.",
+        "truncated": false
+      },
+      {
+        "id": "co-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Glob",
+        "target": "src/checkout/**/*.tsx",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "co-3",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Read",
+        "target": "src/checkout/CheckoutForm.tsx",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "co-4",
+        "kind": "assistant",
+        "text": "The form is one 600-line component. I will move each section into its own step and keep a small `CheckoutSteps` wrapper that holds the shared state.",
+        "truncated": false
+      },
+      {
+        "id": "co-5",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Write",
+        "target": "AddressStep.tsx",
+        "toolStatus": "ok",
+        "added": 84,
+        "removed": 0
+      },
+      {
+        "id": "co-6",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Edit",
+        "target": "CheckoutForm.tsx",
+        "toolStatus": "ok",
+        "added": 9,
+        "removed": 212
+      },
+      {
+        "id": "co-7",
+        "kind": "peer",
+        "text": "Review note: the payment step must keep the saved-card list. It is easy to drop when that section moves.",
+        "truncated": false,
+        "sender": "Checkout v2 · Review"
+      },
+      {
+        "id": "co-8",
+        "kind": "assistant",
+        "text": "Thanks, noted. The saved-card list moves with the payment section.",
+        "truncated": false
+      },
+      {
+        "id": "co-9",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Write",
+        "target": "ShippingStep.tsx",
+        "toolStatus": "ok",
+        "added": 67,
+        "removed": 0
+      },
+      {
+        "id": "co-10",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "npm run typecheck",
+        "toolStatus": "error"
+      },
+      {
+        "id": "co-11",
+        "kind": "thinking",
+        "text": "ShippingMethod is a union of literals. The select gives a string, so parse it before setting state.",
+        "truncated": false
+      },
+      {
+        "id": "co-12",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Edit",
+        "target": "ShippingStep.tsx",
+        "toolStatus": "ok",
+        "added": 6,
+        "removed": 2
+      },
+      {
+        "id": "co-13",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "npm run typecheck",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "co-14",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "npm test -- checkout --reporter=verbose",
+        "toolStatus": "ok"
+      }
+    ],
+    "local:00000000-0000-4000-8000-000000000104": [
+      {
+        "id": "corev-1",
+        "kind": "user",
+        "text": "Review the checkout split as it lands. Send notes to the main tab.",
+        "truncated": false
+      },
+      {
+        "id": "corev-2",
+        "kind": "assistant",
+        "text": "I will read each change as it lands and send notes to the main tab.",
+        "truncated": false
+      },
+      {
+        "id": "corev-3",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Read",
+        "target": "src/checkout/CheckoutForm.tsx",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "corev-4",
+        "kind": "assistant",
+        "text": "Sent one note to the main tab: keep the saved-card list on the payment step.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-000000000106": [
+      {
+        "id": "docs-1",
+        "kind": "user",
+        "text": "Rewrite the README's setup section for the new dev container.",
+        "truncated": false
+      },
+      {
+        "id": "docs-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Read",
+        "target": "README.md",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "docs-3",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Edit",
+        "target": "README.md",
+        "toolStatus": "ok",
+        "added": 31,
+        "removed": 44
+      },
+      {
+        "id": "docs-4",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Write",
+        "target": "manual-setup.md",
+        "toolStatus": "ok",
+        "added": 52,
+        "removed": 0
+      },
+      {
+        "id": "docs-5",
+        "kind": "assistant",
+        "text": "Done. The setup section now starts with the dev container. The old manual steps moved to `docs/manual-setup.md`.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-000000000107": [
+      {
         "id": "rate-1",
         "kind": "user",
-        "truncated": false,
-        "text": "Add retry with backoff to the outgoing webhook client."
+        "text": "Add retry with backoff to the outgoing webhook client.",
+        "truncated": false
       },
       {
         "id": "rate-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Read",
+        "target": "src/webhooks/client.ts",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "rate-3",
         "kind": "fileEdit",
         "truncated": false,
         "toolName": "Edit",
@@ -238,6 +978,190 @@
         "added": 27,
         "removed": 2
       }
+    ],
+    "local:00000000-0000-4000-8000-000000000108": [
+      {
+        "id": "bulk-1",
+        "kind": "user",
+        "text": "Import the March CSV into staging and report the rows that fail.",
+        "truncated": false
+      },
+      {
+        "id": "bulk-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "node scripts/import.js --file march.csv --dry-run",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "bulk-3",
+        "kind": "assistant",
+        "text": "The dry run found 41 bad rows. Most have a date in the wrong format. Starting the real import now.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-000000000109": [
+      {
+        "id": "sse-1",
+        "kind": "user",
+        "text": "The event stream drops after 30 seconds idle. Make the client reconnect, and add an integration test.",
+        "truncated": false
+      },
+      {
+        "id": "sse-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Read",
+        "target": "src/stream/client.ts",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "sse-3",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Edit",
+        "target": "client.ts",
+        "toolStatus": "ok",
+        "added": 22,
+        "removed": 4
+      },
+      {
+        "id": "sse-4",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Write",
+        "target": "stream.reconnect.test.ts",
+        "toolStatus": "ok",
+        "added": 56,
+        "removed": 0
+      },
+      {
+        "id": "sse-5",
+        "kind": "assistant",
+        "text": "The client now expects a heartbeat every 15 seconds and reconnects when one is missed. Next I want to run the integration tests.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-00000000010A": [
+      {
+        "id": "schema-1",
+        "kind": "user",
+        "text": "Write the migration that splits users.name into first and last name.",
+        "truncated": false
+      },
+      {
+        "id": "schema-2",
+        "kind": "fileEdit",
+        "truncated": false,
+        "toolName": "Write",
+        "target": "0042_split_name.sql",
+        "toolStatus": "ok",
+        "added": 24,
+        "removed": 0
+      },
+      {
+        "id": "schema-3",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "make migrate-test",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "schema-4",
+        "kind": "assistant",
+        "text": "The migration is written. It applies and rolls back cleanly on a copy of staging.",
+        "truncated": false
+      }
+    ],
+    "remote:acme-cloud/triage-1": [
+      {
+        "id": "triage-1",
+        "kind": "user",
+        "text": "Find why test_checkout_total fails about one run in ten.",
+        "truncated": false
+      },
+      {
+        "id": "triage-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "pytest tests/test_checkout.py -k total --count=50",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "triage-3",
+        "kind": "assistant",
+        "text": "It fails when two discounts apply in the same second. The discount list has no stable order, so the rounding differs. Checking where the list is built.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-00000000010B": [
+      {
+        "id": "onb-1",
+        "kind": "user",
+        "text": "Write the onboarding copy for the new welcome flow.",
+        "truncated": false
+      },
+      {
+        "id": "onb-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Read",
+        "target": "design/welcome-flow.md",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "onb-3",
+        "kind": "assistant",
+        "text": "Before I write it, I have three questions.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-00000000010C": [
+      {
+        "id": "set-1",
+        "kind": "user",
+        "text": "Plan the new Settings screen.",
+        "truncated": false
+      },
+      {
+        "id": "set-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Grep",
+        "target": "SettingsSection",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "set-3",
+        "kind": "assistant",
+        "text": "Settings live in three places today: the profile screen, the drawer, and an old preferences page. Pick what moves to the new screen.",
+        "truncated": false
+      }
+    ],
+    "local:00000000-0000-4000-8000-00000000010D": [
+      {
+        "id": "legacy-1",
+        "kind": "user",
+        "text": "Watch the worker logs and tell me about errors.",
+        "truncated": false
+      },
+      {
+        "id": "legacy-2",
+        "kind": "tool",
+        "truncated": false,
+        "toolName": "Bash",
+        "target": "tail -n 200 logs/worker.log",
+        "toolStatus": "ok"
+      },
+      {
+        "id": "legacy-3",
+        "kind": "assistant",
+        "text": "No errors in the last 200 lines.",
+        "truncated": false
+      }
     ]
   },
   "details": {
@@ -245,15 +1169,116 @@
       "input": "command: git log --since=1.week --oneline",
       "result": "a41c2e9 feat: checkout_v1 flag\n93be001 feat: rate limiter for webhooks\n71d0c3a docs: move manual setup\n... 9 more"
     },
+    "login-3-1": {
+      "input": "pattern: finishLogin\npath: src/",
+      "result": "src/auth/redirect.ts:41\nsrc/auth/callback.ts:18\nsrc/auth/redirect.test.ts:7"
+    },
+    "login-3-2": {
+      "input": "file_path: src/auth/callback.ts",
+      "result": "export async function onCallback(req) {\n  const session = await exchangeCode(req.query.code)\n  return finishLogin(session, req.query.next)\n}"
+    },
     "login-3": {
+      "subagent": [
+        {
+          "id": "login-3-1",
+          "kind": "tool",
+          "truncated": false,
+          "toolName": "Grep",
+          "target": "finishLogin",
+          "toolStatus": "ok"
+        },
+        {
+          "id": "login-3-2",
+          "kind": "tool",
+          "truncated": false,
+          "toolName": "Read",
+          "target": "src/auth/callback.ts",
+          "toolStatus": "ok"
+        },
+        {
+          "id": "login-3-3",
+          "kind": "assistant",
+          "text": "`finishLogin` in `src/auth/redirect.ts` receives `next` but never uses it.",
+          "truncated": false
+        }
+      ]
+    },
+    "login-4": {
       "input": "file_path: src/auth/redirect.ts",
       "result": "export function finishLogin(session, next) {\n  saveSession(session)\n  router.push('/home')\n}"
+    },
+    "login-8": {
+      "input": "command: npm test -- auth\ndescription: Run the auth tests",
+      "result": "PASS src/auth/redirect.test.ts\n  ✓ keeps next after sign-in (12 ms)\n  ✓ falls back to /home when next is missing (3 ms)\n  ✓ refuses next on another site (2 ms)\n\nTests: 9 passed, 9 total"
+    },
+    "login-10": {
+      "text": "Fixed. Here is what changed:\n\n- `finishLogin` now keeps the `next` value from the sign-in link.\n- A new `isLocalPath` check refuses any link to another site, so `next=https://evil.example` falls back to `/home`.\n- The auth tests pass, 9 of 9.\n\nThe [OWASP cheat sheet on open redirects](https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html) describes the attack this check blocks.\n\nThe check also refuses `//evil.example`, which browsers read as a link to another site, and `/\\evil.example`, which some browsers fix up the same way. Both cases have a line in `isLocalPath` with a comment that says why."
+    },
+    "co-2": {
+      "input": "pattern: src/checkout/**/*.tsx",
+      "result": "src/checkout/CheckoutForm.tsx\nsrc/checkout/SavedCards.tsx\nsrc/checkout/Summary.tsx"
+    },
+    "co-3": {
+      "input": "file_path: src/checkout/CheckoutForm.tsx",
+      "result": "(612 lines)\nexport function CheckoutForm() {\n  const [address, setAddress] = useState(...)\n  ..."
+    },
+    "co-10": {
+      "input": "command: npm run typecheck",
+      "result": "src/checkout/ShippingStep.tsx(14,7): error TS2322: Type 'string' is not assignable to type 'ShippingMethod'.\n\nFound 1 error."
+    },
+    "co-13": {
+      "input": "command: npm run typecheck",
+      "result": "No errors."
+    },
+    "co-14": {
+      "input": "command: npm test -- checkout --reporter=verbose",
+      "result": "PASS src/checkout/AddressStep.test.tsx\n  ✓ keeps the saved address (31 ms)\n  ✓ shows field errors on blur (18 ms)\nPASS src/checkout/ShippingStep.test.tsx\n  ✓ parses the shipping method (6 ms)\n… (the first 64 KB of 2.4 MB)"
+    },
+    "corev-3": {
+      "input": "file_path: src/checkout/CheckoutForm.tsx",
+      "result": "(612 lines)"
+    },
+    "docs-2": {
+      "input": "file_path: README.md",
+      "result": "# acme-web\n\n## Setup\n1. Install Node 22\n..."
+    },
+    "rate-2": {
+      "input": "file_path: src/webhooks/client.ts",
+      "result": "export async function send(hook, body) {\n  return fetch(hook.url, { method: \"POST\", body })\n}"
+    },
+    "bulk-2": {
+      "input": "command: node scripts/import.js --file march.csv --dry-run",
+      "result": "Read 18,204 rows\n41 rows failed validation (see import-errors.csv)"
+    },
+    "sse-2": {
+      "input": "file_path: src/stream/client.ts",
+      "result": "export function connect(url) {\n  const es = new EventSource(url)\n  ..."
+    },
+    "schema-3": {
+      "input": "command: make migrate-test",
+      "result": "Applied 0042 on a copy of staging: ok\nRolled back: ok"
+    },
+    "triage-2": {
+      "input": "command: pytest tests/test_checkout.py -k total --count=50",
+      "result": "45 passed, 5 failed"
+    },
+    "onb-2": {
+      "input": "file_path: design/welcome-flow.md",
+      "result": "# Welcome flow\nScreens: hello, permissions, account, done."
+    },
+    "set-2": {
+      "input": "pattern: SettingsSection",
+      "result": "src/profile/ProfileScreen.tsx\nsrc/app/Drawer.tsx\nsrc/legacy/Prefs.tsx"
+    },
+    "legacy-2": {
+      "input": "command: tail -n 200 logs/worker.log",
+      "result": "(200 lines, no ERROR entries)"
     }
   },
   "prompts": {
     "local:00000000-0000-4000-8000-000000000102": [
       {
-        "id": "prompt-login",
+        "id": "00000000-0000-4000-8000-0000000000E1",
         "kind": "question",
         "toolName": "AskUserQuestion",
         "targetTruncated": false,
@@ -275,29 +1300,178 @@
           }
         ]
       }
+    ],
+    "local:00000000-0000-4000-8000-00000000010B": [
+      {
+        "id": "00000000-0000-4000-8000-0000000000E3",
+        "kind": "question",
+        "toolName": "AskUserQuestion",
+        "targetTruncated": false,
+        "allowAlways": false,
+        "questions": [
+          {
+            "header": "Tone",
+            "text": "Which tone should the welcome screen use?",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Friendly and short"
+              },
+              {
+                "label": "Plain and formal"
+              },
+              {
+                "label": "Match the current app"
+              }
+            ]
+          },
+          {
+            "header": "Steps",
+            "text": "How many onboarding steps?",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "3 steps",
+                "description": "Hello, account, done"
+              },
+              {
+                "label": "4 steps",
+                "description": "Adds permissions"
+              }
+            ]
+          },
+          {
+            "header": "Skip",
+            "text": "Can people skip onboarding?",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Yes, show a Skip button"
+              },
+              {
+                "label": "No, every step is required"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "local:00000000-0000-4000-8000-00000000010C": [
+      {
+        "id": "00000000-0000-4000-8000-0000000000E4",
+        "kind": "question",
+        "toolName": "AskUserQuestion",
+        "targetTruncated": false,
+        "allowAlways": false,
+        "questions": [
+          {
+            "header": "Sections",
+            "text": "Which settings should move to the new screen?",
+            "multiSelect": true,
+            "options": [
+              {
+                "label": "Notifications"
+              },
+              {
+                "label": "Privacy"
+              },
+              {
+                "label": "Account"
+              },
+              {
+                "label": "Appearance"
+              },
+              {
+                "label": "Storage",
+                "description": "Only on the old preferences page today"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "local:00000000-0000-4000-8000-000000000109": [
+      {
+        "id": "00000000-0000-4000-8000-0000000000E2",
+        "kind": "permission",
+        "toolName": "Bash",
+        "summary": "Run the reconnect integration tests, then show which files changed",
+        "target": "npm run test:integration -- --grep \"reconnects after 30 s idle\" --reporter=dot && git diff --stat origin/main...HEAD",
+        "targetTruncated": false,
+        "allowAlways": true,
+        "suggestions": [
+          "Bash(npm run test:integration:*)"
+        ]
+      }
     ]
   },
   "profiles": [
     {
-      "id": "00000000-0000-4000-8000-0000000000f1",
+      "id": "00000000-0000-4000-8000-0000000000F1",
       "name": "Personal",
       "kind": "oauth",
       "isDefault": true
     },
     {
-      "id": "00000000-0000-4000-8000-0000000000f2",
+      "id": "00000000-0000-4000-8000-0000000000F2",
       "name": "acme-work",
       "kind": "oauth",
       "isDefault": false
     },
     {
-      "id": "00000000-0000-4000-8000-0000000000f3",
+      "id": "00000000-0000-4000-8000-0000000000F3",
       "name": "acme-bedrock",
       "kind": "bedrock",
       "isDefault": false
     }
   ],
   "providers": [
+    {
+      "name": "acme-cloud",
+      "available": true,
+      "acceptsPrompt": true,
+      "fields": [
+        {
+          "name": "branch",
+          "type": "string",
+          "label": "Branch",
+          "required": true,
+          "prefill": "main"
+        },
+        {
+          "name": "size",
+          "type": "enum",
+          "label": "Machine size",
+          "required": true,
+          "values": [
+            "Small",
+            "Medium",
+            "Large"
+          ],
+          "prefill": "Medium"
+        },
+        {
+          "name": "setup",
+          "type": "bool",
+          "label": "Run the setup script",
+          "required": false,
+          "prefill": "true"
+        },
+        {
+          "name": "hours",
+          "type": "int",
+          "label": "Time limit, hours",
+          "required": false,
+          "prefill": "4"
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "label": "Notes for the agent",
+          "required": false
+        }
+      ]
+    },
     {
       "name": "acme-sandbox",
       "available": true,
