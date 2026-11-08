@@ -37,6 +37,21 @@ import Foundation
 import GhosttyVt
 import IOKit.hidsystem
 
+// MARK: - Keyboard layout
+
+/// What the keyboard layout types for a key.
+///
+/// Every layout-dependent reading the controller makes goes through this, so the tests can fake a
+/// layout and give the same answers on a machine set to German or AZERTY as on one set to US.
+struct KeyboardLayout: Sendable {
+    /// The characters `event`'s key types with `modifiers` held, as
+    /// `NSEvent.characters(byApplyingModifiers:)` gives them.
+    var characters: @MainActor @Sendable (NSEvent, NSEvent.ModifierFlags) -> String?
+
+    /// The layout the user has selected.
+    static let system = KeyboardLayout { event, modifiers in event.characters(byApplyingModifiers: modifiers) }
+}
+
 // MARK: - TerminalInputController
 
 @MainActor
@@ -44,13 +59,26 @@ final class TerminalInputController {
     /// The view this controller types into. Weak: the view owns the controller.
     weak var view: GhosttyTerminalView?
 
-    /// The preedit string changed. The renderer has no preedit overlay yet, so this is the hook
-    /// the overlay will hang off.
+    /// The preedit string changed. The view draws the preedit itself, from its `NSTextInputClient`
+    /// methods; this hook is for anything else that wants to know.
     var onPreeditChange: (@MainActor (String) -> Void)?
 
-    /// How the Option key behaves. `.never` is the macOS-native default and the only setting under
-    /// which dead keys work (Option+u, u → `ü`). The view's `optionAsMeta` drives it.
-    var optionAsAlt: OptionAsAlt = .never
+    /// Hands a key event to the input method, which may call the view's `NSTextInputClient`
+    /// methods (`setMarkedText`, `insertText`, `doCommand`) before it returns. In the app this is
+    /// the view's own input context. No input method runs in a test process, so the tests replace
+    /// it with one that makes those calls the way a dead key or an IME does.
+    var inputMethod: @MainActor (NSEvent, GhosttyTerminalView) -> Void = { event, view in
+        _ = view.inputContext?.handleEvent(event)
+    }
+
+    /// How the Option key behaves. `.both` by default, as in SwiftTerm, which the app's terminals
+    /// have always used: Option-b sends `ESC b` and Option-Backspace deletes a word. `.never` types
+    /// the layout's character instead, and is the only setting under which dead keys work
+    /// (Option+u, u → `ü`). The view's `optionAsMeta` drives it.
+    var optionAsAlt: OptionAsAlt = .both
+
+    /// The keyboard layout keys are read through. A test seam; the app uses the system's.
+    var layout: KeyboardLayout = .system
 
     // MARK: State
 
@@ -130,12 +158,12 @@ final class TerminalInputController {
         // The IME sees the event *first*, and it sees the option-as-alt translated one — see the
         // file header. `handleEvent` may call back into `insertText` / `setMarkedText` / `doCommand`
         // synchronously, which is why the accumulator is installed around it.
-        let translation = Self.translationEvent(for: event, optionAsAlt: optionAsAlt)
+        let translation = Self.translationEvent(for: event, optionAsAlt: optionAsAlt, layout: layout)
         let action: KeyPress.Action = event.isARepeat ? .repeated : .press
         let markedBefore = hasMarkedText
 
         keyTextAccumulator = []
-        _ = view.inputContext?.handleEvent(translation)
+        inputMethod(translation, view)
         let accumulated = keyTextAccumulator ?? []
         keyTextAccumulator = nil
 
@@ -149,9 +177,10 @@ final class TerminalInputController {
             // paste — one press per committed string, `composing` false because the composition is
             // finished, whatever the preedit state is now.
             for text in accumulated where !Self.isBareControl(text, composing: composing) {
-                send(Self.keyPress(
+                let press = Self.keyPress(
                     event: event, translationEvent: translation, action: action,
-                    optionAsAlt: optionAsAlt, text: text, composing: false))
+                    optionAsAlt: optionAsAlt, text: text, composing: false, layout: layout)
+                send(press, scrollsToBottom: true)
             }
             return true
         }
@@ -159,9 +188,11 @@ final class TerminalInputController {
         // A bare control character arriving mid-composition belongs to the IME, not the terminal.
         if Self.isBareControl(event.characters, composing: composing) { return true }
 
-        send(Self.keyPress(
+        let press = Self.keyPress(
             event: event, translationEvent: translation, action: action,
-            optionAsAlt: optionAsAlt, text: Self.filteredText(of: translation), composing: composing))
+            optionAsAlt: optionAsAlt, text: Self.filteredText(of: translation, layout: layout),
+            composing: composing, layout: layout)
+        send(press, scrollsToBottom: true)
         return true
     }
 
@@ -173,7 +204,7 @@ final class TerminalInputController {
         guard !hasMarkedText else { return true }
         send(Self.keyPress(
             event: event, translationEvent: event, action: .release,
-            optionAsAlt: optionAsAlt, text: "", composing: false))
+            optionAsAlt: optionAsAlt, text: "", composing: false, layout: layout))
         return true
     }
 
@@ -241,7 +272,10 @@ final class TerminalInputController {
         // produced this text here and now — the safety prompt exists for the *clipboard*, whose
         // contents came from somewhere else.
         guard let view else { return }
-        view.send(view.terminal.pasteText(text, source: .text, allowUnsafe: true).bytes)
+        let bytes = view.terminal.pasteText(text, source: .text, allowUnsafe: true).bytes
+        guard !bytes.isEmpty else { return }
+        scrollToBottom(view)
+        view.send(bytes)
     }
 
     // MARK: - Clipboard image chord
@@ -295,16 +329,19 @@ final class TerminalInputController {
     ///   - translationEvent: the event macOS translated the text with (see the file header). Pass
     ///     nil to derive it.
     ///   - text: the text to send, already filtered. Pass nil to take it from `translationEvent`.
+    ///   - layout: the keyboard layout to read the key through.
     static func keyPress(
         event: NSEvent,
         translationEvent: NSEvent? = nil,
         action: KeyPress.Action,
         optionAsAlt: OptionAsAlt,
         text: String? = nil,
-        composing: Bool = false
+        composing: Bool = false,
+        layout: KeyboardLayout = .system
     ) -> KeyPress {
         let mods = modifiers(from: event.modifierFlags)
-        let translation = translationEvent ?? Self.translationEvent(for: event, optionAsAlt: optionAsAlt)
+        let translation = translationEvent
+            ?? Self.translationEvent(for: event, optionAsAlt: optionAsAlt, layout: layout)
 
         // macOS has no API for "which modifiers were spent producing this text", so this is
         // Ghostty's long-standing heuristic: Control and Command never contribute, everything else
@@ -315,7 +352,7 @@ final class TerminalInputController {
 
         var unshifted: UInt32 = 0
         if event.type == .keyDown || event.type == .keyUp,
-           let scalar = event.characters(byApplyingModifiers: [])?.unicodeScalars.first {
+           let scalar = layout.characters(event, [])?.unicodeScalars.first {
             unshifted = scalar.value
         }
 
@@ -324,7 +361,7 @@ final class TerminalInputController {
             key: MacKeyCodes.key(forVirtualKeyCode: event.keyCode),
             mods: mods,
             consumedMods: consumed,
-            text: text ?? filteredText(of: translation),
+            text: text ?? filteredText(of: translation, layout: layout),
             unshiftedCodepoint: unshifted,
             composing: composing)
     }
@@ -337,7 +374,9 @@ final class TerminalInputController {
     ///
     /// Only the four device-independent bits are toggled, on top of the *original* raw flags — the
     /// low bits carry device sides and dead-key state that AppKit needs to keep composing.
-    static func translationEvent(for event: NSEvent, optionAsAlt: OptionAsAlt) -> NSEvent {
+    static func translationEvent(
+        for event: NSEvent, optionAsAlt: OptionAsAlt, layout: KeyboardLayout = .system
+    ) -> NSEvent {
         let mods = modifiers(from: event.modifierFlags)
         let translation = KeyEncoder.translationModifiers(for: mods, optionAsAlt: optionAsAlt)
 
@@ -355,7 +394,7 @@ final class TerminalInputController {
             timestamp: event.timestamp,
             windowNumber: event.windowNumber,
             context: nil,
-            characters: event.characters(byApplyingModifiers: flags) ?? "",
+            characters: layout.characters(event, flags) ?? "",
             charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
             isARepeat: event.isARepeat,
             keyCode: event.keyCode) ?? event
@@ -394,14 +433,14 @@ final class TerminalInputController {
     /// macOS PUA codepoints and must never reach the terminal. Shift+Tab is the live case: AppKit
     /// reports U+0019, the re-read gives U+0009, and both are C0 — so the answer is `""` and the
     /// encoder produces `ESC[Z` / `ESC[9;2u` from the key alone.
-    static func filteredText(of event: NSEvent) -> String {
+    static func filteredText(of event: NSEvent, layout: KeyboardLayout = .system) -> String {
         guard let characters = event.characters else { return "" }
         guard characters.unicodeScalars.count == 1, let scalar = characters.unicodeScalars.first else {
             return characters
         }
         if (0xF700...0xF8FF).contains(scalar.value) { return "" }
         if scalar.value < 0x20 {
-            let relaxed = event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.control))
+            let relaxed = layout.characters(event, event.modifierFlags.subtracting(.control))
             return sanitize(relaxed ?? "")
         }
         return sanitize(characters)
@@ -444,12 +483,22 @@ final class TerminalInputController {
     ///
     /// Returns true when bytes were sent. An empty encoding (a release in legacy mode, a bare
     /// modifier) is normal and returns false.
+    ///
+    /// - Parameter scrollsToBottom: true for a typed key, which brings a viewport the user scrolled
+    ///   back down to the cursor before the bytes go out, as SwiftTerm and every other terminal
+    ///   do. A modifier on its own, a release, and the image chord of a ⌘V do not.
     @discardableResult
-    private func send(_ press: KeyPress) -> Bool {
+    private func send(_ press: KeyPress, scrollsToBottom: Bool = false) -> Bool {
         guard let view else { return false }
         let bytes = view.terminal.encodeKey(press, optionAsAlt: optionAsAlt)
         guard !bytes.isEmpty else { return false }
+        if scrollsToBottom { scrollToBottom(view) }
         view.send(bytes)
         return true
+    }
+
+    /// Brings the viewport down to the cursor, and asks for a frame when it moved.
+    private func scrollToBottom(_ view: GhosttyTerminalView) {
+        if view.terminal.scrollViewportToBottom() { view.requestFrame() }
     }
 }

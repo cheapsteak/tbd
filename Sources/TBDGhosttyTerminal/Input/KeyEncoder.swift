@@ -228,6 +228,10 @@ final class KeyEncoder {
     /// this method always re-applies `optionAsAlt` afterwards. Getting that order wrong silently
     /// breaks every Option binding.
     ///
+    /// The result then goes through ``legacyControlBytes(replacing:kittyFlags:)``, which turns
+    /// Ctrl-I, Ctrl-M, Ctrl-[ and Ctrl-Shift-letter back into control bytes for a program that never
+    /// asked for CSI u.
+    ///
     /// - Returns: the bytes to write to the pty. **An empty array is a normal result**, not an
     ///   error: bare modifier presses, releases in legacy mode, and composing keys produce nothing.
     /// - Throws: ``GhosttyCallError`` if libghostty fails for any reason other than buffer size.
@@ -264,8 +268,73 @@ final class KeyEncoder {
                 ghostty_key_encoder_set(encoder.raw, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, &asAlt),
                 "key_encoder_set(OPTION_AS_ALT)")
 
-            return try encodeCurrentEvent()
+            let encoded = try encodeCurrentEvent()
+            let kittyFlags = GhosttyTerminalState(raw: terminal).kittyKeyboardFlags
+            return Self.legacyControlBytes(replacing: encoded, kittyFlags: kittyFlags) ?? encoded
         }
+    }
+
+    /// Control bytes in place of the CSI u that libghostty encoded some Ctrl keys as, for a program
+    /// that never asked for CSI u.
+    ///
+    /// libghostty's legacy encoder follows the fixterms spec in two places a shell cannot read:
+    ///   * It leaves Ctrl-I, Ctrl-M and Ctrl-[ out of its control-character table on purpose
+    ///     (`key_encode.zig`: "purposely NOT handled here"), and sends `CSI 105;5u`, `CSI 109;5u`
+    ///     and `CSI 91;5u`. In zsh, Ctrl-M prints `09;5u`, and a later Return runs `5u` as a
+    ///     command. These go out as Tab, Return and Esc.
+    ///   * It sends Ctrl-Shift-letter as CSI u (`CSI 118;6u` for Ctrl-Shift-V), so a program can
+    ///     tell it from Ctrl-letter. Only a program that set Kitty flags reads that form, so these go
+    ///     out as the letter's control byte, which every program reads.
+    ///
+    /// xterm, Terminal.app and SwiftTerm send the control byte in both cases, and so does this.
+    /// Only those exact forms are replaced, and only while the program has set no Kitty flags:
+    ///   * Under Kitty flags, the CSI u is what the program asked for.
+    ///   * Under xterm's modifyOtherKeys 2, libghostty sends `CSI 27;5;105~`, which the program
+    ///     also asked for. It does not match the form.
+    ///
+    /// Caps Lock gives `CSI 73;5u` (an upper-case I), and maps the same way. With Alt held as
+    /// Meta (`;7u`), the C0 byte follows an ESC, as libghostty does for every other control key.
+    ///
+    /// - Returns: the bytes to send instead, or nil to send `encoded` unchanged.
+    static func legacyControlBytes(replacing encoded: [UInt8], kittyFlags: UInt8) -> [UInt8]? {
+        guard kittyFlags == 0 else { return nil }
+        // ESC [ <codepoint> ; <modifiers> u
+        guard encoded.count >= 6, encoded[0] == 0x1B, encoded[1] == UInt8(ascii: "["),
+              encoded.last == UInt8(ascii: "u") else { return nil }
+        let fields = encoded[2..<(encoded.count - 1)]
+            .split(separator: UInt8(ascii: ";"), omittingEmptySubsequences: false)
+        guard fields.count == 2, let codepoint = decimal(fields[0]), let modifiers = decimal(fields[1])
+        else { return nil }
+
+        switch modifiers {
+        case 5, 7:
+            // Ctrl, or Ctrl and Alt: the three keys missing from libghostty's table.
+            let control: UInt8
+            switch codepoint {
+            case 0x69, 0x49: control = 0x09  // i, or I under Caps Lock: Tab
+            case 0x6D, 0x4D: control = 0x0D  // m, or M under Caps Lock: Return
+            case 0x5B: control = 0x1B        // [: Esc
+            default: return nil
+            }
+            return modifiers == 7 ? [0x1B, control] : [control]
+        case 6:
+            // Ctrl and Shift: any letter, as its control byte.
+            guard (0x41...0x5A).contains(codepoint) || (0x61...0x7A).contains(codepoint) else { return nil }
+            return [UInt8(codepoint) & 0x1F]
+        default:
+            return nil
+        }
+    }
+
+    /// A run of ASCII digits as a number, or nil for anything else.
+    private static func decimal(_ digits: ArraySlice<UInt8>) -> Int? {
+        guard !digits.isEmpty, digits.count <= 6 else { return nil }
+        var value = 0
+        for byte in digits {
+            guard (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte) else { return nil }
+            value = value * 10 + Int(byte - UInt8(ascii: "0"))
+        }
+        return value
     }
 
     /// Encode the already-configured event, growing the buffer once if libghostty asks for more.

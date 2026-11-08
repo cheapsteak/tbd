@@ -167,8 +167,8 @@ struct ScrollAccumulator: Sendable, Equatable {
         return Int(whole)
     }
 
-    /// Drop the carried fraction — call at the end of a scroll gesture (`NSEvent.phase == .ended`)
-    /// so a new flick starts clean.
+    /// Drop the carried fraction — call when a new gesture begins or the direction reverses, so a
+    /// stale fraction never joins motion it did not belong to.
     mutating func reset() { remainder = 0 }
 }
 
@@ -176,10 +176,27 @@ struct ScrollAccumulator: Sendable, Equatable {
 enum WheelOutcome: Sendable, Equatable {
     /// Nothing to do (zero rows, or the terminal wanted no report).
     case none
-    /// Write these bytes to the pty (mouse tracking is on).
-    case report([UInt8])
+    /// Write `press`, the report of one wheel press for button four (up) or five (down), to the
+    /// pty `count` times, once per row (mouse tracking is on). A count rather than the bytes, so
+    /// the view can bound how many it sends.
+    case report(press: [UInt8], count: Int)
+    /// Write `key`, a cursor-up or cursor-down key, to the pty `count` times, once per row, because
+    /// a program on the alternate screen with alternate scroll (`?1007h`) asked for the wheel as
+    /// arrow keys. A count rather than the bytes, so the view can bound how many it sends.
+    case cursorKeys(key: [UInt8], count: Int)
     /// Mouse tracking is off and the viewport was scrolled by this many rows (negative = up).
     case scrolledViewport(rows: Int)
+}
+
+/// Where wheel rows go under the terminal's modes as they stand, as `MouseEncoder.wheel` decides.
+enum WheelRoute: Sendable, Equatable {
+    /// To the program as mouse reports: libghostty reports the mouse.
+    case reports
+    /// To the program as arrow keys under `?1007`, or nowhere without it: the alternate screen,
+    /// with nothing reported.
+    case alternateScroll
+    /// To the viewport: the primary screen, with nothing reported.
+    case viewport
 }
 
 // MARK: - The encoder
@@ -462,14 +479,29 @@ final class MouseEncoder {
         return Array(stack.prefix(written))
     }
 
-    /// Turn accumulated whole rows of scrolling into either mouse reports or a viewport scroll.
+    /// Where wheel rows go under `terminal`'s modes as they stand: reports while libghostty
+    /// reports the mouse, by the flags rather than the mode bits, then alternate scroll on the
+    /// alternate screen, then the viewport. `wheel` goes by it, and the view reads it to choose
+    /// its arithmetic. Caller holds the terminal lock.
+    func wheelRoute(terminal: VtTerminal) -> WheelRoute {
+        if isReporting(terminal: terminal) { return .reports }
+        return GhosttyTerminalState(raw: terminal).isAlternateScreen ? .alternateScroll : .viewport
+    }
+
+    /// Turn accumulated whole rows of scrolling into mouse reports, arrow keys or a viewport scroll.
     ///
     /// - Parameter rows: whole rows to scroll; **negative = up**, matching
     ///   `GHOSTTY_SCROLL_VIEWPORT_DELTA` ("up is negative"). Feed it from `ScrollAccumulator`.
     ///
-    /// With tracking on, one *press* report per row is emitted for button four (up) / five (down);
-    /// that is what xterm-style wheel reporting is — see the measured bytes in the tests.
-    /// With tracking off the viewport is scrolled instead and no bytes are produced.
+    /// The order is Ghostty's own (`Surface.zig`, `scrollCallback`), as `wheelRoute` gives it:
+    ///   * With tracking on, one *press* report per row is due for button four (up) / five (down);
+    ///     that is what xterm-style wheel reporting is — see the measured bytes in the tests. Every
+    ///     row's report is the same press in the same cell, so it is encoded once and counted.
+    ///   * Otherwise, on the alternate screen, the wheel is arrow keys when the program has
+    ///     alternate scroll (`?1007`) set, which is how `less`, `man` and vim scroll by wheel, and
+    ///     nothing when it has not: the alternate screen has no scrollback to move through.
+    ///   * Otherwise the viewport is scrolled and no bytes are produced.
+    ///
     /// Caller holds the terminal lock.
     func wheel(
         rows: Int,
@@ -479,25 +511,52 @@ final class MouseEncoder {
     ) throws -> WheelOutcome {
         guard rows != 0 else { return .none }
 
-        guard isReporting(terminal: terminal) else {
+        switch wheelRoute(terminal: terminal) {
+        case .alternateScroll:
+            // Arrow keys here match SwiftTerm's own view, and are what makes the wheel work in
+            // less and vim. The app has its own policy for these events, which drops them where
+            // arrow keys typed into an agent's composer would recall its history. Its scroll
+            // monitor (`ScrollWheelAccumulator`) sits in front of the terminal view on every
+            // transport, and once this engine is wired in it will sit in front of this view
+            // too, so the app's policy applies there and this path is the view's own fallback.
+            let state = GhosttyTerminalState(raw: terminal)
+            guard state.mode(Self.alternateScrollMode) else { return .none }
+            let key = Self.alternateScrollKey(
+                up: rows < 0, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode))
+            return .cursorKeys(key: key, count: abs(rows))
+        case .viewport:
             var behavior = GhosttyTerminalScrollViewport()
             behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
             behavior.value.delta = rows
             _ = ghostty_terminal_scroll_viewport(terminal, behavior)
             return .scrolledViewport(rows: rows)
+        case .reports:
+            break
         }
 
         syncFromTerminal(terminal)
         lastMotion = nil
         let press = MousePress(action: .press, button: rows < 0 ? .four : .five, mods: mods, position: position)
-        var bytes: [UInt8] = []
-        for _ in 0..<abs(rows) {
-            // A wheel "click" is a press with no release. It goes straight to the encoder, so it
-            // never joins `pressEncodings`, where it would count as a held button. The encoder is
-            // still told a button is down, as for any press.
-            if let encoded = try encodeEvent(press, with: handle, anyPressed: true) { bytes += encoded }
+        // A wheel "click" is a press with no release. It goes straight to the encoder, so it never
+        // joins `pressEncodings`, where it would count as a held button. The encoder is still told
+        // a button is down, as for any press.
+        guard let report = try encodeEvent(press, with: handle, anyPressed: true), !report.isEmpty else {
+            return .none
         }
-        return bytes.isEmpty ? .none : .report(bytes)
+        return .report(press: report, count: abs(rows))
+    }
+
+    // MARK: Alternate scroll
+
+    /// DEC private mode 1007, alternate scroll. On in a new terminal, as in Ghostty and SwiftTerm.
+    static let alternateScrollMode: UInt16 = 1007
+    /// DEC private mode 1, DECCKM: the cursor keys send `ESC O A` rather than `ESC [ A`.
+    static let applicationCursorKeysMode: UInt16 = 1
+
+    /// The key one row of wheel scrolling types under alternate scroll: cursor up or cursor down.
+    /// Under DECCKM it is the application form, as the real key is.
+    static func alternateScrollKey(up: Bool, applicationCursorKeys: Bool) -> [UInt8] {
+        [0x1B, UInt8(ascii: applicationCursorKeys ? "O" : "["), UInt8(ascii: up ? "A" : "B")]
     }
 }
 

@@ -136,6 +136,22 @@ extension GhosttyTerminal {
         }
     }
 
+    // MARK: Viewport
+
+    /// Moves the viewport down to the active area, as typing does in every terminal. Returns true
+    /// when it moved, so the caller asks for a frame only then.
+    @discardableResult
+    func scrollViewportToBottom() -> Bool {
+        withRaw { raw -> Bool in
+            let metrics = TerminalScrollMetrics.read(raw)
+            guard metrics.offset + metrics.visible < metrics.total else { return false }
+            var behavior = GhosttyTerminalScrollViewport()
+            behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM
+            _ = ghostty_terminal_scroll_viewport(raw, behavior)
+            return true
+        } ?? false
+    }
+
     // MARK: Paste
 
     /// Pastes `text`: bracketing (mode 2004), newline conversion, unsafe-byte stripping and the
@@ -185,8 +201,19 @@ extension GhosttyTerminal {
         }
     }
 
-    /// Whole rows of wheel scrolling. With tracking on the reports are returned in `.report`; with
-    /// tracking off the viewport is scrolled under the lock and the caller should ask for a frame.
+    /// Where wheel rows would go, under one lock, as `MouseEncoder.wheel` decides: reports, arrow
+    /// keys or the viewport. Read from what libghostty reports, like `isMouseReporting`, not from
+    /// the mode bits. The viewport once the terminal is closed, when the wheel does nothing anyway.
+    var wheelRoute: WheelRoute {
+        input("reading where the wheel goes", fallback: .viewport) { raw, binding in
+            binding.mouseEncoder.wheelRoute(terminal: raw)
+        }
+    }
+
+    /// Whole rows of wheel scrolling. With tracking on, the report and how many of it are returned
+    /// in `.report`. With tracking off, on the alternate screen under `?1007`, the arrow key and
+    /// how many of it are returned in `.cursorKeys`; elsewhere the viewport is scrolled under the
+    /// lock and the caller should ask for a frame.
     func mouseWheel(rows: Int, at position: SurfacePoint, mods: TerminalModifiers) -> WheelOutcome {
         input("encoding the wheel", fallback: .none) { raw, binding in
             try binding.mouseEncoder.wheel(rows: rows, at: position, mods: mods, terminal: raw)

@@ -274,7 +274,8 @@ public final class GhosttyTerminalView: NSView {
     public var onFocusChanged: (@MainActor (Bool) -> Void)?
 
     /// Whether Option acts as Meta (Option-b sends `ESC b`) rather than typing the layout's
-    /// character (`∫`). Off is the macOS default, and the only setting under which dead keys work.
+    /// character (`∫`). On by default, as in SwiftTerm, so Option-Backspace deletes a word. Off is
+    /// the macOS text default, and the only setting under which dead keys work.
     public var optionAsMeta: Bool {
         get { inputController.optionAsAlt != .never }
         set { inputController.optionAsAlt = newValue ? .both : .never }
@@ -418,6 +419,7 @@ public final class GhosttyTerminalView: NSView {
         if fontChanged { useRenderContext(font: appearance.font, scale: renderContext.scale) }
         surface.markNeedsDisplay()
         startBlinkIfNeeded()
+        refreshPreeditOverlay()
         requestFrame()
     }
 
@@ -706,6 +708,7 @@ public final class GhosttyTerminalView: NSView {
         grid = size
         terminal.resize(cols: size.cols, rows: size.rows, cellWidthPx: size.cellWidthPx, cellHeightPx: size.cellHeightPx)
         mouseController.syncGeometry()
+        refreshPreeditOverlay()
         if gridChanged { onSizeChanged?(size.cols, size.rows) }
         requestFrame()
     }
@@ -726,6 +729,7 @@ public final class GhosttyTerminalView: NSView {
         useRenderContext(font: terminalAppearance.font, scale: scale)
         pendingGridResize = true
         applyPendingGridResize()
+        refreshPreeditOverlay()
         requestFrame()
     }
 
@@ -877,6 +881,8 @@ public final class GhosttyTerminalView: NSView {
             terminalEngineLog.notice("rendering a frame succeeded after failing")
             renderFailing = false
         }
+        // Program output can move the cursor under a composition.
+        refreshPreeditOverlay()
         frameDriver.update { $0.needsUpdate = surface.needsDisplay }
     }
 
@@ -952,7 +958,12 @@ public final class GhosttyTerminalView: NSView {
 
     public override func resignFirstResponder() -> Bool {
         let accepted = super.resignFirstResponder()
-        if accepted { setFocused(false) }
+        if accepted {
+            // A composition belongs to the focused view; left in place it would show on a pane
+            // that no longer takes the input method's keys.
+            discardComposition()
+            setFocused(false)
+        }
         return accepted
     }
 
