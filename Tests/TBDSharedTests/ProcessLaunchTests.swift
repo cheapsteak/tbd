@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDShared
 
 /// Foundation keeps a `Process`'s `terminationHandler` alive after `run()` throws,
@@ -7,7 +8,7 @@ import Foundation
 /// open for the daemon's life. The observable fact is whether that capture is
 /// released, checked on a sentinel object so other tests' descriptors cannot
 /// disturb the result.
-@Suite("Process launch")
+@Suite("Process launch", .fastPassBounded)
 struct ProcessLaunchTests {
     private final class Sentinel: @unchecked Sendable {}
 

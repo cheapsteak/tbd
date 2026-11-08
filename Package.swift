@@ -334,7 +334,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TBDSharedTests",
-            dependencies: ["TBDShared", "TBDKernel"],
+            dependencies: ["TBDShared", "TBDKernel", "TestSupport"],
             // `.process`, not `.copy`: process flattens the directory's files
             // into the bundle root, which is where
             // `Bundle.module.url(forResource:withExtension:)` looks. `.copy`
