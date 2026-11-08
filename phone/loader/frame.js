@@ -262,7 +262,8 @@ export function isRunnerReady(event, { frameWindow, nonce, loadCount, started })
 /**
  * The part of each safe-area inset that overlaps the frame, given the frame's rectangle in
  * layout-viewport coordinates. The app pads by these values and nothing else, so an inset
- * is never padded twice.
+ * is never padded twice. Each side is capped to [0, inset]: a rectangle read mid-resize can
+ * extend past the layout viewport, and that overflow must not turn into padding.
  * @param {Insets} insets
  * @param {{top: number, right: number, bottom: number, left: number}} rect
  * @param {{width: number, height: number}} layout
@@ -270,11 +271,20 @@ export function isRunnerReady(event, { frameWindow, nonce, loadCount, started })
  */
 export function frameInsets(insets, rect, layout) {
   return {
-    top: Math.max(0, insets.top - rect.top),
-    right: Math.max(0, insets.right - (layout.width - rect.right)),
-    bottom: Math.max(0, insets.bottom - (layout.height - rect.bottom)),
-    left: Math.max(0, insets.left - rect.left),
+    top: overlap(insets.top, rect.top),
+    right: overlap(insets.right, layout.width - rect.right),
+    bottom: overlap(insets.bottom, layout.height - rect.bottom),
+    left: overlap(insets.left, rect.left),
   };
+}
+
+/**
+ * @param {number} inset
+ * @param {number} gap The distance from the frame's edge to the viewport's edge.
+ * @returns {number}
+ */
+function overlap(inset, gap) {
+  return Math.min(inset, Math.max(0, inset - gap));
 }
 
 /**

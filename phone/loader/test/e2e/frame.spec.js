@@ -110,8 +110,8 @@ test('the color scheme and viewport are forwarded', async ({ page, server }) => 
   await expect.poll(() => envEvents(laptop).at(-1)).toMatchObject({
     colorScheme: 'dark',
     layout: { width: 390, height: 500 },
+    safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
   });
-  expect(envEvents(laptop).at(-1).safeArea).toEqual({ top: 0, right: 0, bottom: 0, left: 0 });
 });
 
 test('the app\'s messages reach the laptop and its replies reach the app', async ({ page, server }) => {

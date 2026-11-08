@@ -1133,7 +1133,21 @@ class LoaderPage {
     this.#raf(() => {
       this.#envQueued = false;
       this.#sendEnv();
+      // The frame's rectangle can lag a resize by a frame. If it still overran the layout
+      // viewport, read once more; that read never queues another.
+      if (!this.#frameFitsLayout() && this.#frame !== null) {
+        this.#envQueued = true;
+        this.#raf(() => {
+          this.#envQueued = false;
+          this.#sendEnv();
+        });
+      }
     });
+  }
+
+  #frameFitsLayout() {
+    const r = this.#frameHost.getBoundingClientRect();
+    return r.right <= this.#win.innerWidth && r.bottom <= this.#win.innerHeight;
   }
 
   #sendEnv() {

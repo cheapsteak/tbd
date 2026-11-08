@@ -51,6 +51,20 @@ test('frameInsets cuts the side insets in landscape', () => {
   assert.deepEqual(frameInsets(insets, { top: 44, bottom: 390, left: 20, right: 800 }, layout), { top: 0, right: 3, bottom: 21, left: 27 });
 });
 
+test('frameInsets never exceeds the real inset, even for a rectangle read mid-resize', () => {
+  const layout = { width: 390, height: 500 };
+  const stale = { top: 0, bottom: 659, left: 0, right: 393 };
+  assert.deepEqual(frameInsets({ top: 0, right: 0, bottom: 0, left: 0 }, stale, layout), { top: 0, right: 0, bottom: 0, left: 0 });
+  assert.deepEqual(frameInsets({ top: 0, right: 0, bottom: 34, left: 0 }, stale, layout), { top: 0, right: 0, bottom: 34, left: 0 });
+  assert.deepEqual(frameInsets({ top: 20, right: 0, bottom: 0, left: 0 }, { ...stale, top: -30 }, layout), { top: 20, right: 0, bottom: 0, left: 0 });
+});
+
+test('frameInsets is zero where the frame sits further from the edge than the inset', () => {
+  const insets = { top: 10, right: 10, bottom: 10, left: 10 }, layout = { width: 400, height: 800 };
+  assert.deepEqual(frameInsets(insets, { top: 10, bottom: 790, left: 10, right: 390 }, layout), { top: 0, right: 0, bottom: 0, left: 0 });
+  assert.deepEqual(frameInsets(insets, { top: 0, bottom: 800, left: 0, right: 400 }, layout), insets);
+});
+
 test('openableURL', () => {
   assert.equal(openableURL('https://acme.example/x'), 'https://acme.example/x');
   assert.equal(openableURL('http://acme.example/'), 'http://acme.example/');
