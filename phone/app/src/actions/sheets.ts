@@ -1,7 +1,9 @@
 // Filled by plan 6 part 6d
 //
 // The sheet and menu actions: profiles, switching account, forking, the model, and New.
-// Part 6d fills them. Until then each does nothing.
+// Part 6d fills them. Until then each does nothing. What they load and what a create waits on
+// go in the sheet slice (`state/sheets.ts`), which part 6d fills too; a refused switch or model
+// change goes in `ui.refusal`, by `refKey` of the session.
 //
 // Contract, once filled:
 // - `loadProfiles(): Promise<void>` – `profiles.list`, for the account menu and the Switch
@@ -13,8 +15,9 @@
 // - `setModel(model): Promise<void>` – `session.setModel` on the open session.
 // - `loadProviders(repoID): Promise<void>` – `remote.providers`, prefilled for `repoID`.
 // - `createWorktree(repoID, message): Promise<void>` – `worktree.create`. The new session
-//   opens once the list shows it: `openPending` with `{ ref }` when the reply names it, or
-//   with `{ worktreeID, toast: 'Created {name}' }` when it does not.
+//   opens once the list shows it: `openPending` with `{ worktreeID, toast: 'Created {name}' }`,
+//   which opens the new row's first session and toasts "Created <row name>". The reply's
+//   `session`, when it has one, is that first session.
 // - `createRemote(params): Promise<void>` – `remote.create`, then `openPending` with `{ ref }`.
 // Each resolves once the laptop replied or the request failed. Like every action, none
 // rejects (`actions/index.ts`); `superseded` is silent.

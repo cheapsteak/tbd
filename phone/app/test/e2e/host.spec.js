@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { app, expect, hostCall, hostRequests, openApp, rowNames, takeProblems, test } from './fixtures.js';
+import { app, expect, frameURL, hostCall, hostRequests, openApp, rowNames, takeProblems, test } from './fixtures.js';
 import { BUNDLE_PATH } from './server.js';
 
 const RUNNER_SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../loader/runner.html');
@@ -43,6 +43,8 @@ test('the app frame is the staged runner, under its own policy alone, with an op
   const iframe = page.locator('#frame-host iframe');
   await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
   expect(new URL(/** @type {string} */ (await iframe.getAttribute('src'))).href.split('#')[0]).toBe(`${appHost.origin}/runner.html`);
+  // The document the frame holds is the runner's, as `frameURL` reports it.
+  expect(new URL(await frameURL(page)).href.split('#')[0]).toBe(`${appHost.origin}/runner.html`);
 
   // The staged runner.html is the source with the origin stamped in, and nothing else changed.
   const source = await readFile(RUNNER_SOURCE, 'utf8');

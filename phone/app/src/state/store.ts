@@ -12,6 +12,8 @@ import type { HostEnv } from '../env.ts';
 import type { PhoneGroupLayout, PhoneRow, PhoneSessionRef } from '../protocol/types.ts';
 import { emptyPrompts } from './prompts.ts';
 import type { PromptsState } from './prompts.ts';
+import { emptySheets } from './sheets.ts';
+import type { SheetsState } from './sheets.ts';
 import { emptyTranscript } from './transcript.ts';
 import type { TranscriptState } from './transcript.ts';
 
@@ -84,6 +86,8 @@ export interface AppState {
   ui: UIState;
   transcript: TranscriptState;
   prompts: PromptsState;
+  /** What the menus and sheets load or wait on: profiles, providers, a create in progress (`state/sheets.ts`). */
+  sheets: SheetsState;
 }
 
 export interface Store {
@@ -124,6 +128,7 @@ export function initialState(): AppState {
     },
     transcript: emptyTranscript(),
     prompts: emptyPrompts(),
+    sheets: emptySheets(),
   };
 }
 

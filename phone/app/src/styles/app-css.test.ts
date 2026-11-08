@@ -82,6 +82,17 @@ test('the frame rules become the #app rules', () => {
   assert.ok(appLines.has('.dock{padding-bottom:calc(10px + var(--dock-pad))}'));
 });
 
+test("the app additions hold the transcript's virtual list", () => {
+  // Part 6c's rows are absolutely placed inside .tx, so the mock's .tx gap becomes each row's padding.
+  assert.ok(appLines.has('.tx-list{position:relative;flex:none;margin-bottom:-8px}'));
+  assert.ok(appLines.has('.tx-row{position:absolute;top:0;left:0;right:0;display:flex;flex-direction:column;gap:8px;padding-bottom:8px}'));
+  assert.ok(appLines.has('.tx{position:absolute;inset:0;overflow-y:auto;padding:12px 12px 14px;display:flex;flex-direction:column;gap:8px;background:var(--pane);-webkit-overflow-scrolling:touch}'),
+    "the 8px is the mock's .tx gap");
+  // Both come after the mock's rules, in the app additions block.
+  const additions = appCss.indexOf('/* app additions */');
+  assert.ok(additions > 0 && appCss.indexOf('.tx-list{') > additions && appCss.indexOf('.tx-row{') > additions);
+});
+
 test('only the chosen designs and no review-page rules ship', () => {
   for (const s of ['d-comfy', 'w-words', 'tabs-pills', 'ch-stack', '#panel', '.mocktab', '.sim-sb', '#strip', '.lapbtn', '#frame', '#page'])
     assert.equal(appCss.includes(s), false, s);

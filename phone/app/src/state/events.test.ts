@@ -193,9 +193,15 @@ test('transcript events reach the transcript slice', () => {
 });
 
 test('an event no slice changes returns the state itself', () => {
+  // Slices that change nothing, so the test holds whatever parts 6c and 6d make of the real ones.
+  const unchanged: EventSlices = {
+    applyTranscriptEvent: (s) => s,
+    applyPromptChanged: (s) => ({ prompts: s, receipts: [] }),
+    addReceipt: (s) => s,
+  };
   const s0 = initialState();
-  assert.equal(applyEvent(s0, { event: 'transcript.append', seq: 4, data: { session: R, items: [] } }), s0);
-  assert.equal(applyEvent(s0, { event: 'prompt.changed', seq: 5, data: PROMPT_DATA }), s0);
+  assert.equal(applyEventWith(s0, { event: 'transcript.append', seq: 4, data: { session: R, items: [] } }, unchanged), s0);
+  assert.equal(applyEventWith(s0, { event: 'prompt.changed', seq: 5, data: PROMPT_DATA }, unchanged), s0);
 });
 
 test('applyEvent uses the real slices', () => {

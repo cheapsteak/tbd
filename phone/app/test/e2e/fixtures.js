@@ -175,6 +175,23 @@ export function hostLinks(page) {
 }
 
 /**
+ * The URL of the document the app frame holds now. It stays the staged runner's for as long as
+ * the app never navigates its own frame, so a test that clicks a link checks it after.
+ * @param {Page} page
+ * @returns {Promise<string>}
+ */
+export async function frameURL(page) {
+  const iframe = await page.locator('#frame-host iframe').elementHandle();
+  try {
+    const frame = await iframe?.contentFrame();
+    if (!frame) throw new Error('the host has no app frame');
+    return frame.url();
+  } finally {
+    await iframe?.dispose();
+  }
+}
+
+/**
  * Opens a session from the sessions list: taps the row named `rowName`, then, when `tabName`
  * is given, the session tab named that.
  * - A row is a `button.row` (the mock's sessions list) or a `button[data-row]` (6a's stub list).

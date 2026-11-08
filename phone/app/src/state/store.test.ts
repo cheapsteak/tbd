@@ -2,7 +2,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { emptyPrompts } from './prompts.ts';
+import { emptySheets } from './sheets.ts';
 import { createStore, initialState, nextToast, SESSIONS_ROUTE } from './store.ts';
+import { emptyTranscript } from './transcript.ts';
 
 test('the initial state', () => {
   const s = initialState();
@@ -21,6 +24,10 @@ test('the initial state', () => {
     assert.deepEqual(Object.keys(record), []);
     assert.equal(Object.getPrototypeOf(record), null);
   }
+  // The slices parts 6c and 6d fill start as their own modules say.
+  assert.deepEqual(s.transcript, emptyTranscript());
+  assert.deepEqual(s.prompts, emptyPrompts());
+  assert.deepEqual(s.sheets, emptySheets());
   // Each call makes its own state.
   assert.notEqual(initialState().ui, initialState().ui);
 });

@@ -8,7 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError, SUPERSEDED_TEXT } from '../client/client.ts';
 import type { AppEvent, Method, ParamsOf, PhoneRow, PhoneSession, PhoneSessionRef, ResultOf, SessionsSubscribeResult } from '../protocol/types.ts';
-import { createStore, SESSIONS_ROUTE } from '../state/store.ts';
+import { refKey } from '../protocol/wire.ts';
+import { applySnapshot } from '../state/sessionsData.ts';
+import { createStore, emptyRecord, initialState, SESSIONS_ROUTE } from '../state/store.ts';
 import type { AppState } from '../state/store.ts';
 import { createActions } from './index.ts';
 import type { ActionContext, Actions } from './index.ts';
@@ -325,6 +327,17 @@ test('back shows the sessions list and closes the transcript', async () => {
   assert.deepEqual(h.calls, [['closeTranscript']]);
 });
 
+test('setLastRow marks a row, and null marks none', () => {
+  const h = harness();
+  h.actions.setLastRow('W1');
+  assert.equal(h.state().ui.lastRowID, 'W1');
+  const before = h.state();
+  h.actions.setLastRow('W1');
+  assert.equal(h.state(), before);
+  h.actions.setLastRow(null);
+  assert.equal(h.state().ui.lastRowID, null);
+});
+
 test('a sheet and a menu never show together', () => {
   const h = harness();
   h.actions.openMenu({ name: 'account', askProfileID: null });
@@ -391,15 +404,37 @@ test('openLink asks the loader to open the URL', () => {
 
 // MARK: - createActions
 
-const NO_CONTEXT = {} as ActionContext;
 const NO_SELF = (): Actions => { throw new Error('unused'); };
 
+/**
+ * A context whose laptop refuses every request, and whose store shows session `R` with a
+ * draft, so a filled action that sends something sends it and meets the refusal. These tests
+ * outlive the stubs: once parts 6c and 6d fill their modules, they still hold.
+ */
+function refusingContext(): ActionContext {
+  const s = initialState();
+  const sessions = applySnapshot(snapshot([row('W1', [R])]));
+  const drafts = emptyRecord<string>();
+  drafts[refKey(R)] = 'Run the unit tests.';
+  return {
+    store: createStore({ ...s, sessions, ui: { ...s.ui, route: { screen: 'session', ref: R }, lastRowID: 'W1', drafts } }),
+    client: {
+      stream: null,
+      lastSeq: null,
+      request: () => Promise.reject(new AppError('unavailable', 'The laptop cannot do that now.')),
+    },
+    link: { openLink: () => {} },
+    now: () => 0,
+  };
+}
+
 test('no two action modules share an action name', () => {
+  const ctx = refusingContext();
   const modules = {
-    shell: shellActions(NO_CONTEXT, NO_SELF),
-    transcript: transcriptActions(NO_CONTEXT, NO_SELF),
-    prompts: promptActions(NO_CONTEXT, NO_SELF),
-    sheets: sheetActions(NO_CONTEXT, NO_SELF),
+    shell: shellActions(ctx, NO_SELF),
+    transcript: transcriptActions(ctx, NO_SELF),
+    prompts: promptActions(ctx, NO_SELF),
+    sheets: sheetActions(ctx, NO_SELF),
   };
   const owner = new Map<string, string>();
   for (const [name, actions] of Object.entries(modules)) {
@@ -411,10 +446,10 @@ test('no two action modules share an action name', () => {
 });
 
 test('createActions holds every action the plan names', () => {
-  const actions = createActions({ ...NO_CONTEXT, store: createStore() });
+  const actions = createActions(refusingContext());
   const names = [
     'onEvent', 'onChannelUp', 'onChannelDown', 'retrySubscribe', 'openSession', 'back', 'openPending', 'openSheet',
-    'closeSheet', 'openMenu', 'closeMenu', 'toast', 'clearToast', 'setShowDetails', 'toggleRepo', 'openLink',
+    'closeSheet', 'openMenu', 'closeMenu', 'toast', 'clearToast', 'setShowDetails', 'setLastRow', 'toggleRepo', 'openLink',
     'openTranscript', 'closeTranscript', 'resumeTranscriptOnUp', 'onShowDetailsChanged', 'loadOlder', 'toggleDetail',
     'answerPrompt', 'dismissPrompt', 'setDraft', 'sendMessage',
     'loadProfiles', 'switchProfile', 'fork', 'setModel', 'loadProviders', 'createWorktree', 'createRemote',
@@ -422,8 +457,8 @@ test('createActions holds every action the plan names', () => {
   for (const name of names) assert.equal(typeof (actions as unknown as Record<string, unknown>)[name], 'function', name);
 });
 
-test('the stub actions that return a Promise resolve', async () => {
-  const actions = createActions({ ...NO_CONTEXT, store: createStore() });
+test('every action that returns a Promise resolves, even when the laptop refuses each request', async () => {
+  const actions = createActions(refusingContext());
   const pending = [
     actions.loadOlder(), actions.toggleDetail(0, 'input'), actions.answerPrompt('p1', { kind: 'permission', decision: 'allow' }, 'Allow'),
     actions.sendMessage(), actions.loadProfiles(), actions.switchProfile('P1'), actions.fork(null), actions.setModel('opus'),

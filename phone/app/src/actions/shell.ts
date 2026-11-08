@@ -164,6 +164,14 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
       self().onShowDetailsChanged();
     },
 
+    /**
+     * Marks row `rowID` as the one opened last, which the sessions list shows selected, or
+     * marks none for null. `openSession` and a pending open that opens mark the row themselves.
+     */
+    setLastRow(rowID: string | null): void {
+      setUI((ui) => (ui.lastRowID === rowID ? ui : { ...ui, lastRowID: rowID }));
+    },
+
     /** Collapses group `groupID`, or expands it when it is collapsed. */
     toggleRepo(groupID: string): void {
       setUI((ui) => {
