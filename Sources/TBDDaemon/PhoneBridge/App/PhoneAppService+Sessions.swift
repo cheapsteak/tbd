@@ -283,10 +283,12 @@ extension PhoneAppService {
     ///
     /// Every phone's publisher gathers after every debounced change, and
     /// goes on for the grace after the phone leaves, so re-reading the file
-    /// each time would read it many times a second on a busy laptop. Once
-    /// per `PhoneAppConstants.providerRefreshInterval` keeps a registry edit
-    /// reaching the phone within that interval, and a `sessions.subscribe`
-    /// re-reads it at once.
+    /// each time would read it many times a second on a busy laptop. So a
+    /// gather re-reads it only once `PhoneAppConstants.providerRefreshInterval`
+    /// has passed since the last re-read, and a registry edit reaches the
+    /// phone at the first gather after that. Gathers run only when the
+    /// sessions state changes, so on a quiet laptop an edit waits for the
+    /// next change. A `sessions.subscribe` always re-reads it.
     private nonisolated func gatheredRemoteProviders(forceRefresh: Bool) async -> [RemoteProviderStatus] {
         let refresh = await claimProviderRefresh(force: forceRefresh)
         do {
