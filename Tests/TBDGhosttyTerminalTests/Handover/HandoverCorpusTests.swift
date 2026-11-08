@@ -217,12 +217,15 @@ struct HandoverCorpusTests {
             let leave = Array(program.leave.utf8)
             let viewer = try Self.freshGhostty(state)
             viewer.feed(HandoverFixtures.preamble(named: program.state)[...])
-            #expect(viewer.withLocked { $0.isAlternateScreen }, "\(program.state) must attach on the alternate screen")
+            let attachedOnAlternate: Bool = viewer.withLocked { $0.isAlternateScreen }
+            #expect(attachedOnAlternate, "\(program.state) must attach on the alternate screen")
             viewer.feed(leave[...])
-            #expect(viewer.withLocked { !$0.isAlternateScreen }, "\(program.testDescription) must leave the alternate screen")
+            let leftAlternate: Bool = viewer.withLocked { !$0.isAlternateScreen }
+            #expect(leftAlternate, "\(program.testDescription) must leave the alternate screen")
 
             let receiver = try Self.handedBack(viewer, state: state)
-            #expect(receiver.locked { !$0.isCurrentBufferAlternate }, "\(program.testDescription): the receiver is on its alternate screen")
+            let receiverOnPrimary: Bool = receiver.locked { !$0.isCurrentBufferAlternate }
+            #expect(receiverOnPrimary, "\(program.testDescription): the receiver is on its alternate screen")
             let direct = state.swiftTerm()
             direct.feed(leave)
             let tally = handoverCompare(direct.handoverSnap(), receiver.handoverSnap()).excluding(handoverInertCategories)
@@ -269,9 +272,8 @@ struct HandoverCorpusTests {
             let leaveThenRestore = Array("\(e)[?47l\(e)8".utf8)
             receiver.feed(leaveThenRestore)
             direct.feed(leaveThenRestore)
-            #expect(
-                direct.locked { [$0.buffer.x, $0.buffer.y] } == [9, 2],
-                "SwiftTerm fed the program's bytes must put back the cursor DECSC saved")
+            let restored: [Int] = direct.locked { [$0.buffer.x, $0.buffer.y] }
+            #expect(restored == [9, 2], "SwiftTerm fed the program's bytes must put back the cursor DECSC saved")
             let tally = handoverCompare(direct.handoverSnap(), receiver.handoverSnap()).excluding(handoverInertCategories)
             #expect(
                 tally.isEmpty,
