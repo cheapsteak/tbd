@@ -5099,6 +5099,26 @@ final class AppState {
         Self.ghosttyTerminalEngineEnabled(defaults: userDefaults)
     }
 
+    /// The Settings → Terminal → Experimental toggle for the flag, bound as
+    /// `$appState.ghosttyTerminalEngineSetting`. It reads the observed
+    /// `ghosttyTerminalEngineFlag`, so the toggle, the tabs' engine labels and
+    /// the Terminal menu show one value, and it writes the key to this
+    /// AppState's own store, the one every panel decides its engine from:
+    /// `.standard` in the app, an isolated suite in a test. Never `@AppStorage`,
+    /// which would write `.standard` whatever store this AppState was built with.
+    ///
+    /// Off is stored as an explicit `false`, never by removing the key, so the
+    /// choice holds when `ghosttyTerminalEngineDefault` changes. The mirror is
+    /// refreshed at once rather than left to the key-value observation, so the
+    /// toggle reads back what was just set.
+    var ghosttyTerminalEngineSetting: Bool {
+        get { ghosttyTerminalEngineFlag }
+        set {
+            userDefaults.set(newValue, forKey: Self.useGhosttyTerminalEngineKey)
+            refreshGhosttyTerminalEngineFlag()
+        }
+    }
+
     /// Reads the flag into `ghosttyTerminalEngineFlag`, then keeps it current
     /// for as long as this AppState lives. The handler runs on whichever
     /// thread wrote the key; the weak reference is read on the main thread.

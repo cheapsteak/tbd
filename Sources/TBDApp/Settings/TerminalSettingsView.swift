@@ -47,6 +47,7 @@ struct TerminalSettingsView: View {
     @State private var tmuxFallbackDraft = ""
 
     var body: some View {
+        @Bindable var appState = appState
         Form {
             Section("Font") {
                 HStack {
@@ -223,13 +224,18 @@ struct TerminalSettingsView: View {
                     .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
                 Toggle("GPU terminal rendering (Metal)", isOn: $useMetalTerminalRenderer)
                     .help("Draws terminals through SwiftTerm's Metal renderer instead of its CoreGraphics path. If the GPU path is unavailable, terminals stay on CoreGraphics. While on, terminals already open keep the glyphs they have already drawn, so a Thin Strokes change reaches them only as new characters appear.")
+                // Bound through AppState, not @AppStorage: the tabs' engine labels,
+                // the Terminal menu and every panel read the flag from
+                // AppState.userDefaults, so the toggle has to write that store.
+                Toggle("Use the libghostty terminal engine", isOn: $appState.ghosttyTerminalEngineSetting)
+                    .help("Applies to terminals opened after you change it. Ligatures and right-to-left text are not supported yet. The Metal setting above affects SwiftTerm terminals only; libghostty always draws with Metal.")
                 Text("Takes effect for terminals opened after the change — restart the app to switch every open terminal at once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("Both off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of either setting, turn it off and restart the app.")
+                Text("All three off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of one, turn it off and restart the app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
