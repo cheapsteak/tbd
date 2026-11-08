@@ -220,5 +220,11 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/root11/x/dist/x.js")" = 'var x = 2;' ] && [
   ok "an update over a library replaces its files whole and leaves no scratch directory"
 else bad "update over a library: rc=$rc"; fi
 
+# --- The path rule, against the table all three scripts share ----------------------------
+
+# shellcheck disable=SC1091 # linted on its own
+. "$here/path-rule.testlib.sh"
+path_rule_check
+
 [ "$failures" -eq 0 ] || { echo "vendor-update.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "vendor-update.test.sh: all passed"

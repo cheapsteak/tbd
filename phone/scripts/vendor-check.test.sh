@@ -145,5 +145,11 @@ refuses "a vendored file carrying the origin placeholder refuses" stamped refuse
 t="$tmp/root-link"; make_root "$tmp/real-root"; ln -s real-root "$t"; run "$t"
 if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'is a symlink'; then ok "a vendor root that is a symlink refuses"; else bad "root symlink: rc=$rc $out"; fi
 
+# --- The path rule, against the table all three scripts share ----------------------------
+
+# shellcheck disable=SC1091 # linted on its own
+. "$here/path-rule.testlib.sh"
+path_rule_check
+
 [ "$failures" -eq 0 ] || { echo "vendor-check.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "vendor-check.test.sh: all passed"

@@ -316,6 +316,12 @@ else
 fi
 if [ "$before" = "$after" ]; then ok "the real tree is unchanged"; else bad "staging changed the real tree"; fi
 
+# --- The path rule, against the table all three scripts share ----------------------------
+
+# shellcheck disable=SC1091 # linted on its own
+. "$here/path-rule.testlib.sh"
+path_rule_check
+
 [ "$failures" -eq 0 ] || {
   echo "stage-loader.test.sh: $failures failure(s)" >&2
   exit 1

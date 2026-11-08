@@ -40,6 +40,10 @@ die() {
 # $1 with every byte but A-Z a-z 0-9 . _ / - shown as '?', so a message carries no control bytes.
 shown() { printf '%s' "$1" | tr -c 'A-Za-z0-9._/-' '?'; }
 
+# The path rule for a vendored library's name and the paths of its files. stage-loader.sh,
+# vendor-update.sh and vendor-check.sh each carry these lines word for word, so that each stays
+# one self-contained file; path-rule.testlib.sh runs all three on one table of paths and fails
+# when their verdicts, or these lines, differ.
 segment='[A-Za-z0-9_][A-Za-z0-9._-]*' # no leading dot, so no '..' and no dotfiles
 lib_name="^$segment\$"
 lib_path="^$segment(/$segment)*\$"
