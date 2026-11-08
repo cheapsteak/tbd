@@ -1419,7 +1419,15 @@ test('a failed older page above rows that fit the screen loads again on a tap, a
   await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
 });
 
-test('an older page made stale by a reopen lets the reopened rows ask for theirs once it settles', async ({ page, appHost }) => {
+/**
+ * How many rows the list holds: one past the index of its last row, which a view at the bottom draws.
+ * @param {Locator} tx
+ */
+function rowCount(tx) {
+  return tx.evaluate((el) => Math.max(-1, ...[...el.querySelectorAll('[data-tx-row]')].map((row) => Number(row.getAttribute('data-index')))) + 1);
+}
+
+test('an older page made stale by a reopen lets the reopened rows ask for theirs at once, and changes no row', async ({ page, appHost }) => {
   const items = shortItems();
   await openApp(page, appHost, { scenario: checkoutWith(items) });
   await hostCall(page, 'hold', 'transcript.page');
@@ -1429,19 +1437,20 @@ test('an older page made stale by a reopen lets the reopened rows ask for theirs
   await expect.poll(async () => (await pageCursors(page)).length).toBe(1);
 
   // "Show details" opens the transcript again while the page is on its way. The new rows fit the
-  // screen too, and their page waits for the one on the wire.
+  // screen too, and ask for their page beside the stale one, once.
   const opens = async () => (await hostRequests(page)).filter((r) => r.method === 'transcript.open').length;
   await app(page).locator('.s-head .tg').click();
   await expect.poll(opens).toBe(2);
   await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
-  await frames(tx, 6);
-  expect(await pageCursors(page)).toHaveLength(1);
-
-  // The stale page lands and changes no row, and the new rows ask for their page, once.
-  await hostCall(page, 'release', 'transcript.page');
   await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
+  await frames(tx, 6);
+  expect(await pageCursors(page)).toHaveLength(2);
+
+  // Both land, the stale page first: it changes no row, and the new rows' page goes in above them.
+  await hostCall(page, 'release', 'transcript.page');
   await expect.poll(async () => { const m = await metricsOf(tx); return m.scrollHeight > m.clientHeight; }).toBe(true);
   await frames(tx, 6);
+  expect(await rowCount(tx)).toBe(FIRST_PAGE_MESSAGES + OLDER_PAGE_MESSAGES);
   expect(await pageCursors(page)).toHaveLength(2);
   await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
 });

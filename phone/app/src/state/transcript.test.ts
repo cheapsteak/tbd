@@ -6,7 +6,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
 import type { DetailState } from './detail.ts';
-import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, beginResume, clearTranscript, emptyTranscript, prependPage } from './transcript.ts';
+import {
+  addReceipt, applyPage, applyTranscriptEvent, beginOpen, beginResume, clearTranscript, emptyTranscript, MAX_STALE_PAGES, mayAskOlder, prependPage,
+  settleStalePage, staleHolds,
+} from './transcript.ts';
 import type { TranscriptRow, TranscriptState } from './transcript.ts';
 
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
@@ -348,23 +351,74 @@ test('beginOpen keeps the rows of the session it opens again, and starts another
   assert.equal(other.nextKey, s0.nextKey);
 });
 
-test('an open, a reset or a close while an older page is on its way leaves that page holding the turn', () => {
+test('a reset or a resume page while an older page is on its way leaves that page holding the open’s turn', () => {
   const waiting = { ...withRows([item('u1')]), olderRequestID: 'page-1' };
   const after = [
-    ['reopen', beginOpen(waiting, R, true, 'open-2')],
-    ['switch', beginOpen(waiting, OTHER, false, 'open-2')],
     ['reset', applyTranscriptEvent(waiting, reset(page([item('n1')])))],
-    ['close', clearTranscript(waiting)],
+    ['resume page', applyPage(waiting, page([item('n1')]))],
   ] as const;
   for (const [what, s] of after) {
     assert.equal(s.olderRequestID, null, what);
-    assert.equal(s.stalePage, true, what);
+    assert.equal(s.heldPageID, 'page-1', what);
+    assert.equal(s.stalePages, 1, what);
+    assert.equal(staleHolds(s), true, what);
+    assert.equal(mayAskOlder(s), false, what);
+    // Its settling frees the turn.
+    const settled = settleStalePage(s, 'page-1');
+    assert.equal(settled.heldPageID, null, what);
+    assert.equal(settled.stalePages, 0, what);
+    assert.equal(mayAskOlder(settled), true, what);
   }
-  // With no page on its way there is none to wait for, and one already stale stays so.
-  assert.equal(beginOpen(withRows([item('u1')]), R, true, 'open-2').stalePage, false);
-  assert.equal(clearTranscript({ ...withRows([item('u1')]), stalePage: true }).stalePage, true);
   // The page landing above its own rows holds nothing.
-  assert.equal(prependPage(waiting, page([item('u0')])).stalePage, false);
+  const landed = prependPage(waiting, page([item('u0')]));
+  assert.equal(landed.heldPageID, null);
+  assert.equal(landed.stalePages, 0);
+});
+
+test('an open or a close while an older page is on its way counts that page, and the next open may page at once', () => {
+  const waiting = { ...withRows([item('u1')]), olderRequestID: 'page-1' };
+  const after = [
+    ['reopen', applyPage(beginOpen(waiting, R, true, 'open-2'), page([item('n1')]))],
+    ['switch', applyPage(beginOpen(waiting, OTHER, false, 'open-2'), page([item('n1')]))],
+    ['close, then open', applyPage(beginOpen(clearTranscript(waiting), OTHER, false, 'open-2'), page([item('n1')]))],
+  ] as const;
+  for (const [what, s] of after) {
+    assert.equal(s.olderRequestID, null, what);
+    assert.equal(s.heldPageID, null, what);
+    assert.equal(s.stalePages, 1, what);
+    assert.equal(mayAskOlder(s), true, what);
+    // A page this open made stale, whose turn it held, settles first or after, and either way frees what it held only.
+    const held = applyPage({ ...s, olderRequestID: 'page-2' }, page([item('n2')]));
+    assert.equal(held.heldPageID, 'page-2', what);
+    assert.equal(held.stalePages, 2, what);
+    const oldFirst = settleStalePage(held, 'page-1');
+    assert.equal(oldFirst.heldPageID, 'page-2', what);
+    assert.equal(mayAskOlder(oldFirst), false, what);
+    assert.equal(mayAskOlder(settleStalePage(oldFirst, 'page-2')), true, what);
+  }
+  // With no page on its way there is none to count, and a held page an open leaves counts still.
+  const quiet = beginOpen(withRows([item('u1')]), R, true, 'open-2');
+  assert.equal(quiet.stalePages, 0);
+  const reopened = beginOpen({ ...withRows([item('u1')]), heldPageID: 'page-1', stalePages: 1 }, R, true, 'open-2');
+  assert.equal(reopened.heldPageID, null);
+  assert.equal(reopened.stalePages, 1);
+});
+
+test(`once ${MAX_STALE_PAGES} stale pages are unanswered no page is asked for, until one settles`, () => {
+  let s: TranscriptState = withRows([item('u1')]);
+  for (let n = 1; n <= MAX_STALE_PAGES; n++) {
+    assert.equal(mayAskOlder(s), true, `open ${n}`);
+    s = applyPage(beginOpen({ ...s, olderRequestID: `page-${n}` }, R, false, `open-${n}`), page([item(`n${n}`)]));
+    assert.equal(s.stalePages, n);
+  }
+  assert.equal(staleHolds(s), true);
+  assert.equal(mayAskOlder(s), false);
+  // A close and an open keep the count, since the pages are still on the wire.
+  s = applyPage(beginOpen(clearTranscript(s), OTHER, false, 'open-x'), page([item('x')]));
+  assert.equal(mayAskOlder(s), false);
+  s = settleStalePage(s, 'page-2');
+  assert.equal(s.stalePages, MAX_STALE_PAGES - 1);
+  assert.equal(mayAskOlder(s), true);
 });
 
 test('an open clears a close still unanswered', () => {

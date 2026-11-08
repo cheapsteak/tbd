@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
-import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, clearTranscript, emptyTranscript, prependPage } from '../state/transcript.ts';
+import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, clearTranscript, emptyTranscript, MAX_STALE_PAGES, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import {
   anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
@@ -40,7 +40,7 @@ test('fractional pixels count as they are', () => {
 });
 
 /** The slice's paging state with a cursor, nothing on its way, the start not reached and no failure. */
-const PAGING = { cursor: 'c1', olderRequestID: null, stalePage: false, reachedStart: false, olderFailed: false } as const;
+const PAGING = { cursor: 'c1', olderRequestID: null, heldPageID: null, stalePages: 0, reachedStart: false, olderFailed: false } as const;
 
 test('an older page is wanted within two screens of the top, and not at two', () => {
   const tall = (scrollTop: number): Metrics => ({ scrollTop, scrollHeight: 10_000, clientHeight: 800 });
@@ -51,12 +51,14 @@ test('an older page is wanted within two screens of the top, and not at two', ()
   assert.equal(wantsOlder(tall(5000), PAGING), false);
 });
 
-test('no older page is wanted without a cursor, or with a page on its way, the start reached or a failure', () => {
+test('no older page is wanted without a cursor, or with a page on its way, a stale page holding the turn, the start reached or a failure', () => {
   const near: Metrics = { scrollTop: 100, scrollHeight: 10_000, clientHeight: 800 };
   assert.equal(wantsOlder(near, { ...PAGING, cursor: null }), false);
   assert.equal(wantsOlder(near, { ...PAGING, olderRequestID: 'page-1' }), false);
-  // A page on its way for rows a page replaced.
-  assert.equal(wantsOlder(near, { ...PAGING, stalePage: true }), false);
+  // A page on its way for rows a reset replaced, or as many stale pages as may be unanswered.
+  assert.equal(wantsOlder(near, { ...PAGING, heldPageID: 'page-1', stalePages: 1 }), false);
+  assert.equal(wantsOlder(near, { ...PAGING, stalePages: MAX_STALE_PAGES }), false);
+  assert.equal(wantsOlder(near, { ...PAGING, stalePages: MAX_STALE_PAGES - 1 }), true);
   assert.equal(wantsOlder(near, { ...PAGING, reachedStart: true }), false);
   assert.equal(wantsOlder(near, { ...PAGING, olderFailed: true }), false);
   assert.equal(wantsOlder(near, PAGING), true);

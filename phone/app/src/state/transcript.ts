@@ -22,6 +22,16 @@
  * answers, and those events must land on the rows the resume keeps. A failed open holds no
  * transcript, so nothing folds in then either.
  *
+ * **Older pages on the wire.** One open has at most one `transcript.page` on the wire: the one
+ * the slice waits on (`olderRequestID`), or one a reset or a resume's page made stale, which
+ * holds the open's turn until it settles (`heldPageID`). A new open, of another session or of
+ * the same one, and a close leave the page they made stale on the wire without its holding the
+ * turn, so the next open pages at once. Those pages are counted (`stalePages`), and while
+ * `MAX_STALE_PAGES` of them are unanswered no page is asked for, so a laptop that stops
+ * answering pages takes at most `MAX_STALE_PAGES + 1` of the client's slots however often the
+ * reader reopens (`mayAskOlder`). A stale page's reply never touches the rows, since only the
+ * page the slice waits on counts.
+ *
  * Each function returns a new object when it changes anything, and `s` itself when it does
  * not, so the store does not notify.
  */
@@ -67,11 +77,18 @@ export interface TranscriptState {
    */
   olderRequestID: string | null;
   /**
-   * A `transcript.page` asked for rows that a page or a close has since replaced is still
-   * unanswered. At most one page is on the wire at a time, so none is asked for these rows
-   * until it settles, which clears this, and the list then asks again if it still wants one.
+   * The token of a `transcript.page` this open asked for rows that a reset or a resume's page
+   * has since replaced, while it is unanswered; null otherwise. It holds this open's one page
+   * turn, so none is asked for these rows until it settles (`settleStalePage`), and the list
+   * then asks again if it still wants one. A new open or a close clears it (this file's header).
    */
-  stalePage: boolean;
+  heldPageID: string | null;
+  /**
+   * How many `transcript.page` requests made stale by a page, an open or a close are
+   * unanswered, this open's held one included, across every open since the app started. At
+   * `MAX_STALE_PAGES`, none is asked for until one settles.
+   */
+  stalePages: number;
   /** The last older page failed to load. Nothing asks for another until the reader scrolls. */
   olderFailed: boolean;
   /**
@@ -109,7 +126,8 @@ export function emptyTranscript(): TranscriptState {
     cursor: null,
     reachedStart: false,
     olderRequestID: null,
-    stalePage: false,
+    heldPageID: null,
+    stalePages: 0,
     olderFailed: false,
     pendingClose: false,
     details: {},
@@ -120,32 +138,76 @@ export function emptyTranscript(): TranscriptState {
 
 /**
  * `s` with no transcript open: every field as `emptyTranscript` has it, except `nextKey`, which
- * only grows, so a key never names a second row, `stalePage`, since an older page on its way is
- * still on the wire (`dropOlder`), and `replacements`, which only grows too and counts this.
+ * only grows, so a key never names a second row, `stalePages`, since the stale pages are still
+ * on the wire (`dropOlder`), and `replacements`, which only grows too and counts this.
  */
 export function clearTranscript(s: TranscriptState): TranscriptState {
-  return { ...emptyTranscript(), nextKey: s.nextKey, stalePage: dropOlder(s).stalePage, replacements: s.replacements + 1 };
+  return { ...emptyTranscript(), nextKey: s.nextKey, stalePages: dropOlder(s, false).stalePages, replacements: s.replacements + 1 };
 }
 
 /**
  * The paging fields once the rows an older page was asked for are gone: the slice no longer
- * waits for that page, and while it was on its way, it is still on the wire (`stalePage`).
+ * waits for that page, and while it was on its way, it is still on the wire, so it counts as
+ * stale (`stalePages`). Within the same open (`sameOpen`), as after a reset, it holds the
+ * open's turn (`heldPageID`); a new open or a close frees the turn for the next rows.
  */
-function dropOlder(s: TranscriptState): Pick<TranscriptState, 'olderRequestID' | 'stalePage'> {
-  return { olderRequestID: null, stalePage: s.stalePage || s.olderRequestID !== null };
+function dropOlder(s: TranscriptState, sameOpen: boolean): Pick<TranscriptState, 'olderRequestID' | 'heldPageID' | 'stalePages'> {
+  return {
+    olderRequestID: null,
+    heldPageID: sameOpen ? (s.olderRequestID ?? s.heldPageID) : null,
+    stalePages: s.stalePages + (s.olderRequestID === null ? 0 : 1),
+  };
+}
+
+/**
+ * How many stale `transcript.page` requests may be unanswered before no page is asked for. Each
+ * new open can leave one on the wire, and the client sends at most `MAX_IN_FLIGHT` (32)
+ * requests at a time, so a laptop that stops answering pages must not take its slots: with 3,
+ * pages take at most 4, as the detail reads do (`MAX_DETAIL_READS`), and a reader who reopens
+ * transcripts faster than the laptop answers still pages three opens in a row.
+ */
+export const MAX_STALE_PAGES = 3;
+
+/** The slice's fields that say whether an older page may be asked for (`mayAskOlder`). */
+export type Paging = Pick<TranscriptState, 'cursor' | 'olderRequestID' | 'heldPageID' | 'stalePages' | 'reachedStart' | 'olderFailed'>;
+
+/**
+ * Whether a stale page keeps any older page from being asked for: this open's own (`heldPageID`),
+ * or `MAX_STALE_PAGES` of them. Each one's settling can free it (`settleStalePage`).
+ */
+export function staleHolds(s: Paging): boolean {
+  return s.heldPageID !== null || s.stalePages >= MAX_STALE_PAGES;
+}
+
+/**
+ * Whether the page above the rows may be asked for: the laptop gave a cursor for it, and none of
+ * these holds: a page is on its way for these rows, a stale page holds the turn (`staleHolds`),
+ * the start is reached, or the last page failed (which the reader's next scroll clears).
+ */
+export function mayAskOlder(s: Paging): boolean {
+  return s.cursor !== null && s.olderRequestID === null && !staleHolds(s) && !s.reachedStart && !s.olderFailed;
+}
+
+/**
+ * `s` once the stale page with token `requestID` settled, with a reply or an error: one fewer
+ * is on the wire, and when it held this open's turn, the turn is free.
+ */
+export function settleStalePage(s: TranscriptState, requestID: string): TranscriptState {
+  return { ...s, heldPageID: s.heldPageID === requestID ? null : s.heldPageID, stalePages: Math.max(0, s.stalePages - 1) };
 }
 
 /**
  * `s` opening `ref`'s transcript, the open's token being `requestID`. Opening the session the
  * slice holds already keeps its rows, cursor and details on screen until a page replaces them.
  * Opening another starts with none. Either way, an older page still on its way is dropped
- * (`dropOlder`), since it belongs above rows the open replaces. A close still unanswered no
- * longer matters, since the open replaces whatever the laptop had open.
+ * (`dropOlder`), since it belongs above rows the open replaces, and the new open may page at
+ * once: a stale page holds no new open's turn. A close still unanswered no longer matters,
+ * since the open replaces whatever the laptop had open.
  */
 export function beginOpen(s: TranscriptState, ref: PhoneSessionRef, showDetails: boolean, requestID: string): TranscriptState {
   const base = s.ref !== null && sameRef(s.ref, ref) ? s : clearTranscript(s);
   return {
-    ...base, ref, showDetails, openRequestID: requestID, phase: 'opening', error: null, ...dropOlder(base), olderFailed: false,
+    ...base, ref, showDetails, openRequestID: requestID, phase: 'opening', error: null, ...dropOlder(base, false), olderFailed: false,
     pendingClose: false,
   };
 }
@@ -164,12 +226,13 @@ export function beginResume(s: TranscriptState, requestID: string): TranscriptSt
  * `s` with `page` as its rows, in place of every row it had, receipts and open details
  * included: an open's first page, or a `transcript.reset`, which `replacements` counts. Each row
  * gets a new key. It takes the page's cursor, and drops an older page still on its way
- * (`dropOlder`), which belongs above rows that are gone. It leaves `phase` to the caller.
+ * (`dropOlder`), which belongs above rows that are gone and holds the open's turn until it
+ * settles. It leaves `phase` to the caller.
  */
 export function applyPage(s: TranscriptState, page: TranscriptPage): TranscriptState {
   const { rows, nextKey } = itemRows(page.items, s.nextKey);
   return {
-    ...s, rows, nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, ...dropOlder(s), olderFailed: false,
+    ...s, rows, nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, ...dropOlder(s, true), olderFailed: false,
     details: {}, appendedSinceSeen: 0, replacements: s.replacements + 1,
   };
 }

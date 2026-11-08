@@ -26,7 +26,10 @@
  * Every number is in CSS pixels, as the scroll element reports them.
  */
 
-import type { TranscriptRow, TranscriptState } from '../state/transcript.ts';
+import { mayAskOlder } from '../state/transcript.ts';
+import type { Paging, TranscriptRow } from '../state/transcript.ts';
+
+export type { Paging } from '../state/transcript.ts';
 
 /** How near its bottom a view still counts as at the bottom. */
 export const STICK_PX = 30;
@@ -48,18 +51,15 @@ export function atBottom(m: Metrics): boolean {
   return fromBottom(m) <= STICK_PX;
 }
 
-/** The slice's fields that say whether the list may ask for the page above its rows. */
-export type Paging = Pick<TranscriptState, 'cursor' | 'olderRequestID' | 'stalePage' | 'reachedStart' | 'olderFailed'>;
-
 /**
  * Whether the list should ask for the page above its rows: the view is within two of its own
- * heights of the top, the laptop gave a cursor for that page, and none of these holds: a page
- * is on its way, for these rows or for rows a page replaced (which its settling clears), the
- * start is reached, or the last page failed (which the reader's next scroll clears).
+ * heights of the top, and the slice may ask for that page (`mayAskOlder`): the laptop gave a
+ * cursor for it, and no page is on its way for these rows, no stale page holds the turn (which
+ * its settling frees), the start is not reached, and the last page did not fail (which the
+ * reader's next scroll clears).
  */
 export function wantsOlder(m: Metrics, s: Paging): boolean {
-  return m.scrollTop < 2 * m.clientHeight && s.cursor !== null && s.olderRequestID === null && !s.stalePage && !s.reachedStart
-    && !s.olderFailed;
+  return m.scrollTop < 2 * m.clientHeight && mayAskOlder(s);
 }
 
 /**
