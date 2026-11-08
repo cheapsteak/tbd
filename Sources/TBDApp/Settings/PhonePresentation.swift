@@ -133,6 +133,25 @@ enum PhonePresentation {
         state == .waitingForPhone || state == .awaitingApproval
     }
 
+    /// The offer the pairing sheet shows, from the offer it `started` and the
+    /// daemon's last `status`. Once there is a status, its report stands: the
+    /// offer as it is now, or nil when the daemon reports no offer or another
+    /// one, which ended this one. With no status yet, as before the first
+    /// `phone.status` answers, the offer stands as `phone.pairStart` returned
+    /// it, so the sheet shows its code and closing the sheet denies it.
+    static func sheetPairing(started: PhonePairingStatus, status: PhoneStatusResult?) -> PhonePairingStatus? {
+        guard let status else { return started }
+        guard let pairing = status.pairing, pairing.offerID == started.offerID else { return nil }
+        return pairing
+    }
+
+    /// The offer closing the pairing sheet denies: the one it shows, while
+    /// that offer is live; nil once it has ended.
+    static func offerToDeny(started: PhonePairingStatus, status: PhoneStatusResult?) -> UUID? {
+        guard let shown = sheetPairing(started: started, status: status), isLive(shown.state) else { return nil }
+        return shown.offerID
+    }
+
     /// The line the pane shows when phone control's status could not be read.
     /// A daemon without the methods needs a restart; any other failure is
     /// shown as the daemon put it.

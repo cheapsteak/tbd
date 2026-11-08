@@ -16,18 +16,24 @@ import TBDShared
 /// When Allow or Deny fails, the daemon's reason shows above the buttons.
 ///
 /// Closing the sheet while the offer is live denies it, so a code nobody is
-/// looking at never stays open.
+/// looking at never stays open. That holds while the offer is still starting
+/// too: an offer that finishes starting after the sheet has gone is denied by
+/// its ID.
 struct PhonePairingSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
 
     private enum Phase: Equatable {
         case starting
-        case started(offerID: UUID)
+        /// The offer this sheet started, as `phone.pairStart` returned it.
+        case started(PhonePairingStatus)
         case failed(String)
     }
 
     @State private var phase: Phase = .starting
+    /// Closed when the sheet goes away, so an offer still starting then is
+    /// denied.
+    @State private var request = PhonePairingRequest()
     /// The QR code for the current link, rendered when the link changes.
     @State private var qrImage: NSImage?
     @State private var isActing = false
@@ -37,13 +43,12 @@ struct PhonePairingSheet: View {
     /// The widest the QR code is drawn, in points.
     private static let qrMaxSide: CGFloat = 340
 
-    /// The offer this sheet started, as the daemon last reported it. Nil
-    /// before it starts, and once the daemon reports no offer or another one.
+    /// The offer this sheet started, as the daemon last reported it, or as
+    /// `phone.pairStart` returned it while there is no status yet. Nil before
+    /// it starts, and once the daemon reports no offer or another one.
     private var pairing: PhonePairingStatus? {
-        guard case .started(let offerID) = phase,
-              let pairing = appState.phoneStatus?.pairing,
-              pairing.offerID == offerID else { return nil }
-        return pairing
+        guard case .started(let offer) = phase else { return nil }
+        return PhonePresentation.sheetPairing(started: offer, status: appState.phoneStatus)
     }
 
     var body: some View {
@@ -58,7 +63,7 @@ struct PhonePairingSheet: View {
         .onChange(of: pairing?.link, initial: true) { _, link in
             qrImage = link.flatMap { PhoneQRCode.image(for: $0) }
         }
-        .onDisappear { denyIfLive() }
+        .onDisappear { close() }
     }
 
     @ViewBuilder
@@ -73,7 +78,7 @@ struct PhonePairingSheet: View {
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { cancel() }
                     .keyboardShortcut(.cancelAction)
             }
         case .failed(let message):
@@ -199,21 +204,22 @@ struct PhonePairingSheet: View {
     private func start() async {
         phase = .starting
         didDeny = false
-        if let failure = await appState.startPhonePairing() {
+        switch await appState.startPhonePairing(for: request) {
+        case .started(let offer):
+            phase = .started(offer)
+        case .failed(let failure):
             phase = .failed(failure)
+        case .abandoned:
+            // The sheet has gone, and the offer was denied.
             return
-        }
-        if let offerID = appState.phoneStatus?.pairing?.offerID {
-            phase = .started(offerID: offerID)
-        } else {
-            phase = .failed("Pairing did not start. Try again.")
         }
     }
 
     /// Allows this sheet's own offer, the one whose name and code it shows,
     /// never whatever offer the daemon reports by the time the call runs.
     private func allow() {
-        guard case .started(let offerID) = phase else { return }
+        guard case .started(let offer) = phase else { return }
+        let offerID = offer.offerID
         isActing = true
         Task {
             await appState.allowPhonePairing(offerID: offerID)
@@ -223,7 +229,8 @@ struct PhonePairingSheet: View {
 
     /// Denies this sheet's own offer, never a newer one.
     private func deny() {
-        guard case .started(let offerID) = phase else { return }
+        guard case .started(let offer) = phase else { return }
+        let offerID = offer.offerID
         isActing = true
         didDeny = true
         Task {
@@ -233,17 +240,19 @@ struct PhonePairingSheet: View {
     }
 
     private func cancel() {
-        denyIfLive()
+        close()
         dismiss()
     }
 
-    /// Denies this sheet's offer if it is still live and not yet denied. The
-    /// ID is taken now: by the time the call runs, the daemon may report a
-    /// newer offer, which this sheet never showed.
-    private func denyIfLive() {
-        guard !didDeny, let pairing, PhonePresentation.isLive(pairing.state) else { return }
+    /// The sheet is going away: an offer still starting is denied once it
+    /// has started, and a live one now, unless it is denied already. The ID
+    /// is taken now: by the time the call runs, the daemon may report a newer
+    /// offer, which this sheet never showed.
+    private func close() {
+        request.close()
+        guard !didDeny, case .started(let offer) = phase,
+              let offerID = PhonePresentation.offerToDeny(started: offer, status: appState.phoneStatus) else { return }
         didDeny = true
-        let offerID = pairing.offerID
         Task { await appState.denyPhonePairing(offerID: offerID) }
     }
 

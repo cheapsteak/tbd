@@ -104,6 +104,37 @@ struct PhonePresentationTests {
             .contains("managed only from the TBD app"))
     }
 
+    /// The sheet shows the offer it started as `phone.pairStart` returned it
+    /// until a status arrives, then as the status reports it, and nothing
+    /// once the status reports no offer or another one.
+    @Test func theSheetShowsItsOwnOfferUntilAStatusReportsIt() {
+        let expiresAt = Date(timeIntervalSince1970: 1_800_000_300)
+        let started = PhonePairingStatus(offerID: UUID(), link: "https://acme-loader.github.io/#p=AAAA",
+                                         expiresAt: expiresAt, state: .waitingForPhone)
+        var reported = started
+        reported.state = .awaitingApproval
+        reported.confirmationCode = "123456"
+        reported.deviceName = "iPhone"
+        let other = PhonePairingStatus(offerID: UUID(), link: nil, expiresAt: expiresAt, state: .waitingForPhone)
+        var withOffer = status()
+        withOffer.pairing = reported
+        var withOther = status()
+        withOther.pairing = other
+
+        #expect(PhonePresentation.sheetPairing(started: started, status: nil) == started)
+        #expect(PhonePresentation.sheetPairing(started: started, status: withOffer) == reported)
+        #expect(PhonePresentation.sheetPairing(started: started, status: withOther) == nil)
+        #expect(PhonePresentation.sheetPairing(started: started, status: status()) == nil)
+
+        // Closing the sheet denies the offer it shows, while it is live.
+        #expect(PhonePresentation.offerToDeny(started: started, status: nil) == started.offerID)
+        #expect(PhonePresentation.offerToDeny(started: started, status: withOffer) == started.offerID)
+        #expect(PhonePresentation.offerToDeny(started: started, status: withOther) == nil)
+        var ended = withOffer
+        ended.pairing?.state = .expired
+        #expect(PhonePresentation.offerToDeny(started: started, status: ended) == nil)
+    }
+
     @Test func deviceRowsSayWhetherEachPhoneIsConnected() throws {
         let pairedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let room = String(repeating: "A", count: 43)

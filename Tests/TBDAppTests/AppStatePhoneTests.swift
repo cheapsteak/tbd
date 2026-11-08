@@ -20,6 +20,10 @@ actor FakePhoneClient: PhoneControlClient {
     /// `releaseStatus()`.
     private var holdsStatus: Bool
     private var heldStatus: [CheckedContinuation<Void, Never>] = []
+    /// Whether `phone.pairStart` waits, from its first call, until
+    /// `releasePairStart()`.
+    private var holdsPairStart: Bool
+    private var heldPairStart: [CheckedContinuation<Void, Never>] = []
     private(set) var statusCalls = 0
     private(set) var relayURLs: [String?] = []
     private(set) var allowedOffers: [UUID] = []
@@ -28,7 +32,8 @@ actor FakePhoneClient: PhoneControlClient {
     init(
         status: PhoneStatusResult, devices: [PhoneDevice] = [], statusError: (any Error)? = nil,
         relayURLError: (any Error)? = nil, allowError: (any Error)? = nil, revokeError: (any Error)? = nil,
-        pairing: PhonePairingStatus? = nil, refusedStatusCalls: Int = 0, holdsStatus: Bool = false
+        pairing: PhonePairingStatus? = nil, refusedStatusCalls: Int = 0, holdsStatus: Bool = false,
+        holdsPairStart: Bool = false
     ) {
         self.status = status
         self.devices = devices
@@ -39,6 +44,7 @@ actor FakePhoneClient: PhoneControlClient {
         self.pairing = pairing
         self.refusedStatusCalls = refusedStatusCalls
         self.holdsStatus = holdsStatus
+        self.holdsPairStart = holdsPairStart
     }
 
     static let identityRefusal = "phone control is managed only from the TBD app"
@@ -73,9 +79,24 @@ actor FakePhoneClient: PhoneControlClient {
         return status
     }
 
+    /// How many `phone.pairStart` calls are waiting for `releasePairStart()`.
+    var heldPairStartCalls: Int { heldPairStart.count }
+
+    /// Lets every held `phone.pairStart` call answer, and the later ones
+    /// answer at once.
+    func releasePairStart() {
+        holdsPairStart = false
+        let held = heldPairStart
+        heldPairStart = []
+        for call in held { call.resume() }
+    }
+
     func phoneDevices() async throws -> [PhoneDevice] { devices }
 
     func phonePairStart() async throws -> PhonePairingStatus {
+        if holdsPairStart {
+            await withCheckedContinuation { heldPairStart.append($0) }
+        }
         guard let pairing else { throw DaemonClientError.rpcError("no offer", code: nil) }
         return pairing
     }
@@ -354,8 +375,8 @@ struct AppStatePhoneTests {
             let fake = FakePhoneClient(status: status(pairing: pairing), pairing: pairing)
             state.phoneClient = fake
             await state.refreshPhone()
-            let failure = await state.startPhonePairing()
-            #expect(failure == nil)
+            let outcome = await state.startPhonePairing(for: PhonePairingRequest())
+            #expect(outcome == .started(pairing))
             #expect(state.phoneStatus?.pairing?.offerID == offerID)
             await state.allowPhonePairing(offerID: offerID)
             await state.denyPhonePairing(offerID: offerID)
@@ -413,9 +434,68 @@ struct AppStatePhoneTests {
             await state.allowPhonePairing(offerID: pairing.offerID)
             #expect(state.phonePairingError == reason)
             // A new offer starts without the old offer's failure.
-            let failure = await state.startPhonePairing()
-            #expect(failure == nil)
+            let outcome = await state.startPhonePairing(for: PhonePairingRequest())
+            #expect(outcome == .started(pairing))
             #expect(state.phonePairingError == nil)
+        }
+    }
+
+    /// Before any `phone.status` has answered, `phoneStatus` is nil. An offer
+    /// started then still reaches the sheet, straight from `phone.pairStart`,
+    /// and the sheet's Cancel denies it.
+    @Test func anOfferStartedBeforeAnyStatusReachesTheSheetAndCancelDeniesIt() async {
+        await withState { state in
+            let pairing = PhonePairingStatus(
+                offerID: UUID(), link: "https://acme-loader.github.io/#p=AAAA",
+                expiresAt: Date(timeIntervalSince1970: 1_800_000_300), state: .waitingForPhone)
+            let fake = FakePhoneClient(
+                status: status(), statusError: DaemonClientError.rpcError(FakePhoneClient.identityRefusal, code: nil),
+                pairing: pairing)
+            state.phoneClient = fake
+            let outcome = await state.startPhonePairing(for: PhonePairingRequest())
+            #expect(outcome == .started(pairing))
+            #expect(state.phoneStatus == nil)
+            // The sheet shows the offer, so its code and link, and nothing
+            // has denied it yet.
+            #expect(PhonePresentation.sheetPairing(started: pairing, status: state.phoneStatus) == pairing)
+            let deniedBefore = await fake.deniedOffers
+            #expect(deniedBefore.isEmpty)
+
+            // Cancel denies the offer the sheet shows.
+            let toDeny = PhonePresentation.offerToDeny(started: pairing, status: state.phoneStatus)
+            #expect(toDeny == pairing.offerID)
+            if let toDeny {
+                await state.denyPhonePairing(offerID: toDeny)
+            }
+            let denied = await fake.deniedOffers
+            #expect(denied == [pairing.offerID])
+        }
+    }
+
+    /// The user cancels the sheet while it still says "Starting…". The offer
+    /// that then finishes starting is denied by its ID, so no QR code stays
+    /// usable with no sheet showing it.
+    @Test(.fastPassBounded) func anOfferThatFinishesStartingAfterItsSheetClosedIsDenied() async {
+        await withState { state in
+            let pairing = PhonePairingStatus(
+                offerID: UUID(), link: "https://acme-loader.github.io/#p=AAAA",
+                expiresAt: Date(timeIntervalSince1970: 1_800_000_300), state: .waitingForPhone)
+            let fake = FakePhoneClient(status: status(), pairing: pairing, holdsPairStart: true)
+            state.phoneClient = fake
+            await state.refreshPhone()
+            let request = PhonePairingRequest()
+            let starting = Task { await state.startPhonePairing(for: request) }
+            let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await fake.heldPairStartCalls == 1
+            }
+            #expect(held == .satisfied)
+
+            request.close()
+            await fake.releasePairStart()
+            let outcome = await starting.value
+            #expect(outcome == .abandoned)
+            let denied = await fake.deniedOffers
+            #expect(denied == [pairing.offerID])
         }
     }
 

@@ -27,6 +27,29 @@ protocol PhoneControlClient: Sendable {
 
 extension DaemonClient: PhoneControlClient {}
 
+/// A pairing sheet's hold on the offer it starts: open while the sheet is
+/// shown, closed once it goes away. An offer that finishes starting after the
+/// close is denied at once, because no sheet shows it, and closing the sheet
+/// while it was starting is how the user cancelled it.
+@MainActor
+final class PhonePairingRequest {
+    private(set) var isClosed = false
+
+    func close() {
+        isClosed = true
+    }
+}
+
+/// How `AppState.startPhonePairing(for:)` ended.
+enum PhonePairingStart: Equatable {
+    /// The daemon started this offer, as `phone.pairStart` returned it.
+    case started(PhonePairingStatus)
+    /// No offer started, for this reason.
+    case failed(String)
+    /// The sheet closed while the offer started, so the offer was denied.
+    case abandoned
+}
+
 extension AppState {
     /// How long the connect-time phone refresh waits before each retry,
     /// after its first try fails. About 7.5 s in all.
@@ -153,16 +176,31 @@ extension AppState {
         }
     }
 
-    /// Starts a pairing offer. The new offer is published into `phoneStatus`
-    /// before the refresh, so the pairing sheet sees it even if that refresh
-    /// fails. Returns nil on success, or the reason pairing could not start.
-    /// An earlier offer's Allow or Deny failure is cleared.
-    func startPhonePairing() async -> String? {
+    /// Starts a pairing offer for the sheet that holds `request`, and returns
+    /// the offer as `phone.pairStart` returned it, so the sheet has it even
+    /// while `phoneStatus` is nil, as it is until a `phone.status` answers.
+    /// When there is a `phoneStatus`, the offer is also published into it
+    /// before the refresh, so it stands even if that refresh fails. An earlier
+    /// offer's Allow or Deny failure is cleared.
+    ///
+    /// When the sheet has closed by the time the offer has started, the offer
+    /// is denied by its ID, and the result is `.abandoned`.
+    func startPhonePairing(for request: PhonePairingRequest) async -> PhonePairingStart {
         if phonePairingError != nil { phonePairingError = nil }
-        return await performPhoneAction(RPCMethod.phonePairStart) {
+        var started: PhonePairingStatus?
+        let failure = await performPhoneAction(RPCMethod.phonePairStart) {
             let pairing = try await phoneClient.phonePairStart()
+            started = pairing
             phoneStatus?.pairing = pairing
         }
+        guard let started else {
+            return .failed(failure ?? "Pairing did not start. Try again.")
+        }
+        if request.isClosed {
+            await denyPhonePairing(offerID: started.offerID)
+            return .abandoned
+        }
+        return .started(started)
     }
 
     /// Allows the phone waiting on offer `offerID`, the offer whose phone
