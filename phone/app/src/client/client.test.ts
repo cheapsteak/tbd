@@ -406,12 +406,25 @@ test('env messages are ignored', () => {
   assert.equal(h.posted.length, 0);
 });
 
-test('an ID that is still in use is never sent twice', () => {
+test('an ID that is still in use is never sent twice, and the request rejects rather than throws', async () => {
   const h = harness({ newID: () => 'same' });
   h.up();
   track(h.c.request('profiles.list', {}));
-  assert.throws(() => h.c.request('message.send', { session: REF, text: 'hi' }), /already in use/);
+  let reused: Promise<unknown> | undefined;
+  assert.doesNotThrow(() => { reused = h.c.request('message.send', { session: REF, text: 'hi' }); });
+  await assert.rejects(reused!, (error: unknown) => (
+    error instanceof Error && !(error instanceof AppError) && /request ID same is already in use/.test(error.message)
+  ));
   assert.equal(h.posted.length, 1);
+});
+
+test('a newID that throws rejects the request, and nothing is posted', async () => {
+  const h = harness({ newID: () => { throw new Error('no random values'); } });
+  h.up();
+  let p: Promise<unknown> | undefined;
+  assert.doesNotThrow(() => { p = h.c.request('profiles.list', {}); });
+  await assert.rejects(p!, /no random values/);
+  assert.equal(h.posted.length, 0);
 });
 
 test('the default request ID is a lowercase version 4 UUID, new each time', () => {

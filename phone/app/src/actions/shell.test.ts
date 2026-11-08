@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AppError, SUPERSEDED_TEXT } from '../client/client.ts';
+import { AppClient, AppError, SUPERSEDED_TEXT } from '../client/client.ts';
 import type {
   AppEvent, Method, ParamsOf, PhoneRow, PhoneSession, PhoneSessionRef, ResultOf, SessionsChangedData, SessionsSubscribeResult,
 } from '../protocol/types.ts';
@@ -297,6 +297,35 @@ test('Try again with a first-time client subscribes with {}', async () => {
   await flush();
   h.actions.retrySubscribe();
   assert.deepEqual(h.requests()[1], ['sessions.subscribe', {}]);
+});
+
+test('a subscribe the client refuses before posting still resumes the transcript, and Try again subscribes', async () => {
+  // The real client, whose `newID` gives the ID of a read still queued: the subscribe that
+  // channel up makes collides with it.
+  const ids = ['dup', 'dup', 'fresh'];
+  const posted: Array<Record<string, unknown>> = [];
+  const store = createStore();
+  let actions: Actions | null = null;
+  const client = new AppClient({
+    post: (body) => { posted.push(body); },
+    onEvent: () => {},
+    onUp: () => actions!.onChannelUp(),
+    onDown: () => actions!.onChannelDown(),
+    now: () => 0,
+    newID: () => ids.shift() ?? 'spent',
+  });
+  actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const calls: string[] = [];
+  actions.resumeTranscriptOnUp = () => { calls.push('resumeTranscriptOnUp'); };
+  client.request('profiles.list', {}).catch(() => {});
+  assert.doesNotThrow(() => client.handle({ t: 'channel', up: true }));
+  assert.deepEqual(calls, ['resumeTranscriptOnUp']);
+  await flush();
+  assert.match(store.get().conn.error ?? '', /request ID dup is already in use/);
+  // The refused subscribe is not in flight, so Try again sends a new one.
+  actions.retrySubscribe();
+  assert.equal(store.get().conn.error, null);
+  assert.deepEqual(posted.map((b) => [b.requestID, b.method]), [['dup', 'profiles.list'], ['fresh', 'sessions.subscribe']]);
 });
 
 // MARK: - Events

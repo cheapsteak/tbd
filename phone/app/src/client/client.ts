@@ -295,8 +295,11 @@ export class AppClient {
   }
 
   /**
-   * Sends one request and resolves with its decoded result. It rejects with `AppError` only:
+   * Sends one request and resolves with its decoded result. It never throws: every failure is
+   * the rejected promise, so a caller that counts its requests in flight sees each one settle.
+   * It rejects with an `AppError`:
    * - the daemon's error;
+   * - `bad_request` at once for params that do not fit the method's wire shape;
    * - `too_large` at once for a body over one frame, with nothing posted, and for the largest
    *   body posted when the loader refuses one all the same (`sendFailed: tooLarge`);
    * - `bad_reply` for a reply that does not decode;
@@ -310,8 +313,20 @@ export class AppClient {
    * when the channel is up and fewer than 32 requests are posted and unanswered or wait for the
    * subscribe reply, and, for an action, when no earlier action waits to be sent again.
    * Otherwise it waits, in the order it was made.
+   *
+   * One failure is no `AppError`: a request ID that `newID` gave while it is still in use, a
+   * fault in the client's own setup, rejects with a plain `Error` and posts nothing.
    */
   request<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
+    try {
+      return this.#enqueue(method, params);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  /** `request`'s work, which throws where `request` rejects. */
+  #enqueue<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
     const id = this.#newID();
     // A reused ID would be read by the daemon as a resend: another request's reply, or nothing.
     if (this.#pending.has(id)) throw new Error(`AppClient: request ID ${id} is already in use`);
@@ -319,11 +334,11 @@ export class AppClient {
     try {
       body = requestBody(id, method, params);
     } catch {
-      return Promise.reject(new AppError('bad_request', BAD_PARAMS_TEXT));
+      throw new AppError('bad_request', BAD_PARAMS_TEXT);
     }
     // The loader's refusal of an oversized body names no request, so it is caught here, before
     // the body is queued, while the caller can still be told which request it was.
-    if (!fitsFrame(body)) return Promise.reject(new AppError('too_large', TOO_LONG_TEXT));
+    if (!fitsFrame(body)) throw new AppError('too_large', TOO_LONG_TEXT);
     return new Promise<ResultOf<M>>((resolve, reject) => {
       const lane: Lane = this.#inOnUp ? 'first' : 'queued';
       const pending: Pending = {
