@@ -274,3 +274,78 @@ test('an empty repo still shows its header and "+"', async ({ page, appHost }) =
   await expect(app(page).getByRole('button', { name: 'acme-docs', exact: true })).toBeVisible();
   await expect(app(page).getByRole('button', { name: 'New session in acme-docs' })).toBeVisible();
 });
+
+// --- the live list ----------------------------------------------------------------------
+//
+// The 30 s age refresh has no test here: it would cost a real 31 s wait per run, and `useNow`
+// (ui/now.ts) has its own tests.
+
+/**
+ * `scenario` with each row of `rows` in place of the row with its ID.
+ * @param {{ layout: any[], rows: any[] }} scenario
+ * @param {any[]} rows
+ */
+function withRows(scenario, rows) {
+  const byID = new Map(rows.map((r) => [r.id, r]));
+  return { ...scenario, rows: scenario.rows.map((r) => byID.get(r.id) ?? r) };
+}
+
+test('a status change moves the row and its repo to the top', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  const before = expectedOutline(MOCK);
+  await expect.poll(() => shownOutline(page)).toEqual(before);
+  // The last row of the last repo, as the mock's "A status changes now" picks it.
+  const [lastRepo, lastRows] = before[before.length - 1];
+  const last = mockRow(lastRows[lastRows.length - 1]);
+  const changed = { ...last, sessions: last.sessions.map((/** @type {any} */ s) => ({ ...s, status: { chip: 'idle', agoMinutes: 0 } })) };
+
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [changed], removedRowIDs: [] });
+  const after = expectedOutline(withRows(MOCK, [changed]));
+  expect(after[0][0]).toBe(lastRepo);
+  expect(after[0][1][0]).toBe(last.name);
+  await expect.poll(() => shownOutline(page)).toEqual(after);
+  const top = app(page).locator('.row').first();
+  await expect(top.locator('.t')).toHaveText('now');
+  await expect(top.locator('.sr')).toHaveText('Idle');
+});
+
+test('removedRowIDs removes the row', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await expect.poll(() => shownOutline(page)).toEqual(expectedOutline(MOCK));
+  const login = mockRow('Login redirect fix');
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [], removedRowIDs: [login.id] });
+  await expect.poll(() => shownOutline(page)).toEqual(expectedOutline({ ...MOCK, rows: MOCK.rows.filter((/** @type {any} */ r) => r.id !== login.id) }));
+
+  // The laptop removes the rest of acme-web's rows, and keeps its group: the repo goes last,
+  // header only, with its "+".
+  const web = MOCK.layout.find((/** @type {any} */ g) => g.name === 'acme-web');
+  const layout = MOCK.layout.map((/** @type {any} */ g) => (g === web ? { ...g, rows: [] } : g));
+  await hostCall(page, 'emit', 'sessions.changed', {
+    layout, rows: [], removedRowIDs: web.rows.map((/** @type {any} */ p) => p.id).filter((/** @type {string} */ id) => id !== login.id),
+  });
+  const rest = expectedOutline(MOCK).filter(([repo]) => repo !== 'acme-web');
+  await expect.poll(() => shownOutline(page)).toEqual([...rest, ['acme-web', []]]);
+  await expect(app(page).getByRole('button', { name: 'New session in acme-web' })).toBeVisible();
+});
+
+test('rows that follow a snapshot with more appear', async ({ page, appHost }) => {
+  await openApp(page, appHost, { channel: 'down' });
+  // Every other row waits for a later event; the snapshot's layout places them all.
+  const laterIDs = MOCK.rows.filter((/** @type {any} */ _, /** @type {number} */ i) => i % 2 === 1).map((/** @type {any} */ r) => r.id);
+  await page.evaluate((later) => {
+    /** @type {any} */ (window).__host.setReply('sessions.subscribe', (/** @type {any} */ _params, /** @type {any} */ state) => ({
+      result: {
+        stream: state.stream, seq: state.seq, replayed: false, layout: state.layout,
+        rows: state.rows.filter((/** @type {any} */ r) => !later.includes(r.id)), omittedRows: 0, more: true,
+      },
+    }));
+  }, laterIDs);
+  await hostCall(page, 'setChannel', true);
+  const first = { ...MOCK, rows: MOCK.rows.filter((/** @type {any} */ r) => !laterIDs.includes(r.id)) };
+  await expect.poll(() => shownOutline(page)).toEqual(expectedOutline(first));
+
+  await hostCall(page, 'emit', 'sessions.changed', {
+    rows: MOCK.rows.filter((/** @type {any} */ r) => laterIDs.includes(r.id)), removedRowIDs: [],
+  });
+  await expect.poll(() => shownOutline(page)).toEqual(expectedOutline(MOCK));
+});

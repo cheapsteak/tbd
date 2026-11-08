@@ -5,6 +5,9 @@
 //
 // - `sessions`: the mock scenario after its subscribe.
 // - `reconnect`: the same, then the channel drops, so the loader's strip says "Reconnecting…".
+// - `bump`: the last row of the last repo changes status now, as the mock's "A status changes
+//   now" does, so it and its repo move to the top. The mock's toast is its demo's alone, not the
+//   app's, so this shot has none.
 
 import { readFileSync } from 'node:fs';
 
@@ -16,6 +19,8 @@ test.use({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
 const MOCK = JSON.parse(readFileSync(new URL('scenarios/mock.json', import.meta.url), 'utf8'));
 /** Every row of the mock scenario, by name, sorted as `rowNames` returns them. */
 const MOCK_NAMES = MOCK.rows.map((/** @type {any} */ r) => r.name).sort();
+/** The mock's last row of its last repo once sorted, as its "A status changes now" picks it. */
+const LEGACY_PANE = MOCK.rows.find((/** @type {any} */ r) => r.name === 'Legacy pane');
 
 test('sessions', async ({ page, appHost }) => {
   await openApp(page, appHost);
@@ -29,4 +34,15 @@ test('reconnect', async ({ page, appHost }) => {
   await hostCall(page, 'setChannel', false);
   await expect(page.locator('#strip [data-state="reconnect"]')).toHaveText('Reconnecting…');
   await capture(page, 'reconnect', app(page).locator('.list-foot'));
+});
+
+test('bump', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await expect.poll(() => rowNames(page)).toEqual(MOCK_NAMES);
+  // As the mock's bump does: the status changes now, and an Unknown one reads Idle after it.
+  const sessions = LEGACY_PANE.sessions.map((/** @type {any} */ s) => ({ ...s, status: { chip: 'idle', agoMinutes: 0 } }));
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...LEGACY_PANE, sessions }], removedRowIDs: [] });
+  await expect(app(page).locator('.repo').first()).toHaveText('acme-mobile');
+  await expect(app(page).locator('.row .n').first()).toHaveText('Legacy pane');
+  await capture(page, 'bump', app(page).locator('.list-foot'));
 });
