@@ -203,8 +203,10 @@ struct URLSessionRelayTransportTests {
             // request timeout outlasts this wait, so only that cancel can
             // close it in time.
             switch await pollUntilTrue(timeout: deadline, { server.silentConnections == 0 }) {
-            case .satisfied, .cancelled:
+            case .satisfied:
                 break
+            case .cancelled:
+                throw CancellationError()
             case .timedOut:
                 throw BoundedWaitTimeout(what: "the cancelled connect to close its connection",
                                          observed: "\(server.silentConnections) still open", deadline: deadline)
