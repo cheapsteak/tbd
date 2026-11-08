@@ -456,6 +456,35 @@ for (const [title, name, cls, text] of [
   });
 }
 
+test.describe('in UTC', () => {
+  test.use({ timezoneId: 'UTC' });
+
+  test('a rate limit with no reason says when it lifts, or that the limit is reached', async ({ page, appHost }) => {
+    // As the daemon sends a local rate limit: no reason, and the time it lifts when it knows it.
+    const bulk = mockRow('Bulk import');
+    /** @param {number | undefined} untilAt */
+    const limited = (untilAt) => ({ ...bulk, sessions: [{ ...bulk.sessions[0], status: { chip: 'rateLimited', agoMinutes: 40, ...(untilAt === undefined ? {} : { untilAt }) } }] });
+    const today = new Date();
+    const at = (/** @type {number} */ days, /** @type {number} */ hour, /** @type {number} */ minute) =>
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + days, hour, minute);
+    await openApp(page, appHost, { scenario: withRows(MOCK, [limited(at(0, 15, 0))]) });
+    await openSessionByName(page, 'Bulk import');
+    const band = app(page).locator('.banner');
+    await expect(band).toContainClass('st-rate');
+    await expect(band).toHaveText('Usage limit reached. It resets at 3:00 pm.');
+
+    // On another day, the weekday comes first. The band changes while the screen is open.
+    const tomorrow = at(1, 9, 5);
+    const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(tomorrow).getUTCDay()];
+    await hostCall(page, 'emit', 'sessions.changed', { rows: [limited(tomorrow)], removedRowIDs: [] });
+    await expect(band).toHaveText(`Usage limit reached. It resets at ${weekday} 9:05 am.`);
+
+    await hostCall(page, 'emit', 'sessions.changed', { rows: [limited(undefined)], removedRowIDs: [] });
+    await expect(band).toHaveText('Usage limit reached.');
+    await expect(band.locator('svg')).toHaveCount(1);
+  });
+});
+
 test('the other statuses have no band', async ({ page, appHost }) => {
   await openApp(page, appHost);
   for (const name of ['main', 'Login redirect fix', 'Docs refresh', 'Triage flaky test']) {
