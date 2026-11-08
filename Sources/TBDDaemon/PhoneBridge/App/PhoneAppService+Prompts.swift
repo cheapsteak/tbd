@@ -721,6 +721,7 @@ extension PhoneAppService {
     static let answerReasonTooLongReason = "That reason is too long to send from a phone."
     static let answerRefusedReason = "The laptop refused the answer."
     static let noAnswerReason = "This provider does not support answering prompts."
+    static let notAClaudeAnswerReason = "Only a Claude session can answer prompts."
 
     // MARK: - prompt.answer
 
@@ -730,8 +731,12 @@ extension PhoneAppService {
     /// - A permission answer whose reason is over `promptTextCap` UTF-8 bytes
     ///   is `bad_request`, before anything is called.
     /// - **A local session** the phone cannot see (`phoneVisibleTerminal`) is
-    ///   `not_found`. Otherwise `phoneAnswerPrompt` with the terminal, the
-    ///   prompt and the answer.
+    ///   `not_found`. One whose `answer` capability the sessions list shows
+    ///   unavailable (a Codex session, a tab in a remote lane) is
+    ///   `unsupported` with the list's reason, and any other session that is
+    ///   not Claude (a shell) is `unsupported` with `notAClaudeAnswerReason`
+    ///   (`phoneCapableClaudeTerminal`). Otherwise `phoneAnswerPrompt` with
+    ///   the terminal, the prompt and the answer.
     /// - **A remote session** needs its provider's `answer` capability, as the
     ///   sessions list shows it, or it is `unsupported` with the same reason;
     ///   a provider that is not registered is `not_found`. Then
@@ -751,7 +756,8 @@ extension PhoneAppService {
         let key = PhonePromptAnswerLedger.Key(session: params.session, promptID: params.promptID)
         switch params.session {
         case .local(let terminalID):
-            _ = try await phoneVisibleTerminal(terminalID)
+            _ = try await phoneCapableClaudeTerminal(
+                terminalID, needing: { $0.answer }, notClaude: Self.notAClaudeAnswerReason)
             let core = PromptAnswerParams(terminalID: terminalID, promptID: params.promptID, answer: params.answer)
             return try await answerInLedger(key, deviceID: deviceID) {
                 try await self.actions.phoneAnswerPrompt(core, deviceID: deviceID)

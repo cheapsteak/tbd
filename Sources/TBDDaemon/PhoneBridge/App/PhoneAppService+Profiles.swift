@@ -141,7 +141,8 @@ extension PhoneAppService {
 
     /// The terminal row behind `session`, with its capabilities as the
     /// sessions list shows them, when it is a session switch and fork may act
-    /// on: a local Claude session in a local worktree that the phone can see.
+    /// on: a local Claude session in a local worktree that the phone can see
+    /// (`phoneCapableClaudeTerminal`).
     ///
     /// A remote session is `unsupported` with the reason the sessions list
     /// gives; a session the phone cannot see (`phoneVisibleTerminal`) is
@@ -158,14 +159,8 @@ extension PhoneAppService {
         guard case .local(let terminalID) = session else {
             throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.remoteOnlyReason)
         }
-        let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
-        let capabilities = PhoneSessionStatus.localCapabilities(
-            terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
-        try Self.requireCapability(capabilities.switchProfile, orElse: Self.notAClaudeSessionReason)
-        guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
-            throw PhoneAppError(code: .unsupported, message: Self.notAClaudeSessionReason)
-        }
-        return (terminal, capabilities)
+        return try await phoneCapableClaudeTerminal(
+            terminalID, needing: { $0.switchProfile }, notClaude: Self.notAClaudeSessionReason)
     }
 
     /// `terminal.swapProfile` for `terminalID`, onto `profileID` (nil for the

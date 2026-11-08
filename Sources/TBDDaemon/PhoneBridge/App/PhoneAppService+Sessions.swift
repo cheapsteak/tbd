@@ -312,4 +312,30 @@ extension PhoneAppService {
         }
         return (terminal, worktree)
     }
+
+    /// The terminal row behind a local session, with its capabilities as the
+    /// sessions list shows them (`PhoneSessionStatus.localCapabilities`),
+    /// when the phone can see it (`phoneVisibleTerminal`, else `not_found`),
+    /// the capability `needed` picks is available, and it is a Claude
+    /// session by the list's reading (`PhoneSnapshotBuilder.agent(of:)`).
+    ///
+    /// An unavailable capability is `unsupported` with its reason, as the
+    /// list shows it: a Codex session, a tab in a remote lane. Any other
+    /// session the list does not show as Claude (a shell, or a row with no
+    /// kind and no Claude session) is `unsupported` with `notClaude`.
+    /// `prompt.answer`, `session.switchProfile` and `session.fork` read a
+    /// local session through this, so each refuses what the list marks
+    /// unavailable, in the list's words.
+    nonisolated func phoneCapableClaudeTerminal(
+        _ terminalID: UUID, needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, notClaude: String
+    ) async throws -> (terminal: TBDShared.Terminal, capabilities: PhoneCapabilities) {
+        let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
+        let capabilities = PhoneSessionStatus.localCapabilities(
+            terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
+        try Self.requireCapability(needed(capabilities), orElse: notClaude)
+        guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
+            throw PhoneAppError(code: .unsupported, message: notClaude)
+        }
+        return (terminal, capabilities)
+    }
 }

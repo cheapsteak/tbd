@@ -291,6 +291,30 @@ struct PhonePromptTests {
         #expect(againBytes == firstBytes)
     }
 
+    /// A local session whose `answer` the sessions list shows unavailable (a
+    /// Codex session, a tab in a remote lane), and a shell, which the list
+    /// does not show, are refused before anything is called, with the
+    /// list's reason where it gives one.
+    @Test(arguments: [
+        (TerminalKind.codex, false, "Codex sessions show status only."),
+        (TerminalKind.shell, false, "Only a Claude session can answer prompts."),
+        (TerminalKind.claude, true, "This tab belongs to a remote lane. Use its remote session."),
+    ])
+    func anAnswerOnALocalSessionThatIsNotClaudeIsUnsupported(
+        _ kind: TerminalKind, _ inRemoteLane: Bool, _ reason: String
+    ) async throws {
+        let h = try await PhoneServiceHarness.make()
+        h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
+        let terminal = try await h.seedTerminal(kind: kind, inRemoteLane: inRemoteLane)
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminal.id, "toolu-1"), on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .unsupported, message: reason))
+        #expect(h.actions.answers.isEmpty)
+        #expect(h.actions.calls.isEmpty)
+    }
+
     // MARK: - prompt.answer, a remote session
 
     @Test func aRemoteAnswerNeedsTheAnswerCapability() async throws {
