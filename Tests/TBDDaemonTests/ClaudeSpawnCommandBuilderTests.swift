@@ -157,7 +157,7 @@ struct ClaudeSpawnCommandBuilderTests {
             cmd: nil,
             shellFallback: ""
         )
-        #expect(r.command.hasSuffix(" 'do the thing'"))
+        #expect(r.command.hasSuffix(" -- 'do the thing'"))
     }
 
     @Test("fresh + initial prompt file — the shell reads the prompt, the command stays short")
@@ -175,7 +175,7 @@ struct ClaudeSpawnCommandBuilderTests {
         // The path is shell-escaped like any other argument, and the file is
         // read by the launching shell: tmux rejects a spawn command over about
         // 16 KiB, so a large prompt must not ride in the command itself.
-        #expect(r.command == "claude --session-id sid --dangerously-skip-permissions \"$(cat '/var/packets/it'\\''s a packet.txt')\"")
+        #expect(r.command == "claude --session-id sid --dangerously-skip-permissions -- \"$(cat '/var/packets/it'\\''s a packet.txt')\"")
     }
 
     @Test("an inline initial prompt wins over a prompt file path")
@@ -190,7 +190,7 @@ struct ClaudeSpawnCommandBuilderTests {
             cmd: nil,
             shellFallback: ""
         )
-        #expect(r.command.hasSuffix(" 'do the thing'"))
+        #expect(r.command.hasSuffix(" -- 'do the thing'"))
         #expect(!r.command.contains("ignored.txt"))
     }
 
@@ -208,7 +208,84 @@ struct ClaudeSpawnCommandBuilderTests {
         // Exact-match including the single-quote escaping: this argv is the
         // mechanism a wake prompt relies on to never paste into a live
         // session, so the shape (and shellEscape) must not silently change.
-        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions 'wake: don'\\''t trust the snapshot'")
+        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions -- 'wake: don'\\''t trust the snapshot'")
+    }
+
+    // MARK: - The prompt is never an option
+
+    /// Claude Code parses an argument that starts with `-` as an option even
+    /// when the shell passes it as one quoted word, so a prompt such as
+    /// `- fix the tests` must come after `--` or the spawn fails with
+    /// "unknown option".
+    @Test func aPromptStartingWithADashFollowsTheEndOfOptions() {
+        let resumed = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123", freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: "- fix the tests", profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+        let fresh = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: "sid-1", appendSystemPrompt: "be brief",
+            initialPrompt: "- fix the tests", profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+            sessionName: "acme-worker")
+
+        #expect(resumed.command == "claude --resume abc-123 --dangerously-skip-permissions -- '- fix the tests'")
+        #expect(fresh.command
+            == "claude --session-id sid-1 --dangerously-skip-permissions --name 'acme-worker'"
+            + " --append-system-prompt 'be brief' -- '- fix the tests'")
+    }
+
+    /// A prompt that spells a flag must reach Claude Code as text: read as an
+    /// option, `--settings={…}` would load settings whose hooks run shell
+    /// commands on this machine.
+    @Test func aPromptSpellingTheSettingsFlagIsDeliveredAsText() {
+        let prompt = #"--settings={"hooks":{"SessionStart":[]}}"#
+        let resumed = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123", forkSession: true, freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: prompt, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+            settingsOverlayPath: "/tbd/overlay.json", pluginDirPath: "/tbd/plugin",
+            fileExists: { _ in true })
+        let fresh = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: "sid-1", appendSystemPrompt: nil,
+            initialPrompt: prompt, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+
+        #expect(resumed.command
+            == "claude --resume abc-123 --fork-session --dangerously-skip-permissions"
+            + " --settings '/tbd/overlay.json' --plugin-dir '/tbd/plugin'"
+            + #" -- '--settings={"hooks":{"SessionStart":[]}}'"#)
+        #expect(fresh.command
+            == #"claude --session-id sid-1 --dangerously-skip-permissions -- '--settings={"hooks":{"SessionStart":[]}}'"#)
+        // Only TBD's own overlay is a settings option.
+        #expect(resumed.command.components(separatedBy: " --settings ").count == 2)
+    }
+
+    /// The end-of-options marker exists only to guard a prompt: with no
+    /// prompt, inline or from a file, no branch emits it.
+    @Test func noPromptMeansNoEndOfOptions() {
+        let noPrompts: [(inline: String?, file: String?)] = [(nil, nil), ("", nil), (nil, ""), ("", "")]
+        for (inline, file) in noPrompts {
+            let resumed = ClaudeSpawnCommandBuilder.build(
+                resumeID: "abc-123", freshSessionID: nil, appendSystemPrompt: nil,
+                initialPrompt: inline, initialPromptFilePath: file,
+                profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+            let fresh = ClaudeSpawnCommandBuilder.build(
+                resumeID: nil, freshSessionID: "sid-1", appendSystemPrompt: "be brief",
+                initialPrompt: inline, initialPromptFilePath: file,
+                profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+            let shell = ClaudeSpawnCommandBuilder.build(
+                resumeID: nil, freshSessionID: nil, appendSystemPrompt: nil,
+                initialPrompt: inline, initialPromptFilePath: file,
+                profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+
+            #expect(resumed.command == "claude --resume abc-123 --dangerously-skip-permissions")
+            #expect(fresh.command
+                == "claude --session-id sid-1 --dangerously-skip-permissions --append-system-prompt 'be brief'")
+            #expect(shell.command == "/bin/zsh")
+        }
+
+        // A plain command is not Claude: it never takes a prompt or a marker.
+        let cmd = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: "- fix the tests", profileSecret: nil, cmd: "codex --full-auto",
+            shellFallback: "/bin/zsh")
+        #expect(cmd.command == "codex --full-auto")
     }
 
     @Test("cmd path returns verbatim")

@@ -484,6 +484,13 @@ enum CodexSpawnCommandBuilder {
     /// The Codex launch command: the bare command, then `resume <thread>`
     /// when `resumeThreadID` names one, then the initial prompt as a
     /// trailing argument when there is one.
+    ///
+    /// The prompt follows `--`, which ends Codex's options. Shell quoting
+    /// keeps it one argument, but Codex still parses an argument that starts
+    /// with `-` as an option: `- fix the tests` fails with "unexpected
+    /// argument", and `--config=<key>=<value>` would set a configuration
+    /// override for the session. The prompt is user text, so it is never
+    /// allowed to be read as a flag. No `--` is emitted without a prompt.
     static func build(
         initialPrompt: String?,
         resumeThreadID: String? = nil,
@@ -499,7 +506,7 @@ enum CodexSpawnCommandBuilder {
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
-        return "\(command) \(shellEscape(initialPrompt))"
+        return "\(command) -- \(shellEscape(initialPrompt))"
     }
 
     /// The execution-mode flags every TBD-launched Codex carries.
