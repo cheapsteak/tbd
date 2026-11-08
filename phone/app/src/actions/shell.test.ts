@@ -387,6 +387,35 @@ test('openSession for a session no row lists does nothing', async () => {
   assert.deepEqual(h.calls, []);
 });
 
+test('openSession on the session already shown changes nothing and keeps its transcript', async () => {
+  const h = await subscribed([row('W1', [R])]);
+  h.actions.openSession(R);
+  h.actions.openMenu({ name: 'model' });
+  h.actions.openPending({ ref: R2 });   // a fork of R that the list does not show yet
+  h.calls.length = 0;
+  const before = h.state();
+  h.actions.openSession({ kind: 'local', terminalID: 'T-R' });
+  assert.equal(h.state(), before);
+  assert.deepEqual(h.calls, []);
+  // The tap went nowhere, so the fork still opens once the list shows it.
+  h.actions.onEvent(changed([row('W1', [R, R2])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R2 });
+  assert.deepEqual(h.calls, [['openTranscript', R2]]);
+});
+
+test('back on the sessions list changes nothing and closes no transcript', async () => {
+  const h = await subscribed([row('W1', [R])]);
+  h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' });
+  const before = h.state();
+  h.actions.back();
+  assert.equal(h.state(), before);
+  assert.deepEqual(h.calls, []);
+  // The user stayed put, so the worktree still opens and toasts.
+  h.actions.onEvent(changed([row(WT, [R2], 'fix-login')]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R2 });
+  assert.deepEqual(h.state().ui.toast, { id: 1, text: 'Created fix-login' });
+});
+
 test('back shows the sessions list and closes the transcript', async () => {
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
