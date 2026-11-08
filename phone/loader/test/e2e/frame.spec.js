@@ -86,6 +86,108 @@ test('openLink shows the full URL and opens it with no opener', async ({ context
   expect(await frameText(page)).toContain('acme-api');
 });
 
+test('a long link opens its sheet at the top, with the title and the URL\'s start in view', async ({ page, server, browserName }) => {
+  // The Pixel 7 is tall enough to show the whole URL, so Chromium runs as a smaller Android
+  // phone; WebKit stays the iPhone 15.
+  if (browserName === 'chromium') await page.setViewportSize({ width: 360, height: 640 });
+  const { laptop } = await appRunning(page, server);
+  // Near the loader's 2,048-character cap, so on a phone the URL runs past the sheet's height.
+  const start = 'https://acme.example/';
+  const url = `${start}${'a'.repeat(1_900)}/login`;
+  await sendEvent(laptop, 'debug.openLink', { url });
+  const sheet = page.locator('[data-state="link"]');
+  const open = sheet.getByRole('button', { name: 'Open' });
+  await expect(sheet.locator('.url')).toHaveText(url);
+  await expect(open).toBeFocused();
+
+  const seen = await sheet.evaluate((el, prefix) => {
+    const viewport = { top: 0, bottom: window.innerHeight };
+    const box = el.getBoundingClientRect();
+    /** @param {DOMRect} r */
+    const shown = (r) => r.height > 0 && r.top >= Math.max(viewport.top, box.top) - 0.5
+      && r.bottom <= Math.min(viewport.bottom, box.bottom) + 0.5;
+    const title = /** @type {Element} */ (el.querySelector('.sh-title'));
+    const text = /** @type {Text} */ (/** @type {Element} */ (el.querySelector('.url')).firstChild);
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, prefix.length);
+    return {
+      overflows: el.scrollHeight > el.clientHeight,
+      scrollTop: el.scrollTop,
+      title: shown(title.getBoundingClientRect()),
+      start: [...range.getClientRects()].every(shown),
+    };
+  }, start);
+  // The URL is long enough to push Open below the sheet's edge, so this is the case at issue.
+  expect(seen.overflows).toBe(true);
+  expect(seen).toMatchObject({ scrollTop: 0, title: true, start: true });
+
+  // Open is still there for whoever scrolls down to it.
+  await sheet.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await expect(open).toBeInViewport();
+  await expect(open).toBeFocused();
+});
+
+test('a key held as the sheet opens does not press Open, and the next Enter does', async ({ context, page, server }) => {
+  const { laptop } = await appRunning(page, server);
+  const url = `${server.origin}/__test/landing`;
+  let tabs = 0;
+  context.on('page', () => { tabs += 1; });
+  await page.evaluate(() => {
+    /** @type {string[]} */
+    const downs = [];
+    /** @type {any} */ (window).__downs = downs;
+    document.addEventListener('keydown', (event) => { downs.push(`${event.key}:${event.repeat}`); }, true);
+  });
+  const sheet = page.locator('[data-state="link"]');
+  const open = sheet.getByRole('button', { name: 'Open' });
+
+  // The key goes down before the sheet opens, as Enter does on the app's link, and is held:
+  // the browser's auto-repeat then lands on Open, which the sheet focused. Enter presses a
+  // button on its keydown, Space on its keyup after a keydown on the button.
+  for (const [key, text] of [['Enter', 'Enter'], ['Space', ' ']]) {
+    await page.evaluate(() => {
+      /** @type {any} */ (window).__downs.length = 0;
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+    await page.keyboard.down(key);
+    await sendEvent(laptop, 'debug.openLink', { url });
+    await expect(open).toBeFocused();
+    for (let i = 0; i < 4; i += 1) await page.keyboard.down(key);
+    await page.keyboard.up(key);
+    expect(await page.evaluate(() => /** @type {any} */ (window).__downs))
+      .toEqual([`${text}:false`, `${text}:true`, `${text}:true`, `${text}:true`, `${text}:true`]);
+    await expect(sheet).toBeVisible();
+    await expect(open).toBeFocused();
+    expect(tabs).toBe(0);
+  }
+
+  // A deliberate press after the key came up opens the link.
+  const opened = context.waitForEvent('page');
+  await page.keyboard.press('Enter');
+  const tab = await opened;
+  await tab.waitForLoadState();
+  expect(tab.url()).toBe(url);
+  await expect(sheet).toHaveCount(0);
+  expect(tabs).toBe(1);
+});
+
+test('a fresh Enter press on Open opens the link', async ({ context, page, server }) => {
+  const { laptop } = await appRunning(page, server);
+  const url = `${server.origin}/__test/landing`;
+  await sendEvent(laptop, 'debug.openLink', { url });
+  const sheet = page.locator('[data-state="link"]');
+  await expect(sheet.getByRole('button', { name: 'Open' })).toBeFocused();
+
+  const opened = context.waitForEvent('page');
+  await page.keyboard.press('Enter');
+  const tab = await opened;
+  await tab.waitForLoadState();
+  expect(tab.url()).toBe(url);
+  expect(await tab.evaluate(() => window.opener)).toBeNull();
+  await expect(sheet).toHaveCount(0);
+});
+
 test('openLink refuses javascript: and data: URLs', async ({ page, server }) => {
   const { laptop } = await appRunning(page, server);
   const sheet = page.locator('[data-state="link"]');
