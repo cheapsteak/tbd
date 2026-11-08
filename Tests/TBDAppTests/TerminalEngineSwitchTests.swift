@@ -266,6 +266,38 @@ struct TerminalEngineSwitchTests {
         #expect(attempts.count == 1, "the rebuilt panel did not ask for libghostty")
     }
 
+    /// The poll's list is the other way a terminal goes: when it drops out of
+    /// the list, as when the app missed the daemon's removal across a daemon
+    /// restart, its override goes with it, so a row recreated under the same
+    /// id opens on the engine the flag gives it. A terminal still listed
+    /// keeps its own.
+    @Test("A terminal gone from the polled list keeps no override, so a row recreated under its id opens on the flag's engine")
+    func aTerminalGoneFromThePolledListKeepsNoOverride() {
+        let fixture = SwitchFixture(label: "PolledAway", flag: true)
+        defer { fixture.tearDown() }
+        let base = TerminalPanePresentation.attachIdentity(
+            for: fixture.row, attachEpoch: 0, attachRetry: 0, engineOverride: nil)
+        let otherID = UUID()
+        let other = Self.row(otherID, worktreeID: fixture.worktreeID, transport: .holder)
+        fixture.state.terminals[fixture.worktreeID] = [fixture.row, other]
+        fixture.state.terminalEngineOverrides[fixture.terminalID] = .swiftTerm
+        fixture.state.terminalEngineOverrides[otherID] = .swiftTerm
+
+        fixture.state.adoptTerminalSnapshot([other], worktreeID: fixture.worktreeID)
+
+        let listed = fixture.state.terminals[fixture.worktreeID]?.map(\.id)
+        #expect(listed == [otherID], "the poll did not drop the terminal, so this tests nothing")
+        let goneOverride = fixture.state.terminalEngineOverrides[fixture.terminalID]
+        #expect(goneOverride == nil, "a terminal gone from the list kept the override \(String(describing: goneOverride))")
+        let listedOverride = fixture.state.terminalEngineOverrides[otherID]
+        #expect(listedOverride == .swiftTerm, "a terminal still in the list lost its override")
+
+        fixture.state.adoptTerminalSnapshot([fixture.row, other], worktreeID: fixture.worktreeID)
+        #expect(fixture.state.terminalEngineKind(for: fixture.terminalID)
+                == TerminalEngineFactory.requestedKind(flagEnabled: true, host: .panel(.holder)))
+        #expect(fixture.identity == base, "a recreated row's panel carries the gone terminal's override")
+    }
+
     /// Every branch of the decision, including the one where the override
     /// already names the target but the panel was built on the other engine:
     /// writing it again would change nothing, so the override goes and the
