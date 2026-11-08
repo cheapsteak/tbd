@@ -62,6 +62,26 @@ private func place(_ view: GhosttyTerminalView, in parent: NSView) {
     parent.addSubview(view)
 }
 
+/// A superview that counts the drags and releases the view passes up the responder chain, which
+/// is where a mouse event the view does not handle goes, and sends them no further.
+private final class ResponderChainCounter: NSView {
+    private(set) var draggedCount = 0
+    private(set) var upCount = 0
+
+    override func mouseDragged(with event: NSEvent) { draggedCount += 1 }
+    override func mouseUp(with event: NSEvent) { upCount += 1 }
+}
+
+/// A `ResponderChainCounter` filling `window`'s content view, with `view` placed in it.
+@MainActor
+private func placeInCounter(_ view: GhosttyTerminalView, in window: NSWindow) throws -> ResponderChainCounter {
+    let content = try #require(window.contentView)
+    let counter = ResponderChainCounter(frame: content.bounds)
+    content.addSubview(counter)
+    place(view, in: counter)
+    return counter
+}
+
 /// What a view's frame counters were at one moment.
 private struct FrameCounts: Equatable {
     var built: Int
@@ -439,7 +459,12 @@ struct GhosttyTerminalViewTests {
     /// A host that declines a press has something drawn over the view that owns its events, so a
     /// ⌘-click in that press opens no OSC 8 link; the same ⌘-click, claimed, does, which shows the
     /// point is on the link. The window's activating ⌘-click on a link opens it, as the SwiftTerm
-    /// panel's does, unless the host declined that press too.
+    /// panel's does, unless the host declined that press too, and is consumed whole either way:
+    /// the link is looked up once, at the press, and its release goes nowhere.
+    ///
+    /// That the lookup happens once is not shown here: a second lookup could only disagree with
+    /// the first if the screen changed between the two, and nothing on the main thread runs
+    /// between them for a test to change it from.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func aCommandClickTheHostDeclinesOpensNoLink() throws {
         let fixture = try ViewFixture()
@@ -447,8 +472,7 @@ struct GhosttyTerminalViewTests {
         let recorder = ViewRecorder()
         let window = makeOffscreenWindow()
         defer { window.contentView = nil }
-        let content = try #require(window.contentView)
-        place(view, in: content)
+        let counter = try placeInCounter(view, in: window)
         view.onOpenLink = { recorder.openedLinks.append($0) }
         view.onMouseDownClaimFocus = { recorder.claimsPress }
         try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
@@ -481,15 +505,22 @@ struct GhosttyTerminalViewTests {
         let openedWhenClaimed = recorder.openedLinks
         #expect(openedWhenClaimed == [link], "control: a claimed ⌘-click on the link opened \(openedWhenClaimed)")
 
-        // The window's activating ⌘-click on the link, claimed, opens it.
+        // The window's activating ⌘-click on the link, claimed, opens it, and its release goes
+        // nowhere: not to the selection, not as a report, and not up the responder chain.
+        let upsBeforeActivating = counter.upCount
         let activating = try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command, eventNumber: 8)
         let takesActivating = view.acceptsFirstMouse(for: activating)
         #expect(takesActivating)
         view.mouseDown(with: activating)
+        let selectingAfterActivating = view.mouseController.isSelecting
+        #expect(!selectingAfterActivating, "the activating ⌘-click on a link started a selection")
         view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command, eventNumber: 8))
         let openedWhenActivating = recorder.openedLinks
         #expect(openedWhenActivating == [link, link],
                 "the ⌘-click that activated the window landed on a link and opened \(openedWhenActivating)")
+        let upsPassedOn = counter.upCount - upsBeforeActivating
+        #expect(upsPassedOn == 0,
+                "the activating ⌘-click's release went up the responder chain \(upsPassedOn) times")
     }
 
     /// The report route can still carry a press that encodes as nothing: X10 tracking (`?9h`)

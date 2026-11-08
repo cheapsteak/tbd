@@ -1167,9 +1167,14 @@ public final class GhosttyTerminalView: NSView {
         // is not the first responder, so a pane that cannot take focus by being clicked cannot be
         // typed into at all. The activating click focuses the view too.
         if let window, window.firstResponder !== self { window.makeFirstResponder(self) }
-        // The activating click does nothing else (`acceptsActivatingClick`), unless it is a
-        // ⌘-click on a link this press may open.
-        if isActivationClick, mouseController.linkToOpen(at: event) == nil {
+        // The activating click does nothing else (`acceptsActivatingClick`), except open the link
+        // under a ⌘-click this press may open. The link is looked up once, here: the feed thread
+        // can rewrite the screen between two lookups, and a press let through on the first that
+        // found nothing on the second would go on as an ordinary click.
+        if isActivationClick {
+            if let open = onOpenLink, let uri = mouseController.linkToOpen(at: event) {
+                open(uri)
+            }
             pressIsConsumed = true
             return
         }
