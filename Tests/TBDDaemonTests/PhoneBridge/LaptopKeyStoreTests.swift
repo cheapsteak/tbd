@@ -224,6 +224,39 @@ struct LaptopKeyStoreTests {
         #expect(!FileManager.default.fileExists(atPath: target.path))
     }
 
+    /// The writes after the folder's check name it by its descriptor, never
+    /// by its path. So when the checked folder is moved aside and a link to
+    /// another folder takes its name before the key is written, the key still
+    /// lands in the folder that was checked, and the folder the link points
+    /// to gets nothing. Writes by path would follow the link instead.
+    @Test func aFolderSwappedForALinkAfterItsCheckStillGetsTheKey() throws {
+        let fixture = Fixture()
+        defer { fixture.remove() }
+        try fixture.makePhoneDir()
+        let phoneDir = fixture.phoneDir
+        let checked = fixture.root.appendingPathComponent("phone-checked")
+        let elsewhere = fixture.root.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let swaps = OSAllocatedUnfairLock(initialState: 0)
+        let store = LaptopKeyStore(path: fixture.keyPath, afterFolderCheck: {
+            swaps.withLock { $0 += 1 }
+            #expect(rename(phoneDir.path, checked.path) == 0)
+            #expect(symlink(elsewhere.path, phoneDir.path) == 0)
+        })
+
+        let key = try store.loadOrCreate()
+
+        let swapCount = swaps.withLock { $0 }
+        #expect(swapCount == 1)
+        #expect(isSymbolicLink(phoneDir))
+        let landed = checked.appendingPathComponent("laptop.key")
+        #expect(try Data(contentsOf: landed) == key.rawRepresentation)
+        #expect(mode(of: landed) == 0o600)
+        // The temporary file went in the checked folder too, and is gone.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: checked.path) == ["laptop.key"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.path) == [])
+    }
+
     /// What the loading thread reported, read from the test's poll.
     private final class LoadProbe: @unchecked Sendable {
         private let lock = NSLock()

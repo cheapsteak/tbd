@@ -65,6 +65,12 @@ enum LaptopKeyStoreError: Error, Equatable, LocalizedError {
 /// and never overwrites or regenerates a file that fails a check: a loosened
 /// mode, a truncated write or a restore from backup is refused with a reason
 /// the user can act on, and the file is left alone.
+///
+/// The folder that holds the key is opened once per load and checked on its
+/// descriptor. Every later call names the key and its temporary files by
+/// their names in that descriptor (`openat`, `linkat`, `unlinkat`,
+/// `fstatat`), never by a path, so the folder that was checked is the one
+/// read, written and swept, whatever happens to its path in between.
 struct LaptopKeyStore: Sendable {
     static let keyByteCount = 32
     /// How many times a load reads again after another creator's file appeared
@@ -73,62 +79,133 @@ struct LaptopKeyStore: Sendable {
 
     let path: URL
     private let now: @Sendable () -> Date
+    /// Runs after the folder that will hold a new key has been checked and
+    /// made owner-only, and before anything is written in it. A test replaces
+    /// the folder there, to show that the writes still land in the folder
+    /// that was checked.
+    private let afterFolderCheck: (@Sendable () -> Void)?
 
-    init(path: URL, now: @escaping @Sendable () -> Date = Date.init) {
+    init(
+        path: URL,
+        now: @escaping @Sendable () -> Date = Date.init,
+        afterFolderCheck: (@Sendable () -> Void)? = nil
+    ) {
         self.path = path
         self.now = now
+        self.afterFolderCheck = afterFolderCheck
     }
 
     /// The key at `path`, created on first use.
     ///
-    /// 1. Removes temporary files that an interrupted create left more than
-    ///    `PhoneBridgeConstants.keyTempMaxAge` ago.
-    /// 2. Reads an existing file only after checking that it is a regular file
+    /// 1. Opens the folder that holds the key, when there is one, refusing a
+    ///    symbolic link there or anything that is not a folder.
+    /// 2. Removes temporary files in it that an interrupted create left more
+    ///    than `PhoneBridgeConstants.keyTempMaxAge` ago.
+    /// 3. Reads an existing file only after checking that it is a regular file
     ///    with mode 0600, owned by this user, holding 32 bytes. Any failed
     ///    check throws and writes nothing.
-    /// 3. When there is no file and `createIfMissing` is false, throws
-    ///    `.missing` and creates nothing. A caller with paired phones passes
-    ///    false: a new key would unpair every one of them without a word.
-    /// 4. Otherwise writes a new key, complete and synced, to a temporary file
-    ///    and hard-links it into place. A link never replaces an existing file,
+    /// 4. When there is no file and `createIfMissing` is false, throws
+    ///    `.missing` and creates nothing, not even the folder. A caller with
+    ///    paired phones passes false: a new key would unpair every one of
+    ///    them without a word.
+    /// 5. Otherwise creates the folder if there is none, makes it owner-only,
+    ///    writes a new key, complete and synced, to a temporary file and
+    ///    hard-links it into place. A link never replaces an existing file,
     ///    so when another creator wins the race, its key is read instead.
     func loadOrCreate(createIfMissing: Bool = true) throws -> Curve25519.KeyAgreement.PrivateKey {
         let directory = path.deletingLastPathComponent()
-        sweepStaleTempFiles(in: directory)
+        var folder = try openFolder(directory)
+        defer { if let folder { close(folder) } }
+        if let folder {
+            sweepStaleTempFiles(in: folder)
+        }
         for _ in 0..<Self.maxAttempts {
-            if let existing = try readExisting() {
+            if let folder, let existing = try readExisting(in: folder) {
                 return existing
             }
             guard createIfMissing else {
                 throw LaptopKeyStoreError.missing
             }
-            if let created = try create(in: directory) {
+            let target = try folder ?? createFolder(directory)
+            folder = target
+            if let created = try create(in: target) {
                 return created
             }
         }
         throw LaptopKeyStoreError.io("\(path.path) appeared and vanished \(Self.maxAttempts) times while it was being read")
     }
 
+    // MARK: - The folder
+
+    /// A descriptor for `directory`, or nil when there is none.
+    ///
+    /// `O_NOFOLLOW` refuses a symbolic link there, so what is checked, read
+    /// and written is TBD's own folder and nothing a link points to.
+    /// `O_NONBLOCK` keeps a FIFO there from blocking the open; `fstat` then
+    /// refuses it.
+    private func openFolder(_ directory: URL) throws -> Int32? {
+        let descriptor = Darwin.open(directory.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let code = errno
+            switch code {
+            case ENOENT: return nil
+            case ELOOP: throw LaptopKeyStoreError.io("\(directory.path) is a symbolic link; it must be a folder")
+            default: throw Self.ioError("open", directory.path, code)
+            }
+        }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else {
+            let code = errno
+            close(descriptor)
+            throw Self.ioError("fstat", directory.path, code)
+        }
+        guard (info.st_mode & S_IFMT) == S_IFDIR else {
+            close(descriptor)
+            throw LaptopKeyStoreError.io("\(directory.path) is not a folder")
+        }
+        return descriptor
+    }
+
+    /// Creates `directory` with mode 0700, and its parent if needed, and
+    /// opens it the way `openFolder` does. An existing folder is opened as
+    /// it is; `create(in:)` sets its mode.
+    private func createFolder(_ directory: URL) throws -> Int32 {
+        let parent = directory.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        } catch {
+            throw LaptopKeyStoreError.io("create \(parent.path): \(error.localizedDescription)")
+        }
+        if mkdir(directory.path, 0o700) != 0 {
+            let code = errno
+            guard code == EEXIST else { throw Self.ioError("mkdir", directory.path, code) }
+        }
+        guard let descriptor = try openFolder(directory) else {
+            throw Self.ioError("open", directory.path, ENOENT)
+        }
+        return descriptor
+    }
+
     // MARK: - Reading
 
-    /// The key in the existing file, or nil when there is no file.
+    /// The key in the existing file in `folder`, or nil when there is none.
     ///
     /// The checks run on the open descriptor (`fstat`), so the file that is
-    /// checked is the file that is read, whatever happens to the path in
-    /// between. `O_NOFOLLOW` refuses a symbolic link at the key path rather
-    /// than following it: the target's mode and owner would otherwise be the
-    /// ones checked, and a link can point anywhere. `O_NONBLOCK` keeps a FIFO
-    /// at the path from blocking the open; `fstat` then refuses it. A file
+    /// checked is the file that is read, whatever happens to its name in
+    /// between. `O_NOFOLLOW` refuses a symbolic link at the key's name
+    /// rather than following it: the target's mode and owner would otherwise
+    /// be the ones checked, and a link can point anywhere. `O_NONBLOCK` keeps
+    /// a FIFO there from blocking the open; `fstat` then refuses it. A file
     /// the open is not allowed to read is described by
-    /// `refusalForUnopenableFile(openError:)` instead.
-    private func readExisting() throws -> Curve25519.KeyAgreement.PrivateKey? {
-        let descriptor = Darwin.open(path.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    /// `refusalForUnopenableFile(in:openError:)` instead.
+    private func readExisting(in folder: Int32) throws -> Curve25519.KeyAgreement.PrivateKey? {
+        let descriptor = Darwin.openat(folder, path.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else {
             let code = errno
             switch code {
             case ENOENT: return nil
             case ELOOP: throw LaptopKeyStoreError.notARegularFile
-            case EACCES, EPERM: throw refusalForUnopenableFile(openError: code)
+            case EACCES, EPERM: throw refusalForUnopenableFile(in: folder, openError: code)
             default: throw Self.ioError("open", path.path, code)
             }
         }
@@ -161,16 +238,17 @@ struct LaptopKeyStore: Sendable {
         return key
     }
 
-    /// Why the key file could not be opened for reading (`EACCES` or
-    /// `EPERM`), in the terms the checks on an open file use: a file that
-    /// belongs to another user, or whose mode keeps its owner from reading
-    /// it, gets the same refusal as one that opened. `lstat` describes the
-    /// entry itself and never a link's target, and nothing is read, so no
-    /// file can change between the check and a read. When the entry passes
-    /// every check, or `lstat` fails too, the open's own error stands.
-    private func refusalForUnopenableFile(openError openCode: Int32) -> LaptopKeyStoreError {
+    /// Why the key file in `folder` could not be opened for reading
+    /// (`EACCES` or `EPERM`), in the terms the checks on an open file use: a
+    /// file that belongs to another user, or whose mode keeps its owner from
+    /// reading it, gets the same refusal as one that opened. `fstatat` with
+    /// `AT_SYMLINK_NOFOLLOW` describes the entry itself and never a link's
+    /// target, and nothing is read, so no file can change between the check
+    /// and a read. When the entry passes every check, or `fstatat` fails
+    /// too, the open's own error stands.
+    private func refusalForUnopenableFile(in folder: Int32, openError openCode: Int32) -> LaptopKeyStoreError {
         var info = stat()
-        guard lstat(path.path, &info) == 0 else {
+        guard fstatat(folder, path.lastPathComponent, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
             return Self.ioError("open", path.path, openCode)
         }
         guard (info.st_mode & S_IFMT) == S_IFREG else {
@@ -208,79 +286,53 @@ struct LaptopKeyStore: Sendable {
 
     // MARK: - Creating
 
-    /// Writes a new key and links it into place. Nil when a file appeared at
-    /// `path` first; the caller then reads that one.
-    private func create(in directory: URL) throws -> Curve25519.KeyAgreement.PrivateKey? {
-        let directoryDescriptor = try openOwnerOnlyDirectory(directory)
-        defer { close(directoryDescriptor) }
+    /// Makes `folder` owner-only, writes a new key in it and links it into
+    /// place. Nil when a file appeared at the key's name first; the caller
+    /// then reads that one.
+    ///
+    /// Every call names the files by their names in `folder`, so the key
+    /// lands in the folder that was checked even if that folder's path now
+    /// leads somewhere else.
+    private func create(in folder: Int32) throws -> Curve25519.KeyAgreement.PrivateKey? {
+        let directory = path.deletingLastPathComponent()
+        guard fchmod(folder, 0o700) == 0 else {
+            let code = errno
+            throw Self.ioError("chmod", directory.path, code)
+        }
+        afterFolderCheck?()
 
         let key = Curve25519.KeyAgreement.PrivateKey()
-        let tempPath = directory
-            .appendingPathComponent(".\(path.lastPathComponent).\(UUID().uuidString).tmp").path
-        try Self.writeSynced(key.rawRepresentation, toNewFileAt: tempPath)
+        let name = path.lastPathComponent
+        let tempName = ".\(name).\(UUID().uuidString).tmp"
+        try Self.writeSynced(
+            key.rawRepresentation, toNewFileNamed: tempName, in: folder,
+            path: directory.appendingPathComponent(tempName).path)
 
-        guard Darwin.link(tempPath, path.path) == 0 else {
+        guard linkat(folder, tempName, folder, name, 0) == 0 else {
             let code = errno
-            unlink(tempPath)
+            unlinkat(folder, tempName, 0)
             if code == EEXIST { return nil }
             throw Self.ioError("link", path.path, code)
         }
-        unlink(tempPath)
+        unlinkat(folder, tempName, 0)
         // Make the new name itself durable: a key that phones pair with and
         // that a crash then loses would unpair them all.
-        fsync(directoryDescriptor)
+        fsync(folder)
         logger.notice("phone bridge: created the laptop key file")
         return key
     }
 
-    /// Creates `directory` with mode 0700, or sets an existing one to 0700, and
-    /// returns a descriptor for it. A symbolic link there is refused, so the
-    /// mode change reaches TBD's own folder and nothing a link points to.
-    private func openOwnerOnlyDirectory(_ directory: URL) throws -> Int32 {
-        let parent = directory.deletingLastPathComponent()
-        do {
-            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-        } catch {
-            throw LaptopKeyStoreError.io("create \(parent.path): \(error.localizedDescription)")
-        }
-        if mkdir(directory.path, 0o700) != 0 {
-            let code = errno
-            guard code == EEXIST else { throw Self.ioError("mkdir", directory.path, code) }
-        }
-        let descriptor = Darwin.open(directory.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else {
-            let code = errno
-            if code == ELOOP {
-                throw LaptopKeyStoreError.io("\(directory.path) is a symbolic link; it must be a folder")
-            }
-            throw Self.ioError("open", directory.path, code)
-        }
-        var info = stat()
-        guard fstat(descriptor, &info) == 0 else {
-            let code = errno
-            close(descriptor)
-            throw Self.ioError("fstat", directory.path, code)
-        }
-        guard (info.st_mode & S_IFMT) == S_IFDIR else {
-            close(descriptor)
-            throw LaptopKeyStoreError.io("\(directory.path) is not a folder")
-        }
-        guard fchmod(descriptor, 0o700) == 0 else {
-            let code = errno
-            close(descriptor)
-            throw Self.ioError("chmod", directory.path, code)
-        }
-        return descriptor
-    }
-
-    /// Creates `path`, which must not exist, with mode 0600, writes `bytes`
-    /// and syncs them. On any failure the file is removed.
+    /// Creates `name` in `folder`, where nothing may have that name yet, with
+    /// mode 0600, writes `bytes` and syncs them. On any failure the file is
+    /// removed. `path` names the file in error messages.
     ///
     /// `O_EXCL` refuses any existing entry, a symbolic link included, so the
     /// bytes never go through a file someone else made. `fchmod` sets 0600
-    /// whatever the umask removed from the mode `open` asked for.
-    private static func writeSynced(_ bytes: Data, toNewFileAt path: String) throws {
-        let descriptor = Darwin.open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+    /// whatever the umask removed from the mode `openat` asked for.
+    private static func writeSynced(
+        _ bytes: Data, toNewFileNamed name: String, in folder: Int32, path: String
+    ) throws {
+        let descriptor = Darwin.openat(folder, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else {
             let code = errno
             throw ioError("open", path, code)
@@ -297,12 +349,12 @@ struct LaptopKeyStore: Sendable {
             }
         } catch {
             close(descriptor)
-            unlink(path)
+            unlinkat(folder, name, 0)
             throw error
         }
         guard close(descriptor) == 0 else {
             let code = errno
-            unlink(path)
+            unlinkat(folder, name, 0)
             throw ioError("close", path, code)
         }
     }
@@ -325,28 +377,53 @@ struct LaptopKeyStore: Sendable {
 
     // MARK: - Leftovers
 
-    /// Removes `.<key name>.*.tmp` files whose modification date is more than
-    /// `PhoneBridgeConstants.keyTempMaxAge` before now. An interrupted create
-    /// leaves one behind; a younger one may belong to a create still running.
-    /// Best effort: a file that cannot be read or removed stays for the next
-    /// load.
-    private func sweepStaleTempFiles(in directory: URL) {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+    /// Removes `.<key name>.*.tmp` files in `folder` whose modification date
+    /// is more than `PhoneBridgeConstants.keyTempMaxAge` before now. An
+    /// interrupted create leaves one behind; a younger one may belong to a
+    /// create still running. Best effort: a file that cannot be read or
+    /// removed stays for the next load.
+    private func sweepStaleTempFiles(in folder: Int32) {
         let prefix = ".\(path.lastPathComponent)."
         let suffix = ".tmp"
         let cutoff = now().addingTimeInterval(-PhoneBridgeConstants.keyTempMaxAge)
-        for name in names {
+        for name in Self.names(in: folder) {
             guard name.hasPrefix(prefix), name.hasSuffix(suffix),
                   name.count > prefix.count + suffix.count else { continue }
-            let tempPath = directory.appendingPathComponent(name).path
             var info = stat()
-            guard lstat(tempPath, &info) == 0 else { continue }
+            guard fstatat(folder, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
             let modified = Date(
                 timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec)
                     + TimeInterval(info.st_mtimespec.tv_nsec) / 1_000_000_000)
-            guard modified < cutoff, unlink(tempPath) == 0 else { continue }
+            guard modified < cutoff, unlinkat(folder, name, 0) == 0 else { continue }
             logger.notice("phone bridge: removed a temporary laptop key file left by an interrupted create")
         }
+    }
+
+    /// The names in `folder`, or none when it cannot be listed. The listing
+    /// reads a copy of the descriptor, because closing it closes the
+    /// descriptor it reads; `F_DUPFD_CLOEXEC` keeps the copy out of any
+    /// process the daemon starts meanwhile. Every name is read before any
+    /// file is removed, so no removal can make the listing skip a name.
+    private static func names(in folder: Int32) -> [String] {
+        let copy = fcntl(folder, F_DUPFD_CLOEXEC, 0)
+        guard copy >= 0 else { return [] }
+        guard let listing = fdopendir(copy) else {
+            close(copy)
+            return []
+        }
+        defer { closedir(listing) }
+        var found: [String] = []
+        while let entry = readdir(listing) {
+            let length = Int(entry.pointee.d_namlen)
+            var field = entry.pointee.d_name
+            // A name that is not UTF-8 is no temporary key file's, so it is
+            // left out rather than decoded into one that names another file.
+            let name = withUnsafeBytes(of: &field) { bytes in
+                String(bytes: bytes.prefix(length), encoding: .utf8)
+            }
+            if let name { found.append(name) }
+        }
+        return found
     }
 
     private static func ioError(_ call: String, _ path: String, _ code: Int32) -> LaptopKeyStoreError {
