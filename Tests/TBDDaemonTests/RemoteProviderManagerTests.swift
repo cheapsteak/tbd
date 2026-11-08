@@ -19,6 +19,17 @@ enum FakeProviderOutcome: Sendable {
     case thrown(any Error & Sendable)
 }
 
+/// A `FakeProviderInvoker` call its script had no outcome left for. The
+/// fake records it as an issue and throws it, so the test that made the
+/// call fails and the test process goes on.
+private struct FakeProviderScriptExhausted: Error, CustomStringConvertible {
+    let verb: [String]
+
+    var description: String {
+        "FakeProviderInvoker script exhausted for verb \(verb)"
+    }
+}
+
 /// Scriptable fake provider: each verb invocation pops the next canned
 /// outcome. Intentionally NOT `private` — a later task's RPC-handler tests
 /// reuse this against the same `RemoteProviderInvoking` protocol.
@@ -72,7 +83,11 @@ final class FakeProviderInvoker: RemoteProviderInvoking, @unchecked Sendable {
         calls.append(verb)
         stdins.append(stdin)
         contractVersions.append(contractVersion)
-        precondition(!script.isEmpty, "FakeProviderInvoker script exhausted for verb \(verb)")
+        guard !script.isEmpty else {
+            let exhausted = FakeProviderScriptExhausted(verb: verb)
+            Issue.record(exhausted)
+            throw exhausted
+        }
         switch script.removeFirst() {
         case .result(let result):
             return result
