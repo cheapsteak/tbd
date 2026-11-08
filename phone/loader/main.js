@@ -37,6 +37,7 @@ import {
 /** @typedef {import('./pairing.js').PairingFailure} PairingFailure */
 /** @typedef {import('./links.js').PairingLinkData} PairingLinkData */
 /** @typedef {import('./presence.js').FetchLike} FetchLike */
+/** @typedef {import('./presence.js').PresenceChecks} PresenceChecks */
 /** @typedef {import('./ui.js').RowHandle} RowHandle */
 
 /**
@@ -441,21 +442,14 @@ class LoaderPage {
       this.#screen.replaceChildren(build());
       this.#restoreFocus(this.#screen, focus);
     };
-    // Presence comes from the relay's endpoint, never a socket, so listing the laptops never
-    // knocks another tab off its room. Each answer changes only its row's status line, in
-    // place, so a tap in progress and the scroll position survive it. A return to the page
-    // asks again for every row (`#resume`), so an answer from before the phone locked, or one
-    // cut short while it was locked, does not stay.
-    const presence = checkPresence(list.laptops, {
-      fetch: this.#fetch,
-      visibility: this.#visibility,
-      clock: this.#clock,
-      onResult: (id, status) => {
-        if (epoch !== this.#epoch) return;
-        const record = list.laptops.find((laptop) => laptop.id === id);
-        if (record === undefined) return;
-        rowsByID.get(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), 'list'));
-      },
+    // Each answer changes only its row's status line, in place, so a tap in progress and the
+    // scroll position survive it. A return to the page asks again for every row (`#resume`),
+    // so an answer from before the phone locked, or one cut short while it was locked, does
+    // not stay.
+    const presence = this.#watchPresence(list.laptops, {
+      style: 'list',
+      isCurrent: () => epoch === this.#epoch,
+      rowFor: (id) => rowsByID.get(id),
     });
     this.#mount(build(), () => {
       this.#recheckLaptops = null;
@@ -1077,19 +1071,38 @@ class LoaderPage {
     this.#renderStrip();
     // Each answer changes only its item's status line, in place, so a tap on the menu is
     // never lost to a redraw. A return to the page asks again, as the Laptops screen does.
-    const presence = checkPresence(laptops, {
-      fetch: this.#fetch,
-      visibility: this.#visibility,
-      clock: this.#clock,
-      onResult: (id, status) => {
-        const at = laptops.findIndex((record) => record.id === id);
-        if (this.#menu !== menu || at < 0) return;
-        rows[at].setLine(presenceLine(status, laptops[at].lastConnectedAt, this.#clock.now(), 'menu'));
-      },
+    const rowsByID = new Map(laptops.map((record, i) => [record.id, rows[i]]));
+    const presence = this.#watchPresence(laptops, {
+      style: 'menu',
+      isCurrent: () => this.#menu === menu,
+      rowFor: (id) => rowsByID.get(id),
     });
     menu.recheck = () => presence.recheck();
     menu.abort = () => presence.abort();
     items[0]?.focus();
+  }
+
+  /**
+   * Asks the relay for each laptop's presence, from its endpoint and never a socket, so a
+   * status check never knocks another tab off its room. Each answer goes to its row's status
+   * line, in `style`, while `isCurrent()` holds: the Laptops screen or the menu that asked
+   * still shows.
+   * @param {ReadonlyArray<LaptopRecord>} laptops
+   * @param {{ style: 'list' | 'menu', isCurrent: () => boolean, rowFor: (id: string) => RowHandle | undefined }} options
+   * @returns {PresenceChecks}
+   */
+  #watchPresence(laptops, { style, isCurrent, rowFor }) {
+    return checkPresence(laptops, {
+      fetch: this.#fetch,
+      visibility: this.#visibility,
+      clock: this.#clock,
+      onResult: (id, status) => {
+        if (!isCurrent()) return;
+        const record = laptops.find((laptop) => laptop.id === id);
+        if (record === undefined) return;
+        rowFor(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), style));
+      },
+    });
   }
 
   /** @param {boolean} refocus whether to put the focus back on the strip's button */
