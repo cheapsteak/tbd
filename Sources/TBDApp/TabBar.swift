@@ -987,6 +987,10 @@ private struct TabBarItem: View {
 
     /// The engine this tab's terminal is drawn by, while the libghostty
     /// experiment is on and the terminal has a mounted panel.
+    ///
+    /// The flag is checked before the in-use record is read (`kind` is an
+    /// autoclosure), so while the experiment is off this tab does not observe
+    /// `terminalEnginesInUse` and another panel's mount does not redraw it.
     private var engineLabel: String? {
         guard let terminal else { return nil }
         return TerminalEngineLabel.text(

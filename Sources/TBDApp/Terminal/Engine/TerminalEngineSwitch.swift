@@ -44,8 +44,13 @@ enum TerminalEngineSwitchCommand {
 enum TerminalEngineLabel {
     /// Nil, so no label, while the experiment is off or the tab's terminal
     /// has no mounted panel.
-    static func text(experimentEnabled: Bool, kind: TerminalEngineKind?) -> String? {
-        guard experimentEnabled, let kind else { return nil }
+    ///
+    /// `kind` is read only while the experiment is on. A tab item passes the
+    /// observed `AppState.terminalEnginesInUse` read here, so with the flag
+    /// off the tab does not depend on that record and a panel mounting
+    /// elsewhere does not redraw it.
+    static func text(experimentEnabled: Bool, kind: @autoclosure () -> TerminalEngineKind?) -> String? {
+        guard experimentEnabled, let kind = kind() else { return nil }
         switch kind {
         case .swiftTerm: return "SwiftTerm"
         case .ghostty: return "libghostty"

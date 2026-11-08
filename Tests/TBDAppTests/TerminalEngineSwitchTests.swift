@@ -388,6 +388,71 @@ struct TerminalEngineSwitchTests {
         #expect(fixture.state.terminalEngineSwitchers[fixture.terminalID] == nil)
     }
 
+    /// Every terminal tab item reads the engine record for its label, so a
+    /// write to it redraws them all. With the experiment off no label shows,
+    /// so a panel's mount and teardown must not write it at all; the control,
+    /// flag on, must.
+    @Test("With the experiment off, a panel's mount and teardown write no engine record; with it on, they do")
+    func engineRecordIsNotWrittenWhileTheExperimentIsOff() async {
+        for flag in [nil, false, true] as [Bool?] {
+            let name = flag.map { "\($0)" } ?? "unset"
+            let fixture = SwitchFixture(label: "QuietRecord.\(name)", flag: flag)
+            defer { fixture.tearDown() }
+            // An override counts only while the flag is on, and keeps the
+            // control's panel on SwiftTerm.
+            fixture.state.terminalEngineOverrides[fixture.terminalID] = .swiftTerm
+            let state = fixture.state
+            let written = HolderTestLatch()
+            withObservationTracking {
+                _ = state.terminalEnginesInUse
+            } onChange: {
+                written.set()
+            }
+
+            let panel = fixture.makePanel()
+            await EngineTestSupport.mainQueueTurn()
+            fixture.dismantle(panel)
+            await EngineTestSupport.mainQueueTurn()
+
+            let wasWritten = written.isSet
+            if flag == true {
+                #expect(wasWritten, "control: with the experiment on, the panel's mount wrote no engine record")
+            } else {
+                #expect(!wasWritten,
+                        "with the flag \(name), a panel's mount or teardown wrote the engine record every tab item reads")
+                #expect(state.terminalEnginesInUse.isEmpty)
+            }
+        }
+    }
+
+    /// The tab's label reads the record through `TerminalEngineLabel.text`,
+    /// which reads it only while the experiment is on, so with the flag off a
+    /// tab does not depend on the record and a write to it does not redraw
+    /// the tab.
+    @Test("With the experiment off, the tab's label does not read the engine record; with it on, it does")
+    func engineLabelReadsTheRecordOnlyWhileTheExperimentIsOn() {
+        withTestDefaults("TerminalEngineSwitch.LabelRead") { defaults in
+            let state = AppState(userDefaults: defaults)
+            let terminalID = UUID()
+            for enabled in [false, true] {
+                let changed = HolderTestLatch()
+                withObservationTracking {
+                    _ = TerminalEngineLabel.text(
+                        experimentEnabled: enabled, kind: state.terminalEngineKindInUse(for: terminalID))
+                } onChange: {
+                    changed.set()
+                }
+                state.noteTerminalEngineInUse(.swiftTerm, terminalID: terminalID, owner: UUID())
+                let redrawn = changed.isSet
+                if enabled {
+                    #expect(redrawn, "control: with the experiment on, the label did not read the record")
+                } else {
+                    #expect(!redrawn, "with the experiment off, a record write would redraw the tab")
+                }
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     /// Every visible row of `engine`'s screen. The size is read first: the

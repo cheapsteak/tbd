@@ -639,6 +639,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     /// panel's two writes land in order. Both carry the panel's token, so a
     /// successor made in the same update keeps its entries whichever of the
     /// two SwiftUI runs first.
+    ///
+    /// With `useGhosttyTerminalEngine` off, no label shows, so the record is
+    /// not written at all: every tab item reads it, and a write on every
+    /// panel mount would redraw them all for nothing. The forget then finds
+    /// no entry of this panel's and writes nothing either. A panel mounted
+    /// while the flag was off gets its label when it is next built.
     @MainActor
     static func registerEngineRecords(
         of coordinator: Coordinator, builtOn kind: TerminalEngineKind,
@@ -648,6 +654,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         appState.registerTerminalEngineSwitcher(for: terminalID, owner: owner) { [weak coordinator] in
             coordinator?.switchEngine()
         }
+        guard appState.ghosttyTerminalEngineEnabled else { return }
         DispatchQueue.main.async { [weak appState] in
             appState?.noteTerminalEngineInUse(kind, terminalID: terminalID, owner: owner)
         }
