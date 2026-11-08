@@ -564,8 +564,9 @@ actor PhoneLocalPromptSource: PhonePromptSource {
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         wakeups = continuation
         let terminalID = self.terminalID
+        let idMarker = Self.idMarker(of: terminalID)
         subscriberID = subscriptions.addSubscriber { data in
-            if Self.isPromptChange(data, for: terminalID) {
+            if Self.isPromptChange(data, for: terminalID, idMarker: idMarker) {
                 continuation.yield()
             }
             return true
@@ -599,12 +600,25 @@ actor PhoneLocalPromptSource: PhonePromptSource {
 
     /// Whether the encoded delta `data` is a `.terminalPendingPromptsChanged`
     /// for `terminalID`.
-    static func isPromptChange(_ data: Data, for terminalID: UUID) -> Bool {
-        guard data.range(of: marker) != nil,
+    ///
+    /// The subscriber runs on the broadcaster's own call, once per phone with
+    /// the session open, for every delta of every terminal. So `data` is
+    /// decoded only when it holds both the case's name and the terminal's ID,
+    /// `idMarker` (`idMarker(of:)`), and a prompt change of any other
+    /// terminal costs two byte searches and no decode, as
+    /// `TranscriptDeltaRelay` does for its terminal's deltas.
+    static func isPromptChange(_ data: Data, for terminalID: UUID, idMarker: Data? = nil) -> Bool {
+        guard data.range(of: marker) != nil, data.range(of: idMarker ?? Self.idMarker(of: terminalID)) != nil,
               case .terminalPendingPromptsChanged(let delta)? = try? JSONDecoder().decode(StateDelta.self, from: data) else {
             return false
         }
         return delta.terminalID == terminalID
+    }
+
+    /// `terminalID` as an encoded delta holds it: `StateSubscriptionManager`
+    /// encodes a UUID as its uppercase string.
+    static func idMarker(of terminalID: UUID) -> Data {
+        Data(terminalID.uuidString.utf8)
     }
 }
 

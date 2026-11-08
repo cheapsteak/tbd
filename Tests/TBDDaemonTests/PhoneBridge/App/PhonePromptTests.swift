@@ -552,6 +552,36 @@ struct PhonePromptTests {
             promptID: "elsewhere", answeredBy: .unknown, deviceID: nil))
     }
 
+    /// A local prompt source decodes a delta only when it names the source's
+    /// terminal: a prompt change of another terminal is passed over, and one
+    /// of its own, as the subscription manager encodes it, is taken. The
+    /// byte search looks for the ID as the manager writes it.
+    @Test func aLocalPromptSourceTakesOnlyItsOwnTerminalsPromptChange() throws {
+        let mine = UUID()
+        let other = UUID()
+        let subscriptions = StateSubscriptionManager()
+        let broadcast = FireRecorder<Data>()
+        subscriptions.addSubscriber { data in
+            broadcast.record(data)
+            return true
+        }
+        for terminalID in [mine, other] {
+            subscriptions.broadcast(delta: .terminalPendingPromptsChanged(
+                TerminalPendingPromptsDelta(terminalID: terminalID, captures: [], prompts: [])))
+        }
+        let deltas = broadcast.values
+        try #require(deltas.count == 2)
+        let own = deltas[0]
+        let others = deltas[1]
+
+        let marker = PhoneLocalPromptSource.idMarker(of: mine)
+        #expect(own.range(of: marker) != nil)
+        #expect(others.range(of: marker) == nil)
+        #expect(PhoneLocalPromptSource.isPromptChange(own, for: mine, idMarker: marker))
+        #expect(!PhoneLocalPromptSource.isPromptChange(others, for: mine, idMarker: marker))
+        #expect(PhoneLocalPromptSource.isPromptChange(others, for: other))
+    }
+
     /// The store keeps how each recently closed prompt ended, at most
     /// `recentResolutionLimit` of them, and forgets a prompt's ending when it
     /// opens again.
