@@ -88,3 +88,9 @@ for (const [state, name, band] of /** @type {const} */ ([
     await capture(page, state, app(page).locator('.banner'));
   });
 }
+
+test('working', async ({ page, appHost }) => {
+  await openSession(page, appHost, 'Checkout v2');
+  await expect(app(page).getByRole('tab')).toHaveCount(3);
+  await capture(page, 'working', app(page).locator('.tabs'));
+});

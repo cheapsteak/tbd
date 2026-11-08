@@ -482,3 +482,40 @@ test('the other statuses have no band', async ({ page, appHost }) => {
     await app(page).getByRole('button', { name: 'Back to sessions' }).click();
   }
 });
+
+test('a worktree with several sessions shows one tab each, marking the open one', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2');
+  const tabs = app(page).getByRole('tab');
+  await expect(app(page).getByRole('tablist')).toHaveCount(1);
+  await expect(tabs).toHaveCount(3);
+  expect(await tabs.evaluateAll((els) => els.map((el) => el.firstElementChild?.nextSibling?.textContent))).toEqual(['Claude', 'Review', 'Codex']);
+  // The row opens its working Claude tab.
+  await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'false');
+  await expect(tabs.nth(2)).toHaveAttribute('aria-selected', 'false');
+  await expect(tabs.nth(0).locator('.tdot')).toHaveClass(/(^| )st-work( |$)/);
+  await expect(tabs.nth(1).locator('.tdot')).toHaveClass(/(^| )st-idle( |$)/);
+  await expect(tabs.nth(0).locator('.sr')).toHaveText('Working');
+  await expect(tabs.nth(1).locator('.sr')).toHaveText('Idle');
+  // A one-session row has no strip.
+  await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+  await openSessionByName(page, 'main');
+  await expect(app(page).getByRole('tablist')).toHaveCount(0);
+});
+
+test("switching tabs changes the header's status", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2');
+  const head = app(page).locator('.s-head');
+  await expect(head.locator('.t2a')).toContainText('Working');
+  await expect(head.locator('.t2b')).toHaveText('Personal · sonnet');
+
+  await app(page).getByRole('tab', { name: 'Review' }).click();
+  await expect(app(page).getByRole('tab', { name: 'Review' })).toHaveAttribute('aria-selected', 'true');
+  await expect(app(page).getByRole('tab', { name: 'Claude' })).toHaveAttribute('aria-selected', 'false');
+  await expect(head).toHaveClass(/(^| )st-idle( |$)/);
+  await expect(head.locator('.t2a')).toHaveText('Idle· 20m');
+  await expect(head.getByRole('button', { name: 'Account: acme-work. Switch account' })).toBeVisible();
+  await expect(head.getByRole('button', { name: 'Model: opus. Change model' })).toBeVisible();
+});
