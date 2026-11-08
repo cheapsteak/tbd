@@ -15,9 +15,12 @@ import TBDShared
 /// core function or handler runs, in the same order. The only checks it adds
 /// keep shells, which spec section 6 hides from the phone, out of its reach,
 /// and keep its messages to text: `phoneSessionStates` drops every report on
-/// a shell, and the send rail refuses a shell, a message part that is not
-/// text, an empty message and a message holding a control character, inside
-/// the send core, on the terminal row the core sends to (see `phoneSend`).
+/// a shell; the send rail refuses a shell, a message part that is not text,
+/// an empty message and a message holding a control character, inside the
+/// send core, on the terminal row the core sends to (see `phoneSend`); and
+/// `phoneWake`, `phoneCreateWorktree` and `phoneRemoteSendMessage` hold the
+/// message they carry to the same rule (`PhoneMessageText`) before their
+/// handler runs.
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -71,13 +74,33 @@ protocol PhoneSessionActions: Sendable {
 
     /// `terminal.wake` with only the terminal and the message the wake
     /// carries. A `TerminalWakeResult`.
+    ///
+    /// A message that is not empty is held to the phone message rule
+    /// (`PhoneMessageText.vetted`) first: every CRLF becomes LF, then a blank
+    /// message is refused with `PhoneMessageText.emptyRefusal` and one
+    /// holding a control character with
+    /// `PhoneMessageText.controlCharacterRefusal`. These refusals return
+    /// before the handler runs, so they record no actuation row; the phone
+    /// action recorder has already logged the action. A nil or empty prompt
+    /// is no message and goes to the handler as it came.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.swapProfile` with only the terminal, the new profile and the
     /// mode `p` names. The window size takes its default.
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `worktree.create` with only the repo and the first message.
+    /// `worktree.create` with only the repo and the first message. The
+    /// pending `Worktree`.
+    ///
+    /// A first message that is not empty is held to the phone message rule
+    /// (`PhoneMessageText.vetted`) first, because it rides the first agent's
+    /// spawn command: every CRLF becomes LF, then a blank message is refused
+    /// with `PhoneMessageText.emptyRefusal` and one holding a control
+    /// character with `PhoneMessageText.controlCharacterRefusal`. These
+    /// refusals return before the handler runs, so they create nothing and
+    /// record no actuation row; the phone action recorder has already logged
+    /// the action. A nil or empty first message is no message and goes to the
+    /// handler as it came.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.providers`. A `RemoteProvidersResult`.
@@ -92,6 +115,15 @@ protocol PhoneSessionActions: Sendable {
 
     /// `remote.sendMessage` with only the provider, the session and the text.
     /// It refuses a session waiting on a prompt.
+    ///
+    /// The text is held to the phone message rule (`PhoneMessageText.vetted`)
+    /// first, because the provider pastes it into its session: every CRLF
+    /// becomes LF, then a blank message is refused with
+    /// `PhoneMessageText.emptyRefusal` and one holding a control character
+    /// with `PhoneMessageText.controlCharacterRefusal`. These refusals return
+    /// before the handler runs, so they reach no provider and record no
+    /// actuation row; the phone action recorder has already logged the
+    /// action.
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.transcriptSync` with only the provider and the session.

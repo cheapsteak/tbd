@@ -80,17 +80,78 @@ struct RPCRouterPhoneSessionActionsTests {
     /// the bracketed-paste end marker, and a message of zero-width characters
     /// only.
     private static let refusedMessages: [(text: String, refusal: String)] = [
-        ("\u{0}", RPCRouter.phoneControlCharacterRefusal),
-        ("\u{1b}[201~", RPCRouter.phoneControlCharacterRefusal),
-        ("\u{200B}\u{2060}", RPCRouter.phoneEmptySendRefusal),
+        ("\u{0}", PhoneMessageText.controlCharacterRefusal),
+        ("\u{1b}[201~", PhoneMessageText.controlCharacterRefusal),
+        ("\u{200B}\u{2060}", PhoneMessageText.emptyRefusal),
     ]
 
     @Test func aPhoneMessageIsVettedByTheSendRailsRules() {
-        #expect(RPCRouter.phoneMessageVetted("first\r\nsecond\tthird") == .deliver("first\nsecond\tthird"))
-        #expect(RPCRouter.phoneMessageVetted("lone\rreturn") == .refused(RPCRouter.phoneControlCharacterRefusal))
-        #expect(RPCRouter.phoneMessageVetted("bell\u{7}") == .refused(RPCRouter.phoneControlCharacterRefusal))
-        #expect(RPCRouter.phoneMessageVetted("\r\n") == .refused(RPCRouter.phoneEmptySendRefusal))
-        #expect(RPCRouter.phoneMessageVetted("") == .refused(RPCRouter.phoneEmptySendRefusal))
+        #expect(PhoneMessageText.vetted("first\r\nsecond\tthird") == .deliver("first\nsecond\tthird"))
+        #expect(PhoneMessageText.vetted("lone\rreturn") == .refused(PhoneMessageText.controlCharacterRefusal))
+        #expect(PhoneMessageText.vetted("bell\u{7}") == .refused(PhoneMessageText.controlCharacterRefusal))
+        #expect(PhoneMessageText.vetted("\r\n") == .refused(PhoneMessageText.emptyRefusal))
+        #expect(PhoneMessageText.vetted("") == .refused(PhoneMessageText.emptyRefusal))
+    }
+
+    /// A first message that may be absent, as a wake or a create carries it:
+    /// nil or empty is no message and passes as it came, and any other text
+    /// meets the whole rule.
+    @Test func aFirstMessageIsVettedOnlyWhenThereIsOne() {
+        #expect(PhoneMessageText.vettedFirstMessage(nil) == .deliver(nil))
+        #expect(PhoneMessageText.vettedFirstMessage("") == .deliver(""))
+        #expect(PhoneMessageText.vettedFirstMessage("first\r\nsecond") == .deliver("first\nsecond"))
+        #expect(PhoneMessageText.vettedFirstMessage(" \n") == .refused(PhoneMessageText.emptyRefusal))
+        #expect(PhoneMessageText.vettedFirstMessage("\u{0}") == .refused(PhoneMessageText.controlCharacterRefusal))
+    }
+
+    /// A new worktree's first message rides its first agent's spawn command,
+    /// so it meets the send rail's refusals before the create handler runs,
+    /// and a refused one creates nothing. The repo does not exist, so a
+    /// create that reached the handler would throw `WorktreeLifecycleError`
+    /// rather than answer.
+    @Test func phoneCreateWorktreeRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try makeFixture()
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneCreateWorktree(
+                WorktreeCreateParams(repoID: UUID(), prompt: text), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        let worktrees = try await f.db.worktrees.list()
+        #expect(worktrees.isEmpty, "a refused message creates no worktree row")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.worktreeCreate }
+        #expect(createRows.isEmpty, "a refused message never reaches the create handler")
+    }
+
+    /// The create handler gets the first message with the send rail's line
+    /// endings, and still only the repo and the message.
+    @Test func phoneWorktreeCreateHandsTheHandlerTheMessageWithBareLineFeeds() throws {
+        let repoID = UUID()
+        let vetted = RPCRouter.phoneWorktreeCreateVetted(
+            WorktreeCreateParams(repoID: repoID, prompt: "first\r\nsecond", model: "opus"))
+
+        guard case .deliver(let params) = vetted else {
+            Issue.record("a message with CRLF line endings was refused: \(vetted)")
+            return
+        }
+        #expect(params.repoID == repoID)
+        #expect(params.prompt == "first\nsecond")
+        #expect(try encodedKeys(params) == ["repoID", "prompt"])
+    }
+
+    /// A create with no first message, nil or empty, carries no phone message,
+    /// so no message rule applies and it reaches the handler, which throws for
+    /// the missing repo.
+    @Test func phoneCreateWorktreeWithNoFirstMessageStillReachesTheHandler() async throws {
+        let f = try makeFixture()
+
+        for prompt in [nil, ""] as [String?] {
+            await #expect(throws: WorktreeLifecycleError.self) {
+                _ = try await f.actions.phoneCreateWorktree(
+                    WorktreeCreateParams(repoID: UUID(), prompt: prompt), deviceID: UUID())
+            }
+        }
     }
 
     /// A wake's message is the respawned session's first prompt, carried in a
@@ -137,7 +198,7 @@ struct RPCRouterPhoneSessionActionsTests {
         let response = try await f.actions.phoneWake(
             TerminalWakeParams(terminalID: terminal.id, prompt: ""), deviceID: UUID())
 
-        #expect(response.error != RPCRouter.phoneEmptySendRefusal)
+        #expect(response.error != PhoneMessageText.emptyRefusal)
         let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
         #expect(wakeRows.count == 1)
     }

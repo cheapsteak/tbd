@@ -3876,12 +3876,13 @@ extension RPCRouter {
     ///   is refused whole, before anything is typed, rather than having the
     ///   part dropped.
     /// - Every CRLF in the message, in `text` and in each text part, becomes
-    ///   a bare LF (`phoneLineEndingsNormalized`). A phone's keyboard or
-    ///   clipboard can end lines with CRLF, and the control-character refusal
-    ///   below would otherwise refuse every such message for its CRs. The
-    ///   shape check gives the same verdict either way: it reads text for
-    ///   emptiness after trimming whitespace, and CR is whitespace, so the
-    ///   rebuild can make this change before the shape check runs.
+    ///   a bare LF (`PhoneMessageText.lineEndingsNormalized`). A phone's
+    ///   keyboard or clipboard can end lines with CRLF, and the
+    ///   control-character refusal below would otherwise refuse every such
+    ///   message for its CRs. The shape check gives the same verdict either
+    ///   way: it reads text for emptiness after trimming whitespace, and CR is
+    ///   whitespace, so the rebuild can make this change before the shape
+    ///   check runs.
     ///
     /// **A shell is refused before anything is typed.** Shells are hidden from
     /// the phone (spec section 6), and a shell runs what is typed into it. The
@@ -3894,9 +3895,10 @@ extension RPCRouter {
     /// sent.
     ///
     /// **A blank message is refused before anything is typed.** A message is
-    /// blank when every scalar of its `text`, or of every one of its text
-    /// parts, is whitespace or a format character (general category Cf, such
-    /// as a zero-width space, a word joiner or a byte-order mark). It types
+    /// blank (`PhoneMessageText.isBlank`) when every scalar of its `text`, or
+    /// of every one of its text parts, is whitespace, a format character
+    /// (general category Cf, such as a zero-width space, a word joiner or a
+    /// byte-order mark) or a default-ignorable code point. It types
     /// nothing a person could see, and reaches the pane as a bare Enter (or
     /// as blank or invisible characters and then Enter), which submits
     /// whatever draft the person left in the laptop's composer. A phone
@@ -3917,8 +3919,13 @@ extension RPCRouter {
     /// reads ESC as Escape, ETX as Ctrl-C and a CR as an Enter partway through
     /// the message. So text or a text part holding a scalar below U+0020 other
     /// than LF and tab, or DEL (U+007F), or a C1 control (U+0080–U+009F), is
-    /// refused whole. The check reads the message after the CRLF rebuild
-    /// above, so only a lone CR is refused.
+    /// refused whole (`PhoneMessageText.hasControlCharacter`). The check reads
+    /// the message after the CRLF rebuild above, so only a lone CR is refused.
+    ///
+    /// **The line endings, the blank check and the control-character check
+    /// are the phone message rule** (`PhoneMessageText`), with its refusals.
+    /// Every other path that carries a phone's text applies the same rule, so
+    /// the phone hears the same words for the same text on any of them.
     ///
     /// **A multi-line message submits line by line when bracketed paste is
     /// off.** On the tmux transport the paste is `paste-buffer -p` without
@@ -3959,11 +3966,11 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let phoneParams = TerminalSendParams(
             terminalID: params.terminalID,
-            text: params.text.map { text in Self.phoneLineEndingsNormalized(text) },
+            text: params.text.map { text in PhoneMessageText.lineEndingsNormalized(text) },
             submit: params.submit,
             parts: params.parts?.map { (part: SendPart) -> SendPart in
                 guard case .text(let value) = part else { return part }
-                return .text(Self.phoneLineEndingsNormalized(value))
+                return .text(PhoneMessageText.lineEndingsNormalized(value))
             },
             gateOnAwaitingInput: true)
         return try await sendOnInternalRail(
@@ -4002,55 +4009,13 @@ extension RPCRouter {
             // Refused rather than passed, should one ever arrive.
             return Self.phoneNonTextPartRefusal
         }
-        if texts.allSatisfy({ text in Self.phoneTextIsBlank(text) }) {
-            return Self.phoneEmptySendRefusal
+        if texts.allSatisfy({ text in PhoneMessageText.isBlank(text) }) {
+            return PhoneMessageText.emptyRefusal
         }
-        if texts.contains(where: { text in Self.phoneTextHasControlCharacter(text) }) {
-            return Self.phoneControlCharacterRefusal
+        if texts.contains(where: { text in PhoneMessageText.hasControlCharacter(text) }) {
+            return PhoneMessageText.controlCharacterRefusal
         }
         return nil
-    }
-
-    /// Whether `text`, a phone message's `text` or one of its text parts,
-    /// types nothing a person could see: every scalar is whitespace, a
-    /// format character (general category Cf, such as U+200B ZERO WIDTH
-    /// SPACE, U+2060 WORD JOINER or U+FEFF, the byte-order mark), or a
-    /// default-ignorable code point (such as U+3164 HANGUL FILLER, U+034F
-    /// COMBINING GRAPHEME JOINER or a variation selector). Empty text is
-    /// blank. Whitespace is the set the shape check trims. One visible scalar
-    /// makes the text non-blank, so a ZWJ inside an emoji sequence or a
-    /// variation selector after a visible character keeps it.
-    static func phoneTextIsBlank(_ text: String) -> Bool {
-        text.unicodeScalars.allSatisfy { scalar in
-            CharacterSet.whitespacesAndNewlines.contains(scalar)
-                || scalar.properties.generalCategory == .format
-                || scalar.properties.isDefaultIgnorableCodePoint
-        }
-    }
-
-    /// `text` with every CRLF made a bare LF, for a phone message. A lone CR
-    /// is kept, for the control-character refusal to judge.
-    static func phoneLineEndingsNormalized(_ text: String) -> String {
-        text.replacingOccurrences(of: "\r\n", with: "\n")
-    }
-
-    /// Whether `text`, a phone message's `text` or one of its text parts,
-    /// holds a control character a phone message may not carry
-    /// (`isPhoneRefusedControl`).
-    static func phoneTextHasControlCharacter(_ text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in Self.isPhoneRefusedControl(scalar) }
-    }
-
-    /// Whether `scalar` is a control character a phone message may not carry:
-    /// a C0 control (below U+0020) other than LF and tab, DEL (U+007F), or a
-    /// C1 control (U+0080–U+009F). Any of them reaches a pane whose child has
-    /// bracketed paste off as a key, not as text.
-    private static func isPhoneRefusedControl(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x0A, 0x09: return false
-        case 0x00..<0x20, 0x7F, 0x80...0x9F: return true
-        default: return false
-        }
     }
 
     /// What a paired phone hears when it sends to a shell tab.
@@ -4058,13 +4023,6 @@ extension RPCRouter {
 
     /// What a paired phone hears when its send carries a part that is not text.
     static let phoneNonTextPartRefusal = "a phone can send text only"
-
-    /// What a paired phone hears when its message is blank: empty, or only
-    /// whitespace and invisible format characters.
-    static let phoneEmptySendRefusal = "a phone message cannot be empty"
-
-    /// What a paired phone hears when its message holds a control character.
-    static let phoneControlCharacterRefusal = "a phone message cannot contain control characters"
 
     /// The send core every `terminal.send` caller runs, inside the terminal's
     /// send lane.

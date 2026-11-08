@@ -270,6 +270,34 @@ struct CodexSpawnCommandBuilderTests {
         )
     }
 
+    /// A resumed session with a first message: the subcommand and its thread,
+    /// then the message after `--`, so the message is never read as an
+    /// option of `resume`.
+    @Test("a prompt on a resumed session follows the thread and the end of options")
+    func resumeWithPromptPutsThePromptAfterTheEndOfOptions() {
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: "fix the failing test",
+                resumeThreadID: "thread-123",
+                executablePath: "/opt/bin/codex"
+            )
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123' -- 'fix the failing test'"
+        )
+    }
+
+    /// A first message that is exactly the name of a Codex subcommand stays
+    /// the message: it lands after `--`, where Codex reads it as the prompt
+    /// and never runs `completion` or `logout`.
+    @Test("a prompt that names a subcommand follows the end of options", arguments: ["completion", "logout"])
+    func subcommandNamedPromptFollowsEndOfOptions(_ prompt: String) {
+        let base = "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+        #expect(CodexSpawnCommandBuilder.build(initialPrompt: prompt, executablePath: "codex")
+            == "\(base) -- '\(prompt)'")
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: prompt, resumeThreadID: "thread-123", executablePath: "codex")
+            == "\(base) resume 'thread-123' -- '\(prompt)'")
+    }
+
     @Test("nil resume thread preserves the ordinary launch command")
     func nilResumePreservesLaunch() {
         let ordinary = CodexSpawnCommandBuilder.build(
