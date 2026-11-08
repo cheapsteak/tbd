@@ -33,7 +33,9 @@ import Foundation
 /// call with a new request ID while the device is at that cap runs nothing,
 /// stores nothing and returns the caller's refusal; a repeat of an ID already
 /// in flight still joins its run, and a repeat of a finished one still gets
-/// its reply.
+/// its reply. The app service enforces the same cap before it calls here, so
+/// this cap is defense in depth: the memory stays bounded on its own for any
+/// caller that skips the service's check.
 actor PhoneRequestMemory {
     private enum State {
         case inFlight(Task<Data, Never>)
@@ -107,6 +109,12 @@ actor PhoneRequestMemory {
             }
         }
 
+        // Defense in depth: `PhoneAppService.handleAppMessage` refuses a
+        // device's request past `PhoneAppConstants.requestsInFlightPerDevice`
+        // before it calls here, so through the service this never refuses
+        // today. It stays because nothing else bounds this memory while
+        // runs are going, so the memory must stay safe for a caller that
+        // skips that check.
         guard (devices[deviceID]?.inFlight ?? 0) < inFlightLimit else {
             return (refusal(), false)
         }
