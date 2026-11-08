@@ -240,9 +240,15 @@ extension RPCRouter {
                 rowPermits: { await self.mayAdoptForAttach(terminal) })
             // The app's number for this request rides onto the pending attach
             // and the claim it becomes, which is what lets a claim sweep order
-            // the app's statement of what it holds against this attach.
+            // the app's statement of what it holds against this attach. The
+            // viewer's grid is what the snapshot is written at; an app that
+            // sends none gets the session at the size it had.
+            var viewerGrid: (columns: Int, rows: Int)?
+            if let cols = params.cols, let rows = params.rows {
+                viewerGrid = (columns: cols, rows: rows)
+            }
             vend = try await registry.beginAttach(
-                terminalID: terminal.id, attachSeq: params.attachSeq)
+                terminalID: terminal.id, attachSeq: params.attachSeq, viewerGrid: viewerGrid)
         } catch let error as HolderRegistry.Error
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {
             // Refused, and the holder the row records is not running: the

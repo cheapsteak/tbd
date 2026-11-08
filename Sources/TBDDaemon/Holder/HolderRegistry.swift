@@ -2446,8 +2446,17 @@ actor HolderRegistry {
     /// (`AttachRequestParams.attachSeq`). It is recorded on the pending attach
     /// and kept on the claim the attach becomes, and only an attach that
     /// carries one can be swept (`reconcileClaims`).
+    ///
+    /// `viewerGrid` is the size of the terminal the viewer will feed the
+    /// snapshot into (`AttachRequestParams.cols`). When it is given, the
+    /// session is resized to it, emulator and tty both, before the snapshot is
+    /// written, because a snapshot rebuilds the screen only in a receiver of
+    /// the emulator's own size and the emulator is still at the previous
+    /// viewer's size. The resize is the daemon's to make because no viewer
+    /// holds the pty yet. Nil leaves the session at the size it had.
     func beginAttach(
         terminalID: UUID, attachSeq: UInt64? = nil,
+        viewerGrid: (columns: Int, rows: Int)? = nil,
         maxScrollbackLines: Int = HolderReader.scrollbackLines
     ) async throws -> HolderAttachVend {
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
@@ -2502,6 +2511,15 @@ actor HolderRegistry {
         // check; see `attachBarrier`.
         await attachBarrier?()
 
+        // Resized with the drain quiesced, so the snapshot below is written
+        // at the viewer's size from a grid nothing is feeding. The child's
+        // repaint for the `SIGWINCH` this sends queues on the tty for the
+        // viewer, which is already that size. A release that lands across this
+        // await is caught by the guard below; the resize it leaves behind is
+        // to a viewer's size, and the next attach resizes again.
+        if let viewerGrid {
+            await reader.resize(columns: viewerGrid.columns, rows: viewerGrid.rows)
+        }
         let preamble = await reader.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
         // Re-read EVERYTHING this call decided on, after the last await and
         // with no await before the return. Three things can have changed while

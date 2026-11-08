@@ -16,6 +16,7 @@ final class ScriptedHolderDaemon: HolderAttaching, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [String] = []
     private var attachSeqLog: [UInt64] = []
+    private var attachGridLog: [HolderTestGrid?] = []
     private var attachCount = 0
     private var readyCount = 0
     private var detachCount = 0
@@ -45,15 +46,19 @@ final class ScriptedHolderDaemon: HolderAttaching, @unchecked Sendable {
     var attaches: Int { lock.withLock { attachCount } }
     /// The `attachSeq` each `attach` call carried, in call order.
     var attachSeqs: [UInt64] { lock.withLock { attachSeqLog } }
+    /// The grid each `attach` call carried, in call order.
+    var attachGrids: [HolderTestGrid?] { lock.withLock { attachGridLog } }
     var readies: Int { lock.withLock { readyCount } }
     var detaches: Int { lock.withLock { detachCount } }
 
     func attach(
-        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64,
+        grid: (cols: Int, rows: Int)?
     ) async throws -> HolderAttachment {
         let call = lock.withLock {
             log.append("attach")
             attachSeqLog.append(attachSeq)
+            attachGridLog.append(grid.map { HolderTestGrid(cols: $0.cols, rows: $0.rows) })
             attachCount += 1
             return attachCount - 1
         }
@@ -82,6 +87,14 @@ final class ScriptedHolderDaemon: HolderAttaching, @unchecked Sendable {
         }
         try await detachScript(call)
     }
+}
+
+/// A grid an `attach` call carried, in a shape `#expect` can compare.
+struct HolderTestGrid: Equatable, Sendable, CustomStringConvertible {
+    let cols: Int
+    let rows: Int
+
+    var description: String { "\(cols)x\(rows)" }
 }
 
 /// Holds whatever awaits it until the test opens it. Suspension-based, so no

@@ -1707,15 +1707,20 @@ actor DaemonClient {
     /// and server are the empty string by construction, so nothing else in
     /// these params can identify the row the daemon must branch on. Nil (the
     /// default) is the control-mode caller, which names its pane.
+    ///
+    /// `grid` is the size of the terminal a holder snapshot will be fed into;
+    /// see `AttachRequestParams.cols`.
     func attachRequest(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil, attachSeq: UInt64? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil,
+        grid: (cols: Int, rows: Int)? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(
                 worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID,
-                terminalID: terminalID, attachSeq: attachSeq),
+                terminalID: terminalID, attachSeq: attachSeq,
+                cols: grid?.cols, rows: grid?.rows),
             resultType: AttachRequestResult.self
         )
     }

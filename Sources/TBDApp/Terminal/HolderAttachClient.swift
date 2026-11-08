@@ -56,8 +56,13 @@ protocol HolderAttaching: Sendable {
     ///   daemon's claim sweep can tell an attach the app numbered after a
     ///   sweep from one it numbered before. 0 sends none, and a claim without
     ///   one is never swept.
+    /// - Parameter grid: The size of the terminal the snapshot will be fed
+    ///   into, which the daemon resizes the session to before it writes the
+    ///   snapshot (`AttachRequestParams.cols`). Nil sends none, and the
+    ///   session keeps the size it had.
     func attach(
-        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64,
+        grid: (cols: Int, rows: Int)?
     ) async throws -> HolderAttachment
     func ready(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
@@ -336,9 +341,11 @@ struct HolderAttachClient: HolderAttaching {
     ///
     /// `attachSeq` defaults to 0, which sends none: the panel always passes
     /// the seq its hold minted, and a caller with no hold has nothing a sweep
-    /// should be allowed to take back.
+    /// should be allowed to take back. `grid` defaults to nil, which sends
+    /// none.
     func attach(
-        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64 = 0
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64 = 0,
+        grid: (cols: Int, rows: Int)? = nil
     ) async throws -> HolderAttachment {
         // Fresh nonce per attach: the daemon echoes it in the vend header, so a
         // superseded attach's stale fd can never be delivered to this one.
@@ -357,7 +364,7 @@ struct HolderAttachClient: HolderAttaching {
             result = try await daemonClient.attachRequest(
                 worktreeID: worktreeID, paneID: paneID, windowID: "",
                 attachID: attachID, terminalID: terminalID,
-                attachSeq: attachSeq == 0 ? nil : attachSeq)
+                attachSeq: attachSeq == 0 ? nil : attachSeq, grid: grid)
         } catch {
             promise.cancel()
             throw error

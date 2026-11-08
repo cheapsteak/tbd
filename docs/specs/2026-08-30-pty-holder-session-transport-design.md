@@ -454,7 +454,12 @@ licenses a second writer.
 
 Resize follows the reader: whichever process currently reads the master owns
 `TIOCSWINSZ` — the app drives it from the view while attached, the daemon
-holds the last-known size while detached.
+holds the last-known size while detached. An attach resizes on the way in:
+the request names the viewer's grid, and the daemon, which still owns the pty
+until the vend, resizes the session to it before it writes the snapshot
+preamble. A preamble replays the history one row per line and ends with an
+absolute cursor position, so it rebuilds the screen only in a receiver of the
+size it was written at.
 
 ## Detached output and the headless emulator
 

@@ -896,7 +896,8 @@ private final class SwitchingHolderDaemon: HolderAttaching, @unchecked Sendable 
     var vendCount: Int { lock.withLock { vended } }
 
     func attach(
-        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64,
+        grid: (cols: Int, rows: Int)?
     ) async throws -> HolderAttachment {
         let next: (fd: Int32, generation: UInt64, preamble: Data)? = lock.withLock {
             log.append("attach")
