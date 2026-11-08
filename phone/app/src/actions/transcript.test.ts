@@ -13,6 +13,7 @@ import type {
 import { applySnapshot } from '../state/sessionsData.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, Store } from '../state/store.ts';
+import { applyPage, beginOpen, emptyTranscript } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import { createActions } from './index.ts';
 import type { Actions } from './index.ts';
@@ -351,12 +352,12 @@ test('an older page goes above the rows, asked for with the cursor', async () =>
   const h = await showing();
   const pending = h.actions.loadOlder();
   assert.deepEqual(h.last('transcript.page').params, { session: R, cursor: 'c1' });
-  assert.equal(h.t().loadingOlder, true);
+  assert.notEqual(h.t().olderRequestID, null);
   h.last('transcript.page').resolve(page([item('u0')], 'c0'));
   await pending;
   assert.deepEqual(ids(h.t()), ['u0', 'u1', 'u2']);
   assert.equal(h.t().cursor, 'c0');
-  assert.equal(h.t().loadingOlder, false);
+  assert.equal(h.t().olderRequestID, null);
 });
 
 test('only one older page is asked for at a time', async () => {
@@ -372,6 +373,32 @@ test('only one older page is asked for at a time', async () => {
   h.last('transcript.page').resolve(page([item('u-1')], 'c-1'));
   await second;
   assert.deepEqual(ids(h.t()), ['u-1', 'u0', 'u1', 'u2']);
+});
+
+test('an older page answered while the slice waits on a later page changes nothing, and the later page lands', async () => {
+  const h = await showing();
+  const pending = h.actions.loadOlder();
+  const earlier = h.last('transcript.page');
+  // However the slice came to show other rows with the page turn free, a fresh one here, it
+  // asks for the page above those rows while the first page is still on the wire.
+  h.store.update((s) => ({ ...s, transcript: { ...applyPage(beginOpen(emptyTranscript(), R, false, 'open-9'), page([item('n1')], 'c7')), phase: 'open' } }));
+  const later = h.actions.loadOlder();
+  assert.equal(h.count('transcript.page'), 2);
+  assert.deepEqual(h.last('transcript.page').params, { session: R, cursor: 'c7' });
+  const waiting = h.t().olderRequestID;
+  assert.notEqual(waiting, null);
+
+  earlier.resolve(page([item('u0')], 'c0'));
+  await pending;
+  assert.deepEqual(ids(h.t()), ['n1'], 'the earlier page goes above no row');
+  assert.equal(h.t().cursor, 'c7');
+  assert.equal(h.t().olderRequestID, waiting, 'the slice still waits on the later page');
+
+  h.last('transcript.page').resolve(page([item('n0')], 'c6'));
+  await later;
+  assert.deepEqual(ids(h.t()), ['n0', 'n1']);
+  assert.equal(h.t().cursor, 'c6');
+  assert.equal(h.t().olderRequestID, null);
 });
 
 test('a page that reached the start ends the scroll back', async () => {
@@ -416,7 +443,7 @@ test('a failed older page is not asked for again until the next scroll', async (
   const pending = h.actions.loadOlder();
   h.last('transcript.page').reject(new AppError('unavailable', 'The remote provider refused this. Check the laptop.'));
   await pending;
-  assert.equal(h.t().loadingOlder, false);
+  assert.equal(h.t().olderRequestID, null);
   assert.equal(h.t().olderFailed, true);
   assert.equal(h.t().error, null);
   assert.equal(h.t().phase, 'open');
@@ -534,7 +561,7 @@ test('an older page that the slice still waits for and is superseded ends the wa
   const pending = h.actions.loadOlder();
   h.last('transcript.page').reject(new AppError('superseded', SUPERSEDED_TEXT));
   await pending;
-  assert.equal(h.t().loadingOlder, false);
+  assert.equal(h.t().olderRequestID, null);
   assert.equal(h.t().olderFailed, false);
   void h.actions.loadOlder();
   assert.equal(h.count('transcript.page'), 2);

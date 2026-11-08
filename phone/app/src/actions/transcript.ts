@@ -7,10 +7,10 @@
  * replaces the first. Each open, a resume included, takes a fresh token from `newRequestID`
  * (the client does not show the wire's request ID) and puts it in the slice's `openRequestID`
  * (`beginOpen`, `beginResume`). Its reply counts only while that is still its token, so the
- * reply to an open that a later open or a close replaced changes nothing. An older page counts
- * only while the slice still waits for it (`loadingOlder`): every open, reset and close ends
- * that wait, and a resume keeps it. One that no longer counts still holds the one page turn
- * (`stalePage`) until it settles.
+ * reply to an open that a later open or a close replaced changes nothing. An older page takes a
+ * fresh token too, in the slice's `olderRequestID`, and counts only while that is still its token:
+ * every open, reset and close ends that wait, and a resume keeps it. One that no longer counts
+ * still holds the one page turn (`stalePage`) until it settles.
  *
  * **Across a dropped channel.** The client rejects a `transcript.open` or `transcript.close`
  * still unanswered at a channel up as `superseded`, and never sends it again (`STATE_METHODS`
@@ -330,9 +330,11 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
      * Asks for the page above the rows and puts it above them (`prependPage`). It does nothing
      * unless the transcript is open with a cursor, no older page is on its way, for these rows
      * or for rows a page replaced (`stalePage`), the start is not reached, and the last older
-     * page did not fail. So at most one page is on the wire. A page whose open, reset or close
-     * came first changes no row: it clears `stalePage`, a change the list sees, so it asks
-     * again for the rows it shows now if it still wants their page. On an error:
+     * page did not fail. So at most one page is on the wire. Each page takes a fresh token
+     * (`olderRequestID`), and its reply counts only while the slice still waits on that token.
+     * A page whose open, reset or close came first changes no row: it clears `stalePage`, a
+     * change the list sees, so it asks again for the rows it shows now if it still wants their
+     * page. On an error:
      * - `stale_cursor` or `not_open` opens the transcript again, from its tail;
      * - any other error ends the wait and sets `olderFailed`, so nothing asks again until the
      *   reader scrolls (`clearOlderFailed`). A failing load never retries in a loop.
@@ -340,12 +342,15 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     async loadOlder(): Promise<void> {
       const t = store.get().transcript;
       if (t.ref === null || t.phase !== 'open' || t.cursor === null) return;
-      if (t.loadingOlder || t.stalePage || t.reachedStart || t.olderFailed) return;
+      if (t.olderRequestID !== null || t.stalePage || t.reachedStart || t.olderFailed) return;
       const ref = t.ref;
-      setTranscript((s) => ({ ...s, loadingOlder: true }));
-      // An open, a reset or a close replaced the rows this page was for.
-      const stale = (): boolean => !store.get().transcript.loadingOlder;
+      const token = newRequestID();
+      setTranscript((s) => ({ ...s, olderRequestID: token }));
+      // An open, a reset or a close replaced the rows this page was for, so the slice no longer waits on it.
+      const stale = (): boolean => store.get().transcript.olderRequestID !== token;
       const settledStale = (): void => setTranscript((s) => (s.stalePage ? { ...s, stalePage: false } : s));
+      /** The slice with `fn` applied, while it still waits on this page. */
+      const settle = (fn: (s: TranscriptState) => TranscriptState): void => setTranscript((s) => (s.olderRequestID === token ? fn(s) : s));
       let page: TranscriptPage;
       try {
         page = await ctx.client.request('transcript.page', { session: ref, cursor: t.cursor });
@@ -356,15 +361,15 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
         }
         if (error instanceof AppError && (error.code === 'stale_cursor' || error.code === 'not_open')) {
           // The page settled, so the open does not wait for it.
-          setTranscript((s) => ({ ...s, loadingOlder: false }));
+          settle((s) => ({ ...s, olderRequestID: null }));
           self().openTranscript(ref);
           return;
         }
-        setTranscript((s) => ({ ...s, loadingOlder: false, olderFailed: !isSuperseded(error) }));
+        settle((s) => ({ ...s, olderRequestID: null, olderFailed: !isSuperseded(error) }));
         return;
       }
       if (stale()) settledStale();
-      else setTranscript((s) => prependPage(s, page));
+      else settle((s) => prependPage(s, page));
     },
 
     /** The reader scrolled: an older page that failed may be asked for again. */

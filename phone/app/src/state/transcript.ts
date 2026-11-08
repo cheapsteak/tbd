@@ -59,8 +59,13 @@ export interface TranscriptState {
   /** Asks for the page above the rows. Null once the start is reached. */
   cursor: string | null;
   reachedStart: boolean;
-  /** A `transcript.page` for these rows is on its way. */
-  loadingOlder: boolean;
+  /**
+   * The token of the `transcript.page` on its way for these rows (`loadOlder`), or null while
+   * none is. Each older page takes a fresh token, and its reply counts only while this is still
+   * its token, so a reply never takes the wait of a later page for its own. Every open, reset
+   * and close ends the wait (`dropOlder`), and so does the page's own reply.
+   */
+  olderRequestID: string | null;
   /**
    * A `transcript.page` asked for rows that a page or a close has since replaced is still
    * unanswered. At most one page is on the wire at a time, so none is asked for these rows
@@ -95,7 +100,7 @@ export function emptyTranscript(): TranscriptState {
     nextKey: 0,
     cursor: null,
     reachedStart: false,
-    loadingOlder: false,
+    olderRequestID: null,
     stalePage: false,
     olderFailed: false,
     pendingClose: false,
@@ -117,8 +122,8 @@ export function clearTranscript(s: TranscriptState): TranscriptState {
  * The paging fields once the rows an older page was asked for are gone: the slice no longer
  * waits for that page, and while it was on its way, it is still on the wire (`stalePage`).
  */
-function dropOlder(s: TranscriptState): Pick<TranscriptState, 'loadingOlder' | 'stalePage'> {
-  return { loadingOlder: false, stalePage: s.stalePage || s.loadingOlder };
+function dropOlder(s: TranscriptState): Pick<TranscriptState, 'olderRequestID' | 'stalePage'> {
+  return { olderRequestID: null, stalePage: s.stalePage || s.olderRequestID !== null };
 }
 
 /**
@@ -168,7 +173,7 @@ export function applyPage(s: TranscriptState, page: TranscriptPage): TranscriptS
  */
 export function prependPage(s: TranscriptState, page: TranscriptPage): TranscriptState {
   const { rows, nextKey } = itemRows(page.items, s.nextKey);
-  return { ...s, rows: [...rows, ...s.rows], nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, loadingOlder: false };
+  return { ...s, rows: [...rows, ...s.rows], nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, olderRequestID: null };
 }
 
 /**

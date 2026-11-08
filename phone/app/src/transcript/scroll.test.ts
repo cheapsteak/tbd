@@ -40,7 +40,7 @@ test('fractional pixels count as they are', () => {
 });
 
 /** The slice's paging state with a cursor, nothing on its way, the start not reached and no failure. */
-const PAGING = { cursor: 'c1', loadingOlder: false, stalePage: false, reachedStart: false, olderFailed: false } as const;
+const PAGING = { cursor: 'c1', olderRequestID: null, stalePage: false, reachedStart: false, olderFailed: false } as const;
 
 test('an older page is wanted within two screens of the top, and not at two', () => {
   const tall = (scrollTop: number): Metrics => ({ scrollTop, scrollHeight: 10_000, clientHeight: 800 });
@@ -54,7 +54,7 @@ test('an older page is wanted within two screens of the top, and not at two', ()
 test('no older page is wanted without a cursor, or with a page on its way, the start reached or a failure', () => {
   const near: Metrics = { scrollTop: 100, scrollHeight: 10_000, clientHeight: 800 };
   assert.equal(wantsOlder(near, { ...PAGING, cursor: null }), false);
-  assert.equal(wantsOlder(near, { ...PAGING, loadingOlder: true }), false);
+  assert.equal(wantsOlder(near, { ...PAGING, olderRequestID: 'page-1' }), false);
   // A page on its way for rows a page replaced.
   assert.equal(wantsOlder(near, { ...PAGING, stalePage: true }), false);
   assert.equal(wantsOlder(near, { ...PAGING, reachedStart: true }), false);
@@ -215,12 +215,12 @@ test('a row changed in place, an append that replaces a row, and an older page r
   const s = opened(['a', 'b']);
   assert.equal(change(s, applyTranscriptEvent(s, event('transcript.update', ['b'], 'b, longer'))), 'same');
   assert.equal(change(s, applyTranscriptEvent(s, event('transcript.append', ['b'], 'b again'))), 'same');
-  const older = { ...s, loadingOlder: true };
+  const older = { ...s, olderRequestID: 'page-1' };
   assert.equal(change(s, prependPage(older, page(['y', 'z']))), 'same');
 });
 
 test('an older page and an append seen at once read as appended', () => {
-  const s = { ...opened(['a', 'b']), loadingOlder: true };
+  const s = { ...opened(['a', 'b']), olderRequestID: 'page-1' };
   const both = applyTranscriptEvent(prependPage(s, page(['z'])), event('transcript.append', ['c']));
   assert.equal(change(s, both), 'appended');
 });
@@ -256,12 +256,12 @@ function above(a: TranscriptState, b: TranscriptState): boolean {
 }
 
 test('an older page reads as prepended, with an append or without', () => {
-  const s = { ...opened(['a', 'b']), loadingOlder: true };
+  const s = { ...opened(['a', 'b']), olderRequestID: 'page-1' };
   const older = prependPage(s, page(['y', 'z']));
   assert.equal(above(s, older), true);
   assert.equal(above(s, applyTranscriptEvent(older, event('transcript.append', ['c']))), true);
   // Two pages seen at once.
-  assert.equal(above(s, prependPage({ ...older, loadingOlder: true }, page(['x']))), true);
+  assert.equal(above(s, prependPage({ ...older, olderRequestID: 'page-1' }, page(['x']))), true);
   // The same item IDs as the rows below are new rows all the same.
   assert.equal(above(s, prependPage(s, page(['a', 'b']))), true);
 });

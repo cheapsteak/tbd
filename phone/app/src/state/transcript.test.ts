@@ -114,12 +114,12 @@ test('an item matches the last row that carries its ID', () => {
 test('reset replaces everything, receipts and open details included', () => {
   let s0 = withRows([item('u1'), item('u2')]);
   s0 = addReceipt(s0, R, 'p1', 'Answered on the laptop');
-  s0 = { ...s0, details: { [keyOf(s0, 0)]: DETAIL }, loadingOlder: true };
+  s0 = { ...s0, details: { [keyOf(s0, 0)]: DETAIL }, olderRequestID: 'page-1' };
   const s1 = applyTranscriptEvent(s0, reset(page([item('u9')], 'c9')));
   assert.deepEqual(shown(s1), ['u9:u9']);
   assert.deepEqual(s1.details, {});
   assert.equal(s1.cursor, 'c9');
-  assert.equal(s1.loadingOlder, false);
+  assert.equal(s1.olderRequestID, null);
   assert.equal(s1.appendedSinceSeen, 0);
   // Its rows take new keys, so no key names a row it named before.
   assert.ok(keyOf(s1, 0) >= s0.nextKey);
@@ -139,12 +139,12 @@ test('an older page goes above in order, and no row is dropped for sharing an ID
 });
 
 test('an older page keeps the rows below it and their keys, and takes its cursor', () => {
-  const s0 = { ...withRows([item('u5'), item('u6')]), loadingOlder: true };
+  const s0 = { ...withRows([item('u5'), item('u6')]), olderRequestID: 'page-1' };
   const s1 = prependPage(s0, page([item('u3'), item('u4')], 'c0'));
   assert.deepEqual(shown(s1), ['u3:u3', 'u4:u4', 'u5:u5', 'u6:u6']);
   assert.deepEqual(s1.rows.slice(2).map((r) => r.key), s0.rows.map((r) => r.key));
   assert.equal(s1.cursor, 'c0');
-  assert.equal(s1.loadingOlder, false);
+  assert.equal(s1.olderRequestID, null);
   const s2 = prependPage(s1, page([item('u1')], null));
   assert.equal(s2.cursor, null);
   assert.equal(s2.reachedStart, true);
@@ -250,7 +250,7 @@ test("an item that replaces a row takes the row's open detail along, as followIt
 });
 
 test('beginOpen keeps the rows of the session it opens again, and starts another with none', () => {
-  let s0 = { ...withRows([item('u1')]), loadingOlder: true, olderFailed: true };
+  let s0 = { ...withRows([item('u1')]), olderRequestID: 'page-1', olderFailed: true };
   s0 = { ...s0, details: { [keyOf(s0, 0)]: DETAIL } };
   const again = beginOpen(s0, R, true, 'open-2');
   assert.equal(again.phase, 'opening');
@@ -260,7 +260,7 @@ test('beginOpen keeps the rows of the session it opens again, and starts another
   assert.equal(again.cursor, 'c1');
   assert.equal(again.details, s0.details);
   // A page still on its way belongs to the open this one replaces.
-  assert.equal(again.loadingOlder, false);
+  assert.equal(again.olderRequestID, null);
   assert.equal(again.olderFailed, false);
 
   const other = beginOpen(s0, OTHER, false, 'open-3');
@@ -274,7 +274,7 @@ test('beginOpen keeps the rows of the session it opens again, and starts another
 });
 
 test('an open, a reset or a close while an older page is on its way leaves that page holding the turn', () => {
-  const waiting = { ...withRows([item('u1')]), loadingOlder: true };
+  const waiting = { ...withRows([item('u1')]), olderRequestID: 'page-1' };
   const after = [
     ['reopen', beginOpen(waiting, R, true, 'open-2')],
     ['switch', beginOpen(waiting, OTHER, false, 'open-2')],
@@ -282,7 +282,7 @@ test('an open, a reset or a close while an older page is on its way leaves that 
     ['close', clearTranscript(waiting)],
   ] as const;
   for (const [what, s] of after) {
-    assert.equal(s.loadingOlder, false, what);
+    assert.equal(s.olderRequestID, null, what);
     assert.equal(s.stalePage, true, what);
   }
   // With no page on its way there is none to wait for, and one already stale stays so.
@@ -316,14 +316,14 @@ test('events and receipts fold in only while the transcript shows: not while it 
 });
 
 test('a resume keeps the slice showing, so the events the laptop replays before its reply fold in', () => {
-  const shown0 = { ...withRows([item('u1')]), loadingOlder: true };
+  const shown0 = { ...withRows([item('u1')]), olderRequestID: 'page-1' };
   const resuming = beginResume(shown0, 'open-2');
   assert.equal(resuming.openRequestID, 'open-2');
   assert.equal(resuming.phase, 'open');
   assert.equal(resuming.rows, shown0.rows);
   assert.equal(resuming.cursor, shown0.cursor);
   // An older page on its way still lands, if the resume keeps the feed.
-  assert.equal(resuming.loadingOlder, true);
+  assert.equal(resuming.olderRequestID, 'page-1');
   const s1 = addReceipt(applyTranscriptEvent(resuming, append([item('u2')])), R, 'p1', 'Answered on the laptop');
   assert.deepEqual(shown(s1), ['u1:u1', 'u2:u2', 'receipt:p1:Answered on the laptop']);
   assert.deepEqual(shown(applyTranscriptEvent(resuming, reset(page([item('u7')])))), ['u7:u7']);

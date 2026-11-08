@@ -312,7 +312,7 @@ function List(p: {
         view.restoring = requestAnimationFrame(() => {
           view.restoring = null;
           // A page the reader's scroll asked for meanwhile keeps the anchor, which follows the view again.
-          view.anchor = view.paging?.loadingOlder === true ? anchorNow(el) : null;
+          view.anchor = olderOnItsWay(view.paging) ? anchorNow(el) : null;
         });
       });
     },
@@ -329,7 +329,7 @@ function List(p: {
     if (view.restoring !== null) restore(el);
     settle();
     if (view.anchor !== null && view.restoring === null) {
-      view.anchor = view.paging?.loadingOlder === true ? anchorNow(el) : null;
+      view.anchor = olderOnItsWay(view.paging) ? anchorNow(el) : null;
     }
     const m = metricsOf(el);
     if (view.anchor === null && view.paging !== null && fitsView(m) && wantsOlder(m, view.paging)) askOlder(el);
@@ -498,6 +498,11 @@ function observeRect(instance: Virtualizer<HTMLDivElement, HTMLDivElement>, cb: 
     if (frame !== null) cancelAnimationFrame(frame);
     stop?.();
   };
+}
+
+/** Whether an older page is on its way for the rows the list shows. */
+function olderOnItsWay(paging: Paging | null): boolean {
+  return paging !== null && paging.olderRequestID !== null;
 }
 
 function metricsOf(el: HTMLElement): Metrics {
