@@ -1085,10 +1085,15 @@ test('a reset starts over at the newest items', async ({ page, appHost }) => {
   expect(await pageCursors(page)).toHaveLength(asked + 2);
 });
 
-test('a first page that fits the screen asks for the page above without a scroll', async ({ page, appHost }) => {
-  const items = Array.from({ length: 200 }, (_, i) => ({
+/** 200 short messages, alternating yours and the assistant's: a first page of them fits the screen. */
+function shortItems() {
+  return Array.from({ length: 200 }, (_, i) => ({
     id: `short-${i}`, kind: i % 2 === 0 ? 'user' : 'assistant', text: `Short message ${i}.`, truncated: false,
   }));
+}
+
+test('a first page that fits the screen asks for the page above without a scroll', async ({ page, appHost }) => {
+  const items = shortItems();
   await openApp(page, appHost, { scenario: checkoutWith(items) });
   await openSessionByName(page, 'Checkout v2', 'Claude');
   const tx = app(page).locator('.tx');
@@ -1103,6 +1108,37 @@ test('a first page that fits the screen asks for the page above without a scroll
   expect(await pageCursors(page)).toHaveLength(1);
   await scrollTx(tx, 0);
   await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
+});
+
+test('a failed older page above rows that fit the screen loads again on a tap, and never by itself', async ({ page, appHost }) => {
+  const items = shortItems();
+  await openApp(page, appHost, { scenario: checkoutWith(items) });
+  await hostCall(page, 'setReply', 'transcript.page', { error: { code: 'refused', message: REMOTE_REFUSED } });
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(1);
+  // The rows fit, so no scroll can follow, and nothing asks again by itself.
+  await frames(tx, 6);
+  const m = await metricsOf(tx);
+  expect(m.scrollHeight).toBeLessThanOrEqual(m.clientHeight);
+  expect(await pageCursors(page)).toHaveLength(1);
+  await expect(app(page).getByText(REMOTE_REFUSED)).toHaveCount(0);
+
+  // A tap on the transcript, above its rows, is the reader's next scroll: it asks once more, and
+  // only once while the page still fails.
+  const above = { position: { x: 20, y: 20 } };
+  await tx.tap(above);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
+  await frames(tx, 6);
+  expect(await pageCursors(page)).toHaveLength(2);
+
+  await hostCall(page, 'setReply', 'transcript.page', null);
+  await tx.tap(above);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(3);
+  expect(new Set(await pageCursors(page)).size).toBe(1);
+  await expect.poll(async () => { const now = await metricsOf(tx); return now.scrollHeight > now.clientHeight; }).toBe(true);
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
 });
 
 // --- the "Working…" line and Show details -----------------------------------------------------

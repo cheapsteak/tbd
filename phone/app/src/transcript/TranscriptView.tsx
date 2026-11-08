@@ -39,7 +39,10 @@
  * failed older page (`clearOlderFailed`), so a failure shows nothing and the next scroll asks
  * again. Then, within two screens of the top (`wantsOlder`), the list records an anchor, the row
  * at the top of the view and how far its top sits from the view's top (`anchorAt`), and asks for
- * the page (`loadOlder`). Rows that fit the view, which the reader cannot scroll, ask at once.
+ * the page (`loadOlder`). Rows that fit the view, which the reader cannot scroll, ask at once,
+ * and since no scroll event can follow them, a touch, a press or a wheel on `.tx` stands in for
+ * the reader's next scroll after a failure: it clears the failure, and the layout after it asks
+ * again. Each failure waits for another gesture, so a failing page never retries in a loop.
  * - **While the page is on its way** the anchor follows the view: it is taken again after every
  *   scroll event and every layout, so a page that lands after a swipe or a fling went on holds
  *   where the reader is then, not where the page was asked for.
@@ -100,6 +103,9 @@ const ESTIMATE_PX = 48;
 
 /** The rows the virtualizer draws beyond each end of the screen. */
 const OVERSCAN = 8;
+
+/** The reader's gestures on rows that fit the view, which no scroll event follows (this file's header). */
+const GESTURES = ['touchstart', 'pointerdown', 'wheel'] as const;
 
 /** How often the "Working…" line reads its elapsed time again, in milliseconds. */
 const WORKING_REFRESH_MS = 1_000;
@@ -305,7 +311,7 @@ function List(p: {
     if (view.anchor === null && view.paging !== null && fitsView(m) && wantsOlder(m, view.paging)) askOlder(el);
   }, [view, restore, settle, anchorNow, askOlder]);
 
-  // The reader's scroll, and a `.tx` that changed size.
+  // The reader's scroll, their gestures on rows that fit the view, and a `.tx` that changed size.
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
     const el = scrollRef.current;
@@ -328,11 +334,16 @@ function List(p: {
       const paging = view.paging;
       if (paging !== null && wantsOlder(metricsOf(el), { ...paging, olderFailed: false })) askOlder(el);
     };
+    const onGesture = (): void => {
+      if (fitsView(metricsOf(el))) actions.clearOlderFailed();
+    };
     const resized = new ResizeObserver(afterLayout);
     wrap.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    for (const type of GESTURES) el.addEventListener(type, onGesture, { passive: true });
     resized.observe(el);
     return () => {
       wrap.removeEventListener('scroll', onScroll, { capture: true });
+      for (const type of GESTURES) el.removeEventListener(type, onGesture);
       resized.disconnect();
       dropAnchor();
     };
