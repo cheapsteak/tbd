@@ -211,6 +211,8 @@ final class MouseController: NSObject {
 
     private var trackingArea: NSTrackingArea?
     private var accumulator = ScrollAccumulator()
+    /// Whether the last wheel event's rows scrolled the viewport; nil before the first.
+    private var lastWheelMovedViewport: Bool?
     /// One bucket for the wheel's reports and arrow keys: a program gets one or the other.
     private var programInputBound = WheelInputBound()
     private var autoscrollTask: Task<Void, Never>?
@@ -514,6 +516,11 @@ final class MouseController: NSObject {
         // arithmetic, nothing more. Both reads go by what libghostty reports, not the mode bits:
         // after `?1000h ?1003h ?1003l` the bits say tracking, but the rows scroll the viewport.
         let movesViewport = view.terminal.wheelScrollsViewport
+        // A program that turned reporting on or off mid-gesture changed where the rows go. The
+        // bank belongs to the other arithmetic, so it is dropped, as the app's monitor drops it:
+        // motion that scrolled the viewport is never reported, nor the other way round.
+        if let lastWheelMovedViewport, lastWheelMovedViewport != movesViewport { accumulator.reset() }
+        lastWheelMovedViewport = movesViewport
         let rows = wheelRows(
             deltaY: deltaY,
             hasPreciseDeltas: hasPreciseDeltas,

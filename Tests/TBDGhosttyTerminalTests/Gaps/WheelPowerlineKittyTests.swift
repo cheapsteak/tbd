@@ -223,6 +223,41 @@ struct WheelPowerlineKittyTests {
         #expect(recorder.sent.isEmpty, "scrolling the primary screen sent \(recorder.sent)")
     }
 
+    /// A program that turns reporting on in the middle of a trackpad gesture gets reports for the
+    /// motion after the flip alone: the viewport moves no further, and the fraction the viewport
+    /// banked before the flip is not reported.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func turningReportingOnMidGestureReportsNoStaleRemainder() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: (0..<60).map { "line \($0)\r\n" }.joined())
+        let line = Double(view.cellSize.height)
+
+        // 1.7 lines up with reporting off: the viewport moves one row and banks 0.7.
+        let start = try scrollMetrics(of: terminal).offset
+        Self.wheel(view, deltaY: 1.7 * line, phase: .gestureBegan, at: 1)
+        let beforeFlip = try scrollMetrics(of: terminal).offset
+        try #require(beforeFlip == start - 1, "1.7 lines up moved the viewport from row \(start) to \(beforeFlip)")
+
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+        let reporting = terminal.isMouseReporting
+        try #require(reporting, "?1000h did not turn mouse reporting on")
+        let afterFlip = try scrollMetrics(of: terminal).offset
+
+        // Half a line more. With the 0.7 kept, it would make a whole row, and a report.
+        let half = Self.wheel(view, deltaY: 0.5 * line, phase: .gestureChanged, at: 1.01)
+        #expect(recorder.sent.isEmpty, "half a line after the flip sent \(recorder.sent), from \(describe(half))")
+
+        // 0.6 more makes 1.1 lines since the flip: one report, button 4.
+        let whole = Self.wheel(view, deltaY: 0.6 * line, phase: .gestureChanged, at: 1.02)
+        let sent = Array(recorder.sent.joined())
+        let reports = sent.filter { $0 == 0x1B }.count
+        let isWheelUp = sent.starts(with: Array("\u{1b}[<64;".utf8))
+        #expect(reports == 1 && isWheelUp,
+                "1.1 lines up after the flip sent \(String(decoding: sent, as: UTF8.self).debugDescription), from \(describe(whole))")
+        let end = try scrollMetrics(of: terminal).offset
+        #expect(end == afterFlip, "after the flip the wheel moved the viewport from row \(afterFlip) to \(end)")
+    }
+
     /// After `?1000h ?1003h ?1003l` the 1000 bit is still set, but libghostty reports nothing, so
     /// the wheel scrolls the viewport, and at the viewport's speed: a notch of 3 lines moves it 3
     /// rows, not the one row a notch is when it goes to the program.
