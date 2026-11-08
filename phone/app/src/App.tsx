@@ -9,10 +9,11 @@
  *
  * The variables follow the loader's env, which comes once a frame while the keyboard moves. So
  * `LayoutVars`, a leaf that renders nothing, reads it, and App does not: an env message renders
- * that leaf alone, never the screen (`app/render.test.js`).
+ * that leaf alone, never the screen, and writes only the variables it changed, which while the
+ * keyboard moves is `--dock-pad` alone (`app/render.test.js`).
  */
 
-import { useLayoutEffect, useMemo } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import type { JSX } from 'react';
 import { layoutVars } from './env.ts';
 import { SessionScreen } from './screens/SessionScreen.tsx';
@@ -65,14 +66,27 @@ export function App({ root }: { root: HTMLElement }): JSX.Element {
   );
 }
 
-/** Sets `root`'s layout variables from the loader's env. It renders nothing. */
+/**
+ * Sets `root`'s layout variables from the loader's env. It renders nothing. Each env message is
+ * a new object, so it keeps the values it wrote last and writes only a variable whose value
+ * differs.
+ */
 function LayoutVars({ root }: { root: HTMLElement }): null {
   const env = useAppState((s) => s.env);
-  const vars = useMemo(() => layoutVars(env), [env]);
+  const written = useRef<{ root: HTMLElement; values: Map<string, string> } | null>(null);
 
   useLayoutEffect(() => {
-    for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
-  }, [root, vars]);
+    let last = written.current;
+    if (last === null || last.root !== root) {
+      last = { root, values: new Map() };
+      written.current = last;
+    }
+    for (const [name, value] of Object.entries(layoutVars(env))) {
+      if (last.values.get(name) === value) continue;
+      root.style.setProperty(name, value);
+      last.values.set(name, value);
+    }
+  }, [root, env]);
 
   return null;
 }

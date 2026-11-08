@@ -114,7 +114,7 @@ const ENV = {
   colorScheme: 'light',
 };
 
-test('an env message sets the layout variables and renders none of the screen', async (t) => {
+test('an env message sets only the layout variables it changes, and renders none of the screen', async (t) => {
   // React DOM reads `window.event` to rank an update; Node has no window.
   Object.assign(globalThis, { window: {}, IS_REACT_ACT_ENVIRONMENT: true });
   const errors = [];
@@ -134,18 +134,26 @@ test('an env message sets the layout variables and renders none of the screen', 
     '--safe-top': '0px', '--safe-right': '0px', '--safe-bottom': '0px', '--safe-left': '0px', '--dock-pad': '0px',
   });
 
-  // An env message, and one a frame later as the keyboard rises.
+  // An env message, and one a frame later as the keyboard rises. Each writes only the variables
+  // whose values it changed: the first the insets, the second the keyboard's alone.
+  /** @type {Array<Array<[string, string]>>} */
+  const writes = [];
   for (const height of [844, 600]) {
+    const before = root.set.length;
     await act(async () => {
       store.update((s) => ({ ...s, env: { ...ENV, viewport: { ...ENV.viewport, height } } }));
     });
+    writes.push(root.set.slice(before));
   }
   assert.deepEqual(renders, { SessionsList: 1, SheetHost: 1, Toast: 1 });
-  // Each env set all five variables again; the last one lifts the dock over the keyboard.
-  assert.equal(root.set.length, 15);
-  assert.deepEqual(root.set.slice(-5), [
-    ['--safe-top', '47px'], ['--safe-right', '0px'], ['--safe-bottom', '34px'], ['--safe-left', '0px'], ['--dock-pad', '244px'],
+  assert.deepEqual(writes, [
+    [['--safe-top', '47px'], ['--safe-bottom', '34px'], ['--dock-pad', '34px']],
+    [['--dock-pad', '244px']],
   ]);
+  // The last one lifts the dock over the keyboard.
+  assert.deepEqual(Object.fromEntries(root.set), {
+    '--safe-top': '47px', '--safe-right': '0px', '--safe-bottom': '34px', '--safe-left': '0px', '--dock-pad': '244px',
+  });
 
   // A change App does read still renders the screen: the probes count.
   await act(async () => {
