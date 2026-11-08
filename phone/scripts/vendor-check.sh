@@ -2,6 +2,13 @@
 # usage: vendor-check.sh [vendor-root]
 # Verifies every vendored file against vendor.lock: checksums, no unlisted files,
 # and exactly one tarball, integrity and provenance row per library.
+#
+# It also refuses what stage-loader.sh would refuse to serve from the lock, so a lock that
+# passes here never fails a deploy: a library name or file path outside the path rule below;
+# a listed file that is a symlink, sits behind one, or is not a regular file; a vendored file
+# that would be served as a page (.html .htm .xhtml .svg .xml, in any case); and one that
+# carries runner.html's origin placeholder. No symlink may be anywhere under the vendor root,
+# listed or not, and neither the root nor the lock may be one.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -14,6 +21,35 @@ fail() {
   problems=$((problems + 1))
 }
 
+# $1 with every byte but A-Z a-z 0-9 . _ / - shown as '?', so a message carries no control bytes.
+shown() { printf '%s' "$1" | tr -c 'A-Za-z0-9._/-' '?'; }
+
+# The path rule for a vendored library's name and its files' paths, the one stage-loader.sh
+# serves vendored files under and vendor-update.sh vendors them under.
+segment='[A-Za-z0-9_][A-Za-z0-9._-]*' # no leading dot, so no '..' and no dotfiles
+lib_name="^$segment\$"
+lib_path="^$segment(/$segment)*\$"
+
+# runner.html's placeholder, which stage-loader.sh refuses in any other served file.
+placeholder='https://loader-origin.invalid'
+
+# True when $2, a path relative to the directory $1, names a regular file and neither it nor
+# any directory on the way is a symlink.
+plain_file() {
+  local cur="$1" rest="$2" part
+  while [ -n "$rest" ]; do
+    part="${rest%%/*}"
+    if [ "$part" = "$rest" ]; then rest=''; else rest="${rest#*/}"; fi
+    cur="$cur/$part"
+    if [ -L "$cur" ]; then return 1; fi
+  done
+  [ -f "$cur" ]
+}
+
+if [ -L "${root%/}" ]; then
+  echo "vendor-check: $root is a symlink" >&2
+  exit 1
+fi
 if [ ! -f "$lock" ]; then
   echo "vendor-check: missing $lock" >&2
   exit 1
@@ -26,18 +62,44 @@ tab="$(printf '\t')"
 
 while IFS="$tab" read -r name _ kind value sha || [ -n "$name" ]; do
   case "$name" in '' | '#'*) continue ;; esac
+  if ! [[ "$name" =~ $lib_name ]]; then
+    fail "'$(shown "$name")': a library name must be one segment of A-Z a-z 0-9 . _ - not starting with '.'"
+    continue
+  fi
   [ "$kind" = file ] || continue
   rel="$name/$value"
   printf '%s\n' "$rel" >>"$work/listed"
+  if ! [[ "$value" =~ $lib_path ]]; then
+    fail "$(shown "$rel"): a vendored path must be segments of A-Z a-z 0-9 . _ - none starting with '.'"
+    continue
+  fi
+  case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+    *.html | *.htm | *.xhtml | *.svg | *.xml)
+      fail "$rel: would be served as a page; only index.html and runner.html may be"
+      continue
+      ;;
+  esac
   path="$root/$rel"
-  if [ ! -f "$path" ]; then
-    fail "$rel: listed in vendor.lock but missing on disk"
+  if ! plain_file "$root" "$rel"; then
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      fail "$rel: listed in vendor.lock but a symlink, behind one, or not a regular file"
+    else
+      fail "$rel: listed in vendor.lock but missing on disk"
+    fi
     continue
   fi
   actual="$(shasum -a 256 "$path" | awk '{print $1}')"
   if [ "$actual" != "$sha" ]; then
     fail "$rel: sha256 mismatch (lock $sha, disk $actual)"
   fi
+  # grep exits 0 on a match and 1 on none; anything above 1 is a file it could not read.
+  rc=0
+  grep -qaF -- "$placeholder" "$path" || rc=$?
+  case "$rc" in
+    0) fail "$rel: carries $placeholder, which only runner.html may" ;;
+    1) ;;
+    *) fail "$rel: grep could not read it (exit $rc)" ;;
+  esac
 done <"$lock"
 
 # Every regular file on disk (except the lock) must be listed.
@@ -45,20 +107,29 @@ done <"$lock"
 while IFS= read -r rel || [ -n "$rel" ]; do
   [ -n "$rel" ] || continue
   if ! grep -Fxq -- "$rel" "$work/listed"; then
-    fail "$rel: unlisted file (present on disk, absent from vendor.lock)"
+    fail "$(shown "$rel"): unlisted file (present on disk, absent from vendor.lock)"
   fi
 done <"$work/ondisk"
 
+# No symlink anywhere under the root, the lock included: stage-loader.sh serves nothing
+# through one, and a listed file reached through one is not the file the lock describes.
+(cd "$root" && find . -type l | sed 's|^\./||' | LC_ALL=C sort) >"$work/links"
+while IFS= read -r rel || [ -n "$rel" ]; do
+  [ -n "$rel" ] || continue
+  fail "$(shown "$rel"): a symlink under the vendor root"
+done <"$work/links"
+
 # Exactly one tarball, integrity and provenance row per library.
-names="$(awk -F'\t' '!/^#/ && NF>0 {print $1}' "$lock" | LC_ALL=C sort -u)"
-for n in $names; do
+awk -F'\t' '!/^#/ && NF>0 {print $1}' "$lock" | LC_ALL=C sort -u >"$work/names"
+while IFS= read -r n || [ -n "$n" ]; do
+  [ -n "$n" ] || continue
   for k in tarball integrity provenance; do
     count="$(awk -F'\t' -v n="$n" -v k="$k" '$1==n && $3==k {c++} END {print c+0}' "$lock")"
     if [ "$count" -ne 1 ]; then
-      fail "$n: expected exactly one $k row, found $count"
+      fail "$(shown "$n"): expected exactly one $k row, found $count"
     fi
   done
-done
+done <"$work/names"
 
 if [ "$problems" -ne 0 ]; then
   echo "vendor-check: $problems problem(s)" >&2
