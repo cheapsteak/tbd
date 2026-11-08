@@ -24,6 +24,10 @@ import TBDShared
 struct RemoteAttachTerminalView: View {
     let provider: RemoteProviderConfig
     let sessionID: String
+    /// `AppState.ghosttyTerminalEngineEnabled` when the pager built this view,
+    /// forwarded to `LocalPTYTerminalRepresentable`, so the terminal follows
+    /// the store the pager's `AppState` was built with.
+    let ghosttyTerminalEngineEnabled: Bool
     /// Called once when the local attach process ends, for any reason
     /// (clean exit, crash, unreachable host). Never implies the remote
     /// session died — only that this local viewer process stopped.
@@ -63,10 +67,17 @@ struct RemoteAttachTerminalView: View {
     }
 
     var body: some View {
+        representable(appearance: appearance)
+    }
+
+    /// The terminal host `body` shows. Separate from `body`, which needs the
+    /// environment's `appearance`, so a test can check what reaches the host.
+    func representable(appearance: AppearanceSettings) -> LocalPTYTerminalRepresentable {
         LocalPTYTerminalRepresentable(
             argv: provider.argv + ["attach", sessionID],
             environment: Self.attachEnvironment(),
             appearance: appearance,
+            ghosttyTerminalEngineEnabled: ghosttyTerminalEngineEnabled,
             onExit: onDetached,
             onStarted: onStarted,
             onViewMounted: onViewMounted,

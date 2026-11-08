@@ -47,7 +47,6 @@ struct TerminalSettingsView: View {
     @State private var tmuxFallbackDraft = ""
 
     var body: some View {
-        @Bindable var appState = appState
         Form {
             Section("Font") {
                 HStack {
@@ -224,11 +223,8 @@ struct TerminalSettingsView: View {
                     .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
                 Toggle("GPU terminal rendering (Metal)", isOn: $useMetalTerminalRenderer)
                     .help("Draws terminals through SwiftTerm's Metal renderer instead of its CoreGraphics path. If the GPU path is unavailable, terminals stay on CoreGraphics. While on, terminals already open keep the glyphs they have already drawn, so a Thin Strokes change reaches them only as new characters appear.")
-                // Bound through AppState, not @AppStorage: the tabs' engine labels,
-                // the Terminal menu and every panel read the flag from
-                // AppState.userDefaults, so the toggle has to write that store.
-                Toggle("Use the libghostty terminal engine", isOn: $appState.ghosttyTerminalEngineSetting)
-                    .help("Applies to terminals opened after you change it. Ligatures and right-to-left text are not supported yet. The Metal setting above affects SwiftTerm terminals only; libghostty always draws with Metal.")
+                Toggle("Use the libghostty terminal engine", isOn: Self.ghosttyEngineBinding(appState))
+                    .help("Applies to terminals opened after you change it. Terminals that run through tmux stay on SwiftTerm. Ligatures and right-to-left text are not supported yet. The Metal setting above affects SwiftTerm terminals only; libghostty always draws with Metal.")
                 Text("Takes effect for terminals opened after the change — restart the app to switch every open terminal at once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -309,6 +305,16 @@ struct TerminalSettingsView: View {
     }
 
     // MARK: - Computed helpers
+
+    /// The binding the "Use the libghostty terminal engine" toggle is handed,
+    /// kept here so the view and its tests use the same one. It goes through
+    /// `AppState.ghosttyTerminalEngineSetting`, not `@AppStorage`: the tabs'
+    /// engine labels, the Terminal menu, every holder panel and every local
+    /// PTY read the flag from `AppState.userDefaults`, so the toggle has to
+    /// write that store.
+    static func ghosttyEngineBinding(_ appState: AppState) -> Binding<Bool> {
+        Bindable(appState).ghosttyTerminalEngineSetting
+    }
 
     private var currentScheme: TerminalColorScheme {
         ColorSchemes.scheme(forID: appearance.schemeID, store: appState.themeStore)

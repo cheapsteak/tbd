@@ -1204,17 +1204,18 @@ final class AppState {
     /// panel's registration survives its predecessor's teardown.
     @ObservationIgnored var terminalEngineSwitchers: [UUID: TerminalEngineSwitcher] = [:]
     /// `ghosttyTerminalEngineEnabled`, held where a view can observe it: the
-    /// tab's engine label and the Terminal menu read this, never
-    /// `@AppStorage`, so they follow the store this AppState was built with,
-    /// as every panel deciding its engine does. Refreshed by
-    /// `ghosttyTerminalEngineFlagObservation` and written only when it
-    /// changes. A panel deciding its engine reads the store itself.
+    /// tab's engine label, the Terminal menu and the Settings toggle read
+    /// this, never `@AppStorage`, so they follow the store this AppState was
+    /// built with, as every holder panel and local PTY deciding its engine
+    /// does. Refreshed by `ghosttyTerminalEngineFlagObservation` and written
+    /// only when it changes. A panel deciding its engine reads the store
+    /// itself.
     private(set) var ghosttyTerminalEngineFlag = false
     /// Key-value observation of `useGhosttyTerminalEngineKey` in
     /// `userDefaults`. Unlike `UserDefaults.didChangeNotification`, which only
-    /// this process's writes post, it also hears another process's write, so
-    /// `defaults write`, the way the flag is turned on before it has a
-    /// Settings toggle, reaches the tabs and the menu.
+    /// this process's writes post, it also catches writes from outside the
+    /// app, such as `defaults write`, so those reach the tabs, the menu and
+    /// the Settings toggle too.
     @ObservationIgnored private var ghosttyTerminalEngineFlagObservation: NSKeyValueObservation?
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
@@ -5074,9 +5075,10 @@ final class AppState {
     /// Whether terminals opened now should be built on libghostty, where their
     /// host allows it (`TerminalEngineFactory.requestedKind`). Three-state: an
     /// unset key takes `shippedDefault`, and an explicit `false` or `true`
-    /// holds against any change to it.
+    /// holds against any change to it. `defaults` has no default value on
+    /// purpose: the store is an `AppState`'s, never an implicit `.standard`.
     static func ghosttyTerminalEngineEnabled(
-        defaults: UserDefaults = .standard,
+        defaults: UserDefaults,
         shippedDefault: Bool = ghosttyTerminalEngineDefault
     ) -> Bool {
         ghosttyTerminalEngineEnabled(
@@ -5099,13 +5101,14 @@ final class AppState {
         Self.ghosttyTerminalEngineEnabled(defaults: userDefaults)
     }
 
-    /// The Settings → Terminal → Experimental toggle for the flag, bound as
-    /// `$appState.ghosttyTerminalEngineSetting`. It reads the observed
-    /// `ghosttyTerminalEngineFlag`, so the toggle, the tabs' engine labels and
-    /// the Terminal menu show one value, and it writes the key to this
-    /// AppState's own store, the one every panel decides its engine from:
-    /// `.standard` in the app, an isolated suite in a test. Never `@AppStorage`,
-    /// which would write `.standard` whatever store this AppState was built with.
+    /// The Settings → Terminal → Experimental toggle for the flag, bound
+    /// through `TerminalSettingsView.ghosttyEngineBinding(_:)`. It reads the
+    /// observed `ghosttyTerminalEngineFlag`, so the toggle, the tabs' engine
+    /// labels and the Terminal menu show one value, and it writes the key to
+    /// this AppState's own store, the one every holder panel and local PTY
+    /// decides its engine from: `.standard` in the app, an isolated suite in a
+    /// test. Never `@AppStorage`, which would write `.standard` whatever store
+    /// this AppState was built with.
     ///
     /// Off is stored as an explicit `false`, never by removing the key, so the
     /// choice holds when `ghosttyTerminalEngineDefault` changes. The mirror is

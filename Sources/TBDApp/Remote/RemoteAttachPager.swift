@@ -178,6 +178,9 @@ struct RemoteAttachPager: NSViewControllerRepresentable {
         return RemoteAttachTerminalView(
             provider: config,
             sessionID: selection.sessionID,
+            // Read from the store this AppState was built with, where the
+            // Settings toggle writes, as every holder panel reads it.
+            ghosttyTerminalEngineEnabled: appState.ghosttyTerminalEngineEnabled,
             onDetached: { [weak appState] exitCode in
                 appState?.markRemoteSessionDetached(selection, exitCode: exitCode, generation: generation)
             },

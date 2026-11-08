@@ -35,6 +35,12 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// caller silently inherits another's contract-specific variables.
     let environment: [String: String]
     let appearance: AppearanceSettings
+    /// Whether `useGhosttyTerminalEngine` is on, as the caller's `AppState`
+    /// reads it from the store it was built with, the one the Settings toggle
+    /// writes and every holder panel decides its engine from. Never read here
+    /// from `.standard`, which under `TBD_MOCK` or in a test is another store.
+    /// Used once, in `makeNSView`, so a running terminal keeps its engine.
+    let ghosttyTerminalEngineEnabled: Bool
     /// Called once when the local process ends, for any reason. For a
     /// provider `attach` this never implies the remote session died — only
     /// that this local viewer process stopped.
@@ -63,16 +69,17 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// is always visible while it runs — claims unconditionally.
     var onClaimFocus: (() -> Void)?
 
+    /// The engine `makeNSView` asks the factory for: libghostty while
+    /// `useGhosttyTerminalEngine` is on, since a local PTY's mouse modes are
+    /// its program's own, as on a holder panel.
+    var requestedEngineKind: TerminalEngineKind {
+        TerminalEngineFactory.requestedKind(flagEnabled: ghosttyTerminalEngineEnabled, host: .localPTY)
+    }
+
     func makeNSView(context: Context) -> NSView {
         let coordinator = context.coordinator
-        // libghostty while `useGhosttyTerminalEngine` is on: a local PTY's
-        // mouse modes are its program's own, as on a holder panel. Read from
-        // `.standard`, where the Settings toggle writes, as the renderer
-        // preference below is.
         let engine = TerminalEngineFactory.make(
-            kind: TerminalEngineFactory.requestedKind(
-                flagEnabled: AppState.ghosttyTerminalEngineEnabled(),
-                host: .localPTY),
+            kind: requestedEngineKind,
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(

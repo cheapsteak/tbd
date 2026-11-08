@@ -1,28 +1,32 @@
 import Foundation
+import Observation
 import SwiftUI
 import Testing
 @testable import TBDApp
+import TBDShared
 import TestSupport
 
 /// The "Use the libghostty terminal engine" toggle in Settings → Terminal →
-/// Experimental, driven through the binding the view makes from `$appState`:
-/// `Bindable(state).ghosttyTerminalEngineSetting`.
+/// Experimental, driven through the binding the view hands it,
+/// `TerminalSettingsView.ghosttyEngineBinding(_:)`.
 ///
 /// The toggle has to write the store its AppState was built with, because the
-/// tabs' engine labels, the Terminal menu and every panel read the flag from
-/// there. Turning it off has to store an explicit `false`, so the choice holds
-/// when `AppState.ghosttyTerminalEngineDefault` changes. Every store is an
-/// isolated suite; `.standard` is the developer's real plist, so no test reads
-/// or writes it. Tier 1: in-process state only, no waits.
+/// tabs' engine labels, the Terminal menu, every holder panel and every local
+/// PTY read the flag from there. Turning it off has to store an explicit
+/// `false`, so the choice holds when `AppState.ghosttyTerminalEngineDefault`
+/// changes. Every store is an isolated suite; `.standard` is the developer's
+/// real plist, so no test reads or writes it. Tier 1, apart from one bounded
+/// wait for the key-value observation of a write made outside the toggle.
 /// Design: `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
 @MainActor
 @Suite("libghostty engine setting", .fastPassBounded)
 struct GhosttyEngineSettingTests {
     private static let key = AppState.useGhosttyTerminalEngineKey
 
-    /// The binding `TerminalSettingsView` hands its toggle.
+    /// The view's own binding, so a change to how the view binds its toggle
+    /// is a change to what these tests drive.
     private static func toggle(_ state: AppState) -> Binding<Bool> {
-        Bindable(state).ghosttyTerminalEngineSetting
+        TerminalSettingsView.ghosttyEngineBinding(state)
     }
 
     @Test("Turning the toggle on stores true in the AppState's own store, and turning it off stores an explicit false that holds against a later default")
@@ -74,6 +78,61 @@ struct GhosttyEngineSettingTests {
                 if stored == nil {
                     #expect(!shown, "an unset key showed the toggle on, but the engine ships off")
                 }
+            }
+        }
+    }
+
+    /// What redraws the toggle: reading it registers with Observation, so a
+    /// write to the store from outside the toggle, as `defaults write` makes,
+    /// reaches a Settings window already open. A getter that read the store
+    /// instead of the observed mirror would show the right value and never
+    /// redraw.
+    @Test("Reading the toggle is observation-tracked, so a write to the store from outside the toggle redraws it")
+    func toggleRedrawsOnAWriteFromOutside() async {
+        await withTestDefaults("GhosttyEngineSetting.Tracked") { defaults in
+            let state = AppState(userDefaults: defaults)
+            let unset = Self.toggle(state).wrappedValue
+            #expect(!unset, "a fresh store showed the toggle on")
+
+            let redrawn = HolderTestLatch()
+            withObservationTracking {
+                _ = Self.toggle(state).wrappedValue
+            } onChange: {
+                redrawn.set()
+            }
+            defaults.set(true, forKey: Self.key)
+            await EngineTestSupport.waitUntil(
+                "the toggle to redraw after the key was set outside it",
+                observed: { "redrawn \(redrawn.isSet), toggle shows \(Self.toggle(state).wrappedValue)" }
+            ) {
+                redrawn.isSet
+            }
+            let wasRedrawn = redrawn.isSet
+            #expect(wasRedrawn, "setting the key outside the toggle did not redraw a view that read it")
+            let shown = Self.toggle(state).wrappedValue
+            #expect(shown, "the toggle did not show the key set outside it")
+        }
+    }
+
+    /// A remote attach terminal is a local PTY, which reads the flag from the
+    /// pager's AppState rather than from `.standard`. Driven from the toggle
+    /// through `RemoteAttachPager.makeTerminalView` to the engine the terminal
+    /// host asks the factory for, without making its view, so nothing spawns.
+    @Test("A remote attach terminal asks for the engine the toggle chose, read from the store its AppState was built with")
+    func remoteAttachTerminalFollowsTheToggle() {
+        withTestDefaults("GhosttyEngineSetting.RemoteAttach") { defaults in
+            let state = AppState(userDefaults: defaults)
+            let appearance = AppearanceSettings(defaults: defaults)
+            let mountKey = RemoteAttachMountKey(
+                selection: RemoteSessionSelection(provider: "acme", sessionID: "s1"), generation: 0)
+            let config = RemoteProviderConfig(name: "acme", exec: "/usr/bin/true")
+
+            for enabled in [true, false] {
+                Self.toggle(state).wrappedValue = enabled
+                let attach = RemoteAttachPager.makeTerminalView(for: mountKey, provider: config, appState: state)
+                let requested: TerminalEngineKind = attach.representable(appearance: appearance).requestedEngineKind
+                let expected: TerminalEngineKind = enabled ? .ghostty : .swiftTerm
+                #expect(requested == expected, "with the toggle \(enabled ? "on" : "off"), a remote attach terminal asked for \(requested)")
             }
         }
     }
