@@ -388,19 +388,24 @@ struct KeyAndIMETests {
         #expect(fixture.recorder.sent.isEmpty, "discarding the composition sent \(fixture.recorder.sent)")
     }
 
-    /// On a wide character the block cursor covers both of its cells, so a composition one cell
-    /// wide is widened to both there too, and no half of the cursor shows beside it.
-    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
-    func aCompositionOnAWideCharacterCoversTheWholeCursor() throws {
+    /// On either half of a wide character the block cursor covers both of its cells, so a
+    /// composition one cell wide is widened to both there too, starting on the lead cell, and no
+    /// half of the cursor shows beside it. `cursorColumn` is the CUP column: 1 puts the cursor on
+    /// に's lead cell, 2 on its tail.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: [1, 2])
+    func aCompositionOnAWideCharacterCoversTheWholeCursor(cursorColumn: Int) throws {
         let fixture = try KeyViewFixture()
         let view = fixture.view
         let window = try windowHolding(view)
         defer { window.contentView = nil }
 
-        // A CJK character, then the cursor back on its first cell.
-        fixture.terminal.feed(text: "に\u{1b}[1;1H")
+        // A CJK character, then the cursor back on one of its cells.
+        fixture.terminal.feed(text: "に\u{1b}[1;\(cursorColumn)H")
         view.renderTick()
         try #require(view.framesBuilt > 0, "no frame was built, so the surface knows no wide cells")
+        let onTail = view.surface.cursor.isWideTail
+        try #require(onTail == (cursorColumn == 2),
+                     "CUP to column \(cursorColumn) left the cursor \(onTail ? "on" : "off") に's tail")
         let span = view.surface.cursorCells
         try #require(span.column == 0 && span.width == 2,
                      "the cursor covers \(span.width) cells from column \(span.column), not both of に's")
@@ -409,8 +414,10 @@ struct KeyAndIMETests {
         view.keyDown(with: try keyDown(0x2D, characters: "n", ignoringModifiers: "n"))
         let overlay = try #require(view.preeditLayer, "composing left no overlay")
         let cell = view.cellSize
-        #expect(abs(overlay.frame.minX) < 0.01 && abs(overlay.frame.width - cell.width * 2) < 0.01,
-                "a one-cell composition on に spans x \(overlay.frame.minX) to \(overlay.frame.maxX), not both of its cells (cell \(cell.width) pt)")
+        #expect(abs(overlay.frame.minX) < 0.01,
+                "with the cursor on column \(cursorColumn) the composition starts at x \(overlay.frame.minX), not on に's lead cell at 0")
+        #expect(abs(overlay.frame.width - cell.width * 2) < 0.01,
+                "a one-cell composition on に is \(overlay.frame.width) pt wide, not both of its cells (cell \(cell.width) pt)")
     }
 
     /// Typing brings a viewport the user scrolled back down to the cursor, as SwiftTerm does. A
