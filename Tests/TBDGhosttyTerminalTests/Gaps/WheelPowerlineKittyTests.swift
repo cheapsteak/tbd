@@ -258,6 +258,46 @@ struct WheelPowerlineKittyTests {
         #expect(end == afterFlip, "after the flip the wheel moved the viewport from row \(afterFlip) to \(end)")
     }
 
+    /// A program that turns reporting off in the middle of a trackpad gesture leaves the wheel
+    /// on the viewport, from a clean bank: the fraction banked for reports before the flip does
+    /// not scroll it, and no report goes out after the flip.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func turningReportingOffMidGestureScrollsNoStaleRemainder() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: (0..<60).map { "line \($0)\r\n" }.joined() + "\u{1b}[?1000h\u{1b}[?1006h")
+        let line = Double(view.cellSize.height)
+        let reportingBefore = terminal.isMouseReporting
+        try #require(reportingBefore, "?1000h did not turn mouse reporting on")
+
+        // 1.7 lines up with reporting on: one report, 0.7 banked, and the viewport stays put.
+        let start = try scrollMetrics(of: terminal).offset
+        let first = Self.wheel(view, deltaY: 1.7 * line, phase: .gestureBegan, at: 1)
+        let firstSent = Array(recorder.sent.joined())
+        let firstReports = firstSent.filter { $0 == 0x1B }.count
+        try #require(firstReports == 1,
+                     "1.7 lines up with reporting on sent \(String(decoding: firstSent, as: UTF8.self).debugDescription), from \(describe(first))")
+        recorder.sent = []
+
+        terminal.feed(text: "\u{1b}[?1000l")
+        let reportingAfter = terminal.isMouseReporting
+        try #require(!reportingAfter, "?1000l did not turn mouse reporting off")
+        let afterFlip = try scrollMetrics(of: terminal).offset
+        try #require(afterFlip == start, "the report or the flip moved the viewport from row \(start) to \(afterFlip)")
+
+        // Half a line more. With the 0.7 kept, it would make a whole row and scroll the viewport.
+        let half = Self.wheel(view, deltaY: 0.5 * line, phase: .gestureChanged, at: 1.01)
+        let afterHalf = try scrollMetrics(of: terminal).offset
+        #expect(afterHalf == afterFlip,
+                "half a line after the flip moved the viewport from row \(afterFlip) to \(afterHalf): \(describe(half))")
+
+        // 0.6 more makes 1.1 lines since the flip: one row up.
+        let whole = Self.wheel(view, deltaY: 0.6 * line, phase: .gestureChanged, at: 1.02)
+        let afterWhole = try scrollMetrics(of: terminal).offset
+        #expect(afterWhole == afterFlip - 1,
+                "1.1 lines up after the flip moved the viewport from row \(afterFlip) to \(afterWhole): \(describe(whole))")
+        #expect(recorder.sent.isEmpty, "after the flip the wheel sent \(recorder.sent)")
+    }
+
     /// Vim with the mouse off, then `:set mouse=a`: the fraction banked for arrow keys on the
     /// alternate screen is not carried into the first report, as the app's monitor carries
     /// nothing while reporting is off.
