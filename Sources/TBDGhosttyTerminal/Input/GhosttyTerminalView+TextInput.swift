@@ -193,8 +193,9 @@ extension GhosttyTerminalView {
     /// Shows the composition text over the cursor, or takes it away once there is none.
     ///
     /// The text is drawn on the terminal's background, so it covers the cells beneath it and the
-    /// cursor, and it is as many cells wide as the text needs: two for each CJK character. A
-    /// composition too wide for the rest of the row moves left to stay inside the view.
+    /// cursor, and it is as many cells wide as the text needs, two for each CJK character, and at
+    /// least as wide as the cursor. A composition too wide for the rest of the row moves left to
+    /// stay inside the view.
     func updatePreeditOverlay() {
         let text = inputController.preedit
         guard !text.isEmpty, let host = layer else {
@@ -211,8 +212,18 @@ extension GhosttyTerminalView {
         // Whole cells, with a little slack so a text exactly two cells wide is not rounded to three.
         let cellWidth = max(cellRect(column: 0, row: 0, columns: 1).width, 1)
         let textWidth = NSAttributedString(string: text, attributes: [.font: font]).size().width
-        let columns = max(1, Int((textWidth / cellWidth - 0.01).rounded(.up)))
-        var overlayFrame = cellRect(column: anchor.column, row: anchor.row, columns: columns)
+        // At least the cells the block cursor covers, so a composition on either half of a wide
+        // character hides both halves of the cursor rather than one. The cells are the surface's,
+        // from the frame on screen, so they count only while that frame's cursor is the anchor's;
+        // before the first frame, or between output and the next frame, the anchor alone places
+        // the overlay, and the next frame moves it again.
+        let cursorCells = surface.cursorCells
+        let coversAnchor = surface.cursor.isVisible && surface.cursor.row == anchor.row
+            && (cursorCells.column..<(cursorCells.column + cursorCells.width)).contains(anchor.column)
+        let startColumn = coversAnchor ? cursorCells.column : anchor.column
+        let minimumColumns = coversAnchor ? cursorCells.width : 1
+        let columns = max(minimumColumns, Int((textWidth / cellWidth - 0.01).rounded(.up)))
+        var overlayFrame = cellRect(column: startColumn, row: anchor.row, columns: columns)
         if bounds.width > 0, overlayFrame.maxX > bounds.width {
             overlayFrame.origin.x = max(0, bounds.width - overlayFrame.width)
         }

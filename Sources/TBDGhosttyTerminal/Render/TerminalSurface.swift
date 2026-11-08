@@ -419,7 +419,9 @@ final class TerminalSurface {
     /// libghostty reports a cursor on the tail, and its cell data marks the lead, which the frame
     /// builder records in `wideLeads`. Not the glyph: a wide cell with none, a full-width space or
     /// text hidden with SGR 8, is still two cells, and the cursor keeps one width across it.
-    private var cursorCells: (column: Int, width: Int) {
+    ///
+    /// Internal so the view's input method overlay covers the same cells.
+    var cursorCells: (column: Int, width: Int) {
         if cursor.isWideTail { return (max(0, cursor.column - 1), 2) }
         return (cursor.column, isWideLead(column: cursor.column, row: cursor.row) ? 2 : 1)
     }
