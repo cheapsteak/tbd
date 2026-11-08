@@ -231,6 +231,28 @@ struct PhoneSendTests {
         #expect(h.actions.calls.isEmpty)
     }
 
+    /// A message of only invisible format characters is blank by the phone
+    /// message rule (`PhoneMessageText.isBlank`), so the service refuses it
+    /// with the same words on every path: a parked session is not woken, and
+    /// no remote provider is asked anything.
+    @Test func aZeroWidthMessageIsABadRequestOnEveryPath() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal()
+        try await h.park(terminal.id)
+        h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        let outbox = await h.connect()
+
+        let (local, _) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), "\u{200B}"), on: outbox)
+        let (remote, _) = try await h.request(
+            .messageSend, params: Self.message(Self.remoteSession, "\u{200B}"), on: outbox)
+
+        #expect(local.error == PhoneAppError(code: .badRequest, message: "Write a message first."))
+        #expect(remote.error == PhoneAppError(code: .badRequest, message: "Write a message first."))
+        #expect(h.actions.calls.isEmpty)
+    }
+
     /// `messageMaxBytes` is the most a message may hold: one byte over it is
     /// refused before anything is sent, and exactly that many is sent.
     @Test func aMessageOverTheCapIsABadRequest() async throws {

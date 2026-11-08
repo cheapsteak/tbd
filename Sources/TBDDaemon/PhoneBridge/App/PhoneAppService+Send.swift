@@ -85,8 +85,10 @@ extension PhoneAppService {
     /// transcript composer would, and says how it ended: `sent`, `woken` or
     /// `unknown`.
     ///
-    /// Text that is empty once trimmed is `bad_request`, and so is text over
-    /// `PhoneAppConstants.messageMaxBytes`.
+    /// Blank text (`PhoneMessageText.isBlank`: empty, or only whitespace and
+    /// invisible format characters such as a zero-width space) is
+    /// `bad_request`, on every path, before anything is looked up or sent;
+    /// so is text over `PhoneAppConstants.messageMaxBytes`.
     ///
     /// **A local session** is looked up with its worktree, `not_found` when
     /// the phone cannot see it (`phoneVisibleTerminal`), and
@@ -126,7 +128,7 @@ extension PhoneAppService {
     nonisolated func sendText(
         _ text: String, to session: PhoneSessionRef, deviceID: UUID, purpose: PhoneSendPurpose = .message
     ) async throws -> ActionOutcomeResult {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !PhoneMessageText.isBlank(text) else {
             throw PhoneAppError(code: .badRequest, message: Self.emptyMessageReason)
         }
         guard text.utf8.count <= PhoneAppConstants.messageMaxBytes else {
