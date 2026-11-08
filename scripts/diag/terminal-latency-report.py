@@ -96,7 +96,8 @@ no-regression condition are a human judgement.
 
 USAGE
 -----
-    defaults write TBDApp enableTerminalLatencyDiagnostic -bool true
+    defaults write com.github.cheapsteak.tbd enableTerminalLatencyDiagnostic -bool true
+    # (an unbundled `swift run` build reads the TBDApp domain instead)
     # relaunch TBDApp (scripts/restart.sh), then drive a run:
     scripts/diag/terminal-latency-probe.py \\
         --worktree <name> \\
@@ -1183,7 +1184,8 @@ def main() -> int:
     if not capture.echoes and not capture.draws:
         print("No terminal latency lines found.", file=sys.stderr)
         print(
-            "Is `defaults write TBDApp enableTerminalLatencyDiagnostic -bool true` set,"
+            "Is `defaults write com.github.cheapsteak.tbd enableTerminalLatencyDiagnostic"
+            " -bool true` set (the TBDApp domain for an unbundled `swift run` build),"
             " and did the app relaunch after? `log show` also needs --info.",
             file=sys.stderr,
         )

@@ -5294,8 +5294,9 @@ final class AppState {
     /// deliberately no Settings toggle: it logs at `.info` once per draw and
     /// its echo probe writes input into a session, neither of which may be
     /// armed by default —
-    /// `defaults write TBDApp enableTerminalLatencyDiagnostic -bool true`,
-    /// then relaunch.
+    /// `defaults write com.github.cheapsteak.tbd enableTerminalLatencyDiagnostic -bool true`,
+    /// then relaunch. An unbundled `swift run` build reads the `TBDApp`
+    /// domain instead.
     nonisolated static let enableTerminalLatencyDiagnosticKey =
         "enableTerminalLatencyDiagnostic"
 
