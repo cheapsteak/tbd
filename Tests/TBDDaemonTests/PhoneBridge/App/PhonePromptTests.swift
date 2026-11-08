@@ -754,7 +754,8 @@ struct PhonePromptTests {
         #expect(try PhoneAppCoding.makeEncoder().encode(fitted).count <= PhoneFrameBudget.eventDataBytes)
 
         var set = PhonePromptSet(session: session)
-        let first = try #require(set.advance(to: [huge, small], attribution: PhonePromptAttribution()))
+        let firstChange = set.advance(to: [huge, small], attribution: PhonePromptAttribution())
+        let first = try #require(firstChange)
         let firstIDs = first.prompts.map(\.id)
         #expect(firstIDs == ["toolu-2"])
         #expect(set.advance(to: [small], attribution: PhonePromptAttribution()) == nil, "nothing the phone has changed")
