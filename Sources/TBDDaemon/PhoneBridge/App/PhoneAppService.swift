@@ -12,13 +12,30 @@ struct DeviceContext: Sendable {
     let requestID: String
 }
 
-/// Serves one method. It takes the whole request body and returns the whole
-/// reply body, as `PhoneAppCoding.reply(requestID:result:)` encodes it. For
-/// an error reply it throws: a `PhoneAppError` is sent as it is, a
-/// `DecodingError` becomes `bad_request`, and anything else `internal`. So a
-/// handler that decodes something other than its params, such as an
+/// Serves one method. It takes the whole request body and returns its reply:
+/// usually the whole reply body, as `PhoneAppCoding.reply(requestID:result:)`
+/// encodes it. For an error reply it throws: a `PhoneAppError` is sent as it
+/// is, a `DecodingError` becomes `bad_request`, and anything else `internal`.
+/// So a handler that decodes something other than its params, such as an
 /// `RPCResponse`'s result, catches that error itself.
-typealias PhoneMethodHandler = @Sendable (Data, DeviceContext) async throws -> Data
+typealias PhoneMethodHandler = @Sendable (Data, DeviceContext) async throws -> PhoneHandlerReply
+
+/// What a handler hands back.
+enum PhoneHandlerReply: Sendable {
+    /// The whole reply body, sent through the connection the phone has when
+    /// the request finishes.
+    case body(Data)
+    /// Work that runs on the service, in the place where the reply would be
+    /// sent, when the request finishes and the phone is connected: it queues
+    /// the reply itself, then any events that must follow it. Nothing can
+    /// come between, so a reply can name the stream's `seq` at that moment
+    /// and the events after it start exactly there. Live events for a
+    /// request start only after its reply this way. Only methods whose
+    /// replies are not remembered may use it (see
+    /// `PhoneAppService.remembersReplies(of:)`); for the others it is an
+    /// `internal` error.
+    case onQueue(@Sendable (isolated PhoneAppService) -> Void)
+}
 
 /// What a connection's `sessions.subscribe` decided about the phone's event
 /// stream, which a `transcript.open` with `resume` reads.
@@ -49,6 +66,16 @@ struct PhoneDeviceState: Sendable {
     /// What this connection's `sessions.subscribe` decided. Every connect and
     /// disconnect clears it.
     var resume: PhoneResumeDecision = .undecided
+    /// Whether events go out on this connection. Only once its
+    /// `sessions.subscribe` reply is queued: until then the phone's place in
+    /// the stream is not settled, and the reply's replay or snapshot covers
+    /// what came before. Events emitted meanwhile are numbered and kept, not
+    /// sent. Every connect and disconnect clears it.
+    var live = false
+    /// The publisher keeping the phone's sessions list current, from its
+    /// first `sessions.subscribe` until this state is dropped. It runs on
+    /// while the phone is away, so a resume replays what changed.
+    var sessions: PhoneSessionsFeed?
     /// Drops this state `parseStateGrace` after a disconnect; nil while the
     /// phone is connected.
     var grace: Task<Void, Never>?
@@ -61,6 +88,7 @@ struct PhoneDeviceState: Sendable {
     func shutDown() async {
         grace?.cancel()
         outbox?.close()
+        await sessions?.publisher.stop()
     }
 }
 
@@ -145,10 +173,17 @@ final class PhoneOutboxQueue: Sendable {
 ///    record nothing.
 /// 6. **The handler runs**, under the identity in `DeviceContext`.
 ///
+/// **Events.** `emit(_:data:to:)` numbers every event on the device's stream.
+/// It sends one only once the connection's `sessions.subscribe` reply is
+/// queued (`PhoneDeviceState.live`), so a phone never sees events before the
+/// reply that tells it where the stream stands.
+///
 /// **Extending it.** A later task serves a method by returning its handler
 /// from `registeredHandler(for:)`, usually built with `typed(_:_:)`, and keeps
 /// per-device state in `PhoneDeviceState`, stopping it in
-/// `PhoneDeviceState.shutDown()`. Code in other files reads and changes
+/// `PhoneDeviceState.shutDown()`. A handler whose reply must be followed by
+/// events, or must say where the stream stands, returns
+/// `PhoneHandlerReply.onQueue`. Code in other files reads and changes
 /// `devices` entries in place; only the lifecycle methods add or remove one.
 actor PhoneAppService: PhoneAppHandling {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
@@ -212,6 +247,7 @@ actor PhoneAppService: PhoneAppHandling {
         state.outbox?.close()
         state.outbox = PhoneOutboxQueue(outbox)
         state.resume = .undecided
+        state.live = false
         devices[peer.deviceID] = state
     }
 
@@ -225,6 +261,7 @@ actor PhoneAppService: PhoneAppHandling {
         state.outbox?.close()
         state.outbox = nil
         state.resume = .undecided
+        state.live = false
         state.grace?.cancel()
         let token = nextToken
         nextToken &+= 1
@@ -365,20 +402,27 @@ actor PhoneAppService: PhoneAppHandling {
     }
 
     /// Sends a finished request's reply through the connection the phone has
-    /// now. A request cancelled by a revoke sends nothing.
-    private func requestFinished(_ token: UInt64, deviceID: UUID, reply: Data) {
+    /// now, or runs the handler's work in its place while the phone is
+    /// connected. A request cancelled by a revoke sends nothing.
+    private func requestFinished(_ token: UInt64, deviceID: UUID, reply: PhoneHandlerReply) {
         requests[deviceID]?[token] = nil
         if requests[deviceID]?.isEmpty == true {
             requests[deviceID] = nil
         }
         guard !Task.isCancelled else { return }
-        send(reply, to: deviceID)
+        switch reply {
+        case .body(let body):
+            send(body, to: deviceID)
+        case .onQueue(let work):
+            guard devices[deviceID]?.outbox != nil else { return }
+            work(self)
+        }
     }
 
     /// The request's work: the flag, then the request memory around
     /// `perform`. Runs off the actor, so one phone's slow request holds up
     /// nothing else.
-    private nonisolated func serve(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> Data {
+    private nonisolated func serve(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> PhoneHandlerReply {
         let requestID = context.requestID
         let enabled: Bool
         do {
@@ -386,12 +430,12 @@ actor PhoneAppService: PhoneAppHandling {
         } catch {
             Self.logger.error(
                 "Phone app: could not read the phone control setting: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return Self.failure(requestID, .internalError, "TBD could not read its phone control setting. Try again.")
+            return .body(Self.failure(requestID, .internalError, "TBD could not read its phone control setting. Try again."))
         }
         guard enabled else {
-            return Self.failure(requestID, .phoneControlOff, "Phone control is off on this laptop.")
+            return .body(Self.failure(requestID, .phoneControlOff, "Phone control is off on this laptop."))
         }
-        guard !Task.isCancelled else { return Self.stopped(requestID) }
+        guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
         guard Self.remembersReplies(of: method) else {
             return await perform(method, body: body, context: context)
         }
@@ -403,49 +447,56 @@ actor PhoneAppService: PhoneAppHandling {
                 return Self.failure(requestID, .refused, Self.tooManyRequests)
             },
             work: { [self] in
-                await self.perform(method, body: body, context: context)
+                switch await self.perform(method, body: body, context: context) {
+                case .body(let reply):
+                    return reply
+                case .onQueue:
+                    // Work on the service cannot be kept for a resend.
+                    Self.logger.fault("Phone app: \(method.rawValue, privacy: .public) is remembered and cannot run on the queue")
+                    return Self.failure(requestID, .internalError, "Something went wrong on the laptop.")
+                }
             })
-        return reply
+        return .body(reply)
     }
 
     /// The part of a request that acts, run once per request ID when its
     /// replies are remembered: the pairing check, the record, the handler.
     /// A request cancelled by a revoke before its record stops there, so it
     /// neither records nor acts.
-    private nonisolated func perform(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> Data {
+    private nonisolated func perform(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> PhoneHandlerReply {
         let requestID = context.requestID
         do {
             guard try await db.phoneDevices.device(id: context.peer.deviceID) != nil else {
-                return Self.failure(requestID, .refused, "This phone is no longer paired.")
+                return .body(Self.failure(requestID, .refused, "This phone is no longer paired."))
             }
         } catch {
             Self.logger.error(
                 "Phone app: could not read a phone's pairing: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return Self.failure(requestID, .internalError, "TBD could not check this phone's pairing. Try again.")
+            return .body(Self.failure(requestID, .internalError, "TBD could not check this phone's pairing. Try again."))
         }
         guard let handler = await registeredHandler(for: method) else {
-            return PhoneAppCoding.errorReply(requestID: requestID, Self.notServed)
+            return .body(PhoneAppCoding.errorReply(requestID: requestID, Self.notServed))
         }
-        guard !Task.isCancelled else { return Self.stopped(requestID) }
+        guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
         do {
             if let target = try Self.recordTarget(for: method, body: body) {
                 recorder.record(PhoneActionRecord(deviceName: context.peer.deviceName, action: method.rawValue, target: target))
             }
             let reply = try await handler(body, context)
-            guard !Task.isCancelled else { return Self.stopped(requestID) }
+            guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
             return reply
         } catch let error as PhoneAppError {
-            return PhoneAppCoding.errorReply(requestID: requestID, error)
+            return .body(PhoneAppCoding.errorReply(requestID: requestID, error))
         } catch is DecodingError {
-            return Self.failure(requestID, .badRequest, "The request's params are not valid.")
+            return .body(Self.failure(requestID, .badRequest, "The request's params are not valid."))
         } catch is CancellationError {
-            return Self.stopped(requestID)
+            return .body(Self.stopped(requestID))
         } catch {
             // Only the error's type is public: its description can quote what
             // the handler was working on, such as a path or a message.
             Self.logger.error(
                 "Phone app: \(method.rawValue, privacy: .public) failed: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return Self.failure(requestID, .internalError, "Something went wrong on the laptop.")
+            return .body(Self.failure(requestID, .internalError, "Something went wrong on the laptop."))
         }
     }
 
@@ -474,7 +525,12 @@ actor PhoneAppService: PhoneAppHandling {
             return replaced
         }
         switch method {
-        case .sessionsSubscribe, .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
+        case .sessionsSubscribe:
+            return { [self] body, context in
+                let params = try PhoneAppCoding.params(SessionsSubscribeParams.self, from: body)
+                return try await self.sessionsSubscribe(params, context)
+            }
+        case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
              .messageSend, .promptAnswer, .profilesList, .sessionSwitchProfile, .sessionFork,
              .sessionSetModel, .worktreeCreate, .remoteProviders, .remoteCreate:
             return nil
@@ -496,7 +552,7 @@ actor PhoneAppService: PhoneAppHandling {
         return { body, context in
             let decoded = try PhoneAppCoding.params(P.self, from: body)
             let result = try await serve(decoded, context)
-            return try PhoneAppCoding.reply(requestID: context.requestID, result: result)
+            return .body(try PhoneAppCoding.reply(requestID: context.requestID, result: result))
         }
     }
 
@@ -568,10 +624,11 @@ actor PhoneAppService: PhoneAppHandling {
     // MARK: - Sending
 
     /// Numbers an event on the device's stream, keeps it for a reconnect, and
-    /// sends it while the phone is connected. While it is disconnected, the
-    /// event is kept and not sent. Does nothing for a device with no state.
-    /// The caller keeps the event within one frame.
-    func emit<D: Codable & Sendable>(_ name: PhoneAppEventName, data: D, to deviceID: UUID) async {
+    /// sends it while the connection is live (see `PhoneDeviceState.live`).
+    /// Otherwise, and while the phone is disconnected, the event is kept and
+    /// not sent. Does nothing for a device with no state. The caller keeps
+    /// the event within one frame.
+    func emit<D: Codable & Sendable>(_ name: PhoneAppEventName, data: D, to deviceID: UUID) {
         let bytes: Data?
         do {
             bytes = try devices[deviceID]?.stream.append(name, data: data)
@@ -580,7 +637,7 @@ actor PhoneAppService: PhoneAppHandling {
                 "Phone app: could not encode a \(name.rawValue, privacy: .public) event: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return
         }
-        guard let bytes else { return }
+        guard let bytes, devices[deviceID]?.live == true else { return }
         send(bytes, to: deviceID)
     }
 
@@ -614,7 +671,15 @@ actor PhoneAppService: PhoneAppHandling {
 
     private static let tooManyRequests = "Too many requests are in progress. Try again in a moment."
 
-    private static func failure(_ requestID: String, _ code: PhoneAppErrorCode, _ message: String) -> Data {
+    /// A new token, unique for this service's life, to tell one run of
+    /// something from a later one.
+    func mintToken() -> UInt64 {
+        let token = nextToken
+        nextToken &+= 1
+        return token
+    }
+
+    static func failure(_ requestID: String, _ code: PhoneAppErrorCode, _ message: String) -> Data {
         PhoneAppCoding.errorReply(requestID: requestID, PhoneAppError(code: code, message: message))
     }
 

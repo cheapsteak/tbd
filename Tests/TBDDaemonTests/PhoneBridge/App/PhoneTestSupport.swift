@@ -252,12 +252,14 @@ enum PhoneTestRequests {
 
 /// A `PhoneAppService` over an in-memory database with phone control on and
 /// one paired phone named "Acme Phone", with fakes for everything it calls
-/// and an `EventDrivenTestClock` for its timers.
+/// and an `EventDrivenTestClock` for its timers. `subscriptions` is the
+/// service's own, so a test can broadcast state deltas to it.
 struct PhoneServiceHarness: Sendable {
     let db: TBDDatabase
     let actions: FakeSessionActions
     let recorder: CapturingRecorder
     let clock: EventDrivenTestClock
+    let subscriptions: StateSubscriptionManager
     let service: PhoneAppService
     let peer: PhonePeer
 
@@ -271,11 +273,13 @@ struct PhoneServiceHarness: Sendable {
         let actions = FakeSessionActions()
         let recorder = CapturingRecorder()
         let clock = EventDrivenTestClock()
+        let subscriptions = StateSubscriptionManager()
         let service = PhoneAppService(
-            db: db, actions: actions, subscriptions: StateSubscriptionManager(),
+            db: db, actions: actions, subscriptions: subscriptions,
             pendingPrompts: PendingPromptStore(), recorder: recorder, clock: clock)
         return PhoneServiceHarness(
-            db: db, actions: actions, recorder: recorder, clock: clock, service: service, peer: peer)
+            db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
+            service: service, peer: peer)
     }
 
     /// Connects the phone through a fresh outbox and returns it.

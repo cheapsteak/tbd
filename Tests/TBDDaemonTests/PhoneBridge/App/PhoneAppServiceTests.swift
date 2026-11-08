@@ -107,6 +107,8 @@ struct PhoneAppServiceTests {
         try await h.db.config.setPhoneControlEnabled(true)
         _ = try await h.request(.sessionsSubscribe, params: subscribe, on: outbox)
         #expect(await h.service.resumeDecision(for: h.peer.deviceID) == .snapshot)
+        // Stops the publisher the subscribe started.
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
     @Test func flagOnRunsTheAction() async throws {
@@ -436,34 +438,48 @@ struct PhoneAppServiceTests {
         #expect(try await subscribedStream(h, on: again) != stream)
     }
 
-    /// While the phone is away, an event is numbered and kept, not sent. A
-    /// `sessions.subscribe` naming the stream and the last seq the phone saw
-    /// decides to replay exactly what it missed, before the next message.
-    @Test func anEventWhileDisconnectedIsKeptForTheResume() async throws {
+    /// Events go out only once the connection's `sessions.subscribe` reply
+    /// is queued. One emitted before it is numbered and kept, and the reply's
+    /// `seq` covers it; one emitted after it is sent. While the phone is away
+    /// an event is kept, and a new connection holds events back until its
+    /// own `sessions.subscribe`, which decides to replay exactly what the
+    /// phone missed.
+    @Test func eventsWaitForTheSubscribeReply() async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
         let outbox = await h.connect()
-        let seen = SessionsChangedData(layout: nil, rows: [], removedRowIDs: ["acme-1"])
-        let missed = SessionsChangedData(layout: nil, rows: [], removedRowIDs: ["acme-2"])
+        let early = SessionsChangedData(layout: nil, rows: [], removedRowIDs: ["acme-1"])
+        let late = SessionsChangedData(layout: nil, rows: [], removedRowIDs: ["acme-2"])
+        let away = SessionsChangedData(layout: nil, rows: [], removedRowIDs: ["acme-3"])
 
-        await h.service.emit(.sessionsChanged, data: seen, to: deviceID)
-        let sent = try await outbox.body(at: 0)
+        await h.service.emit(.sessionsChanged, data: early, to: deviceID)
+        let (reply, bytes) = try await h.request(
+            .sessionsSubscribe, params: SessionsSubscribeParams(stream: nil, sinceSeq: nil), on: outbox)
+        #expect(reply.kind == "reply")
+        let subscribed = try JSONDecoder().decode(PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bytes).result
+        #expect(subscribed.seq == 1)
+
+        await h.service.emit(.sessionsChanged, data: late, to: deviceID)
+        let lateBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 2, data: late)
+        #expect(try await outbox.body(at: 1) == lateBytes)
+
         await h.service.phoneDisconnected(h.peer)
-        await h.service.emit(.sessionsChanged, data: missed, to: deviceID)
+        await h.service.emit(.sessionsChanged, data: away, to: deviceID)
         let again = await h.connect()
-        let stream = try #require(await h.service.streamID(for: deviceID))
+        await h.service.emit(.sessionsChanged, data: early, to: deviceID)
+        #expect(again.bodies.isEmpty)
 
-        // No handler serves `sessions.subscribe` yet; the decision is made all
-        // the same.
-        _ = try await h.request(
-            .sessionsSubscribe, params: SessionsSubscribeParams(stream: stream, sinceSeq: 1), on: again)
+        let (resumed, _) = try await h.request(
+            .sessionsSubscribe, params: SessionsSubscribeParams(stream: subscribed.stream, sinceSeq: 2), on: again)
 
-        let seenBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 1, data: seen)
-        let missedBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 2, data: missed)
-        #expect(sent == seenBytes)
-        #expect(await h.service.resumeDecision(for: deviceID) == .replay([missedBytes]))
-        #expect(outbox.bodies.count == 1)
-        #expect(again.bodies.count == 1)
+        #expect(resumed.error == nil)
+        let awayBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 3, data: away)
+        let heldBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 4, data: early)
+        #expect(await h.service.resumeDecision(for: deviceID) == .replay([awayBytes, heldBytes]))
+        #expect(try await again.body(at: 1) == awayBytes)
+        #expect(try await again.body(at: 2) == heldBytes)
+        #expect(outbox.bodies.count == 2)
+        await h.service.phoneRevoked(deviceID: deviceID)
     }
 
     // MARK: - Revoke
