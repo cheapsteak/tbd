@@ -314,9 +314,12 @@ Requests:
 its kind (question or permission), the tool name, a summary of the input, and the questions with
 their options, or the permission's suggested rules.
 
-**No double actions.** The daemon keeps each request ID and its result for 10 minutes. A repeat of
-a known request ID returns the stored result and does nothing again. So a resend after a reconnect
-is safe.
+**No double actions.** The daemon keeps each request ID and its result for 10 minutes, in memory.
+A repeat of a known request ID returns the stored result and does nothing again. The phone resends
+an action after a reconnect only within 9 minutes of first sending it, and only once the new
+connection's `sessions.subscribe` reply shows the same event stream. A new stream can mean the
+daemon restarted and forgot its requests, so the phone then says it cannot confirm the action, and
+does not send it again.
 
 **Fixtures.** Every app-protocol message has a JSON fixture under `phone/protocol/`. Swift tests
 decode and re-encode each one, and TypeScript tests do the same, so the two sides cannot drift.
@@ -670,8 +673,10 @@ Research: `phone-app-stack.md`.
   - **marked 18.1.x** – markdown, tokenizer only. The app maps tokens to React elements, so no HTML
     string is ever made, raw HTML in a transcript cannot run, and no sanitizer is needed.
   - **@tanstack/react-virtual 3.x** – the transcript list.
-- **Size.** About 60–80 KB gzipped in total. It downloads once per TBD version, compressed, and the
-  loader caches it by hash. The loader keeps the newest two bundles per laptop.
+- **Size.** React and the app shell alone measure 277 KB, or 85 KB gzipped. The transcript's
+  libraries and the remaining screens add to that. A build test fails any bundle over 160 KB
+  gzipped. It downloads once per TBD version, compressed, and the loader caches it by hash. The
+  loader keeps the newest two bundles per laptop.
 
 **The loader's libraries.** **jsQR 1.4.0** decodes QR codes where `BarcodeDetector` is missing,
 which includes iPhone Safari. It loads only on the pairing screen. jsQR has had no commits since
@@ -832,7 +837,9 @@ Research: `ci-layout.md`.
     `false`, so a failed gate runs every part rather than none. The `phone-app` job runs the app's
     tests, rebuilds the bundle with `npm run build:app`, and fails if the result differs from the
     committed bundle under `Sources/`. While `phone/package.json` names no `build:app` script, it
-    passes only if no bundle is committed;
+    passes only if no bundle is committed. It then runs the app's end-to-end tests in WebKit and
+    Chromium: the committed bundle runs under the real staged runner and its policy, against a
+    scripted laptop. The job keeps their screenshots as an artifact;
   - an always-running `Phone checks` job passes when the harness job passed and each part either
     succeeded or was skipped by the classifier's `false`. A cancelled part, or one skipped for any
     other reason, fails it. It is the one context branch protection requires, so exactly one job
@@ -843,6 +850,12 @@ Research: `ci-layout.md`.
   named for the phone (the classifier, the bundle check and their harnesses), runs every part. The
   rest of `phone/` outside `loader/` and `app/` is the workspace's shared tooling, such as
   `phone/package.json`, its lockfile, `.nvmrc` and `tsconfig.json`, and runs the loader and the app.
+  `phone/loader/**` runs the phone app as well as the loader, because the app's end-to-end tests
+  run the real runner and frame; only `phone/loader/test/**` runs the loader alone. The app's
+  tests also read files outside `phone/`, to catch drift: the daemon's app protocol
+  (`Sources/TBDDaemon/PhoneBridge/App/**`, `Sources/TBDShared/PromptAnswer.swift` and
+  `Sources/TBDShared/PendingPrompt.swift`) and the mocks (`docs/design/phone-control/**`). A change
+  to any of them runs the phone app too.
 - **The Swift gate's rule:** the Swift suite skips `relay/**` and every path under `phone/` except
   `phone/protocol/**` and `phone/test-vectors/**`. Every path under those two runs it, Markdown
   included, because Swift tests read them. The committed app bundle lives under `Sources/`, so a

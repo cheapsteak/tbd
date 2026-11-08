@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test \"loader/**/*.test.js\"",
-    "test:app": "node --test \"app/**/*.test.js\"",
+    "test:app": "tsc -p app/tsconfig.json && node --test \"app/**/*.test.js\" \"app/**/*.test.ts\"",
     "build:app": "node app/build.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "vectors": "node test-vectors/generate.mjs",
@@ -12,10 +12,19 @@
     "vendor:check": "bash scripts/vendor-check.sh",
     "test:scripts": "bash scripts/vendor-check.test.sh && bash scripts/vendor-update.test.sh && bash scripts/osv-check.test.sh && bash scripts/stage-loader.test.sh",
     "test:e2e": "playwright test -c loader/test/e2e/playwright.config.js",
-    "screenshots": "playwright test -c loader/test/e2e/playwright.config.js --project=webkit-iphone screens.spec.js"
+    "screenshots": "playwright test -c loader/test/e2e/playwright.config.js --project=webkit-iphone screens.spec.js",
+    "test:app:e2e": "playwright test -c app/test/e2e/playwright.config.js",
+    "screenshots:app": "playwright test -c app/test/e2e/playwright.config.js --project=webkit-iphone screens.spec"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",
+    "@tanstack/react-virtual": "3.14.26",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
+    "marked": "18.1.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "typescript": "6.0.3",
     "ws": "8.22.0"
   }

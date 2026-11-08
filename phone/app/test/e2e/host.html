@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The loader page's policy, word for word (phone/loader/index.html), so this page is no looser
+     than the page it stands in for. It governs this page only: the app frame loads the staged
+     runner.html, whose own policy is the only one its document has. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' https: wss:; frame-src 'self'; worker-src 'none'; manifest-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types loader-jsqr">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>TBD app host</title>
+<link rel="stylesheet" href="/loader.css">
+<script type="module" src="/__app/host.js"></script>
+</head>
+<body>
+<header id="strip" hidden></header>
+<main id="screen" hidden></main>
+<div id="frame-host"></div>
+<div id="safe-probe" aria-hidden="true"></div>
+</body>
+</html>

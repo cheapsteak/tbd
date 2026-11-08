@@ -125,9 +125,41 @@ classify_bytes() {
 test_each_part_alone() {
   expect "relay source runs the relay alone"            "$RELAY" relay/cloudflare/src/index.ts
   expect "the relay's README runs the relay alone"      "$RELAY" relay/cloudflare/README.md
-  expect "the loader runs the loader alone"             "$LOADER" phone/loader/index.html
+  expect "the loader runs the loader and the app"       "$LOADER_AND_APP" phone/loader/index.html
+  expect "the loader's own tests run the loader alone"  "$LOADER" phone/loader/test/e2e/screens.spec.js
   expect "the app's source runs the app alone"          "$APP" phone/app/src/main.tsx
   expect "the committed bundle runs the app alone"      "$APP" Sources/TBDDaemon/Resources/phone-app/app.js
+}
+
+# The app's tests read these files to check the app against them, so a change
+# to one alone must run the app. The Swift suite has its own gate.
+test_files_the_app_tests_read_run_the_app() {
+  local path
+  for path in \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppService.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppProtocol.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppMessages.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneNewFile.swift \
+    Sources/TBDDaemon/PhoneBridge/App/Transcript/TranscriptFeed.swift \
+    Sources/TBDShared/PromptAnswer.swift \
+    Sources/TBDShared/PendingPrompt.swift \
+    docs/design/phone-control/phone-control-mocks.html \
+    docs/design/phone-control/screenshots/light/sessions.webp \
+    docs/design/phone-control/README.md
+  do
+    expect "$path runs the app alone" "$APP" "$path"
+  done
+  # Only those: the rest of the bridge and of TBDShared, and other designs, run no part.
+  for path in \
+    Sources/TBDDaemon/PhoneBridge/PhoneBridge.swift \
+    Sources/TBDDaemon/PhoneBridge/AppX/PhoneAppService.swift \
+    Sources/TBDShared/PromptAnswerTests.swift \
+    docs/design/other/mocks.html \
+    docs/design/phone-control.md
+  do
+    expect "$path runs no part" "$NONE" "$path"
+  done
 }
 
 test_shared_inputs_run_every_part() {
@@ -203,7 +235,7 @@ test_mixed_changes() {
   expect "a relay change among docs runs the relay alone" "$RELAY" \
     relay/cloudflare/src/index.ts docs/x.md
   expect "a relay change and a loader change run both" "$RELAY_AND_LOADER" \
-    relay/cloudflare/src/index.ts docs/x.md phone/loader/a.js
+    relay/cloudflare/src/index.ts docs/x.md phone/loader/test/a.js
 }
 
 # A path dropped on the floor could be the one that runs a part.
@@ -213,7 +245,7 @@ test_input_handling() {
   assert_eq "an unterminated last line is judged" "$RELAY" "$(classify_bytes 'docs/a.md\nrelay/x')"
   assert_eq "blank lines between paths are ignored" "$NONE" "$(classify_bytes 'docs/a.md\n\nREADME.md\n')"
   assert_eq "NUL-separated input is read" "$RELAY" "$(classify_bytes 'docs/a.md\000relay/x\000')"
-  assert_eq "an unterminated last NUL record is judged" "$LOADER" "$(classify_bytes 'docs/a.md\000phone/loader/x')"
+  assert_eq "an unterminated last NUL record is judged" "$LOADER" "$(classify_bytes 'docs/a.md\000phone/loader/test/x')"
   assert_eq "a newline inside a NUL-separated path stays one path" "$NONE" \
     "$(classify_bytes 'docs/a\nrelay/x\000README.md\000')"
 }
@@ -225,7 +257,7 @@ test_input_handling() {
 test_output_contract() {
   local d stdout summary rc
   d="$(scratch)"
-  stdout="$(printf 'relay/cloudflare/src/index.ts\nphone/loader/index.html\ndocs/x.txt\nREADME.md\n' |
+  stdout="$(printf 'relay/cloudflare/src/index.ts\nphone/loader/test/index.html\ndocs/x.txt\nREADME.md\n' |
     GITHUB_OUTPUT="$d/output" GITHUB_STEP_SUMMARY="$d/summary" "$BASH" "$SCRIPT" --classify 2>/dev/null)"
   assert_eq "\$GITHUB_OUTPUT holds exactly the three lines, in order" "$(as_lines "$RELAY_AND_LOADER")" "$(cat "$d/output")"
   assert_eq "nothing goes to stdout when \$GITHUB_OUTPUT is set" "" "$stdout"
@@ -237,7 +269,7 @@ test_output_contract() {
 - phone_app: skipped" "$(printf '%s\n' "$summary" | grep -v '^$' | head -4)"
   assert_eq "the summary ends with one line per file, in input order" \
     "- \`relay/cloudflare/src/index.ts\` – relay – relay/**
-- \`phone/loader/index.html\` – loader – phone/loader/**
+- \`phone/loader/test/index.html\` – loader – the loader's own tests
 - \`docs/x.txt\` – no part – docs/**
 - \`README.md\` – no part – Markdown outside relay/ and phone/" "$(printf '%s\n' "$summary" | tail -4)"
 
@@ -249,6 +281,17 @@ test_output_contract() {
     "- \`phone/package.json\` – loader, phone_app – the phone workspace's shared tooling"
   assert_line "a file naming every part lists all three" "$summary" \
     "- \`.github/workflows/phone.yml\` – relay, loader, phone_app – the workflow that runs the parts"
+
+  d="$(scratch)"
+  printf 'Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift\nSources/TBDShared/PromptAnswer.swift\ndocs/design/phone-control/phone-control-mocks.html\n' |
+    GITHUB_OUTPUT="$d/output" GITHUB_STEP_SUMMARY="$d/summary" "$BASH" "$SCRIPT" --classify >/dev/null 2>&1
+  summary="$(cat "$d/summary")"
+  assert_line "the daemon's app protocol says why it runs the app" "$summary" \
+    "- \`Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift\` – phone_app – the daemon's app protocol, which the app's tests check against"
+  assert_line "a TBDShared enum says why it runs the app" "$summary" \
+    "- \`Sources/TBDShared/PromptAnswer.swift\` – phone_app – a TBDShared enum the app's tests check against"
+  assert_line "the mocks say why they run the app" "$summary" \
+    "- \`docs/design/phone-control/phone-control-mocks.html\` – phone_app – the mocks, which the app's tests check against"
 
   # A skip with no record of why is refused: every answer turns to `true`.
   d="$(scratch)"
