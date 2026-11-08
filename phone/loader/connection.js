@@ -22,7 +22,7 @@ import { relaySocketURL } from './links.js';
 import {
   ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
 } from './protocol.js';
-import { RelaySocket, reconnectDelay } from './relay.js';
+import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
 /** @typedef {import('./types.js').LaptopRecord} LaptopRecord */
@@ -98,7 +98,6 @@ import { RelaySocket, reconnectDelay } from './relay.js';
  * @property {boolean} ready
  */
 
-const REPLACED = 4000;
 // The backoff reaches its cap long before this; the bound only keeps `2 ** attempt` finite.
 const MAX_ATTEMPT = 32;
 // IK message 1's payload. The laptop ignores it (plan 3 change 7).

@@ -31,6 +31,8 @@ const SIGNALS = new Set(['peer-joined', 'peer-left', 'peer-absent']);
 const OPEN = 1; // WebSocket.OPEN
 const ABNORMAL_CLOSURE = 1006;
 const NORMAL_CLOSURE = 1000;
+/** The relay's close code for a socket another socket of the same role displaced. */
+export const REPLACED = 4000;
 
 /**
  * One relay WebSocket (relay API v1): text signals, binary frames, a keepalive ping every

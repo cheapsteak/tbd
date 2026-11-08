@@ -25,7 +25,7 @@ import { relaySocketURL } from './links.js';
 import {
   ProtocolError, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
 } from './protocol.js';
-import { RelaySocket } from './relay.js';
+import { REPLACED, RelaySocket } from './relay.js';
 import { laptopIDFromKey } from './store.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
@@ -90,8 +90,6 @@ import { laptopIDFromKey } from './store.js';
 
 // Browsers run a longer timeout at once, so a far-off deadline is waited for in steps.
 const MAX_TIMER_MS = 2_147_483_647;
-// The relay's close code for a socket another socket of the same role displaced.
-const REPLACED = 4000;
 
 export class PairingError extends Error {
   /**
