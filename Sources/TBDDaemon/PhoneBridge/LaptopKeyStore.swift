@@ -79,6 +79,11 @@ struct LaptopKeyStore: Sendable {
 
     let path: URL
     private let now: @Sendable () -> Date
+    /// Runs after a load has opened and checked a folder that was already
+    /// there, and before it sweeps or reads anything in it. A test replaces
+    /// the folder there, to show that the sweep and the read still use the
+    /// folder that was checked.
+    private let afterFolderOpen: (@Sendable () -> Void)?
     /// Runs after the folder that will hold a new key has been checked and
     /// made owner-only, and before anything is written in it. A test replaces
     /// the folder there, to show that the writes still land in the folder
@@ -88,10 +93,12 @@ struct LaptopKeyStore: Sendable {
     init(
         path: URL,
         now: @escaping @Sendable () -> Date = Date.init,
+        afterFolderOpen: (@Sendable () -> Void)? = nil,
         afterFolderCheck: (@Sendable () -> Void)? = nil
     ) {
         self.path = path
         self.now = now
+        self.afterFolderOpen = afterFolderOpen
         self.afterFolderCheck = afterFolderCheck
     }
 
@@ -117,6 +124,7 @@ struct LaptopKeyStore: Sendable {
         var folder = try openFolder(directory)
         defer { if let folder { close(folder) } }
         if let folder {
+            afterFolderOpen?()
             sweepStaleTempFiles(in: folder)
         }
         for _ in 0..<Self.maxAttempts {

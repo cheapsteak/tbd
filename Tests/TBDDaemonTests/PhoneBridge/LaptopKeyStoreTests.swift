@@ -257,6 +257,102 @@ struct LaptopKeyStoreTests {
         #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere.path) == [])
     }
 
+    /// The sweep and the read name the folder by its descriptor as well. So
+    /// when the checked folder is moved aside right after its open, and a
+    /// link to a folder holding a planted key and a leftover of its own takes
+    /// its name, the load still sweeps the checked folder and returns its
+    /// key, and the planted folder is left as it was. A sweep or a read by
+    /// path would follow the link: `O_NOFOLLOW` on the key's own open covers
+    /// only its last component.
+    @Test func aFolderSwappedForALinkBeforeTheReadStillGivesItsOwnKey() throws {
+        let fixture = Fixture()
+        defer { fixture.remove() }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let original = try LaptopKeyStore(path: fixture.keyPath, now: { now }).loadOrCreate()
+        let phoneDir = fixture.phoneDir
+        let checked = fixture.root.appendingPathComponent("phone-checked")
+        let elsewhere = fixture.root.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let planted = Data(repeating: 7, count: 32)
+        let plantedKey = elsewhere.appendingPathComponent("laptop.key")
+        try planted.write(to: plantedKey)
+        #expect(chmod(plantedKey.path, 0o600) == 0)
+        let staleName = ".laptop.key.A.tmp"
+        for folder in [phoneDir, elsewhere] {
+            let stale = folder.appendingPathComponent(staleName)
+            try Data(repeating: 1, count: 32).write(to: stale)
+            try FileManager.default.setAttributes(
+                [.modificationDate: now.addingTimeInterval(-120)], ofItemAtPath: stale.path)
+        }
+        let swaps = OSAllocatedUnfairLock(initialState: 0)
+        let store = LaptopKeyStore(path: fixture.keyPath, now: { now }, afterFolderOpen: {
+            swaps.withLock { $0 += 1 }
+            #expect(rename(phoneDir.path, checked.path) == 0)
+            #expect(symlink(elsewhere.path, phoneDir.path) == 0)
+        })
+
+        let loaded = try store.loadOrCreate(createIfMissing: false)
+
+        let swapCount = swaps.withLock { $0 }
+        #expect(swapCount == 1)
+        #expect(isSymbolicLink(phoneDir))
+        #expect(loaded.rawRepresentation == original.rawRepresentation)
+        // The checked folder's leftover is swept; the planted folder keeps
+        // its key, unchanged, and its leftover.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: checked.path) == ["laptop.key"])
+        let plantedNames = try FileManager.default.contentsOfDirectory(atPath: elsewhere.path).sorted()
+        #expect(plantedNames == [staleName, "laptop.key"])
+        #expect(try Data(contentsOf: plantedKey) == planted)
+    }
+
+    /// The phone folder's own open refuses a symbolic link there
+    /// (`O_NOFOLLOW`), whatever the caller asked for, and the folder the link
+    /// points to is neither written nor read. Followed, the link would take a
+    /// new key somewhere else, or hand back a key someone planted there.
+    @Test(arguments: [true, false], [true, false])
+    func aSymbolicLinkAtThePhoneFolderIsRefusedAndLeftAlone(createIfMissing: Bool, targetHoldsAKey: Bool) throws {
+        let fixture = Fixture()
+        defer { fixture.remove() }
+        let target = fixture.root.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let planted = Data(repeating: 7, count: 32)
+        let plantedKey = target.appendingPathComponent("laptop.key")
+        if targetHoldsAKey {
+            try planted.write(to: plantedKey)
+            #expect(chmod(plantedKey.path, 0o600) == 0)
+        }
+        try FileManager.default.createSymbolicLink(at: fixture.phoneDir, withDestinationURL: target)
+
+        #expect(throws: LaptopKeyStoreError.io("\(fixture.phoneDir.path) is a symbolic link; it must be a folder")) {
+            _ = try LaptopKeyStore(path: fixture.keyPath).loadOrCreate(createIfMissing: createIfMissing)
+        }
+
+        #expect(isSymbolicLink(fixture.phoneDir))
+        let expected: [String] = targetHoldsAKey ? ["laptop.key"] : []
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path) == expected)
+        if targetHoldsAKey {
+            #expect(try Data(contentsOf: plantedKey) == planted)
+        }
+    }
+
+    /// A plain file where the phone folder belongs is refused as not a
+    /// folder, whatever the caller asked for, and left as it is. Opened as a
+    /// folder, it would fail later with an error that names the key instead.
+    @Test(arguments: [true, false])
+    func aPlainFileAtThePhoneFolderIsRefusedAsNotAFolder(createIfMissing: Bool) throws {
+        let fixture = Fixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true)
+        let contents = Data("acme".utf8)
+        try contents.write(to: fixture.phoneDir)
+
+        #expect(throws: LaptopKeyStoreError.io("\(fixture.phoneDir.path) is not a folder")) {
+            _ = try LaptopKeyStore(path: fixture.keyPath).loadOrCreate(createIfMissing: createIfMissing)
+        }
+
+        #expect(try Data(contentsOf: fixture.phoneDir) == contents)
+    }
+
     /// What the loading thread reported, read from the test's poll.
     private final class LoadProbe: @unchecked Sendable {
         private let lock = NSLock()
@@ -275,30 +371,28 @@ struct LaptopKeyStoreTests {
     private struct LoadDidNotReturn: Error, CustomStringConvertible {
         let started: Bool
         let elapsed: Duration
+        /// Which open blocked, and what its blocking shows is gone.
+        let blockedOpen: String
         var description: String {
             started
                 ? "loadOrCreate started but had not returned after \(elapsed): it blocked "
-                    + "opening a FIFO at the key path, so O_NONBLOCK is gone"
+                    + "opening \(blockedOpen)"
                 : "the loading thread never got to run within \(elapsed): a scheduling "
                     + "starvation, not a blocked open"
         }
     }
 
-    /// `open(2)` for reading on a FIFO with no writer never returns unless
-    /// `O_NONBLOCK` is set. The load runs on a dedicated thread behind a
-    /// bounded wait, so a regression fails this test instead of hanging the
-    /// suite; the bound is a hang guard, not the assertion, because a blocked
-    /// open never returns at all. If it does block, the test opens the write
-    /// end to release the stuck open.
-    @Test func aFIFOAtTheKeyPathIsRefusedWithoutBlocking() async throws {
-        let fixture = Fixture()
-        defer { fixture.remove() }
-        try fixture.makePhoneDir()
-        let made = mkfifo(fixture.keyPath.path, 0o600)
-        let code = errno
-        try #require(made == 0, Comment(rawValue: "mkfifo failed: \(String(cString: strerror(code)))"))
-
-        let store = LaptopKeyStore(path: fixture.keyPath)
+    /// What `store.loadOrCreate()` returned, run on a dedicated thread behind
+    /// a bounded wait. `open(2)` for reading on a FIFO with no writer never
+    /// returns unless something refuses the FIFO first, so a regression fails
+    /// the calling test instead of hanging the suite; the bound is a hang
+    /// guard, not the assertion, because a blocked open never returns at all.
+    /// If it does block, the write end of `fifo` is opened to release the
+    /// stuck open, the expiry is recorded naming `blockedOpen`, and the
+    /// result is nil. It is nil too when the test was cancelled.
+    private func loadBehindABoundedWait(
+        _ store: LaptopKeyStore, fifo: URL, blockedOpen: String
+    ) async -> Result<Data, any Error>? {
         let probe = LoadProbe()
         let started = ContinuousClock.now
         let worker = Thread {
@@ -315,17 +409,58 @@ struct LaptopKeyStoreTests {
         }
         if outcome == .timedOut {
             let didStart = probe.started
-            let writeEnd = open(fixture.keyPath.path, O_WRONLY | O_NONBLOCK)
+            let writeEnd = open(fifo.path, O_WRONLY | O_NONBLOCK)
             if writeEnd >= 0 { close(writeEnd) }
-            Issue.record(LoadDidNotReturn(started: didStart, elapsed: ContinuousClock.now - started))
-            return
+            Issue.record(LoadDidNotReturn(
+                started: didStart, elapsed: ContinuousClock.now - started, blockedOpen: blockedOpen))
+            return nil
         }
-        guard outcome == .satisfied, let result = probe.result else { return }
+        guard outcome == .satisfied else { return nil }
+        return probe.result
+    }
+
+    /// The key's open on a FIFO there must not wait for a writer:
+    /// `O_NONBLOCK` keeps it from blocking, and `fstat` then refuses it.
+    @Test func aFIFOAtTheKeyPathIsRefusedWithoutBlocking() async throws {
+        let fixture = Fixture()
+        defer { fixture.remove() }
+        try fixture.makePhoneDir()
+        let made = mkfifo(fixture.keyPath.path, 0o600)
+        let code = errno
+        try #require(made == 0, Comment(rawValue: "mkfifo failed: \(String(cString: strerror(code)))"))
+
+        guard let result = await loadBehindABoundedWait(
+            LaptopKeyStore(path: fixture.keyPath), fifo: fixture.keyPath,
+            blockedOpen: "a FIFO at the key path, so O_NONBLOCK is gone"
+        ) else { return }
 
         #expect(throws: LaptopKeyStoreError.notARegularFile) {
             _ = try result.get()
         }
         #expect(isFIFO(fixture.keyPath))
+    }
+
+    /// The phone folder's open on a FIFO there must not wait for a writer
+    /// either. `O_DIRECTORY` refuses it before the open would wait, and
+    /// `O_NONBLOCK` with the `fstat` check is the second guard, so the open
+    /// blocks only when both `O_DIRECTORY` and `O_NONBLOCK` are gone.
+    @Test func aFIFOAtThePhoneFolderIsRefusedWithoutBlocking() async throws {
+        let fixture = Fixture()
+        defer { fixture.remove() }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true)
+        let made = mkfifo(fixture.phoneDir.path, 0o600)
+        let code = errno
+        try #require(made == 0, Comment(rawValue: "mkfifo failed: \(String(cString: strerror(code)))"))
+
+        guard let result = await loadBehindABoundedWait(
+            LaptopKeyStore(path: fixture.keyPath), fifo: fixture.phoneDir,
+            blockedOpen: "a FIFO at the phone folder's path, so O_DIRECTORY and O_NONBLOCK are both gone"
+        ) else { return }
+
+        #expect(throws: LaptopKeyStoreError.io("\(fixture.phoneDir.path) is not a folder")) {
+            _ = try result.get()
+        }
+        #expect(isFIFO(fixture.phoneDir))
     }
 
     @Test func staleTempFilesAreSweptAndFreshOnesKept() throws {
