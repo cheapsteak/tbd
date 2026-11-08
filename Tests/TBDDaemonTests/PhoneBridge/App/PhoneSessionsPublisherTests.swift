@@ -203,6 +203,54 @@ struct PhoneSessionsPublisherTests {
         #expect(PhoneSessionsPublisher.diff(old: old, new: old) == nil)
     }
 
+    /// A row too large for a frame is left out of the change and out of the
+    /// baseline: the publisher still holds the phone to have the row's old
+    /// value, so the next gather finds it changed again.
+    @Test func aRowTooLargeForAFrameStaysChangedForTheNextGather() async throws {
+        let old = Self.row("acme-a")
+        let huge = Self.row("acme-a", name: String(repeating: "x", count: PhoneFrameBudget.eventDataBytes + 1))
+        let before = Self.row("acme-b")
+        let after = Self.row("acme-b", name: "acme-b2")
+        let gathered = Self.snapshot([huge, after])
+        let p = Self.makePublisher(gathering: gathered)
+        await p.publisher.start(baseline: Self.snapshot([old, before]))
+
+        try await p.clock.requireAdvanceWhenArmed(by: .milliseconds(500))
+
+        let change = try #require(await p.emitted.next())
+        #expect(change == SessionsChangedData(layout: nil, rows: [after], removedRowIDs: []))
+        let held = try #require(await p.publisher.phoneBaseline)
+        #expect(held.rows == [old, after])
+        let retried = PhoneSessionsPublisher.diff(old: held, new: gathered)
+        #expect(retried == SessionsChangedData(layout: nil, rows: [huge], removedRowIDs: []))
+        await p.publisher.stop()
+    }
+
+    /// What the frames leave out stays as the phone has it: a changed row
+    /// keeps its old value, a new row is absent, a removal keeps its old row,
+    /// and the layout is the old one.
+    @Test func whatTheFramesLeaveOutStaysAsThePhoneHasIt() {
+        let a = Self.row("acme-a")
+        let b = Self.row("acme-b")
+        let a2 = Self.row("acme-a", name: "acme-a2")
+        let c = Self.row("acme-c")
+        let old = Self.snapshot([a, b])
+        let new = Self.snapshot([a2, c], groupName: "acme-renamed")
+        var framed = PhoneSessionsPublisher.Framed()
+        framed.leftOutLayout = true
+        framed.leftOutRowIDs = ["acme-a", "acme-c"]
+        framed.leftOutRemovedRowIDs = ["acme-b"]
+
+        let sent = PhoneSessionsPublisher.sent(new, since: old, leaving: framed)
+
+        #expect(sent.layout == old.layout)
+        #expect(sent.rows == [a, b])
+        let retried = PhoneSessionsPublisher.diff(old: sent, new: new)
+        #expect(retried == SessionsChangedData(layout: new.layout, rows: [a2, c], removedRowIDs: ["acme-b"]))
+        let whole = PhoneSessionsPublisher.sent(new, since: old, leaving: PhoneSessionsPublisher.Framed())
+        #expect(whole == new)
+    }
+
     @Test func stopRemovesTheSubscriberForGood() async throws {
         let empty = PhoneSnapshot(layout: [], rows: [], omittedRows: 0)
         let p = Self.makePublisher(gathering: empty)
@@ -269,6 +317,12 @@ struct PhoneSessionsPublisherTests {
             SessionsChangedData(layout: nil, rows: [small], removedRowIDs: []),
             SessionsChangedData(layout: nil, rows: [small], removedRowIDs: []),
         ])
+        let framed = PhoneSessionsPublisher.framed(
+            SessionsChangedData(layout: nil, rows: [small, big, small], removedRowIDs: []), budget: budget)
+        #expect(framed.frames == frames)
+        #expect(framed.leftOutRowIDs == [big.id])
+        #expect(framed.leftOutRemovedRowIDs.isEmpty)
+        #expect(framed.leftOutLayout == false)
     }
 
     /// The reply carries the layout and as many rows as fit, with `more`

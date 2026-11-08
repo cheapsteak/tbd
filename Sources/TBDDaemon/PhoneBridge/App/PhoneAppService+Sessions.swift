@@ -112,11 +112,21 @@ extension PhoneAppService {
         devices[deviceID]?.resume = .snapshot
         send(reply, to: deviceID)
         devices[deviceID]?.live = true
-        if !parts.rest.isEmpty {
+        // A `let`, as the task below captures it.
+        let baseline: PhoneSnapshot
+        if parts.rest.isEmpty {
+            baseline = snapshot
+        } else {
             let rest = SessionsChangedData(layout: nil, rows: parts.rest, removedRowIDs: [])
-            for frame in PhoneSessionsPublisher.frames(rest, budget: PhoneFrameBudget.eventDataBytes) {
+            let framed = PhoneSessionsPublisher.framed(rest, budget: PhoneFrameBudget.eventDataBytes)
+            for frame in framed.frames {
                 emit(.sessionsChanged, data: frame, to: deviceID)
             }
+            // A row the frames left out is one the phone does not have, so
+            // the publisher's first change sends it again.
+            baseline = PhoneSessionsPublisher.sent(
+                snapshot, since: PhoneSnapshot(layout: snapshot.layout, rows: [], omittedRows: snapshot.omittedRows),
+                leaving: framed)
         }
         // A transcript opened before this reply starts now, after it, and a
         // resumed open that waited for it is answered, and refused, since
@@ -126,7 +136,7 @@ extension PhoneAppService {
         // A stop that reaches the new publisher first leaves it stopped.
         Task {
             await earlier?.stop()
-            await publisher.start(baseline: snapshot)
+            await publisher.start(baseline: baseline)
         }
     }
 

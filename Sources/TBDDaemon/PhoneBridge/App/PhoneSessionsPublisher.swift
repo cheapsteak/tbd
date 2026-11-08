@@ -55,7 +55,8 @@ actor PhoneSessionsPublisher {
         }
     }
 
-    /// What the phone has: the last list it was sent.
+    /// What the phone has: the last list it was sent, less what the frames
+    /// left out (`sent(_:since:leaving:)`).
     private var baseline: PhoneSnapshot?
     private var subscriberID: StateSubscriptionManager.SubscriberID?
     private var wakeups: AsyncStream<Void>.Continuation?
@@ -78,6 +79,11 @@ actor PhoneSessionsPublisher {
     /// and `stop`. For tests.
     var isSubscribed: Bool {
         subscriberID != nil
+    }
+
+    /// What the publisher holds the phone to have. For tests.
+    var phoneBaseline: PhoneSnapshot? {
+        baseline
     }
 
     /// Subscribes to state deltas, with `baseline` as what the phone has.
@@ -143,9 +149,15 @@ actor PhoneSessionsPublisher {
         }
         guard !stopped else { return }
         let new = Self.steadied(gathered, since: old)
-        baseline = new
-        guard let change = Self.diff(old: old, new: new) else { return }
-        for frame in Self.frames(change, budget: PhoneFrameBudget.eventDataBytes) {
+        guard let change = Self.diff(old: old, new: new) else {
+            baseline = new
+            return
+        }
+        let framed = Self.framed(change, budget: PhoneFrameBudget.eventDataBytes)
+        // What the frames left out stays as the phone has it, so the next
+        // gather finds it changed again and tries it again.
+        baseline = Self.sent(new, since: old, leaving: framed)
+        for frame in framed.frames {
             guard !stopped else { return }
             await emit(frame)
         }
@@ -209,7 +221,40 @@ actor PhoneSessionsPublisher {
         return PhoneSnapshot(layout: new.layout, rows: rows, omittedRows: new.omittedRows)
     }
 
+    /// What the phone has once it got `new`'s change from `old` in `framed`'s
+    /// frames: `new`, except that what the frames left out is as in `old`. A
+    /// row left out keeps its `old` value, or is absent when `old` had none;
+    /// a removal left out keeps its `old` row; a layout left out is `old`'s.
+    /// Diffing against this finds each left-out item again.
+    static func sent(_ new: PhoneSnapshot, since old: PhoneSnapshot, leaving framed: Framed) -> PhoneSnapshot {
+        guard framed.leftOutLayout || !framed.leftOutRowIDs.isEmpty || !framed.leftOutRemovedRowIDs.isEmpty else {
+            return new
+        }
+        var before: [String: PhoneRow] = [:]
+        for row in old.rows where before[row.id] == nil {
+            before[row.id] = row
+        }
+        var rows = new.rows.compactMap { row -> PhoneRow? in
+            guard framed.leftOutRowIDs.contains(row.id) else { return row }
+            return before[row.id]
+        }
+        rows += old.rows.filter { framed.leftOutRemovedRowIDs.contains($0.id) }
+        return PhoneSnapshot(
+            layout: framed.leftOutLayout ? old.layout : new.layout, rows: rows, omittedRows: new.omittedRows)
+    }
+
     // MARK: - Frames
+
+    /// `frames(_:budget:)`'s frames, with the items they left out.
+    struct Framed: Equatable, Sendable {
+        var frames: [SessionsChangedData] = []
+        /// Whether the layout was left out.
+        var leftOutLayout = false
+        /// The IDs of the rows left out.
+        var leftOutRowIDs: Set<String> = []
+        /// The removed row IDs left out.
+        var leftOutRemovedRowIDs: Set<String> = []
+    }
 
     /// `data` split into events that each encode, as a whole
     /// `sessions.changed` event envelope with any `seq`, to at most `budget`
@@ -217,19 +262,26 @@ actor PhoneSessionsPublisher {
     /// removals that do not fit there go on the next; the rows follow in
     /// order, as many to a frame as fit.
     ///
-    /// An item that alone cannot fit a frame is left out and logged. The
-    /// snapshot builder keeps every row and the layout well inside a frame,
-    /// so that does not happen to the list it builds.
+    /// An item that alone cannot fit a frame is left out and logged, and
+    /// `framed(_:budget:)` names it. The snapshot builder keeps every row and
+    /// the layout well inside a frame, so that does not happen to the list it
+    /// builds.
     static func frames(_ data: SessionsChangedData, budget: Int) -> [SessionsChangedData] {
+        framed(data, budget: budget).frames
+    }
+
+    /// `frames(_:budget:)`, with the items it left out.
+    static func framed(_ data: SessionsChangedData, budget: Int) -> Framed {
         if eventSize(data) <= budget {
-            return [data]
+            return Framed(frames: [data])
         }
         let encoder = PhoneAppCoding.makeEncoder()
-        var result: [SessionsChangedData] = []
+        var result = Framed()
         var layout = data.layout
         if let pending = layout, eventSize(SessionsChangedData(layout: pending, rows: [], removedRowIDs: [])) > budget {
             logger.error("Phone sessions: left out a layout too large for a frame")
             layout = nil
+            result.leftOutLayout = true
         }
         let removals = data.removedRowIDs
         let rows = data.rows
@@ -264,14 +316,16 @@ actor PhoneSessionsPublisher {
                 // The next item does not fit even an empty frame.
                 if nextRemoval < removals.count {
                     logger.error("Phone sessions: left out a removed row ID too large for a frame")
+                    result.leftOutRemovedRowIDs.insert(removals[nextRemoval])
                     nextRemoval += 1
                 } else {
                     logger.error("Phone sessions: left out a row too large for a frame")
+                    result.leftOutRowIDs.insert(rows[nextRow].id)
                     nextRow += 1
                 }
                 continue
             }
-            result.append(SessionsChangedData(layout: frameLayout, rows: frameRows, removedRowIDs: frameRemovals))
+            result.frames.append(SessionsChangedData(layout: frameLayout, rows: frameRows, removedRowIDs: frameRemovals))
         }
         return result
     }
