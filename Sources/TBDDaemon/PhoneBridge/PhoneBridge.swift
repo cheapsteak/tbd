@@ -275,9 +275,11 @@ actor PhoneBridge: PhoneBridgeControlling {
     }
 
     func reconcile(afterSavingRelay url: URL, checkedAs info: PhoneRelayInfo) async {
-        // Only an answer the bridge would itself take as usable stands in for
-        // its check.
-        let seed = (try? RelayCompatibility.check(info)) == nil ? nil : RelaySeed(url: url, info: info)
+        // `info` is what `checkRelay` returned, which it returns only for a
+        // relay `RelayCompatibility.check` found usable. The seed stands only
+        // for `url`: `reconcileNow` takes it only while `url` is the saved
+        // relay.
+        let seed = RelaySeed(url: url, info: info)
         await serialized { await self.reconcileAndAnnounce(seed: seed) }
     }
 
