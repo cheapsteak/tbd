@@ -18,6 +18,7 @@ import datetime
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -67,59 +68,51 @@ def record(when: float, message: str, level: str = "Default", category: str = "t
     })
 
 
-def active(when: float, terminal: str, **kwargs) -> str:
+def libghostty(when: float, terminal: str, **kwargs) -> str:
     return record(when, f"libghostty engine active for {terminal}", **kwargs)
 
 
-def switch(when: float, terminal: str, source: str, target: str, **kwargs) -> str:
-    message = f"switching terminal engine terminal={terminal} from={source} to={target} override={target}"
-    return record(when, message, level="Info", **kwargs)
+def swiftterm(when: float, terminal: str, **kwargs) -> str:
+    return record(when, f"SwiftTerm engine active for {terminal}", **kwargs)
 
 
-def fallback(when: float) -> str:
-    return record(when, "libghostty engine unavailable, fell back to SwiftTerm: no Metal device")
-
-
-def heartbeats(start: float, stop: float) -> list[str]:
-    message = "heartbeat policy=0 windows=2 active=true keyWindow=true"
-    return [
-        record(when, message, level="Info", category="lifecycle")
-        for when in range(int(start), int(stop) + 1, 5)
-    ]
+def fallback(when: float, terminal: str) -> str:
+    return record(when, f"libghostty engine unavailable for {terminal}, fell back to SwiftTerm: metalUnavailable")
 
 
 # The setup the docstring asks for: both terminals opened on libghostty, then
-# ⌃⌘E in the one that becomes the SwiftTerm arm.
+# ⌃⌘E in the one that becomes the SwiftTerm arm, whose rebuild logs its line.
 STANDARD_ENGINE_LINES = [
-    active(10, SWIFTTERM_ID),
-    active(11, GHOSTTY_ID),
-    switch(20, SWIFTTERM_ID, "ghostty", "swiftTerm"),
+    libghostty(10, SWIFTTERM_ID),
+    libghostty(11, GHOSTTY_ID),
+    swiftterm(20, SWIFTTERM_ID),
 ]
 
 
 class FakeLog:
-    """`read_app_log`'s stand-in: canned ndjson, filtered to the asked window
-    and category as `log show` would."""
+    """`read_app_log`'s stand-in: canned ndjson from the asked start on, as
+    `log show --start` would give it."""
 
-    def __init__(self, engine: list[str], lifecycle: list[str] | None = None) -> None:
-        self.engine = list(engine)
-        self.lifecycle = heartbeats(0, 3600) if lifecycle is None else list(lifecycle)
-        self.calls: list[tuple[str, datetime.datetime, datetime.datetime | None]] = []
+    def __init__(self, lines: list[str]) -> None:
+        self.lines = list(lines)
+        self.calls: list[datetime.datetime] = []
 
-    def __call__(self, category, start, end):
-        self.calls.append((category, start, end))
-        source = self.engine if category == "terminalEngine" else self.lifecycle
-        kept = []
-        for line in source:
-            when = datetime.datetime.strptime(json.loads(line)["timestamp"], "%Y-%m-%d %H:%M:%S.%f%z")
-            if when >= start and (end is None or when <= end):
-                kept.append(line)
+    def __call__(self, start):
+        self.calls.append(start)
+        kept = [
+            line for line in self.lines
+            if datetime.datetime.strptime(json.loads(line)["timestamp"], "%Y-%m-%d %H:%M:%S.%f%z") >= start
+        ]
         return "\n".join(kept) + "\n"
 
 
-def refusal(test: unittest.TestCase, terminals: dict[str, str], log: FakeLog) -> str:
+def confirm(lines: list[str], terminals: dict[str, str] = ENGINE_TERMINALS):
+    return probe.confirm_engines(terminals, PID, at(-60), FakeLog(lines))
+
+
+def refusal(test: unittest.TestCase, lines: list[str], terminals: dict[str, str] = ENGINE_TERMINALS) -> str:
     with test.assertRaises(SystemExit) as raised:
-        probe.confirm_engines(terminals, PID, at(-60), log)
+        confirm(lines, terminals)
     return str(raised.exception.code)
 
 
@@ -214,19 +207,18 @@ class VerifyTests(unittest.TestCase):
 
 class EngineCheckTests(unittest.TestCase):
     def test_standard_setup_confirms_both_arms(self):
-        evidence = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), FakeLog(STANDARD_ENGINE_LINES))
-        self.assertEqual(evidence["swiftterm"].kind, "switch")
+        evidence = confirm(STANDARD_ENGINE_LINES)
         self.assertEqual(evidence["swiftterm"].engine, "swiftterm")
-        self.assertEqual(evidence["libghostty"].kind, "active")
+        self.assertEqual(evidence["swiftterm"].at, at(20))
+        self.assertEqual(evidence["libghostty"].engine, "libghostty")
         self.assertEqual(evidence["libghostty"].at, at(11))
 
     def test_ids_match_case_insensitively(self):
         lowered = {arm: terminal.lower() for arm, terminal in ENGINE_TERMINALS.items()}
-        evidence = probe.confirm_engines(lowered, PID, at(-60), FakeLog(STANDARD_ENGINE_LINES))
-        self.assertEqual(set(evidence), {"swiftterm", "libghostty"})
+        self.assertEqual(set(confirm(STANDARD_ENGINE_LINES, lowered)), {"swiftterm", "libghostty"})
 
     def test_swiftterm_arm_still_on_libghostty_is_refused(self):
-        message = refusal(self, ENGINE_TERMINALS, FakeLog(STANDARD_ENGINE_LINES[:2]))
+        message = refusal(self, STANDARD_ENGINE_LINES[:2])
         self.assertIn(f"swiftterm arm {SWIFTTERM_ID}", message)
         self.assertIn("puts it on libghostty", message)
         self.assertIn("Nothing has been written to any terminal.", message)
@@ -234,91 +226,71 @@ class EngineCheckTests(unittest.TestCase):
 
     def test_arms_given_the_wrong_way_round_are_both_refused(self):
         swapped = {"swiftterm": GHOSTTY_ID, "libghostty": SWIFTTERM_ID}
-        message = refusal(self, swapped, FakeLog(STANDARD_ENGINE_LINES))
+        message = refusal(self, STANDARD_ENGINE_LINES, swapped)
         self.assertIn(f"swiftterm arm {GHOSTTY_ID}: its latest engine line", message)
         self.assertIn(f"libghostty arm {SWIFTTERM_ID}: its latest engine line", message)
         self.assertIn("puts it on swiftterm", message)
 
     def test_a_terminal_no_line_names_is_refused(self):
-        message = refusal(self, ENGINE_TERMINALS, FakeLog([active(11, GHOSTTY_ID)]))
+        message = refusal(self, [libghostty(11, GHOSTTY_ID)])
         self.assertIn(f"swiftterm arm {SWIFTTERM_ID}: no engine line names it", message)
-        self.assertIn("A SwiftTerm build logs nothing", message)
+        self.assertIn("built while the libghostty engine was off logs none", message)
+        self.assertNotIn("libghostty arm", message)
 
-    def test_switch_to_libghostty_needs_an_active_line_after_it(self):
-        pending = [active(10, SWIFTTERM_ID), switch(12, SWIFTTERM_ID, "ghostty", "swiftTerm"),
-                   switch(20, GHOSTTY_ID, "swiftTerm", "ghostty")]
-        message = refusal(self, ENGINE_TERMINALS, FakeLog(pending))
-        self.assertIn("is a switch to libghostty with no 'libghostty engine active' line after it", message)
-        evidence = probe.confirm_engines(
-            ENGINE_TERMINALS, PID, at(-60), FakeLog(pending + [active(21, GHOSTTY_ID)])
-        )
-        self.assertEqual(evidence["libghostty"].at, at(21))
+    def test_the_latest_line_wins(self):
+        # Switched to SwiftTerm and back: libghostty again.
+        back = STANDARD_ENGINE_LINES + [swiftterm(30, GHOSTTY_ID), libghostty(40, GHOSTTY_ID)]
+        self.assertEqual(confirm(back)["libghostty"].at, at(40))
+        # Switched back to libghostty: no longer a SwiftTerm arm.
+        self.assertIn("puts it on libghostty", refusal(self, STANDARD_ENGINE_LINES + [libghostty(30, SWIFTTERM_ID)]))
 
-    def test_fallback_after_the_libghostty_active_line_is_refused(self):
-        message = refusal(self, ENGINE_TERMINALS, FakeLog(STANDARD_ENGINE_LINES + [fallback(30)]))
-        self.assertIn(f"libghostty arm {GHOSTTY_ID}: a libghostty start fell back", message)
-        self.assertNotIn("swiftterm arm", message)
+    def test_a_fallback_puts_its_terminal_on_swiftterm(self):
+        # Read even without the SwiftTerm line that follows it.
+        message = refusal(self, STANDARD_ENGINE_LINES + [fallback(30, GHOSTTY_ID)])
+        self.assertIn(f"libghostty arm {GHOSTTY_ID}: its latest engine line", message)
+        self.assertIn("puts it on swiftterm", message)
+        fell_back = [fallback(15, SWIFTTERM_ID), libghostty(11, GHOSTTY_ID)]
+        self.assertEqual(confirm(fell_back)["swiftterm"].at, at(15))
 
-    def test_fallback_before_the_libghostty_active_line_does_not_matter(self):
-        lines = [active(10, SWIFTTERM_ID), switch(20, SWIFTTERM_ID, "ghostty", "swiftTerm"),
-                 fallback(30), active(40, GHOSTTY_ID)]
-        evidence = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), FakeLog(lines))
-        self.assertEqual(evidence["libghostty"].at, at(40))
+    def test_another_terminals_lines_do_not_matter(self):
+        other = "9E9E9E9E-0000-4000-8000-000000000005"
+        lines = STANDARD_ENGINE_LINES + [fallback(30, other), swiftterm(31, other)]
+        self.assertEqual(confirm(lines)["libghostty"].at, at(11))
 
     def test_lines_from_another_app_process_are_ignored(self):
         # An earlier app's line about the same id says nothing now: a relaunch
         # rebuilds every panel and forgets every switch.
-        stale = STANDARD_ENGINE_LINES + [active(30, SWIFTTERM_ID, pid=PID + 1)]
-        probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), FakeLog(stale))
-        only_stale = [active(11, GHOSTTY_ID), switch(20, SWIFTTERM_ID, "ghostty", "swiftTerm", pid=PID + 1)]
-        self.assertIn("no engine line names it", refusal(self, ENGINE_TERMINALS, FakeLog(only_stale)))
+        confirm(STANDARD_ENGINE_LINES + [libghostty(30, SWIFTTERM_ID, pid=PID + 1)])
+        only_stale = [libghostty(11, GHOSTTY_ID), swiftterm(20, SWIFTTERM_ID, pid=PID + 1)]
+        self.assertIn("no engine line names it", refusal(self, only_stale))
 
-    def test_switch_skipped_line_is_not_evidence(self):
-        # A second press before the rebuild says "stays on ghostty" about a
-        # panel that is about to be rebuilt on SwiftTerm.
-        skipped = record(
-            21,
-            f"terminal engine switch skipped terminal={SWIFTTERM_ID}: a switch is already"
-            " rebuilding the panel, so the panel stays on ghostty",
-            level="Info",
-        )
-        evidence = probe.confirm_engines(
-            ENGINE_TERMINALS, PID, at(-60), FakeLog(STANDARD_ENGINE_LINES + [skipped])
-        )
-        self.assertEqual(evidence["swiftterm"].kind, "switch")
+    def test_switch_lines_are_not_evidence(self):
+        # The build that follows a switch logs its own line; the `.info`
+        # switch and skip lines are not read.
+        lines = STANDARD_ENGINE_LINES + [
+            record(30, f"switching terminal engine terminal={GHOSTTY_ID} from=ghostty to=swiftTerm"
+                       " override=swiftTerm", level="Info"),
+            record(31, f"terminal engine switch skipped terminal={SWIFTTERM_ID}: a switch is"
+                       " already rebuilding the panel, so the panel stays on ghostty", level="Info"),
+        ]
+        evidence = confirm(lines)
+        self.assertEqual(evidence["libghostty"].at, at(11))
+        self.assertEqual(evidence["swiftterm"].at, at(20))
 
-    def test_an_engine_this_script_does_not_know_is_refused(self):
-        lines = [active(10, SWIFTTERM_ID), switch(20, SWIFTTERM_ID, "ghostty", "someEngine"), active(11, GHOSTTY_ID)]
-        self.assertIn("an engine this script does not know", refusal(self, ENGINE_TERMINALS, FakeLog(lines)))
-
-    def test_libghostty_arm_needs_info_lines_from_before_its_active_line(self):
-        # The heartbeats start after the `active` line: the store may have
-        # dropped a switch made between the two.
-        log = FakeLog(STANDARD_ENGINE_LINES, lifecycle=heartbeats(600, 900))
-        message = refusal(self, ENGINE_TERMINALS, log)
-        self.assertIn(f"libghostty arm {GHOSTTY_ID}: the log store holds no .info line", message)
-        self.assertNotIn("swiftterm arm", message)
-        witness_calls = [call for call in log.calls if call[0] == "lifecycle"]
-        self.assertEqual(len(witness_calls), 1)
-        self.assertEqual(witness_calls[0][1], at(11) - probe.INFO_WITNESS_WINDOW)
-
-    def test_info_lines_from_another_process_are_no_witness(self):
-        message = "heartbeat policy=0 windows=2 active=true keyWindow=true"
-        foreign = [record(5, message, level="Info", category="lifecycle", pid=PID + 1)]
-        log = FakeLog(STANDARD_ENGINE_LINES, lifecycle=foreign)
-        self.assertIn("holds no .info line", refusal(self, ENGINE_TERMINALS, log))
-
-    def test_non_json_and_foreign_lines_are_skipped(self):
+    def test_non_json_local_pty_and_foreign_lines_are_skipped(self):
         text = "\n".join([
             "Filtering the log data using \"subsystem == ...\"",
             "{not json",
             json.dumps(["a", "list"]),
             record(5, "libghostty engine active for a local PTY"),
-            record(6, f"libghostty engine active for {GHOSTTY_ID}", category="terminallatency"),
+            record(6, "SwiftTerm engine active for a local PTY"),
+            record(7, "libghostty engine unavailable for a local PTY, fell back to SwiftTerm: x"),
+            record(8, f"libghostty engine active for {GHOSTTY_ID}", category="terminallatency"),
             *STANDARD_ENGINE_LINES,
         ])
         lines = probe.parse_engine_lines(text, PID)
-        self.assertEqual([line.kind for line in lines], ["active", "active", "switch"])
+        self.assertEqual([line.engine for line in lines], ["libghostty", "libghostty", "swiftterm"])
+        self.assertEqual(lines[2].terminal, SWIFTTERM_ID.lower())
 
     def test_recheck_passes_when_nothing_changed(self):
         log = FakeLog(STANDARD_ENGINE_LINES)
@@ -328,18 +300,28 @@ class EngineCheckTests(unittest.TestCase):
     def test_recheck_refuses_a_rebuild_during_the_run(self):
         log = FakeLog(STANDARD_ENGINE_LINES)
         before = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), log)
-        log.engine.append(active(100, GHOSTTY_ID))
+        log.lines.append(libghostty(100, GHOSTTY_ID))
         problems = probe.recheck_engines(ENGINE_TERMINALS, PID, at(-60), before, log)
         self.assertEqual(len(problems), 1)
         self.assertIn(f"libghostty arm {GHOSTTY_ID}: a new engine line landed during the run", problems[0])
 
-    def test_recheck_refuses_a_switch_during_the_run(self):
+    def test_recheck_refuses_an_engine_change_during_the_run(self):
         log = FakeLog(STANDARD_ENGINE_LINES)
         before = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), log)
-        log.engine.append(switch(100, GHOSTTY_ID, "ghostty", "swiftTerm"))
+        log.lines.append(swiftterm(100, GHOSTTY_ID))
         problems = probe.recheck_engines(ENGINE_TERMINALS, PID, at(-60), before, log)
         self.assertEqual(len(problems), 1)
         self.assertIn("puts it on swiftterm", problems[0])
+
+    def test_the_log_query_reads_notice_lines_only(self):
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="{}\n", stderr="")
+        with mock.patch.object(probe.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(probe.read_app_log(at(0)), "{}\n")
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["/usr/bin/log", "show"])
+        self.assertNotIn("--info", command)
+        self.assertEqual(command[command.index("--style") + 1], "ndjson")
+        self.assertIn('category == "terminalEngine"', command[command.index("--predicate") + 1])
 
     def test_parse_etime(self):
         self.assertEqual(probe.parse_etime("05:07"), 307)
@@ -468,7 +450,7 @@ class EngineRunTests(unittest.TestCase):
     def test_engine_change_during_the_run_refuses_the_report(self):
         log = FakeLog(STANDARD_ENGINE_LINES)
         status, out, err, written = self.run_main(
-            log, during_run=lambda: log.engine.append(switch(100, SWIFTTERM_ID, "swiftTerm", "ghostty"))
+            log, during_run=lambda: log.lines.append(libghostty(100, SWIFTTERM_ID))
         )
         self.assertEqual(status, 1)
         self.assertEqual(len(written), 4)

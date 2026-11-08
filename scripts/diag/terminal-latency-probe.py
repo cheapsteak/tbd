@@ -67,66 +67,56 @@ HOW ENGINE MODE CONFIRMS EACH ARM'S ENGINE
 ------------------------------------------
 The daemon's terminal rows do not record an engine, and the latency lines do
 not name one. So samples go to an arm by terminal id, and each id's engine is
-read from the app's own engine lines (`com.tbd.app`, category
-`terminalEngine`), from the running TBDApp's launch until now:
+read from the app's own log (`com.tbd.app`, category `terminalEngine`), from
+the running TBDApp's launch until now. While the libghostty engine is on, the
+app logs a `.notice` line for every terminal build, naming the engine that
+build got. A switch's rebuild and a build that fell back log one too:
 
-    libghostty engine active for <id>                                .notice
-    switching terminal engine terminal=<id> from=<k> to=<k> ...       .info
-    libghostty engine unavailable, fell back to SwiftTerm: <reason>   .notice
+    libghostty engine active for <id>
+    SwiftTerm engine active for <id>
+    libghostty engine unavailable for <id>, fell back to SwiftTerm: <reason>
 
-The first is a panel built on libghostty. The second is Switch Terminal
-Engine (⌃⌘E), and the panel is rebuilt on `<k>` straight after it. The third
-names no terminal at all. A "terminal engine switch skipped" line is not
-evidence: after a second press before the rebuild, it names the engine the
-panel is leaving.
+The latest of these lines for an id decides its engine. The log store keeps
+`.notice` lines longest and drops its oldest lines first, so the latest line
+it holds is the terminal's last build. Lines from an earlier app process are
+ignored, because a relaunch rebuilds every panel. An app build too old to log
+the SwiftTerm line never confirms a SwiftTerm arm, so the check refuses every
+run against it.
 
-The latest line that names an id gives its engine. The run is refused before
-any keystroke when, for either arm:
-- no line names the id, or the latest one names the other engine;
-- the latest line is a switch to libghostty with no `active` line after it,
-  so the start fell back or the panel has not been rebuilt;
-- (libghostty arm only) a fallback line follows its `active` line. A fallback
-  names no terminal, so it may be this panel's rebuild.
+The run is refused before any keystroke when no line names an arm's id, or
+the latest one names the other engine. After the run the lines are read
+again, and the report is refused when either arm's latest line has changed:
+an arm that was rebuilt during the run, even on the same engine, does not
+hold one panel's samples.
 
-A SwiftTerm build logs nothing. So the SwiftTerm arm needs a switch line:
-open both terminals with the libghostty engine on, then press ⌃⌘E in the one
-that will be the SwiftTerm arm.
-
-The switch lines are `.info`, and macOS may drop old `.info` lines from its
-store. If a switch line was dropped, a terminal's older `active` line would
-look current. So the libghostty arm is accepted only when the store still
-holds an `.info` line from the app's `lifecycle` category in the five minutes
-before its `active` line. The app writes a heartbeat line there every five
-seconds. The store drops its oldest lines first, so every later line is still
-there too. After the run the lines are read again, and the report is refused
-when either arm's latest line has changed: an arm that was rebuilt or switched
-during the run does not hold one engine's samples.
-
-The check cannot see one change: a libghostty panel rebuilt after the engine
-was turned off in Settings. That rebuild is on SwiftTerm and logs nothing.
-Keep the engine on for the whole run.
+A build while the engine is off logs nothing. So a terminal opened before the
+engine was turned on has no line and is refused, and the check cannot see a
+libghostty panel rebuilt after the engine was turned off. Keep the engine on
+from setup to the end of the run.
 
 Why the log, and not the caller's word: an A/B that measured one engine twice
 by mistake looks like a flat result, and a flat result decides the engine's
-future. `--trust-engines` skips the check, for a machine whose log store
-keeps no `.info` lines. It prints a banner on stderr and above the report's
-figures, and the caller then vouches for each arm from its tab's engine
-label.
+future. `--trust-engines` skips the check, for when the app's log cannot
+answer. It prints a banner on stderr and above the report's figures, and the
+caller then vouches for each arm from its tab's engine label.
 
 SETUP THIS DRIVER CANNOT DO FOR YOU
 -----------------------------------
-1. `defaults write TBDApp enableTerminalLatencyDiagnostic -bool true`, then
-   relaunch the app with `scripts/restart.sh`. The gate resolves once at
-   launch; flipping it under a running app does nothing.
+1. `defaults write com.github.cheapsteak.tbd enableTerminalLatencyDiagnostic
+   -bool true`, then relaunch the app with `scripts/restart.sh`. The gate
+   resolves once at launch; flipping it under a running app does nothing. An
+   unbundled `swift run` build reads the `TBDApp` domain instead.
 2. Two `cat` shell terminals in a scratch worktree.
    - Transport mode: one spawned with `Config.ptyHolderDefault` off (tmux) and
      one with it on (holder). The flag is read at spawn, so a holder session
      exists only if it was on then.
-   - Engine mode: two holder terminals. Turn on Settings > Terminal >
-     Experimental > "Use the libghostty terminal engine", open both terminals
-     (both start on libghostty), then focus one and press ⌃⌘E (Terminal >
-     Switch Terminal Engine). Its tab label then reads SwiftTerm, and it is
-     the SwiftTerm arm.
+   - Engine mode: two holder terminals, opened while Settings > Terminal >
+     Experimental > "Use the libghostty terminal engine" is on, so the app
+     logs which engine each one got. Both open on libghostty. Focus one and
+     press ⌃⌘E (Terminal > Switch Terminal Engine): it is rebuilt on
+     SwiftTerm, its tab label reads SwiftTerm, and it is the SwiftTerm arm.
+     While the engine is on, that press is how a holder terminal gets onto
+     SwiftTerm. The check reads the rebuild's own line, not the press.
 3. Pass their ids. This driver verifies each one's transport and kind from the
    daemon before the first sample and refuses anything that is not a plain
    shell -- it types into terminals, and an agent session must never be one of
@@ -364,44 +354,38 @@ LOG_BINARY = "/usr/bin/log"
 APP_PROCESS_NAME = "TBDApp"
 APP_SUBSYSTEM = "com.tbd.app"
 ENGINE_CATEGORY = "terminalEngine"
-# Where the app's five-second heartbeat goes, at `.info`. Any `.info` line
-# here serves as the witness that the store still holds `.info` lines.
-LIFECYCLE_CATEGORY = "lifecycle"
-INFO_WITNESS_WINDOW = datetime.timedelta(minutes=5)
 # Taken off the app's age, so a line logged in the launch's first second is
 # still inside the window.
 LAUNCH_SLACK = datetime.timedelta(seconds=5)
 
-# The app's lines, as `TerminalEngineFactory.logActive` and `logFallback`, and
-# `TerminalPanelRepresentable.Coordinator.switchEngine`, emit them
-# (`Sources/TBDApp/Terminal/`). The ids are UUIDs; a local PTY's line
-# ("... active for a local PTY") names no terminal and matches neither
-# pattern. The "switch skipped" line is deliberately not read: after a second
-# press before the rebuild, its "stays on" names the engine being left.
-ENGINE_ACTIVE_RE = re.compile(r"^libghostty engine active for (?P<terminal>\S+)$")
-ENGINE_SWITCH_RE = re.compile(
-    r"^switching terminal engine terminal=(?P<terminal>\S+) from=(?P<source>\S+) to=(?P<target>\S+)"
+# The app's `.notice` lines, as `TerminalEngineFactory.logActive` and
+# `logFallback` (`Sources/TBDApp/Terminal/Engine/`) emit them, and the arm
+# each one puts its terminal on. The app follows a fallback line with a
+# SwiftTerm line for the same terminal; the fallback line is read as well, so
+# the rule holds even without that second line. The ids are UUIDs, so a local
+# PTY's lines ("... for a local PTY") match none.
+ENGINE_LINE_PATTERNS = (
+    (re.compile(r"^libghostty engine active for (?P<terminal>\S+)$"), "libghostty"),
+    (re.compile(r"^SwiftTerm engine active for (?P<terminal>\S+)$"), "swiftterm"),
+    (
+        re.compile(r"^libghostty engine unavailable for (?P<terminal>[^\s,]+), fell back to SwiftTerm: "),
+        "swiftterm",
+    ),
 )
-ENGINE_FALLBACK_PREFIX = "libghostty engine unavailable, fell back to SwiftTerm:"
-# `TerminalEngineKind`'s raw values, as the switch lines print them.
-ENGINE_KINDS = {"swiftTerm": "swiftterm", "ghostty": "libghostty"}
 
-# Reads one category of the app's log, `--info` included, as `log show
-# --style ndjson` prints it: (category, start, end or None) -> text. The
-# production reader runs `/usr/bin/log`; a test passes canned text.
-LogReader = Callable[[str, datetime.datetime, "datetime.datetime | None"], str]
+# Reads the app's engine lines from a start until now, as `log show --style
+# ndjson` prints them. The production reader runs `/usr/bin/log`; a test
+# passes canned text.
+LogReader = Callable[[datetime.datetime], str]
 
 
 @dataclass(frozen=True)
 class EngineLine:
-    """One engine line from the app's log."""
+    """One engine line from the app's log: the engine a terminal was built on."""
 
     at: datetime.datetime
-    level: str  # `log show`'s messageType: "Default" is `.notice`, "Info" is `.info`
-    kind: str  # "active", "switch" or "fallback"
-    terminal: str | None  # lowercase; None on a fallback, which names none
-    engine: str | None  # the arm label this line puts the terminal on; None if unknown
-    pending: bool  # a switch to libghostty, which only a later `active` line confirms
+    terminal: str  # lowercase
+    engine: str  # the arm label: "swiftterm" or "libghostty"
     message: str
 
 
@@ -414,27 +398,15 @@ def parse_log_timestamp(text: object) -> datetime.datetime | None:
         return None
 
 
-def classify_engine_message(message: str, at: datetime.datetime, level: str) -> EngineLine | None:
-    match = ENGINE_ACTIVE_RE.match(message)
-    if match:
-        return EngineLine(at, level, "active", match["terminal"].lower(), "libghostty", False, message)
-    match = ENGINE_SWITCH_RE.match(message)
-    if match:
-        engine = ENGINE_KINDS.get(match["target"])
-        return EngineLine(
-            at, level, "switch", match["terminal"].lower(), engine, engine == "libghostty", message
-        )
-    if message.startswith(ENGINE_FALLBACK_PREFIX):
-        return EngineLine(at, level, "fallback", None, "swiftterm", False, message)
-    return None
+def parse_engine_lines(text: str, pid: int) -> list[EngineLine]:
+    """The engine lines one app process logged, oldest first.
 
-
-def log_records(text: str, pid: int, category: str):
-    """The `log show --style ndjson` records of one category from one process.
-
-    Filtered here rather than in the predicate, so the filter is the same code
-    a test runs. Anything that is not a JSON object is skipped.
+    Only that process: an app relaunch rebuilds every panel and forgets every
+    switch, so a line from an earlier process says nothing about a terminal
+    now. Filtered here rather than in the predicate, so the filter is the same
+    code a test runs. Anything that is not a JSON object is skipped.
     """
+    lines = []
     for raw in text.splitlines():
         raw = raw.strip()
         if not raw.startswith("{"):
@@ -445,92 +417,56 @@ def log_records(text: str, pid: int, category: str):
             continue
         if not isinstance(record, dict):
             continue
-        if record.get("subsystem") != APP_SUBSYSTEM or record.get("category") != category:
+        if record.get("subsystem") != APP_SUBSYSTEM or record.get("category") != ENGINE_CATEGORY:
             continue
         if record.get("processID") != pid:
             continue
         at = parse_log_timestamp(record.get("timestamp"))
-        if at is None:
-            continue
-        yield at, record
-
-
-def parse_engine_lines(text: str, pid: int) -> list[EngineLine]:
-    """The engine lines one app process logged, oldest first.
-
-    Only that process: an app relaunch rebuilds every panel and forgets every
-    switch, so a line from an earlier process says nothing about a terminal
-    now.
-    """
-    lines = []
-    for at, record in log_records(text, pid, ENGINE_CATEGORY):
         message = record.get("eventMessage")
-        if not isinstance(message, str):
+        if at is None or not isinstance(message, str):
             continue
-        line = classify_engine_message(message, at, str(record.get("messageType", "")))
-        if line is not None:
-            lines.append(line)
+        for pattern, engine in ENGINE_LINE_PATTERNS:
+            match = pattern.match(message)
+            if match:
+                lines.append(EngineLine(at, match["terminal"].lower(), engine, message))
+                break
     # Stable, so lines with one timestamp keep the order `log show` gave.
     lines.sort(key=lambda line: line.at)
     return lines
-
-
-def has_info_line(text: str, pid: int, not_after: datetime.datetime) -> bool:
-    """Whether the store still holds a `lifecycle` `.info` line from this
-    process at or before `not_after`."""
-    return any(
-        at <= not_after and record.get("messageType") == "Info"
-        for at, record in log_records(text, pid, LIFECYCLE_CATEGORY)
-    )
 
 
 def short_time(at: datetime.datetime) -> str:
     return at.strftime("%H:%M:%S")
 
 
-SWIFTTERM_HINT = (
-    "A SwiftTerm build logs nothing, so the SwiftTerm arm needs a switch line:"
-    " with the libghostty engine on, focus the terminal and press ⌃⌘E until its"
-    " tab label reads SwiftTerm."
-)
-LIBGHOSTTY_HINT = (
-    "Turn on Settings > Terminal > Experimental > \"Use the libghostty terminal"
-    " engine\", then open a new holder shell for this arm, or press ⌃⌘E in this one."
-)
+# What to do about an arm the log does not confirm. A terminal built while the
+# libghostty engine was off logs no line at all.
+ENGINE_HINTS = {
+    "swiftterm": "With the libghostty engine on, focus it and press ⌃⌘E until its tab label"
+    " reads SwiftTerm.",
+    "libghostty": "With Settings > Terminal > Experimental > \"Use the libghostty terminal"
+    " engine\" on, open a new holder shell for this arm, or press ⌃⌘E in this one.",
+}
 
 
 def engine_verdict(
     lines: list[EngineLine], arm: str, terminal_id: str
 ) -> tuple[EngineLine | None, str | None]:
-    """The line that gives this terminal's engine, and why it does not put the
+    """The latest line that names this terminal, and why it does not put the
     terminal on `arm`'s engine, or None when it does."""
     wanted = terminal_id.lower()
     named = [line for line in lines if line.terminal == wanted]
-    hint = SWIFTTERM_HINT if arm == "swiftterm" else LIBGHOSTTY_HINT
     if not named:
-        return None, f"{arm} arm {terminal_id}: no engine line names it. {hint}"
+        return None, (
+            f"{arm} arm {terminal_id}: no engine line names it. A terminal built while"
+            f" the libghostty engine was off logs none. {ENGINE_HINTS[arm]}"
+        )
     latest = named[-1]
-    if latest.pending:
-        return latest, (
-            f"{arm} arm {terminal_id}: its latest engine line ({short_time(latest.at)})"
-            " is a switch to libghostty with no 'libghostty engine active' line after it."
-            " The start fell back to SwiftTerm, or the panel has not been rebuilt."
-        )
     if latest.engine != arm:
-        on = latest.engine or "an engine this script does not know"
         return latest, (
             f"{arm} arm {terminal_id}: its latest engine line ({short_time(latest.at)})"
-            f" puts it on {on}: \"{latest.message}\". {hint}"
+            f" puts it on {latest.engine}: \"{latest.message}\". {ENGINE_HINTS[arm]}"
         )
-    if arm == "libghostty":
-        fallbacks = [line for line in lines if line.kind == "fallback" and line.at > latest.at]
-        if fallbacks:
-            return latest, (
-                f"{arm} arm {terminal_id}: a libghostty start fell back to SwiftTerm at"
-                f" {short_time(fallbacks[0].at)}, after this terminal's 'active' line"
-                f" ({short_time(latest.at)}). A fallback line names no terminal, so it may"
-                " have been this panel's rebuild. Close it and open a new holder shell."
-            )
     return latest, None
 
 
@@ -539,34 +475,15 @@ def confirm_engines(
 ) -> dict[str, EngineLine]:
     """Each arm's evidence line. Raises SystemExit, before any keystroke, when
     the log does not put every arm on its own engine."""
-    lines = parse_engine_lines(read_log(ENGINE_CATEGORY, since, None), pid)
+    lines = parse_engine_lines(read_log(since), pid)
     evidence: dict[str, EngineLine] = {}
     reasons: list[str] = []
     for arm, terminal_id in terminals.items():
         line, reason = engine_verdict(lines, arm, terminal_id)
-        if reason is not None:
+        if reason is None:
+            evidence[arm] = line
+        else:
             reasons.append(reason)
-            continue
-        assert line is not None
-        # A `.notice` line is kept longer than an `.info` one, so a switch
-        # after it could be gone while it stays. An `.info` line is its own
-        # proof that later `.info` lines are kept.
-        if line.level != "Info":
-            witness = read_log(
-                LIFECYCLE_CATEGORY,
-                line.at - INFO_WITNESS_WINDOW,
-                line.at + datetime.timedelta(seconds=1),
-            )
-            if not has_info_line(witness, pid, line.at):
-                reasons.append(
-                    f"{arm} arm {terminal_id}: the log store holds no .info line from"
-                    f" the five minutes before its 'active' line ({short_time(line.at)}),"
-                    " so a switch after that line could have been dropped. Press ⌃⌘E"
-                    " twice in it, so it is rebuilt on libghostty now, or pass"
-                    " --trust-engines on a store that keeps no .info lines."
-                )
-                continue
-        evidence[arm] = line
     if reasons:
         raise SystemExit(
             f"REFUSING TO RUN — the app's log (TBDApp pid {pid}, since"
@@ -589,14 +506,13 @@ def recheck_engines(
     Any change counts, a rebuild on the same engine included: a panel rebuilt
     mid-run was handed over mid-run, and its samples straddle two panels.
     """
-    lines = parse_engine_lines(read_log(ENGINE_CATEGORY, since, None), pid)
+    lines = parse_engine_lines(read_log(since), pid)
     problems = []
     for arm, terminal_id in terminals.items():
         line, reason = engine_verdict(lines, arm, terminal_id)
         if reason is not None:
             problems.append(reason)
         elif line != before.get(arm):
-            assert line is not None
             problems.append(
                 f"{arm} arm {terminal_id}: a new engine line landed during the run"
                 f" ({short_time(line.at)}): \"{line.message}\""
@@ -604,17 +520,21 @@ def recheck_engines(
     return problems
 
 
-def read_app_log(category: str, start: datetime.datetime, end: datetime.datetime | None) -> str:
-    """One category of the app's log, `.info` included, as ndjson."""
-    command = [LOG_BINARY, "show", "--start", start.astimezone().strftime("%Y-%m-%d %H:%M:%S")]
-    if end is not None:
-        command += ["--end", end.astimezone().strftime("%Y-%m-%d %H:%M:%S")]
-    command += [
-        "--info",
+def read_app_log(start: datetime.datetime) -> str:
+    """The app's engine lines from `start` until now, as ndjson.
+
+    No `--info`: the engine lines are `.notice`, which the store keeps
+    longest, and the rule reads nothing else.
+    """
+    command = [
+        LOG_BINARY,
+        "show",
+        "--start",
+        start.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
         "--style",
         "ndjson",
         "--predicate",
-        f'subsystem == "{APP_SUBSYSTEM}" AND category == "{category}"',
+        f'subsystem == "{APP_SUBSYSTEM}" AND category == "{ENGINE_CATEGORY}"',
     ]
     try:
         result = subprocess.run(
@@ -622,12 +542,12 @@ def read_app_log(category: str, start: datetime.datetime, end: datetime.datetime
         )
     except subprocess.TimeoutExpired:
         raise SystemExit(
-            f"`{' '.join(command[:2])}` for the app's {category} lines did not return"
-            f" within {LOG_SHOW_TIMEOUT_SECONDS}s, so no arm's engine could be checked."
+            f"`{LOG_BINARY} show` for the app's engine lines did not return within"
+            f" {LOG_SHOW_TIMEOUT_SECONDS}s, so no arm's engine could be checked."
         ) from None
     except subprocess.CalledProcessError as error:
         raise SystemExit(
-            f"`{LOG_BINARY} show` failed reading the app's {category} lines"
+            f"`{LOG_BINARY} show` failed reading the app's engine lines"
             f" (exit {error.returncode}): {error.stderr.strip()}"
         ) from None
     return result.stdout
@@ -748,7 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--trust-engines",
         action="store_true",
         help="Engine mode: skip the log check of each arm's engine, with a banner on the"
-        " report. For a log store that keeps no .info lines.",
+        " report. For when the app's log cannot answer.",
     )
     parser.add_argument(
         "--app-pid",
