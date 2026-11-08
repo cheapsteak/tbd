@@ -9,9 +9,9 @@ import TBDShared
 /// router's own `encoder` to match the router's own `decoder`; the phone's
 /// identity, built from the one `deviceID` it is given; in
 /// `phoneSessionStates`, the removal of every report on a shell; and, in
-/// `phoneWake`, `phoneCreateWorktree` and `phoneRemoteSendMessage`, the phone
-/// message rule the send rail applies (`PhoneMessageText`), whose refusal
-/// answers before the handler runs. Past that, each runs the checks of the
+/// `phoneWake`, `phoneCreateWorktree`, `phoneRemoteCreate` and
+/// `phoneRemoteSendMessage`, the phone message rule the send rail applies
+/// (`PhoneMessageText`), whose refusal answers before the handler runs. Past that, each runs the checks of the
 /// RPC it mirrors, in that RPC's order, and returns that RPC's response.
 ///
 /// **The rebuild names what a phone keeps, never what it loses.** Every params
@@ -107,9 +107,18 @@ extension RPCRouter: PhoneSessionActions {
         try await handleRemoteSessions()
     }
 
+    /// A remote session create from a phone. A first message in its form
+    /// values is pasted by the provider into the new session, so it is held
+    /// to the phone message rule first (`phoneRemoteCreateVetted`), and a
+    /// refused one creates nothing. A create with no first message goes to
+    /// the handler as it came.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleRemoteCreate(
-            encoder.encode(Self.phoneRemoteCreateParams(p)), actor: .phone(deviceID: deviceID))
+        switch Self.phoneRemoteCreateVetted(p) {
+        case .refused(let reason):
+            return RPCResponse(error: reason)
+        case .deliver(let params):
+            return try await handleRemoteCreate(encoder.encode(params), actor: .phone(deviceID: deviceID))
+        }
     }
 
     /// A message from a phone to a remote session, held to the phone message
@@ -179,6 +188,40 @@ extension RPCRouter: PhoneSessionActions {
     /// seed and a parent worktree take their defaults, none.
     static func phoneRemoteCreateParams(_ p: RemoteCreateParams) -> RemoteCreateParams {
         RemoteCreateParams(provider: p.provider, paramsJSON: p.paramsJSON)
+    }
+
+    /// A remote session a phone creates, as the handler gets it: the provider
+    /// and its form values (`phoneRemoteCreateParams`), with the first
+    /// message, the form's `prompt` value (`PhoneAppService.promptFieldName`),
+    /// held to the phone message rule (`PhoneMessageText.vetted`). Form
+    /// values that are not a JSON object, and a `prompt` that is absent, not
+    /// a string, or empty, carry no phone message and are kept as they came,
+    /// for the handler to judge. When the rule changes the message, its
+    /// CRLFs made bare LFs, the form values are written out again with it.
+    /// Either the params, or the refusal that answers in place of the create.
+    static func phoneRemoteCreateVetted(
+        _ p: RemoteCreateParams
+    ) -> PhoneMessageText.Vetted<RemoteCreateParams> {
+        let narrowed = phoneRemoteCreateParams(p)
+        let field = PhoneAppService.promptFieldName
+        guard let data = narrowed.paramsJSON.data(using: .utf8),
+              var form = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let prompt = form[field] as? String, !prompt.isEmpty else {
+            return .deliver(narrowed)
+        }
+        switch PhoneMessageText.vetted(prompt) {
+        case .refused(let reason):
+            return .refused(reason)
+        case .deliver(let normalized):
+            guard normalized != prompt else { return .deliver(narrowed) }
+            form[field] = normalized
+            // A form that came out of `JSONSerialization` always goes back in.
+            guard let rewritten = try? JSONSerialization.data(withJSONObject: form),
+                  let json = String(data: rewritten, encoding: .utf8) else {
+                return .refused("remote.create paramsJSON could not be written out again")
+            }
+            return .deliver(RemoteCreateParams(provider: narrowed.provider, paramsJSON: json))
+        }
     }
 
     /// A profile swap from a phone: the terminal, the profile to move it to

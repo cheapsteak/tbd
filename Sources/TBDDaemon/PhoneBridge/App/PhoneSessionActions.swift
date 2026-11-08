@@ -18,9 +18,9 @@ import TBDShared
 /// a shell; the send rail refuses a shell, a message part that is not text,
 /// an empty message and a message holding a control character, inside the
 /// send core, on the terminal row the core sends to (see `phoneSend`); and
-/// `phoneWake`, `phoneCreateWorktree` and `phoneRemoteSendMessage` hold the
-/// message they carry to the same rule (`PhoneMessageText`) before their
-/// handler runs.
+/// `phoneWake`, `phoneCreateWorktree`, `phoneRemoteCreate` and
+/// `phoneRemoteSendMessage` hold the message they carry to the same rule
+/// (`PhoneMessageText`) before their handler runs.
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -111,6 +111,17 @@ protocol PhoneSessionActions: Sendable {
 
     /// `remote.create` with only the provider and its form values. The new
     /// session's `RemoteSessionPayload`.
+    ///
+    /// A first message in the form values, a `prompt` string that is not
+    /// empty, is held to the phone message rule (`PhoneMessageText.vetted`)
+    /// first, because the provider pastes it into the new session: every
+    /// CRLF becomes LF, then a blank message is refused with
+    /// `PhoneMessageText.emptyRefusal` and one holding a control character
+    /// with `PhoneMessageText.controlCharacterRefusal`. These refusals return
+    /// before the handler runs, so they create nothing, reach no provider and
+    /// record no actuation row; the phone action recorder has already logged
+    /// the action. Form values with no such `prompt` go to the handler as
+    /// they came.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.sendMessage` with only the provider, the session and the text.

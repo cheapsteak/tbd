@@ -520,6 +520,88 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(request.actor == ActuationActor.phone(deviceID: d))
     }
 
+    /// Remote create form values holding `prompt` as their one value.
+    private static func promptForm(_ prompt: String) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [PhoneAppService.promptFieldName: prompt])
+        return try #require(String(data: data, encoding: .utf8))
+    }
+
+    /// The provider pastes a new session's first message into it, so a first
+    /// message the send rail refuses reaches no provider, creates nothing and
+    /// records no create.
+    @Test func phoneRemoteCreateRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try await makeRemoteFixture([Self.describeDeclaring([])])
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneRemoteCreate(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: try Self.promptForm(text)),
+                deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused message never reaches the provider")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
+        #expect(createRows.isEmpty)
+    }
+
+    /// The create handler gets the first message with the send rail's line
+    /// endings, the other form values as they came, and still only the
+    /// provider and the form values.
+    @Test func phoneRemoteCreateVettedHandsTheHandlerTheMessageWithBareLineFeeds() throws {
+        let full = RemoteCreateParams(
+            provider: "agentbox", paramsJSON: #"{"prompt": "first\r\nsecond", "repo": "acme/api"}"#,
+            parentWorktreeID: UUID(), seedRetainedKey: "acme-key")
+
+        let vetted = RPCRouter.phoneRemoteCreateVetted(full)
+
+        guard case .deliver(let params) = vetted else {
+            Issue.record("a message with CRLF line endings was refused: \(vetted)")
+            return
+        }
+        #expect(try encodedKeys(params) == ["provider", "paramsJSON"])
+        #expect(params.provider == "agentbox")
+        let form = try #require(
+            try JSONSerialization.jsonObject(with: Data(params.paramsJSON.utf8)) as? [String: String])
+        #expect(form == ["prompt": "first\nsecond", "repo": "acme/api"])
+    }
+
+    /// Form values with no first message carry no phone message, so they pass
+    /// as they came, byte for byte.
+    @Test func phoneRemoteCreateVettedKeepsFormValuesWithNoFirstMessage() {
+        for paramsJSON in ["{}", #"{"prompt": ""}"#, #"{"prompt": 3}"#, #"{"repo": "acme/api"}"#, "not json"] {
+            let vetted = RPCRouter.phoneRemoteCreateVetted(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON))
+            guard case .deliver(let params) = vetted else {
+                Issue.record("form values \(paramsJSON) were refused: \(vetted)")
+                continue
+            }
+            #expect(params.paramsJSON == paramsJSON)
+        }
+    }
+
+    /// The provider's create gets the first message with bare line feeds, and
+    /// the record names the phone.
+    @Test func phoneRemoteCreateDeliversTheMessageWithBareLineFeeds() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": []}"#),
+        ])
+        let d = UUID()
+
+        let response = try await f.actions.phoneRemoteCreate(
+            RemoteCreateParams(provider: "agentbox", paramsJSON: try Self.promptForm("first\r\nsecond")),
+            deviceID: d)
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        let stdin = try #require(f.invoker.stdinsSnapshot().compactMap { $0 }.first)
+        let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
+        let form = try #require(body["params"] as? [String: Any])
+        #expect(form["prompt"] as? String == "first\nsecond")
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteCreate })
+        #expect(request.actor == ActuationActor.phone(deviceID: d))
+    }
+
     /// The `remote.answer` core under the phone's pairing, through the door:
     /// no socket peer, delivered, and the record names the phone.
     @Test func phoneAnswerRemotePromptIsDeliveredAndRecordsThePhone() async throws {
