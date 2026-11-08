@@ -19,8 +19,10 @@
  *   collapses it, a failed one too, and the next tap starts over.
  * - "Show more" puts the message's whole text in place of the cut text, through `Markdown`,
  *   once it arrived, and the button goes, as in the mock. Its box shows the loading line, the
- *   too-large line or the laptop's message. After a failure the button comes back, and a tap
- *   starts over.
+ *   too-large line or the laptop's message. While the text loads, the button stays, marked
+ *   busy (`aria-busy`), and a tap on it cancels the load (spec section 7, "Large details"): the
+ *   detail goes, and the row shows its cut text and "Show more" again. After a failure the
+ *   button comes back, and a tap starts over.
  * - A subagent row draws its items in `.nest`, each through this component as a nested row,
  *   under one budget for the whole nest (`nest.ts`): items past it are not drawn, and the row
  *   shows "Too large for the phone. Open on the laptop." under the nest. It collapses as a tool
@@ -86,13 +88,14 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
         </div>
       );
     case 'assistant': {
-      const full = detail?.phase !== 'loading' ? detail?.text.text : undefined;
+      const loading = detail?.phase === 'loading';
+      const full = detail !== null && !loading ? detail.text.text : undefined;
       return (
         <>
           <div className="say">
             <Markdown text={full ?? text} nodes={full === undefined ? p.tree : null} />
-            {it.truncated && toggle !== null && (detail === null || detail.phase === 'failed') && (
-              <button className="morebtn" type="button" onClick={() => toggle('text')}>
+            {it.truncated && toggle !== null && (detail === null || loading || detail.phase === 'failed') && (
+              <button className="morebtn" type="button" aria-busy={loading || undefined} onClick={() => toggle('text')}>
                 Show more
               </button>
             )}

@@ -297,6 +297,44 @@ test('a failed Show more brings its button back, and a tap on it starts over', a
   expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 0]]);
 });
 
+test('Show more stays while its text loads, and a tap on it cancels the load', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const say = tx.locator('.say', { hasText: 'Fixed. Here is what changed:' });
+  const more = say.locator('.morebtn');
+  await hostCall(page, 'hold', 'transcript.detail');
+  await more.click();
+  await expect(tx.locator('.detail .loading')).toHaveText('Loading from the laptop…');
+  await expect(more).toHaveText('Show more');
+  await expect(more).toHaveAttribute('aria-busy', 'true');
+  await expect.poll(() => detailRequests(page)).toEqual([['login-10', 'text', 0]]);
+
+  // A tap cancels: the loading line goes, and the row keeps its cut text and Show more.
+  await more.click();
+  await expect(tx.locator('.detail')).toHaveCount(0);
+  await expect(more).toHaveText('Show more');
+  await expect(more).not.toHaveAttribute('aria-busy');
+
+  // The held reply, then an event behind it on the same channel: once the event's row shows,
+  // the app has taken the reply, and it changed nothing.
+  await hostCall(page, 'release', 'transcript.detail');
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF, items: [{ id: 'x-cancel', kind: 'assistant', text: 'Here after the cancelled text.', truncated: false }],
+  });
+  await expect(tx.locator('.say', { hasText: 'Here after the cancelled text.' })).toBeVisible();
+  await expect(say).not.toContainText('Both cases have a line');
+  await expect(more).toHaveText('Show more');
+  await expect(tx.locator('.detail')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0]]);
+
+  // The next tap loads the whole text.
+  await more.click();
+  await expect(say).toContainText('Both cases have a line in isLocalPath with a comment that says why.');
+  await expect(more).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 0]]);
+});
+
 test('collapsing while the chunks load asks for no more of them', async ({ page, appHost }) => {
   // About 150 KB of input: three chunks.
   const input = 'command: npm test -- auth --verbose '.repeat(4_200);
