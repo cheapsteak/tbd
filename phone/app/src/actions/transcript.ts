@@ -36,7 +36,7 @@ import type {
   PhoneSessionRef, TranscriptDetailParams, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult, TranscriptPage,
 } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
-import { addChunk, askOf, badReply, cancelDetail, detailParts, failDetail, isOpen, startDetail } from '../state/detail.ts';
+import { addChunk, askOf, badReply, detailParts, failDetail, startDetail } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
 import { applyPage, beginOpen, beginResume, clearTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
@@ -261,10 +261,11 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     /**
      * Opens or closes one part of the row with key `rowKey`, loading its chunks, and resolves
      * once they landed or failed. `part` is the part the row names (`detailParts`).
-     * - **A tap on a row whose detail shows** (loading, loaded or too large) collapses it
-     *   (`cancelDetail`): the reply on its way is dropped, and nothing more is asked.
-     * - **Any other tap**, on a closed row, a collapsed one or a failed one, starts the detail
-     *   over from its first chunk, while the transcript is open and the row holds an item.
+     * - **A tap on a row whose detail shows** (loading, loaded or too large) collapses it: the
+     *   detail leaves the slice with what arrived of it, the reply on its way is dropped, and
+     *   nothing more is asked.
+     * - **Any other tap**, on a closed row or a failed one, starts the detail over from its first
+     *   chunk, while the transcript is open and the row holds an item.
      *
      * Each reply counts only while the slice still holds this very detail under `rowKey` and the
      * transcript is open (`stillAsked`). So a reply that lands after a collapse, a second tap,
@@ -287,8 +288,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     async toggleDetail(rowKey: number, part: TranscriptDetailPart): Promise<void> {
       const t = store.get().transcript;
       const shown = t.details[rowKey];
-      if (isOpen(shown) && shown.phase !== 'failed') {
-        putDetail(rowKey, shown, cancelDetail(shown));
+      if (shown !== undefined && shown.phase !== 'failed') {
+        dropDetail(rowKey, shown);
         return;
       }
       const row = t.rows.find((r) => r.key === rowKey);

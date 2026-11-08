@@ -30,7 +30,8 @@
  * arrived of it and asks for no more of it, and the detail goes on to its next part, as a tool's
  * result after an input too large. It is named in `largeParts`, and the detail ends `tooLarge`
  * rather than `open`. An error fails the detail with its message, keeping what arrived. A
- * collapse (`cancelDetail`) drops what arrived, and `addChunk` drops every later reply.
+ * collapse removes the detail from the slice, and what arrived with it; the action then drops
+ * every later reply for it, since the slice no longer holds it (`toggleDetail`).
  *
  * **Drawing.** A part of 1 MB can still be a million short lines, a page far taller than a phone
  * lays out well, so the pane draws at most `MAX_DETAIL_LINES` lines of a part (`firstLines`).
@@ -95,8 +96,6 @@ export interface DetailState {
   /** The parts that were too large for the phone, each keeping what arrived of it. */
   largeParts: readonly TranscriptDetailPart[];
   phase: 'loading' | 'open' | 'tooLarge' | 'failed';
-  /** True once the reader collapsed the row: later results are dropped. */
-  cancelled: boolean;
   /** The laptop's message when `phase` is `failed`. */
   error: string | null;
 }
@@ -121,7 +120,7 @@ export function detailParts(part: TranscriptDetailPart, item: PhoneItem): readon
 /** A detail about to ask for chunk 0 of `parts[0]`. `parts` must not be empty. */
 export function startDetail(parts: readonly TranscriptDetailPart[]): DetailState {
   return {
-    parts, partIndex: 0, chunk: 0, chunkCount: 0, text: {}, items: [], bytes: 0, largeParts: [], phase: 'loading', cancelled: false, error: null,
+    parts, partIndex: 0, chunk: 0, chunkCount: 0, text: {}, items: [], bytes: 0, largeParts: [], phase: 'loading', error: null,
   };
 }
 
@@ -132,11 +131,11 @@ export function askOf(d: DetailState): DetailAsk {
 
 /**
  * `d` with one reply folded in, and the request to send next, or null when the detail is done.
- * See this file's header for the rules. A reply that comes once `d` is cancelled, or no longer
- * loading, changes nothing and asks for nothing.
+ * See this file's header for the rules. A reply that comes once `d` is no longer loading changes
+ * nothing and asks for nothing.
  */
 export function addChunk(d: DetailState, r: TranscriptDetailResult): { next: DetailState; ask: DetailAsk | null } {
-  if (d.cancelled || d.phase !== 'loading') return { next: d, ask: null };
+  if (d.phase !== 'loading') return { next: d, ask: null };
   const part = d.parts[d.partIndex]!;
   const first = d.chunk === 0;
   const chunkCount = first ? r.chunkCount : d.chunkCount;
@@ -186,22 +185,9 @@ export function firstLines(text: string, max = MAX_DETAIL_LINES): { text: string
   return end + 1 >= text.length ? { text, cut: false } : { text: text.slice(0, end), cut: true };
 }
 
-/** `d` failed with `message`, keeping what arrived. A cancelled detail stays as it is. */
+/** `d` failed with `message`, keeping what arrived. */
 export function failDetail(d: DetailState, message: string): DetailState {
-  return d.cancelled ? d : { ...d, phase: 'failed', error: message };
-}
-
-/**
- * `d` collapsed: later results are dropped, and what arrived is let go, since a collapsed row
- * shows none of it and a tap loads it afresh.
- */
-export function cancelDetail(d: DetailState): DetailState {
-  return d.cancelled ? d : { ...d, cancelled: true, text: {}, items: [], bytes: 0 };
-}
-
-/** Whether `d` shows: loaded, loading or ended, and not collapsed. */
-export function isOpen(d: DetailState | undefined): d is DetailState {
-  return d !== undefined && !d.cancelled;
+  return { ...d, phase: 'failed', error: message };
 }
 
 /**

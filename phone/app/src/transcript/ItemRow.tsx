@@ -14,7 +14,7 @@
  * - a system note's label is always "System", since the wire has no label.
  *
  * **Details** (`DetailPane`, and `state/detail.ts` for the chunk rules). A row whose detail is
- * open (a record, not cancelled) reads `aria-expanded="true"` and turns its triangle down.
+ * open (it has a record) reads `aria-expanded="true"` and turns its triangle down.
  * - A tool row draws its box under the button: Input and Result, or the loading line.
  * - "Show more" puts the message's whole text in place of the cut text, through `Markdown`,
  *   once it arrived, and the button goes, as in the mock. Its box shows the loading line, the
@@ -36,7 +36,6 @@
 import { memo, useMemo, type JSX } from 'react';
 import type { MdNode } from '../markdown/mdTree.ts';
 import type { PhoneItem } from '../protocol/types.ts';
-import { isOpen } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 import { toolGlyph } from '../state/status.ts';
@@ -63,7 +62,7 @@ export interface ItemRowProps {
 export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | null {
   const { row, toggle: onToggle } = p;
   const toggle = onToggle === null ? null : (part: RowPart): void => onToggle(row.key, part);
-  const detail = toggle !== null && isOpen(p.detail) ? p.detail : null;
+  const detail = toggle !== null ? (p.detail ?? null) : null;
   const expanded = detail !== null;
   if (row.kind === 'receipt') {
     return (

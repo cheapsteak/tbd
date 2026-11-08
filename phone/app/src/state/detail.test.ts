@@ -13,7 +13,7 @@ import { createActions } from '../actions/index.ts';
 import type { Method, ParamsOf, PhoneItem, PhoneSessionRef, ResultOf, TranscriptDetailPart, TranscriptDetailResult } from '../protocol/types.ts';
 import { utf8Length } from '../limits.ts';
 import {
-  addChunk, askOf, cancelDetail, DETAIL_CHUNK_BYTES, DETAIL_LIMIT_BYTES, detailParts, failDetail, firstLines, MAX_DETAIL_CHUNKS,
+  addChunk, askOf, DETAIL_CHUNK_BYTES, DETAIL_LIMIT_BYTES, detailParts, failDetail, firstLines, MAX_DETAIL_CHUNKS,
   MAX_DETAIL_LINES, MAX_SUBAGENT_ITEMS, startDetail,
 } from './detail.ts';
 import type { DetailAsk, DetailState } from './detail.ts';
@@ -107,16 +107,6 @@ test('tooLarge keeps the first chunk of its part and asks for none of the rest, 
   const fits = run(startDetail(['input', 'result']), (ask) => reply(ask, 2)).d;
   assert.equal(fits.phase, 'open');
   assert.deepEqual(fits.largeParts, []);
-});
-
-test('a collapsed detail drops later replies and asks for nothing', () => {
-  const d = cancelDetail(addChunk(startDetail(['text']), reply({ part: 'text', chunk: 0 }, 3)).next);
-  assert.equal(d.cancelled, true);
-  assert.deepEqual(d.text, {});
-  const step = addChunk(d, reply({ part: 'text', chunk: 1 }, 3));
-  assert.equal(step.next, d);
-  assert.equal(step.ask, null);
-  assert.equal(failDetail(d, 'x'), d);
 });
 
 test('a detail that ended takes no more replies', () => {
@@ -381,12 +371,12 @@ test('collapsing stops the next chunk request', async () => {
   const h = harness();
   const done = h.actions.toggleDetail(h.key(0), 'input');
   await h.actions.toggleDetail(h.key(0), 'input');
-  const collapsed = h.t().details[h.key(0)]!;
-  assert.equal(collapsed.cancelled, true);
+  assert.equal(h.t().details[h.key(0)], undefined, 'a collapse removes the detail');
+  const collapsed = h.t();
   answer(h.last(), 3);
   await done;
   assert.deepEqual(h.asked(), [['input', 0]]);
-  assert.equal(h.t().details[h.key(0)], collapsed, 'the late reply changed nothing');
+  assert.equal(h.t(), collapsed, 'the late reply changed nothing');
 });
 
 test('a tap on an open detail collapses it, and the next tap loads it afresh', async () => {
@@ -397,11 +387,11 @@ test('a tap on an open detail collapses it, and the next tap loads it afresh', a
   answer(h.last(), 1);
   await done;
   await h.actions.toggleDetail(h.key(0), 'input');
-  assert.equal(h.t().details[h.key(0)]?.cancelled, true);
+  assert.equal(h.t().details[h.key(0)], undefined);
   assert.equal(h.sent.length, 2);
   void h.actions.toggleDetail(h.key(0), 'input');
   assert.deepEqual(h.asked(), [['input', 0], ['result', 0], ['input', 0]]);
-  assert.equal(h.t().details[h.key(0)]?.cancelled, false);
+  assert.equal(h.t().details[h.key(0)]?.phase, 'loading');
 });
 
 test('a too-large detail collapses with a tap', async () => {
@@ -414,7 +404,7 @@ test('a too-large detail collapses with a tap', async () => {
   await done;
   assert.equal(h.t().details[h.key(0)]?.phase, 'tooLarge');
   await h.actions.toggleDetail(h.key(0), 'input');
-  assert.equal(h.t().details[h.key(0)]?.cancelled, true);
+  assert.equal(h.t().details[h.key(0)], undefined);
   assert.equal(h.sent.length, 2);
 });
 
