@@ -53,7 +53,9 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * `replaced` or `stop()` (even one called from inside `onEvent`), nothing more is reported.
  * `app` is reported only while the state is `ready`. `bundle` comes just before `ready`, except
  * when `welcome` names the bundle `runningBundle` reports: the app already runs it, so the
- * state goes to `ready` with no `bundle`.
+ * state goes to `ready` with no `bundle`. A handshake that goes unanswered reads `offline`
+ * (`connecting` during the post-pairing grace), and the retries that follow keep that state
+ * until the laptop answers one: `handshaking` comes back with message 2.
  * @typedef {{ kind: 'state', state: ConnectionState }
  *   | { kind: 'connected', laptopName: string }
  *   | { kind: 'bundle', sha256: string, text: string }
@@ -81,8 +83,9 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * @property {BundleCache} cache
  * @property {(url: string) => WebSocketLike} openSocket
  * @property {(event: ConnectionEvent) => void} onEvent
- * @property {number} [absentGraceMs] For this long after `start()`, `peer-absent` and
- *   `peer-left` read `connecting` rather than `offline`. Default 0; `main.js` passes
+ * @property {number} [absentGraceMs] For this long after `start()`, `peer-absent`,
+ *   `peer-left` and a handshake that goes unanswered read `connecting` rather than `offline`.
+ *   Default 0; `main.js` passes
  *   SIGNAL_TIMEOUT_MS right after pairing, while the laptop's device link joins the new room.
  * @property {() => boolean} [isVisible] Default `() => true`. While it is false, a reconnect
  *   waits for `resume()`.
@@ -147,6 +150,12 @@ export class LaptopConnection {
   #gotSignal = false;
   /** The current socket's last signal was `peer-absent` or `peer-left`. */
   #peerAbsent = false;
+  /**
+   * The last handshake got no message 2 in time, and no answer or `peer-absent`/`peer-left`
+   * has come since. A retry's handshake then leaves the state as it is, so the screen does
+   * not flip from "Laptop offline" to connecting and back on every retry.
+   */
+  #unanswered = false;
   #attempt = 0;
   #graceOver = false;
 
@@ -200,7 +209,11 @@ export class LaptopConnection {
       this.#graceTimer = this.#tasks.arm(this.#absentGraceMs, () => {
         this.#graceTimer = null;
         this.#graceOver = true;
-        if (this.#socket !== null && this.#peerAbsent) this.#setState('offline');
+        const away = this.#socket !== null && this.#peerAbsent;
+        // `connecting` only from the timeout's grace reading: a retry that met a closed socket
+        // since reads `reconnecting`, and keeps it.
+        const unanswered = this.#unanswered && this.#state === 'connecting';
+        if (away || unanswered) this.#setState('offline');
       });
     } else {
       this.#graceOver = true;
@@ -315,7 +328,8 @@ export class LaptopConnection {
         } else {
           this.#endSession();
           this.#peerAbsent = true;
-          this.#setState(this.#graceOver ? 'offline' : 'connecting');
+          this.#unanswered = false;
+          this.#setState(this.#awayState());
         }
         return;
       case 'frame':
@@ -387,7 +401,7 @@ export class LaptopConnection {
       socket, initiator: null, transport: null, timer: null, cacheTimer: null, welcome: null, assembler: null, ready: false,
     };
     this.#session = session;
-    this.#setState('handshaking');
+    if (!this.#unanswered) this.#setState('handshaking');
     const initiator = await createInitiator({
       pattern: 'IK',
       localStatic: this.#keyPair,
@@ -401,10 +415,16 @@ export class LaptopConnection {
     socket.send(message1);
     session.timer = this.#tasks.arm(HANDSHAKE_TIMEOUT_MS, () => {
       if (!this.#isCurrent(session) || session.transport !== null) return;
-      // Plan 3 refuses an unknown key without a reply, so a phone removed while it was away
-      // reads as offline. The socket stays open for the next peer-joined.
-      this.#endSession();
-      this.#setState('offline');
+      // No message 2. Plan 3 refuses an unknown key without a reply, so a phone removed while
+      // it was away reads as offline. But message 1 or 2 may have been lost instead (a relay
+      // hiccup, or a laptop still storing this phone's key right after `paired`), and the
+      // laptop's socket stays where it is, so this socket would get no new peer-joined. A
+      // fresh socket, after the backoff, does: the laptop resets on the peer-joined it causes,
+      // and a fresh handshake runs.
+      this.#closeSocket();
+      this.#unanswered = true;
+      this.#setState(this.#awayState());
+      this.#reconnectWithBackoff();
     });
   }
 
@@ -454,6 +474,9 @@ export class LaptopConnection {
     session.initiator = null;
     session.transport = result.transport;
     const laptopName = readLaptopName(result.payload);
+    // The laptop answered: a retry after an unanswered handshake reads handshaking from here.
+    this.#unanswered = false;
+    this.#setState('handshaking');
     this.#emit({ kind: 'connected', laptopName });
     // The laptop counts the phone as connected once this first transport message decrypts.
     await this.#send(session, makeHello());
@@ -642,6 +665,15 @@ export class LaptopConnection {
   }
 
   // --- plumbing -----------------------------------------------------------------------------
+
+  /**
+   * What a laptop that is away, or does not answer, reads as: `offline`, or `connecting` while
+   * the post-pairing grace lasts.
+   * @returns {ConnectionState}
+   */
+  #awayState() {
+    return this.#graceOver ? 'offline' : 'connecting';
+  }
 
   /** @param {ConnectionState} state */
   #setState(state) {

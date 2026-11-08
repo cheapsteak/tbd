@@ -180,6 +180,14 @@ test('an unknown phone key reads as Laptop offline', async ({ page, server }) =>
   await expect(page.locator('[data-state="connecting"]')).toBeVisible();
   await page.clock.fastForward(10_000);
   await expect(page.locator('[data-state="offline"] h2')).toHaveText('Laptop offline');
+
+  // The phone retries on a fresh socket once the backoff (1 s, with up to a quarter of jitter)
+  // has passed. The laptop refuses that message 1 too, and the screen stays on Laptop offline.
+  await page.clock.fastForward(1_250);
+  await expect.poll(() => laptop.counts.refused).toBe(refused + 2);
+  const seen = await states(page);
+  expect(seen.slice(seen.indexOf('offline'))).toEqual(['offline']);
+  await expect(page.locator('[data-state="offline"] h2')).toHaveText('Laptop offline');
 });
 
 // --- keys and the socket -------------------------------------------------------------------
