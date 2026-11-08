@@ -1,7 +1,7 @@
 // The test host's own guarantees, in WebKit as an iPhone and in Chromium as an Android phone:
-// the app runs as a phone runs it (the committed bundle, in the staged runner, under the
-// runner's policy alone, with an opaque origin), and the fixture's console check sees what
-// goes wrong inside the frame. Nothing here depends on a screen that a later part fills.
+// the app runs as a phone runs it (the bundle on disk, served unchanged, in the staged runner,
+// under the runner's policy alone, with an opaque origin), and the fixture's console check sees
+// what goes wrong inside the frame. Nothing here depends on a screen that a later part fills.
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -68,7 +68,8 @@ test('the app frame is the staged runner, under its own policy alone, with an op
     expect(Object.keys(response.headers()).filter((name) => name.startsWith('content-security-policy')), route).toEqual([]);
   }
 
-  // The bundle is the committed file, byte for byte.
+  // The server serves the bundle on disk as it is, adding nothing. That the file on disk is the
+  // committed bundle is CI's bundle check (`scripts/ci/phone-app-bundle-check.sh`), not this.
   const bundle = await (await request.get(`${appHost.origin}/__app/app.js`)).body();
   expect(bundle.equals(await readFile(BUNDLE_PATH))).toBe(true);
 });
