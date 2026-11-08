@@ -263,11 +263,14 @@ function relaySockets() {
 
 /**
  * Boots the loader on a fake page at `href`.
- * @param {{ href?: string, framed?: boolean, laptops?: any[], openSocket?: (url: string) => any }} [options]
+ * @param {{ href?: string, framed?: boolean, laptops?: any[], openSocket?: (url: string) => any,
+ *   fetch?: (url: string, init: RequestInit) => Promise<any> }} [options]
  */
 function bootPage({
   href = PAGE, framed = false, laptops = [], openSocket = () => {
     throw new TypeError('no sockets in these tests');
+  }, fetch = async () => {
+    throw new TypeError('no network in these tests');
   },
 } = {}) {
   /** @type {string[]} */
@@ -291,9 +294,7 @@ function bootPage({
     clock,
     indexedDB: idb,
     subtle: crypto.subtle,
-    fetch: async () => {
-      throw new TypeError('no network in these tests');
-    },
+    fetch,
     openSocket,
     requestAnimationFrame: (/** @type {() => void} */ callback) => setImmediate(callback),
   }));
@@ -439,10 +440,11 @@ test('a store that never answers still shows Reload after STORE_TIMEOUT_MS of vi
  * Boots on a store holding one laptop, which the page connects to, and has the relay say the
  * laptop is away, so the page sits on the offline screen with the strip naming the laptop and
  * no timer of the connection's pending.
+ * @param {{ fetch?: (url: string, init: RequestInit) => Promise<any> }} [options] the presence fetch
  */
-async function bootOnOfflineLaptop() {
+async function bootOnOfflineLaptop({ fetch } = {}) {
   const relay = relaySockets();
-  const page = bootPage({ laptops: [await storedLaptop('acme-mbp')], openSocket: (url) => relay.openSocket(url) });
+  const page = bootPage({ laptops: [await storedLaptop('acme-mbp')], openSocket: (url) => relay.openSocket(url), fetch });
   page.idb.plan.push('answer');
   page.idb.succeed();
   await until(() => relay.sockets.length === 1, 'the laptop\'s socket');
@@ -524,6 +526,82 @@ test('a connection state that changes the screen under an open menu closes it to
   await until(() => page.screen() === 'connecting', 'the connecting screen');
   assert.equal(page.menuShown(), false);
   assert.equal(page.catcherShown(), false);
+});
+
+// --- presence, and a return to the page ---------------------------------------------------
+
+/** A presence fetch whose answers the test gives, call by call. */
+function presenceFetch() {
+  /** @type {Array<{ url: string, resolve: (value: unknown) => void, reject: (error: unknown) => void }>} */
+  const calls = [];
+  return {
+    calls,
+    /** @param {string} url */
+    fetch: (url) => new Promise((resolve, reject) => {
+      calls.push({ url, resolve, reject });
+    }),
+    /**
+     * @param {number} i
+     * @param {boolean} laptop
+     */
+    answer: (i, laptop) => calls[i].resolve({ status: 200, json: async () => ({ laptop }) }),
+    /** @param {number} i */
+    fail: (i) => calls[i].reject(new TypeError('Load failed')),
+  };
+}
+
+test('a return to the page asks again for the presence the Laptops screen shows, and updates its rows in place', async () => {
+  const net = presenceFetch();
+  const page = bootPage({ laptops: [await storedLaptop('acme-mbp'), await storedLaptop('acme-mini')], fetch: net.fetch });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => page.screen() === 'laptops' && net.calls.length === 2, 'the Laptops screen asking for presence');
+  const drawn = /** @type {any} */ (page.doc.getElementById('screen')).children[0];
+
+  // The phone locks with both requests out, and on its return both have failed.
+  page.setVisibility('hidden');
+  net.fail(0);
+  net.fail(1);
+  await until(() => page.text().split(MESSAGES.relay).length === 3, 'both rows reading Can\'t reach the relay');
+  page.setVisibility('visible');
+  assert.equal(net.calls.length, 4, 'one new request per laptop');
+  net.answer(2, true);
+  net.answer(3, false);
+  await until(() => !page.text().includes(MESSAGES.relay), 'both rows updated');
+  assert.ok(page.text().includes(MESSAGES.online));
+  assert.ok(page.text().includes(MESSAGES.offlineRow));
+  assert.equal(/** @type {any} */ (page.doc.getElementById('screen')).children[0], drawn, 'the rows changed in place');
+});
+
+test('a return to the page asks again for the presence the strip menu shows, and the menu stays open', async () => {
+  const net = presenceFetch();
+  const { page } = await bootOnOfflineLaptop({ fetch: net.fetch });
+  page.idb.plan.push('answer');
+  page.stripButton().dispatchEvent(new Event('click'));
+  await until(() => page.menuShown() && net.calls.length === 1, 'the menu asking for presence');
+
+  page.setVisibility('hidden');
+  net.fail(0);
+  await until(() => page.strip.textContent.includes(MESSAGES.relay), 'the menu reading Can\'t reach the relay');
+  page.setVisibility('visible');
+  assert.equal(net.calls.length, 2, 'a new request');
+  net.answer(1, true);
+  await until(() => !page.strip.textContent.includes(MESSAGES.relay), 'the menu updated');
+  assert.ok(page.strip.textContent.includes(MESSAGES.online));
+  assert.equal(page.menuShown(), true);
+});
+
+test('a return to the page asks for no presence once the menu has closed', async () => {
+  const net = presenceFetch();
+  const { page } = await bootOnOfflineLaptop({ fetch: net.fetch });
+  page.idb.plan.push('answer');
+  page.stripButton().dispatchEvent(new Event('click'));
+  await until(() => page.menuShown() && net.calls.length === 1, 'the menu asking for presence');
+  page.doc.dispatchEvent(Object.assign(new Event('keydown'), { key: 'Escape' }));
+  assert.equal(page.menuShown(), false);
+  page.setVisibility('hidden');
+  page.setVisibility('visible');
+  assert.equal(net.calls.length, 1);
 });
 
 // --- a connection, against a scripted laptop -----------------------------------------------

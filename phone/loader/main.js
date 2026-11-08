@@ -42,8 +42,9 @@ import {
 
 /**
  * The strip's open laptop menu. `nodes` stays empty until the laptops are read and the menu
- * is drawn; from then on its nodes stay in the strip until it closes.
- * @typedef {{ abort(): void, nodes: HTMLElement[] }} Menu
+ * is drawn; from then on its nodes stay in the strip until it closes. `recheck` asks the relay
+ * for every laptop's presence again, and `abort` cancels what is still out.
+ * @typedef {{ abort(): void, recheck(): void, nodes: HTMLElement[] }} Menu
  */
 
 /**
@@ -176,6 +177,8 @@ class LoaderPage {
   #epoch = 0;
   /** @type {(() => void) | null} Undoes what the current screen started (scanner, presence). */
   #leaveScreen = null;
+  /** @type {(() => void) | null} While the Laptops screen shows: asks for every row's presence again. */
+  #recheckLaptops = null;
 
   /** @type {LaptopRecord | null} The laptop the strip names. */
   #current = null;
@@ -438,19 +441,31 @@ class LoaderPage {
     };
     // Presence comes from the relay's endpoint, never a socket, so listing the laptops never
     // knocks another tab off its room. Each answer changes only its row's status line, in
-    // place, so a tap in progress and the scroll position survive it.
-    const checks = checkPresence(list.laptops, {
-      fetch: this.#fetch,
-      clock: this.#clock,
-      onResult: (id, status) => {
-        if (epoch !== this.#epoch) return;
-        statuses.set(id, status);
-        const record = list.laptops.find((laptop) => laptop.id === id);
-        if (record === undefined) return;
-        rowsByID.get(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), 'list'));
-      },
+    // place, so a tap in progress and the scroll position survive it. A return to the page
+    // asks again (`#resume`), so an answer cut short while the phone was locked does not stay.
+    /** @type {{ abort(): void } | null} */
+    let checks = null;
+    const check = () => {
+      checks?.abort();
+      checks = checkPresence(list.laptops, {
+        fetch: this.#fetch,
+        visibility: this.#visibility,
+        clock: this.#clock,
+        onResult: (id, status) => {
+          if (epoch !== this.#epoch) return;
+          statuses.set(id, status);
+          const record = list.laptops.find((laptop) => laptop.id === id);
+          if (record === undefined) return;
+          rowsByID.get(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), 'list'));
+        },
+      });
+    };
+    check();
+    this.#mount(build(), () => {
+      this.#recheckLaptops = null;
+      checks?.abort();
     });
-    this.#mount(build(), () => checks.abort());
+    this.#recheckLaptops = check;
   }
 
   /**
@@ -1031,7 +1046,7 @@ class LoaderPage {
     const current = this.#current;
     if (current === null || this.#menu !== null) return;
     /** @type {Menu} */
-    const menu = { abort: () => {}, nodes: [] };
+    const menu = { abort: () => {}, recheck: () => {}, nodes: [] };
     this.#menu = menu;
     let list;
     try {
@@ -1061,17 +1076,24 @@ class LoaderPage {
     this.#strip.append(...nodes);
     this.#renderStrip();
     // Each answer changes only its item's status line, in place, so a tap on the menu is
-    // never lost to a redraw.
-    const checks = checkPresence(laptops, {
-      fetch: this.#fetch,
-      clock: this.#clock,
-      onResult: (id, status) => {
-        const at = laptops.findIndex((record) => record.id === id);
-        if (this.#menu !== menu || at < 0) return;
-        rows[at].setLine(presenceLine(status, laptops[at].lastConnectedAt, this.#clock.now(), 'menu'));
-      },
-    });
-    menu.abort = () => checks.abort();
+    // never lost to a redraw. A return to the page asks again, as the Laptops screen does.
+    /** @type {{ abort(): void } | null} */
+    let checks = null;
+    menu.recheck = () => {
+      checks?.abort();
+      checks = checkPresence(laptops, {
+        fetch: this.#fetch,
+        visibility: this.#visibility,
+        clock: this.#clock,
+        onResult: (id, status) => {
+          const at = laptops.findIndex((record) => record.id === id);
+          if (this.#menu !== menu || at < 0) return;
+          rows[at].setLine(presenceLine(status, laptops[at].lastConnectedAt, this.#clock.now(), 'menu'));
+        },
+      });
+    };
+    menu.abort = () => checks?.abort();
+    menu.recheck();
     items[0]?.focus();
   }
 
@@ -1134,10 +1156,16 @@ class LoaderPage {
 
   // --- lifecycle --------------------------------------------------------------------------
 
-  /** The page is visible again, or came back from the back-forward cache. */
+  /**
+   * The page is visible again, or came back from the back-forward cache. Presence showing on
+   * the Laptops screen or in the strip's menu is asked for again: a request the phone locked
+   * on may have failed meanwhile, and would leave "Can't reach the relay" on every row.
+   */
   #resume() {
     this.#connection?.resume();
     this.#pairing?.probe();
+    this.#recheckLaptops?.();
+    this.#menu?.recheck();
   }
 
   /** @param {KeyboardEvent} event */
