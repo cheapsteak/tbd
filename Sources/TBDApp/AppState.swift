@@ -1183,6 +1183,39 @@ final class AppState {
     /// question for it. Absent reads as zero; a terminal's entry goes with
     /// the terminal (`recordTerminalRemoval`).
     var terminalAttachRetries: [UUID: Int] = [:]
+    /// The engine a person switched each terminal to with Switch Terminal
+    /// Engine, keyed by terminal id. Part of a terminal view's SwiftUI
+    /// identity, so a switch rebuilds the panel on the other engine.
+    ///
+    /// Memory only, on purpose: a relaunch drops every override, so a terminal
+    /// opens on the engine `useGhosttyTerminalEngine` gives it. It counts only
+    /// while that flag is on and only for a holder panel
+    /// (`TerminalEngineFactory.requestedKind`). A terminal's entry goes with
+    /// the terminal (`recordTerminalRemoval`).
+    var terminalEngineOverrides: [UUID: TerminalEngineKind] = [:]
+    /// The engine each mounted terminal panel was actually built on, which a
+    /// failed libghostty start makes SwiftTerm whatever was asked for. What the
+    /// tab's engine label names. Written a main-queue turn after the panel is
+    /// made and after it is dismantled, by `noteTerminalEngineInUse` and
+    /// `forgetTerminalEngineInUse`, each scoped to the panel that wrote it.
+    var terminalEnginesInUse: [UUID: TerminalEngineInUse] = [:]
+    /// Each mounted terminal panel's Switch Terminal Engine handler, keyed by
+    /// terminal id and scoped to the panel that registered it, so a successor
+    /// panel's registration survives its predecessor's teardown.
+    @ObservationIgnored var terminalEngineSwitchers: [UUID: TerminalEngineSwitcher] = [:]
+    /// `ghosttyTerminalEngineEnabled`, held where a view can observe it: the
+    /// tab's engine label and the Terminal menu read this, never
+    /// `@AppStorage`, so they follow the store this AppState was built with,
+    /// as every panel deciding its engine does. Refreshed by
+    /// `ghosttyTerminalEngineFlagObservation` and written only when it
+    /// changes. A panel deciding its engine reads the store itself.
+    private(set) var ghosttyTerminalEngineFlag = false
+    /// Key-value observation of `useGhosttyTerminalEngineKey` in
+    /// `userDefaults`. Unlike `UserDefaults.didChangeNotification`, which only
+    /// this process's writes post, it also hears another process's write, so
+    /// `defaults write`, the way the flag is turned on before it has a
+    /// Settings toggle, reaches the tabs and the menu.
+    @ObservationIgnored private var ghosttyTerminalEngineFlagObservation: NSKeyValueObservation?
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
     /// attaches again from scratch.
@@ -2861,6 +2894,7 @@ final class AppState {
         expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
+        watchGhosttyTerminalEngineFlag()
         installInjectionHandler()
         installScreenRequestHandler()
         // Give the notification manager a back-reference so banner clicks
@@ -5016,6 +5050,82 @@ final class AppState {
         shippedDefault: Bool = useMetalTerminalRendererDefault
     ) -> Bool {
         stored ?? shippedDefault
+    }
+
+    /// UserDefaults key for the experimental libghostty terminal engine. When
+    /// on, holder panels and local PTY terminals (remote attach and remote
+    /// sign-in) opened afterwards are built on `GhosttyEngine` instead of
+    /// `SwiftTermEngine`; tmux and control-mode panels stay on SwiftTerm
+    /// whatever it says. Off by default, because it replaces a load-bearing
+    /// rendering and input path. Design:
+    /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+    ///
+    /// App-side `UserDefaults`, on `.standard` in the app, for the reasons on
+    /// `useMetalTerminalRendererKey`. Nothing writes it except a person
+    /// choosing, so an unset key means nobody has chosen. Reads go through
+    /// `ghosttyTerminalEngineEnabled(defaults:)`, never `bool(forKey:)`.
+    static let useGhosttyTerminalEngineKey = "useGhosttyTerminalEngine"
+
+    /// The one default for `useGhosttyTerminalEngineKey`. Graduation is a
+    /// one-line change here: it reaches everyone who never chose and keeps
+    /// every explicit `false`.
+    static let ghosttyTerminalEngineDefault = false
+
+    /// Whether terminals opened now should be built on libghostty, where their
+    /// host allows it (`TerminalEngineFactory.requestedKind`). Three-state: an
+    /// unset key takes `shippedDefault`, and an explicit `false` or `true`
+    /// holds against any change to it.
+    static func ghosttyTerminalEngineEnabled(
+        defaults: UserDefaults = .standard,
+        shippedDefault: Bool = ghosttyTerminalEngineDefault
+    ) -> Bool {
+        ghosttyTerminalEngineEnabled(
+            stored: defaults.object(forKey: useGhosttyTerminalEngineKey) as? Bool,
+            shippedDefault: shippedDefault)
+    }
+
+    /// The three-state decision on its own: nil, nobody chose, follows
+    /// `shippedDefault`.
+    static func ghosttyTerminalEngineEnabled(
+        stored: Bool?,
+        shippedDefault: Bool = ghosttyTerminalEngineDefault
+    ) -> Bool {
+        stored ?? shippedDefault
+    }
+
+    /// This app's reading of `useGhosttyTerminalEngineKey`, from the store it
+    /// was built with: `.standard` in the app, an isolated suite in a test.
+    var ghosttyTerminalEngineEnabled: Bool {
+        Self.ghosttyTerminalEngineEnabled(defaults: userDefaults)
+    }
+
+    /// Reads the flag into `ghosttyTerminalEngineFlag`, then keeps it current
+    /// for as long as this AppState lives. The handler runs on whichever
+    /// thread wrote the key; the weak reference is read on the main thread.
+    private func watchGhosttyTerminalEngineFlag() {
+        refreshGhosttyTerminalEngineFlag()
+        ghosttyTerminalEngineFlagObservation = userDefaults.observe(
+            \.useGhosttyTerminalEngine
+        ) { [weak self] _, _ in
+            AppState.performOnMain { self?.refreshGhosttyTerminalEngineFlag() }
+        }
+    }
+
+    private func refreshGhosttyTerminalEngineFlag() {
+        let enabled = ghosttyTerminalEngineEnabled
+        if ghosttyTerminalEngineFlag != enabled {
+            ghosttyTerminalEngineFlag = enabled
+        }
+    }
+
+    /// Runs `body` on the main actor: at once when already on the main
+    /// thread, otherwise on the next main-loop turn.
+    nonisolated private static func performOnMain(_ body: @escaping @MainActor @Sendable () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { body() }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
+        }
     }
 
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less

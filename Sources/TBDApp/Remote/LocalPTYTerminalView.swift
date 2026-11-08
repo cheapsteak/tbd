@@ -51,10 +51,10 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// Called with the terminal view when it is made, and again when it is
     /// dismantled — the attach pane registers it as its selection's focus
     /// target (`AppState.registerRemoteTerminalView`). Optional for the same
-    /// reason as `onStarted`. Typed on `TBDTerminalView`, the SwiftTerm
-    /// engine's view, because the registry it feeds is.
-    var onViewMounted: ((TBDTerminalView) -> Void)?
-    var onViewDismantled: ((TBDTerminalView) -> Void)?
+    /// reason as `onStarted`. Typed on `RemoteFocusTerminalView`, which both
+    /// engines' views conform to, because the registry it feeds is.
+    var onViewMounted: ((any RemoteFocusTerminalView) -> Void)?
+    var onViewDismantled: ((any RemoteFocusTerminalView) -> Void)?
     /// Replaces the spawn-time focus claim. The attach pane routes it through
     /// `AppState.focusRemoteTerminalAfterSelectionChange`, because a pane can
     /// spawn while its detail view keeps it transparent (the log fallback, a
@@ -65,8 +65,14 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let coordinator = context.coordinator
+        // libghostty while `useGhosttyTerminalEngine` is on: a local PTY's
+        // mouse modes are its program's own, as on a holder panel. Read from
+        // `.standard`, where the Settings toggle writes, as the renderer
+        // preference below is.
         let engine = TerminalEngineFactory.make(
-            kind: .swiftTerm,
+            kind: TerminalEngineFactory.requestedKind(
+                flagEnabled: AppState.ghosttyTerminalEngineEnabled(),
+                host: .localPTY),
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(
@@ -96,7 +102,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         coordinator.onStarted = onStarted
         coordinator.onViewDismantled = onViewDismantled
         coordinator.onClaimFocus = onClaimFocus
-        if let terminalView = engine.view as? TBDTerminalView {
+        if let terminalView = engine.view as? any RemoteFocusTerminalView {
             onViewMounted?(terminalView)
         }
 
@@ -115,7 +121,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        if let terminalView = nsView as? TBDTerminalView {
+        if let terminalView = nsView as? any RemoteFocusTerminalView {
             coordinator.onViewDismantled?(terminalView)
         }
         coordinator.cleanup()
@@ -132,7 +138,7 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         /// Mirrors `onExit`'s storage for the spawn side — see the
         /// representable's `onStarted`.
         var onStarted: ((Date) -> Void)?
-        var onViewDismantled: ((TBDTerminalView) -> Void)?
+        var onViewDismantled: ((any RemoteFocusTerminalView) -> Void)?
         /// See the representable's `onClaimFocus`.
         var onClaimFocus: (() -> Void)?
         /// What runs once the engine has its real size: starting the child.

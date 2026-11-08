@@ -413,7 +413,8 @@ struct TransportMigrationRaceTests {
         return TerminalPanePresentation.identity(
             for: current, switching: state.switchingAccountTerminals[row.id],
             attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
-            attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+            attachRetry: state.terminalAttachRetries[row.id] ?? 0,
+            engineOverride: state.terminalEngineOverrides[row.id])
     }
 
     @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async throws {

@@ -164,12 +164,13 @@ private struct PinnedTerminalCell: View {
                     }
                 )
                 // The identity every terminal host shares, so the attach-failed
-                // placard's Retry, and an account switch's wake, rebuild this
-                // panel too, as they do a pane's.
+                // placard's Retry, an account switch's wake, and an engine
+                // switch rebuild this panel too, as they do a pane's.
                 .id(TerminalPanePresentation.attachIdentity(
                     for: terminal,
                     attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0,
-                    attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0))
+                    attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0,
+                    engineOverride: appState.terminalEngineOverrides[terminal.id]))
             } else {
                 ZStack {
                     Color(nsColor: .textBackgroundColor)

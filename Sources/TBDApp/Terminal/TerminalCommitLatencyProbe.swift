@@ -376,24 +376,40 @@ final class TerminalCommitLatencyProbe {
 
     /// Points SwiftTerm's frame-presented diagnostics hook at this probe.
     ///
-    /// The hook is a process-wide static with a single slot, so installing
-    /// takes sole ownership of it. That is safe here only because TBD uses it
-    /// nowhere else; a second user would need a real fan-out in the fork. Only
-    /// `shared` installs, so a probe built by `make(defaults:)` in a test
-    /// never touches process-global state.
+    /// The hook is a process-wide static with a single slot, shared with the
+    /// SwiftTerm engines' own `onFramePresented` through
+    /// `SwiftTermFramePresentedFanOut`, which owns the slot. Only `shared`
+    /// installs, so a probe built by `make(defaults:)` in a test never touches
+    /// process-global state.
     func installFramePresentedHook() {
-        TerminalView.onFramePresented = { [weak self] in
-            // SwiftTerm calls this on the main thread from the Core Graphics
-            // `draw` path, and off-main only from the Metal renderer — which
-            // TBD does not use. Ignoring a non-main call keeps that assumption
-            // from turning into a crash if it ever stops holding, and hopping
-            // to main instead would fold dispatch latency into the span.
-            guard Thread.isMainThread else { return }
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.recordFramePresented(at: self.now())
-            }
-        }
+        SwiftTermFramePresentedFanOut.attach(probe: self)
+    }
+
+    /// SwiftTerm called its frame-presented hook: a terminal draw returned.
+    fileprivate func frameDrawReturned() {
+        recordFramePresented(at: now())
+    }
+
+    // MARK: - libghostty frames
+
+    /// A libghostty frame is about to be encoded: the same point in its draw
+    /// as `TBDTerminalView.viewWillDraw()` is in SwiftTerm's, so both engines'
+    /// draws open and join cycles alike. libghostty draws from its display
+    /// link on the main thread, so the cycle's mark and completion block land
+    /// on that turn's transaction; Metal presents the frame outside it, so
+    /// `commitms` for a libghostty cycle is the app's Core Animation work in
+    /// that turn, not the frame's.
+    static func recordEngineDrawWillBegin(view: NSView) {
+        guard let probe = shared else { return }
+        probe.recordDrawWillBegin(at: probe.timestamp(), isOnScreen: isOnScreen(view))
+    }
+
+    /// A libghostty frame has been encoded and committed to the GPU, the app's
+    /// last work on it: the end of the paint span, as SwiftTerm's draw
+    /// returning is.
+    static func recordEngineFrameDrawn() {
+        guard let probe = shared else { return }
+        probe.recordFramePresented(at: probe.timestamp())
     }
 
     // MARK: - Visibility
@@ -442,5 +458,78 @@ final class TerminalCommitLatencyProbe {
     static func make(defaults: UserDefaults) -> TerminalCommitLatencyProbe? {
         guard AppState.commitLatencyDiagnosticEnabled(defaults: defaults) else { return nil }
         return TerminalCommitLatencyProbe()
+    }
+}
+
+/// The one owner of SwiftTerm's process-wide frame-presented hook,
+/// `TerminalView.onFramePresented`, which it fans out to the commit probe and
+/// to each SwiftTerm engine's `onFramePresented`.
+///
+/// SwiftTerm calls the hook on the main thread at the end of a Core Graphics
+/// `draw`, and says nothing of which view drew. So a `TBDTerminalView` that
+/// begins drawing while its engine has an `onFramePresented` waits here, and
+/// the next present fires every waiting view's hook once.
+///
+/// **The attribution is approximate.** AppKit sends `viewWillDraw` to a whole
+/// subtree before drawing any of it, so when several terminals draw in one
+/// display cycle every one of them hears the first terminal's draw return,
+/// early by the draws after it; and a view whose draw bails before the hook
+/// waits for the next terminal's present. Each view still hears one present
+/// per frame it began. The commit probe's own span is unaffected: it is the
+/// span of all terminal draws in the cycle, not a per-view number.
+///
+/// Installed on first use and never removed. With no probe and no view
+/// waiting, a present costs one empty check.
+@MainActor
+enum SwiftTermFramePresentedFanOut {
+    private static var installed = false
+    private static weak var probe: TerminalCommitLatencyProbe?
+    /// Views whose draw began since the last present, in the order they began.
+    private static var waiting: [WaitingView] = []
+
+    private struct WaitingView {
+        weak var view: TBDTerminalView?
+    }
+
+    static func attach(probe: TerminalCommitLatencyProbe) {
+        self.probe = probe
+        installIfNeeded()
+    }
+
+    /// Called from `TBDTerminalView.viewWillDraw()` while the view's engine
+    /// has an `onFramePresented`.
+    static func noteDrawWillBegin(_ view: TBDTerminalView) {
+        installIfNeeded()
+        guard !waiting.contains(where: { $0.view === view }) else { return }
+        waiting.append(WaitingView(view: view))
+    }
+
+    /// What SwiftTerm's hook runs: the probe first, so its stamp is the
+    /// draw's own, then every waiting view.
+    static func framePresented() {
+        probe?.frameDrawReturned()
+        guard !waiting.isEmpty else { return }
+        let views = waiting
+        waiting.removeAll(keepingCapacity: true)
+        for entry in views {
+            entry.view?.onFramePresented?()
+        }
+    }
+
+    private static func installIfNeeded() {
+        guard !installed else { return }
+        installed = true
+        TerminalView.onFramePresented = {
+            // SwiftTerm calls this on the main thread from the Core Graphics
+            // `draw` path, and off-main only from the Metal renderer, which
+            // TBD's SwiftTerm terminals use only behind their own flag.
+            // Ignoring a non-main call keeps that assumption from turning
+            // into a crash if it ever stops holding, and hopping to main
+            // instead would fold dispatch latency into the span.
+            guard Thread.isMainThread else { return }
+            MainActor.assumeIsolated {
+                SwiftTermFramePresentedFanOut.framePresented()
+            }
+        }
     }
 }

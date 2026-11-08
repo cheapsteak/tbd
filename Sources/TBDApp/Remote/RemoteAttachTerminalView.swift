@@ -35,8 +35,8 @@ struct RemoteAttachTerminalView: View {
     let onStarted: (Date) -> Void
     /// Forwarded to `LocalPTYTerminalRepresentable`: the pager registers the
     /// view as this selection's focus target while it is mounted.
-    var onViewMounted: ((TBDTerminalView) -> Void)?
-    var onViewDismantled: ((TBDTerminalView) -> Void)?
+    var onViewMounted: ((any RemoteFocusTerminalView) -> Void)?
+    var onViewDismantled: ((any RemoteFocusTerminalView) -> Void)?
     /// Forwarded to `LocalPTYTerminalRepresentable`: the pager gates the
     /// spawn-time focus claim on the attach slot being shown.
     var onClaimFocus: (() -> Void)?

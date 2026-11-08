@@ -147,6 +147,10 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
         }
     }
 
+    func deliverDroppedText(_ text: String) {
+        terminalView.deliverDroppedText(text)
+    }
+
     // MARK: - Input
 
     nonisolated func feed(_ bytes: ArraySlice<UInt8>) {
@@ -375,12 +379,13 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
         set { terminalView.onDrawStart = newValue }
     }
 
-    /// Kept, and not yet called. SwiftTerm's frame-presented hook is one
-    /// process-wide static, `TerminalView.onFramePresented`, and
-    /// `TerminalCommitLatencyProbe` owns it, so no single view's engine can
-    /// install there without taking it from the probe. Firing this per engine
-    /// is the instruments task's job.
-    var onFramePresented: (@MainActor () -> Void)?
+    /// Fired when SwiftTerm's Core Graphics `draw` returns for a frame this
+    /// view began, through `SwiftTermFramePresentedFanOut`, which shares
+    /// SwiftTerm's one process-wide hook with the commit probe.
+    var onFramePresented: (@MainActor () -> Void)? {
+        get { terminalView.onFramePresented }
+        set { terminalView.onFramePresented = newValue }
+    }
 
     // MARK: - TerminalViewDelegate
 

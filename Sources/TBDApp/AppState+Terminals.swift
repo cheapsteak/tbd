@@ -403,6 +403,13 @@ extension AppState {
             terminalSessionOrderObservedAt.removeValue(forKey: terminal.id)
             terminalReplacementObservedGeneration.removeValue(forKey: terminal.id)
             lastForwardedProgramStatusReports.removeValue(forKey: terminal.id)
+            // A Switch Terminal Engine choice goes with the terminal here as
+            // in `recordTerminalRemoval`, so a row recreated under this id
+            // after a missed removal opens on the flag's engine. Written only
+            // when there is one: the dictionary is observed.
+            if terminalEngineOverrides[terminal.id] != nil {
+                terminalEngineOverrides.removeValue(forKey: terminal.id)
+            }
         }
         guard visible != existing else { return }
         terminals[worktreeID] = visible
@@ -555,6 +562,9 @@ extension AppState {
         if limitHits[terminalID] != nil { limitHits.removeValue(forKey: terminalID) }
         if terminalAttachRetries[terminalID] != nil {
             terminalAttachRetries.removeValue(forKey: terminalID)
+        }
+        if terminalEngineOverrides[terminalID] != nil {
+            terminalEngineOverrides.removeValue(forKey: terminalID)
         }
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date

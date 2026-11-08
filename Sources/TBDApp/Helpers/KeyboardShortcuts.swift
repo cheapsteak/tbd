@@ -278,6 +278,21 @@ private struct TerminalCommandsContent: View {
         .keyboardShortcut("w", modifiers: .command)
         .disabled(!appState.canCloseFocusedTab)
 
+        // In the menu only while the libghostty experiment is on, and enabled
+        // only for a focused holder terminal (`TerminalEngineSwitchCommand`).
+        // The flag is read through `AppState`, from the store every panel
+        // decides its engine from, so the menu follows it as soon as it changes.
+        if TerminalEngineSwitchCommand.isVisible(experimentEnabled: appState.ghosttyTerminalEngineFlag) {
+            Button(TerminalEngineSwitchCommand.title) {
+                Task { @MainActor in
+                    appState.switchFocusedTerminalEngine()
+                }
+            }
+            .keyboardShortcut(
+                TerminalEngineSwitchCommand.key, modifiers: TerminalEngineSwitchCommand.modifiers)
+            .disabled(!appState.canSwitchFocusedTerminalEngine)
+        }
+
         Divider()
 
         // ⌘/ is unbound in this app, unclaimed by the terminal view, inert in

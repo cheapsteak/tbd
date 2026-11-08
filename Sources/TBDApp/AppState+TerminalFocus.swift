@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import class TBDGhosttyTerminal.GhosttyTerminalView
 import TBDShared
 
 /// A weak reference to a mounted terminal's view, for focus. An `NSView`
@@ -15,6 +16,47 @@ final class TerminalFocusTarget {
 
     init(_ view: NSView) {
         self.view = view
+    }
+}
+
+/// A terminal engine's view as the remote attach focus registry needs it: one
+/// whose window hook a registration can chain a focus claim onto, after the
+/// engine's own forwarder, and later take back off.
+///
+/// Both engines' views conform, so a local PTY built on libghostty is
+/// registered, claimed and given up exactly as a SwiftTerm one is. Without
+/// that, a libghostty attach pane hidden behind the log fallback would keep
+/// focus and send typing to the remote session unseen.
+@MainActor
+protocol RemoteFocusTerminalView: NSView {
+    /// Chains `claim` after the view's own window hook, and returns what puts
+    /// the own hook back.
+    func chainWindowHook(_ claim: @escaping @MainActor () -> Void) -> () -> Void
+}
+
+extension TBDTerminalView: RemoteFocusTerminalView {
+    func chainWindowHook(_ claim: @escaping @MainActor () -> Void) -> () -> Void {
+        let ownHook = onMovedToWindow
+        onMovedToWindow = {
+            ownHook?()
+            claim()
+        }
+        return { [weak self] in
+            self?.onMovedToWindow = ownHook
+        }
+    }
+}
+
+extension GhosttyTerminalView: RemoteFocusTerminalView {
+    func chainWindowHook(_ claim: @escaping @MainActor () -> Void) -> () -> Void {
+        let ownHook = onMovedToWindow
+        onMovedToWindow = {
+            ownHook?()
+            claim()
+        }
+        return { [weak self] in
+            self?.onMovedToWindow = ownHook
+        }
     }
 }
 
@@ -121,18 +163,13 @@ extension AppState {
     /// the hook back. A registration that supersedes another for the same
     /// selection puts the superseded view's hook back first, so hooks never
     /// stack and a superseded view never claims for its replacement.
-    func registerRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
+    func registerRemoteTerminalView(_ view: any RemoteFocusTerminalView, for selection: RemoteSessionSelection) {
         remoteTerminalFocusTargets[selection]?.restoreWindowHook?()
         let target = TerminalFocusTarget(view)
-        let ownHook = view.onMovedToWindow
-        target.restoreWindowHook = { [weak view] in
-            view?.onMovedToWindow = ownHook
-        }
-        remoteTerminalFocusTargets[selection] = target
-        view.onMovedToWindow = { [weak self] in
-            ownHook?()
+        target.restoreWindowHook = view.chainWindowHook { [weak self] in
             self?.focusRemoteTerminalAfterSelectionChange(selection)
         }
+        remoteTerminalFocusTargets[selection] = target
     }
 
     /// Called by `RemoteSessionDetailView` whenever the selection whose
@@ -160,7 +197,7 @@ extension AppState {
     /// Identity-guarded: a superseded view's dismantle, which can land after
     /// its replacement registered, leaves the replacement alone. Its own hook
     /// was put back when it was superseded.
-    func unregisterRemoteTerminalView(_ view: TBDTerminalView, for selection: RemoteSessionSelection) {
+    func unregisterRemoteTerminalView(_ view: any RemoteFocusTerminalView, for selection: RemoteSessionSelection) {
         guard let target = remoteTerminalFocusTargets[selection], target.view === view else { return }
         target.restoreWindowHook?()
         remoteTerminalFocusTargets.removeValue(forKey: selection)

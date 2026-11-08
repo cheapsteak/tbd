@@ -476,20 +476,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let coordinator = context.coordinator
+        let panelRow = appState.terminals.values
+            .lazy
+            .flatMap { $0 }
+            .first(where: { $0.id == terminalID })
+        // The engine is chosen once, here: a holder panel may be built on
+        // libghostty while `useGhosttyTerminalEngine` is on, or on whichever
+        // engine Switch Terminal Engine chose for it, and every other panel
+        // stays on SwiftTerm. A panel whose row AppState has not loaded yet
+        // resolves as tmux, as `panelTransport()` does, and so is built on
+        // SwiftTerm, where it stays unless a switch moves it once its row is
+        // in.
+        let engineKind = appState.terminalEngineKind(for: terminalID)
         // Wire up Cmd+Click file path detection: the worktree path is what a
         // clicked relative path resolves against.
         let engine = TerminalEngineFactory.make(
-            kind: .swiftTerm,
+            kind: engineKind,
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(
                 terminalID: terminalID,
                 worktreePath: worktreePath,
                 remoteURL: remoteURL,
-                isCodexTerminal: appState.terminals.values
-                    .flatMap { $0 }
-                    .first(where: { $0.id == terminalID })?
-                    .isCodexTerminal == true))
+                isCodexTerminal: panelRow?.isCodexTerminal == true))
 
         // Experimental GPU draw path (default off — Settings → Terminal →
         // Experimental). Requested here rather than in `updateNSView` so a
@@ -614,8 +623,58 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         appState.registerTerminalView(engine.view, for: terminalID)
+        Self.registerEngineRecords(
+            of: coordinator, requested: engineKind, builtOn: engine.kind, in: appState, terminalID: terminalID)
 
         return engine.view
+    }
+
+    /// Enters a newly made panel in AppState's per-terminal engine records:
+    /// Switch Terminal Engine reaches the panel through
+    /// `terminalEngineSwitchers`, and the tab's engine label names the engine
+    /// it was actually built on from `terminalEnginesInUse`. The coordinator
+    /// keeps what the panel asked for, `requested`, beside the override its
+    /// identity carries, for the switch to decide by (`TerminalEngineBuild`).
+    ///
+    /// The label's record is observed, so it is written a main-queue turn
+    /// later rather than inside the view update that made the panel;
+    /// `unregisterEngineRecords` forgets it the same way, queued after, so a
+    /// panel's two writes land in order. Both carry the panel's token, so a
+    /// successor made in the same update keeps its entries whichever of the
+    /// two SwiftUI runs first.
+    ///
+    /// With `useGhosttyTerminalEngine` off, no label shows, so the record is
+    /// not written at all: every tab item reads it, and a write on every
+    /// panel mount would redraw them all for nothing. The forget then finds
+    /// no entry of this panel's and writes nothing either. A panel mounted
+    /// while the flag was off gets its label when it is next built.
+    @MainActor
+    static func registerEngineRecords(
+        of coordinator: Coordinator, requested: TerminalEngineKind, builtOn kind: TerminalEngineKind,
+        in appState: AppState, terminalID: UUID
+    ) {
+        coordinator.engineBuild = TerminalEngineBuild(
+            requested: requested, override: appState.terminalEngineOverrides[terminalID])
+        let owner = coordinator.engineSwitchToken
+        appState.registerTerminalEngineSwitcher(for: terminalID, owner: owner) { [weak coordinator] in
+            coordinator?.switchEngine()
+        }
+        guard appState.ghosttyTerminalEngineEnabled else { return }
+        DispatchQueue.main.async { [weak appState] in
+            appState?.noteTerminalEngineInUse(kind, terminalID: terminalID, owner: owner)
+        }
+    }
+
+    /// Takes a dismantled panel out of the records `registerEngineRecords`
+    /// entered it in, leaving a successor's entries alone.
+    @MainActor
+    static func unregisterEngineRecords(of coordinator: Coordinator, terminalID: UUID) {
+        let owner = coordinator.engineSwitchToken
+        guard let appState = coordinator.appState else { return }
+        appState.unregisterTerminalEngineSwitcher(for: terminalID, owner: owner)
+        DispatchQueue.main.async { [weak appState] in
+            appState?.forgetTerminalEngineInUse(terminalID: terminalID, owner: owner)
+        }
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
@@ -639,6 +698,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.appState?.unregisterTerminalView(nsView, for: coordinator.panelID)
+        unregisterEngineRecords(of: coordinator, terminalID: coordinator.panelID)
         coordinator.cleanup()
     }
 
@@ -929,6 +989,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// from `dismantleNSView` and every reader is a `@MainActor` method,
         /// so plain-var access is race-free.
         private var isTornDown = false
+        /// Names this panel in AppState's per-terminal engine records
+        /// (`terminalEngineSwitchers`, `terminalEnginesInUse`), so a
+        /// predecessor's teardown leaves its successor's entries alone.
+        let engineSwitchToken = UUID()
+        /// What this panel asked the factory for, and the override its
+        /// identity carries, recorded by `registerEngineRecords`. Nil until
+        /// then, and a panel with none does not switch.
+        var engineBuild: TerminalEngineBuild?
 
         init(clock: any Clock<Duration> = ContinuousClock()) {
             self.clock = clock
@@ -1995,6 +2063,64 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             ledger.register(terminalID: panelID, task: handback)
         }
 
+        /// Switch Terminal Engine: record the other engine for this terminal,
+        /// which rebuilds the panel on it.
+        ///
+        /// The switch touches the session not at all. The override is part of
+        /// the panel's identity (`TerminalPanePresentation.attachIdentity`), so
+        /// writing it makes SwiftUI tear this panel down and build its
+        /// successor, exactly as a layout change does. The teardown's
+        /// `cleanup()` makes the one handback, through `detachHolderSession()`:
+        /// the reader reads on within its bound until the output ends between
+        /// sequences (`TerminalEngine.isAtSequenceBoundary`, on either engine),
+        /// the screen is serialized after the close, and the detach carries
+        /// it. The successor's attach waits for that detach
+        /// (`HolderHandbackLedger.awaitSettled`) and receives the screen. A
+        /// panel with no live attach needs nothing else: its teardown settles
+        /// whatever is in flight, as for a closed tab. Nothing is awaited here,
+        /// so nothing can land after a teardown or a close that follows.
+        ///
+        /// The other engine is the other of the one this panel is actually
+        /// on, and what to write is `TerminalEngineSwitchPlan.plan`'s answer:
+        /// the override that changes this panel's identity and makes the
+        /// rebuilt panel ask for that engine. That holds for a panel built
+        /// while `useGhosttyTerminalEngine` was off, or before its row loaded,
+        /// which runs on SwiftTerm and already resolves to libghostty now. Two
+        /// presses do nothing more: one after a libghostty start fell back to
+        /// SwiftTerm, which would only fall back again, and a second press
+        /// before the rebuild. The log says which. With the flag off, where an
+        /// override counts for nothing, nothing happens at all.
+        @MainActor
+        func switchEngine() {
+            guard !isTornDown, let appState, let engine, let engineBuild,
+                  appState.ghosttyTerminalEngineEnabled,
+                  panelTransport() == .holder else { return }
+            let builtOn = engine.kind
+            let target = builtOn.other
+            let plan = TerminalEngineSwitchPlan.plan(
+                build: engineBuild, builtOn: builtOn,
+                currentOverride: appState.terminalEngineOverrides[panelID])
+            let skipped: String
+            switch plan {
+            case .setOverride(let override):
+                terminalEngineSwitchLog.info(
+                    "switching terminal engine terminal=\(self.panelID, privacy: .public) from=\(builtOn.rawValue, privacy: .public) to=\(target.rawValue, privacy: .public) override=\(override?.rawValue ?? "none", privacy: .public)"
+                )
+                // Nil removes the entry.
+                appState.terminalEngineOverrides[panelID] = override
+                return
+            case .skipFellBack:
+                skipped = "libghostty did not start here and would fall back again"
+            case .skipRebuildPending:
+                skipped = "a switch is already rebuilding the panel"
+            case .skipNothingMoves:
+                skipped = "no override would rebuild the panel on \(target.rawValue)"
+            }
+            terminalEngineSwitchLog.info(
+                "terminal engine switch skipped terminal=\(self.panelID, privacy: .public): \(skipped, privacy: .public), so the panel stays on \(builtOn.rawValue, privacy: .public)"
+            )
+        }
+
         /// Serialize this panel's terminal as the byte stream that reconstructs
         /// it — `HolderReader.snapshotPreamble` in the other direction, at the
         /// same scrollback depth the daemon sends out.
@@ -2290,38 +2416,56 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 let location = event.locationInWindow
 
                 let consumed = MainActor.assumeIsolated { [weak self] in
-                    guard let self else { return false }
-                    guard let engine = ref.engine else { return false }
-                    let tv = engine.view
-                    guard tv.window != nil else { return false }
-                    // Short-circuit when a SwiftUI overlay is open on top of this
-                    // terminal — pass the event through so the overlay can handle it.
-                    if self.shouldSuppressEvents() { return false }
-                    let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return false }
-
-                    // Use actual scroll position so the session routes to the
-                    // correct pane. Grid math runs OUTSIDE the lock (view API);
-                    // the mouseMode guard and the sends ride one `withScreen`
-                    // block — the same calls, under the same lock, as
-                    // SwiftTerm's own native mouse-reporting path.
-                    let grid = engine.gridPosition(atWindowLocation: location)
-                    let cellHeight = engine.cellSize.height
-
-                    return engine.withScreen { screen -> Bool in
-                        let wheel = self.wheelAccumulator.reports(
-                            for: wheelEvent,
-                            cellHeight: cellHeight,
-                            mouseReporting: screen.mouseReporting,
-                            alternateScreen: screen.isAlternateScreen)
-                        guard wheel.claim else { return false }
-                        if let (col, row) = grid, wheel.lines != 0 {
-                            screen.sendWheelReports(lines: wheel.lines, column: col, row: row)
-                        }
-                        return true
-                    }
+                    guard let self, let engine = ref.engine else { return false }
+                    return self.consumeScrollWheel(wheelEvent, atWindowLocation: location, on: engine)
                 }
                 return consumed ? nil : event
+            }
+        }
+
+        /// The scroll monitor's decision for one wheel event over `engine`'s
+        /// view: true when the panel claims it, so the event never reaches the
+        /// view, and false when it passes through to whatever is under it.
+        ///
+        /// Engine-agnostic: the mode it routes by, the alternate-screen check
+        /// and the reports all come from `withScreen`, so a libghostty view is
+        /// routed exactly as a SwiftTerm one is, and the view's own wheel
+        /// handling runs only for an event this passes through. Split from the
+        /// monitor so a test can drive it, since a local monitor sees only
+        /// events the run loop dequeues.
+        @MainActor
+        func consumeScrollWheel(
+            _ wheelEvent: ScrollWheelAccumulator.Event,
+            atWindowLocation location: CGPoint,
+            on engine: any TerminalEngine
+        ) -> Bool {
+            let tv = engine.view
+            guard tv.window != nil else { return false }
+            // Short-circuit when a SwiftUI overlay is open on top of this
+            // terminal — pass the event through so the overlay can handle it.
+            if shouldSuppressEvents() { return false }
+            let point = tv.convert(location, from: nil)
+            guard tv.bounds.contains(point) else { return false }
+
+            // Use actual scroll position so the session routes to the
+            // correct pane. Grid math runs OUTSIDE the lock (view API);
+            // the mouseMode guard and the sends ride one `withScreen`
+            // block — the same calls, under the same lock, as
+            // SwiftTerm's own native mouse-reporting path.
+            let grid = engine.gridPosition(atWindowLocation: location)
+            let cellHeight = engine.cellSize.height
+
+            return engine.withScreen { screen -> Bool in
+                let wheel = self.wheelAccumulator.reports(
+                    for: wheelEvent,
+                    cellHeight: cellHeight,
+                    mouseReporting: screen.mouseReporting,
+                    alternateScreen: screen.isAlternateScreen)
+                guard wheel.claim else { return false }
+                if let (col, row) = grid, wheel.lines != 0 {
+                    screen.sendWheelReports(lines: wheel.lines, column: col, row: row)
+                }
+                return true
             }
         }
 

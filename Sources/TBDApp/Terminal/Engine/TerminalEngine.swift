@@ -110,6 +110,12 @@ protocol TerminalEngine: AnyObject, Sendable {
     /// Whether pastes are offered to the delegate before the terminal brackets
     /// them. On only while a control-mode attach is live.
     func setControlModePasteInterception(enabled: Bool)
+    /// Routes text a drop produced, such as the shell-quoted paths of dropped
+    /// files, exactly as the view routes a real drop: offered to the delegate
+    /// while paste interception is on, else sent as typed. The view's drop
+    /// handler calls the same entry, and a test drives it here, because a test
+    /// can neither build an `NSDraggingInfo` nor write the general pasteboard.
+    func deliverDroppedText(_ text: String)
 
     // MARK: Instruments
 
@@ -118,6 +124,11 @@ protocol TerminalEngine: AnyObject, Sendable {
     var latencyTap: TerminalLatencyTap? { get set }
     /// Called as each frame begins drawing.
     var onDrawStart: (@MainActor () -> Void)? { get set }
-    /// Called when a frame has been presented.
+    /// Called when a frame has been presented, as each emulator can say it,
+    /// and the two say different things. SwiftTerm: its Core Graphics draw
+    /// has returned, the app's last work on the frame. libghostty: Metal has
+    /// reported the drawable presented, a frame or so later and closer to the
+    /// glass. Compare the two engines with the latency tap and the commit
+    /// probe, which stamp the same points in both, not with this.
     var onFramePresented: (@MainActor () -> Void)? { get set }
 }

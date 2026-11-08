@@ -125,6 +125,12 @@ extension GhosttyTerminal {
         }
     }
 
+    /// The terminal's input binding, made now if nothing has made it yet. nil once the terminal is
+    /// closed, or if it cannot be made.
+    func inputBindingIfOpen() -> InputBinding? {
+        input("making the input binding", fallback: nil) { _, binding in binding }
+    }
+
     // MARK: Keys
 
     /// Encodes one key press against the terminal's current modes. Returns the bytes for the caller

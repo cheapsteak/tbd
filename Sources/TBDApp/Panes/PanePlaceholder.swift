@@ -433,7 +433,8 @@ struct PanePlaceholder: View {
             .id(TerminalPanePresentation.identity(
                 for: terminal, switching: switching,
                 attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0,
-                attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0))
+                attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0,
+                engineOverride: appState.terminalEngineOverrides[terminal.id]))
             .overlay {
                 // Full-surface click-to-wake for a PARKED pane: the whole
                 // frozen snapshot is the resume affordance (the old

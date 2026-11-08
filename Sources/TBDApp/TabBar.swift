@@ -982,6 +982,19 @@ private struct TabBarItem: View {
         isSelected || isHovering
     }
 
+    /// The engine this tab's terminal is drawn by, while the libghostty
+    /// experiment is on and the terminal has a mounted panel.
+    ///
+    /// The flag comes from `AppState`'s own store, the one every panel
+    /// decides its engine from, and is checked before the in-use record is
+    /// read (`AppState.terminalEngineLabel(for:)`), so while the experiment is
+    /// off this tab does not observe `terminalEnginesInUse` and another
+    /// panel's mount does not redraw it.
+    private var engineLabel: String? {
+        guard let terminal else { return nil }
+        return appState.terminalEngineLabel(for: terminal.id)
+    }
+
     /// The rename field's minimum width: the label's width when editing
     /// began, and at least 60 pt.
     private var renameFieldMinWidth: CGFloat {
@@ -1113,6 +1126,16 @@ private struct TabBarItem: View {
                             .foregroundStyle(.orange)
                             .padding(.leading, 4)
                             .help("Session limit hit — TBD will type \"continue\" at this time. Right-click to cancel.")
+                    }
+
+                    if let engineLabel {
+                        Text(engineLabel)
+                            .font(.system(size: 9))
+                            .lineLimit(1)
+                            .fixedSize()
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 4)
+                            .help("Drawn by \(engineLabel). Terminal ▸ \(TerminalEngineSwitchCommand.title) (⌃⌘E) moves a holder terminal to the other engine.")
                     }
                 }
                 .padding(.leading, 8)
