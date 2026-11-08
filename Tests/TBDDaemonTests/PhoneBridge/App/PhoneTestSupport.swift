@@ -366,6 +366,39 @@ final class HeldPairingRead: @unchecked Sendable {
     }
 }
 
+// MARK: - FailingPairingRead
+
+/// A pairing read for `PhoneAppService(readPairing:)` that throws on its
+/// first `failures` calls, as a database read that fails does, and reads the
+/// device's row on every call after them.
+final class FailingPairingRead: @unchecked Sendable {
+    struct ReadFailed: Error {}
+
+    private let lock = NSLock()
+    private var remaining: Int
+    private var count = 0
+
+    init(failures: Int) {
+        remaining = failures
+    }
+
+    /// How many reads have started, the failed ones included.
+    var reads: Int { lock.withLock { count } }
+
+    func read(_ db: TBDDatabase, _ deviceID: UUID) async throws -> Bool {
+        let fails = lock.withLock { () -> Bool in
+            count += 1
+            guard remaining > 0 else { return false }
+            remaining -= 1
+            return true
+        }
+        if fails {
+            throw ReadFailed()
+        }
+        return try await db.phoneDevices.device(id: deviceID) != nil
+    }
+}
+
 // MARK: - Waiting
 
 /// Waits until `condition` holds, or throws naming `what`.
@@ -429,9 +462,12 @@ struct PhoneServiceHarness: Sendable {
 
     /// With `phoneControlRead`, the service reads the phone control flag
     /// through it, so a test can hold the first read still; with
-    /// `pairingRead`, it reads each request's pairing through it, likewise.
+    /// `pairingRead`, it reads each request's pairing through it, likewise;
+    /// with `failingPairingRead`, each request's pairing read goes through
+    /// it, so a test can make the first reads fail.
     static func make(
-        phoneControlRead: HeldPhoneControlRead? = nil, pairingRead: HeldPairingRead? = nil
+        phoneControlRead: HeldPhoneControlRead? = nil, pairingRead: HeldPairingRead? = nil,
+        failingPairingRead: FailingPairingRead? = nil
     ) async throws -> PhoneServiceHarness {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPhoneControlEnabled(true)
@@ -451,6 +487,8 @@ struct PhoneServiceHarness: Sendable {
         var readPairing: (@Sendable (UUID) async throws -> Bool)?
         if let pairingRead {
             readPairing = { deviceID in try await pairingRead.read(db, deviceID) }
+        } else if let failingPairingRead {
+            readPairing = { deviceID in try await failingPairingRead.read(db, deviceID) }
         }
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,

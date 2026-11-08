@@ -164,6 +164,47 @@ struct PhoneRequestMemoryTests {
         await memory.forget(deviceID: phone)
     }
 
+    /// A run whose reply is not remembered, one that says its action
+    /// certainly did not happen, leaves no entry: a repeat that joined it in
+    /// flight gets its bytes, and a later call with the same ID runs again.
+    @Test func aReplyThatIsNotRememberedLetsAResendRunAgain() async throws {
+        let memory = PhoneRequestMemory(clock: EventDrivenTestClock())
+        let tally = RunTally()
+        let gate = RunGate()
+        defer { gate.open() }
+        let phone = self.phone
+        let refusal: @Sendable (PhoneRequestMemory.Refusal) -> Data = { _ in capRefusal }
+        let failing = job("send", tally: tally, gate: gate)
+        let notRemembered: @Sendable () async -> PhoneRequestMemory.RunReply = {
+            PhoneRequestMemory.RunReply(bytes: await failing(), remembered: false)
+        }
+
+        let first = Task {
+            await memory.reply(
+                deviceID: phone, requestID: "r1", method: .messageSend, refusal: refusal, run: notRemembered)
+        }
+        try await waitUntil("the first run to start") { await tally.count("send") == 1 }
+        let joined = Task {
+            await memory.reply(
+                deviceID: phone, requestID: "r1", method: .messageSend, refusal: refusal, run: notRemembered)
+        }
+        try await waitUntil("the repeat to join the run in flight") { await memory.waitingRepeats == 1 }
+        gate.open()
+        let a = await first.value
+        let b = await joined.value
+        #expect(a.reply == Data("send run 1".utf8))
+        #expect(b.reply == a.reply)
+        #expect(b.repeated)
+        #expect(await !memory.remembers(deviceID: phone, requestID: "r1"))
+
+        let resent = await memory.reply(deviceID: phone, requestID: "r1", work: job("send", tally: tally))
+        #expect(!resent.repeated)
+        #expect(resent.reply == Data("send run 2".utf8))
+        #expect(await tally.count("send") == 2)
+        #expect(await memory.remembers(deviceID: phone, requestID: "r1"))
+        await memory.forget(deviceID: phone)
+    }
+
     @Test func theMemoryForgetsAfterTenMinutes() async throws {
         let clock = EventDrivenTestClock()
         let memory = PhoneRequestMemory(clock: clock)

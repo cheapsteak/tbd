@@ -23,6 +23,13 @@ import Foundation
 /// this call from a task of its own rather than from the bridge's handler
 /// call. Only ``forget(deviceID:)`` cancels a run.
 ///
+/// **A reply whose action certainly did not happen is not kept.** A run
+/// that hands back a ``RunReply`` with `remembered` false, such as a request
+/// that stopped before it could act, has its entry forgotten when it
+/// finishes: callers waiting on the run still get its bytes, and a later call
+/// with the same pair runs `work` again, since retrying it is safe. Every
+/// other reply is kept, so a resend never acts twice.
+///
 /// **Retention counts from the reply.** An entry starts its `retention` timer
 /// when its run finishes, so an entry cannot expire while its run is going and
 /// let a repeat start a second one. The timer sleeps on the injected clock.
@@ -52,6 +59,14 @@ actor PhoneRequestMemory {
         case tooManyInFlight
         /// The request ID is remembered for a request with another method.
         case requestIDInUse
+    }
+
+    /// One run's reply, and whether a repeat after the run gets it.
+    struct RunReply: Sendable {
+        let bytes: Data
+        /// False for a reply whose action certainly did not happen, which
+        /// the memory forgets when the run finishes, so a resend runs again.
+        let remembered: Bool
     }
 
     private enum State {
@@ -106,8 +121,20 @@ actor PhoneRequestMemory {
         self.clock = clock
     }
 
+    /// ``reply(deviceID:requestID:method:refusal:run:)`` for a `work` whose
+    /// every reply is kept.
+    func reply(deviceID: UUID, requestID: String, method: PhoneAppMethod,
+               refusal: @Sendable (Refusal) -> Data,
+               work: @escaping @Sendable () async -> Data) async -> (reply: Data, repeated: Bool) {
+        await reply(deviceID: deviceID, requestID: requestID, method: method, refusal: refusal, run: {
+            RunReply(bytes: await work(), remembered: true)
+        })
+    }
+
     /// Runs `work` once per (deviceID, requestID) within `retention`; a repeat with the same
     /// `method`, in flight or done, returns the first run's reply bytes and does not call `work`.
+    /// A finished run whose reply is not `remembered` leaves no entry, so a
+    /// later call with the pair runs `work` again.
     ///
     /// `repeated` is false for the call that ran `work`, and for a refused
     /// call, which returns `refusal` of its reason without running `work` or
@@ -118,7 +145,7 @@ actor PhoneRequestMemory {
     /// cannot both find the pair unknown.
     func reply(deviceID: UUID, requestID: String, method: PhoneAppMethod,
                refusal: @Sendable (Refusal) -> Data,
-               work: @escaping @Sendable () async -> Data) async -> (reply: Data, repeated: Bool) {
+               run work: @escaping @Sendable () async -> RunReply) async -> (reply: Data, repeated: Bool) {
         if let entry = devices[deviceID]?.entries[requestID] {
             guard entry.method == method else {
                 return (refusal(.requestIDInUse), false)
@@ -150,8 +177,10 @@ actor PhoneRequestMemory {
         // this actor, and this method holds it until its first `await`.
         let run = Task {
             let reply = await work()
-            self.finish(deviceID: deviceID, requestID: requestID, entryID: entryID, reply: reply)
-            return reply
+            self.finish(
+                deviceID: deviceID, requestID: requestID, entryID: entryID, reply: reply.bytes,
+                remembered: reply.remembered)
+            return reply.bytes
         }
         insert(Entry(id: entryID, method: method, state: .inFlight(run), expiry: nil),
                deviceID: deviceID, requestID: requestID)
@@ -216,11 +245,18 @@ actor PhoneRequestMemory {
     /// Stores a finished run's reply, starts its retention timer, and evicts
     /// the device's oldest finished entries while it is past `perDeviceLimit`,
     /// so a device a burst took past the limit shrinks back as its runs
-    /// finish. Does nothing when the entry is gone, which only
+    /// finish. A reply that is not `remembered` is not stored: its entry is
+    /// forgotten. Does nothing when the entry is gone, which only
     /// ``forget(deviceID:)`` does to an entry in flight.
-    private func finish(deviceID: UUID, requestID: String, entryID: UInt64, reply: Data) {
+    private func finish(deviceID: UUID, requestID: String, entryID: UInt64, reply: Data, remembered: Bool) {
         guard var device = devices[deviceID], device.entries[requestID]?.id == entryID else { return }
         device.inFlight -= 1
+        guard remembered else {
+            device.entries.removeValue(forKey: requestID)
+            device.order.removeAll { $0 == requestID }
+            devices[deviceID] = device.entries.isEmpty ? nil : device
+            return
+        }
         device.entries[requestID]?.state = .done(reply)
         device.entries[requestID]?.expiry = armExpiry(deviceID: deviceID, requestID: requestID, entryID: entryID)
         evictPastLimit(&device)

@@ -193,6 +193,52 @@ struct PhoneAppServiceTests {
         #expect(h.recorder.records.isEmpty)
     }
 
+    /// A pairing that could not be read is `internal`, and the request did
+    /// not act, so the request memory does not keep the reply: a resend of
+    /// the same ID once the read works runs the action.
+    @Test func aResendAfterAFailedPairingReadActs() async throws {
+        let failing = FailingPairingRead(failures: 1)
+        let h = try await PhoneServiceHarness.make(failingPairingRead: failing)
+        await h.service.setHandler(Self.sendStub(h.actions), for: .messageSend)
+        let outbox = await h.connect()
+
+        let (failed, _) = try await h.request(.messageSend, id: "r1", params: sendParams, on: outbox)
+        #expect(failed.error == PhoneAppError(
+            code: .internalError, message: "TBD could not check this phone's pairing. Try again."))
+        #expect(h.actions.calls.isEmpty)
+        #expect(await !h.service.memory.remembers(deviceID: h.peer.deviceID, requestID: "r1"))
+
+        let (resent, _) = try await h.request(.messageSend, id: "r1", params: sendParams, on: outbox)
+        #expect(resent.error == nil)
+        #expect(h.actions.sends.count == 1)
+        #expect(failing.reads == 2)
+        #expect(await h.service.memory.remembers(deviceID: h.peer.deviceID, requestID: "r1"))
+    }
+
+    /// A handler's own `internal` reply can come after the core acted, as for
+    /// a core result that does not decode, so it is kept: a resend of the
+    /// same ID gets it again and acts no more.
+    @Test func aHandlersInternalReplyIsRememberedSoAResendActsNoMore() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let actions = h.actions
+        let actedThenFailed = PhoneAppService.typed(MessageSendParams.self) { p, context -> ActionOutcomeResult in
+            _ = try await actions.phoneSend(
+                TerminalSendParams(terminalID: UUID(), submit: true, parts: [.text(p.text)]),
+                deviceID: context.peer.deviceID)
+            throw PhoneAppError(code: .internalError, message: PhoneAppService.internalErrorReason)
+        }
+        await h.service.setHandler(actedThenFailed, for: .messageSend)
+        let outbox = await h.connect()
+
+        let (first, _) = try await h.request(.messageSend, id: "r1", params: sendParams, on: outbox)
+        let (resent, _) = try await h.request(.messageSend, id: "r1", params: sendParams, on: outbox)
+
+        let internalError = PhoneAppError(code: .internalError, message: PhoneAppService.internalErrorReason)
+        #expect(first.error == internalError)
+        #expect(resent.error == internalError)
+        #expect(h.actions.sends.count == 1)
+    }
+
     @Test func aRequestIDOverTheLimitIsRefusedBeforeTheMemory() async throws {
         let h = try await PhoneServiceHarness.make()
         await h.service.setHandler(Self.sendStub(h.actions), for: .messageSend)

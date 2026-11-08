@@ -215,7 +215,8 @@ final class PhoneOutboxQueue: Sendable {
 ///    something (see `remembersReplies(of:)`). The steps below run once per
 ///    request ID; a repeat gets the first run's reply, and a request that
 ///    reuses a remembered ID for another method runs nothing and is answered
-///    `bad_request`.
+///    `bad_request`. A reply that says the request certainly did not act is
+///    not kept, so a resend of it runs again (see `perform`).
 /// 3. **The pairing.** The phone's `phone_device` row must still exist, or the
 ///    reply is `refused`. A failed read fails closed with `internal`. This
 ///    closes the window where a request starts just before a revoke and
@@ -618,7 +619,7 @@ actor PhoneAppService: PhoneAppHandling {
         }
         guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
         guard Self.remembersReplies(of: method) else {
-            return await perform(method, body: body, context: context)
+            return await perform(method, body: body, context: context).reply
         }
         let deviceID = context.peer.deviceID
         let (reply, _) = await memory.reply(
@@ -635,16 +636,17 @@ actor PhoneAppService: PhoneAppHandling {
                     return Self.failure(requestID, .badRequest, Self.requestIDInUse)
                 }
             },
-            work: { [self] in
-                let performed = await self.perform(method, body: body, context: context)
+            run: { [self] in
+                let (performed, actionDidNotHappen) = await self.perform(method, body: body, context: context)
                 switch performed {
                 case .body(let reply):
-                    return reply
+                    return PhoneRequestMemory.RunReply(bytes: reply, remembered: !actionDidNotHappen)
                 case .onQueue:
                     performed.discard()
                     // Work on the service cannot be kept for a resend.
                     Self.logger.fault("Phone app: \(method.rawValue, privacy: .public) is remembered and cannot run on the queue")
-                    return Self.failure(requestID, .internalError, Self.internalErrorReason)
+                    return PhoneRequestMemory.RunReply(
+                        bytes: Self.failure(requestID, .internalError, Self.internalErrorReason), remembered: true)
                 }
             })
         return .body(reply)
@@ -655,26 +657,38 @@ actor PhoneAppService: PhoneAppHandling {
     /// record, the handler. A request whose device was revoked by the lookup,
     /// or that was cancelled by a revoke before its record, stops there, so
     /// it neither records nor acts.
-    private nonisolated func perform(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> PhoneHandlerReply {
+    ///
+    /// **`actionDidNotHappen`** is true for a reply that says the request
+    /// certainly did not act, so the request memory forgets it and a resend
+    /// runs again (`PhoneRequestMemory.RunReply`): an `internal` reply from
+    /// before the handler ran (the pairing could not be read), and every
+    /// `stopped` reply. A request stops only on a revoke, which forgets the
+    /// device's request IDs anyway. Every other reply is remembered, the
+    /// handler's `internal` ones included: a handler raises `internal` for a
+    /// core result that does not decode (`decoded(_:from:method:)`), after
+    /// the core acted, and a resend must not act again.
+    private nonisolated func perform(
+        _ method: PhoneAppMethod, body: Data, context: DeviceContext
+    ) async -> (reply: PhoneHandlerReply, actionDidNotHappen: Bool) {
         let requestID = context.requestID
         let deviceID = context.peer.deviceID
         do {
             guard try await readPairing(deviceID) else {
-                return .body(Self.failure(requestID, .refused, Self.noLongerPairedReason))
+                return (.body(Self.failure(requestID, .refused, Self.noLongerPairedReason)), false)
             }
         } catch {
             Self.logger.error(
                 "Phone app: could not read a phone's pairing: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return .body(Self.failure(requestID, .internalError, "TBD could not check this phone's pairing. Try again."))
+            return (.body(Self.failure(requestID, .internalError, "TBD could not check this phone's pairing. Try again.")), true)
         }
         let lookup = await lookUpHandler(for: method, deviceID: deviceID)
         guard !lookup.revoked else {
-            return .body(Self.failure(requestID, .refused, Self.noLongerPairedReason))
+            return (.body(Self.failure(requestID, .refused, Self.noLongerPairedReason)), false)
         }
         guard let handler = lookup.handler else {
-            return .body(PhoneAppCoding.errorReply(requestID: requestID, Self.notServed))
+            return (.body(PhoneAppCoding.errorReply(requestID: requestID, Self.notServed)), false)
         }
-        guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
+        guard !Task.isCancelled else { return (.body(Self.stopped(requestID)), true) }
         do {
             if let target = try Self.recordTarget(for: method, body: body) {
                 recorder.record(PhoneActionRecord(deviceName: context.peer.deviceName, action: method.rawValue, target: target))
@@ -682,21 +696,21 @@ actor PhoneAppService: PhoneAppHandling {
             let reply = try await handler(body, context)
             guard !Task.isCancelled else {
                 reply.discard()
-                return .body(Self.stopped(requestID))
+                return (.body(Self.stopped(requestID)), true)
             }
-            return reply
+            return (reply, false)
         } catch let error as PhoneAppError {
-            return .body(PhoneAppCoding.errorReply(requestID: requestID, error))
+            return (.body(PhoneAppCoding.errorReply(requestID: requestID, error)), false)
         } catch is DecodingError {
-            return .body(Self.failure(requestID, .badRequest, "The request's params are not valid."))
+            return (.body(Self.failure(requestID, .badRequest, "The request's params are not valid.")), false)
         } catch is CancellationError {
-            return .body(Self.stopped(requestID))
+            return (.body(Self.stopped(requestID)), true)
         } catch {
             // Only the error's type is public: its description can quote what
             // the handler was working on, such as a path or a message.
             Self.logger.error(
                 "Phone app: \(method.rawValue, privacy: .public) failed: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return .body(Self.failure(requestID, .internalError, Self.internalErrorReason))
+            return (.body(Self.failure(requestID, .internalError, Self.internalErrorReason)), false)
         }
     }
 
