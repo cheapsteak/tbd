@@ -111,7 +111,7 @@ test('each error code has its screen', () => {
   for (const code of ['badBase64', 'badJSON', 'badField'])
     assert.equal(m(code), 'This pairing link is damaged. Make a new one on the laptop.');
   assert.equal(m('unsupportedVersion'), 'Reload this page');
-  assert.equal(m('expired'), 'This pairing code expired. Make a new one on the laptop.');
+  assert.equal(m('expired'), 'The pairing code expired');
   assert.equal(linkErrorMessage(new TypeError('x')), 'This is not a TBD pairing link.');
   assert.equal(linkErrorMessage(null), 'This is not a TBD pairing link.');
 });

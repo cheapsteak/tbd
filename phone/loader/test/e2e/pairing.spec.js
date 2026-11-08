@@ -119,9 +119,10 @@ test('the stored room is the laptop\'s new room, not the QR code\'s room', async
   expect(rooms[0]).not.toBe(offerRoom);
 });
 
-test('deny shows Pairing was declined on the laptop. and saves nothing', async ({ page, server }) => {
-  const { laptop } = await pairViaPaste(page, server, { decision: 'deny' });
-  await expect(page.locator('[data-state="denied"] h2')).toHaveText('Pairing was declined on the laptop.');
+test('deny shows <name> did not allow this phone and saves nothing', async ({ page, server }) => {
+  const { laptop, link } = await pairViaPaste(page, server, { decision: 'deny' });
+  await expect(page.locator('[data-state="denied"] h2')).toHaveText(`${linkFields(link).name} did not allow this phone`);
+  await expect(page.locator('[data-state="denied"] p')).toHaveText('Someone chose Deny on the laptop. If that was a mistake, pair again.');
   expect(laptop.counts.hello).toBe(1);
   expect(laptop.devices.size).toBe(0);
   expect(await readLoaderDB(page)).toEqual(EMPTY_DB);
@@ -129,7 +130,7 @@ test('deny shows Pairing was declined on the laptop. and saves nothing', async (
 
 test('laptop expiry shows the expired message and saves nothing', async ({ page, server }) => {
   const { laptop } = await pairViaPaste(page, server, { decision: 'expire' });
-  await expect(page.locator('[data-state="expired"] h2')).toHaveText('This pairing code expired. Make a new one on the laptop.');
+  await expect(page.locator('[data-state="expired"] h2')).toHaveText('The pairing code expired');
   expect(laptop.counts.hello).toBe(1);
   expect(laptop.devices.size).toBe(0);
   expect(await readLoaderDB(page)).toEqual(EMPTY_DB);
@@ -139,7 +140,7 @@ test('a link already past exp plus 120 s is refused before any socket opens', as
   await page.goto(`${server.origin}/`);
   await openPasteScreen(page);
   await pasteLink(page, server.pairingLink(server.laptops[0], { expSeconds: -121 }));
-  await expect(pasteRefusal(page)).toHaveText('This pairing code expired. Make a new one on the laptop.');
+  await expect(pasteRefusal(page)).toHaveText('The pairing code expired');
   expect(server.relay.stats.phoneJoins.size).toBe(0);
   expect(server.requests.filter((url) => url.startsWith('/v1/rooms/'))).toEqual([]);
 });

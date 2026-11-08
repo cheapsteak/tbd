@@ -11,8 +11,9 @@ export const MESSAGES = Object.freeze({
   replaced: 'Connected in another tab',
   /** @param {string} name */
   keyMissing: (name) => `This phone's key for ${name} is missing. Forget it and pair again.`,
-  denied: 'Pairing was declined on the laptop.',
-  expired: 'This pairing code expired. Make a new one on the laptop.',
+  /** @param {string} laptop */
+  denied: (laptop) => `${laptop} did not allow this phone`,
+  expired: 'The pairing code expired',
   invalidCode: 'This pairing code is no longer valid. Make a new one on the laptop.',
   notLink: 'This is not a TBD pairing link.',
   damagedLink: 'This pairing link is damaged. Make a new one on the laptop.',

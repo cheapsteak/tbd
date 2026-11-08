@@ -654,7 +654,7 @@ class LoaderPage {
     switch (screen) {
       case 'denied':
         this.#mount(renderMessage({
-          state: screen, tone: 'err', icon: 'x', nav: bar, title: MESSAGES.denied,
+          state: screen, tone: 'err', icon: 'x', nav: bar, title: MESSAGES.denied(laptop),
           body: 'Someone chose Deny on the laptop. If that was a mistake, pair again.',
           actions: [{ label: 'Pair again', kind: 'pri', onClick: pairAgain }, back],
         }));
