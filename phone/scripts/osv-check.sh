@@ -2,8 +2,8 @@
 # usage: osv-check.sh [--print-queries] [lockfile...]
 # Checks the vendored libraries (phone/loader/vendor/vendor.lock) and the packages pinned in
 # each npm lockfile against OSV. Exit 0: no advisories. 1: advisories found. 2: could not check,
-# which includes a lockfile that does not exist: a run that skipped one it was asked to check
-# would report a clean result for packages it never looked at.
+# which includes a lockfile or a vendor lock that does not exist: a run that skipped one it was
+# asked to check would report a clean result for packages it never looked at.
 # env: OSV_API_URL (default https://api.osv.dev/v1/querybatch), OSV_RESPONSE_FILE (test seam:
 # read the response from this file instead of the network), VENDOR_LOCK (default the repo's lock).
 set -euo pipefail
@@ -29,10 +29,13 @@ trap 'rm -rf "$work"' EXIT
 
 : >"$work/pairs"
 
-if [ -f "$vendor_lock" ]; then
-  awk -F'\t' '!/^#/ && $3=="tarball" {print $1 "\t" $2}' "$vendor_lock" >>"$work/pairs"
-else
-  echo "osv-check: notice: no vendor lock at $vendor_lock; skipping it"
+if [ ! -f "$vendor_lock" ]; then
+  echo "osv-check: vendor lock $vendor_lock does not exist" >&2
+  exit 2
+fi
+if ! awk -F'\t' '!/^#/ && $3=="tarball" {print $1 "\t" $2}' "$vendor_lock" >>"$work/pairs"; then
+  echo "osv-check: could not read $vendor_lock" >&2
+  exit 2
 fi
 
 for lf in "${lockfiles[@]}"; do

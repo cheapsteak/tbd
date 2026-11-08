@@ -61,5 +61,22 @@ if [ "$rc" -eq 2 ] && ! printf '%s' "$out" | grep -q '"queries"'; then
   ok "a missing lockfile exits 2 before printing queries"
 else bad "missing lockfile with --print-queries rc=$rc $out"; fi
 
+# A vendor lock that is not there, from a wrong VENDOR_LOCK or a moved file, must not pass for
+# one with nothing in it: jsQR would go unchecked under a clean result.
+rc=0; out="$(VENDOR_LOCK="$tmp/no-such.lock" OSV_RESPONSE_FILE="$tmp/clean.json" bash "$osv" "$tmp/package-lock.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q "$tmp/no-such.lock does not exist" && ! printf '%s' "$out" | grep -q 'no advisories'; then
+  ok "a missing vendor lock exits 2, never a clean result"
+else bad "missing vendor lock rc=$rc $out"; fi
+
+rc=0; out="$(VENDOR_LOCK="$tmp/no-such.lock" bash "$osv" --print-queries "$tmp/package-lock.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && ! printf '%s' "$out" | grep -q '"queries"'; then
+  ok "a missing vendor lock exits 2 before printing queries"
+else bad "missing vendor lock with --print-queries rc=$rc $out"; fi
+
+rc=0; out="$(VENDOR_LOCK="$tmp" OSV_RESPONSE_FILE="$tmp/clean.json" bash "$osv" "$tmp/package-lock.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && ! printf '%s' "$out" | grep -q 'no advisories'; then
+  ok "a vendor lock that is a directory exits 2"
+else bad "directory vendor lock rc=$rc $out"; fi
+
 [ "$failures" -eq 0 ] || { echo "osv-check.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "osv-check.test.sh: all passed"
