@@ -7,7 +7,7 @@ import { NoiseError, phonePrologue } from '../../channel/noise.js';
 import { base64urlEncode } from '../../channel/pairingLink.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, PAIRING_EXPIRY_GRACE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
+  HANDSHAKE_TIMEOUT_MS, KEEPALIVE_MS, LOADER_VERSION, PAIRING_EXPIRY_GRACE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { isWrapKey, unwrapPhoneKeyPair } from '../../keys.js';
 import { isRoomID, readPairingLink, relaySocketURL } from '../../links.js';
@@ -740,6 +740,35 @@ test('the signal and handshake timeouts count only visible time: one that falls 
   await second.clock.advance(1);
   await failsWith(q, 'invalid');
   assert.equal(shown.listeners(), 0);
+});
+
+test('the socket\'s wait for a keepalive pong counts only visible time: a ping out when the page hides does not end pairing', async () => {
+  const env = await setup({ offer: { decision: 'silent' } });
+  const page = fakeVisibility();
+  const pings = () => env.relay.stats.pings.get(env.offer.room) ?? 0;
+  const p = pair(env, { visibility: page });
+  await until(() => env.laptop.counts.hello === 1, 'hello at the laptop');
+  // A keepalive ping goes out while the phone waits for Allow, and its pong is lost on the way,
+  // as when the phone locks first.
+  env.relay.blackHole(env.offer.room, true);
+  await env.clock.advance(KEEPALIVE_MS);
+  await quiet();
+  assert.equal(env.relay.stats.swallowed.get(env.offer.room), 1, 'the keepalive ping');
+  page.hide();
+  await env.clock.advance(KEEPALIVE_MS * 3);
+  await quiet();
+  env.relay.blackHole(env.offer.room, false);
+  page.show();
+  // The return probes the socket, which answers.
+  p.run.probe();
+  await until(() => pings() === 1, 'the probe ping');
+  await quiet();
+  await env.clock.advance(KEEPALIVE_MS - 1);
+  await quiet();
+  assert.equal(p.settled(), null, 'still waiting for Allow');
+  p.run.cancel();
+  await failsWith(p, 'cancelled');
+  assert.equal(page.listeners(), 0, 'no timer is left listening');
 });
 
 // --- the pairing socket ---------------------------------------------------------------------

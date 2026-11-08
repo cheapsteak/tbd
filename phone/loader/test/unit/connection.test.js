@@ -6,7 +6,7 @@ import { deflateRawSync } from 'node:zlib';
 import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../channel/noise.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES,
+  CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, KEEPALIVE_MS, LOADER_VERSION, MAX_CHUNK_BYTES,
   PAIRED_GRACE_MS, RESUME_COALESCE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
@@ -1649,6 +1649,35 @@ test('the handshake timeout counts only visible time: one that falls due while h
   await env.clock.advance(1);
   await until(() => c.states().includes('offline'), 'offline');
   assert.equal(env.net.count('close()'), 1, 'the socket ends, for a retry');
+  c.conn.stop();
+  assert.equal(page.listeners(), 0, 'no timer is left listening');
+});
+
+test('the socket\'s wait for a keepalive pong counts only visible time: a ping out when the page hides does not end a live socket', async () => {
+  const env = await setup();
+  const page = fakeVisibility();
+  const c = connection(env, { visibility: page });
+  c.conn.start();
+  await until(() => c.states().includes('ready'), 'ready');
+  // A keepalive ping goes out, and its pong is lost on the way, as when the phone locks first.
+  env.relay.blackHole(env.room, true);
+  await env.clock.advance(KEEPALIVE_MS);
+  await quiet();
+  const pings = () => env.relay.stats.pings.get(env.room) ?? 0;
+  assert.equal(env.relay.stats.swallowed.get(env.room), 1, 'the keepalive ping');
+  page.hide();
+  await env.clock.advance(KEEPALIVE_MS * 10);
+  await quiet();
+  env.relay.blackHole(env.room, false);
+  page.show();
+  // The return probes the socket, which answers.
+  c.conn.resume();
+  await until(() => pings() === 1, 'the probe ping');
+  await quiet();
+  await env.clock.advance(KEEPALIVE_MS - 1);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready'], 'never reconnecting');
+  assert.equal(env.joins(), 1);
   c.conn.stop();
   assert.equal(page.listeners(), 0, 'no timer is left listening');
 });

@@ -78,9 +78,10 @@ import { laptopIDFromKey } from './store.js';
  *   has been read; never after pairing has ended.
  * @property {SubtleCrypto} [subtle] For the phone's key. Default `crypto.subtle`.
  * @property {Visibility} [visibility] The page's visibility. Default: always visible. The
- *   signal and handshake timeouts count only time while the page is visible
- *   (`startVisibleTimer`), so a phone that locks mid-pairing is not failed for answers it could
- *   not hear. The link's expiry is a wall-clock deadline, and counts all time.
+ *   signal and handshake timeouts, and the socket's waits for a pong, count only time while
+ *   the page is visible (`startVisibleTimer`), so a phone that locks mid-pairing is not failed
+ *   for answers it could not hear. The link's expiry is a wall-clock deadline, and counts all
+ *   time.
  * @property {Clock} [clock]
  */
 
@@ -143,6 +144,7 @@ class Pairing {
   #openSocket;
   #onCode;
   #subtle;
+  #visibility;
   #clock;
   #url;
   #prologue;
@@ -188,6 +190,7 @@ class Pairing {
     this.#openSocket = openSocket;
     this.#onCode = onCode;
     this.#subtle = subtle;
+    this.#visibility = visibility;
     this.#clock = clock;
     // Anything a task throws ends pairing with `invalid`.
     this.#tasks = new TaskChain({
@@ -230,6 +233,7 @@ class Pairing {
       url: this.#url,
       openSocket: this.#openSocket,
       onEvent: (event) => this.#tasks.enqueue(() => this.#onRelayEvent(event)),
+      visibility: this.#visibility,
       clock: this.#clock,
     });
     this.#socket = socket;

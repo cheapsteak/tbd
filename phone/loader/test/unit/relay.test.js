@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { RelaySocket, reconnectDelay } from '../../relay.js';
 import { KEEPALIVE_MS, RESUME_PONG_TIMEOUT_MS } from '../../constants.js';
 import { FakeClock } from '../support/fake-clock.js';
+import { fakeVisibility } from '../support/helpers.js';
 
 // A hand-driven WebSocketLike: the test plays the relay through the server* methods.
 class FakeSocket {
@@ -45,7 +46,8 @@ class FakeSocket {
   }
 }
 
-function setup() {
+/** @param {{ visibility?: ReturnType<typeof fakeVisibility> }} [options] */
+function setup({ visibility } = {}) {
   const clock = new FakeClock();
   const events = [];
   /** @type {FakeSocket[]} */
@@ -60,13 +62,15 @@ function setup() {
       return ws;
     },
     onEvent: (event) => events.push(event),
+    visibility,
     clock,
   });
   return { clock, events, sockets, urls, relay };
 }
 
-function openedSetup() {
-  const s = setup();
+/** @param {{ visibility?: ReturnType<typeof fakeVisibility> }} [options] */
+function openedSetup(options = {}) {
+  const s = setup(options);
   s.relay.open();
   s.sockets[0].serverOpen();
   return { ...s, ws: s.sockets[0] };
@@ -129,6 +133,96 @@ test('a missing pong by the next keepalive reports dead and closes', async () =>
   ws.serverClose(1000);
   await clock.advance(KEEPALIVE_MS * 2);
   assert.deepEqual(events, [{ kind: 'open' }, { kind: 'dead' }]);
+});
+
+test('a keepalive ping sent just before the page hides gets a fresh window on its return', async () => {
+  const visibility = fakeVisibility();
+  const { clock, events, ws } = openedSetup({ visibility });
+  await clock.advance(KEEPALIVE_MS);
+  assert.equal(pings(ws), 1);
+
+  // The phone locks before the pong is handled, and stays locked for many keepalives. On the
+  // return the overdue keepalive runs before the pong that arrived meanwhile: no dead socket.
+  visibility.hide();
+  await clock.advance(KEEPALIVE_MS * 10);
+  visibility.show();
+  await clock.advance(KEEPALIVE_MS - 1);
+  assert.deepEqual(events, [{ kind: 'open' }]);
+  assert.equal(pings(ws), 1, 'no second ping while the first is out');
+  ws.serverText('pong');
+  assert.equal(visibility.listeners(), 0, 'the pong ends the wait and its listener');
+  await clock.advance(KEEPALIVE_MS);
+  assert.equal(pings(ws), 2, 'the keepalive goes on');
+  ws.serverText('pong');
+  await clock.advance(KEEPALIVE_MS);
+  assert.equal(pings(ws), 3);
+  assert.deepEqual(events, [{ kind: 'open' }]);
+  assert.equal(ws.closedWith, null);
+});
+
+test('a pong that never comes ends the socket after KEEPALIVE_MS of time while visible', async () => {
+  const visibility = fakeVisibility();
+  const { clock, events, ws } = openedSetup({ visibility });
+  await clock.advance(KEEPALIVE_MS);
+  await clock.advance(KEEPALIVE_MS / 2);
+  visibility.hide();
+  await clock.advance(KEEPALIVE_MS * 10);
+  // A timer that runs on the return before its visibilitychange does nothing either.
+  visibility.show();
+  visibility.freeze();
+  await clock.advance(KEEPALIVE_MS);
+  assert.deepEqual(events, [{ kind: 'open' }]);
+  visibility.show();
+  await clock.advance(KEEPALIVE_MS - 1);
+  assert.deepEqual(events, [{ kind: 'open' }]);
+  await clock.advance(1);
+  assert.deepEqual(events, [{ kind: 'open' }, { kind: 'dead' }]);
+  assert.equal(ws.closedWith?.code, 1000);
+  assert.equal(clock.pending, 0);
+  assert.equal(visibility.listeners(), 0);
+});
+
+test('pings go out on the clock while the page is hidden, and their pongs keep the socket', async () => {
+  const visibility = fakeVisibility(false);
+  const { clock, events, ws } = openedSetup({ visibility });
+  for (let i = 1; i <= 3; i += 1) {
+    await clock.advance(KEEPALIVE_MS);
+    assert.equal(pings(ws), i);
+    ws.serverText('pong');
+  }
+  assert.deepEqual(events, [{ kind: 'open' }]);
+  assert.equal(visibility.listeners(), 0);
+});
+
+test('a probe sent just before the page hides gets a fresh window on its return', async () => {
+  const visibility = fakeVisibility();
+  {
+    const { relay, clock, events, ws } = openedSetup({ visibility });
+    relay.probe();
+    await clock.advance(RESUME_PONG_TIMEOUT_MS - 1);
+    visibility.hide();
+    await clock.advance(RESUME_PONG_TIMEOUT_MS * 5);
+    visibility.show();
+    relay.probe();
+    assert.equal(pings(ws), 1, 'the probe still out answers for this return too');
+    await clock.advance(RESUME_PONG_TIMEOUT_MS - 1);
+    ws.serverText('pong');
+    await clock.advance(RESUME_PONG_TIMEOUT_MS);
+    assert.deepEqual(events, [{ kind: 'open' }]);
+    relay.close();
+  }
+  {
+    const { relay, clock, events } = openedSetup({ visibility });
+    relay.probe();
+    visibility.hide();
+    await clock.advance(RESUME_PONG_TIMEOUT_MS * 5);
+    visibility.show();
+    await clock.advance(RESUME_PONG_TIMEOUT_MS - 1);
+    assert.deepEqual(events, [{ kind: 'open' }]);
+    await clock.advance(1);
+    assert.deepEqual(events, [{ kind: 'open' }, { kind: 'dead' }]);
+  }
+  assert.equal(visibility.listeners(), 0);
 });
 
 test('probe without a pong in 3 s reports dead; with a pong it does not', async () => {
