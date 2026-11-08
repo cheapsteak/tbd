@@ -195,6 +195,9 @@ test('each decoded message reaches its handler, and nothing else does', () => {
   assert.deepEqual(port.posted, [], 'the link never answers the loader by itself');
 });
 
+// Node starts a port as soon as a `message` listener is added, so this test passes even if
+// HostLink never calls `port.start()`. The fake-port call-order test above is the one that
+// catches a missing start; this one checks real delivery and structured clone.
 test('messages the loader posted before the bundle ran reach the app once the link starts the port', { timeout: 5_000 }, async () => {
   const { port1: loader, port2: app } = new MessageChannel();
   try {

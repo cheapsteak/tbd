@@ -54,6 +54,10 @@ export function utf8Length(s: string): number {
  * check does (`sendApp` in `phone/loader/connection.js`: `JSON.stringify`, then UTF-8), less
  * the constant wrapper. A body that JSON cannot encode, such as one with a cycle or a BigInt,
  * never fits: the loader reports it as `tooLarge` too.
+ *
+ * The body must be JSON-shaped plain data. The loader measures the structured clone of what
+ * the app posts, not the app's own object, so the two agree only on plain data: a class
+ * instance's `toJSON` is gone from the clone, and a function cannot be posted at all.
  */
 export function fitsFrame(body: Record<string, unknown>): boolean {
   let json: string | undefined;

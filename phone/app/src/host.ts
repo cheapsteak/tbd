@@ -96,7 +96,12 @@ export class HostLink {
     port.start();
   }
 
-  /** Asks the loader to send `body` to the laptop. The caller checks `fitsFrame` first. */
+  /**
+   * Asks the loader to send `body` to the laptop. The caller checks `fitsFrame` first. The
+   * body must be JSON-shaped plain data: the loader measures and sends the structured clone,
+   * so a class instance with `toJSON` would encode differently there, and a function makes
+   * this post throw.
+   */
   postApp(body: Record<string, unknown>): void {
     this.#port.postMessage({ t: 'app', body });
   }
