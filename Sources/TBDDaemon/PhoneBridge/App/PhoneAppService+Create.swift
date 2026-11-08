@@ -38,6 +38,7 @@ extension PhoneAppService {
     static let formValueTooLongReason = "A value in the form is too long."
     static let incompleteFormReason = "The form is not complete."
     static let providerNotReadyReason = "This provider is not ready on this laptop."
+    static let providerNeedsSignInReason = "Sign in to this provider on your laptop."
     static let noCreateFormReason = "This provider has not reported its create form yet."
     static let repoHasNoRemoteReason = "This repo has no remote that this provider can use."
 
@@ -215,23 +216,30 @@ extension PhoneAppService {
 
     /// Why a provider cannot create a session from the phone, or nil when it
     /// can:
-    /// - **its health is not `ok`**: the health message, which is the
-    ///   provider's own error message, or TBD's, already cut to 240
-    ///   characters by the provider manager, and cut here to
-    ///   `PhoneText.fieldLimit` bytes; `providerNotReadyReason` when it has
-    ///   none;
+    /// - **its health is `needsAuth`**: `providerNeedsSignInReason`;
+    /// - **its health is `stale` or `error`**: `providerNotReadyReason`;
     /// - **it has not reported its form** (no `describe`), which disables the
     ///   laptop sheet's Create button: `noCreateFormReason`;
     /// - **`repoPlan` cannot answer its `repo` field**, because the repo has
     ///   no remote this provider can read: `repoHasNoRemoteReason`. A blank
     ///   `repo` would be left out of the request and answered by the
     ///   provider's own default repository, required or not.
+    ///
+    /// **The phone never gets a provider's health message**, only these fixed
+    /// lines, as it gets fixed lines for an agent's error
+    /// (`PhoneSessionStatus`). The provider manager falls back to the
+    /// provider's raw stderr, or to the description of a Swift error, when a
+    /// failing verb sends no contract error, and shortening that text does not
+    /// make it safe: a wrapper's stderr can quote a URL with an access token
+    /// in it. The laptop shows the message, where its user can act on it.
     static func unavailableReason(_ status: RemoteProviderStatus, repoPlan: RemoteCreateFormLogic.Plan?) -> String? {
-        guard status.health == .ok else {
-            let message = status.errorMessage.flatMap { text in
-                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
-            }
-            return PhoneText.capped(message ?? providerNotReadyReason)
+        switch status.health {
+        case .ok:
+            break
+        case .needsAuth:
+            return providerNeedsSignInReason
+        case .stale, .error:
+            return providerNotReadyReason
         }
         guard status.describe != nil else { return noCreateFormReason }
         if repoPlan?.repoUnanswered == true { return repoHasNoRemoteReason }

@@ -375,16 +375,16 @@ struct PhoneCreateTests {
         ])
     }
 
-    /// A provider that is not ready says why and carries no fields: its
-    /// health message cut to 256 bytes, a missing form, or a repo it cannot
-    /// read.
+    /// A provider that is not ready says why, in a fixed line for its health
+    /// and never in its health message, and carries no fields: it needs a
+    /// sign-in, it is stale or failing, it has no form yet, or it cannot read
+    /// the repo.
     @Test func aProviderThatIsNotReadySaysWhy() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h, remoteURL: nil)
-        let long = String(repeating: "é", count: 300)
         try Self.offer(h, [
             Self.status("acme-auth", health: .needsAuth, errorMessage: "Not signed in"),
-            Self.status("acme-long", health: .error, errorMessage: long),
+            Self.status("acme-failing", health: .error, errorMessage: "exit 2"),
             Self.status("acme-quiet", health: .stale),
             Self.status("acme-new", describes: false),
             Self.status("acme-repo"),
@@ -398,8 +398,8 @@ struct PhoneCreateTests {
         try #require(providers.count == 5)
         let reasons = providers.map { [$0.name, $0.reason ?? "<none>"] }
         #expect(reasons == [
-            ["acme-auth", "Not signed in"],
-            ["acme-long", PhoneText.capped(long)],
+            ["acme-auth", PhoneAppService.providerNeedsSignInReason],
+            ["acme-failing", PhoneAppService.providerNotReadyReason],
             ["acme-quiet", PhoneAppService.providerNotReadyReason],
             ["acme-new", PhoneAppService.noCreateFormReason],
             ["acme-repo", PhoneAppService.repoHasNoRemoteReason],
@@ -408,8 +408,33 @@ struct PhoneCreateTests {
         #expect(available == [false, false, false, false, false])
         let fieldCounts = providers.map(\.fields.count)
         #expect(fieldCounts == [0, 0, 0, 0, 0])
-        let longReasonBytes = providers[1].reason?.utf8.count ?? 0
-        #expect(longReasonBytes <= PhoneText.fieldLimit)
+    }
+
+    /// A provider's health message can be its raw stderr, which can quote a
+    /// token. Neither `remote.providers` nor `remote.create` sends it, in any
+    /// health that is not `ok`.
+    @Test(arguments: [ProviderHealth.needsAuth, .stale, .error])
+    func aProvidersHealthMessageNeverReachesThePhone(_ health: ProviderHealth) async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let stderr = "curl: 401 https://acme-control.example/v1/sessions?access_token=sk-test-secret"
+        try Self.offer(h, [Self.status(health: health, errorMessage: stderr)])
+        try Self.startsSession(h)
+        let outbox = await h.connect()
+
+        let (_, listed) = try await h.request(
+            .remoteProviders, params: PhoneRemoteProvidersParams(repoID: repo.id), on: outbox)
+        let (created, refused) = try await h.request(
+            .remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
+
+        #expect(created.error?.code == .unsupported)
+        #expect(h.actions.remoteCreates.isEmpty)
+        for bytes in [listed, refused] {
+            let text = String(decoding: bytes, as: UTF8.self)
+            for secret in ["sk-test-secret", "access_token", "acme-control.example", "curl"] {
+                #expect(!text.contains(secret), "a \(health.rawValue) reply carries \(secret)")
+            }
+        }
     }
 
     @Test func providersForAHiddenRepoAreNotFound() async throws {
@@ -605,7 +630,7 @@ struct PhoneCreateTests {
         let (repoless, _) = try await h.request(
             .remoteCreate, params: Self.createParams(repoID: noRemote.id, provider: "acme-repo"), on: outbox)
 
-        #expect(signedOut.error == PhoneAppError(code: .unsupported, message: "Not signed in"))
+        #expect(signedOut.error == PhoneAppError(code: .unsupported, message: PhoneAppService.providerNeedsSignInReason))
         #expect(repoless.error == PhoneAppError(code: .unsupported, message: PhoneAppService.repoHasNoRemoteReason))
         #expect(h.actions.remoteCreates.isEmpty)
     }
