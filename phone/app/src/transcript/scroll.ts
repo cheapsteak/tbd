@@ -9,10 +9,12 @@
  *   back at the bottom (`pushedFromBottom`). Rows that arrive while it does not keep to the
  *   bottom show the "New messages" pill instead (`rowsChange`).
  * - **Older pages.** The list asks for the page above its rows once the reader is within two
- *   screen heights of the top, one page at a time (`wantsOlder`).
+ *   screen heights of the top, one page at a time (`wantsOlder`), and at once when the rows fit
+ *   the view, which the reader cannot scroll (`fitsView`).
  * - **Holding the reader's place.** Before an older page goes in above the rows, the list
- *   records an anchor: a row, and how far its top sits below the top of the view. Once the page
- *   is in, it scrolls so that row sits there again (`restoreTop`).
+ *   records an anchor: the row at the top of the view, and how far its top sits below the top
+ *   of the view (`anchorAt`). Once the page is in (`prepended`), it scrolls so that row sits
+ *   there again (`restoreTop`).
  *
  * Every number is in CSS pixels, as the scroll element reports them.
  */
@@ -49,10 +51,28 @@ export function wantsOlder(m: Metrics, s: Pick<TranscriptState, 'cursor' | 'load
   return m.scrollTop < 2 * m.clientHeight && s.cursor !== null && !s.loadingOlder && !s.reachedStart && !s.olderFailed;
 }
 
+/**
+ * Whether the rows fit the view, so the reader cannot scroll it at all and no scroll of theirs
+ * can ask for the page above. A first page of four short messages can fit a phone's screen.
+ */
+export function fitsView(m: Metrics): boolean {
+  return m.scrollHeight <= m.clientHeight;
+}
+
 /** A place in the list: a row, by its key, and the row's top minus the view's `scrollTop`. */
 export interface Anchor {
   key: number;
   offset: number;
+}
+
+/**
+ * The anchor for a view scrolled to `scrollTop`: `row` is the row that holds the view's top
+ * line, which is the first row whose bottom is below it, by its key and its start in the list,
+ * and `listTop` is where the list starts in the scroll element's content. Its offset is below 0
+ * when the row starts above the view.
+ */
+export function anchorAt(row: { key: number; start: number }, listTop: number, scrollTop: number): Anchor {
+  return { key: row.key, offset: listTop + row.start - scrollTop };
 }
 
 /** The `scrollTop` that puts the anchor's row, whose top is now at `rowTop`, back where it was. */
@@ -63,8 +83,8 @@ export function restoreTop(anchor: Anchor, rowTop: number): number {
 /**
  * Whether a scroll event moved the view from `prevTop`, the `scrollTop` the list last saw or
  * wrote, by more than a pixel, so a rounded read-back does not count. The reader's swipe moves
- * it, and so does the virtualizer when rows above the view change height. The event the list's
- * own write fires does not, since the list notes where its write left the view.
+ * it. The event of a write by the list, or by the virtualizer when rows above the view change
+ * height, does not, since the list notes where each of those writes left the view.
  */
 export function moved(prevTop: number, m: Metrics): boolean {
   return Math.abs(m.scrollTop - prevTop) > 1;
@@ -98,8 +118,12 @@ export function pushedFromBottom(stuck: boolean, seen: number, m: Metrics): bool
   return stuck && fromBottom(m) > seen + 1;
 }
 
-/** What the list last saw of its rows: the last row's key, or null with none, and the slice's `appendedSinceSeen`. */
+/**
+ * What the list last saw of its rows: the first and the last row's keys, each null with no
+ * rows, and the slice's `appendedSinceSeen`.
+ */
 export interface SeenRows {
+  firstKey: number | null;
   lastKey: number | null;
   appended: number;
 }
@@ -120,9 +144,19 @@ export function rowsChange(seen: SeenRows, rows: readonly TranscriptRow[], appen
   return appended > seen.appended ? 'appended' : 'same';
 }
 
-/** What the list sees of `rows` now, for the next `rowsChange`. */
+/** What the list sees of `rows` now, for the next `rowsChange` and `prepended`. */
 export function seenRows(rows: readonly TranscriptRow[], appended: number): SeenRows {
-  return { lastKey: rows.length > 0 ? rows[rows.length - 1]!.key : null, appended };
+  return { firstKey: rows[0]?.key ?? null, lastKey: rows[rows.length - 1]?.key ?? null, appended };
+}
+
+/**
+ * Whether rows came in above the rows the list last saw, as an older page puts them: the row
+ * that was first is still there, and no longer first. A page in place of the rows gives every
+ * row a new key, so it never reads as prepended.
+ */
+export function prepended(seen: SeenRows, rows: readonly TranscriptRow[]): boolean {
+  if (seen.firstKey === null || rows.length === 0 || rows[0]!.key === seen.firstKey) return false;
+  return rows.some((row) => row.key === seen.firstKey);
 }
 
 /** Whether a row has `key`, looked for from the bottom, where the row that was last stays after an append. */

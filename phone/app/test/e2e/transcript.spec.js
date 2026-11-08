@@ -4,7 +4,10 @@
 // a tool's input and result, "Show more", a subagent's items, a detail too large for the phone,
 // one the laptop no longer holds, and a collapse while the chunks load. Then the list: it opens
 // at the newest rows and draws only the rows near the screen, new rows keep a view at the bottom
-// there, and below a view scrolled up they show the "New messages" pill instead.
+// there, and below a view scrolled up they show the "New messages" pill instead. Then the older
+// pages of a 2,000-item transcript: one at a time, each holding the reader's place as it goes
+// in, a failed one shown as nothing, a reset back to the newest rows, and the scroll back ending
+// at the first item.
 //
 // mock.json has no slash item and no running tool, and its fake laptop leaves out thinking and
 // system notes unless "Show details" is on, so those arrive through `emit`, which the fake
@@ -17,7 +20,7 @@
 
 import { readFileSync } from 'node:fs';
 
-import { chunkText, DETAIL_CHUNK_BYTES, TEXT } from './fake-laptop-app.js';
+import { chunkText, DETAIL_CHUNK_BYTES, FIRST_PAGE_MESSAGES, OLDER_PAGE_MESSAGES, startBefore, TEXT } from './fake-laptop-app.js';
 import { app, expect, hostCall, hostRequests, openApp, openSessionByName, test } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
@@ -652,4 +655,391 @@ test('a shorter or turned screen keeps a view at the bottom there', async ({ pag
   await expect.poll(async () => (await metricsOf(tx)).clientHeight).toBeLessThan(size.width);
   await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
   await expect(tx.locator('button.tool', { hasText: `npm run step-${TALL_ROWS - 1}` })).toBeInViewport();
+});
+
+// --- older pages: one at a time, holding the reader's place -----------------------------------
+
+/** The items of the long transcript. */
+const LONG_ITEMS = 2_000;
+/** The turn of the long transcript's newest item, which is that turn's answer. */
+const LAST_TURN = Math.floor((LONG_ITEMS - 1) / 3);
+/** Spec section 7's caps: a first page of 16 KB, and an older page that fits one frame. */
+const FIRST_PAGE_CAP = 16_384;
+const OLDER_PAGE_CAP = 61_440;
+/** What 4b says when a remote session's earlier history failed to load (`remoteRefusedReason`). */
+const REMOTE_REFUSED = 'The remote provider refused this. Check the laptop.';
+
+/**
+ * `LONG_ITEMS` items alternating user, assistant and tool, the assistant's text one to six lines
+ * long, the oldest first.
+ */
+function longItems() {
+  return Array.from({ length: LONG_ITEMS }, (_, i) => {
+    const turn = Math.floor(i / 3);
+    const id = `long-${i}`;
+    if (i % 3 === 0) return { id, kind: 'user', text: `Question ${turn}: what does step ${turn} change?`, truncated: false };
+    if (i % 3 === 1) {
+      const lines = Array.from({ length: 1 + (turn % 6) }, (_, k) => `Answer ${turn}, line ${k + 1}: step ${turn} moves part ${k + 1} of the form.`);
+      return { id, kind: 'assistant', text: lines.join('\n\n'), truncated: false };
+    }
+    return { id, kind: 'tool', toolName: 'Bash', target: `npm test -- step-${turn}`, toolStatus: 'ok', truncated: false };
+  });
+}
+
+/**
+ * How many older pages the fake laptop serves for `items` before the start, the way 4b's daemon
+ * pages them: the first page back to the 4th-last message, each older page back 20 messages more.
+ * Throws when a page would be over spec section 7's caps, which the daemon would cut and the
+ * fake does not: then the fake would not page like the daemon.
+ * @param {any[]} items
+ */
+function olderPages(items) {
+  const bytes = (/** @type {any[]} */ shown) => new TextEncoder().encode(JSON.stringify({ items: shown, cursor: '0', reachedStart: false, omittedItems: 0 })).length;
+  let start = startBefore(items, items.length, FIRST_PAGE_MESSAGES);
+  if (bytes(items.slice(start)) > FIRST_PAGE_CAP) throw new Error('the first page is over 16 KB');
+  let pages = 0;
+  while (start > 0) {
+    const end = start;
+    start = startBefore(items, end, OLDER_PAGE_MESSAGES);
+    if (bytes(items.slice(start, end)) > OLDER_PAGE_CAP) throw new Error(`the page before ${end} is over 61,440 bytes`);
+    pages += 1;
+  }
+  return pages;
+}
+
+const LONG = longItems();
+/** The older pages between the long transcript's first page and its start. */
+const LONG_PAGES = olderPages(LONG);
+
+/**
+ * mock.json with Checkout v2's Claude transcript replaced by `items`.
+ * @param {any[]} items
+ */
+function checkoutWith(items) {
+  const scenario = structuredClone(MOCK);
+  scenario.transcripts[CHECKOUT_KEY] = items;
+  return scenario;
+}
+
+/**
+ * The cursor of every `transcript.page` that reached the laptop, in order.
+ * @param {Page} page
+ */
+async function pageCursors(page) {
+  return (await hostRequests(page)).filter((r) => r.method === 'transcript.page').map((r) => r.params.cursor);
+}
+
+/**
+ * The key of the list's first row while the list draws it, or null. A page that goes in above
+ * the rows puts another row first.
+ * @param {Locator} tx
+ * @returns {Promise<string | null>}
+ */
+function firstRowKey(tx) {
+  return tx.evaluate((el) => el.querySelector('[data-tx-row][data-index="0"]')?.getAttribute('data-key') ?? null);
+}
+
+/**
+ * Waits until a page went in above the rows: the first row is another, or out of sight.
+ * @param {Locator} tx
+ * @param {string | null} before the first row's key before the page
+ */
+async function pageWentIn(tx, before) {
+  if (before === null) throw new Error('the list does not draw its first row');
+  await expect.poll(() => firstRowKey(tx)).not.toBe(before);
+}
+
+/**
+ * Waits `n` animation frames in the app.
+ * @param {Locator} tx
+ * @param {number} n
+ */
+function frames(tx, n) {
+  return tx.evaluate((_, count) => new Promise((resolve) => {
+    let left = count;
+    const step = () => {
+      left -= 1;
+      if (left <= 0) resolve(undefined);
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }), n);
+}
+
+/**
+ * The first row the view shows whole, by its row key, and its top on the screen.
+ * @param {Locator} tx
+ */
+async function firstWholeRow(tx) {
+  const found = await tx.evaluate((el) => {
+    const view = el.getBoundingClientRect();
+    const rows = [...el.querySelectorAll('[data-tx-row]')].map((row) => ({ key: row.getAttribute('data-key'), box: row.getBoundingClientRect() }));
+    rows.sort((a, b) => a.box.top - b.box.top);
+    return rows.find((r) => r.box.top >= view.top && r.box.bottom <= view.top + el.clientHeight)?.key ?? null;
+  });
+  if (found === null) throw new Error('the view shows no row whole');
+  const row = tx.locator(`[data-tx-row][data-key="${found}"]`);
+  return { key: found, row, top: await topOf(row) };
+}
+
+/**
+ * Opens the long transcript and returns it once its first page shows at the bottom and nothing
+ * is on its way. A first page that fits the screen asks for the page above at once; that page is
+ * held until the first page shows, then let through and waited for.
+ * @param {Page} page
+ * @param {AppHost} appHost
+ */
+async function openLong(page, appHost) {
+  await openApp(page, appHost, { scenario: checkoutWith(LONG) });
+  await hostCall(page, 'hold', 'transcript.page');
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: `Answer ${LAST_TURN}, line 1:` })).toBeInViewport();
+  await frames(tx, 3);
+  const asked = (await pageCursors(page)).length;
+  expect(asked).toBeLessThanOrEqual(1);
+  const first = await firstRowKey(tx);
+  await hostCall(page, 'release', 'transcript.page');
+  if (asked === 1) await pageWentIn(tx, first);
+  await frames(tx, 3);
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  const m = await metricsOf(tx);
+  expect(m.scrollHeight).toBeGreaterThan(m.clientHeight);
+  return { tx, asked };
+}
+
+/**
+ * Scrolls to the top once more for each page still above the rows, waiting for each to go in,
+ * then to the top, where the transcript's first item shows. At the top no row sits above the
+ * view for the virtualizer to correct for, so the view leaves the top only when a page goes in
+ * and the list puts the reader's row back below it.
+ * @param {Locator} tx
+ * @param {number} asked the pages asked for already
+ */
+async function scrollToStart(tx, asked) {
+  for (let n = asked; n < LONG_PAGES; n++) {
+    await scrollTx(tx, 0);
+    await expect.poll(async () => (await metricsOf(tx)).scrollTop).toBeGreaterThan(0);
+  }
+  await scrollTx(tx, 0);
+  await expect(tx.locator('.me', { hasText: 'Question 0:' })).toBeInViewport();
+}
+
+test('the long transcript pages as the daemon pages one', () => {
+  // The first page back to the 4th-last message and each older page 20 messages back, all
+  // under spec section 7's caps (`olderPages` throws otherwise).
+  expect(LONG_PAGES).toBeGreaterThan(60);
+});
+
+test('scrolling up loads older pages one at a time', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'hold', 'transcript.page');
+  for (let round = 1; round <= 3; round++) {
+    // A swipe's worth of scroll events, all within two screens of the top.
+    for (const top of [400, 200, 100, 0, 60]) await scrollTx(tx, top);
+    await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + round);
+    await scrollTx(tx, 0);
+    await frames(tx, 3);
+    expect(await pageCursors(page)).toHaveLength(asked + round);
+    const first = await firstRowKey(tx);
+    await hostCall(page, 'release', 'transcript.page');
+    await pageWentIn(tx, first);
+    await hostCall(page, 'hold', 'transcript.page');
+  }
+  await hostCall(page, 'release', 'transcript.page');
+  // Each asked with the cursor the page before it gave, further back each time.
+  const cursors = (await pageCursors(page)).map(Number);
+  for (let i = 1; i < cursors.length; i++) expect(cursors[i]).toBeLessThan(cursors[i - 1]);
+});
+
+test('loading an older page keeps the top visible row in place', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'hold', 'transcript.page');
+  // Rows above the view, so the rows of the page land further up still.
+  await scrollTx(tx, 150);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  const { key, row, top: before } = await firstWholeRow(tx);
+  const keysBefore = await tx.locator('[data-tx-row]').evaluateAll((els) => els.map((el) => Number(el.getAttribute('data-key'))));
+  const first = await firstRowKey(tx);
+  if (first === null) throw new Error('the list does not draw its first row');
+
+  // The row's top in every frame from before the page goes in until ten frames after.
+  const sampled = tx.evaluate((el, { rowKey, firstKey }) => new Promise((resolve) => {
+    /** @type {Array<number | null>} */
+    const tops = [];
+    let inAt = -1;
+    const step = () => {
+      const r = el.querySelector(`[data-tx-row][data-key="${rowKey}"]`);
+      tops.push(r === null ? null : r.getBoundingClientRect().top);
+      const nowFirst = el.querySelector('[data-tx-row][data-index="0"]')?.getAttribute('data-key') ?? null;
+      if (inAt < 0 && nowFirst !== firstKey) inAt = tops.length;
+      if ((inAt >= 0 && tops.length - inAt >= 10) || tops.length > 600) resolve({ tops, inAt });
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }), { rowKey: key, firstKey: first });
+  await hostCall(page, 'release', 'transcript.page');
+  const { tops, inAt } = /** @type {{ tops: Array<number | null>, inAt: number }} */ (await sampled);
+
+  expect(inAt, 'the page went in while the frames were watched').toBeGreaterThan(0);
+  const frameTop = tops[0];
+  if (frameTop === null || frameTop === undefined) throw new Error('the row was not drawn');
+  for (const t of tops) expect(t === null ? Infinity : Math.abs(t - frameTop)).toBeLessThanOrEqual(1);
+  const after = await topOf(row);
+  expect(Math.abs(after - before)).toBeLessThanOrEqual(1);
+  // The virtualizer measured rows of the new page above the view, each of which it corrects
+  // the view for: so the restore and its correction did not count one height twice.
+  const above = await tx.locator('[data-tx-row]').evaluateAll((els, { old, rowTop }) => els.filter((el) => {
+    const box = el.getBoundingClientRect();
+    return !old.includes(Number(el.getAttribute('data-key'))) && box.bottom <= rowTop && Math.round(box.height) !== 48;
+  }).length, { old: keysBefore, rowTop: frameTop });
+  expect(above).toBeGreaterThan(0);
+});
+
+test('a page that lands after the reader scrolled on holds where they are then', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'hold', 'transcript.page');
+  await scrollTx(tx, 600);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  // The reader goes on up while the page is on its way, as a fling does.
+  for (const top of [450, 300, 150]) await scrollTx(tx, top);
+  expect(await pageCursors(page)).toHaveLength(asked + 1);
+  const { row, top: before } = await firstWholeRow(tx);
+  const first = await firstRowKey(tx);
+  await hostCall(page, 'release', 'transcript.page');
+  await pageWentIn(tx, first);
+  await frames(tx, 4);
+  expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(1);
+});
+
+test('a scroll the reader makes as the page goes in is kept, not pulled back', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'hold', 'transcript.page');
+  await scrollTx(tx, 150);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  const { row, top: before } = await firstWholeRow(tx);
+  const first = await firstRowKey(tx);
+  // As a fling goes on: the reader's next 40 px up land right after the commit that puts the
+  // page in, before the frame in which the list puts the anchor back once more.
+  await tx.evaluate((el, firstKey) => {
+    const list = /** @type {HTMLElement} */ (el.querySelector('.tx-list'));
+    const watch = new MutationObserver(() => {
+      if ((el.querySelector('[data-tx-row][data-index="0"]')?.getAttribute('data-key') ?? null) === firstKey) return;
+      watch.disconnect();
+      el.scrollTop -= 40;
+    });
+    watch.observe(list, { attributes: true, childList: true, subtree: true });
+  }, first);
+  await hostCall(page, 'release', 'transcript.page');
+  // Any page that scroll asks for waits, so only the one page goes in.
+  await hostCall(page, 'hold', 'transcript.page');
+  await pageWentIn(tx, first);
+  await frames(tx, 6);
+  expect(Math.abs((await topOf(row)) - (before + 40))).toBeLessThanOrEqual(1);
+});
+
+test('only rows near the screen are in the page', async ({ page, appHost }) => {
+  test.setTimeout(90_000);
+  const { tx, asked } = await openLong(page, appHost);
+  await scrollToStart(tx, asked);
+  // Every page is in: the list is many screens tall.
+  const m = await metricsOf(tx);
+  expect(m.scrollHeight).toBeGreaterThan(50 * m.clientHeight);
+  expect(await tx.locator('[data-tx-row]').count()).toBeLessThan(80);
+  await scrollTx(tx, Math.round(m.scrollHeight / 2));
+  await frames(tx, 3);
+  expect(await tx.locator('[data-tx-row]').count()).toBeLessThan(80);
+  await scrollTx(tx, 'bottom');
+  await frames(tx, 3);
+  expect(await tx.locator('[data-tx-row]').count()).toBeLessThan(80);
+  await expect(tx.locator('.say', { hasText: `Answer ${LAST_TURN}, line 1:` })).toBeInViewport();
+});
+
+test('scrolling back through all 2,000 items reaches the first, and asks for nothing past the start', async ({ page, appHost }) => {
+  test.setTimeout(90_000);
+  const { tx, asked } = await openLong(page, appHost);
+  await scrollToStart(tx, asked);
+  const cursors = await pageCursors(page);
+  expect(cursors).toHaveLength(LONG_PAGES);
+  // The last page reached the start, so no scroll asks again.
+  for (const top of [300, 0, 100, 0]) await scrollTx(tx, top);
+  await frames(tx, 3);
+  expect(await pageCursors(page)).toEqual(cursors);
+  await expect(tx.locator('.me').first()).toContainText('Question 0:');
+});
+
+test('a failed older page shows nothing, and loads on the next scroll', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'setReply', 'transcript.page', { error: { code: 'refused', message: REMOTE_REFUSED } });
+  await scrollTx(tx, 150);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  const first = await firstRowKey(tx);
+  // Nothing shows, and nothing more is asked while the reader does not scroll.
+  await frames(tx, 6);
+  await expect(app(page).getByText(REMOTE_REFUSED)).toHaveCount(0);
+  expect(await firstRowKey(tx)).toBe(first);
+  expect(await pageCursors(page)).toHaveLength(asked + 1);
+
+  // The next scroll asks again, for the same page, and this time it goes in.
+  await hostCall(page, 'setReply', 'transcript.page', null);
+  await scrollTx(tx, 100);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 2);
+  const cursors = await pageCursors(page);
+  expect(cursors[asked + 1]).toBe(cursors[asked]);
+  await pageWentIn(tx, first);
+  await expect(app(page).getByText(REMOTE_REFUSED)).toHaveCount(0);
+});
+
+test('a reset starts over at the newest items', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'hold', 'transcript.page');
+  await scrollTx(tx, 0);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  const first = await firstRowKey(tx);
+  await hostCall(page, 'release', 'transcript.page');
+  await pageWentIn(tx, first);
+  // Scrolled up, with the next page on its way.
+  await hostCall(page, 'hold', 'transcript.page');
+  await scrollTx(tx, 0);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 2);
+
+  await hostCall(page, 'emit', 'transcript.reset', {
+    session: CHECKOUT_REF, reason: 'rollover', page: { items: bashRows('reset', 40), reachedStart: true, omittedItems: 0 },
+  });
+  await expect(tx.locator('button.tool', { hasText: 'npm run reset-39' })).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await expect(tx.locator('.me, .say')).toHaveCount(0);
+
+  // The page that was on its way changes nothing when it lands: once an event behind it on the
+  // same channel shows, the app has taken it.
+  await hostCall(page, 'release', 'transcript.page');
+  await appendToCheckout(page, bashRows('after', 1));
+  await expect(tx.locator('button.tool', { hasText: 'npm run after-0' })).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await expect(tx.locator('.me, .say')).toHaveCount(0);
+  await expect(app(page).locator('.pill')).toHaveCount(0);
+  // The reset's page reached the start, so a scroll up asks for nothing.
+  await scrollTx(tx, 0);
+  await frames(tx, 3);
+  expect(await pageCursors(page)).toHaveLength(asked + 2);
+});
+
+test('a first page that fits the screen asks for the page above without a scroll', async ({ page, appHost }) => {
+  const items = Array.from({ length: 200 }, (_, i) => ({
+    id: `short-${i}`, kind: i % 2 === 0 ? 'user' : 'assistant', text: `Short message ${i}.`, truncated: false,
+  }));
+  await openApp(page, appHost, { scenario: checkoutWith(items) });
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+  await expect.poll(() => pageCursors(page)).toEqual([String(items.length - FIRST_PAGE_MESSAGES)]);
+  // The page went in above, and the view stayed at the newest row.
+  await expect.poll(async () => { const m = await metricsOf(tx); return m.scrollHeight > m.clientHeight; }).toBe(true);
+  await frames(tx, 3);
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+  // Now the reader can scroll, so nothing more is asked until they do.
+  expect(await pageCursors(page)).toHaveLength(1);
+  await scrollTx(tx, 0);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
 });

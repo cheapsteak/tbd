@@ -8,7 +8,8 @@ import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../pr
 import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, emptyTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import {
-  atBottom, fromBottom, moved, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX, sticksAfterScroll, wantsOlder,
+  anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
+  sticksAfterScroll, wantsOlder,
 } from './scroll.ts';
 import type { Metrics } from './scroll.ts';
 
@@ -57,6 +58,30 @@ test('no older page is wanted without a cursor, or with a page on its way, the s
   assert.equal(wantsOlder(near, { ...PAGING, reachedStart: true }), false);
   assert.equal(wantsOlder(near, { ...PAGING, olderFailed: true }), false);
   assert.equal(wantsOlder(near, PAGING), true);
+});
+
+test('rows fit the view when they are no taller than it, and not a pixel taller', () => {
+  assert.equal(fitsView({ scrollTop: 0, scrollHeight: 500, clientHeight: 800 }), true);
+  assert.equal(fitsView({ scrollTop: 0, scrollHeight: 800, clientHeight: 800 }), true);
+  assert.equal(fitsView({ scrollTop: 0, scrollHeight: 801, clientHeight: 800 }), false);
+  assert.equal(fitsView(at(0)), false);
+});
+
+test('anchorAt measures the row’s top from the view’s top, through the list’s own top', () => {
+  // The list starts 12 px into the scroll element; the row starts 400 px into the list.
+  assert.equal(anchorAt({ key: 7, start: 400 }, 12, 380).offset, 32);
+  // The row starts above the view.
+  assert.equal(anchorAt({ key: 7, start: 400 }, 12, 450).offset, -38);
+  assert.deepEqual(anchorAt({ key: 3, start: 0 }, 12, 0), { key: 3, offset: 12 });
+});
+
+test('an anchor taken before a page and restored after it moves the view by the page’s height', () => {
+  const a = anchorAt({ key: 7, start: 400 }, 12, 380);
+  // A page 1,440 px tall went in above: the row now starts at 1,840 in the list.
+  assert.equal(restoreTop(a, 12 + 1840), 380 + 1440);
+  // The list's top moved too, as when the rows outgrew the view.
+  const short = anchorAt({ key: 3, start: 0 }, 300, 0);
+  assert.equal(restoreTop(short, 12 + 1440), 1440 + 12 - 300);
 });
 
 test('restoreTop puts the anchor’s row back at its offset', () => {
@@ -190,8 +215,37 @@ test('the first page over no rows reads as replaced, and no rows to none as same
   assert.equal(rowsChange(seenRows(opened(['a']).rows, 0), [], 0), 'replaced');
 });
 
-test('seenRows names the last row’s key and the appends', () => {
+test('seenRows names the first and the last row’s keys and the appends', () => {
   const s = applyTranscriptEvent(opened(['a', 'b']), event('transcript.append', ['c']));
-  assert.deepEqual(seenRows(s.rows, s.appendedSinceSeen), { lastKey: s.rows[2]!.key, appended: 1 });
-  assert.deepEqual(seenRows([], 0), { lastKey: null, appended: 0 });
+  assert.deepEqual(seenRows(s.rows, s.appendedSinceSeen), { firstKey: s.rows[0]!.key, lastKey: s.rows[2]!.key, appended: 1 });
+  assert.deepEqual(seenRows([], 0), { firstKey: null, lastKey: null, appended: 0 });
+});
+
+/** Whether the list reads rows that came in above, from `a` to `b`. */
+function above(a: TranscriptState, b: TranscriptState): boolean {
+  return prepended(seenRows(a.rows, a.appendedSinceSeen), b.rows);
+}
+
+test('an older page reads as prepended, with an append or without', () => {
+  const s = { ...opened(['a', 'b']), loadingOlder: true };
+  const older = prependPage(s, page(['y', 'z']));
+  assert.equal(above(s, older), true);
+  assert.equal(above(s, applyTranscriptEvent(older, event('transcript.append', ['c']))), true);
+  // Two pages seen at once.
+  assert.equal(above(s, prependPage({ ...older, loadingOlder: true }, page(['x']))), true);
+  // The same item IDs as the rows below are new rows all the same.
+  assert.equal(above(s, prependPage(s, page(['a', 'b']))), true);
+});
+
+test('an append, an update, a reset, a reopen and a first page do not read as prepended', () => {
+  const s = opened(['a', 'b']);
+  assert.equal(above(s, s), false);
+  assert.equal(above(s, applyTranscriptEvent(s, event('transcript.append', ['c']))), false);
+  assert.equal(above(s, applyTranscriptEvent(s, event('transcript.update', ['a'], 'a, longer'))), false);
+  const reset: AppEvent = { event: 'transcript.reset', seq: 2, data: { session: R, reason: 'rollover', page: page(['z', 'a', 'b']) } };
+  assert.equal(above(s, applyTranscriptEvent(s, reset)), false);
+  assert.equal(above(s, { ...applyPage(beginOpen(s, R, false, 'open-2'), page(['z', 'a', 'b'])), phase: 'open' }), false);
+  const none = beginOpen(emptyTranscript(), R, false, 'open-1');
+  assert.equal(above(none, opened(['a'])), false);
+  assert.equal(prepended(seenRows(s.rows, 0), []), false);
 });
