@@ -280,6 +280,11 @@ struct GhosttyTerminalViewTests {
         content.addSubview(view)
         view.onSend = { recorder.sent.append($0) }
         fixture.terminal.feed(text: "\u{1b}[?1002h\u{1b}[?1006h")
+        // First responder before the focus, as a focused view always is. Otherwise the press's
+        // click-to-focus makes it first responder, which takes the focus from the window, and the
+        // test window is never key: the view would lose focus before the press, and the
+        // `setFocused(false)` below would change nothing.
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
         view.setFocused(true)
 
         view.mouseDown(with: try mouseEvent(.leftMouseDown, at: NSPoint(x: 20, y: 100), in: window))
