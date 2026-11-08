@@ -37,8 +37,9 @@
  *     each phone it starts keeping state for (`PhoneEventStream.swift`). So an acting resend
  *     waits for the subscribe reply, and goes out only when that reply replays the stream or
  *     names the stream the client already had. A new stream, or no stream known before,
- *     rejects it with `not_confirmed`. So does an error reply to the subscribe, or a reply
- *     that does not decode: the client cannot learn then whether the daemon remembers it. A
+ *     rejects it with `not_confirmed`. So does a subscribe that fails, by an error reply, a
+ *     reply that does not decode, or a refusal before the daemon sees it (the client's or the
+ *     loader's): the client cannot learn then whether the daemon remembers it. A
  *     new stream can also mean only that the daemon's 120 s grace for an absent phone ran out
  *     while it still remembered the request; refusing then is the cautious reading.
  * - **A resend of a read** that finished runs again, which is harmless at any age, so reads
@@ -306,8 +307,8 @@ export class AppClient {
    * - `superseded` for a state request still unanswered when the channel comes back up;
    * - `not_confirmed` for an acting request still unanswered when the channel comes back up,
    *   when it is more than 540 s past its first send, or when the new connection's subscribe
-   *   reply names a new stream, is an error or does not decode; and for a repost of one that
-   *   the daemon answers `refused`.
+   *   reply names a new stream, is an error or does not decode, or that subscribe is refused
+   *   before the daemon sees it; and for a repost of one that the daemon answers `refused`.
    *
    * It has no timeout: the daemon answers every request it runs. The request goes out at once
    * when the channel is up and fewer than 32 requests are posted and unanswered or wait for the
@@ -321,6 +322,12 @@ export class AppClient {
     try {
       return this.#enqueue(method, params);
     } catch (error) {
+      // Refused before it was posted, a subscribe gets no reply, so the reposts that wait for
+      // one are settled now, as an error reply would settle them.
+      if (method === 'sessions.subscribe') {
+        this.#subscribeFailed();
+        this.#pump();
+      }
       return Promise.reject(error);
     }
   }
@@ -353,7 +360,11 @@ export class AppClient {
 
   // MARK: - The channel
 
-  /** A change to up: the three steps in this file's header, then the queue. */
+  /**
+   * A change to up: the three steps in this file's header, then the queue. The held requests
+   * take their lanes before `onUp` runs, so a subscribe that `onUp` makes and that fails at once
+   * finds the acting reposts waiting for it. `#pump` posts none of them until `onUp` returns.
+   */
   #channelUp(): void {
     if (this.#up) return;
     this.#up = true;
@@ -361,23 +372,23 @@ export class AppClient {
     for (const pending of [...this.#pending.values()]) {
       if (STATE_METHODS.has(pending.method)) this.#fail(pending, 'superseded', SUPERSEDED_TEXT);
     }
+    const reads: Pending[] = [];
+    for (const pending of this.#held) {
+      if (ACTING_METHODS.has(pending.method)) {
+        pending.lane = 'unconfirmed';
+        this.#unconfirmed.push(pending);
+      } else {
+        reads.push(pending);
+      }
+    }
+    this.#held = [];
+    this.#addResends(reads);
+    this.#rejectTooOld([...this.#unconfirmed, ...this.#resends]);
     this.#inOnUp = true;
     try {
       this.#onUp();
     } finally {
       this.#inOnUp = false;
-      const reads: Pending[] = [];
-      for (const pending of this.#held) {
-        if (ACTING_METHODS.has(pending.method)) {
-          pending.lane = 'unconfirmed';
-          this.#unconfirmed.push(pending);
-        } else {
-          reads.push(pending);
-        }
-      }
-      this.#held = [];
-      this.#addResends(reads);
-      this.#rejectTooOld([...this.#unconfirmed, ...this.#resends]);
       this.#pump();
     }
   }
@@ -406,7 +417,9 @@ export class AppClient {
    * one it refused would wait forever. So the posted, unanswered request whose serialized body
    * is largest fails, as the likeliest to be that body, and of bodies the same size, the one
    * posted last. Every other request stands: failing them all would fail the subscribe too,
-   * and put "That message is too long" on the error screen when nobody wrote one.
+   * and put "That message is too long" on the error screen when nobody wrote one. When the one
+   * that fails is the subscribe, the acting reposts waiting for its reply are settled as an
+   * error reply settles them (`#failSent`).
    */
   #failLargestPosted(): void {
     let largest: Pending | undefined;
@@ -420,8 +433,7 @@ export class AppClient {
       }
     }
     if (largest === undefined) return;
-    this.#fail(largest, 'too_large', TOO_LONG_TEXT);
-    this.#pump();
+    this.#failSent(largest, 'too_large', TOO_LONG_TEXT);
   }
 
   /**
@@ -592,11 +604,11 @@ export class AppClient {
         // The daemon checks its cap on running requests before its request memory, so a
         // repost of an action that already ran can be refused as "too many in progress".
         // Shown as is, it invites the user to try again under a new ID, which would act twice.
-        this.#failOnReply(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
+        this.#failSent(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
       } else {
         // A code outside the closed list is a reply this build cannot fully read. Its message
         // is the daemon's own words for the phone, so it is kept.
-        this.#failOnReply(pending, isErrorCode(code) ? code : 'bad_reply', message);
+        this.#failSent(pending, isErrorCode(code) ? code : 'bad_reply', message);
       }
       return;
     }
@@ -604,7 +616,7 @@ export class AppClient {
     try {
       result = decodeResult(pending.method, reply.result);
     } catch {
-      this.#failOnReply(pending, 'bad_reply', BAD_REPLY_TEXT);
+      this.#failSent(pending, 'bad_reply', BAD_REPLY_TEXT);
       return;
     }
     // Before the promise resolves, so the numbering holds for the very next port message.
@@ -622,7 +634,7 @@ export class AppClient {
    * the client already had, shows the daemon is the one that numbered that stream, so it still
    * remembers their IDs: they go out, still held to the horizon. Any other stream may come from
    * a daemon that restarted and forgot them, so each is rejected `not_confirmed`. A subscribe
-   * reply that is an error, or does not decode, rejects them too (`#failOnReply`).
+   * reply that is an error, or does not decode, rejects them too (`#subscribeFailed`).
    */
   #subscribed(result: SessionsSubscribeResult): void {
     const before = this.#stream;
@@ -651,23 +663,34 @@ export class AppClient {
     if (body.kind !== 'reply' || typeof requestID !== 'string') return;
     const pending = this.#sentRequest(requestID);
     if (pending === undefined) return;
-    this.#failOnReply(pending, 'bad_reply', BAD_REPLY_TEXT);
+    this.#failSent(pending, 'bad_reply', BAD_REPLY_TEXT);
   }
 
   /**
-   * Fails `pending` on its reply: the daemon's error, or a reply that does not decode. When it
-   * is a `sessions.subscribe`, which is always this connection's (a channel up supersedes any
-   * other), the acting reposts waiting for its reply are rejected `not_confirmed` first: the
-   * client cannot learn whether the daemon still remembers them, so it never sends them again.
-   * Then the queue moves on, and the actions that waited behind them go out. Events stay
-   * dropped until a subscribe reply decodes.
+   * Fails a request that was sent: on its reply (the daemon's error, or a reply that does not
+   * decode), or on the loader's refusal of its body (`sendFailed: tooLarge`). When it is a
+   * `sessions.subscribe`, which is always this connection's (a channel up supersedes any other),
+   * the acting reposts waiting for its reply are rejected first (`#subscribeFailed`). Then the
+   * queue moves on.
    */
-  #failOnReply(pending: Pending, code: ErrorCode | LocalErrorCode, message: string): void {
-    if (pending.method === 'sessions.subscribe') {
-      for (const waiting of [...this.#unconfirmed]) this.#fail(waiting, 'not_confirmed', NOT_CONFIRMED_TEXT);
-    }
+  #failSent(pending: Pending, code: ErrorCode | LocalErrorCode, message: string): void {
+    if (pending.method === 'sessions.subscribe') this.#subscribeFailed();
     this.#fail(pending, code, message);
     this.#pump();
+  }
+
+  /**
+   * This connection's subscribe failed: an error reply, a reply that does not decode, or the
+   * client's or the loader's refusal of it. Nothing will then show whether the daemon still
+   * remembers the acting reposts waiting for its reply, so each is rejected `not_confirmed` and
+   * never sent again. The caller then moves the queue on, and the actions that waited behind
+   * them go out. Events stay dropped until a subscribe reply decodes.
+   *
+   * While the channel is down, nothing waits for a reply: the held actions wait for the next
+   * connection's subscribe, and this leaves them to it.
+   */
+  #subscribeFailed(): void {
+    for (const waiting of [...this.#unconfirmed]) this.#fail(waiting, 'not_confirmed', NOT_CONFIRMED_TEXT);
   }
 
   /**

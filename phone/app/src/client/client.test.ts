@@ -1068,6 +1068,65 @@ test('a subscribe reply whose result or envelope does not decode rejects a held 
   }
 });
 
+test('a subscribe the loader refuses as too large rejects a held action, and the action behind it goes', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const held = track(h.c.request('message.send', { session: REF, text: 'A' }));
+  const id = last(h, 'message.send')!.requestID;
+  h.down();
+  const queued = track(h.c.request('message.send', { session: REF, text: 'B' }));
+  h.up();
+  // The subscribe is the one body posted, so it is the one the refusal fails.
+  assert.equal(h.posted.at(-1)!.method, 'sessions.subscribe');
+  h.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
+  await flush();
+  assert.equal(held.state, 'rejected');
+  assert.deepEqual([(held.error as AppError).code, (held.error as AppError).message], ['not_confirmed', NOT_CONFIRMED_TEXT]);
+  assert.equal(sends(h, id), 1);
+  assert.equal(h.posted.at(-1)!.params.text, 'B');
+  assert.equal(queued.state, 'pending');
+});
+
+test('a subscribe the client refuses before posting rejects a held action, and the action behind it goes', async () => {
+  // The second subscribe gets the held action's ID, which is still in use.
+  const ids = ['r1', 'r2', 'r3', 'r2', 'r4'];
+  let subscribed: ReturnType<typeof track> | undefined;
+  const h = harness({
+    newID: () => ids.shift()!,
+    whenUp: (c) => { subscribed = track(c.request('sessions.subscribe', {})); },
+  });
+  connect(h);
+  const held = track(h.c.request('message.send', { session: REF, text: 'A' }));
+  h.down();
+  const queued = track(h.c.request('message.send', { session: REF, text: 'B' }));
+  h.up();
+  await flush();
+  assert.equal(subscribed!.state, 'rejected');
+  assert.equal(held.state, 'rejected');
+  assert.equal((held.error as AppError).code, 'not_confirmed');
+  assert.equal(sends(h, 'r2'), 1);
+  assert.deepEqual(h.posted.slice(2).map((b) => [b.requestID, b.method]), [['r3', 'message.send']]);
+  assert.equal(queued.state, 'pending');
+});
+
+test('a subscribe refused while the channel is down leaves a held action to the next subscribe', async () => {
+  const ids = ['r1', 'r2', 'r2', 'r3'];
+  const h = harness({ newID: () => ids.shift()!, whenUp: subscribe });
+  connect(h);
+  const held = track(h.c.request('message.send', { session: REF, text: 'A' }));
+  h.down();
+  const refused = track(h.c.request('sessions.subscribe', {}));
+  await flush();
+  assert.equal(refused.state, 'rejected');
+  assert.equal(held.state, 'pending');
+  h.up();
+  confirm(h);
+  assert.equal(sends(h, 'r2'), 2);
+  h.reply(last(h, 'message.send'), { outcome: 'sent' });
+  await flush();
+  assert.equal(held.state, 'resolved');
+});
+
 test('a failed subscribe rejects only acting reposts: reads and never-sent actions stay', async () => {
   const h = harness({ whenUp: subscribe });
   connect(h);
