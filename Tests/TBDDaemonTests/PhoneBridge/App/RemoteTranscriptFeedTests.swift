@@ -529,7 +529,8 @@ struct RemoteTranscriptFeedTests {
 
     /// A prompt read that waits for the phone's answer to a prompt that
     /// closed never holds up the transcript: the follower's ticks go on, and
-    /// the prompt's closing follows once the answer finishes.
+    /// the wait ends at `answerAttributionWait`, which sends the closing
+    /// attributed to the phone. The answer finishing later sends nothing more.
     @Test func aSlowPromptReadNeverHoldsUpTheTicks() async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
@@ -560,11 +561,15 @@ struct RemoteTranscriptFeedTests {
         ) {
             Self.appendedIDs(in: outbox) == ["m3"]
         }
-        #expect(try Self.events(.promptChanged, PromptChangedData.self, in: outbox).count == 1)
-
-        gate.open()
+        // The sync tick's advance passed the attribution bound too, so the
+        // closing arrived from the bound, not from the answer finishing.
         let closed = try await Self.promptEvent(1, in: outbox)
         #expect(closed.data.resolved == [PhonePromptResolution(promptID: "rp-1", answeredBy: .phone, deviceID: deviceID)])
+        #expect(try Self.events(.promptChanged, PromptChangedData.self, in: outbox).count == 2)
+
+        gate.open()
+        try await waitUntil("the answer's reply") { Self.replyIndices("answer-1", in: outbox).count == 1 }
+        #expect(try Self.events(.promptChanged, PromptChangedData.self, in: outbox).count == 2)
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
