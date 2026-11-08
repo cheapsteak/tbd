@@ -208,15 +208,18 @@ extension PhoneAppService {
         for terminal in try await db.terminals.list() {
             terminals[terminal.worktreeID, default: []].append(terminal)
         }
-        // Tab order and labels only matter where an agent tab shows.
-        var tabOrder: [UUID: [UUID]] = [:]
-        var tabLabels: [UUID: String] = [:]
+        // Tab order and labels only matter where an agent tab shows. Each is
+        // one read across those worktrees, since every phone's publisher
+        // gathers again after every change.
+        var agentWorktreeIDs: Set<UUID> = []
         for (worktreeID, list) in terminals where list.contains(where: { PhoneSnapshotBuilder.agent(of: $0) != nil }) {
-            tabOrder[worktreeID] = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
-            for tab in try await db.tabs.listForWorktree(worktreeID: worktreeID) {
-                if let label = tab.label {
-                    tabLabels[tab.id] = label
-                }
+            agentWorktreeIDs.insert(worktreeID)
+        }
+        let tabOrder = try await db.worktrees.getTabOrders(worktreeIDs: agentWorktreeIDs)
+        var tabLabels: [UUID: String] = [:]
+        for tab in try await db.tabs.listForWorktrees(worktreeIDs: agentWorktreeIDs) {
+            if let label = tab.label {
+                tabLabels[tab.id] = label
             }
         }
         let profiles = try await db.modelProfiles.list()

@@ -1465,6 +1465,27 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Read the `tabOrder` column of every worktree in `worktreeIDs` in one
+    /// read, each decoded as `getTabOrder(worktreeID:)` decodes it. Every ID
+    /// asked for has an entry: an empty array for a worktree with no stored
+    /// order or no row.
+    public func getTabOrders(worktreeIDs: Set<UUID>) async throws -> [UUID: [UUID]] {
+        guard !worktreeIDs.isEmpty else { return [:] }
+        let keys = worktreeIDs.map(\.uuidString)
+        let records = try await writer.read { db in
+            try WorktreeRecord.fetchAll(db, keys: keys)
+        }
+        var orders: [UUID: [UUID]] = [:]
+        for worktreeID in worktreeIDs {
+            orders[worktreeID] = []
+        }
+        for record in records {
+            guard let worktreeID = UUID(uuidString: record.id), orders[worktreeID] != nil else { continue }
+            orders[worktreeID] = Self.decodeTabOrder(record.tabOrder)
+        }
+        return orders
+    }
+
     /// Replace the `tabOrder` JSON column for a worktree.
     public func setTabOrder(worktreeID: UUID, tabIDs: [UUID]) async throws {
         let json = Self.encodeTabOrder(tabIDs)

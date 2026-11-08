@@ -91,6 +91,19 @@ public struct TabStore: Sendable {
         }
     }
 
+    /// List the tab states of every worktree in `worktreeIDs` in one read,
+    /// each as `listForWorktree(worktreeID:)` lists it.
+    public func listForWorktrees(worktreeIDs: Set<UUID>) async throws -> [TabState] {
+        guard !worktreeIDs.isEmpty else { return [] }
+        let keys = worktreeIDs.map(\.uuidString)
+        return try await writer.read { db in
+            try TabRecord
+                .filter(keys.contains(Column("worktreeID")))
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+        }
+    }
+
     /// Delete a tab row by ID (used as cleanup when a terminal/note is deleted).
     public func delete(tabID: UUID) async throws {
         _ = try await writer.write { db in

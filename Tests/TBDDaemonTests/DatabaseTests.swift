@@ -246,6 +246,50 @@ struct DatabaseTests {
         #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).map(\.id) == [terminal.id])
     }
 
+    /// The batched reads answer exactly what the per-worktree reads answer
+    /// for each worktree asked for, and nothing for one not asked for.
+    @Test func tabOrdersAndTabsReadForSeveralWorktreesAtOnce() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/acme-tabs", displayName: "acme", defaultBranch: "main")
+        func makeWorktree(_ name: String) async throws -> Worktree {
+            try await db.worktrees.create(
+                repoID: repo.id, name: name, branch: "tbd/\(name)",
+                path: "/tmp/acme-tabs/\(name)", tmuxServer: "tbd-acme")
+        }
+        let ordered = try await makeWorktree("ordered")
+        let unordered = try await makeWorktree("unordered")
+        let other = try await makeWorktree("other")
+        let missing = UUID()
+        let first = UUID()
+        let second = UUID()
+        try await db.worktrees.setTabOrder(worktreeID: ordered.id, tabIDs: [second, first])
+        try await db.worktrees.setTabOrder(worktreeID: other.id, tabIDs: [first])
+        try await db.tabs.setLabel(tabID: first, worktreeID: ordered.id, label: "Acme first")
+        try await db.tabs.setLabel(tabID: second, worktreeID: unordered.id, label: "Acme second")
+        try await db.tabs.setLabel(tabID: UUID(), worktreeID: other.id, label: "Acme other")
+        let asked: Set<UUID> = [ordered.id, unordered.id, missing]
+
+        let orders = try await db.worktrees.getTabOrders(worktreeIDs: asked)
+        let tabs = try await db.tabs.listForWorktrees(worktreeIDs: asked)
+
+        var expectedOrders: [UUID: [UUID]] = [:]
+        var expectedTabs: [TabState] = []
+        for worktreeID in asked {
+            expectedOrders[worktreeID] = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
+            expectedTabs += try await db.tabs.listForWorktree(worktreeID: worktreeID)
+        }
+        let tabIDs = Set(tabs.map(\.id))
+        let expectedTabIDs = Set(expectedTabs.map(\.id))
+        let labels = Set(tabs.compactMap(\.label))
+        #expect(orders == expectedOrders)
+        #expect(orders == [ordered.id: [second, first], unordered.id: [], missing: []])
+        #expect(tabIDs == expectedTabIDs)
+        #expect(tabIDs == [first, second])
+        #expect(labels == ["Acme first", "Acme second"])
+        #expect(try await db.worktrees.getTabOrders(worktreeIDs: []).isEmpty)
+        #expect(try await db.tabs.listForWorktrees(worktreeIDs: []).isEmpty)
+    }
+
     @Test func deleteTerminalsForWorktree() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")

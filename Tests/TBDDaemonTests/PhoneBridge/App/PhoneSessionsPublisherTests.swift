@@ -305,6 +305,34 @@ struct PhoneSessionsPublisherTests {
         #expect(wholeResult.more == false)
     }
 
+    // MARK: - Gathering
+
+    /// The gather reads the stored tab order and the tab labels of every
+    /// worktree with an agent tab, and the snapshot orders and names that
+    /// worktree's sessions by them.
+    @Test func theGatherReadsEachWorktreesTabOrderAndLabels() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let first = try await h.seedTerminal()
+        let second = try await h.db.terminals.create(
+            worktreeID: first.worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            claudeSessionID: "acme-session-2", kind: .claude)
+        let other = try await h.seedTerminal()
+        try await h.db.worktrees.setTabOrder(worktreeID: first.worktreeID, tabIDs: [second.id, first.id])
+        try await h.db.tabs.setLabel(tabID: second.id, worktreeID: first.worktreeID, label: "review")
+        try await h.db.tabs.setLabel(tabID: other.id, worktreeID: other.worktreeID, label: "acme other")
+
+        let snapshot = try await h.service.gatherSnapshot()
+
+        let foundRow = snapshot.rows.first { $0.id == first.worktreeID.uuidString }
+        let row = try #require(foundRow)
+        let refs = row.sessions.map(\.ref)
+        #expect(refs == [.local(terminalID: second.id), .local(terminalID: first.id)])
+        #expect(row.sessions.first?.tabName == "review")
+        let foundOther = snapshot.rows.first { $0.id == other.worktreeID.uuidString }
+        let otherRow = try #require(foundOther)
+        #expect(otherRow.sessions.first?.tabName == "acme other")
+    }
+
     // MARK: - sessions.subscribe
 
     private static let fresh = SessionsSubscribeParams(stream: nil, sinceSeq: nil)
