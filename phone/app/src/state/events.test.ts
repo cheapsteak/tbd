@@ -81,6 +81,26 @@ test("leaving the session closes its menu and its sheets, but not New's", () => 
   assert.deepEqual(s3.ui.sheet, { name: 'switch-confirm', profileID: 'P1' });
 });
 
+test('New stays open when the route goes back to the list, and closes when it goes to a session', () => {
+  const sheet = { name: 'new', repoID: 'R1', repoName: 'acme' } as const;
+  // The open session leaves the list while New is up: the list shows, and New stays over it.
+  const s0 = stateWith([row('W1', [OTHER]), row('W2', [R])], { route: { screen: 'session', ref: R }, sheet });
+  const s1 = applyEvent(s0, changed([], ['W2'], ['W1']));
+  assert.equal(s1.ui.route, SESSIONS_ROUTE);
+  assert.equal(s1.ui.sheet, sheet);
+  // The worktree New created lists its session: it opens, and New closes.
+  const s2 = applyEvent({ ...s1, ui: { ...s1.ui, pendingOpen: { worktreeID: WT, toast: 'Created {name}' } } }, changed([row(WT, [R2], 'fix-login')]));
+  assert.deepEqual(s2.ui.route, { screen: 'session', ref: R2 });
+  assert.equal(s2.ui.sheet, null);
+  // So does a { ref } open, and one the list shows already.
+  const s3 = applyEvent(stateWith([row('W1', [OTHER])], { sheet, pendingOpen: { ref: R } }), changed([row('W3', [R])]));
+  assert.deepEqual(s3.ui.route, { screen: 'session', ref: R });
+  assert.equal(s3.ui.sheet, null);
+  const s4 = withPendingOpen(stateWith([row('W1', [R])], { sheet }), { ref: R });
+  assert.deepEqual(s4.ui.route, { screen: 'session', ref: R });
+  assert.equal(s4.ui.sheet, null);
+});
+
 test('a pending open becomes the route once its session appears', () => {
   const s0 = stateWith([row('W1', [OTHER])], { pendingOpen: { ref: R }, menu: { name: 'model' } });
   const s1 = applyEvent(s0, changed([row('W1', [OTHER])]));

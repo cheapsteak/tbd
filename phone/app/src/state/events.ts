@@ -65,8 +65,11 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * 2. Then a pending open that the list now shows opens, and is cleared. A `{ worktreeID }`
  *    open with a toast template shows it, `{name}` replaced by the row's name.
  *
- * A change of screen clears the menu and every sheet but `new`, since they act on the session
- * the screen showed; `new` acts on a repo. Opening a session also marks its row (`lastRowID`).
+ * A change of screen clears the menu and every sheet, since they act on the session the screen
+ * showed. The one exception is `new`, which acts on a repo, not a session: it stays when the
+ * route goes back to the sessions list, which it opens from, so a session that leaves the list
+ * does not close it. A route to a session closes `new` too, so it never stays over the session
+ * a create opened. Opening a session also marks its row (`lastRowID`).
  */
 export function applySessions(state: AppState, sessions: SessionsData): AppState {
   return { ...state, sessions, ui: followList(state.ui, sessions) };
@@ -96,7 +99,8 @@ function followList(ui: UIState, d: SessionsData): UIState {
 
 /**
  * `ui` showing `route`, with `rowID` marked as the row opened last when it is not null, or `ui`
- * itself when it shows that screen already.
+ * itself when it shows that screen already. It keeps only a `new` sheet, and only on the way to
+ * the sessions list (`applySessions`).
  */
 function moveTo(ui: UIState, route: Route, rowID: string | null): UIState {
   if (sameRoute(ui.route, route)) return ui;
@@ -104,7 +108,7 @@ function moveTo(ui: UIState, route: Route, rowID: string | null): UIState {
     ...ui,
     route,
     menu: null,
-    sheet: ui.sheet?.name === 'new' ? ui.sheet : null,
+    sheet: route.screen === 'sessions' && ui.sheet?.name === 'new' ? ui.sheet : null,
     lastRowID: rowID ?? ui.lastRowID,
   };
 }

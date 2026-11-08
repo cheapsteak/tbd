@@ -457,6 +457,7 @@ test("a pending open that opens is not the user's navigation: the user's own sta
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
   h.actions.setShowDetails(true);
+  h.actions.back();
   h.actions.toggleRepo('repo:R1');
   h.actions.openSheet({ name: 'new', repoID: 'R1', repoName: 'acme' });
   h.actions.openPending({ worktreeID: WT, toast: null });
@@ -465,9 +466,11 @@ test("a pending open that opens is not the user's navigation: the user's own sta
   const ui = h.state().ui;
   assert.deepEqual(ui.route, { screen: 'session', ref: R2 });
   assert.equal(ui.pendingOpen, null);
-  for (const key of ['sheet', 'showDetails', 'collapsed', 'toast', 'nav', 'refusal', 'drafts'] as const) {
+  for (const key of ['showDetails', 'collapsed', 'toast', 'nav', 'refusal', 'drafts'] as const) {
     assert.equal(ui[key], before[key], key);
   }
+  // New closes, so it does not stay over the session it created.
+  assert.equal(ui.sheet, null);
 });
 
 test('an event that leaves the route as it was opens and closes nothing', async () => {
