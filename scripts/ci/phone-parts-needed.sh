@@ -150,8 +150,10 @@ judge() {
       PARTS='loader phone_app'; REASON='shared with Swift, the loader and the phone app'; return ;;
     relay/*)
       PARTS=relay; REASON='relay/**'; return ;;
+    phone/loader/test/*)
+      PARTS=loader; REASON='the loader'"'"'s own tests'; return ;;
     phone/loader/*)
-      PARTS=loader; REASON='phone/loader/**'; return ;;
+      PARTS='loader phone_app'; REASON='the loader, which the app'"'"'s end-to-end tests run'; return ;;
     phone/app/*)
       PARTS=phone_app; REASON='phone/app/**'; return ;;
     Sources/TBDDaemon/Resources/phone-app/*)

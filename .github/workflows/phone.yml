@@ -241,8 +241,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.phone_app != 'false' }}
     runs-on: ubuntu-latest
-    # 10: `npm ci`, the app's tests and one bundle build, a few minutes cold.
-    timeout-minutes: 10
+    # 20: `npm ci`, the app's tests and one bundle build, one browser install,
+    # and two engines (WebKit and Chromium) running the app's end-to-end
+    # tests, so a cold run takes several minutes.
+    timeout-minutes: 20
     steps:
       # `persist-credentials: false`: `npm ci` runs third-party install
       # scripts, and nothing later needs the token in the git config.
@@ -256,6 +258,31 @@ jobs:
           cache-dependency-path: phone/package-lock.json
       - name: Rebuild the app bundle and compare it with the committed one
         run: bash scripts/ci/phone-app-bundle-check.sh
+      - name: Install Playwright's WebKit and Chromium
+        if: ${{ !cancelled() }}
+        working-directory: phone
+        run: npx playwright install --with-deps chromium webkit
+      - name: Test the app end to end
+        if: ${{ !cancelled() }}
+        working-directory: phone
+        run: npm run test:app:e2e
+      - name: Keep Playwright traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-playwright
+          path: |
+            phone/app/test/e2e/test-results
+            phone/app/test/e2e/report
+          retention-days: 7
+      - name: Keep the app screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-screenshots
+          path: phone/app/test/e2e/screenshots
+          retention-days: 14
+          if-no-files-found: warn
 
   # The one context branch protection requires. Exactly one job across
   # `.github/workflows/` may carry this name, because branch protection matches
