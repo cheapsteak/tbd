@@ -1,3 +1,7 @@
 loader/test/e2e/test-results/
 loader/test/e2e/report/
 loader/test/e2e/screenshots/
+app/test/e2e/test-results/
+app/test/e2e/report/
+app/test/e2e/screenshots/
+app/test/e2e/pairs-out/
