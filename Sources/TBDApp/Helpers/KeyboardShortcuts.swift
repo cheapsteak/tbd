@@ -260,6 +260,13 @@ private struct WorktreeCommandsContent: View {
 
 private struct TerminalCommandsContent: View {
     @Environment(AppState.self) var appState
+    /// `useGhosttyTerminalEngine` as stored, nil while nobody has chosen, so
+    /// the menu follows the flag as soon as it changes. Read only.
+    @AppStorage(AppState.useGhosttyTerminalEngineKey) private var ghosttyEngineChoice: Bool?
+
+    private var ghosttyExperimentEnabled: Bool {
+        AppState.ghosttyTerminalEngineEnabled(stored: ghosttyEngineChoice)
+    }
 
     var body: some View {
         Button("New Tab") {
@@ -277,6 +284,19 @@ private struct TerminalCommandsContent: View {
         }
         .keyboardShortcut("w", modifiers: .command)
         .disabled(!appState.canCloseFocusedTab)
+
+        // In the menu only while the libghostty experiment is on, and enabled
+        // only for a focused holder terminal (`TerminalEngineSwitchCommand`).
+        if TerminalEngineSwitchCommand.isVisible(experimentEnabled: ghosttyExperimentEnabled) {
+            Button(TerminalEngineSwitchCommand.title) {
+                Task { @MainActor in
+                    await appState.switchFocusedTerminalEngine()
+                }
+            }
+            .keyboardShortcut(
+                TerminalEngineSwitchCommand.key, modifiers: TerminalEngineSwitchCommand.modifiers)
+            .disabled(!appState.canSwitchFocusedTerminalEngine)
+        }
 
         Divider()
 

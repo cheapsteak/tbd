@@ -976,10 +976,22 @@ private struct TabBarItem: View {
     private var showClaudeTabUsageTooltip: Bool = true
     @AppStorage(AppState.usageResetTimeStyleKey)
     private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
+    /// `useGhosttyTerminalEngine` as stored, nil while nobody has chosen, so
+    /// the engine label follows the flag as soon as it changes. Read only.
+    @AppStorage(AppState.useGhosttyTerminalEngineKey) private var ghosttyEngineChoice: Bool?
     @Environment(AppState.self) private var appState
 
     private var showClose: Bool {
         isSelected || isHovering
+    }
+
+    /// The engine this tab's terminal is drawn by, while the libghostty
+    /// experiment is on and the terminal has a mounted panel.
+    private var engineLabel: String? {
+        guard let terminal else { return nil }
+        return TerminalEngineLabel.text(
+            experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: ghosttyEngineChoice),
+            kind: appState.terminalEngineKindInUse(for: terminal.id))
     }
 
     /// The rename field's minimum width: the label's width when editing
@@ -1113,6 +1125,16 @@ private struct TabBarItem: View {
                             .foregroundStyle(.orange)
                             .padding(.leading, 4)
                             .help("Session limit hit — TBD will type \"continue\" at this time. Right-click to cancel.")
+                    }
+
+                    if let engineLabel {
+                        Text(engineLabel)
+                            .font(.system(size: 9))
+                            .lineLimit(1)
+                            .fixedSize()
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 4)
+                            .help("Drawn by \(engineLabel). Terminal ▸ \(TerminalEngineSwitchCommand.title) (⌃⌘E) moves a holder terminal to the other engine.")
                     }
                 }
                 .padding(.leading, 8)

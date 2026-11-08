@@ -1,0 +1,177 @@
+import AppKit
+import Foundation
+import os
+import SwiftUI
+import TBDShared
+
+/// Where a switch says what it did, beside the factory's engine lines.
+let terminalEngineSwitchLog = Logger(subsystem: "com.tbd.app", category: "terminalEngine")
+
+// MARK: - Switch Terminal Engine
+
+/// Switch Terminal Engine: move a live holder terminal to the other engine, to
+/// compare the two on the same session while `useGhosttyTerminalEngine` soaks.
+///
+/// The switch hands the session back to the daemon through the panel's own
+/// detach (`TerminalPanelRepresentable.Coordinator.switchEngine()`), records
+/// the other engine in `AppState.terminalEngineOverrides`, and the panel's
+/// identity then rebuilds it on that engine, which attaches as any new panel
+/// does. Design: `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+enum TerminalEngineSwitchCommand {
+    static let title = "Switch Terminal Engine"
+    /// ⌃⌘E. Unbound elsewhere in this app and not a macOS default, and a
+    /// terminal program has no use for a Control-Command chord, so the menu
+    /// taking it costs no session a key.
+    static var key: KeyEquivalent { "e" }
+    static var modifiers: EventModifiers { [.command, .control] }
+
+    /// The command is in the menu only while the experiment is on.
+    static func isVisible(experimentEnabled: Bool) -> Bool {
+        experimentEnabled
+    }
+
+    /// It runs only for a focused holder panel: a tmux or control-mode panel
+    /// stays on SwiftTerm, and a local PTY (remote attach or remote sign-in)
+    /// has no daemon session to hand back.
+    static func isEnabled(experimentEnabled: Bool, focusedHost: TerminalEngineHost?) -> Bool {
+        experimentEnabled && focusedHost == .panel(.holder)
+    }
+}
+
+/// The small label a terminal tab carries while the experiment is on, naming
+/// the engine its panel was built on.
+enum TerminalEngineLabel {
+    /// Nil, so no label, while the experiment is off or the tab's terminal
+    /// has no mounted panel.
+    static func text(experimentEnabled: Bool, kind: TerminalEngineKind?) -> String? {
+        guard experimentEnabled, let kind else { return nil }
+        switch kind {
+        case .swiftTerm: return "SwiftTerm"
+        case .ghostty: return "libghostty"
+        }
+    }
+}
+
+extension TerminalEngineKind {
+    /// The engine a switch moves a terminal built on this one to.
+    var other: TerminalEngineKind {
+        switch self {
+        case .swiftTerm: return .ghostty
+        case .ghostty: return .swiftTerm
+        }
+    }
+}
+
+/// The engine a mounted panel was built on, and which panel said so.
+struct TerminalEngineInUse: Equatable, Sendable {
+    let kind: TerminalEngineKind
+    /// The writing panel's token, so a predecessor's teardown cannot erase
+    /// its successor's entry.
+    let owner: UUID
+}
+
+/// A mounted panel's Switch Terminal Engine handler.
+struct TerminalEngineSwitcher {
+    /// The registering panel's token, so a predecessor's teardown cannot
+    /// unregister its successor.
+    let owner: UUID
+    let run: @MainActor () async -> Void
+}
+
+extension AppState {
+    /// The engine a panel for `terminalID` should be built on now: the
+    /// switch's override where there is one, else what
+    /// `useGhosttyTerminalEngine` gives the panel's transport. A terminal whose
+    /// row is not loaded resolves as tmux, as the panel's transport does.
+    func terminalEngineKind(for terminalID: UUID) -> TerminalEngineKind {
+        let transport = terminals.values.lazy.flatMap { $0 }
+            .first(where: { $0.id == terminalID })?.transport ?? .tmux
+        return TerminalEngineFactory.requestedKind(
+            flagEnabled: ghosttyTerminalEngineEnabled,
+            host: .panel(transport),
+            override: terminalEngineOverrides[terminalID])
+    }
+
+    /// What the tab's engine label names: the engine the terminal's panel was
+    /// built on, or nil when no panel for it is mounted.
+    func terminalEngineKindInUse(for terminalID: UUID) -> TerminalEngineKind? {
+        terminalEnginesInUse[terminalID]?.kind
+    }
+
+    /// Records the engine panel `owner` was built on.
+    func noteTerminalEngineInUse(_ kind: TerminalEngineKind, terminalID: UUID, owner: UUID) {
+        let entry = TerminalEngineInUse(kind: kind, owner: owner)
+        if terminalEnginesInUse[terminalID] != entry {
+            terminalEnginesInUse[terminalID] = entry
+        }
+    }
+
+    /// Forgets the engine panel `owner` recorded, unless a successor panel
+    /// has recorded its own since.
+    func forgetTerminalEngineInUse(terminalID: UUID, owner: UUID) {
+        guard terminalEnginesInUse[terminalID]?.owner == owner else { return }
+        terminalEnginesInUse.removeValue(forKey: terminalID)
+    }
+
+    func registerTerminalEngineSwitcher(
+        for terminalID: UUID, owner: UUID, run: @escaping @MainActor () async -> Void
+    ) {
+        terminalEngineSwitchers[terminalID] = TerminalEngineSwitcher(owner: owner, run: run)
+    }
+
+    func unregisterTerminalEngineSwitcher(for terminalID: UUID, owner: UUID) {
+        guard terminalEngineSwitchers[terminalID]?.owner == owner else { return }
+        terminalEngineSwitchers.removeValue(forKey: terminalID)
+    }
+
+    /// Where the terminal with keyboard focus is hosted, or nil when focus is
+    /// not in a terminal.
+    ///
+    /// Reads `focusedTabCloseContext` first for the reason
+    /// `resolvedFocusedTabCloseContext()` does: it is the one observable
+    /// property that moves when terminal focus does, so a menu item reading
+    /// this re-evaluates. The answer itself comes from the first responder.
+    func focusedTerminalEngineHost() -> TerminalEngineHost? {
+        _ = focusedTabCloseContext
+        guard let responder = NSApp.keyWindow?.firstResponder as? NSView else { return nil }
+        return terminalEngineHost(ofFocusedView: responder)
+    }
+
+    /// The host of a terminal view: a registered panel's transport, or a local
+    /// PTY for a registered remote attach or remote sign-in view.
+    func terminalEngineHost(ofFocusedView view: NSView) -> TerminalEngineHost? {
+        if let terminalID = terminalFocusTargets.first(where: { $0.value.view === view })?.key {
+            let transport = terminals.values.lazy.flatMap { $0 }
+                .first(where: { $0.id == terminalID })?.transport ?? .tmux
+            return .panel(transport)
+        }
+        if remoteTerminalFocusTargets.values.contains(where: { $0.view === view }) {
+            return .localPTY
+        }
+        return nil
+    }
+
+    /// Whether Switch Terminal Engine can run now.
+    var canSwitchFocusedTerminalEngine: Bool {
+        TerminalEngineSwitchCommand.isEnabled(
+            experimentEnabled: ghosttyTerminalEngineEnabled,
+            focusedHost: focusedTerminalEngineHost())
+    }
+
+    /// Switches the focused holder terminal to the other engine. Re-resolved
+    /// from the first responder, so a stale menu state cannot switch the
+    /// wrong terminal.
+    func switchFocusedTerminalEngine() async {
+        guard canSwitchFocusedTerminalEngine,
+              let responder = NSApp.keyWindow?.firstResponder as? NSView,
+              let terminalID = terminalFocusTargets.first(where: { $0.value.view === responder })?.key
+        else { return }
+        await switchTerminalEngine(terminalID: terminalID)
+    }
+
+    /// Runs the mounted panel's switch for `terminalID`, if it has one.
+    func switchTerminalEngine(terminalID: UUID) async {
+        guard let switcher = terminalEngineSwitchers[terminalID] else { return }
+        await switcher.run()
+    }
+}

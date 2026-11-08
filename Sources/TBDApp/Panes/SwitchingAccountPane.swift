@@ -72,10 +72,12 @@ enum TerminalPanePresentation {
     /// parked placeholder.
     static func identity(
         for terminal: Terminal, switching: SwitchingAccount?, attachEpoch: Int,
-        attachRetry: Int
+        attachRetry: Int, engineOverride: TerminalEngineKind?
     ) -> String {
         let parked = switching == nil ? terminal.isParked : false
-        let attach = attachIdentity(for: terminal, attachEpoch: attachEpoch, attachRetry: attachRetry)
+        let attach = attachIdentity(
+            for: terminal, attachEpoch: attachEpoch, attachRetry: attachRetry,
+            engineOverride: engineOverride)
         return "\(attach)-\(parked)"
     }
 
@@ -83,14 +85,25 @@ enum TerminalPanePresentation {
     /// terminal, its window, and the two counts that rebuild the view into a
     /// fresh attach — an account switch's `attachEpoch`, and `attachRetry`, the
     /// attach-failed placard's Retry count (`AppState.terminalAttachRetries`),
-    /// kept apart so a Retry never moves the count the switch reads.
+    /// kept apart so a Retry never moves the count the switch reads — and the
+    /// engine Switch Terminal Engine chose (`AppState.terminalEngineOverrides`),
+    /// which rebuilds the view on that engine.
     ///
     /// The pinned dock uses this alone: it renders no parked placeholder, and
     /// rebuilding it on a park would only start an attach to a session that
-    /// is not there. `attachRetry` has no default so no host can leave Retry
-    /// unable to rebuild it.
-    static func attachIdentity(for terminal: Terminal, attachEpoch: Int, attachRetry: Int) -> String {
-        "\(terminal.id)-\(terminal.tmuxWindowID)-\(attachEpoch)-\(attachRetry)"
+    /// is not there. `attachRetry` and `engineOverride` have no default so no
+    /// host can leave Retry or a switch unable to rebuild it. A nil override
+    /// adds nothing, so a terminal nobody switched keeps the identity it had.
+    /// The engine the flag would choose is left out on purpose: turning the
+    /// flag on or off reaches terminals opened afterwards, and must not
+    /// rebuild every open one.
+    static func attachIdentity(
+        for terminal: Terminal, attachEpoch: Int, attachRetry: Int,
+        engineOverride: TerminalEngineKind?
+    ) -> String {
+        let base = "\(terminal.id)-\(terminal.tmuxWindowID)-\(attachEpoch)-\(attachRetry)"
+        guard let engineOverride else { return base }
+        return "\(base)-engine-\(engineOverride.rawValue)"
     }
 
     /// The notice composed into a parked pane's frozen snapshot, or nil.

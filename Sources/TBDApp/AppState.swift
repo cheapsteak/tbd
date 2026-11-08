@@ -1183,6 +1183,26 @@ final class AppState {
     /// question for it. Absent reads as zero; a terminal's entry goes with
     /// the terminal (`recordTerminalRemoval`).
     var terminalAttachRetries: [UUID: Int] = [:]
+    /// The engine a person switched each terminal to with Switch Terminal
+    /// Engine, keyed by terminal id. Part of a terminal view's SwiftUI
+    /// identity, so a switch rebuilds the panel on the other engine.
+    ///
+    /// Memory only, on purpose: a relaunch drops every override, so a terminal
+    /// opens on the engine `useGhosttyTerminalEngine` gives it. It counts only
+    /// while that flag is on and only for a holder panel
+    /// (`TerminalEngineFactory.requestedKind`). A terminal's entry goes with
+    /// the terminal (`recordTerminalRemoval`).
+    var terminalEngineOverrides: [UUID: TerminalEngineKind] = [:]
+    /// The engine each mounted terminal panel was actually built on, which a
+    /// failed libghostty start makes SwiftTerm whatever was asked for. What the
+    /// tab's engine label names. Written a main-queue turn after the panel is
+    /// made and after it is dismantled, by `noteTerminalEngineInUse` and
+    /// `forgetTerminalEngineInUse`, each scoped to the panel that wrote it.
+    var terminalEnginesInUse: [UUID: TerminalEngineInUse] = [:]
+    /// Each mounted terminal panel's Switch Terminal Engine handler, keyed by
+    /// terminal id and scoped to the panel that registered it, so a successor
+    /// panel's registration survives its predecessor's teardown.
+    @ObservationIgnored var terminalEngineSwitchers: [UUID: TerminalEngineSwitcher] = [:]
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
     /// attaches again from scratch.

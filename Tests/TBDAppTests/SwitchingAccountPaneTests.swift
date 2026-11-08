@@ -117,7 +117,8 @@ struct SwitchingAccountPaneTests {
                 return TerminalPanePresentation.identity(
                     for: cached, switching: state.switchingAccountTerminals[row.id],
                     attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
-                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0,
+                    engineOverride: state.terminalEngineOverrides[row.id])
             }
             let before = identity()
             state.terminalProfileSwapper = { @MainActor terminalID, _, _, _, _ in
@@ -151,7 +152,8 @@ struct SwitchingAccountPaneTests {
                 return TerminalPanePresentation.identity(
                     for: cached, switching: state.switchingAccountTerminals[row.id],
                     attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
-                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0,
+                    engineOverride: state.terminalEngineOverrides[row.id])
             }
             let before = identity()
             var duringRPC: String?
@@ -216,12 +218,12 @@ struct SwitchingAccountPaneTests {
         let switching = SwitchingAccount(profileName: "Acme")
 
         #expect(
-            TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0, attachRetry: 0)
-                == TerminalPanePresentation.identity(for: parked, switching: switching, attachEpoch: 0, attachRetry: 0))
+            TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0, attachRetry: 0, engineOverride: nil)
+                == TerminalPanePresentation.identity(for: parked, switching: switching, attachEpoch: 0, attachRetry: 0, engineOverride: nil))
         // Setting the record on an awake row is not a flip either.
         #expect(
-            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0, attachRetry: 0)
-                == TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0, attachRetry: 0))
+            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0, attachRetry: 0, engineOverride: nil)
+                == TerminalPanePresentation.identity(for: awake, switching: switching, attachEpoch: 0, attachRetry: 0, engineOverride: nil))
     }
 
     /// And the other branch: an ordinary pane still rebuilds on every flip,
@@ -233,8 +235,8 @@ struct SwitchingAccountPaneTests {
         parked.hibernatedAt = Date()
 
         #expect(
-            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0, attachRetry: 0)
-                != TerminalPanePresentation.identity(for: parked, switching: nil, attachEpoch: 0, attachRetry: 0))
+            TerminalPanePresentation.identity(for: awake, switching: nil, attachEpoch: 0, attachRetry: 0, engineOverride: nil)
+                != TerminalPanePresentation.identity(for: parked, switching: nil, attachEpoch: 0, attachRetry: 0, engineOverride: nil))
     }
 
     /// The one rebuild a switch does get: the swap's wake advances the epoch,
@@ -321,7 +323,8 @@ struct SwitchingAccountPaneTests {
                 return TerminalPanePresentation.identity(
                     for: current, switching: state.switchingAccountTerminals[row.id],
                     attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
-                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0,
+                    engineOverride: state.terminalEngineOverrides[row.id])
             }
             var afterRetry: String?
             state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in

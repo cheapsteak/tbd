@@ -481,13 +481,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .flatMap { $0 }
             .first(where: { $0.id == terminalID })
         // The engine is chosen once, here: a holder panel may be built on
-        // libghostty while `useGhosttyTerminalEngine` is on, and every other
-        // panel stays on SwiftTerm. A panel whose row AppState has not loaded
-        // yet resolves as tmux, as `panelTransport()` does, and so stays on
+        // libghostty while `useGhosttyTerminalEngine` is on, or on whichever
+        // engine Switch Terminal Engine chose for it, and every other panel
+        // stays on SwiftTerm. A panel whose row AppState has not loaded yet
+        // resolves as tmux, as `panelTransport()` does, and so stays on
         // SwiftTerm for its life.
-        let engineKind = TerminalEngineFactory.requestedKind(
-            flagEnabled: appState.ghosttyTerminalEngineEnabled,
-            host: .panel(panelRow?.transport ?? .tmux))
+        let engineKind = appState.terminalEngineKind(for: terminalID)
         // Wire up Cmd+Click file path detection: the worktree path is what a
         // clicked relative path resolves against.
         let engine = TerminalEngineFactory.make(
@@ -623,8 +622,47 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         appState.registerTerminalView(engine.view, for: terminalID)
+        Self.registerEngineRecords(
+            of: coordinator, builtOn: engine.kind, in: appState, terminalID: terminalID)
 
         return engine.view
+    }
+
+    /// Enters a newly made panel in AppState's per-terminal engine records:
+    /// Switch Terminal Engine reaches the panel through
+    /// `terminalEngineSwitchers`, and the tab's engine label names the engine
+    /// it was actually built on from `terminalEnginesInUse`.
+    ///
+    /// The label's record is observed, so it is written a main-queue turn
+    /// later rather than inside the view update that made the panel;
+    /// `unregisterEngineRecords` forgets it the same way, queued after, so a
+    /// panel's two writes land in order. Both carry the panel's token, so a
+    /// successor made in the same update keeps its entries whichever of the
+    /// two SwiftUI runs first.
+    @MainActor
+    static func registerEngineRecords(
+        of coordinator: Coordinator, builtOn kind: TerminalEngineKind,
+        in appState: AppState, terminalID: UUID
+    ) {
+        let owner = coordinator.engineSwitchToken
+        appState.registerTerminalEngineSwitcher(for: terminalID, owner: owner) { [weak coordinator] in
+            await coordinator?.switchEngine()
+        }
+        DispatchQueue.main.async { [weak appState] in
+            appState?.noteTerminalEngineInUse(kind, terminalID: terminalID, owner: owner)
+        }
+    }
+
+    /// Takes a dismantled panel out of the records `registerEngineRecords`
+    /// entered it in, leaving a successor's entries alone.
+    @MainActor
+    static func unregisterEngineRecords(of coordinator: Coordinator, terminalID: UUID) {
+        let owner = coordinator.engineSwitchToken
+        guard let appState = coordinator.appState else { return }
+        appState.unregisterTerminalEngineSwitcher(for: terminalID, owner: owner)
+        DispatchQueue.main.async { [weak appState] in
+            appState?.forgetTerminalEngineInUse(terminalID: terminalID, owner: owner)
+        }
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
@@ -648,6 +686,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.appState?.unregisterTerminalView(nsView, for: coordinator.panelID)
+        unregisterEngineRecords(of: coordinator, terminalID: coordinator.panelID)
         coordinator.cleanup()
     }
 
@@ -927,6 +966,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// from `dismantleNSView` and every reader is a `@MainActor` method,
         /// so plain-var access is race-free.
         private var isTornDown = false
+        /// Names this panel in AppState's per-terminal engine records
+        /// (`terminalEngineSwitchers`, `terminalEnginesInUse`), so a
+        /// predecessor's teardown leaves its successor's entries alone.
+        let engineSwitchToken = UUID()
+        /// Whether `switchEngine()` is running, so a second press while it
+        /// runs does nothing.
+        private var engineSwitchInFlight = false
 
         init(clock: any Clock<Duration> = ContinuousClock()) {
             self.clock = clock
@@ -1952,6 +1998,56 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
             }
             ledger.register(terminalID: panelID, task: handback)
+        }
+
+        /// Switch Terminal Engine: hand the session back to the daemon, then
+        /// rebuild this panel on the other engine.
+        ///
+        /// The handback is this panel's ordinary one, `detachHolderSession()`,
+        /// the path a tab close takes, and nothing of its own: the reader
+        /// stops, the screen is serialized after the close, and the detach
+        /// carries it. The switch waits for that detach to return
+        /// (`HolderHandbackLedger.awaitSettled`) before it records the other
+        /// engine in `AppState.terminalEngineOverrides`, so the old view keeps
+        /// its last frame until the session is free. The override changes the
+        /// panel's identity, SwiftUI rebuilds it, and the new panel attaches
+        /// as any new panel does, receiving the screen this one handed back.
+        ///
+        /// A panel with no live attach (one still attaching, or showing the
+        /// attach-failed placard) hands nothing back here; it just records
+        /// the override, and the rebuild's teardown settles whatever is in
+        /// flight, as it does for a closed tab.
+        ///
+        /// The other engine is the other of the one this panel was actually
+        /// built on. A panel whose libghostty start fell back to SwiftTerm was
+        /// asked for libghostty already, so a switch there would ask for the
+        /// same engine again, leave the identity as it is, and strand the
+        /// session detached with nothing to rebuild the panel; it does
+        /// nothing and logs why. One switch at a time: a second press while
+        /// one runs does nothing. With `useGhosttyTerminalEngine` off, where
+        /// an override would count for nothing, nothing happens at all.
+        @MainActor
+        func switchEngine() async {
+            guard !isTornDown, !engineSwitchInFlight, let appState, let engine,
+                  appState.ghosttyTerminalEngineEnabled,
+                  panelTransport() == .holder else { return }
+            let target = engine.kind.other
+            guard appState.terminalEngineKind(for: panelID) != target else {
+                terminalEngineSwitchLog.info(
+                    "terminal engine switch skipped terminal=\(self.panelID, privacy: .public): \(target.rawValue, privacy: .public) was asked for and did not start, so the panel stays on \(engine.kind.rawValue, privacy: .public)"
+                )
+                return
+            }
+            engineSwitchInFlight = true
+            if holderAttach != nil {
+                detachHolderSession()
+                await handbackLedger(appState).awaitSettled(terminalID: panelID)
+            }
+            terminalEngineSwitchLog.info(
+                "switching terminal engine terminal=\(self.panelID, privacy: .public) from=\(engine.kind.rawValue, privacy: .public) to=\(target.rawValue, privacy: .public)"
+            )
+            appState.terminalEngineOverrides[panelID] = target
+            engineSwitchInFlight = false
         }
 
         /// Serialize this panel's terminal as the byte stream that reconstructs

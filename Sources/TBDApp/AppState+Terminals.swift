@@ -556,6 +556,9 @@ extension AppState {
         if terminalAttachRetries[terminalID] != nil {
             terminalAttachRetries.removeValue(forKey: terminalID)
         }
+        if terminalEngineOverrides[terminalID] != nil {
+            terminalEngineOverrides.removeValue(forKey: terminalID)
+        }
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {

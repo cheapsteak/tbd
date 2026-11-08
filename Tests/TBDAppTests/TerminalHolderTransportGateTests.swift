@@ -565,7 +565,8 @@ struct TerminalHolderTransportGateTests {
             TerminalPanePresentation.identity(
                 for: row, switching: nil,
                 attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
-                attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+                attachRetry: state.terminalAttachRetries[row.id] ?? 0,
+                engineOverride: state.terminalEngineOverrides[row.id])
         }
         let before = identity()
 
