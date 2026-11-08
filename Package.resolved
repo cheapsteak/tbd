@@ -1,5 +1,5 @@
 {
-  "originHash" : "96f65a1849388eef64beb7cff4cfd7e4e66b6051652a1d404e82cad628b32665",
+  "originHash" : "89720f14ff59fee35dc95aef9ebebb3da0088ca2eafed20f41ab399322abd2db",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -141,7 +141,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/cheapsteak/SwiftTerm",
       "state" : {
-        "revision" : "fedbcac6b312b17f459c296d025e0ccddceccdcc"
+        "revision" : "57cdacefd68b7d761f54486c0381a15d3c752ff9"
       }
     },
     {
