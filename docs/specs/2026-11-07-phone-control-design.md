@@ -461,6 +461,16 @@ the phone does not show it until tapped.
 **Large details.** A detail arrives in chunks that each fit one frame, and the user can cancel it.
 Above 1 MB the phone shows the first part and "Too large for the phone. Open on the laptop."
 
+- **The phone never trusts the laptop's chunk counts or sizes.** It counts the bytes that arrive.
+  It asks for at most as many chunks of a part as an honest laptop sends for 1 MB, and it stops a
+  part once what arrived passes 1 MB, keeping that and showing the same line. It also stops a
+  subagent's items at 1,000.
+- **A text part draws at most 20,000 lines.** Past them the pane shows the same line, so a
+  megabyte of short lines is no taller than a megabyte of wrapped text.
+- **A subagent's items share one message's budget** for markdown and nodes, the caps under
+  "Rendering on the phone". Items past it are not drawn, and the row shows the same line under the
+  ones that are.
+
 **Fewer round trips.** As soon as the channel is up, the app sends `sessions.subscribe` and, when
 the user was last in a session, `transcript.open`, without waiting for either reply.
 
@@ -469,6 +479,13 @@ the user was last in a session, `transcript.open`, without waiting for either re
 - The transcript list uses TanStack Virtual, so only rows near the screen exist in the page. It
   measures rows of any height, and holds the user's place when older rows load above.
 - Markdown renders only for rows near the screen.
+- Only the first 6,144 characters of a message are read as markdown, and the rest shows as plain
+  text, so a long message cannot stall the screen. Some of the markdown reader's rules take time
+  that grows with the square of a paragraph's length. The cut falls after a blank line in the
+  second half of those characters when there is one, and otherwise after the last line break or
+  space.
+- Markdown nests at most 16 levels deep, and one message draws at most about 50,000 nodes. Past
+  either cap, the rest shows as its markdown source.
 - While the user is at the bottom, new items keep the view at the bottom. Otherwise a "New
   messages ↓" pill appears.
 
