@@ -63,6 +63,56 @@ struct TerminalEngineInputTests {
                 "\(kind): Option-b sent \(EngineTestSupport.describe(fixture.recorder.sent))")
     }
 
+    // MARK: - Text-editing shortcuts
+
+    /// The macOS text-editing shortcuts `TBDTerminalView` turns into shell
+    /// line editing, in `performKeyEquivalent`, which AppKit offers a key
+    /// before any menu: ⌘← and ⌘→ are Home and End, ⌘⌫ is Ctrl-U, and ⌥⌫ and
+    /// ⌥⌦ delete a word back and forward. Both engines send the same bytes.
+    @Test("The text-editing shortcuts send the same bytes", arguments: TerminalEngineFactory.availableKinds)
+    func textEditingShortcutsSendTheSameBytes(kind: TerminalEngineKind) async throws {
+        let fixture = EngineUnderTest(kind: kind, label: "EngineInput.TextEditing")
+        defer { fixture.tearDown() }
+        #expect(fixture.engine.kind == kind, "asked for \(kind), the factory built \(fixture.engine.kind)")
+        let view = fixture.engine.view
+        let window = EngineTestSupport.mount(view)
+        defer { EngineTestSupport.unmount(window) }
+        window.makeFirstResponder(view)
+        await EngineTestSupport.settle()
+        fixture.recorder.reset()
+
+        let arrows: NSEvent.ModifierFlags = [.function, .numericPad]
+        let shortcuts: [TextEditingShortcut] = [
+            TextEditingShortcut(name: "⌘←", keyCode: 0x7B, characters: "\u{F702}",
+                                flags: arrows.union(.command), bytes: [0x1B, 0x5B, 0x48]),
+            TextEditingShortcut(name: "⌘→", keyCode: 0x7C, characters: "\u{F703}",
+                                flags: arrows.union(.command), bytes: [0x1B, 0x5B, 0x46]),
+            TextEditingShortcut(name: "⌘⌫", keyCode: 0x33, characters: "\u{7F}", flags: .command, bytes: [0x15]),
+            TextEditingShortcut(name: "⌥⌫", keyCode: 0x33, characters: "\u{7F}", flags: .option, bytes: [0x1B, 0x7F]),
+            TextEditingShortcut(name: "⌥⌦", keyCode: 0x75, characters: "\u{F728}",
+                                flags: [.option, .function], bytes: [0x1B, 0x64]),
+        ]
+        for shortcut in shortcuts {
+            let event = try #require(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: shortcut.flags,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, characters: shortcut.characters, charactersIgnoringModifiers: shortcut.characters,
+                isARepeat: false, keyCode: shortcut.keyCode))
+            let handled = view.performKeyEquivalent(with: event)
+            #expect(handled, "\(kind): \(shortcut.name) was left for the menus")
+            let sent = await EngineTestSupport.waitUntil(
+                "\(shortcut.name) to reach send", observed: { fixture.recorder.summary }
+            ) {
+                !fixture.recorder.sent.isEmpty
+            }
+            guard sent else { return }
+            await EngineTestSupport.settle()
+            let bytes = fixture.recorder.sent
+            #expect(bytes == shortcut.bytes, "\(kind): \(shortcut.name) sent \(EngineTestSupport.describe(bytes))")
+            fixture.recorder.reset()
+        }
+    }
+
     // MARK: - Wheel
 
     @Test("On the alternate screen with mouse reporting off, the scroll monitor claims the wheel and nothing reaches the pty; with reporting on, it sends reports",
@@ -132,6 +182,17 @@ struct TerminalEngineInputTests {
         #expect(fixture.recorder.sent.starts(with: Array("\u{1b}[<65;".utf8)),
                 "\(kind): with reporting on the wheel sent \(EngineTestSupport.describe(fixture.recorder.sent))")
     }
+}
+
+/// One text-editing shortcut and the bytes both engines send for it.
+private struct TextEditingShortcut {
+    let name: String
+    let keyCode: UInt16
+    /// `characters` and `charactersIgnoringModifiers` both: AppKit gives the
+    /// same for these keys.
+    let characters: String
+    let flags: NSEvent.ModifierFlags
+    let bytes: [UInt8]
 }
 
 /// What a US layout types for the one key these tests press.

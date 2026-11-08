@@ -158,6 +158,28 @@ extension GhosttyTerminal {
         } ?? false
     }
 
+    /// SwiftTerm's PageUp and PageDown: the viewport moves a page, a screen's height of rows,
+    /// while the program has claimed neither key. It has when it set Kitty keyboard flags, turned
+    /// on application cursor keys (DECCKM), or is on the alternate screen, and then this scrolls
+    /// nothing and returns false, so the key goes to the program. Returns true when it scrolled,
+    /// even by nothing at the end of the scrollback, as SwiftTerm takes the key there too.
+    ///
+    /// `ignoringApplicationCursorKeys` leaves DECCKM out of that test. SwiftTerm does that for a
+    /// page key with Option held while Option is not Meta, which it pages through `pageUp()`.
+    func scrollViewportByPage(up: Bool, ignoringApplicationCursorKeys: Bool = false) -> Bool {
+        withRaw { raw -> Bool in
+            let state = GhosttyTerminalState(raw: raw)
+            let claimedByCursorKeys = !ignoringApplicationCursorKeys
+                && state.mode(MouseEncoder.applicationCursorKeysMode)
+            guard state.kittyKeyboardFlags == 0, !claimedByCursorKeys, !state.isAlternateScreen else { return false }
+            var behavior = GhosttyTerminalScrollViewport()
+            behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
+            behavior.value.delta = up ? -state.rows : state.rows
+            _ = ghostty_terminal_scroll_viewport(raw, behavior)
+            return true
+        } ?? false
+    }
+
     // MARK: Paste
 
     /// Pastes `text`: bracketing (mode 2004), newline conversion, unsafe-byte stripping and the
@@ -277,6 +299,13 @@ extension GhosttyTerminal {
             binding.selection.reset()
             binding.selection.clearSelection()
         }
+    }
+
+    /// Selects the whole screen, scrollback included, and ends the click sequence. Returns false
+    /// when there is nothing to select or the terminal is closed.
+    @discardableResult
+    func selectAll() -> Bool {
+        input("selecting everything", fallback: false) { _, binding in try binding.selection.selectAll() }
     }
 
     /// The selected text, formatted the way a terminal copy does it. nil with no selection.
