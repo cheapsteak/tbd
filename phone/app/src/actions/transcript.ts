@@ -59,6 +59,21 @@ interface DetailRead {
   settled: Promise<ReadOutcome>;
 }
 
+/**
+ * The most `transcript.detail` requests on the wire at once, across every row. The client sends
+ * at most `MAX_IN_FLIGHT` (32) requests at a time and queues the rest, so a laptop that stops
+ * answering detail reads must not take its slots: with 4, the reader still sees four rows load
+ * side by side, which is as many as a phone's screen opens at a time, and 28 slots stay free for
+ * the subscribe, sends, pages and session actions. Further reads wait in `readDetail`.
+ */
+export const MAX_DETAIL_READS = 4;
+
+/** A detail read waiting for a slot: `go(true)` sends it, `go(false)` drops it unsent. */
+interface QueuedRead {
+  wanted: () => boolean;
+  go: (send: boolean) => void;
+}
+
 /** The slice an open's reply leaves: its page in place of the rows, or the rows kept when it resumed. */
 function opened(t: TranscriptState, result: TranscriptOpenResult): TranscriptState {
   return { ...(result.page === undefined ? t : applyPage(t, result.page)), phase: 'open' };
@@ -137,20 +152,83 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
    */
   const reads = new Map<number, DetailRead>();
 
+  /** How many detail requests are on the wire, at most `MAX_DETAIL_READS`. */
+  let readsOut = 0;
+
+  /** The detail reads waiting for a slot, oldest first. */
+  const queued: QueuedRead[] = [];
+
+  /**
+   * Drops each queued read no longer wanted, unsent, and sends the oldest wanted ones while a
+   * slot is free. It runs when a read settles and at every change of the state, so a collapse,
+   * a reset or a close drops the reads it made unwanted at once, and their taps resolve.
+   */
+  function pump(): void {
+    for (let i = 0; i < queued.length; ) {
+      const q = queued[i]!;
+      if (!q.wanted()) {
+        queued.splice(i, 1);
+        q.go(false);
+      } else if (readsOut < MAX_DETAIL_READS) {
+        queued.splice(i, 1);
+        readsOut += 1;
+        q.go(true);
+      } else {
+        i += 1;
+      }
+    }
+  }
+  store.subscribe(() => {
+    if (queued.length > 0) pump();
+  });
+
+  /**
+   * Takes a slot: at once when one is free and no read waits, so the request goes out in the
+   * caller's turn, and otherwise in turn. False when the read was dropped unsent.
+   */
+  function takeSlot(wanted: () => boolean): true | Promise<boolean> {
+    if (queued.length === 0 && readsOut < MAX_DETAIL_READS) {
+      readsOut += 1;
+      return true;
+    }
+    return new Promise<boolean>((go) => {
+      queued.push({ wanted, go });
+    });
+  }
+
+  function freeSlot(): void {
+    readsOut -= 1;
+    pump();
+  }
+
   /**
    * The outcome of asking `params` for row `rowKey`, with at most one request on the wire per
-   * row. While an earlier request for the row is unanswered, as after a tap, a collapse and a
-   * tap, it waits for that one to settle: its outcome is the answer when it asked the same, and
-   * otherwise this asks once it is gone. So a laptop that never answers holds one request per
-   * row, however often the row is tapped, and the client's 32 slots stay free for the rest.
-   * Null when `wanted` turns false while it waits: the detail was collapsed or replaced, and
-   * nothing is asked for it.
+   * row, and at most `MAX_DETAIL_READS` across all rows. While an earlier request for the row is
+   * unanswered, as after a tap, a collapse and a tap, it waits for that one to settle: its
+   * outcome is the answer when it asked the same, and otherwise this asks once it is gone. So a
+   * laptop that never answers holds one request per row, however often the row is tapped, and
+   * four in all, however many rows are tapped, and the client's other slots stay free. Null
+   * when `wanted` turns false while it waits, for the row's earlier request or for a slot: the
+   * detail was collapsed or replaced, and nothing is asked for it.
    */
   async function readDetail(rowKey: number, params: TranscriptDetailParams, wanted: () => boolean): Promise<ReadOutcome | null> {
-    for (let prior = reads.get(rowKey); prior !== undefined; prior = reads.get(rowKey)) {
-      const outcome = await prior.settled;
-      if (!wanted()) return null;
-      if (sameRead(prior.params, params)) return outcome;
+    for (;;) {
+      for (let prior = reads.get(rowKey); prior !== undefined; prior = reads.get(rowKey)) {
+        const outcome = await prior.settled;
+        if (!wanted()) return null;
+        if (sameRead(prior.params, params)) return outcome;
+      }
+      const slot = takeSlot(wanted);
+      if (slot !== true) {
+        if (!(await slot)) return null;
+        if (!wanted()) {
+          freeSlot();
+          return null;
+        }
+      }
+      // Another read for the row may have gone out while this one waited for its slot.
+      if (!reads.has(rowKey)) break;
+      freeSlot();
     }
     const settled = ctx.client.request('transcript.detail', params).then(
       (result): ReadOutcome => ({ ok: true, result }),
@@ -161,6 +239,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     // Registered first, so it runs before anyone awaiting `settled` looks at `reads` again.
     void settled.then(() => {
       if (reads.get(rowKey) === read) reads.delete(rowKey);
+      freeSlot();
     });
     return settled;
   }
@@ -278,7 +357,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
      *
      * A row has at most one request on the wire (`readDetail`): a tap while the request of a
      * collapsed detail of the row is unanswered waits for it, and takes its reply when it asked
-     * for the same first chunk.
+     * for the same first chunk. All rows together have at most `MAX_DETAIL_READS`: a read past
+     * them waits its turn, and one whose detail is collapsed or replaced meanwhile is never sent.
      *
      * A reply for another item ID than the one asked for fails the detail with `BAD_REPLY_TEXT`.
      * An error fails it with the error's message: `not_found`, "That detail is not in the

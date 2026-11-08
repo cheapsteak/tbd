@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { chunkText } from '../../test/e2e/fake-laptop-app.js';
 import { AppError, BAD_REPLY_TEXT, SUPERSEDED_TEXT } from '../client/client.ts';
 import { createActions } from '../actions/index.ts';
+import { MAX_DETAIL_READS } from '../actions/transcript.ts';
 import type { Method, ParamsOf, PhoneItem, PhoneSessionRef, ResultOf, TranscriptDetailPart, TranscriptDetailResult } from '../protocol/types.ts';
 import { utf8Length } from '../limits.ts';
 import {
@@ -476,6 +477,69 @@ test('taps against a laptop that never answers put one request per row on the wi
   assert.equal(h.t().details[h.key(0)]?.phase, 'open');
   assert.equal(h.t().details[h.key(1)]?.phase, 'open');
   assert.equal(h.sent.length, 4);
+});
+
+/** `n` tool items, t1 to t<n>. */
+function tools(n: number): PhoneItem[] {
+  return Array.from({ length: n }, (_, i) => tool(`t${i + 1}`));
+}
+
+/** The detail requests sent and not yet answered, as item IDs. */
+function unanswered(sent: readonly Sent[], answered: ReadonlySet<Sent>): string[] {
+  return sent.filter((s) => s.method === 'transcript.detail' && !answered.has(s)).map((s) => s.params.itemID);
+}
+
+test('taps on many rows of a laptop that never answers put at most MAX_DETAIL_READS requests on the wire', async () => {
+  const h = harness(tools(10));
+  const taps = h.t().rows.map((r) => h.actions.toggleDetail(r.key, 'input'));
+  await flush();
+  assert.deepEqual(h.sent.map((s) => s.params.itemID), ['t1', 't2', 't3', 't4']);
+  assert.equal(MAX_DETAIL_READS, 4);
+  // Every row shows its loading line meanwhile.
+  assert.ok(h.t().rows.every((r) => h.t().details[r.key]?.phase === 'loading'));
+
+  // A reply frees a slot, and the oldest waiting read takes it, ahead of the answered row's next part.
+  const answered = new Set<Sent>();
+  answered.add(h.sent[0]!);
+  answer(h.sent[0]!, 1);
+  await flush();
+  assert.deepEqual(unanswered(h.sent, answered), ['t2', 't3', 't4', 't5']);
+
+  // Answered one by one, every row loads in turn, never more than four at a time.
+  for (let i = 1; i < 200 && answered.size < h.sent.length; i += 1) {
+    const s = h.sent.find((x) => !answered.has(x))!;
+    answered.add(s);
+    answer(s, 1);
+    await flush();
+    assert.ok(unanswered(h.sent, answered).length <= MAX_DETAIL_READS);
+  }
+  await Promise.all(taps);
+  assert.ok(h.t().rows.every((r) => h.t().details[r.key]?.phase === 'open'));
+  assert.equal(h.sent.length, 20, 'an input and a result for each of the ten rows');
+});
+
+test('a queued read whose row is collapsed is dropped unsent, and its tap resolves', async () => {
+  const h = harness(tools(5));
+  const taps = h.t().rows.map((r) => h.actions.toggleDetail(r.key, 'input'));
+  await flush();
+  assert.deepEqual(h.sent.map((s) => s.params.itemID), ['t1', 't2', 't3', 't4']);
+  await h.actions.toggleDetail(h.key(4), 'input');
+  assert.equal(h.t().details[h.key(4)], undefined);
+  await taps[4];
+  answer(h.sent[0]!, 1);
+  await flush();
+  assert.deepEqual(h.sent.map((s) => [s.params.itemID, s.params.part]), [['t1', 'input'], ['t2', 'input'], ['t3', 'input'], ['t4', 'input'], ['t1', 'result']]);
+});
+
+test('a close drops every queued read unsent, and their taps resolve', async () => {
+  const h = harness(tools(7));
+  const taps = h.t().rows.map((r) => h.actions.toggleDetail(r.key, 'input'));
+  await flush();
+  h.actions.closeTranscript();
+  await Promise.all(taps.slice(4));
+  for (const s of h.sent.filter((x) => x.method === 'transcript.detail')) answer(s, 1);
+  await Promise.all(taps);
+  assert.deepEqual(h.sent.filter((s) => s.method === 'transcript.detail').map((s) => s.params.itemID), ['t1', 't2', 't3', 't4']);
 });
 
 test('a tap that asks for another chunk than the request still on the wire waits for it, then asks', async () => {
