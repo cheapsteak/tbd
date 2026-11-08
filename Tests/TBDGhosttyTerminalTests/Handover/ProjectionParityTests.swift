@@ -14,7 +14,7 @@ import Testing
 /// A state may differ only when the two engines hold different screens for the same bytes, and
 /// only in the fields its entry names. Those states are listed with the reason, and the list is
 /// exact: a new difference fails, a difference in a field the entry does not name fails, and so
-/// does a listed state that stops differing, which means the list is stale. The lists are derived
+/// does a listed field that stops differing, which means the list is stale. The lists are derived
 /// from the proof of concept's engine comparison, which found these cells and cursors differing;
 /// CI confirms them against the pinned SwiftTerm fork.
 ///
@@ -118,9 +118,10 @@ struct ProjectionParityTests {
             fields.keys.sorted().map { "\($0): \(fields[$0] ?? "")" }.joined(separator: " | ")
         }
         if let miss = misses[name] {
+            let matching = miss.fields.subtracting(differences.keys)
             #expect(
-                !differences.isEmpty,
-                "\(name) is a known \(walk) miss (\(miss.reason)) but now matches SwiftTerm: remove it from the list")
+                matching.isEmpty,
+                "\(name) is a known \(walk) miss (\(miss.reason)) but now matches SwiftTerm in \(matching.sorted()): remove them from its entry")
             let unexplained = differences.filter { !miss.fields.contains($0.key) }
             #expect(
                 unexplained.isEmpty,

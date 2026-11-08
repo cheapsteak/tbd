@@ -14,15 +14,16 @@ import Testing
 /// modes, the mouse modes in effect, the region, the pen and the kitty flags. A state may differ
 /// only where the two engines hold different screens for the same bytes, and only in the
 /// categories its entry names. Each list is exact: a new difference fails, a difference outside a
-/// listed state's categories fails, and so does a listed state that stops differing, which means
-/// the list is stale. The lists are the proof of concept's misses on its generated states; CI
-/// confirms them against the pinned SwiftTerm fork.
+/// listed state's categories fails, and so does a listed category that stops differing, which
+/// means the list is stale. The lists are the proof of concept's misses on its generated
+/// states; CI confirms them against the pinned SwiftTerm fork.
 ///
 /// On an alternate screen each of the three also leaves it, the way the state entered it, and
 /// compares again: the primary screen behind it, with its scrollback, and what the leave puts
 /// back. There the two engines may also differ in `oneValueForBothScreens`, so the handback's
 /// receiver is held as well to SwiftTerm fed the program's own bytes, in every category. The tests
-/// after them hold the handback's reorderings, its scrollback cap and a detach inside a sequence.
+/// after them hold a program that leaves its alternate screen while a viewer is attached, the
+/// handback's reorderings, its scrollback cap and a detach inside a sequence.
 ///
 /// Every body runs on a thread the tests own, one at a time: see `onHandoverThread`.
 @Suite(.serialized, .fastPassBounded)
@@ -48,7 +49,8 @@ struct HandoverCorpusTests {
     ]
 
     /// What the two engines may differ in once a program has left the alternate screen, whatever
-    /// crossed. Every alternate-screen state shares it, so it is not held to differing.
+    /// crossed. Every alternate-screen state shares it, and most differ in none of it, so unlike a
+    /// state's own miss it is not held to differing.
     static let oneValueForBothScreens = HandoverMiss(
         reason: "libghostty keeps one scrolling region, autowrap, reverse wrap and DECLRMM for both screens and leaves the cursor's visibility alone on a switch; SwiftTerm keeps a region per screen, puts back the modes its `?1049h` saved, and shows the cursor on every switch",
         categories: ["region", "mode.DECAWM", "mode.reverseWrap", "mode.DECLRMM", "cursorVisible", "mode.DECTCEM"])
@@ -666,9 +668,10 @@ struct HandoverCorpusTests {
 
     private static func expectOutcome(_ name: String, tally: HandoverTally, misses: [String: HandoverMiss], crossing: String) {
         if let miss = misses[name] {
+            let matching = miss.categories.subtracting(tally.categories)
             #expect(
-                !tally.isEmpty,
-                "\(name) is a known miss for the \(crossing) (\(miss.reason)) but now matches: remove it from the list")
+                matching.isEmpty,
+                "\(name) is a known miss for the \(crossing) (\(miss.reason)) but now matches in \(matching.sorted()): remove them from its entry")
             let unexplained = tally.excluding(miss.categories)
             #expect(
                 unexplained.isEmpty,
