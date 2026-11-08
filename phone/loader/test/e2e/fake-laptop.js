@@ -101,6 +101,11 @@ const TEST_PAGES = {
  *   `globalThis.__debugVariant = <variant>;` prepended, for `laptop.setBundle`.
  * @property {(room: string) => () => void} holdPresence Holds every presence answer for `room`
  *   until the returned function is called.
+ * @property {() => () => void} holdUpgrades Parks every WebSocket upgrade on `/v1/rooms/…`
+ *   from now on, unanswered, so each phone socket stays connecting, until the returned
+ *   function is called. Each parked upgrade is in `requests` on arrival but joins the relay
+ *   only on release, in arrival order, and only if its client is still there: one the phone
+ *   gave up on meanwhile never joins. Later upgrades go straight through. One hold at a time.
  * @property {string[]} requests Every request path, query included, in arrival order:
  *   pages, files, presence checks and WebSocket upgrades.
  * @property {boolean} refuseUpgrade While true, every WebSocket upgrade gets 503.
@@ -132,6 +137,12 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
   const held = new Map();
   /** @type {Set<() => void>} */
   const releases = new Set();
+  /**
+   * Upgrades parked by `holdUpgrades`, or null while none is held.
+   * @type {Array<{ req: import('node:http').IncomingMessage, socket: import('node:stream').Duplex,
+   *   head: Buffer, url: string }> | null}
+   */
+  let parked = null;
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
   const http = createServer();
 
@@ -167,7 +178,23 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
       releases.add(release);
       return release;
     },
+    holdUpgrades: () => {
+      if (parked !== null) throw new Error('upgrades are already held');
+      parked = [];
+      const release = () => {
+        releases.delete(release);
+        const waiting = parked ?? [];
+        parked = null;
+        for (const { req, socket, head, url } of waiting) {
+          if (!socket.destroyed) bridge(req, socket, head, url);
+        }
+      };
+      releases.add(release);
+      return release;
+    },
     close: async () => {
+      for (const { socket } of parked ?? []) socket.destroy();
+      parked = null;
       for (const release of [...releases]) release();
       for (const ws of sockets) ws.terminate();
       sockets.clear();
@@ -196,6 +223,10 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
     }
     if (server.refuseUpgrade) {
       refuse(socket, 503, 'Service Unavailable');
+      return;
+    }
+    if (parked !== null) {
+      parked.push({ req, socket, head, url });
       return;
     }
     bridge(req, socket, head, url);

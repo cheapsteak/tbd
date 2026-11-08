@@ -198,6 +198,22 @@ test('a black-holed room drops everything both ways, answers no ping and never c
   assert.deepEqual(phone2.events, [['binary', [4]]]);
 });
 
+test('a black hole counts what it swallows, per room, and nothing from a replaced socket', () => {
+  const { relay, phoneSocket, laptopSocket } = paired();
+  relay.blackHole(ROOM, true);
+  phoneSocket.send('ping');
+  phoneSocket.send(new Uint8Array([1]));
+  laptopSocket.send(new Uint8Array([2]));
+  assert.equal(relay.stats.swallowed.get(ROOM), 3);
+  assert.equal(relay.stats.swallowed.get(OTHER_ROOM), undefined);
+  relay.connect(path('phone'), recorder());
+  phoneSocket.send('ping');
+  assert.equal(relay.stats.swallowed.get(ROOM), 3, 'the replaced socket sends nothing');
+  relay.blackHole(ROOM, false);
+  laptopSocket.send(new Uint8Array([3]));
+  assert.equal(relay.stats.swallowed.get(ROOM), 3);
+});
+
 test('tamper changes, duplicates or drops laptop-to-phone frames only', () => {
   const { relay, laptop, phone, phoneSocket, laptopSocket } = paired();
   relay.tamper(ROOM, (frame) => {

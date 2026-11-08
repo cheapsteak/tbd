@@ -6,6 +6,8 @@
 //   that carry `data-state`), so a test can check a screen that is on show only for a moment,
 //   such as the code, which `paired` replaces at once. Read them with `screensSeen`.
 // - The pairing helpers drive the loader through its real screens and controls.
+// - `watchSockets` records the WebSockets a page opens, the pings it sends and the pongs it
+//   gets, so a test can count the phone's joins from the phone's side.
 
 import { expect, test as base } from '@playwright/test';
 
@@ -281,4 +283,156 @@ export async function frameText(page) {
     // The frame went away while it was read.
     return '';
   }
+}
+
+/**
+ * The device room of a laptop this phone paired with once: the room its `paired` carried.
+ * @param {ScriptedLaptop} laptop
+ * @returns {string}
+ */
+export function deviceRoom(laptop) {
+  const rooms = [...laptop.devices.keys()];
+  if (rooms.length !== 1) throw new Error(`the laptop has ${rooms.length} devices, not 1`);
+  return rooms[0];
+}
+
+/**
+ * Waits for the app frame's text to contain `text`: the debug app's sessions, by default.
+ * @param {Page} page
+ * @param {string} [text]
+ */
+export async function waitForAppText(page, text = 'acme-api') {
+  await expect.poll(() => frameText(page)).toContain(text);
+}
+
+/**
+ * The header strip's laptop button; its `b` is the laptop's name.
+ * @param {Page} page
+ */
+export function stripButton(page) {
+  return page.locator('#strip .lapbtn');
+}
+
+/**
+ * Taps the header strip and waits for its laptop menu.
+ * @param {Page} page
+ * @returns {Promise<import('@playwright/test').Locator>} the menu
+ */
+export async function openStripMenu(page) {
+  const menu = page.locator('[data-state="lapmenu"]');
+  await stripButton(page).click();
+  await expect(menu).toBeVisible();
+  return menu;
+}
+
+/**
+ * On the Laptops screen, taps the laptop named `name` and waits for its app.
+ * @param {Page} page
+ * @param {string} name
+ * @param {string} [text] what the app frame then shows
+ */
+export async function openLaptop(page, name, text = 'acme-api') {
+  const list = page.locator('[data-state="laptops"]');
+  await expect(list).toBeVisible();
+  await list.locator('button.lap-row', { hasText: name }).click();
+  await waitForAppFrame(page);
+  await waitForAppText(page, text);
+  await expect(stripButton(page).locator('b')).toHaveText(name);
+}
+
+/**
+ * Pairs each laptop in turn and waits for its app: the first by opening its link, so the page
+ * starts afresh, and the others through the paste screen, which the header strip's menu reaches.
+ * The page ends connected to the last.
+ * @param {Page} page
+ * @param {FakeLaptopServer} server
+ * @param {ScriptedLaptop[]} laptops
+ */
+export async function pairLaptops(page, server, laptops) {
+  for (const [i, laptop] of laptops.entries()) {
+    if (i === 0) await pairViaFragment(page, server, { laptop });
+    else await pairViaPaste(page, server, { laptop });
+    await waitForAppText(page);
+  }
+}
+
+/**
+ * What a page's WebSockets did, as `watchSockets` records it.
+ * @typedef {{ opened: string[], pingsSent: number, pongs: number }} SocketLog
+ */
+
+/**
+ * Makes each later document of `page` record its WebSockets: the URL of each one it opens,
+ * the pings it sends and the pongs it gets. A pong is counted before the loader's own handler
+ * sees it, in the same dispatch, so a count read afterwards means the loader has had it too.
+ * Read it with `socketLog`.
+ * @param {Page} page
+ */
+export async function watchSockets(page) {
+  await page.addInitScript(() => {
+    if (window.top !== window || '__tbdSockets' in window) return;
+    /** @type {SocketLog} */
+    const log = { opened: [], pingsSent: 0, pongs: 0 };
+    Object.defineProperty(window, '__tbdSockets', { value: log });
+    const Native = window.WebSocket;
+    class Watched extends Native {
+      /**
+       * @param {string | URL} url
+       * @param {string | string[]} [protocols]
+       */
+      constructor(url, protocols) {
+        super(url, protocols);
+        log.opened.push(String(url));
+        this.addEventListener('message', (event) => {
+          if (event.data === 'pong') log.pongs += 1;
+        });
+      }
+
+      /** @param {string | ArrayBufferLike | Blob | ArrayBufferView} data */
+      send(data) {
+        if (data === 'ping') log.pingsSent += 1;
+        super.send(data);
+      }
+    }
+    window.WebSocket = Watched;
+  });
+}
+
+/**
+ * @param {Page} page
+ * @returns {Promise<SocketLog>}
+ */
+export function socketLog(page) {
+  return page.evaluate(() => /** @type {any} */ (window).__tbdSockets);
+}
+
+/**
+ * How many phone sockets the page has opened to `room`.
+ * @param {Page} page
+ * @param {string} room
+ */
+export async function phoneSocketsTo(page, room) {
+  const { opened } = await socketLog(page);
+  return opened.filter((url) => url.endsWith(`/v1/rooms/${room}?role=phone`)).length;
+}
+
+let roundTrips = 0;
+
+/**
+ * One app message each way: the laptop asks the debug app to open a link, the app asks the
+ * loader (which shows the link sheet) and tells the laptop. The sheet is then cancelled.
+ * @param {Page} page
+ * @param {ScriptedLaptop} laptop
+ */
+export async function appRoundTrip(page, laptop) {
+  roundTrips += 1;
+  const url = `https://example.com/acme-${roundTrips}`;
+  const sent = await laptop.sendApp(deviceRoom(laptop), { kind: 'event', event: 'debug.openLink', data: { url } });
+  expect(sent).toBe(true);
+  await expect.poll(() => laptop.appBodies.some((body) => /** @type {any} */ (body).event === 'debug.openLinkSent'
+    && /** @type {any} */ (body).data?.url === url)).toBe(true);
+  const sheet = page.locator('[data-state="link"]');
+  await expect(sheet.locator('.url')).toHaveText(url);
+  await sheet.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sheet).toHaveCount(0);
 }

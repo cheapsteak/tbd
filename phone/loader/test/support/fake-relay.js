@@ -43,8 +43,10 @@ const NO_STATUS = 1005;
  * @property {(room: string, fn: TamperFn | null) => void} tamper
  *   Passes each laptop-to-phone binary frame through `fn`.
  * @property {{ pings: Map<string, number>, phoneJoins: Map<string, number>,
- *              laptopJoins: Map<string, number>, presence: Map<string, number> }} stats
- *   Counts per room.
+ *              laptopJoins: Map<string, number>, presence: Map<string, number>,
+ *              swallowed: Map<string, number> }} stats
+ *   Counts per room. `swallowed` counts what a black hole took from a room's sockets: each
+ *   text or binary message a client sent while the room was black-holed.
  */
 
 /** @returns {FakeRelay} */
@@ -56,6 +58,7 @@ export function createFakeRelay() {
     /** @type {Map<string, number>} */ phoneJoins: new Map(),
     /** @type {Map<string, number>} */ laptopJoins: new Map(),
     /** @type {Map<string, number>} */ presence: new Map(),
+    /** @type {Map<string, number>} */ swallowed: new Map(),
   };
 
   /** @param {string} id */
@@ -119,7 +122,11 @@ export function createFakeRelay() {
 
       return {
         send(data) {
-          if (!member.open || room.blackHole) return;
+          if (!member.open) return;
+          if (room.blackHole) {
+            bump(stats.swallowed, id);
+            return;
+          }
           if (typeof data === 'string') {
             // Client text is never forwarded; only `ping` is answered.
             if (data === 'ping') {
