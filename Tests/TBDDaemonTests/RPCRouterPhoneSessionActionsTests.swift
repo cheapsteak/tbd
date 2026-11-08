@@ -568,7 +568,7 @@ struct RPCRouterPhoneSessionActionsTests {
     /// Form values with no first message carry no phone message, so they pass
     /// as they came, byte for byte.
     @Test func phoneRemoteCreateVettedKeepsFormValuesWithNoFirstMessage() {
-        for paramsJSON in ["{}", #"{"prompt": ""}"#, #"{"prompt": 3}"#, #"{"repo": "acme/api"}"#, "not json"] {
+        for paramsJSON in ["{}", #"{"prompt": ""}"#, #"{"repo": "acme/api"}"#, "not json"] {
             let vetted = RPCRouter.phoneRemoteCreateVetted(
                 RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON))
             guard case .deliver(let params) = vetted else {
@@ -577,6 +577,55 @@ struct RPCRouterPhoneSessionActionsTests {
             }
             #expect(params.paramsJSON == paramsJSON)
         }
+    }
+
+    /// A `prompt` that is there and is not a string is refused, whatever it
+    /// holds: the provider would paste its own text for the value, which the
+    /// phone message rule never saw, such as an array or an object holding
+    /// the bracketed-paste end marker.
+    @Test func phoneRemoteCreateVettedRefusesAPromptThatIsNotAString() throws {
+        let marker = "\u{1b}[201~"
+        let forms: [[String: Any]] = [
+            [PhoneAppService.promptFieldName: [marker, "acme"]],
+            [PhoneAppService.promptFieldName: ["text": marker]],
+            [PhoneAppService.promptFieldName: 3],
+            [PhoneAppService.promptFieldName: NSNull()],
+        ]
+        for form in forms {
+            let data = try JSONSerialization.data(withJSONObject: form)
+            let paramsJSON = try #require(String(data: data, encoding: .utf8))
+            let vetted = RPCRouter.phoneRemoteCreateVetted(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON))
+            guard case .refused(let reason) = vetted else {
+                Issue.record("form values \(paramsJSON) were not refused: \(vetted)")
+                continue
+            }
+            #expect(reason == RPCRouter.phoneRemoteCreatePromptNotStringRefusal, "form \(paramsJSON)")
+        }
+    }
+
+    /// Through the door, an array or an object `prompt` holding the
+    /// bracketed-paste end marker reaches no provider, creates nothing and
+    /// records no create.
+    @Test func phoneRemoteCreateRefusesAPromptThatIsNotAString() async throws {
+        let f = try await makeRemoteFixture([Self.describeDeclaring([])])
+        let marker = "\u{1b}[201~"
+        let forms: [[String: Any]] = [
+            [PhoneAppService.promptFieldName: [marker]],
+            [PhoneAppService.promptFieldName: ["text": marker]],
+        ]
+
+        for form in forms {
+            let data = try JSONSerialization.data(withJSONObject: form)
+            let paramsJSON = try #require(String(data: data, encoding: .utf8))
+            let response = try await f.actions.phoneRemoteCreate(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == RPCRouter.phoneRemoteCreatePromptNotStringRefusal, "form \(paramsJSON)")
+        }
+        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused prompt never reaches the provider")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
+        #expect(createRows.isEmpty)
     }
 
     /// The provider's create gets the first message with bare line feeds, and

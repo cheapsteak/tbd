@@ -190,14 +190,25 @@ extension RPCRouter: PhoneSessionActions {
         RemoteCreateParams(provider: p.provider, paramsJSON: p.paramsJSON)
     }
 
+    /// What a paired phone hears when its new remote session's `prompt` form
+    /// value is there and is not a string.
+    static let phoneRemoteCreatePromptNotStringRefusal = "remote.create prompt must be a string"
+
     /// A remote session a phone creates, as the handler gets it: the provider
     /// and its form values (`phoneRemoteCreateParams`), with the first
     /// message, the form's `prompt` value (`PhoneAppService.promptFieldName`),
-    /// held to the phone message rule (`PhoneMessageText.vetted`). Form
-    /// values that are not a JSON object, and a `prompt` that is absent, not
-    /// a string, or empty, carry no phone message and are kept as they came,
-    /// for the handler to judge. When the rule changes the message, its
-    /// CRLFs made bare LFs, the form values are written out again with it.
+    /// held to the phone message rule (`PhoneMessageText.vetted`).
+    ///
+    /// - **A `prompt` that is there and is not a string** (a number, an
+    ///   array, an object, a null) is refused with
+    ///   `phoneRemoteCreatePromptNotStringRefusal`. The provider would paste
+    ///   whatever text it makes of the value, which the rule never saw.
+    /// - **Form values that are not a JSON object, and a `prompt` that is
+    ///   absent or empty,** carry no phone message and are kept as they came,
+    ///   for the handler to judge.
+    /// - **When the rule changes the message,** its CRLFs made bare LFs, the
+    ///   form values are written out again with it.
+    ///
     /// Either the params, or the refusal that answers in place of the create.
     static func phoneRemoteCreateVetted(
         _ p: RemoteCreateParams
@@ -206,7 +217,13 @@ extension RPCRouter: PhoneSessionActions {
         let field = PhoneAppService.promptFieldName
         guard let data = narrowed.paramsJSON.data(using: .utf8),
               var form = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let prompt = form[field] as? String, !prompt.isEmpty else {
+              let value = form[field] else {
+            return .deliver(narrowed)
+        }
+        guard let prompt = value as? String else {
+            return .refused(phoneRemoteCreatePromptNotStringRefusal)
+        }
+        guard !prompt.isEmpty else {
             return .deliver(narrowed)
         }
         switch PhoneMessageText.vetted(prompt) {
