@@ -976,9 +976,6 @@ private struct TabBarItem: View {
     private var showClaudeTabUsageTooltip: Bool = true
     @AppStorage(AppState.usageResetTimeStyleKey)
     private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
-    /// `useGhosttyTerminalEngine` as stored, nil while nobody has chosen, so
-    /// the engine label follows the flag as soon as it changes. Read only.
-    @AppStorage(AppState.useGhosttyTerminalEngineKey) private var ghosttyEngineChoice: Bool?
     @Environment(AppState.self) private var appState
 
     private var showClose: Bool {
@@ -988,14 +985,14 @@ private struct TabBarItem: View {
     /// The engine this tab's terminal is drawn by, while the libghostty
     /// experiment is on and the terminal has a mounted panel.
     ///
-    /// The flag is checked before the in-use record is read (`kind` is an
-    /// autoclosure), so while the experiment is off this tab does not observe
-    /// `terminalEnginesInUse` and another panel's mount does not redraw it.
+    /// The flag comes from `AppState`'s own store, the one every panel
+    /// decides its engine from, and is checked before the in-use record is
+    /// read (`AppState.terminalEngineLabel(for:)`), so while the experiment is
+    /// off this tab does not observe `terminalEnginesInUse` and another
+    /// panel's mount does not redraw it.
     private var engineLabel: String? {
         guard let terminal else { return nil }
-        return TerminalEngineLabel.text(
-            experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: ghosttyEngineChoice),
-            kind: appState.terminalEngineKindInUse(for: terminal.id))
+        return appState.terminalEngineLabel(for: terminal.id)
     }
 
     /// The rename field's minimum width: the label's width when editing

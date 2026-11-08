@@ -385,7 +385,7 @@ struct TerminalEngineSwitchTests {
     func switchCommandHiddenWhenExperimentOff() async {
         #expect(!TerminalEngineSwitchCommand.isVisible(experimentEnabled: false))
         #expect(TerminalEngineSwitchCommand.isVisible(experimentEnabled: true))
-        // As the menu reads the stored flag: unset and false hide it.
+        // Through the three-state read of the store: unset and false hide it.
         #expect(!TerminalEngineSwitchCommand.isVisible(
             experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: nil)))
         #expect(!TerminalEngineSwitchCommand.isVisible(
@@ -621,30 +621,72 @@ struct TerminalEngineSwitchTests {
         }
     }
 
-    /// The tab's label reads the record through `TerminalEngineLabel.text`,
-    /// which reads it only while the experiment is on, so with the flag off a
-    /// tab does not depend on the record and a write to it does not redraw
-    /// the tab.
+    /// The tab's label (`AppState.terminalEngineLabel(for:)`) reads the record
+    /// only while the experiment is on, so with the flag off a tab does not
+    /// depend on the record and a write to it does not redraw the tab.
     @Test("With the experiment off, the tab's label does not read the engine record; with it on, it does")
     func engineLabelReadsTheRecordOnlyWhileTheExperimentIsOn() {
-        withTestDefaults("TerminalEngineSwitch.LabelRead") { defaults in
-            let state = AppState(userDefaults: defaults)
-            let terminalID = UUID()
-            for enabled in [false, true] {
+        for flag in [nil, false, true] as [Bool?] {
+            let name = flag.map { "\($0)" } ?? "unset"
+            withTestDefaults("TerminalEngineSwitch.LabelRead.\(name)") { defaults in
+                if let flag {
+                    defaults.set(flag, forKey: AppState.useGhosttyTerminalEngineKey)
+                }
+                let state = AppState(userDefaults: defaults)
+                let terminalID = UUID()
                 let changed = HolderTestLatch()
                 withObservationTracking {
-                    _ = TerminalEngineLabel.text(
-                        experimentEnabled: enabled, kind: state.terminalEngineKindInUse(for: terminalID))
+                    _ = state.terminalEngineLabel(for: terminalID)
                 } onChange: {
                     changed.set()
                 }
                 state.noteTerminalEngineInUse(.swiftTerm, terminalID: terminalID, owner: UUID())
                 let redrawn = changed.isSet
-                if enabled {
+                if flag == true {
                     #expect(redrawn, "control: with the experiment on, the label did not read the record")
                 } else {
-                    #expect(!redrawn, "with the experiment off, a record write would redraw the tab")
+                    #expect(!redrawn, "with the flag \(name), a record write would redraw the tab")
                 }
+            }
+        }
+    }
+
+    /// The tab's label and the Terminal menu read the flag through
+    /// `AppState.ghosttyTerminalEngineFlag`, from the store the AppState was
+    /// built with, the one every panel decides its engine from. A test's
+    /// AppState and the mock app use a store other than `.standard`, so a
+    /// label read from `.standard` would show or hide against the flag that
+    /// built the panel. The flag is set after the AppState is made, as a
+    /// person turning it on in a running app does, so the mirror has to
+    /// follow the store, and each change has to redraw what read it.
+    @Test("The tab's engine label and the menu follow the flag in the AppState's own store, set after the AppState was made")
+    func engineLabelFollowsTheFlagInTheAppStatesStore() async {
+        await withTestDefaults("TerminalEngineSwitch.LabelStore") { defaults in
+            let state = AppState(userDefaults: defaults)
+            let terminalID = UUID()
+            state.noteTerminalEngineInUse(.ghostty, terminalID: terminalID, owner: UUID())
+            let unset = state.terminalEngineLabel(for: terminalID)
+            #expect(unset == nil, "a label with the flag unset in the AppState's store")
+
+            for (flag, expected) in [(true, "libghostty"), (false, nil)] as [(Bool, String?)] {
+                let redrawn = HolderTestLatch()
+                withObservationTracking {
+                    _ = state.terminalEngineLabel(for: terminalID)
+                } onChange: {
+                    redrawn.set()
+                }
+                defaults.set(flag, forKey: AppState.useGhosttyTerminalEngineKey)
+                await EngineTestSupport.waitUntil(
+                    "the label to follow the flag set to \(flag)",
+                    observed: { String(describing: state.terminalEngineLabel(for: terminalID)) }
+                ) {
+                    state.terminalEngineLabel(for: terminalID) == expected
+                }
+                let wasRedrawn = redrawn.isSet
+                #expect(wasRedrawn, "setting the flag to \(flag) did not redraw a tab that read the label")
+                let menuShows = TerminalEngineSwitchCommand.isVisible(
+                    experimentEnabled: state.ghosttyTerminalEngineFlag)
+                #expect(menuShows == flag, "with the flag set to \(flag), the menu showed the command: \(menuShows)")
             }
         }
     }

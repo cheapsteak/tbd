@@ -146,6 +146,7 @@ final class AppStateEmissionTracker {
         _ = state.terminalAttachRetries
         _ = state.terminalEngineOverrides
         _ = state.terminalEnginesInUse
+        _ = state.ghosttyTerminalEngineFlag
         _ = state.editingWorktreeID
         _ = state.prStatuses
         _ = state.prObservations
@@ -278,6 +279,7 @@ final class AppStateEmissionTracker {
         "terminalAttachRetries",
         "terminalEngineOverrides",
         "terminalEnginesInUse",
+        "ghosttyTerminalEngineFlag",
         "editingWorktreeID",
         "prStatuses",
         "prObservations",

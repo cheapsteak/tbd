@@ -58,6 +58,17 @@ enum TerminalEngineLabel {
     }
 }
 
+extension UserDefaults {
+    /// The stored `AppState.useGhosttyTerminalEngineKey`, for key-value
+    /// observation only (`AppState.ghosttyTerminalEngineFlag`): a defaults
+    /// key is observed by a property of the same name, so the name and the
+    /// key must stay equal. Reads go through
+    /// `AppState.ghosttyTerminalEngineEnabled(defaults:)`.
+    @objc dynamic var useGhosttyTerminalEngine: NSNumber? {
+        object(forKey: "useGhosttyTerminalEngine") as? NSNumber
+    }
+}
+
 extension TerminalEngineKind {
     /// The engine a switch moves a terminal built on this one to.
     var other: TerminalEngineKind {
@@ -160,6 +171,16 @@ extension AppState {
         terminalEnginesInUse[terminalID]?.kind
     }
 
+    /// The engine label the tab for `terminalID` shows, or nil for none.
+    /// Reads the observed `ghosttyTerminalEngineFlag`, so the label follows
+    /// this AppState's store, and reads the in-use record only while that is
+    /// on, so with the flag off no tab observes the record.
+    func terminalEngineLabel(for terminalID: UUID) -> String? {
+        TerminalEngineLabel.text(
+            experimentEnabled: ghosttyTerminalEngineFlag,
+            kind: terminalEngineKindInUse(for: terminalID))
+    }
+
     /// Records the engine panel `owner` was built on.
     func noteTerminalEngineInUse(_ kind: TerminalEngineKind, terminalID: UUID, owner: UUID) {
         let entry = TerminalEngineInUse(kind: kind, owner: owner)
@@ -213,10 +234,12 @@ extension AppState {
         return nil
     }
 
-    /// Whether Switch Terminal Engine can run now.
+    /// Whether Switch Terminal Engine can run now. Reads the observed
+    /// `ghosttyTerminalEngineFlag`, so the menu item re-evaluates when the
+    /// flag changes.
     var canSwitchFocusedTerminalEngine: Bool {
         TerminalEngineSwitchCommand.isEnabled(
-            experimentEnabled: ghosttyTerminalEngineEnabled,
+            experimentEnabled: ghosttyTerminalEngineFlag,
             focusedHost: focusedTerminalEngineHost())
     }
 

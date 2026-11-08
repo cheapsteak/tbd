@@ -1203,6 +1203,19 @@ final class AppState {
     /// terminal id and scoped to the panel that registered it, so a successor
     /// panel's registration survives its predecessor's teardown.
     @ObservationIgnored var terminalEngineSwitchers: [UUID: TerminalEngineSwitcher] = [:]
+    /// `ghosttyTerminalEngineEnabled`, held where a view can observe it: the
+    /// tab's engine label and the Terminal menu read this, never
+    /// `@AppStorage`, so they follow the store this AppState was built with,
+    /// as every panel deciding its engine does. Refreshed by
+    /// `ghosttyTerminalEngineFlagObservation` and written only when it
+    /// changes. A panel deciding its engine reads the store itself.
+    private(set) var ghosttyTerminalEngineFlag = false
+    /// Key-value observation of `useGhosttyTerminalEngineKey` in
+    /// `userDefaults`. Unlike `UserDefaults.didChangeNotification`, which only
+    /// this process's writes post, it also hears another process's write, so
+    /// `defaults write`, the way the flag is turned on before it has a
+    /// Settings toggle, reaches the tabs and the menu.
+    @ObservationIgnored private var ghosttyTerminalEngineFlagObservation: NSKeyValueObservation?
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
     /// attaches again from scratch.
@@ -2881,6 +2894,7 @@ final class AppState {
         expandedSidebarGroups = Self.restoredSidebarGroups(defaults: userDefaults)
         startMemoryPressureMonitor()
         registerFocusObservers()
+        watchGhosttyTerminalEngineFlag()
         installInjectionHandler()
         installScreenRequestHandler()
         // Give the notification manager a back-reference so banner clicks
@@ -5083,6 +5097,35 @@ final class AppState {
     /// was built with: `.standard` in the app, an isolated suite in a test.
     var ghosttyTerminalEngineEnabled: Bool {
         Self.ghosttyTerminalEngineEnabled(defaults: userDefaults)
+    }
+
+    /// Reads the flag into `ghosttyTerminalEngineFlag`, then keeps it current
+    /// for as long as this AppState lives. The handler runs on whichever
+    /// thread wrote the key; the weak reference is read on the main thread.
+    private func watchGhosttyTerminalEngineFlag() {
+        refreshGhosttyTerminalEngineFlag()
+        ghosttyTerminalEngineFlagObservation = userDefaults.observe(
+            \.useGhosttyTerminalEngine
+        ) { [weak self] _, _ in
+            AppState.performOnMain { self?.refreshGhosttyTerminalEngineFlag() }
+        }
+    }
+
+    private func refreshGhosttyTerminalEngineFlag() {
+        let enabled = ghosttyTerminalEngineEnabled
+        if ghosttyTerminalEngineFlag != enabled {
+            ghosttyTerminalEngineFlag = enabled
+        }
+    }
+
+    /// Runs `body` on the main actor: at once when already on the main
+    /// thread, otherwise on the next main-loop turn.
+    nonisolated private static func performOnMain(_ body: @escaping @MainActor @Sendable () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { body() }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
+        }
     }
 
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less
