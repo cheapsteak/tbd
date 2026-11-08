@@ -9,8 +9,8 @@
 // in, a failed one shown as nothing, a reset back to the newest rows, and the scroll back ending
 // at the first item. Then the "Working…" line and its elapsed time, and the "Show details"
 // switch, which opens the transcript again with thinking and system notes. Last, links: each
-// leaves only through the loader's `openLink`, and links the app does not offer, and raw HTML,
-// stay text.
+// leaves only through the loader's `openLink`, with the URL its item holds now, a link in a
+// subagent's nest included, and links the app does not offer, and raw HTML, stay text.
 //
 // mock.json has no slash item and no running tool, and its fake laptop leaves out thinking and
 // system notes unless "Show details" is on, so the first test has those arrive through `emit`,
@@ -1299,5 +1299,50 @@ test('a link in a message shown in full through Show more opens through the load
   await expect(link).toBeVisible();
   await link.click();
   await expect.poll(() => hostLinks(page)).toEqual([notes]);
+  expect(await frameURL(page)).toContain('/runner.html');
+});
+
+test('a link whose URL an update changes in place opens the new URL', async ({ page, appHost }) => {
+  const moved = 'https://acme.example/docs/v2';
+  const tx = await openLinks(page, appHost);
+  const say = tx.locator('.say', { hasText: 'See docs' });
+  await say.locator('.lnk').click();
+  await expect.poll(() => hostLinks(page)).toEqual([DOCS]);
+
+  // The same item, its link in the same place with the same text, and only its URL and the
+  // words after it changed: the row and its link are drawn again, not made anew.
+  await hostCall(page, 'emit', 'transcript.update', {
+    session: CHECKOUT_REF, items: [{ id: 'link-2', kind: 'assistant', text: `See [docs](${moved}), moved.`, truncated: false }],
+  });
+  await expect(say).toHaveText('See docs, moved.');
+  await say.locator('.lnk').click();
+  await expect.poll(() => hostLinks(page)).toEqual([DOCS, moved]);
+  expect(await frameURL(page)).toContain('/runner.html');
+});
+
+test('a link in a subagent’s nest opens its own URL, and sits in no button', async ({ page, appHost }) => {
+  const callback = 'https://acme.example/callback';
+  const rules = 'https://acme.example/redirect-rules';
+  const scenario = structuredClone(MOCK);
+  scenario.details['login-3'].subagent.push({
+    id: 'login-3-4', kind: 'assistant', truncated: false,
+    text: `See [the callback notes](${callback}) and [the redirect rules](${rules}).`,
+  });
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const agent = tx.locator('button.tool', { hasText: 'Explore agent' });
+  await agent.click();
+  const links = tx.locator('.nest .lnk');
+  await expect(links).toHaveText(['the callback notes', 'the redirect rules']);
+  expect(await links.evaluateAll((els) => els.map((el) => el.closest('button') === null))).toEqual([true, true]);
+
+  await links.last().click();
+  await expect.poll(() => hostLinks(page)).toEqual([rules]);
+  await links.first().click();
+  await expect.poll(() => hostLinks(page)).toEqual([rules, callback]);
+  // The taps opened links and nothing else: the subagent row stays open and asked once.
+  await expect(agent).toHaveAttribute('aria-expanded', 'true');
+  expect(await detailRequests(page)).toEqual([['login-3', 'subagent', 0]]);
   expect(await frameURL(page)).toContain('/runner.html');
 });
