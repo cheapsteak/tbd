@@ -16,6 +16,10 @@ actor FakePhoneClient: PhoneControlClient {
     /// How many `phone.status` calls, from the first, are refused as a
     /// daemon still recording the app's identity refuses them.
     let refusedStatusCalls: Int
+    /// Whether `phone.status` waits, from its first call, until
+    /// `releaseStatus()`.
+    private var holdsStatus: Bool
+    private var heldStatus: [CheckedContinuation<Void, Never>] = []
     private(set) var statusCalls = 0
     private(set) var relayURLs: [String?] = []
     private(set) var allowedOffers: [UUID] = []
@@ -24,7 +28,7 @@ actor FakePhoneClient: PhoneControlClient {
     init(
         status: PhoneStatusResult, devices: [PhoneDevice] = [], statusError: (any Error)? = nil,
         relayURLError: (any Error)? = nil, allowError: (any Error)? = nil, revokeError: (any Error)? = nil,
-        pairing: PhonePairingStatus? = nil, refusedStatusCalls: Int = 0
+        pairing: PhonePairingStatus? = nil, refusedStatusCalls: Int = 0, holdsStatus: Bool = false
     ) {
         self.status = status
         self.devices = devices
@@ -34,6 +38,7 @@ actor FakePhoneClient: PhoneControlClient {
         self.revokeError = revokeError
         self.pairing = pairing
         self.refusedStatusCalls = refusedStatusCalls
+        self.holdsStatus = holdsStatus
     }
 
     static let identityRefusal = "phone control is managed only from the TBD app"
@@ -44,7 +49,22 @@ actor FakePhoneClient: PhoneControlClient {
         status = newStatus
     }
 
+    /// How many `phone.status` calls are waiting for `releaseStatus()`.
+    var heldStatusCalls: Int { heldStatus.count }
+
+    /// Lets every held `phone.status` call answer, and the later ones answer
+    /// at once.
+    func releaseStatus() {
+        holdsStatus = false
+        let held = heldStatus
+        heldStatus = []
+        for call in held { call.resume() }
+    }
+
     func phoneStatus() async throws -> PhoneStatusResult {
+        if holdsStatus {
+            await withCheckedContinuation { heldStatus.append($0) }
+        }
         statusCalls += 1
         if statusCalls <= refusedStatusCalls {
             throw DaemonClientError.rpcError(Self.identityRefusal, code: nil)
@@ -84,11 +104,14 @@ actor FakePhoneClient: PhoneControlClient {
 @MainActor
 @Suite("AppStatePhone")
 struct AppStatePhoneTests {
-    private func withState(_ body: (AppState) async throws -> Void) async rethrows {
+    private func withState(
+        phoneRetryClock: any Clock<Duration> = ContinuousClock(),
+        _ body: (AppState) async throws -> Void
+    ) async rethrows {
         let suite = TestDefaultsSuite("TBDAppTests.AppStatePhone")
         let defaults = suite.defaults
         defer { suite.tearDown() }
-        try await body(AppState(userDefaults: defaults))
+        try await body(AppState(userDefaults: defaults, phoneRetryClock: phoneRetryClock))
     }
 
     private func status(
@@ -130,25 +153,27 @@ struct AppStatePhoneTests {
     }
 
     @Test(.clockDriven) func aRefusedConnectTimeStatusIsRetriedUntilItAnswers() async throws {
-        try await withState { state in
+        let clock = EventDrivenTestClock()
+        try await withState(phoneRetryClock: clock) { state in
             let expected = status(connected: [UUID()])
             let fake = FakePhoneClient(status: expected, refusedStatusCalls: 2)
             state.phoneClient = fake
-            let clock = EventDrivenTestClock()
-            state.phoneRetryClock = clock
             state.isConnected = true
 
-            await state.refreshPhoneAtConnect()
+            state.refreshPhoneAtConnect()
+            let refresh = try #require(state.phoneConnectRefreshTask)
+            // The retries arm on the main actor, so their guards take the
+            // saturated-pass budget. The first retry arms once the first
+            // read has been refused.
+            try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
             #expect(state.phoneStatus == nil)
             #expect(state.phoneStatusError == FakePhoneClient.identityRefusal)
 
-            // The retries arm on the main actor, so their guards take the
-            // saturated-pass budget.
             let delays = AppState.phoneConnectRetryDelays
             try await clock.requireAdvanceWhenArmed(by: delays[0], timeout: TestDeadlines.saturatedPass)
             try await clock.requireAdvanceWhenArmed(by: delays[1], timeout: TestDeadlines.saturatedPass)
             // The third call answers, and the retries end there.
-            await state.phoneConnectRetryTask?.value
+            await refresh.value
             #expect(state.phoneStatus == expected)
             #expect(state.phoneStatusError == nil)
             let calls = await fake.statusCalls
@@ -157,33 +182,128 @@ struct AppStatePhoneTests {
         }
     }
 
-    @Test(.clockDriven) func theConnectTimeRetriesStopWhenTheAppDisconnects() async throws {
-        try await withState { state in
+    @Test(.clockDriven) func aDisconnectStopsTheConnectTimeRetries() async throws {
+        let clock = EventDrivenTestClock()
+        try await withState(phoneRetryClock: clock) { state in
             let fake = FakePhoneClient(status: status(), refusedStatusCalls: 10)
             state.phoneClient = fake
-            let clock = EventDrivenTestClock()
-            state.phoneRetryClock = clock
             state.isConnected = true
 
-            await state.refreshPhoneAtConnect()
+            state.refreshPhoneAtConnect()
+            let refresh = try #require(state.phoneConnectRefreshTask)
+            try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+            // The disconnect cancels the retry's sleep; nothing advances it.
             state.isConnected = false
-            try await clock.requireAdvanceWhenArmed(
-                by: AppState.phoneConnectRetryDelays[0], timeout: TestDeadlines.saturatedPass)
-            await state.phoneConnectRetryTask?.value
+            #expect(state.phoneConnectRefreshTask == nil)
+            await refresh.value
             let calls = await fake.statusCalls
             #expect(calls == 1)
+            #expect(!clock.hasSleeper)
             #expect(state.phoneStatus == nil)
         }
     }
 
     @Test func aConnectTimeStatusThatAnswersSchedulesNoRetry() async {
-        await withState { state in
+        let clock = EventDrivenTestClock()
+        await withState(phoneRetryClock: clock) { state in
             let expected = status()
-            state.phoneClient = FakePhoneClient(status: expected)
+            let fake = FakePhoneClient(status: expected)
+            state.phoneClient = fake
             state.isConnected = true
-            await state.refreshPhoneAtConnect()
+            state.refreshPhoneAtConnect()
+            await state.phoneConnectRefreshTask?.value
             #expect(state.phoneStatus == expected)
-            #expect(state.phoneConnectRetryTask == nil)
+            let calls = await fake.statusCalls
+            #expect(calls == 1)
+            #expect(!clock.hasSleeper)
+        }
+    }
+
+    /// The phone status belongs to the daemon that answered it. Once the
+    /// connection is lost, a "Phone connected" chip would show a phone the
+    /// app can no longer see, so status, devices and chip all go.
+    @Test func aLostConnectionForgetsThePhoneStatus() async {
+        await withState { state in
+            let paired = device("iPhone")
+            state.phoneClient = FakePhoneClient(status: status(connected: [paired.id]), devices: [paired])
+            state.isConnected = true
+            await state.refreshPhone()
+            #expect(PhoneChipPresentation.make(status: state.phoneStatus) != nil)
+            #expect(state.phoneDevices == [paired])
+
+            state.handleConnectionError(DaemonClientError.daemonNotRunning)
+            #expect(!state.isConnected)
+            #expect(state.phoneStatus == nil)
+            #expect(state.phoneDevices.isEmpty)
+            #expect(PhoneChipPresentation.make(status: state.phoneStatus) == nil)
+        }
+    }
+
+    /// A read the old daemon answers after the connection is lost does not
+    /// put its status back.
+    @Test(.fastPassBounded) func aReadAnsweredAfterTheConnectionIsLostDoesNotLand() async {
+        await withState { state in
+            let fake = FakePhoneClient(status: status(connected: [UUID()]), holdsStatus: true)
+            state.phoneClient = fake
+            state.isConnected = true
+            let reading = Task { await state.refreshPhone() }
+            let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await fake.heldStatusCalls == 1
+            }
+            #expect(held == .satisfied)
+
+            state.isConnected = false
+            await fake.releaseStatus()
+            await reading.value
+            #expect(state.phoneStatus == nil)
+            #expect(state.phoneDevices.isEmpty)
+        }
+    }
+
+    /// The poll tick's plain reconnect reads the phone status again, and
+    /// returns while that read is still waiting on the daemon.
+    @Test(.fastPassBounded) func thePollTicksReconnectReadsThePhoneStatusWithoutWaitingForIt() async {
+        await withState { state in
+            let expected = status(connected: [UUID()])
+            let fake = FakePhoneClient(status: expected, holdsStatus: true)
+            state.phoneClient = fake
+            state.isConnected = true
+
+            await state.pollTickDidReconnect()
+            let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await fake.heldStatusCalls == 1
+            }
+            #expect(held == .satisfied)
+            #expect(state.phoneStatus == nil)
+
+            await fake.releaseStatus()
+            await state.phoneConnectRefreshTask?.value
+            #expect(state.phoneStatus == expected)
+        }
+    }
+
+    /// An answered subscription may come from a daemon that replaced the old
+    /// one with no disconnect the app saw, so it reads the phone status again.
+    @Test func anAnsweredSubscriptionReadsThePhoneStatus() async {
+        await withState { state in
+            let expected = status(connected: [UUID()])
+            let fake = FakePhoneClient(status: expected)
+            state.phoneClient = fake
+            // `startSubscription` re-seeds program status and re-reports the
+            // composer drafts; both are answered here, so the test sends no
+            // RPC of its own for them.
+            state.programStatusListFetcher = { @MainActor in [] }
+            state.composerDraftsSetter = { _ in }
+            let attempts = SubscribeAttempts(connectingFrom: 0)
+            state.deltaSubscriber = { onConnected, _ in attempts.run(onConnected: onConnected) }
+
+            state.startSubscription()
+            let read = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+                await fake.statusCalls >= 1
+            }
+            #expect(read == .satisfied)
+            await state.phoneConnectRefreshTask?.value
+            #expect(state.phoneStatus == expected)
         }
     }
 

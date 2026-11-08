@@ -893,7 +893,14 @@ final class AppState {
     @ObservationIgnored private var mainAreaSizeBroadcastTask: Task<Void, Never>?
     @ObservationIgnored private var lastBroadcastCols: Int = 0
     @ObservationIgnored private var lastBroadcastRows: Int = 0
-    var isConnected: Bool = false
+    /// Whether the app is connected to the daemon. Losing the connection
+    /// forgets the phone status, which belongs to the daemon that is gone
+    /// (`phoneConnectionLost`).
+    var isConnected: Bool = false {
+        didSet {
+            if oldValue, !isConnected { phoneConnectionLost() }
+        }
+    }
     var layouts: [UUID: LayoutNode] = [:] {
         didSet {
             persistLayouts()
@@ -1284,9 +1291,11 @@ final class AppState {
     var devServerRunningWorktreeIDs: Set<UUID> = []
     /// Phone control's status from `phone.status`: the settings, the relay,
     /// the connected phones and any pairing offer. Nil until the first read
-    /// succeeds; a failed read keeps the last one. See `AppState+Phone.swift`.
+    /// after a connect succeeds; a failed read keeps the last one, and losing
+    /// the daemon connection clears it. See `AppState+Phone.swift`.
     var phoneStatus: PhoneStatusResult?
-    /// The paired phones, from `phone.devices`.
+    /// The paired phones, from `phone.devices`. Emptied when the daemon
+    /// connection is lost.
     var phoneDevices: [PhoneDevice] = []
     /// Why the last phone read failed, in the daemon's words; nil once one
     /// succeeds.
@@ -1306,11 +1315,13 @@ final class AppState {
     /// The newest phone refresh started. Refreshes overlap (a delta, an
     /// action, the pane appearing); an answer from an older one is dropped.
     @ObservationIgnored var phoneRefreshGeneration: UInt64 = 0
-    /// The connect-time phone refresh's retries, while it has any left. See
+    /// The connect-time phone refresh, its first read and its retries. A
+    /// disconnect and the next connect's refresh cancel it. See
     /// `refreshPhoneAtConnect`.
-    @ObservationIgnored var phoneConnectRetryTask: Task<Void, Never>?
-    /// The clock those retries wait on, so a test can step them.
-    @ObservationIgnored var phoneRetryClock: any Clock<Duration> = ContinuousClock()
+    @ObservationIgnored var phoneConnectRefreshTask: Task<Void, Never>?
+    /// The clock the connect-time refresh's retries wait on, an init
+    /// parameter so a test's clock is in place before any retry can start.
+    let phoneRetryClock: any Clock<Duration>
     /// Failures from the last Start/Stop/Restart per worktree, shown at the
     /// bottom of the Servers menu.
     var devServerActionMessages: [UUID: [String]] = [:]
@@ -2916,10 +2927,12 @@ final class AppState {
     init(
         userDefaults: UserDefaults = .standard,
         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
-        onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log
+        onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log,
+        phoneRetryClock: any Clock<Duration> = ContinuousClock()
     ) {
         self.userDefaults = userDefaults
         self.onEngineNotice = onEngineNotice
+        self.phoneRetryClock = phoneRetryClock
         self.windowChrome = WindowChromeState()
         self.tmuxExecutableResolver = tmuxExecutableResolver
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
@@ -3417,10 +3430,15 @@ final class AppState {
                     // composer-draft set. The daemon keeps the last set across
                     // a dropped subscription and loses it to a restart, so
                     // this report is what brings it back in line either way.
+                    //
+                    // And the phone status is read again: a new daemon's
+                    // phones are not the old one's, and the app may have seen
+                    // no disconnect to clear them.
                     Task { @MainActor [weak self] in
                         self?.panelSubscriptionRegistered()
                         self?.resendLastProgramStatusReports()
                         self?.pushComposerDrafts()
+                        self?.refreshPhoneAtConnect()
                     }
                     // An answered subscription may come from a new daemon,
                     // and the app may never have seen a disconnect. Record the
@@ -4239,6 +4257,18 @@ final class AppState {
         if sweepNow { await sweepHolderClaims() }
     }
 
+    /// What the poll tick does once its plain reconnect succeeds, a connect
+    /// that loads no initial state: claim sweeps are allowed again (this
+    /// tick's own sweep follows), the spawn preferences and foreground state
+    /// go to the daemon, which may be a new one, and the phone status is read
+    /// again in a task of its own.
+    func pollTickDidReconnect() async {
+        await holderClaimSweepDidConnect(sweepNow: false)
+        pushClaudeSpawnPreferences()
+        pushForegroundState()
+        refreshPhoneAtConnect()
+    }
+
     /// Poll daemon for state changes every 2 seconds.
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -4261,9 +4291,7 @@ final class AppState {
                         let didConnect = await self.daemonClient.connect()
                         self.isConnected = didConnect
                         if didConnect {
-                            await self.holderClaimSweepDidConnect(sweepNow: false)
-                            self.pushClaudeSpawnPreferences()
-                            self.pushForegroundState()
+                            await self.pollTickDidReconnect()
                         } else if !AppState.pidFilePointsAtLiveDaemon() {
                             // The socket file exists but nothing accepted the
                             // connection, and the pid file doesn't name a live
@@ -4355,7 +4383,7 @@ final class AppState {
             startSubscription()
             await refreshPRStatuses()
             await refreshDevServerSummary()
-            await refreshPhoneAtConnect()
+            refreshPhoneAtConnect()
             pushClaudeSpawnPreferences()
             pushForegroundState()
             // Last, so the initial load never waits on it.

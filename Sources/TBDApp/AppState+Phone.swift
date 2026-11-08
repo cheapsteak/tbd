@@ -42,27 +42,33 @@ extension AppState {
         _ = await readPhone()
     }
 
-    /// The phone refresh at connect, which tries again when it fails.
+    /// The phone refresh at connect, which tries again when it fails. Every
+    /// connect calls it: the first load, the poll tick's reconnect, an added
+    /// repository that finds the daemon again, and each subscription the
+    /// daemon answers, which may come from a new daemon.
     ///
-    /// The daemon can refuse the first `phone.status` while it is still
-    /// recording the app's identity, and no delta follows that refusal, so
-    /// `phoneStatus` would stay nil and the "Phone connected" chip hidden
-    /// while a phone may be controlling the laptop. So a failed first try is
-    /// retried after each of `phoneConnectRetryDelays` on `phoneRetryClock`,
-    /// in a task of its own, so the rest of the connect does not wait. The
-    /// retries stop at the first `phone.status` that answers, once the app
-    /// disconnects, and when a later connect starts its own.
-    func refreshPhoneAtConnect() async {
-        phoneConnectRetryTask?.cancel()
-        phoneConnectRetryTask = nil
-        let answered = await readPhone()
-        guard !answered else { return }
-        phoneConnectRetryTask = Task { [weak self] in
-            await self?.retryPhoneRefresh()
+    /// The whole refresh, first read included, runs in a task of its own,
+    /// kept as `phoneConnectRefreshTask`, so a slow `phone.status` holds up
+    /// nothing else the connect does. The daemon can refuse the first
+    /// `phone.status` while it is still recording the app's identity, and no
+    /// delta follows that refusal, so `phoneStatus` would stay nil and the
+    /// "Phone connected" chip hidden while a phone may be controlling the
+    /// laptop. So a failed first try is retried after each of
+    /// `phoneConnectRetryDelays` on `phoneRetryClock`. The retries stop at
+    /// the first `phone.status` that answers. A disconnect cancels the task,
+    /// and a later connect replaces it.
+    func refreshPhoneAtConnect() {
+        phoneConnectRefreshTask?.cancel()
+        phoneConnectRefreshTask = Task { [weak self] in
+            await self?.runConnectPhoneRefresh()
         }
     }
 
-    private func retryPhoneRefresh() async {
+    private func runConnectPhoneRefresh() async {
+        // Cancelled before it ran: a read now would start after the
+        // disconnect or the newer refresh that cancelled it.
+        guard !Task.isCancelled else { return }
+        if await readPhone() { return }
         for delay in Self.phoneConnectRetryDelays {
             do {
                 try await phoneRetryClock.sleep(for: delay)
@@ -72,6 +78,19 @@ extension AppState {
             guard isConnected, !Task.isCancelled else { return }
             if await readPhone() { return }
         }
+    }
+
+    /// The daemon connection is lost. Its phone status, connected phones
+    /// included, belongs to the daemon that is gone, so it is cleared, and
+    /// the "Phone connected" chip with it; the next connect reads it again.
+    /// The connect-time refresh stops, and a read still in flight is
+    /// dropped when it answers.
+    func phoneConnectionLost() {
+        phoneConnectRefreshTask?.cancel()
+        phoneConnectRefreshTask = nil
+        phoneRefreshGeneration &+= 1
+        if phoneStatus != nil { phoneStatus = nil }
+        if !phoneDevices.isEmpty { phoneDevices = [] }
     }
 
     /// `refreshPhone`'s work. Returns whether `phone.status` answered,
