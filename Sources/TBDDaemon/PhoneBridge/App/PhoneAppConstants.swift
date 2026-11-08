@@ -62,7 +62,11 @@ enum PhoneAppConstants {
     static let promptOptionCap = 1_024
     /// The most bytes read back from an offset to find a page's start.
     static let anchorScanLimit = 8_388_608
-    /// The most items a subagent's count reports.
+    /// Bounds a subagent row's item count, two ways: the most bytes of a
+    /// subagent's transcript file that `TranscriptPager.subagentItemCount`
+    /// reads, so a larger file has no count, and the largest count a row
+    /// carries, which is also the count a row is measured with while a page
+    /// is fitted.
     static let subagentCountLimit = 1_048_576
 }
 

@@ -2,7 +2,7 @@
   "kind": "request",
   "method": "transcript.page",
   "params": {
-    "cursor": "184320",
+    "cursor": "0:184320:5d1f8a3c97e2b046",
     "session": {
       "kind": "local",
       "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
