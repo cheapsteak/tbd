@@ -346,6 +346,78 @@ test('channel up with no transcript open sends no transcript request', () => {
   assert.deepEqual(h.requests(), [['sessions.subscribe', {}]]);
 });
 
+// MARK: - A session with no transcript
+
+const NO_TRANSCRIPT = { available: false, reason: 'Codex transcripts arrive in a later TBD release' };
+
+/** A `sessions.changed` that sends row `id` again, its one session `ref` with the transcript capability `transcript`. */
+function transcriptTurned(id: string, ref: PhoneSessionRef, transcript: PhoneSession['capabilities']['transcript']): AppEvent {
+  const r = row(id, [ref]);
+  const sessions = r.sessions.map((s) => ({ ...s, capabilities: { ...s.capabilities, transcript } }));
+  return { event: 'sessions.changed', seq: 11, data: { rows: [{ ...r, sessions }], removedRowIDs: [] } };
+}
+
+test('a session the list shows with no transcript is never asked for one: not opened, not on Show details, not at a channel up', () => {
+  const h = harness();
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  h.actions.openSession(R);
+  h.actions.setShowDetails(true);
+  reconnect(h);
+  h.actions.setShowDetails(false);
+  assert.equal(h.count('transcript.open'), 0);
+  assert.equal(h.count('transcript.close'), 0);
+  assert.equal(h.t().ref, null);
+  assert.equal(h.t().phase, 'idle');
+});
+
+test('opening a session with no transcript closes the transcript open before it', async () => {
+  const h = await showing();
+  h.actions.onEvent(transcriptTurned('W2', OTHER, NO_TRANSCRIPT));
+  h.actions.openSession(OTHER);
+  assert.equal(h.count('transcript.open'), 1);
+  assert.deepEqual(h.last('transcript.close').params, {});
+  assert.equal(h.t().ref, null);
+  assert.deepEqual(ids(h.t()), []);
+});
+
+test('a transcript that turned unavailable is closed at the next channel up, not resumed', async () => {
+  const h = await showing();
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  reconnect(h);
+  assert.equal(h.count('transcript.open'), 1);
+  assert.equal(h.count('transcript.close'), 1);
+  assert.equal(h.t().ref, null);
+});
+
+test('a session with no transcript opens once the list shows its transcript available, while it shows', () => {
+  const h = harness();
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  h.actions.openSession(R);
+  h.actions.toast('Copied');
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  assert.equal(h.count('transcript.open'), 0);
+  h.actions.setShowDetails(true);
+  h.actions.onEvent(transcriptTurned('W1', R, CAN));
+  assert.deepEqual(h.requests().filter(([m]) => m === 'transcript.open'), [['transcript.open', { session: R, showDetails: true, resume: false }]]);
+  assert.equal(h.t().phase, 'opening');
+  h.actions.onEvent(transcriptTurned('W1', R, CAN));
+  assert.equal(h.count('transcript.open'), 1);
+});
+
+test('a session with no transcript that the reader left does not open when its transcript turns available', () => {
+  const h = harness();
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  h.actions.openSession(R);
+  h.actions.back();
+  h.actions.onEvent(transcriptTurned('W1', R, CAN));
+  assert.equal(h.count('transcript.open'), 0);
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  h.actions.onEvent(transcriptTurned('W1', R, CAN));
+  assert.deepEqual(h.requests().filter(([m]) => m === 'transcript.open'), [['transcript.open', { session: OTHER, showDetails: false, resume: false }]]);
+});
+
 // MARK: - Older pages
 
 test('an older page goes above the rows, asked for with the cursor', async () => {

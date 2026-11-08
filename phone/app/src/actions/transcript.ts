@@ -28,6 +28,15 @@
  * - **A close still unanswered**, with no transcript open since, goes out again: the laptop may
  *   still be sending that transcript.
  *
+ * **A session with no transcript.** No open goes out for a session the sessions list shows with
+ * its transcript unavailable (`capabilities.transcript`), as a Codex session's is: not when it is
+ * opened, not when "Show details" changes, and not at a channel up. The laptop would refuse it.
+ * Held back, it closes any transcript the slice holds, since a refused open leaves the laptop
+ * sending the one it opened before. It opens once the list shows its transcript available while
+ * the route still shows it, as a remote session's can turn when its provider describes itself
+ * late (`openHeldBack`). A session the list does not show opens as before, since only the laptop
+ * can answer for it.
+ *
  * Every action resolves and never rejects (`actions/index.ts`); `superseded` is silent.
  */
 
@@ -39,6 +48,8 @@ import type {
 import { sameRef } from '../protocol/wire.ts';
 import { addChunk, askOf, badReply, detailParts, failDetail, startDetail } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
+import { findSession } from '../state/route.ts';
+import type { SessionsData } from '../state/store.ts';
 import { applyPage, beginOpen, beginResume, clearTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import type { ActionContext, Actions } from './index.ts';
@@ -95,9 +106,42 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
   let closeToken: string | null = null;
 
   /**
+   * The session whose open `open` held back, since the list shows its transcript unavailable,
+   * with the list it was last checked against, while the route shows it; null otherwise. Kept
+   * here and not in the store, since nothing renders it (`openHeldBack`).
+   */
+  let heldBack: { ref: PhoneSessionRef; sessions: SessionsData } | null = null;
+
+  /** Whether the sessions list shows `ref`'s session with its transcript unavailable. */
+  function unavailable(sessions: SessionsData, ref: PhoneSessionRef): boolean {
+    const found = findSession(sessions, ref);
+    return found !== null && !found.session.capabilities.transcript.available;
+  }
+
+  /**
+   * Opens the session `open` held back once the list shows its transcript available, and drops
+   * it once the route no longer shows it. It looks the session up only when the list changed,
+   * so any other change costs it two comparisons.
+   */
+  function openHeldBack(): void {
+    if (heldBack === null) return;
+    const s = store.get();
+    const { route } = s.ui;
+    if (route.screen !== 'session' || !sameRef(route.ref, heldBack.ref)) {
+      heldBack = null;
+      return;
+    }
+    if (s.sessions === heldBack.sessions) return;
+    heldBack = { ref: heldBack.ref, sessions: s.sessions };
+    if (findSession(s.sessions, heldBack.ref)?.session.capabilities.transcript.available === true) open(heldBack.ref, s.ui.showDetails, false);
+  }
+
+  /**
    * Opens `ref`'s transcript (`beginOpen`), or with `resume` resumes the one the slice shows
-   * (`beginResume`), and sends `transcript.open`. The request goes out before this returns, so a
-   * call from `onUp` goes out in its turn. Its reply, while it still counts:
+   * (`beginResume`), and sends `transcript.open`, unless the list shows its transcript
+   * unavailable: then it sends no open, closes any transcript the slice holds, and holds the
+   * open back (`heldBack`). The request goes out before this returns, so a call from `onUp` goes
+   * out in its turn. Its reply, while it still counts:
    * - a page replaces the rows, and `resumed: true` keeps them;
    * - a refused resume opens again, fresh, once. The laptop refuses a resume it can no longer
    *   honour ("The transcript changed while it was opened. Try again.") and expects the phone
@@ -105,6 +149,13 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
    * - any other error fails the open with the laptop's message.
    */
   function open(ref: PhoneSessionRef, showDetails: boolean, resume: boolean): void {
+    const { sessions } = store.get();
+    if (unavailable(sessions, ref)) {
+      heldBack = { ref, sessions };
+      if (store.get().transcript.ref !== null) close();
+      return;
+    }
+    heldBack = null;
     const token = newRequestID();
     setTranscript((t) => (resume ? beginResume(t, token) : beginOpen(t, ref, showDetails, token)));
     ctx.client.request('transcript.open', { session: ref, showDetails, resume }).then(
@@ -306,6 +357,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
   // The transcript the queue and the loops last looked at: a change to any other slice gives them nothing to do.
   let looked = store.get().transcript;
   store.subscribe(() => {
+    openHeldBack();
     const t = store.get().transcript;
     if (t === looked) return;
     looked = t;

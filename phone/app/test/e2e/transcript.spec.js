@@ -108,7 +108,7 @@ test('a truncated assistant message offers Show more', async ({ page, appHost })
   await expect(app(page).locator('.say .morebtn')).toHaveCount(1);
 });
 
-test('a session with no transcript shows the laptop’s reason', async ({ page, appHost }) => {
+test('a session with no transcript shows the laptop’s reason, and never asks for its transcript', async ({ page, appHost }) => {
   const reason = 'This session has no transcript to show.';
   const scenario = structuredClone(MOCK);
   const row = scenario.rows.find((/** @type {any} */ r) => r.name === 'Docs refresh');
@@ -118,6 +118,22 @@ test('a session with no transcript shows the laptop’s reason', async ({ page, 
   const note = app(page).locator('.codex-note');
   await expect(note.locator('b')).toHaveText(reason);
   await expect(app(page).locator('.tx .me, .tx .say, .tx .tool')).toHaveCount(0);
+
+  // Neither "Show details" nor a reconnect asks for it.
+  const head = app(page).locator('.s-head');
+  await head.locator('.tg').click();
+  await expect(head.getByRole('switch', { name: 'Show details' })).toBeChecked();
+  await hostCall(page, 'setChannel', false);
+  await hostCall(page, 'setChannel', true);
+  const subscribes = async () => (await hostRequests(page)).filter((r) => r.method === 'sessions.subscribe').length;
+  await expect.poll(subscribes).toBe(2);
+  await expect(note.locator('b')).toHaveText(reason);
+  // A session with a transcript opens after them, so an open of this one would have reached the laptop first.
+  await head.getByRole('button', { name: 'Back to sessions' }).click();
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(app(page).locator('.tx .say').first()).toBeVisible();
+  const asked = (await hostRequests(page)).filter((r) => r.method.startsWith('transcript.'));
+  expect(asked.map((r) => [r.method, r.params])).toEqual([['transcript.open', { session: LOGIN_REF, showDetails: true, resume: false }]]);
 });
 
 // --- details --------------------------------------------------------------------------------
