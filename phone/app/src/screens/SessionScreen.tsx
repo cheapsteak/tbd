@@ -6,8 +6,9 @@
  * It shows the session the route names. No row may list that session yet while the list waits
  * for rows a partial snapshot left for later, since one of them may hold it. Then it shows a
  * header of its own with the back button, over the loading screen's spinner: `SessionHeader`
- * needs a row and a session. Once the list is complete, the route goes back to the list with
- * the update that left the session out (`resolveRoute`).
+ * needs a row and a session. The update that left the session waiting closed the menu and every
+ * sheet (`applySessions`). Once the list is complete, the route goes back to the list with the
+ * update that left the session out (`resolveRoute`).
  */
 
 import { useMemo } from 'react';

@@ -185,6 +185,38 @@ test('a partial snapshot after a reconnect keeps the open session until its row 
   assert.deepEqual(h.calls, [['resumeTranscriptOnUp', 2], ['closeTranscript']]);
 });
 
+test('a partial snapshot that leaves the open session waiting closes its sheet and menu for good', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSheet({ name: 'fork' });
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  // A new stream's snapshot that holds only W2; W1 follows as a sessions.changed.
+  h.sent[1]!.resolve({
+    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: true, rows: [row('W2', [OTHER])],
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }],
+  });
+  await flush();
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
+  assert.equal(h.state().ui.sheet, null);
+  h.actions.onEvent(changed([row('W1', [R])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
+  assert.equal(h.state().ui.sheet, null);
+  // The same for a menu, which would otherwise open again over the session when its row came.
+  h.actions.openMenu({ name: 'model' });
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  h.sent[2]!.resolve({
+    stream: 's3', seq: 1, replayed: false, omittedRows: 0, more: true, rows: [],
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }],
+  });
+  await flush();
+  assert.equal(h.state().ui.menu, null);
+  h.actions.onEvent(changed([row('W1', [R]), row('W2', [OTHER])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
+  assert.equal(h.state().ui.menu, null);
+});
+
 test("a refused subscribe shows the daemon's message", async () => {
   const { actions, sent, state } = harness();
   actions.onChannelUp();

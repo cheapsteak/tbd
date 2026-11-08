@@ -82,6 +82,36 @@ test("leaving the session closes its menu and its sheets, but not New's", () => 
   assert.deepEqual(s3.ui.sheet, { name: 'switch-confirm', profileID: 'P1' });
 });
 
+test("a session left waiting for its row closes its menu and its sheets, and keeps its route", () => {
+  const route = { screen: 'session', ref: R } as const;
+  const s0 = stateWith([row('W1', [OTHER]), row('W2', [R])], { route, menu: { name: 'account', askProfileID: null }, sheet: { name: 'fork' } });
+  // A partial snapshot that places W2 but leaves its row for later.
+  const partial = (rows: PhoneRow[]) => applySnapshot({
+    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: true, rows,
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }] }],
+  });
+  const s1 = applySessions(s0, partial([row('W1', [OTHER])]));
+  assert.equal(s1.ui.route, route);
+  assert.equal(s1.ui.menu, null);
+  assert.equal(s1.ui.sheet, null);
+  // So does New, as a route to a session would close it.
+  const sheet = { name: 'new', repoID: 'R1', repoName: 'acme' } as const;
+  assert.equal(applySessions({ ...s0, ui: { ...s0.ui, menu: null, sheet } }, partial([row('W1', [OTHER])])).ui.sheet, null);
+  // The row arrives: the session shows again, and nothing opens again with it.
+  const s2 = applyEvent(s1, changed([row('W2', [R])]));
+  assert.equal(s2.ui.route, route);
+  assert.equal(s2.ui.menu, null);
+  assert.equal(s2.ui.sheet, null);
+  // A partial snapshot that holds the session's row leaves the menu and the sheet open.
+  const s3 = applySessions(s0, partial([row('W2', [R])]));
+  assert.equal(s3.ui, s0.ui);
+  // And so does a change that keeps the session listed while other rows are still to come.
+  const s4 = applyEvent(s3, changed([row('W2', [R], 'renamed')]));
+  assert.equal(s4.ui, s0.ui);
+  // While it waits with neither open, an update keeps the UI itself.
+  assert.equal(applyEvent(s1, changed([row('W1', [OTHER], 'renamed')])).ui, s1.ui);
+});
+
 test('New stays open when the route goes back to the list, and closes when it goes to a session', () => {
   const sheet = { name: 'new', repoID: 'R1', repoName: 'acme' } as const;
   // The open session leaves the list while New is up: the list shows, and New stays over it.

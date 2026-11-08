@@ -6,7 +6,7 @@
 
 import type { AppEvent } from '../protocol/types.ts';
 import { applyPromptChanged } from './prompts.ts';
-import { pendingOpenTarget, resolveRoute, sameRoute } from './route.ts';
+import { findSession, pendingOpenTarget, resolveRoute, sameRoute } from './route.ts';
 import { applySessionsChanged } from './sessionsData.ts';
 import { nextToast } from './store.ts';
 import type { AppState, PendingOpen, Route, SessionsData, UIState } from './store.ts';
@@ -70,6 +70,11 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * route goes back to the sessions list, which it opens from, so a session that leaves the list
  * does not close it. A route to a session closes `new` too, so it never stays over the session
  * a create opened. Opening a session also marks its row (`lastRowID`).
+ *
+ * A session route that stands while no row lists its session, as while a partial snapshot's
+ * rows are on their way, closes the menu and every sheet too, as a route to a session does.
+ * The session screen waits for the row then, and they would act on a session the list does not
+ * show; a menu left set would open again when the row comes.
  */
 export function applySessions(state: AppState, sessions: SessionsData): AppState {
   return { ...state, sessions, ui: followList(state.ui, sessions) };
@@ -85,7 +90,7 @@ export function withPendingOpen(state: AppState, p: PendingOpen): AppState {
 
 function followList(ui: UIState, d: SessionsData): UIState {
   // `resolveRoute` keeps the route or goes back to the list, so it leaves no row to mark.
-  const next = moveTo(ui, resolveRoute(ui.route, d), null);
+  const next = closeWhileUnlisted(moveTo(ui, resolveRoute(ui.route, d), null), d);
   const pending = next.pendingOpen;
   if (pending === null) return next;
   const target = pendingOpenTarget(pending, d);
@@ -111,4 +116,14 @@ function moveTo(ui: UIState, route: Route, rowID: string | null): UIState {
     sheet: route.screen === 'sessions' && ui.sheet?.name === 'new' ? ui.sheet : null,
     lastRowID: rowID ?? ui.lastRowID,
   };
+}
+
+/**
+ * `ui` with no menu and no sheet when its route shows a session that no row of `d` lists, or
+ * `ui` itself when it shows the list, finds its session, or has neither open.
+ */
+function closeWhileUnlisted(ui: UIState, d: SessionsData): UIState {
+  if (ui.route.screen !== 'session' || (ui.menu === null && ui.sheet === null)) return ui;
+  if (findSession(d, ui.route.ref) !== null) return ui;
+  return { ...ui, menu: null, sheet: null };
 }
