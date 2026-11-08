@@ -4,7 +4,7 @@
 // adds reaches the caller unvalidated. `app.body` is the one opaque value: it is checked to be
 // a JSON object and passed on unread.
 
-import { LOADER_PROTOCOLS, LOADER_VERSION, MAX_BUNDLE_COMPRESSED } from './constants.js';
+import { LAPTOP_NAME_MAX_BYTES, LOADER_PROTOCOLS, LOADER_VERSION, MAX_BUNDLE_COMPRESSED } from './constants.js';
 import { isRoomID } from './links.js';
 
 /**
@@ -43,6 +43,9 @@ const MAX_TBD_VERSION_LENGTH = 64;
 const utf8Encoder = new TextEncoder();
 // `fatal` makes invalid UTF-8 throw instead of decoding to U+FFFD.
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+// For the well-formedness round trip only. `ignoreBOM` keeps a string that starts with U+FEFF
+// intact, where the default would drop it and make a well-formed string look malformed.
+const roundTripDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 
 export class ProtocolError extends Error {
   /**
@@ -168,7 +171,7 @@ export function parseLaptopMessage(obj) {
 
 /**
  * Reads the payload of a handshake's message 2, pairing (`IKpsk2`) or reconnecting (`IK`):
- * `{"laptopName": <string>}`. Other fields are ignored.
+ * `{"laptopName": <string>}`, a name `isLaptopName` accepts. Other fields are ignored.
  * @param {Uint8Array} payload
  * @returns {string} the laptop's name
  * @throws {ProtocolError}
@@ -180,10 +183,27 @@ export function readLaptopName(payload) {
   } catch {
     throw new ProtocolError('message2');
   }
-  if (!isPlainObject(value) || typeof value.laptopName !== 'string') {
+  const name = isPlainObject(value) ? value.laptopName : undefined;
+  if (typeof name !== 'string' || !isLaptopName(name)) {
     throw new ProtocolError('message2.laptopName');
   }
-  return value.laptopName;
+  return name;
+}
+
+/**
+ * Whether `name` passes the rules a pairing link's `name` must (channel/pairingLink.js): not
+ * empty, no lone surrogate, and at most LAPTOP_NAME_MAX_BYTES bytes of UTF-8. A laptop's name
+ * is stored and shown on every screen, so the one a handshake reports obeys the same rules as
+ * the one a pairing link carries.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isLaptopName(name) {
+  if (name.length === 0) return false;
+  // Encoding replaces a lone surrogate with U+FFFD, so only a well-formed string survives the
+  // round trip, and only then does the encoded length count its real bytes.
+  const encoded = utf8Encoder.encode(name);
+  return roundTripDecoder.decode(encoded) === name && encoded.length <= LAPTOP_NAME_MAX_BYTES;
 }
 
 /**

@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
-import { base64urlEncode } from '../../channel/pairingLink.js';
-import { LOADER_VERSION, MAX_BUNDLE_COMPRESSED } from '../../constants.js';
+import { PairingLinkError, base64urlEncode, parsePairingLink } from '../../channel/pairingLink.js';
+import { LAPTOP_NAME_MAX_BYTES, LOADER_VERSION, MAX_BUNDLE_COMPRESSED } from '../../constants.js';
 import {
-  ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
+  ProtocolError, checkCompat, decodeMessage, encodeMessage, isLaptopName, makeHello, parseLaptopMessage, readLaptopName,
 } from '../../protocol.js';
 
 const HASH = 'ab'.repeat(32);
@@ -170,7 +171,6 @@ test('paired carries a room ID', () => {
 test('readLaptopName reads message 2\'s payload and refuses anything else', () => {
   assert.equal(readLaptopName(bytes({ laptopName: 'acme-mbp' })), 'acme-mbp');
   assert.equal(readLaptopName(bytes({ laptopName: 'Ada’s MacBook 😀', extra: [1] })), 'Ada’s MacBook 😀');
-  assert.equal(readLaptopName(bytes({ laptopName: '' })), '');
   /** @type {Array<[Uint8Array, string]>} */
   const cases = [
     [Uint8Array.of(0xff), 'message2'],
@@ -186,9 +186,62 @@ test('readLaptopName reads message 2\'s payload and refuses anything else', () =
     [bytes({ laptopName: null }), 'message2.laptopName'],
     [bytes({ laptopName: ['acme-mbp'] }), 'message2.laptopName'],
     [bytes({ name: 'acme-mbp' }), 'message2.laptopName'],
+    [bytes({ laptopName: '' }), 'message2.laptopName'],
+    [bytes({ laptopName: 'a'.repeat(LAPTOP_NAME_MAX_BYTES + 1) }), 'message2.laptopName'],
+    [bytes('{"laptopName":"\\ud800"}'), 'message2.laptopName'],
   ];
   for (const [input, reason] of cases) {
     assert.throws(() => readLaptopName(input), { name: 'ProtocolError', reason }, new TextDecoder().decode(input));
+  }
+});
+
+// The names a pairing link may carry, and whether one may. Each is checked against
+// parsePairingLink too, so the two rules cannot part.
+/** @type {Array<[string, string, boolean]>} */
+const LAPTOP_NAMES = [
+  ['a plain name', 'acme-mbp', true],
+  ['curly quotes', 'Acme’s MacBook Pro', true],
+  ['one space', ' ', true],
+  ['a control character', '\u0007acme', true],
+  ['a leading byte order mark', '\uFEFFacme', true],
+  ['256 ASCII bytes', 'a'.repeat(256), true],
+  ['256 bytes of 2-byte letters', 'é'.repeat(128), true],
+  ['256 bytes of 4-byte emoji', '😀'.repeat(64), true],
+  ['an empty name', '', false],
+  ['257 ASCII bytes', 'a'.repeat(257), false],
+  ['257 bytes in 129 letters', 'é'.repeat(128) + 'a', false],
+  ['257 bytes in 256 UTF-16 units', 'a'.repeat(255) + 'é', false],
+  ['260 bytes of emoji', '😀'.repeat(65), false],
+  ['a lone high surrogate', '\ud800', false],
+  ['a lone low surrogate inside a name', 'a\udc00b', false],
+  ['half of an emoji', 'acme\ud83d', false],
+];
+
+test('the limit is 256 UTF-8 bytes', () => assert.equal(LAPTOP_NAME_MAX_BYTES, 256));
+
+test('readLaptopName takes exactly the names a pairing link may carry, and refuses the rest', () => {
+  const vectors = JSON.parse(readFileSync(new URL('../../../test-vectors/pairing-link.json', import.meta.url), 'utf8'));
+  const [{ link }] = vectors.valid;
+  /** @param {string} name */
+  const linkTakes = (name) => {
+    const fragment = base64urlEncode(new TextEncoder().encode(JSON.stringify({ ...link, name })));
+    try {
+      parsePairingLink(`${vectors.loaderURL}#p=${fragment}`, { now: vectors.now * 1000 });
+      return true;
+    } catch (error) {
+      if (error instanceof PairingLinkError) return false;
+      throw error;
+    }
+  };
+  for (const [label, name, valid] of LAPTOP_NAMES) {
+    assert.equal(linkTakes(name), valid, `a pairing link with ${label}`);
+    assert.equal(isLaptopName(name), valid, label);
+    const payload = bytes({ laptopName: name, other: '\ud800' });
+    if (valid) {
+      assert.equal(readLaptopName(payload), name, label);
+    } else {
+      assert.throws(() => readLaptopName(payload), { name: 'ProtocolError', reason: 'message2.laptopName' }, label);
+    }
   }
 });
 

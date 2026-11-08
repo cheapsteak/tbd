@@ -30,6 +30,9 @@ export const MAX_BUNDLE_COMPRESSED = 4 * 1024 * 1024;
 export const MAX_BUNDLE_TEXT = 16 * 1024 * 1024;
 
 export const DEVICE_NAME_MAX = 64;
+// The most UTF-8 bytes a laptop's name may take: the limit a pairing link's `name` has
+// (MAX_NAME_BYTES in channel/pairingLink.js), applied to the name message 2 reports too.
+export const LAPTOP_NAME_MAX_BYTES = 256;
 
 export const QR_INTERVAL_MS = 250;
 export const QR_MAX_EDGE = 640;
