@@ -786,7 +786,7 @@ class LoaderPage {
         this.#frame?.deliver(event.body);
         return;
       case 'fatal':
-        this.#onFatal(event.reason);
+        this.#endConnection(fatalScreen(event.reason), event.reason);
     }
   }
 
@@ -795,9 +795,7 @@ class LoaderPage {
     this.#state = state;
     if (state === 'replaced') {
       // Another tab of this page took the room. The connection has ended, so the frame goes.
-      this.#connection = null;
-      this.#destroyFrame();
-      this.#showConnScreen('replaced');
+      this.#endConnection('replaced');
       return;
     }
     if (this.#frame !== null) {
@@ -841,7 +839,7 @@ class LoaderPage {
       sha256,
       sendApp: (body) => connection.sendApp(/** @type {Record<string, unknown>} */ (body)),
       onOpenLink: (url) => this.#showLinkSheet(url),
-      onFault: () => this.#onFrameFault(),
+      onFault: () => this.#endConnection('reload'),
       clock: this.#clock,
     });
     this.#frameSha = sha256;
@@ -849,21 +847,18 @@ class LoaderPage {
     this.#sendEnv();
   }
 
-  #onFrameFault() {
-    this.#frame = null;
-    this.#frameSha = null;
+  /**
+   * Ends the current laptop's connection, if it has not ended itself, removes the app frame
+   * and shows `screen`.
+   * @param {'replaced' | 'update' | 'reload' | 'removed'} screen
+   * @param {FatalReason} [reason]
+   */
+  #endConnection(screen, reason) {
     const connection = this.#connection;
     this.#connection = null;
     connection?.stop();
-    this.#closeSheet();
-    this.#showConnScreen('reload');
-  }
-
-  /** @param {FatalReason} reason */
-  #onFatal(reason) {
-    this.#connection = null;
     this.#destroyFrame();
-    this.#showConnScreen(fatalScreen(reason), reason);
+    this.#showConnScreen(screen, reason);
   }
 
   /** Tries the current laptop again from the start. */
