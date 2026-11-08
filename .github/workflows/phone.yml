@@ -212,9 +212,12 @@ jobs:
       - name: Test the phone scripts
         if: ${{ !cancelled() }}
         run: npm run test:scripts
+      # `!cancelled()`, like the steps above, so this also runs when `npm ci`
+      # failed, and then a bare `npx playwright` would download and run
+      # whatever `playwright` is newest. `--no-install` fails instead.
       - name: Install Playwright's WebKit and Chromium
         if: ${{ !cancelled() }}
-        run: npx playwright install --with-deps chromium webkit
+        run: npx --no-install playwright install --with-deps chromium webkit
       - name: Test the loader end to end
         if: ${{ !cancelled() }}
         run: npm run test:e2e
