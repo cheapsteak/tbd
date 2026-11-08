@@ -297,6 +297,36 @@ final class HeldPhoneControlRead: @unchecked Sendable {
     }
 }
 
+// MARK: - HeldPairingRead
+
+/// A pairing read for `PhoneAppService(readPairing:)` whose first call reads
+/// the device's row and then waits until `gate` opens before answering what
+/// it read, so a test can revoke the phone between a request's pairing read
+/// and its handler, as a revoke that deletes the row just after the read
+/// does. Every later call reads the row and answers at once.
+final class HeldPairingRead: @unchecked Sendable {
+    let gate = PhoneTestGate()
+    private let lock = NSLock()
+    private var count = 0
+
+    init() {}
+
+    /// How many reads have started, the held one included.
+    var reads: Int { lock.withLock { count } }
+
+    func read(_ db: TBDDatabase, _ deviceID: UUID) async throws -> Bool {
+        let paired = try await db.phoneDevices.device(id: deviceID) != nil
+        let isFirst = lock.withLock { () -> Bool in
+            count += 1
+            return count == 1
+        }
+        if isFirst {
+            await gate.wait()
+        }
+        return paired
+    }
+}
+
 // MARK: - Waiting
 
 /// Waits until `condition` holds, or throws naming `what`.
@@ -347,8 +377,11 @@ struct PhoneServiceHarness: Sendable {
     let peer: PhonePeer
 
     /// With `phoneControlRead`, the service reads the phone control flag
-    /// through it, so a test can hold the first read still.
-    static func make(phoneControlRead: HeldPhoneControlRead? = nil) async throws -> PhoneServiceHarness {
+    /// through it, so a test can hold the first read still; with
+    /// `pairingRead`, it reads each request's pairing through it, likewise.
+    static func make(
+        phoneControlRead: HeldPhoneControlRead? = nil, pairingRead: HeldPairingRead? = nil
+    ) async throws -> PhoneServiceHarness {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPhoneControlEnabled(true)
         let peer = PhonePeer(deviceID: UUID(), deviceName: "Acme Phone")
@@ -364,10 +397,14 @@ struct PhoneServiceHarness: Sendable {
         if let phoneControlRead {
             readPhoneControl = { try await phoneControlRead.read(db) }
         }
+        var readPairing: (@Sendable (UUID) async throws -> Bool)?
+        if let pairingRead {
+            readPairing = { deviceID in try await pairingRead.read(db, deviceID) }
+        }
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, locateTranscript: Self.locateTranscript,
-            recorder: recorder, readPhoneControl: readPhoneControl, clock: clock)
+            recorder: recorder, readPhoneControl: readPhoneControl, readPairing: readPairing, clock: clock)
         return PhoneServiceHarness(
             db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, service: service, peer: peer)

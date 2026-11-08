@@ -785,6 +785,35 @@ struct PhoneAppServiceTests {
         #expect(h.clock.sleeperCount == 0)
     }
 
+    /// A remembered action whose pairing read passed just before the revoke
+    /// deleted the row, held between that read and its handler, never acts:
+    /// its run lives in the request memory's own task, and the revoke marks
+    /// the device and cancels that run before it waits on anything, so the
+    /// run stops at its handler lookup.
+    @Test func aRememberedActionHeldBeforeItsHandlerNeverActsAfterARevoke() async throws {
+        let held = HeldPairingRead()
+        defer { held.gate.open() }
+        let h = try await PhoneServiceHarness.make(pairingRead: held)
+        let deviceID = h.peer.deviceID
+        await h.service.setHandler(Self.sendStub(h.actions), for: .messageSend)
+        _ = await h.connect()
+
+        let body = try PhoneTestRequests.body(.messageSend, id: "r1", params: sendParams)
+        await h.service.handleAppMessage(body, from: h.peer)
+        try await waitUntil("the send's pairing read to start") { held.reads == 1 }
+        #expect(await h.service.memory.remembers(deviceID: deviceID, requestID: "r1"))
+        // The bridge's order: the row goes, the connection ends, then the
+        // revoke.
+        _ = try await h.db.phoneDevices.delete(id: deviceID)
+        await h.service.phoneDisconnected(h.peer)
+        await h.service.phoneRevoked(deviceID: deviceID)
+        held.gate.open()
+
+        try await waitUntil("the request to end") { await h.service.requestsRunning(for: deviceID) == 0 }
+        #expect(h.actions.calls.isEmpty)
+        #expect(h.recorder.records.isEmpty)
+    }
+
     /// A revoke cancels the device's requests still running. The held send
     /// sees its cancellation, and its run sends no reply, even through a
     /// connection made after the revoke and before the run ended.

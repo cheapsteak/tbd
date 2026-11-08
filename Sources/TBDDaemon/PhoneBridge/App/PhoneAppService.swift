@@ -206,7 +206,9 @@ final class PhoneOutboxQueue: Sendable {
 ///    reply is `refused`. A failed read fails closed with `internal`. This
 ///    closes the window where a request starts just before a revoke and
 ///    reaches the memory after it.
-/// 4. **The handler.** A method with no handler yet replies `unavailable`.
+/// 4. **The handler**, looked up on the service in the same turn as the
+///    revoke mark (`phoneRevoked`): a device revoked since its pairing read
+///    replies `refused`, and a method with no handler yet `unavailable`.
 /// 5. **The record**, for the methods `recordTarget(for:body:)` names, from
 ///    the decoded params. Params that do not decode reply `bad_request` and
 ///    record nothing.
@@ -240,6 +242,10 @@ actor PhoneAppService: PhoneAppHandling {
     /// decision: `db.config`, unless the init was handed a reader, as a test
     /// does to hold a read still.
     let readPhoneControl: @Sendable () async throws -> Bool
+    /// Reads whether a device is still paired, for every request that acts:
+    /// its `phone_device` row in `db`, unless the init was handed a reader,
+    /// as a test does to hold a read still.
+    let readPairing: @Sendable (UUID) async throws -> Bool
     /// The transcript file of a terminal in the worktree at the path given,
     /// as the terminal row names it (`ClaudeTranscriptLocator.filePath` under
     /// the daemon's `projects/` roots), or nil.
@@ -270,6 +276,10 @@ actor PhoneAppService: PhoneAppHandling {
     /// the moment `handleAppMessage` accepts one until it ends or is
     /// abandoned. No two of a device's running requests share an ID.
     private var requests: [UUID: [UInt64: RunningRequest]] = [:]
+    /// The devices `phoneRevoked` has revoked. A pairing makes a new device
+    /// ID, so an ID once here never comes back, and the set grows by one per
+    /// revoke.
+    private var revokedDevices: Set<UUID> = []
     private var nextToken: UInt64 = 0
 
     init(db: TBDDatabase, actions: any PhoneSessionActions, subscriptions: StateSubscriptionManager,
@@ -277,6 +287,7 @@ actor PhoneAppService: PhoneAppHandling {
          locateTranscript: @escaping @Sendable (TBDShared.Terminal, _ worktreePath: String) -> String?,
          recorder: any PhoneActionRecording = LoggerPhoneActionRecorder(),
          readPhoneControl: (@Sendable () async throws -> Bool)? = nil,
+         readPairing: (@Sendable (UUID) async throws -> Bool)? = nil,
          now: @escaping @Sendable () -> Date = { Date() },
          clock: any Clock<Duration> = ContinuousClock()) {
         self.db = db
@@ -289,6 +300,11 @@ actor PhoneAppService: PhoneAppHandling {
             self.readPhoneControl = readPhoneControl
         } else {
             self.readPhoneControl = { [db] in try await db.config.get().phoneControlEnabled }
+        }
+        if let readPairing {
+            self.readPairing = readPairing
+        } else {
+            self.readPairing = { [db] deviceID in try await db.phoneDevices.device(id: deviceID) != nil }
         }
         self.now = now
         self.clock = clock
@@ -367,13 +383,23 @@ actor PhoneAppService: PhoneAppHandling {
     /// holds. A cancelled request sends no reply, and a run that notices its
     /// cancellation replies with an error, never a success. Work a handler
     /// has already started in a core function can still finish.
+    ///
+    /// **Nothing waits before the work is stopped.** Before its first
+    /// suspension the revoke marks the device revoked, drops its state and
+    /// cancels its requests' tasks; then it forgets the request memory's
+    /// runs, which live in the memory's own tasks, where a request's
+    /// cancellation does not reach; and only then waits for the state's
+    /// publisher and feeds to stop. A request whose pairing read passed just
+    /// before the row went looks its handler up on the service, so it finds
+    /// the mark and stops there, however long the rest of the revoke takes.
     func phoneRevoked(deviceID: UUID) async {
+        revokedDevices.insert(deviceID)
         let state = devices.removeValue(forKey: deviceID)
         for request in (requests[deviceID] ?? [:]).values {
             request.task?.cancel()
         }
-        await state?.shutDown()
         await memory.forget(deviceID: deviceID)
+        await state?.shutDown()
     }
 
     /// Drops the device's state once its grace runs out, if the phone has not
@@ -602,21 +628,27 @@ actor PhoneAppService: PhoneAppHandling {
     }
 
     /// The part of a request that acts, run once per request ID when its
-    /// replies are remembered: the pairing check, the record, the handler.
-    /// A request cancelled by a revoke before its record stops there, so it
-    /// neither records nor acts.
+    /// replies are remembered: the pairing check, the handler lookup, the
+    /// record, the handler. A request whose device was revoked by the lookup,
+    /// or that was cancelled by a revoke before its record, stops there, so
+    /// it neither records nor acts.
     private nonisolated func perform(_ method: PhoneAppMethod, body: Data, context: DeviceContext) async -> PhoneHandlerReply {
         let requestID = context.requestID
+        let deviceID = context.peer.deviceID
         do {
-            guard try await db.phoneDevices.device(id: context.peer.deviceID) != nil else {
-                return .body(Self.failure(requestID, .refused, "This phone is no longer paired."))
+            guard try await readPairing(deviceID) else {
+                return .body(Self.failure(requestID, .refused, Self.noLongerPairedReason))
             }
         } catch {
             Self.logger.error(
                 "Phone app: could not read a phone's pairing: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return .body(Self.failure(requestID, .internalError, "TBD could not check this phone's pairing. Try again."))
         }
-        guard let handler = await registeredHandler(for: method) else {
+        let lookup = await lookUpHandler(for: method, deviceID: deviceID)
+        guard !lookup.revoked else {
+            return .body(Self.failure(requestID, .refused, Self.noLongerPairedReason))
+        }
+        guard let handler = lookup.handler else {
             return .body(PhoneAppCoding.errorReply(requestID: requestID, Self.notServed))
         }
         guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
@@ -648,6 +680,14 @@ actor PhoneAppService: PhoneAppHandling {
     }
 
     // MARK: - Handlers
+
+    /// `method`'s handler, and whether `deviceID` was revoked, read in one
+    /// turn on the service, so a revoke that ran before it is always seen.
+    private func lookUpHandler(
+        for method: PhoneAppMethod, deviceID: UUID
+    ) -> (revoked: Bool, handler: PhoneMethodHandler?) {
+        (revokedDevices.contains(deviceID), registeredHandler(for: method))
+    }
 
     /// The one place a method gets its handler; nil while no task serves it.
     /// A later task serves a method by returning its handler here, as in
@@ -857,6 +897,8 @@ actor PhoneAppService: PhoneAppHandling {
     static let requestIDInUse = "That request ID is already in use."
     /// The `internal` error's words for a failure on the laptop.
     static let internalErrorReason = "Something went wrong on the laptop."
+    /// The reply to a request from a phone whose pairing is gone.
+    static let noLongerPairedReason = "This phone is no longer paired."
 
     /// A new token, unique for this service's life, to tell one run of
     /// something from a later one.
