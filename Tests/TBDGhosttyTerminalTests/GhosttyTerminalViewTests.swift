@@ -14,6 +14,10 @@ private final class ViewRecorder {
     var sizes: [[Int]] = []
     /// The terminal's own grid, read from inside `onSizeChanged`, as `[cols, rows]`.
     var terminalSizesSeen: [[Int]] = []
+    /// Every URI `onOpenLink` was handed.
+    var openedLinks: [String] = []
+    /// What `onMouseDownClaimFocus` answers.
+    var claimsPress = true
 }
 
 /// An 80×24 terminal and a view over it in a monospaced font, 13 pt unless a test needs a render
@@ -69,14 +73,16 @@ private func frameCounts(of view: GhosttyTerminalView) -> FrameCounts {
     FrameCounts(built: view.framesBuilt, committed: view.framesCommitted)
 }
 
-/// A mouse event at `location`, in window coordinates, addressed to `window`.
+/// A mouse event at `location`, in window coordinates, addressed to `window`. `eventNumber` tells
+/// one press from another: AppKit asks `acceptsFirstMouse` about the activating click's.
 @MainActor
 private func mouseEvent(
-    _ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow, flags: NSEvent.ModifierFlags = []
+    _ type: NSEvent.EventType, at location: NSPoint, in window: NSWindow, flags: NSEvent.ModifierFlags = [],
+    eventNumber: Int = 0
 ) throws -> NSEvent {
     try #require(NSEvent.mouseEvent(
         with: type, location: location, modifierFlags: flags, timestamp: 0,
-        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        windowNumber: window.windowNumber, context: nil, eventNumber: eventNumber, clickCount: 1, pressure: 1))
 }
 
 /// A mouse event of `type` for no window. Its `buttonNumber` is 0 whatever the type.
@@ -360,6 +366,130 @@ struct GhosttyTerminalViewTests {
         #expect(recorder.sent.isEmpty, "the press and release sent \(recorder.sent)")
         #expect(view.mouseController.pendingReportReleases.isEmpty,
                 "\(view.mouseController.pendingReportReleases) wait for a release")
+    }
+
+    /// The click that brings a background window forward only activates it, as the SwiftTerm
+    /// panel's does: the view takes first responder, and the press, its drags and its release
+    /// reach neither the program, as mouse reports, nor the selection, which would drop the
+    /// selection the user came back to copy. The next click in the window is an ordinary one.
+    /// The view starts without first responder, since taking it is part of what is tested.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theActivatingClickFocusesTheViewAndGoesNoFurther() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.onSend = { recorder.sent.append($0) }
+        view.onMouseDownClaimFocus = { recorder.claimsPress }
+        fixture.terminal.feed(text: "\u{1b}[?1002h\u{1b}[?1006h")
+        let point = NSPoint(x: 20, y: 100)
+        let dragPoint = NSPoint(x: 80, y: 100)
+
+        // Reported: the activating press, its drag and its release send nothing.
+        let down = try mouseEvent(.leftMouseDown, at: point, in: window, eventNumber: 42)
+        let takesIt = view.acceptsFirstMouse(for: down)
+        #expect(takesIt, "the view did not take the click that activates its window")
+        view.mouseDown(with: down)
+        let focused = window.firstResponder === view
+        #expect(focused, "the click that activated the window did not focus the terminal under it")
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: dragPoint, in: window, eventNumber: 42))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: dragPoint, in: window, eventNumber: 42))
+        let sentByActivation = recorder.sent
+        #expect(sentByActivation.isEmpty, "the activating click reached the program: \(sentByActivation)")
+        let pending = view.mouseController.pendingReportReleases
+        #expect(pending.isEmpty, "\(pending) wait for a release")
+
+        // Control: an ordinary click, now the window is active, is reported.
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window, eventNumber: 43))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: point, in: window, eventNumber: 43))
+        let reports = recorder.sent
+        let pressAndRelease = reports.count == 2
+            && reports.first.map { isSGRReport($0, button: 0, final: "M") } == true
+            && reports.last.map { isSGRReport($0, button: 0, final: "m") } == true
+        #expect(pressAndRelease, "control: an ordinary click sent \(reports), not a left press and its release")
+
+        // Selected: with reporting off, the activating click starts no selection.
+        fixture.terminal.feed(text: "\u{1b}[?1002l")
+        try #require(!fixture.terminal.isMouseReporting, "resetting 1002 left reporting on")
+        recorder.sent.removeAll()
+        window.makeFirstResponder(nil)
+        let selectDown = try mouseEvent(.leftMouseDown, at: point, in: window, eventNumber: 44)
+        let takesTheSecond = view.acceptsFirstMouse(for: selectDown)
+        #expect(takesTheSecond)
+        view.mouseDown(with: selectDown)
+        let selecting = view.mouseController.isSelecting
+        #expect(!selecting, "the click that activated the window started a selection")
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: dragPoint, in: window, eventNumber: 44))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: dragPoint, in: window, eventNumber: 44))
+        let refocused = window.firstResponder === view
+        #expect(refocused, "the second activating click did not focus the terminal")
+        let sentBySecond = recorder.sent
+        #expect(sentBySecond.isEmpty, "the activating click sent \(sentBySecond)")
+
+        // Control: an ordinary press selects.
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window, eventNumber: 45))
+        let ordinarySelects = view.mouseController.isSelecting
+        #expect(ordinarySelects, "control: an ordinary press started no selection")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: point, in: window, eventNumber: 45))
+    }
+
+    /// A host that declines a press has something drawn over the view that owns its events, so a
+    /// ⌘-click in that press opens no OSC 8 link; the same ⌘-click, claimed, does, which shows the
+    /// point is on the link. The window's activating ⌘-click on a link opens it, as the SwiftTerm
+    /// panel's does, unless the host declined that press too.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aCommandClickTheHostDeclinesOpensNoLink() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.onOpenLink = { recorder.openedLinks.append($0) }
+        view.onMouseDownClaimFocus = { recorder.claimsPress }
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
+        let link = "https://example.com/acme"
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2J\u{1b}]8;;\(link)\u{1b}\\open me\u{1b}]8;;\u{1b}\\")
+        // On the link's first cells in row 0, whatever the window's scale against the view's.
+        let cell = view.cellSize
+        let onLink = view.convert(NSPoint(x: cell.width, y: cell.height / 4), to: nil)
+
+        recorder.claimsPress = false
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command))
+        let openedWhenDeclined = recorder.openedLinks
+        #expect(openedWhenDeclined.isEmpty, "a ⌘-click the host declined opened \(openedWhenDeclined)")
+
+        let declinedActivating = try mouseEvent(
+            .leftMouseDown, at: onLink, in: window, flags: .command, eventNumber: 7)
+        let takesDeclined = view.acceptsFirstMouse(for: declinedActivating)
+        #expect(takesDeclined)
+        view.mouseDown(with: declinedActivating)
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command, eventNumber: 7))
+        let openedWhenDeclinedActivating = recorder.openedLinks
+        #expect(openedWhenDeclinedActivating.isEmpty,
+                "an activating ⌘-click the host declined opened \(openedWhenDeclinedActivating)")
+
+        // Control: the same ⌘-click, claimed, opens the link.
+        recorder.claimsPress = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command))
+        let openedWhenClaimed = recorder.openedLinks
+        #expect(openedWhenClaimed == [link], "control: a claimed ⌘-click on the link opened \(openedWhenClaimed)")
+
+        // The window's activating ⌘-click on the link, claimed, opens it.
+        let activating = try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command, eventNumber: 8)
+        let takesActivating = view.acceptsFirstMouse(for: activating)
+        #expect(takesActivating)
+        view.mouseDown(with: activating)
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command, eventNumber: 8))
+        let openedWhenActivating = recorder.openedLinks
+        #expect(openedWhenActivating == [link, link],
+                "the ⌘-click that activated the window landed on a link and opened \(openedWhenActivating)")
     }
 
     /// The report route can still carry a press that encodes as nothing: X10 tracking (`?9h`)

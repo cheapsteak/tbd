@@ -283,8 +283,9 @@ public final class GhosttyTerminalView: NSView {
     // own. A host that embeds the view among others (the app's panels) sets the ones it needs.
 
     /// Called on every left mouse-down, before the view handles it, so the host can move its own
-    /// focus to this view. Its answer is the host's to act on; the view handles the click either
-    /// way.
+    /// focus to this view. `false` declines the press: something the host draws over the view owns
+    /// its events, so a ⌘-click in that press opens no link. The view still takes first responder
+    /// and handles the rest of the click either way.
     public var onMouseDownClaimFocus: (@MainActor () -> Bool)?
 
     /// The view became the first responder (`true`) or stopped being it (`false`), however focus
@@ -306,7 +307,10 @@ public final class GhosttyTerminalView: NSView {
     /// Called each time the view is put into a window.
     public var onMovedToWindow: (@MainActor () -> Void)?
 
-    /// Whether the view takes the click that activates its window. On by default.
+    /// Whether the view takes the click that activates its window. On by default. The click it
+    /// takes only activates, as in any macOS terminal: the view becomes first responder, and the
+    /// press, its drags and its release reach neither the program nor the selection, so the
+    /// selection the user came back to copy stays. A ⌘-click on an OSC 8 link still opens it.
     public var acceptsActivatingClick = true
 
     /// Whether Option acts as Meta (Option-b sends `ESC b`) rather than typing the layout's
@@ -443,7 +447,11 @@ public final class GhosttyTerminalView: NSView {
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
     public override var wantsUpdateLayer: Bool { true }
-    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool { acceptsActivatingClick }
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        guard acceptsActivatingClick else { return false }
+        activationClickEventNumber = event?.eventNumber
+        return true
+    }
 
     // MARK: - Appearance
 
@@ -1135,20 +1143,50 @@ public final class GhosttyTerminalView: NSView {
         return forward(event) || super.performKeyEquivalent(with: event)
     }
 
+    /// The event number of the mouse-down AppKit last asked about in `acceptsFirstMouse`, which it
+    /// asks only for a click into a window that is not key. The matching `mouseDown` is that
+    /// activating click.
+    private var activationClickEventNumber: Int?
+
+    /// Set while the left press under way is the window's activating click, which the view
+    /// consumed: its drags and its release go nowhere either, since neither the program nor the
+    /// selection saw it begin. A release with no press would reach the program as a click.
+    private var pressIsConsumed = false
+
+    /// Set while the host declined the left press under way (`onMouseDownClaimFocus` answered
+    /// `false`), from its mouse-down through its mouse-up. A ⌘-click in it opens no link: the
+    /// host has something over the view that owns its events.
+    private(set) var hostDeclinedPress = false
+
     public override func mouseDown(with event: NSEvent) {
-        _ = onMouseDownClaimFocus?()
+        let isActivationClick = event.eventNumber == activationClickEventNumber
+        activationClickEventNumber = nil
+        pressIsConsumed = false
+        hostDeclinedPress = onMouseDownClaimFocus?() == false
         // Click-to-focus. `TerminalInputController.acceptsKeyDown` declines every event whose view
         // is not the first responder, so a pane that cannot take focus by being clicked cannot be
-        // typed into at all.
+        // typed into at all. The activating click focuses the view too.
         if let window, window.firstResponder !== self { window.makeFirstResponder(self) }
+        // The activating click does nothing else (`acceptsActivatingClick`), unless it is a
+        // ⌘-click on a link this press may open.
+        if isActivationClick, mouseController.linkToOpen(at: event) == nil {
+            pressIsConsumed = true
+            return
+        }
         if !forward(event) { super.mouseDown(with: event) }
     }
 
     public override func mouseUp(with event: NSEvent) {
+        defer {
+            pressIsConsumed = false
+            hostDeclinedPress = false
+        }
+        guard !pressIsConsumed else { return }
         if !forward(event) { super.mouseUp(with: event) }
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        guard !pressIsConsumed else { return }
         if !forward(event) { super.mouseDragged(with: event) }
     }
 

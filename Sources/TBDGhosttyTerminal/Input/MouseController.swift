@@ -346,15 +346,24 @@ final class MouseController: NSObject {
 
     // MARK: Press
 
+    /// The URI the left mouse-down `event` opens: the OSC 8 link under a ⌘-click, when the view
+    /// has a host to hand links to (`onOpenLink`) and the host has not declined the press
+    /// (`hostDeclinedPress`). nil for any other press.
+    func linkToOpen(at event: NSEvent) -> String? {
+        guard let view, view.onOpenLink != nil, !view.hostDeclinedPress,
+              event.type == .leftMouseDown, event.modifierFlags.contains(.command) else { return nil }
+        syncGeometry()
+        return view.terminal.hyperlinkRun(at: surfacePoint(of: event, in: view))?.uri
+    }
+
     private func mouseDown(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
         let terminal = view.terminal
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
 
         // ⌘-click on an OSC 8 link opens it and never reaches the terminal or the selection.
-        if mods.contains(.command), event.type == .leftMouseDown, let open = view.onOpenLink,
-           let run = terminal.hyperlinkRun(at: position) {
-            open(run.uri)
+        if let open = view.onOpenLink, let uri = linkToOpen(at: event) {
+            open(uri)
             return true
         }
 
