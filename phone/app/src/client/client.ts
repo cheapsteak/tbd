@@ -63,7 +63,7 @@
  */
 
 import type { LoaderMessage } from '../host.ts';
-import { fitsFrame, MAX_IN_FLIGHT, RESEND_HORIZON_MS } from '../limits.ts';
+import { fitsFrame, MAX_IN_FLIGHT, RESEND_HORIZON_MS, utf8Length } from '../limits.ts';
 import { decodeEnvelope, decodeEventData, decodeResult, isErrorCode, requestBody } from '../protocol/wire.ts';
 import type { Envelope } from '../protocol/wire.ts';
 import type { AppEvent, ErrorCode, Method, ParamsOf, ResultOf, SessionsSubscribeResult } from '../protocol/types.ts';
@@ -286,7 +286,7 @@ export class AppClient {
         else this.#channelDown();
         break;
       case 'sendFailed':
-        if (message.reason === 'tooLarge') this.#failPosted();
+        if (message.reason === 'tooLarge') this.#failLargestPosted();
         else this.#holdPosted();
         break;
       case 'env':
@@ -297,7 +297,8 @@ export class AppClient {
   /**
    * Sends one request and resolves with its decoded result. It rejects with `AppError` only:
    * - the daemon's error;
-   * - `too_large` at once for a body over one frame, with nothing posted;
+   * - `too_large` at once for a body over one frame, with nothing posted, and for the largest
+   *   body posted when the loader refuses one all the same (`sendFailed: tooLarge`);
    * - `bad_reply` for a reply that does not decode;
    * - `superseded` for a state request still unanswered when the channel comes back up;
    * - `not_confirmed` for an acting request still unanswered when the channel comes back up,
@@ -385,19 +386,44 @@ export class AppClient {
   }
 
   /**
-   * `sendFailed: tooLarge`. The loader's message names no request, so every posted, unanswered
-   * request is failed: the one it refused is among them, and leaving it would wait forever.
-   * `request` checks the same limit the loader does, so this should never happen.
+   * `sendFailed: tooLarge`. `request` checks the same limit the loader does, so this should
+   * never happen. The loader posts one for each body it refuses, but names no request, and the
+   * one it refused would wait forever. So the posted, unanswered request whose serialized body
+   * is largest fails, as the likeliest to be that body, and of bodies the same size, the one
+   * posted last. Every other request stands: failing them all would fail the subscribe too,
+   * and put "That message is too long" on the error screen when nobody wrote one.
    */
-  #failPosted(): void {
-    for (const pending of [...this.#posted]) this.#fail(pending, 'too_large', TOO_LONG_TEXT);
+  #failLargestPosted(): void {
+    let largest: Pending | undefined;
+    let largestBytes = -1;
+    // In the order they were posted on this channel, so `>=` keeps the one posted last.
+    for (const pending of this.#posted) {
+      const bytes = utf8Length(JSON.stringify(pending.body));
+      if (bytes >= largestBytes) {
+        largest = pending;
+        largestBytes = bytes;
+      }
+    }
+    if (largest === undefined) return;
+    this.#fail(largest, 'too_large', TOO_LONG_TEXT);
     this.#pump();
   }
 
   /**
-   * `sendFailed: offline`. The loader names no request, so every posted, unanswered request is
-   * taken as unsent and held for the next channel up. Reposting one sent after all is safe:
-   * the daemon reads it as a resend.
+   * `sendFailed: offline`, and a change to down. The loader names no request, so every posted,
+   * unanswered request is taken as unsent and held for the next channel up. Reposting one sent
+   * after all is safe: the daemon reads it as a resend.
+   *
+   * A `sendFailed: offline` always comes while the client is down, so in practice it finds
+   * nothing posted here. The loader refuses a body as offline only while its connection is not
+   * ready to send (`sendApp` in `phone/loader/connection.js`). Whatever ends that readiness
+   * reports a state other than `ready` in the same task (`#setState` there), and the loader
+   * posts `down` from it at once (`#onState` in `phone/loader/main.js`, `setChannel` in
+   * `phone/loader/frame.js`). A connection that ends reports nothing, but the loader destroys
+   * the frame with it (`#endConnection` and `#stopConnection` in `main.js`). The `down` and the
+   * `sendFailed` go out on one port, whose messages arrive in order, and the next `up` comes
+   * only once the connection is ready again. So a `sendFailed: offline` lands after the `down`
+   * that began its time away and before the `up` that ends it.
    */
   #holdPosted(): void {
     for (const pending of this.#posted) this.#hold(pending);

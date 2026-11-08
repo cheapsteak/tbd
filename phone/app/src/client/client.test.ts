@@ -261,37 +261,72 @@ test('an error reply frees a slot too', () => {
   assert.equal(h.posted.length, 33);
 });
 
-test('sendFailed tooLarge fails every unanswered request', async () => {
+test('sendFailed tooLarge fails only the posted, unanswered request with the largest body', async () => {
   const h = harness();
   h.up();
-  const posted = Array.from({ length: 33 }, () => track(h.c.request('profiles.list', {})));
-  const answered = posted[0]!;
-  h.reply(h.posted[0], PROFILES);   // r33 is posted in r1's slot
+  const short = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const long = track(h.c.request('message.send', { session: REF, text: 'x'.repeat(1_000) }));
+  const longer = track(h.c.request('message.send', { session: REF, text: 'x'.repeat(2_000) }));
+  const read = track(h.c.request('profiles.list', {}));
+  h.reply(h.posted[2], { outcome: 'sent' });   // the longest is answered, so it is not a candidate
   h.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
   await flush();
-  assert.equal(answered.state, 'resolved');
-  for (const p of posted.slice(1)) {
-    assert.equal(p.state, 'rejected');
-    assert.ok(p.error instanceof AppError);
-    assert.equal(p.error.code, 'too_large');
-    assert.equal(p.error.message, TOO_LONG_TEXT);
-  }
-  // Their replies, if they come, are ignored, and new requests go out.
-  h.reply(h.posted[1], PROFILES);
-  track(h.c.request('profiles.list', {}));
-  assert.equal(h.posted.at(-1)!.requestID, 'r34');
+  assert.equal(longer.state, 'resolved');
+  assert.deepEqual([short.state, long.state, read.state], ['pending', 'rejected', 'pending']);
+  assert.ok(long.error instanceof AppError);
+  assert.deepEqual([long.error.code, long.error.message], ['too_large', TOO_LONG_TEXT]);
+  // Each sendFailed stands for one body: a second fails the next largest.
+  h.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
+  await flush();
+  assert.deepEqual([short.state, read.state], ['rejected', 'pending']);
+  // A reply to a failed request, if one comes, is ignored; the rest still resolve.
+  h.reply(h.posted[1], { outcome: 'sent' });
+  h.reply(h.posted[3], PROFILES);
+  await flush();
+  assert.equal(long.state, 'rejected');
+  assert.equal(read.state, 'resolved');
 });
 
-test('sendFailed tooLarge leaves a request that was never posted waiting', async () => {
+test('sendFailed tooLarge fails the one posted last of bodies the same size', async () => {
+  const h = harness();
+  h.up();
+  const first = track(h.c.request('message.send', { session: REF, text: 'A' }));
+  const second = track(h.c.request('message.send', { session: REF, text: 'B' }));
+  h.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
+  await flush();
+  assert.deepEqual([first.state, second.state], ['pending', 'rejected']);
+});
+
+test('sendFailed tooLarge leaves the subscribe alone when a larger body is posted', async () => {
+  let subscribed: { state: string } | undefined;
+  const h = harness({ whenUp: (c) => { subscribed = track(c.request('sessions.subscribe', {})); } });
+  h.up();
+  const send = track(h.c.request('message.send', { session: REF, text: 'Run the unit tests.' }));
+  h.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
+  await flush();
+  assert.equal(send.state, 'rejected');
+  assert.equal(subscribed!.state, 'pending');
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
+  await flush();
+  assert.equal(subscribed!.state, 'resolved');
+});
+
+test('sendFailed tooLarge frees one slot, which a request never posted takes', async () => {
   const h = harness();
   h.up();
   const all = Array.from({ length: 34 }, () => track(h.c.request('profiles.list', {})));
   h.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
   await flush();
-  assert.equal(all.filter((p) => p.state === 'rejected').length, 32);
-  // The two queued requests take the freed slots.
-  assert.deepEqual(h.posted.slice(32).map((b) => b.requestID), ['r33', 'r34']);
-  assert.equal(all[32]!.state, 'pending');
+  // r10 to r32 have the longest bodies, and r32 was posted last of them.
+  assert.deepEqual(all.flatMap((p, i) => (p.state === 'rejected' ? [i + 1] : [])), [32]);
+  assert.deepEqual(h.posted.slice(32).map((b) => b.requestID), ['r33']);
+  assert.equal(all[33]!.state, 'pending');
+  // With nothing posted, it fails nothing.
+  const idle = harness();
+  const queued = track(idle.c.request('profiles.list', {}));
+  idle.c.handle({ t: 'sendFailed', reason: 'tooLarge' });
+  await flush();
+  assert.equal(queued.state, 'pending');
 });
 
 test('a result that does not decode rejects with bad_reply', async () => {
