@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # usage: osv-check.sh [--print-queries] [lockfile...]
 # Checks the vendored libraries (phone/loader/vendor/vendor.lock) and the packages pinned in
-# each npm lockfile against OSV. Exit 0: no advisories. 1: advisories found. 2: could not check.
+# each npm lockfile against OSV. Exit 0: no advisories. 1: advisories found. 2: could not check,
+# which includes a lockfile that does not exist: a run that skipped one it was asked to check
+# would report a clean result for packages it never looked at.
 # env: OSV_API_URL (default https://api.osv.dev/v1/querybatch), OSV_RESPONSE_FILE (test seam:
 # read the response from this file instead of the network), VENDOR_LOCK (default the repo's lock).
 set -euo pipefail
@@ -35,8 +37,8 @@ fi
 
 for lf in "${lockfiles[@]}"; do
   if [ ! -f "$lf" ]; then
-    echo "osv-check: notice: $lf does not exist; skipping it"
-    continue
+    echo "osv-check: lockfile $lf does not exist" >&2
+    exit 2
   fi
   if ! jq -r '.packages // {} | to_entries[]
       | select(.key | startswith("node_modules/"))

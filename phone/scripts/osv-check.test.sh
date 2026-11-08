@@ -44,10 +44,22 @@ printf '{"results":[{}]}\n' >"$tmp/short.json"
 rc=0; OSV_RESPONSE_FILE="$tmp/short.json" bash "$osv" "$tmp/package-lock.json" >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 2 ]; then ok "response of the wrong length exits 2"; else bad "short rc=$rc"; fi
 
-rc=0; out="$(OSV_RESPONSE_FILE="$tmp/hit.json" bash "$osv" --print-queries "$tmp/missing.json" 2>&1)" || rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'does not exist' && printf '%s' "$out" | grep -q '"jsqr"'; then
-  ok "missing lockfile is skipped with a notice, lock still checked"
+# Read alone, the vendor lock makes one query, and this response answers it cleanly.
+printf '{"results":[{}]}\n' >"$tmp/clean-one.json"
+rc=0; out="$(OSV_RESPONSE_FILE="$tmp/clean-one.json" bash "$osv" "$tmp/missing.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q "$tmp/missing.json does not exist"; then
+  ok "a missing lockfile exits 2, never a clean result"
 else bad "missing lockfile rc=$rc $out"; fi
+
+rc=0; out="$(OSV_RESPONSE_FILE="$tmp/clean.json" bash "$osv" "$tmp/package-lock.json" "$tmp/missing.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && ! printf '%s' "$out" | grep -q 'no advisories'; then
+  ok "a missing lockfile beside one that exists still exits 2"
+else bad "missing beside present rc=$rc $out"; fi
+
+rc=0; out="$(bash "$osv" --print-queries "$tmp/missing.json" 2>&1)" || rc=$?
+if [ "$rc" -eq 2 ] && ! printf '%s' "$out" | grep -q '"queries"'; then
+  ok "a missing lockfile exits 2 before printing queries"
+else bad "missing lockfile with --print-queries rc=$rc $out"; fi
 
 [ "$failures" -eq 0 ] || { echo "osv-check.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "osv-check.test.sh: all passed"
