@@ -114,6 +114,91 @@ struct TerminalEngineIdentityTests {
         }
     }
 
+    /// Two ways a probe reaches an engine that the test above does not make:
+    /// after reporting was turned on and then off again, and split across two
+    /// feeds where a pty read ended inside it. SwiftTerm's bytes are the
+    /// answer each time, and its shape is checked first, so the comparison
+    /// cannot pass on two engines that both said nothing.
+    @Test("The probe gets SwiftTerm's exact bytes from libghostty after reporting goes on and off, and when a read splits it",
+          .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice),
+          arguments: ProbeDelivery.allCases)
+    func bothEnginesAnswerAProbeTheSameAfterAGateChangeOrASplit(_ delivery: ProbeDelivery) async {
+        let swiftTerm = EngineUnderTest(kind: .swiftTerm, label: "EngineIdentity.\(delivery.rawValue).SwiftTerm")
+        let ghostty = EngineUnderTest(kind: .ghostty, label: "EngineIdentity.\(delivery.rawValue).Ghostty")
+        defer {
+            swiftTerm.tearDown()
+            ghostty.tearDown()
+        }
+        #expect(ghostty.engine.kind == .ghostty, "the factory fell back, so this compares SwiftTerm with itself")
+        for setting in delivery.reportingSettings {
+            swiftTerm.engine.setProgramStatusReporting(enabled: setting)
+            ghostty.engine.setProgramStatusReporting(enabled: setting)
+            await EngineTestSupport.settle()
+        }
+        swiftTerm.recorder.reset()
+        ghostty.recorder.reset()
+
+        // Each part is parsed to the end, and its replies, if any, delivered,
+        // before the next one arrives.
+        for part in delivery.feeds {
+            swiftTerm.feed(part)
+            ghostty.feed(part)
+            await EngineTestSupport.settle()
+        }
+        let da1ReplyStart = Array("\u{1b}[?".utf8)
+        let answered = await EngineTestSupport.waitUntil(
+            "both engines to answer the DA1 behind the \(delivery.rawValue) probe",
+            observed: { "SwiftTerm \(swiftTerm.recorder.summary); libghostty \(ghostty.recorder.summary)" }
+        ) {
+            Self.contains(da1ReplyStart, in: swiftTerm.recorder.sent)
+                && Self.contains(da1ReplyStart, in: ghostty.recorder.sent)
+        }
+        guard answered else { return }
+        await EngineTestSupport.settle()
+
+        let expected = swiftTerm.recorder.sent
+        let actual = ghostty.recorder.sent
+        let reporting = delivery.reportingSettings.last ?? false
+        let expectedDA1 = reporting ? Array(expected.dropFirst(Self.probeReply.count)) : expected
+        if reporting {
+            #expect(expected.starts(with: Self.probeReply),
+                    "SwiftTerm did not answer the probe first: \(EngineTestSupport.describe(expected))")
+        }
+        #expect(expectedDA1.starts(with: da1ReplyStart),
+                "SwiftTerm sent \(EngineTestSupport.describe(expected)) for the \(delivery.rawValue) probe, not \(reporting ? "the probe's answer, then " : "")DA1's")
+        #expect(actual == expected,
+                "\(delivery.rawValue): libghostty sent \(EngineTestSupport.describe(actual)), SwiftTerm \(EngineTestSupport.describe(expected))")
+        #expect(!Self.contains(Self.libghosttyAnswerStart, in: actual),
+                "libghostty's own probe answer reached send: \(EngineTestSupport.describe(actual))")
+    }
+
+    /// How the probe reaches the engines in the test above.
+    enum ProbeDelivery: String, CaseIterable, Sendable {
+        /// Whole, after reporting was turned on and then off.
+        case reportingOnThenOff
+        /// Split after `ESC ] 7501 ;`, with reporting on.
+        case splitWithReportingOn
+        /// Split after `ESC ] 7501 ;`, with reporting off.
+        case splitWithReportingOff
+
+        /// Each reporting setting in turn, the last one standing.
+        var reportingSettings: [Bool] {
+            switch self {
+            case .reportingOnThenOff: return [true, false]
+            case .splitWithReportingOn: return [true]
+            case .splitWithReportingOff: return [false]
+            }
+        }
+
+        /// The probe, then DA1, in the feeds that deliver them.
+        var feeds: [String] {
+            switch self {
+            case .reportingOnThenOff: return ["\u{1b}]7501;?\u{07}\u{1b}[c"]
+            case .splitWithReportingOn, .splitWithReportingOff: return ["\u{1b}]7501;", "?\u{07}\u{1b}[c"]
+            }
+        }
+    }
+
     // MARK: - The adapter, headless
 
     /// The answers the engine hands libghostty are read from SwiftTerm at run
