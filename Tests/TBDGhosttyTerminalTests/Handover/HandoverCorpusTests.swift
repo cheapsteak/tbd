@@ -16,8 +16,13 @@ import Testing
 /// categories its entry names. Each list is exact: a new difference fails, a difference outside a
 /// listed state's categories fails, and so does a listed state that stops differing, which means
 /// the list is stale. The lists are the proof of concept's misses on its generated states; CI
-/// confirms them against the pinned SwiftTerm fork. The tests after them hold the handback's
-/// reorderings, its scrollback cap and a detach inside a sequence.
+/// confirms them against the pinned SwiftTerm fork.
+///
+/// On an alternate screen each of the three also leaves it, the way the state entered it, and
+/// compares again: the primary screen behind it, with its scrollback, and what the leave puts
+/// back. There the two engines may also differ in `oneValueForBothScreens`, so the handback's
+/// receiver is held as well to SwiftTerm fed the program's own bytes, in every category. The tests
+/// after them hold the handback's reorderings, its scrollback cap and a detach inside a sequence.
 ///
 /// Every body runs on a thread the tests own, one at a time: see `onHandoverThread`.
 @Suite(.serialized, .fastPassBounded)
@@ -42,6 +47,12 @@ struct HandoverCorpusTests {
         "vs16-at-edge": heartAtTheEdge,
     ]
 
+    /// What the two engines may differ in once a program has left the alternate screen, whatever
+    /// crossed. Every alternate-screen state shares it, so it is not held to differing.
+    static let oneValueForBothScreens = HandoverMiss(
+        reason: "libghostty keeps one scrolling region, autowrap, reverse wrap and DECLRMM for both screens and leaves the cursor's visibility alone on a switch; SwiftTerm keeps a region per screen, puts back the modes its `?1049h` saved, and shows the cursor on every switch",
+        categories: ["region", "mode.DECAWM", "mode.reverseWrap", "mode.DECLRMM", "cursorVisible", "mode.DECTCEM"])
+
     // MARK: - Every state through each crossing
 
     /// The daemon's SwiftTerm preamble, read by a fresh libghostty viewer, against the same
@@ -58,8 +69,15 @@ struct HandoverCorpusTests {
 
             let tally = handoverCompare(swiftTerm.handoverSnap(), ghostty.handoverSnap())
                 .excluding(handoverInertCategories)
-            Self.expectOutcome(
-                name, tally: tally, misses: Self.freshMisses, crossing: "SwiftTerm preamble into a fresh libghostty")
+            let crossing = "SwiftTerm preamble into a fresh libghostty"
+            Self.expectOutcome(name, tally: tally, misses: Self.freshMisses, crossing: crossing)
+
+            guard let leave = Self.leave(ghostty) else { return }
+            swiftTerm.feed(leave)
+            ghostty.feed(leave[...])
+            let left = handoverCompare(swiftTerm.handoverSnap(), ghostty.handoverSnap())
+                .excluding(Self.allowedAfterLeaving(name, misses: Self.freshMisses))
+            #expect(left.isEmpty, "\(name), \(crossing), then \(Self.describe(leave)): \(left.summary)")
         }
     }
 
@@ -73,6 +91,13 @@ struct HandoverCorpusTests {
             let fresh = try Self.freshGhostty(state)
             fresh.feed(preamble[...])
             let expected = fresh.handoverSnap()
+            // On an alternate screen, the same again once the program has left it.
+            let leave = Self.leave(fresh)
+            var expectedLeft: HandoverSnap?
+            if let leave {
+                fresh.feed(leave[...])
+                expectedLeft = fresh.handoverSnap()
+            }
             fresh.close()
 
             for life in HandoverCorpus.priorLives {
@@ -82,12 +107,26 @@ struct HandoverCorpusTests {
                 reused.feed(preamble[...])
                 let tally = handoverCompare(expected, reused.handoverSnap())
                 #expect(tally.isEmpty, "\(name), after a \(life.name) life and a reset: \(tally.summary)")
+                if let leave, let expectedLeft {
+                    reused.feed(leave[...])
+                    let left = handoverCompare(expectedLeft, reused.handoverSnap())
+                    #expect(
+                        left.isEmpty,
+                        "\(name), after a \(life.name) life and a reset, then \(Self.describe(leave)): \(left.summary)")
+                }
             }
         }
     }
 
     /// A libghostty viewer's handback, read by a fresh SwiftTerm emulator, against the viewer. The
     /// viewer's scrollback is cut to the newest rows the handback carries.
+    ///
+    /// Once the program leaves an alternate screen, the receiver is compared with the viewer and
+    /// with SwiftTerm fed the program's own bytes. The viewer cannot say what `?1049l` puts back
+    /// of autowrap, reverse wrap and DECLRMM, because libghostty keeps one of each for both
+    /// screens; SwiftTerm fed the program's bytes can. So a handback that sets one of them before
+    /// the switch, where the receiver's `?1049h` saves it as the primary's, differs from the
+    /// second.
     @Test(arguments: HandoverFixtures.names)
     func ghosttyHandbackIntoSwiftTermMatches(_ name: String) async throws {
         try await onHandoverThread {
@@ -97,8 +136,26 @@ struct HandoverCorpusTests {
 
             let expected = source.handoverSnap().keepingNewestHistory(handoverScrollback)
             let tally = handoverCompare(expected, receiver.handoverSnap()).excluding(handoverInertCategories)
-            Self.expectOutcome(
-                name, tally: tally, misses: Self.handbackMisses, crossing: "libghostty handback into SwiftTerm")
+            let crossing = "libghostty handback into SwiftTerm"
+            Self.expectOutcome(name, tally: tally, misses: Self.handbackMisses, crossing: crossing)
+
+            guard let leave = Self.leave(source) else { return }
+            let direct = state.swiftTerm()
+            source.feed(leave[...])
+            receiver.feed(leave)
+            direct.feed(leave)
+            let received = receiver.handoverSnap()
+            let allowed = Self.allowedAfterLeaving(name, misses: Self.handbackMisses)
+            let fromViewer = handoverCompare(source.handoverSnap().keepingNewestHistory(handoverScrollback), received)
+                .excluding(allowed)
+            #expect(
+                fromViewer.isEmpty,
+                "\(name), \(crossing), then \(Self.describe(leave)): the receiver differs from the viewer: \(fromViewer.summary)")
+            let fromDirect = handoverCompare(direct.handoverSnap().keepingNewestHistory(handoverScrollback), received)
+                .excluding(allowed.subtracting(Self.oneValueForBothScreens.categories))
+            #expect(
+                fromDirect.isEmpty,
+                "\(name), \(crossing), then \(Self.describe(leave)): the receiver differs from SwiftTerm fed the program's bytes: \(fromDirect.summary)")
         }
     }
 
@@ -539,6 +596,24 @@ struct HandoverCorpusTests {
     }
 
     // MARK: - Helpers
+
+    /// The reset that leaves the alternate screen the way `terminal` entered it, as the program
+    /// would send it. nil on the primary screen.
+    private static func leave(_ terminal: GhosttyTerminal) -> [UInt8]? {
+        terminal.withLocked { state in
+            guard state.isAlternateScreen else { return nil }
+            let entered = [UInt16(1049), 1047].first { state.mode($0) } ?? 47
+            return Array("\u{1b}[?\(entered)l".utf8)
+        }
+    }
+
+    private static func describe(_ bytes: [UInt8]) -> String { String(decoding: bytes, as: UTF8.self).debugDescription }
+
+    /// What a state may differ in once the program has left the alternate screen: its own miss, the
+    /// inert margins, and what libghostty keeps once for both screens.
+    private static func allowedAfterLeaving(_ name: String, misses: [String: HandoverMiss]) -> Set<String> {
+        handoverInertCategories.union(oneValueForBothScreens.categories).union(misses[name]?.categories ?? [])
+    }
 
     /// A libghostty viewer of the state's size that has read nothing.
     private static func freshGhostty(_ state: HandoverState) throws -> GhosttyTerminal {

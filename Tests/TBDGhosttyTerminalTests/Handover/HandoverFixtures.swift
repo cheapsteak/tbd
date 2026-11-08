@@ -32,6 +32,9 @@ enum HandoverReviewStates {
             // on both screens.
             ("alt-47-cursor-moved", lines(5) + "\(e)[3;10Hprimary\(e)[?47h\(e)[2J\(e)[12;30Halt"),
             ("alt-1047-cursor-moved", lines(5) + "\(e)[3;10Hprimary\(e)[?1047h\(e)[2J\(e)[12;30Halt"),
+            // Reverse wrap, DECLRMM with margins, and autowrap off, all set on the alternate
+            // screen. SwiftTerm's `?1049l` puts back the primary's values, saved by `?1049h`.
+            ("alt-saved-modes", lines(10) + "\(e)[?1049h\(e)[?45h\(e)[?69h\(e)[5;40s\(e)[?7l\(e)[3;10Hx"),
         ]
         return cases.map {
             HandoverState(
