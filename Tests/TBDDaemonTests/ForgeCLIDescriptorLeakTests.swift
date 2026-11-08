@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 
 /// A forge CLI call that never launches must give back both of its pipes.
@@ -13,37 +14,59 @@ import Foundation
 struct ForgeCLIDescriptorLeakTests {
     private static let calls = 25
 
-    private static func openDescriptorCount() -> Int {
-        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+    /// The read of `/dev/fd` failed, so no count can be trusted. Thrown rather
+    /// than folded into a sentinel, which would read as a leak or as a clean run.
+    private struct DescriptorTableUnreadable: Error {}
+
+    /// Counts this process's open descriptors, and throws when the table cannot
+    /// be read so a failed read is never mistaken for a count.
+    private static func openDescriptorCount() throws -> Int {
+        do {
+            return try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        } catch {
+            throw DescriptorTableUnreadable()
+        }
     }
 
     /// Descriptors settle on a later turn when an autorelease pool drains
     /// lazily, so a count that has not returned to the baseline is polled
-    /// briefly. A leak never returns.
-    private static func settledCount(atMost baseline: Int) async -> Int {
-        var count = openDescriptorCount()
-        for _ in 0..<40 where count > baseline {
-            try? await Task.sleep(for: .milliseconds(50))
-            count = openDescriptorCount()
+    /// briefly. A leak never returns, so it ends as a timeout that names both
+    /// counts. A cancelled test reports nothing.
+    private static func expectSettled(atMost baseline: Int) async throws {
+        var last = baseline
+        var readError: Error?
+        let outcome = await pollUntilTrue(
+            timeout: .seconds(2), pollInterval: .milliseconds(50)
+        ) {
+            do {
+                last = try openDescriptorCount()
+            } catch {
+                readError = error
+                return true
+            }
+            return last <= baseline
         }
-        return count
+        if let readError { throw readError }
+        if outcome == .timedOut {
+            Issue.record("open descriptors stayed at \(last) against a baseline of \(baseline)")
+        }
     }
 
     @Test("a launch that fails closes the pipes it opened")
-    func failedLaunchClosesPipes() async {
-        let baseline = Self.openDescriptorCount()
+    func failedLaunchClosesPipes() async throws {
+        let baseline = try Self.openDescriptorCount()
         for _ in 0..<Self.calls {
             let result = await PRStatusManager.runCLI(
                 executable: "/bin/sh", args: ["-c", "true"],
                 repoPath: "/nonexistent/\(UUID().uuidString)")
             #expect(result == nil)
         }
-        #expect(await Self.settledCount(atMost: baseline) <= baseline)
+        try await Self.expectSettled(atMost: baseline)
     }
 
     @Test("a call cancelled before it launches closes the pipes it opened")
-    func cancelledBeforeLaunchClosesPipes() async {
-        let baseline = Self.openDescriptorCount()
+    func cancelledBeforeLaunchClosesPipes() async throws {
+        let baseline = try Self.openDescriptorCount()
         for _ in 0..<Self.calls {
             let task = Task {
                 // Cancel from inside, so the cancellation is already standing
@@ -54,6 +77,6 @@ struct ForgeCLIDescriptorLeakTests {
             }
             #expect(await task.value == nil)
         }
-        #expect(await Self.settledCount(atMost: baseline) <= baseline)
+        try await Self.expectSettled(atMost: baseline)
     }
 }
