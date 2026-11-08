@@ -369,6 +369,74 @@ struct PhoneAppServiceTests {
         #expect(PhoneActionRecord.loggableTarget(raw) == "remote:acme/?gpj.exe?x?y?z-é")
     }
 
+    // MARK: - Sessions the phone can see
+
+    /// What takes a listed local session out of the phone's sight.
+    enum OutOfSight: String, CaseIterable, Sendable {
+        case terminalGone
+        case worktreeArchived
+        case repoHidden
+    }
+
+    /// A phone can keep a terminal ID from a list sent before its tab closed,
+    /// its worktree was archived or its repo hidden. Every action on a local
+    /// session answers such an ID `not_found`, and nothing reaches the
+    /// daemon.
+    @Test(arguments: OutOfSight.allCases)
+    func everyLocalActionIsNotFoundOnASessionThePhoneCannotSee(_ outOfSight: OutOfSight) async throws {
+        let h = try await PhoneServiceHarness.make()
+        let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
+        let terminal = try await h.seedTerminal()
+        switch outOfSight {
+        case .terminalGone:
+            try await h.db.terminals.delete(id: terminal.id)
+        case .worktreeArchived:
+            try await h.db.worktrees.archive(id: terminal.worktreeID)
+        case .repoHidden:
+            let worktree = try await h.db.worktrees.get(id: terminal.worktreeID)
+            let repoID = try #require(worktree?.repoID)
+            try await h.db.repos.setHidden(id: repoID, hidden: true)
+        }
+        let outbox = await h.connect()
+        let session = PhoneSessionRef.local(terminalID: terminal.id)
+
+        let (sent, _) = try await h.request(
+            .messageSend, params: MessageSendParams(session: session, text: "hi"), on: outbox)
+        let (model, _) = try await h.request(
+            .sessionSetModel, params: SessionSetModelParams(session: session, model: "opus"), on: outbox)
+        let (answered, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(
+                session: session, promptID: "toolu-1", answer: .permission(decision: .allow, message: nil)),
+            on: outbox)
+        let (switched, _) = try await h.request(
+            .sessionSwitchProfile, params: SessionSwitchProfileParams(session: session, profileID: profile.id),
+            on: outbox)
+        let (forked, _) = try await h.request(
+            .sessionFork, params: SessionForkParams(session: session, profileID: nil), on: outbox)
+
+        let notFound = PhoneAppError(code: .notFound, message: PhoneAppService.noSuchSessionReason)
+        let errors = [sent.error, model.error, answered.error, switched.error, forked.error]
+        let expected: [PhoneAppError?] = Array(repeating: notFound, count: 5)
+        #expect(errors == expected, "\(outOfSight.rawValue)")
+        #expect(h.actions.calls.isEmpty)
+    }
+
+    /// The same session in sight acts, so the refusals above are about sight
+    /// and nothing else.
+    @Test func aLocalSessionInSightActs() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal()
+        let outbox = await h.connect()
+
+        let (sent, _) = try await h.request(
+            .messageSend, params: MessageSendParams(session: .local(terminalID: terminal.id), text: "hi"),
+            on: outbox)
+
+        #expect(sent.error == nil)
+        #expect(h.actions.calls == [FakeSessionActions.Call(method: .send, deviceID: h.peer.deviceID)])
+    }
+
     // MARK: - Replies across a reconnect
 
     /// A disconnect in the middle of a send does not cut it short. Its reply

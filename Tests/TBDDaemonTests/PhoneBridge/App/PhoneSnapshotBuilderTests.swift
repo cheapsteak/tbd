@@ -254,13 +254,43 @@ struct PhoneSnapshotBuilderTests {
         let sessions = try Self.row(w.id.uuidString, in: s).sessions
         try #require(sessions.count == 2)
         let noMessages = PhoneCapability(available: false, reason: "This session cannot take messages.")
-        let expected = PhoneCapabilities(
+        #expect(sessions[0].capabilities == PhoneCapabilities(
             transcript: Self.available, send: noMessages, answer: Self.available,
-            switchProfile: Self.available, fork: Self.available, model: noMessages)
-        #expect(sessions[0].capabilities == expected)
-        #expect(sessions[1].capabilities == expected)
+            switchProfile: Self.available, fork: Self.available, model: noMessages))
+        #expect(sessions[1].capabilities == PhoneCapabilities(
+            transcript: Self.available, send: noMessages, answer: Self.available,
+            switchProfile: Self.available,
+            fork: PhoneCapability(available: false, reason: PhoneSessionStatus.parkedForkReason),
+            model: noMessages))
         // The send path refuses it with the same words.
         #expect(PhoneAppService.cannotTakeMessagesReason == noMessages.reason)
+    }
+
+    /// A parked Claude session does not offer Fork, because the profile swap
+    /// would move the parked session rather than copy it, and `session.fork`
+    /// refuses it with the same words. It still offers everything else:
+    /// Send wakes it, and Switch Profile moves it, which is what a switch is.
+    @Test func aParkedSessionOffersNoFork() throws {
+        let a = UUID()
+        let w = Self.worktree("fix-login", repo: a)
+        let running = Self.terminal(in: w.id, kind: .claude)
+        var parked = Self.terminal(in: w.id, kind: .claude, createdAt: Self.base.addingTimeInterval(1))
+        parked.hibernatedAt = Self.base
+
+        let s = PhoneSnapshotBuilder.build(Self.input(
+            repos: [Repo(id: a, path: "/tmp/acme", displayName: "acme")], worktrees: [w],
+            terminals: [running, parked]))
+
+        let sessions = try Self.row(w.id.uuidString, in: s).sessions
+        try #require(sessions.count == 2)
+        #expect(sessions[0].capabilities.fork == Self.available)
+        #expect(sessions[1].capabilities == PhoneCapabilities(
+            transcript: Self.available, send: Self.available, answer: Self.available,
+            switchProfile: Self.available,
+            fork: PhoneCapability(
+                available: false, reason: "This session is parked. Send it a message to wake it, then fork it."),
+            model: Self.available))
+        #expect(PhoneAppService.parkedForkReason == PhoneSessionStatus.parkedForkReason)
     }
 
     @Test func everyStateMapsToItsChip() {

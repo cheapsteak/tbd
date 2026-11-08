@@ -544,7 +544,8 @@ extension PhoneAppService {
     ///
     /// - A permission answer whose reason is over `promptTextCap` UTF-8 bytes
     ///   is `bad_request`, before anything is called.
-    /// - **A local session**: `phoneAnswerPrompt` with the terminal, the
+    /// - **A local session** the phone cannot see (`phoneVisibleTerminal`) is
+    ///   `not_found`. Otherwise `phoneAnswerPrompt` with the terminal, the
     ///   prompt and the answer.
     /// - **A remote session** needs its provider's `answer` capability, as the
     ///   sessions list shows it, or it is `unsupported` with the same reason;
@@ -565,6 +566,7 @@ extension PhoneAppService {
         let key = PhonePromptAnswerLedger.Key(session: params.session, promptID: params.promptID)
         switch params.session {
         case .local(let terminalID):
+            _ = try await phoneVisibleTerminal(terminalID)
             let core = PromptAnswerParams(terminalID: terminalID, promptID: params.promptID, answer: params.answer)
             return try await answerInLedger(key, deviceID: deviceID) {
                 try await self.actions.phoneAnswerPrompt(core, deviceID: deviceID)

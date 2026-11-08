@@ -156,7 +156,7 @@ struct PhonePromptTests {
 
     @Test func answeringAnOpenPromptDelivers() async throws {
         let h = try await PhoneServiceHarness.make()
-        let terminalID = UUID()
+        let terminalID = try await h.seedTerminal().id
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
         let outbox = await h.connect()
         let answer = PromptAnswer.question(answers: ["Which branches?": "main, release"])
@@ -180,7 +180,8 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.alreadyResolved))
         let outbox = await h.connect()
 
-        let (reply, bytes) = try await h.request(.promptAnswer, params: Self.local(UUID(), "toolu-1"), on: outbox)
+        let terminalID = try await h.seedTerminal().id
+        let (reply, bytes) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
         #expect(reply.error == nil)
         #expect(try Self.outcome(bytes) == .alreadyResolved)
@@ -193,7 +194,8 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.unknown))
         let outbox = await h.connect()
 
-        let (reply, bytes) = try await h.request(.promptAnswer, params: Self.local(UUID(), "toolu-1"), on: outbox)
+        let terminalID = try await h.seedTerminal().id
+        let (reply, bytes) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
         #expect(reply.error == nil)
         #expect(try Self.outcome(bytes) == .unknown)
@@ -204,7 +206,8 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerPrompt, with: RPCResponse(error: RPCRouter.promptHookDetachedRefusal))
         let outbox = await h.connect()
 
-        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(UUID(), "toolu-1"), on: outbox)
+        let terminalID = try await h.seedTerminal().id
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
         #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptHookDetachedRefusal))
     }
@@ -217,7 +220,8 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerPrompt, with: RPCResponse(error: RPCRouter.promptAnswerDisabledRefusal))
         let outbox = await h.connect()
 
-        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(UUID(), "toolu-1"), on: outbox)
+        let terminalID = try await h.seedTerminal().id
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
         #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptAnswerDisabledRefusal))
     }
@@ -227,7 +231,8 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerPrompt, with: RPCResponse(error: ""))
         let outbox = await h.connect()
 
-        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(UUID(), "toolu-1"), on: outbox)
+        let terminalID = try await h.seedTerminal().id
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
         #expect(reply.error == PhoneAppError(code: .refused, message: PhoneAppService.answerRefusedReason))
     }
@@ -238,14 +243,15 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerPrompt, with: .ok())
         let outbox = await h.connect()
 
-        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(UUID(), "toolu-1"), on: outbox)
+        let terminalID = try await h.seedTerminal().id
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
         #expect(reply.error?.code == .internalError)
     }
 
     @Test func aDenyMessagePassesThroughUnchanged() async throws {
         let h = try await PhoneServiceHarness.make()
-        let terminalID = UUID()
+        let terminalID = try await h.seedTerminal().id
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
         let outbox = await h.connect()
         let deny = PromptAnswer.permission(decision: .deny, message: "Not on main.\nUse a branch \u{2013} \u{E9}\u{540D} \"now\"")
@@ -261,7 +267,7 @@ struct PhonePromptTests {
     /// is `bad_request`, and nothing reaches the core.
     @Test func aDenyReasonOverTheCapIsABadRequest() async throws {
         let h = try await PhoneServiceHarness.make()
-        let terminalID = UUID()
+        let terminalID = try await h.seedTerminal().id
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
         let outbox = await h.connect()
         let atCap = String(repeating: "\u{E9}", count: PhoneAppConstants.promptTextCap / 2)
@@ -286,7 +292,8 @@ struct PhonePromptTests {
         let h = try await PhoneServiceHarness.make()
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
         let outbox = await h.connect()
-        let params = Self.local(UUID(), "toolu-1")
+        let terminalID = try await h.seedTerminal().id
+        let params = Self.local(terminalID, "toolu-1")
 
         let (first, firstBytes) = try await h.request(.promptAnswer, id: "answer-1", params: params, on: outbox)
         let (again, againBytes) = try await h.request(.promptAnswer, id: "answer-1", params: params, on: outbox)
@@ -370,7 +377,7 @@ struct PhonePromptTests {
         ]
         for (response, kept) in cases {
             let h = try await PhoneServiceHarness.make()
-            let terminalID = UUID()
+            let terminalID = try await h.seedTerminal().id
             h.actions.respond(to: .answerPrompt, with: response)
             let outbox = await h.connect()
 
@@ -765,7 +772,7 @@ struct PhonePromptTests {
     @Test func aPromptThePhoneAnsweredSaysPhone() async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
-        let terminalID = UUID()
+        let terminalID = try await h.seedTerminal().id
         h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
         await h.pendingPrompts.open(
             terminalID: terminalID, sessionID: nil, toolUseID: "toolu-1", toolName: "Bash",
@@ -795,7 +802,7 @@ struct PhonePromptTests {
     func aPhoneAnswerStillRunningIsWaitedFor(outcome: PromptAnswerOutcome) async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
-        let terminalID = UUID()
+        let terminalID = try await h.seedTerminal().id
         let gate = PhoneTestGate()
         h.actions.hold(.answerPrompt, on: gate)
         h.actions.respond(to: .answerPrompt, with: try Self.answered(outcome))
@@ -960,10 +967,19 @@ struct PhonePromptAnswerRouterTests {
     func thePhoneObeysThePromptAnswerSetting(enabled: Bool) async throws {
         let f = try await makeFixture()
         try await f.db.config.setTranscriptPromptAnswerEnabled(enabled)
+        // A terminal the phone can see, since the service answers no other.
+        let repo = try await f.db.repos.create(
+            path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        let worktree = try await f.db.worktrees.create(
+            repoID: repo.id, name: "acme-one", branch: "acme-one",
+            path: "/acme/widgets-one-\(UUID().uuidString)", tmuxServer: "tbd-acme")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", claudeSessionID: "acme-session",
+            kind: .claude)
         let outbox = CapturingOutbox()
         await f.service.phoneConnected(f.peer, outbox: outbox)
         let params = PhonePromptAnswerParams(
-            session: .local(terminalID: UUID()), promptID: "toolu-1",
+            session: .local(terminalID: terminal.id), promptID: "toolu-1",
             answer: .permission(decision: .allow, message: nil))
 
         await f.service.handleAppMessage(

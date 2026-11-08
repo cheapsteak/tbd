@@ -16,13 +16,13 @@ import TBDShared
 /// **Switch and fork restart or copy a live session under other
 /// credentials,** so both act only on a session the phone can see and can do
 /// this to: a local Claude session in a local worktree, by the sessions
-/// list's own reading (`PhoneSnapshotBuilder.agent(of:)` and
-/// `PhoneSessionStatus.localCapabilities`). A remote session, a Codex
+/// list's own reading (`phoneVisibleTerminal`, `PhoneSnapshotBuilder.agent(of:)`
+/// and `PhoneSessionStatus.localCapabilities`). A remote session, a Codex
 /// session, a shell and a tab in a remote lane are `unsupported`, with the
 /// reason the sessions list shows where it has one. A profile the phone
-/// names must exist, or the request is `not_found`, and so is a session that
-/// is gone. Both read these rows themselves before calling the swap, which
-/// checks them again.
+/// names must exist, or the request is `not_found`, and so is a session the
+/// phone cannot see. Both read these rows themselves before calling the
+/// swap, which checks them again.
 ///
 /// Both go through `phoneSwapProfile`, `terminal.swapProfile` under the
 /// verified pairing's device, `context.peer.deviceID`. A refusal is `refused`
@@ -35,7 +35,11 @@ extension PhoneAppService {
 
     static let noSuchProfileReason = "That profile is no longer on this laptop."
     static let notAClaudeSessionReason = "Only a Claude session can switch profiles or fork."
-    static let parkedForkReason = "This session is parked. Send it a message to wake it, then fork it."
+    /// The sessions list marks a parked session's fork unavailable with the
+    /// same words.
+    static let parkedForkReason = PhoneSessionStatus.parkedForkReason
+    static let forkMovedReason =
+        "The session was parked before the fork started, so it moved to that profile instead. Open it to continue."
     /// The most bytes a `profiles.list` result may encode to, leaving the
     /// rest of one frame for the reply's envelope.
     static let profilesResultBytes = PhoneFrameBudget.eventDataBytes
@@ -94,7 +98,7 @@ extension PhoneAppService {
     nonisolated func sessionSwitchProfile(
         _ params: SessionSwitchProfileParams, _ context: DeviceContext
     ) async throws -> SessionRefResult {
-        let terminal = try await swappableTerminal(params.session, mode: .inPlace)
+        let (terminal, _) = try await swappableTerminal(params.session)
         guard try await db.modelProfiles.get(id: params.profileID) != nil else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProfileReason)
         }
@@ -116,12 +120,19 @@ extension PhoneAppService {
     /// profile in place whatever the mode asks, so a fork of one would open
     /// no tab and would move the session itself to the other profile, the
     /// opposite of a fork, which leaves the session where it is. The phone
-    /// wakes it first by sending it a message. A session that parks between
-    /// this check and the swap's own read still takes the swap's cold path.
+    /// wakes it first by sending it a message. The sessions list already
+    /// marks such a fork unavailable; this guard answers a request that raced
+    /// the park, as `refused`, a state the phone can change, where the list's
+    /// other reasons are kinds of session it cannot fork, `unsupported`. A
+    /// session that parks between this check and the swap's own read takes
+    /// the swap's cold path, which `swapProfile` reports.
     nonisolated func sessionFork(_ params: SessionForkParams, _ context: DeviceContext) async throws -> SessionRefResult {
-        let terminal = try await swappableTerminal(params.session, mode: .fork)
+        let (terminal, capabilities) = try await swappableTerminal(params.session)
         guard !terminal.isParked else {
             throw PhoneAppError(code: .refused, message: Self.parkedForkReason)
+        }
+        guard capabilities.fork.available else {
+            throw PhoneAppError(code: .unsupported, message: capabilities.fork.reason ?? Self.notAClaudeSessionReason)
         }
         if let profileID = params.profileID, try await db.modelProfiles.get(id: profileID) == nil {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProfileReason)
@@ -132,41 +143,36 @@ extension PhoneAppService {
 
     // MARK: - Shared
 
-    /// The terminal row behind `session`, when it is a session switch and
-    /// fork may act on: a local Claude session in a local worktree.
+    /// The terminal row behind `session`, with its capabilities as the
+    /// sessions list shows them, when it is a session switch and fork may act
+    /// on: a local Claude session in a local worktree that the phone can see.
     ///
     /// A remote session is `unsupported` with the reason the sessions list
-    /// gives; a terminal or worktree that is gone is `not_found`; a session
-    /// whose list capability for `mode` is unavailable (a Codex session, a
-    /// tab in a remote lane) is `unsupported` with that capability's reason;
-    /// any other session the list does not show as Claude (a shell, or a row
-    /// with no kind and no Claude session) is `unsupported`.
+    /// gives; a session the phone cannot see (`phoneVisibleTerminal`) is
+    /// `not_found`; a session whose `switchProfile` capability is unavailable
+    /// (a Codex session, a tab in a remote lane) is `unsupported` with that
+    /// capability's reason; any other session the list does not show as
+    /// Claude (a shell, or a row with no kind and no Claude session) is
+    /// `unsupported`. `switchProfile` is read for both methods because it is
+    /// what the session is; `fork` differs from it only on a parked session,
+    /// which `sessionFork` answers itself.
     private nonisolated func swappableTerminal(
-        _ session: PhoneSessionRef, mode: TerminalSwapMode
-    ) async throws -> TBDShared.Terminal {
+        _ session: PhoneSessionRef
+    ) async throws -> (terminal: TBDShared.Terminal, capabilities: PhoneCapabilities) {
         guard case .local(let terminalID) = session else {
             throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.remoteOnlyReason)
         }
-        guard let terminal = try await db.terminals.get(id: terminalID),
-              let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
-            throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
-        }
+        let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         let capabilities = PhoneSessionStatus.localCapabilities(
             terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
-        let capability: PhoneCapability
-        switch mode {
-        case .inPlace:
-            capability = capabilities.switchProfile
-        case .fork:
-            capability = capabilities.fork
-        }
-        guard capability.available else {
-            throw PhoneAppError(code: .unsupported, message: capability.reason ?? Self.notAClaudeSessionReason)
+        guard capabilities.switchProfile.available else {
+            throw PhoneAppError(
+                code: .unsupported, message: capabilities.switchProfile.reason ?? Self.notAClaudeSessionReason)
         }
         guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
             throw PhoneAppError(code: .unsupported, message: Self.notAClaudeSessionReason)
         }
-        return terminal
+        return (terminal, capabilities)
     }
 
     /// `terminal.swapProfile` for `terminalID`, onto `profileID` (nil for the
@@ -174,6 +180,13 @@ extension PhoneAppService {
     /// reference of the terminal row it returns. A refusal is `refused` with
     /// the daemon's reason; a result that is not a terminal row is
     /// `internal`. A revoke noticed before the swap stops it.
+    ///
+    /// **A fork that returns the session's own row moved it.** The session
+    /// parked after `sessionFork` checked it, and the swap's cold path moved
+    /// the parked row to the profile in place, opening no tab. That is not a
+    /// fork, so the reply is `refused` with `forkMovedReason`, which says
+    /// what happened, never a success that names the old session as the new
+    /// one.
     private nonisolated func swapProfile(
         _ terminalID: UUID, to profileID: UUID?, mode: TerminalSwapMode, deviceID: UUID
     ) async throws -> SessionRefResult {
@@ -183,6 +196,11 @@ extension PhoneAppService {
             deviceID: deviceID)
         guard response.success else { throw Self.refusal(response.error) }
         let row = try Self.decoded(TBDShared.Terminal.self, from: response, method: "terminal.swapProfile")
+        if mode == .fork, row.id == terminalID {
+            Self.profilesLogger.notice(
+                "Phone session.fork: terminal \(terminalID, privacy: .public) parked before the swap, which moved it in place")
+            throw PhoneAppError(code: .refused, message: Self.forkMovedReason)
+        }
         return SessionRefResult(session: .local(terminalID: row.id))
     }
 }

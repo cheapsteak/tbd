@@ -576,6 +576,9 @@ actor PhoneAppService: PhoneAppHandling {
                 try await self.remoteCreate(params, context)
             }
         case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose:
+            // Not served yet. `transcript.open` must resolve a local session
+            // through `phoneVisibleTerminal`, as every local-session action
+            // does, so the phone opens nothing the laptop no longer shows it.
             return nil
         }
     }

@@ -137,6 +137,7 @@ enum PhoneSessionStatus {
     static let remoteLaneTabReason = "This tab belongs to a remote lane. Use its remote session."
     static let remoteOnlyReason = "Not available for remote sessions."
     static let cannotTakeMessagesReason = "This session cannot take messages."
+    static let parkedForkReason = "This session is parked. Send it a message to wake it, then fork it."
 
     /// A local session's capabilities. A Claude session has all six; a Codex
     /// session shows its status only. A tab in a remote lane's row has none,
@@ -147,6 +148,11 @@ enum PhoneSessionStatus {
     /// same two inputs: where the composer is hidden (a row saved before
     /// terminals recorded their kind, say), both are unavailable, so the list
     /// never offers what every send would refuse.
+    ///
+    /// `fork` is unavailable on a parked session, with `parkedForkReason`:
+    /// the profile swap moves a parked row in place whatever its mode, so
+    /// `session.fork` refuses one. Parking is the only reason `fork` and
+    /// `switchProfile` differ.
     static func localCapabilities(terminal: TBDShared.Terminal, isRemoteWorktree: Bool) -> PhoneCapabilities {
         if isRemoteWorktree {
             let none = unavailable(remoteLaneTabReason)
@@ -167,7 +173,8 @@ enum PhoneSessionStatus {
         }
         return PhoneCapabilities(
             transcript: available, send: messages, answer: available,
-            switchProfile: available, fork: available, model: messages)
+            switchProfile: available, fork: terminal.isParked ? unavailable(parkedForkReason) : available,
+            model: messages)
     }
 
     /// Each provider's declared capabilities, by provider name, from its

@@ -269,4 +269,37 @@ extension PhoneAppService {
             return []
         }
     }
+
+    // MARK: - The sessions the phone can see
+
+    /// The terminal row behind a local session, and its worktree, when the
+    /// phone can see them: the terminal row exists, its worktree exists and
+    /// is not archived, and the worktree's repo, when it has one, exists and
+    /// is not hidden. A scratch worktree has no repo. These are the rows
+    /// `gatherSnapshot` reads and `PhoneSnapshotBuilder` lists; a shell tab
+    /// and a tab in a remote lane pass here, and each action refuses them
+    /// with its own reason.
+    ///
+    /// Anything else is `not_found`, with `noSuchSessionReason`. A phone can
+    /// keep a terminal ID from a list it was sent before the repo was hidden
+    /// or the worktree archived, and it acts on nothing the laptop no longer
+    /// shows it. So every action on a local session resolves its terminal
+    /// here, and nowhere else: `message.send` and `session.setModel`
+    /// (`sendText`), `prompt.answer`, `session.switchProfile` and
+    /// `session.fork`. `transcript.open`, not served yet, must resolve a local
+    /// session here too.
+    nonisolated func phoneVisibleTerminal(
+        _ terminalID: UUID
+    ) async throws -> (terminal: TBDShared.Terminal, worktree: Worktree) {
+        let notFound = PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
+        guard let terminal = try await db.terminals.get(id: terminalID),
+              let worktree = try await db.worktrees.get(id: terminal.worktreeID),
+              worktree.status != .archived else {
+            throw notFound
+        }
+        if let repoID = worktree.repoID {
+            guard let repo = try await db.repos.get(id: repoID), !repo.hidden else { throw notFound }
+        }
+        return (terminal, worktree)
+    }
 }

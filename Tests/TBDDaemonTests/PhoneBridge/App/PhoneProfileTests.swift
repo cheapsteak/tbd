@@ -342,6 +342,25 @@ struct PhoneProfileTests {
         #expect(h.actions.calls.isEmpty)
     }
 
+    /// A session that parks after the fork checked it takes the swap's cold
+    /// path, which moves it to the profile in place and answers with the
+    /// session's own row. That is no fork, so the phone hears what happened
+    /// instead of a success naming the old session as the new one.
+    @Test func aForkThatMovedTheSessionIsRefused() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
+        let terminal = try await h.seedTerminal()
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(terminal.id))
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .sessionFork,
+            params: SessionForkParams(session: .local(terminalID: terminal.id), profileID: profile.id), on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneAppService.forkMovedReason))
+        #expect(Self.swaps(h) == [[terminal.id.uuidString, profile.id.uuidString, "fork"]])
+    }
+
     @Test func forkUnderAMissingProfileIsNotFound() async throws {
         let h = try await PhoneServiceHarness.make()
         let terminal = try await h.seedTerminal()

@@ -90,7 +90,8 @@ extension PhoneAppService {
     /// Text that is empty once trimmed is `bad_request`, and so is text over
     /// `PhoneAppConstants.messageMaxBytes`.
     ///
-    /// **A local session** is looked up with its worktree, and
+    /// **A local session** is looked up with its worktree, `not_found` when
+    /// the phone cannot see it (`phoneVisibleTerminal`), and
     /// `ComposerState.resolve` decides, with the worktree's real location:
     /// - **hidden or unavailable** (a Codex or shell tab, a tab in a remote
     ///   lane): `unsupported`;
@@ -142,10 +143,7 @@ extension PhoneAppService {
     }
 
     private nonisolated func sendLocal(_ text: String, terminalID: UUID, deviceID: UUID) async throws -> ActionOutcomeResult {
-        guard let terminal = try await db.terminals.get(id: terminalID),
-              let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
-            throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
-        }
+        let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         switch ComposerState.resolve(terminal: terminal, isRemoteWorktree: !worktree.location.isLocal) {
         case .hidden, .unavailable:
             throw PhoneAppError(code: .unsupported, message: Self.cannotTakeMessagesReason)
