@@ -126,7 +126,11 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// **Revoking** deletes the phone's row before anything else, so no later
 /// handshake from that phone is accepted, whatever its link is doing. Then
 /// `revoked` goes to the phone, if it is connected, and the link stops.
-/// Turning phone control off and `stop()` never send `revoked`.
+/// Turning phone control off and `stop()` never send `revoked`. A bridge
+/// that a problem keeps from running reconciles after a revoke, in the same
+/// line of changes: a key file missing while phones were paired is what
+/// revoking every phone fixes, so the last revoke starts the bridge with a
+/// new key.
 ///
 /// **Every pairing raises a TBD notification** naming the phone, so a pairing
 /// the user did not make is visible.
@@ -312,7 +316,9 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// Unpairs a phone. Throws `.noSuchDevice` for an ID with no row. Works
     /// while the bridge is stopped, so a user whose key file is missing can
-    /// revoke every phone and start again.
+    /// revoke every phone and start again: while a problem keeps the bridge
+    /// from running, each revoke reconciles, and the one that leaves no
+    /// phone paired starts it.
     func revoke(deviceID: UUID) async throws {
         try await serialized { await self.revokeNow(deviceID) }.get()
     }
@@ -517,6 +523,10 @@ actor PhoneBridge: PhoneBridgeControlling {
             links[deviceID] = nil
             await handler.phoneRevoked(deviceID: deviceID)
             PhoneBridgeLog.record(.revoked(name: device.name, deviceID: deviceID))
+            // The revoke may have removed what kept the bridge from running.
+            if running == nil, problem != nil {
+                await reconcileNow()
+            }
             broadcast(.phoneStatusChanged)
             return .success(())
         } catch {

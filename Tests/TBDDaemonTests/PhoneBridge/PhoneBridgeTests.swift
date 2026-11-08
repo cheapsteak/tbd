@@ -918,7 +918,7 @@ struct PhoneBridgeTests {
     }
 
     @Test func aMissingKeyWithPairedPhonesIsNotRegenerated() async throws {
-        try await withBridge(devices: 1, keyFile: .missing) { h in
+        try await withBridge(devices: 2, keyFile: .missing) { h in
             await h.bridge.reconcile()
             let status = await h.bridge.status()
             #expect(status.running == false)
@@ -926,14 +926,23 @@ struct PhoneBridgeTests {
             #expect(!FileManager.default.fileExists(atPath: h.keyPath.path))
             #expect(h.relay.connectAttempts.isEmpty)
 
-            // Revoking works while the bridge is stopped. With no phone left,
-            // a new key unpairs nobody, so the next reconcile makes one.
+            // Revoking works while the bridge is stopped. With a phone still
+            // paired, the key is not made again.
             try await h.bridge.revoke(deviceID: h.phones[0].device.id)
-            await h.bridge.reconcile()
+            let halfway = await h.bridge.status()
+            #expect(halfway.running == false)
+            #expect(halfway.problem?.contains("missing") == true)
+            #expect(!FileManager.default.fileExists(atPath: h.keyPath.path))
+            #expect(h.relay.connectAttempts.isEmpty)
+
+            // With no phone left, a new key unpairs nobody: revoking the last
+            // phone starts the bridge with one at once, and pairing works.
+            try await h.bridge.revoke(deviceID: h.phones[1].device.id)
             let after = await h.bridge.status()
             #expect(after.running && after.problem == nil)
             #expect(FileManager.default.fileExists(atPath: h.keyPath.path))
-            #expect(h.relay.connectAttempts.isEmpty)
+            let offer = try await h.bridge.pairStart()
+            #expect(offer.state == .waitingForPhone)
         }
     }
 
