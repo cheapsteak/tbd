@@ -156,6 +156,18 @@ enum PhoneSessionStatus {
             switchProfile: available, fork: available, model: available)
     }
 
+    /// Each provider's declared capabilities, by provider name, from its
+    /// `describe`; none for a provider that has not described itself. A name
+    /// listed twice keeps its first entry. The sessions list and the send
+    /// path both read capabilities through this, so they cannot disagree.
+    static func declaredCapabilities(_ providers: [RemoteProviderStatus]) -> [String: Set<String>] {
+        var declared: [String: Set<String>] = [:]
+        for provider in providers where declared[provider.config.name] == nil {
+            declared[provider.config.name] = Set(provider.describe?.capabilities ?? [])
+        }
+        return declared
+    }
+
     /// A remote session's capabilities, from the capabilities its provider
     /// declares in `describe`: `transcript` needs `transcript.read`, `send`
     /// and `model` need `send-submit`, `answer` needs `answer`. A remote

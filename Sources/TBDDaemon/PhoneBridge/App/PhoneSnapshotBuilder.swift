@@ -197,11 +197,7 @@ enum PhoneSnapshotBuilder {
                 }
             }
             remoteByLocation = remote
-            var declared: [String: Set<String>] = [:]
-            for provider in input.providers where declared[provider.config.name] == nil {
-                declared[provider.config.name] = Set(provider.describe?.capabilities ?? [])
-            }
-            self.declared = declared
+            declared = PhoneSessionStatus.declaredCapabilities(input.providers)
             var names: [UUID: String] = [:]
             for profile in input.profiles where names[profile.id] == nil {
                 names[profile.id] = profile.name

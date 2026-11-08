@@ -46,6 +46,10 @@ enum PhoneAppConstants {
     /// The longest request ID the service accepts, in UTF-8 bytes. A longer
     /// one is refused before it reaches the request memory.
     static let requestIDMaxBytes = 128
+    /// The most UTF-8 bytes of text one `message.send` or `session.setModel`
+    /// may type into a session. A frame already bounds a request near 64 KB;
+    /// this makes the limit explicit, so it holds whatever carries the text.
+    static let messageMaxBytes = 262_144
     /// The most rows one `sessions.subscribe` snapshot carries.
     static let snapshotMaxRows = 1_000
     /// The most items one first page carries.

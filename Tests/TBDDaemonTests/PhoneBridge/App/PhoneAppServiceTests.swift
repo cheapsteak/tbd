@@ -183,7 +183,8 @@ struct PhoneAppServiceTests {
         let h = try await PhoneServiceHarness.make()
         let outbox = await h.connect()
 
-        let (reply, _) = try await h.request(.messageSend, params: sendParams, on: outbox)
+        let (reply, _) = try await h.request(
+            .sessionFork, params: SessionForkParams(session: .local(terminalID: terminalID), profileID: nil), on: outbox)
 
         #expect(reply.error?.code == .unavailable)
         #expect(h.actions.calls.isEmpty)

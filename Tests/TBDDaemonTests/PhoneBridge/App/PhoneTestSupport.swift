@@ -77,6 +77,16 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         lock.withLock { responses[method] = response }
     }
 
+    /// Every later `phoneRemoteProviders` answers one registered provider,
+    /// `name`, that declares `capabilities` in its `describe`.
+    func registerProvider(_ name: String, capabilities: [String]) throws {
+        let provider = RemoteProviderStatus(
+            config: RemoteProviderConfig(name: name, exec: "/usr/local/bin/acme-provider"),
+            describe: ProviderDescribe(name: name, capabilities: capabilities), health: .ok,
+            errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
+        respond(to: .remoteProviders, with: try RPCResponse(result: RemoteProvidersResult(providers: [provider])))
+    }
+
     private func record(_ method: Method, deviceID: UUID?, keep: (inout Log) -> Void = { _ in }) -> RPCResponse {
         lock.withLock {
             log.calls.append(Call(method: method, deviceID: deviceID))
@@ -303,5 +313,48 @@ struct PhoneServiceHarness: Sendable {
         await service.handleAppMessage(body, from: peer)
         let bytes = try await outbox.body(at: index)
         return (try JSONDecoder().decode(PhoneTestReply.self, from: bytes), bytes)
+    }
+
+    // MARK: Seeded sessions
+
+    /// A terminal of `kind` in a new worktree of a new repo: a local
+    /// worktree, or with `inRemoteLane` a remote lane's row, whose location
+    /// is a provider's session. A Claude terminal has a Claude session ID, so
+    /// it can be parked.
+    func seedTerminal(kind: TerminalKind = .claude, inRemoteLane: Bool = false) async throws -> TBDShared.Terminal {
+        let repo = try await db.repos.create(
+            path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
+        let worktreeID: UUID
+        if inRemoteLane {
+            worktreeID = try await db.worktrees.createRemote(
+                repoID: repo.id, name: "acme-remote", branch: "main",
+                provider: "acme-cloud", sessionID: "rs-1").id
+        } else {
+            worktreeID = try await db.worktrees.create(
+                repoID: repo.id, name: "acme-one", displayName: "Acme one", branch: "acme-one",
+                path: "/acme/widgets-one-\(UUID().uuidString)", tmuxServer: "tbd-acme").id
+        }
+        return try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            claudeSessionID: kind == .claude ? "acme-session" : nil, kind: kind)
+    }
+
+    /// Parks `terminalID` as the idle sweep does.
+    func park(_ terminalID: UUID) async throws {
+        try await db.terminals.setHibernated(
+            id: terminalID, sessionID: "acme-session", reason: .auto,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+    }
+
+    /// Records a permission dialog on `terminalID`'s screen, reported by the
+    /// agent itself, with `message` as its text.
+    func showPrompt(on terminalID: UUID, message: String) async throws {
+        _ = try await db.terminals.setActivityState(
+            id: terminalID,
+            activityState: .waitingForUser,
+            source: .programStatus,
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            awaitingInputReason: AwaitingInputReason(
+                message: message, programStatusBlock: ProgramStatusBlock(kind: .permission, taskID: nil)))
     }
 }

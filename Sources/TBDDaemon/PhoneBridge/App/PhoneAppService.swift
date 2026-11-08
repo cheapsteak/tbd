@@ -530,9 +530,17 @@ actor PhoneAppService: PhoneAppHandling {
                 let params = try PhoneAppCoding.params(SessionsSubscribeParams.self, from: body)
                 return try await self.sessionsSubscribe(params, context)
             }
+        case .messageSend:
+            return Self.typed(MessageSendParams.self) { [self] params, context in
+                try await self.messageSend(params, context)
+            }
+        case .sessionSetModel:
+            return Self.typed(SessionSetModelParams.self) { [self] params, context in
+                try await self.sessionSetModel(params, context)
+            }
         case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
-             .messageSend, .promptAnswer, .profilesList, .sessionSwitchProfile, .sessionFork,
-             .sessionSetModel, .worktreeCreate, .remoteProviders, .remoteCreate:
+             .promptAnswer, .profilesList, .sessionSwitchProfile, .sessionFork,
+             .worktreeCreate, .remoteProviders, .remoteCreate:
             return nil
         }
     }
