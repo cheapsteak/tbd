@@ -28,13 +28,17 @@ private struct ViewFixture {
     let view: GhosttyTerminalView
     let appearance: GhosttyAppearance
 
-    init(clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13) throws {
+    /// - Parameter thinStrokes: the appearance's stroke weight; `nil` keeps `GhosttyAppearance`'s
+    ///   own default.
+    init(clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13, thinStrokes: Bool? = nil) throws {
         terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
-        appearance = GhosttyAppearance(
+        var appearance = GhosttyAppearance(
             font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
             foreground: .init(r: 0xDD, g: 0xDD, b: 0xDD),
             background: .init(r: 0x10, g: 0x10, b: 0x10),
             cursor: .init(r: 0xFF, g: 0xFF, b: 0xFF))
+        if let thinStrokes { appearance.thinStrokes = thinStrokes }
+        self.appearance = appearance
         view = try GhosttyTerminalView(terminal: terminal, appearance: appearance, clock: clock)
     }
 }
@@ -121,6 +125,36 @@ private func otherButtonEvent(_ type: CGEventType, number: Int64) throws -> NSEv
     let event = try #require(NSEvent(cgEvent: cgEvent))
     try #require(event.buttonNumber == Int(number), "the event carries button \(event.buttonNumber)")
     return event
+}
+
+/// One letter as a glyph cache draws it, beside the same letter from an unthickened and a
+/// thickened rasterizer on the cache's own font.
+private struct StrokeSample {
+    let drawn: RasterizedGlyph
+    let thin: RasterizedGlyph
+    let thick: RasterizedGlyph
+
+    /// The glyph's total coverage: the sum of its alpha bytes.
+    static func ink(_ glyph: RasterizedGlyph) -> Int { glyph.pixels.reduce(0) { $0 + Int($1) } }
+
+    var description: String {
+        "drawn \(drawn.width)×\(drawn.height) px, ink \(Self.ink(drawn)); "
+            + "unthickened \(thin.width)×\(thin.height) px, ink \(Self.ink(thin)); "
+            + "thickened \(thick.width)×\(thick.height) px, ink \(Self.ink(thick))"
+    }
+}
+
+/// `letter` from `cache`, and from an unthickened and a thickened rasterizer on its font.
+private func strokeSample(_ cache: GlyphCache, letter: Character = "m") throws -> StrokeSample {
+    let thin = GlyphRasterizer(fontSet: cache.fontSet, metrics: cache.metrics, thicken: false)
+    let thick = GlyphRasterizer(fontSet: cache.fontSet, metrics: cache.metrics, thicken: true)
+    let shaped = cache.shaper.shape(letter)
+    let drawn = try #require(cache.rasterizer.rasterize(shaped), "the glyph cache drew no \(letter)")
+    try #require(!drawn.isColor, "the \(letter) was drawn as a colour glyph")
+    return StrokeSample(
+        drawn: drawn,
+        thin: try #require(thin.rasterize(shaped), "the unthickened rasterizer drew no \(letter)"),
+        thick: try #require(thick.rasterize(shaped), "the thickened rasterizer drew no \(letter)"))
 }
 
 /// True when `bytes` is one SGR mouse report for `button`: `ESC [ < button ; … final`.
@@ -859,34 +893,130 @@ struct GhosttyTerminalViewTests {
 
     /// A view draws text at SwiftTerm's stroke weight. Font smoothing on an alpha-only bitmap is a
     /// stem-darkening pass that makes every stroke about a device pixel heavier, and SwiftTerm draws
-    /// without it, so the glyph cache a view is given leaves it off. Checked on the cache the view
-    /// really draws from: its glyphs are the bitmaps an unthickened rasterizer makes, and they carry
-    /// less ink than a thickened rasterizer's.
+    /// without it, so the glyph cache a view is given with the default appearance leaves it off.
+    /// Checked on the cache the view really draws from: its glyphs are the bitmaps an unthickened
+    /// rasterizer makes, and they carry less ink than a thickened rasterizer's.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func aViewDrawsGlyphsWithoutThickening() throws {
         let fixture = try ViewFixture()
         let cache = fixture.view.renderContext.renderer.glyphCache
-        let unthickened = GlyphRasterizer(fontSet: cache.fontSet, metrics: cache.metrics, thicken: false)
-        let thickened = GlyphRasterizer(fontSet: cache.fontSet, metrics: cache.metrics, thicken: true)
-        /// The glyph's total coverage: the sum of its alpha bytes.
-        func ink(_ glyph: RasterizedGlyph) -> Int { glyph.pixels.reduce(0) { $0 + Int($1) } }
-
         let letters: [Character] = ["l", "m"]
         for letter in letters {
-            let shaped = cache.shaper.shape(letter)
-            let drawn = try #require(cache.rasterizer.rasterize(shaped), "the view's glyph cache drew no \(letter)")
-            let plain = try #require(unthickened.rasterize(shaped), "the unthickened rasterizer drew no \(letter)")
-            let heavy = try #require(thickened.rasterize(shaped), "the thickened rasterizer drew no \(letter)")
-            try #require(!drawn.isColor, "the \(letter) was drawn as a colour glyph")
-            let drawnInk = ink(drawn)
-            let plainInk = ink(plain)
-            let heavyInk = ink(heavy)
-            let sameBitmap = drawn == plain
-            #expect(sameBitmap,
-                    "the view's \(letter) (\(drawn.width)×\(drawn.height) px, ink \(drawnInk)) is not the unthickened one (\(plain.width)×\(plain.height) px, ink \(plainInk))")
-            #expect(drawnInk < heavyInk,
-                    "the view's \(letter) carries ink \(drawnInk), no less than the thickened one's \(heavyInk)")
+            let sample = try strokeSample(cache, letter: letter)
+            let sameBitmap = sample.drawn == sample.thin
+            #expect(sameBitmap, "the view's \(letter) is not the unthickened one: \(sample.description)")
+            let drawnInk = StrokeSample.ink(sample.drawn)
+            let thickInk = StrokeSample.ink(sample.thick)
+            #expect(drawnInk < thickInk, "the view's \(letter) carries no less ink than the thickened one: \(sample.description)")
         }
+    }
+
+    /// The Thin strokes choice decides a view's stroke weight, as it decides SwiftTerm's font
+    /// smoothing: with thin strokes the glyphs are the unthickened rasterizer's, and without them
+    /// the thickened one's.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: [true, false])
+    func thinStrokesDecideAViewsStrokeWeight(thinStrokes: Bool) throws {
+        let fixture = try ViewFixture(thinStrokes: thinStrokes)
+        let view = fixture.view
+        let context = view.renderContext
+        let thickened = context.thicken
+        #expect(thickened == !thinStrokes, "with thin strokes \(thinStrokes) the atlas has thicken \(thickened)")
+        let sample = try strokeSample(context.renderer.glyphCache)
+        let expected = thinStrokes ? sample.thin : sample.thick
+        let matches = sample.drawn == expected
+        #expect(matches, "with thin strokes \(thinStrokes) the view's m has the wrong weight: \(sample.description)")
+
+        // A view is built outside a window, as every production view is. Mounting it can move it to
+        // the window's backing scale, which takes another context; the weight must survive that.
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        let mountedThickened = view.renderContext.thicken
+        #expect(mountedThickened == !thinStrokes,
+                "with thin strokes \(thinStrokes) the mounted view's atlas has thicken \(mountedThickened)")
+    }
+
+    /// Changing the stroke weight of an open view moves it to a context drawn at the new weight, as
+    /// a font change does, and every row is rebuilt against the new atlas. The old atlas is never
+    /// drawn from again, so no frame mixes glyphs of both weights. Turning thin strokes back on
+    /// returns the view to unthickened glyphs.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func changingTheStrokeWeightRebuildsTheAtlasAtTheNewWeight() throws {
+        let fixture = try ViewFixture(thinStrokes: true)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        fixture.terminal.feed(text: "mmm")
+        view.renderTick()
+        try #require(view.framesBuilt >= 1, "the view built no frame before the change")
+        let thinContext = view.renderContext
+        try #require(!thinContext.thicken, "the view started with a thickened atlas")
+        let unbuiltStamp = SIMD2<UInt64>(repeating: .max)
+        let stampBefore = view.surface.atlasRebuildStamp
+        try #require(stampBefore != unbuiltStamp, "the first frame left the surface's atlas stamp unset")
+
+        var heavier = fixture.appearance
+        heavier.thinStrokes = false
+        view.apply(heavier)
+        // Only a re-attach resets the stamp, and nothing builds a frame between `apply` and here.
+        // Both atlases start at rebuild generation 1, so without the re-attach the stamp would
+        // read as current against the new atlas.
+        let stampAfter = view.surface.atlasRebuildStamp
+        #expect(stampAfter == unbuiltStamp, "the stroke change did not re-attach the surface: stamp \(stampAfter)")
+        let thickContext = view.renderContext
+        #expect(thickContext !== thinContext, "turning thin strokes off kept the thin context")
+        #expect(thickContext.renderer.glyphCache.grayscale !== thinContext.renderer.glyphCache.grayscale,
+                "turning thin strokes off kept the thin glyph atlas")
+        #expect(thickContext.thicken, "turning thin strokes off did not thicken the atlas")
+        let thick = try strokeSample(thickContext.renderer.glyphCache)
+        let thickMatches = thick.drawn == thick.thick
+        #expect(thickMatches, "with thin strokes off the view's m is not the thickened one: \(thick.description)")
+
+        // The next frame rebuilds every row once, against the new atlas. The re-attach forces that,
+        // and so does the palette `apply` hands the terminal; the count shows it is one pass.
+        let rows = fixture.terminal.withLocked { $0.rows }
+        let builder = thickContext.renderer.frameBuilder
+        let buildsBefore = builder.rowBuildCount
+        view.renderTick()
+        let rebuilt = builder.rowBuildCount - buildsBefore
+        #expect(rebuilt == rows, "the frame after the change built rows \(rebuilt) times for \(rows) rows")
+
+        view.apply(fixture.appearance)
+        let backContext = view.renderContext
+        #expect(backContext !== thickContext, "turning thin strokes back on kept the thickened context")
+        #expect(!backContext.thicken, "turning thin strokes back on left the atlas thickened")
+        let thin = try strokeSample(backContext.renderer.glyphCache)
+        let thinMatches = thin.drawn == thin.thin
+        #expect(thinMatches, "with thin strokes back on the view's m is not the unthickened one: \(thin.description)")
+    }
+
+    /// The render context is keyed on stroke weight as well as font and scale. The same font at the
+    /// same scale gets one context per weight, each drawing its own atlas, so a weight change can
+    /// never be handed the atlas of the other weight. The same weight gets the shared context.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theRenderContextIsKeyedOnStrokeWeight() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let thin = try TerminalRenderContext.shared(font: font, scale: 2, thicken: false, device: device)
+        let thinAgain = try TerminalRenderContext.shared(font: font, scale: 2, thicken: false, device: device)
+        let thick = try TerminalRenderContext.shared(font: font, scale: 2, thicken: true, device: device)
+        #expect(thinAgain === thin, "the same font, scale and weight built a second context")
+        #expect(thick !== thin, "a change of weight was handed the context of the other weight")
+        #expect(thick.renderer.glyphCache.grayscale !== thin.renderer.glyphCache.grayscale,
+                "both weights draw into one glyph atlas")
+        let thinRasterizerThickens = thin.renderer.glyphCache.rasterizer.thicken
+        let thickRasterizerThickens = thick.renderer.glyphCache.rasterizer.thicken
+        #expect(!thinRasterizerThickens, "the unthickened context's rasterizer thickens")
+        #expect(thickRasterizerThickens, "the thickened context's rasterizer does not thicken")
     }
 }
 

@@ -340,7 +340,7 @@ final class GlyphCache {
     private var entries: [Key: CacheEntry] = [:]
 
     /// - Parameter thicken: font smoothing on grayscale glyphs (`GlyphRasterizer.thicken`). Off by
-    ///   default, and `TerminalRenderContext` passes none, so text has SwiftTerm's stroke weight.
+    ///   default. `TerminalRenderContext` turns it on only for an appearance with thin strokes off.
     init(fontSet: FontSet,
          device: MTLDevice?,
          grayscaleInitialSize: Int? = nil,

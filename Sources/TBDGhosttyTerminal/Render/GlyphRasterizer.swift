@@ -13,10 +13,15 @@
 // coverage at 12.5 pt. It dilates edges by up to a pixel, so the transparent padding grows by one to
 // hold it. Colour glyphs are bitmaps and unaffected.
 //
-// It is off by default, as Ghostty's own `font-thicken` is, so libghostty text has the stroke weight
-// of SwiftTerm, which draws without it. With it on, a 2x screenshot shows every stroke about one
-// device pixel heavier than SwiftTerm's, with a grey fringe, and beside a SwiftTerm terminal that
-// reads as soft, non-Retina text.
+// It is off by default, as Ghostty's own `font-thicken` is. TBD's "Thin strokes" setting, on by
+// default, is what decides it: thin strokes leave it off, and turning thin strokes off turns it on,
+// just as SwiftTerm turns CoreGraphics font smoothing off and on for the same setting. With it on, a
+// 2x screenshot shows every stroke about one device pixel heavier than SwiftTerm's thin strokes,
+// with a grey fringe, and beside a SwiftTerm terminal that reads as soft, non-Retina text.
+//
+// Known gap with it on: CoreGraphics dilates a glyph by an amount that depends on the text colour,
+// and this context draws every glyph with a white fill. Light text matches SwiftTerm's smoothed
+// text; dark text comes out heavier than SwiftTerm's.
 
 import CoreGraphics
 import CoreText
