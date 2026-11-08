@@ -1,13 +1,13 @@
 /**
  * Which session the app shows, kept to the sessions the list shows. The phone acts only on a
  * session its list shows; anything else the laptop refuses as `not_found`. So the session
- * screen closes when its session leaves every row, and a session the laptop made for this
- * phone opens only once a row lists it.
+ * screen closes when its session leaves every row of a complete list, and a session the laptop
+ * made for this phone opens only once a row lists it.
  */
 
 import { sameRef } from '../protocol/wire.ts';
 import type { PhoneRow, PhoneSession, PhoneSessionRef } from '../protocol/types.ts';
-import { rowByID } from './sessionsData.ts';
+import { isComplete, rowByID } from './sessionsData.ts';
 import { SESSIONS_ROUTE } from './store.ts';
 import type { PendingOpen, Route, SessionsData } from './store.ts';
 
@@ -22,12 +22,14 @@ export function findSession(d: SessionsData, ref: PhoneSessionRef): { row: Phone
 }
 
 /**
- * `route`, or the sessions route when it shows a session that no row lists. A route that
+ * `route`, or the sessions route when it shows a session that no row lists and the list is
+ * complete (`isComplete`). While a row the layout places has not arrived, as after a snapshot
+ * with `more` set, a session route stands, since that row may hold its session. A route that
  * stands is returned itself, so a `!==` check tells a change.
  */
 export function resolveRoute(route: Route, d: SessionsData): Route {
   if (route.screen === 'sessions') return route;
-  return findSession(d, route.ref) === null ? SESSIONS_ROUTE : route;
+  return findSession(d, route.ref) === null && isComplete(d) ? SESSIONS_ROUTE : route;
 }
 
 /** Whether `a` and `b` show the same screen: both the list, or both the same session. */

@@ -60,7 +60,8 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
 
 /**
  * `state` with the list `sessions`, and the route kept to it:
- * 1. A session route whose session no row lists goes back to the sessions list.
+ * 1. A session route whose session no row lists goes back to the sessions list, once every
+ *    row the layout places has arrived (`resolveRoute`).
  * 2. Then a pending open that the list now shows opens, and is cleared. A `{ worktreeID }`
  *    open with a toast template shows it, `{name}` replaced by the row's name.
  *

@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { AppEvent, PhoneRow, PhoneSession, PhoneSessionRef, PromptChangedData } from '../protocol/types.ts';
+import type { AppEvent, PhoneRow, PhoneSession, PhoneSessionRef, PromptChangedData, SessionsChangedData } from '../protocol/types.ts';
 import { applyEvent, applyEventWith, applySessions, withPendingOpen } from './events.ts';
 import type { EventSlices } from './events.ts';
 import { applyPromptChanged } from './prompts.ts';
@@ -41,13 +41,19 @@ function stateWith(rows: PhoneRow[], ui: Partial<UIState> = {}): AppState {
   return { ...s, sessions, ui: { ...s.ui, ...ui } };
 }
 
-function changed(rows: PhoneRow[], removedRowIDs: string[] = []): AppEvent {
-  return { event: 'sessions.changed', seq: 2, data: { rows, removedRowIDs } };
+/**
+ * A `sessions.changed`. With `placed`, it carries a layout whose one group places those rows,
+ * as the daemon's does whenever it removes a row.
+ */
+function changed(rows: PhoneRow[], removedRowIDs: string[] = [], placed?: string[]): AppEvent {
+  const data: SessionsChangedData = { rows, removedRowIDs };
+  if (placed !== undefined) data.layout = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: placed.map((id) => ({ id, depth: 0 })) }];
+  return { event: 'sessions.changed', seq: 2, data };
 }
 
 test('a session that leaves every row sends the route back to sessions', () => {
   const s0 = stateWith([row('W1', [OTHER]), row('W2', [R])], { route: { screen: 'session', ref: R } });
-  const s1 = applyEvent(s0, changed([], ['W2']));
+  const s1 = applyEvent(s0, changed([], ['W2'], ['W1']));
   assert.deepEqual(s1.ui.route, { screen: 'sessions' });
   assert.deepEqual(Object.keys(s1.sessions.rows), ['W1']);
 });
@@ -63,11 +69,11 @@ test('a route that stands keeps the same object', () => {
 test("leaving the session closes its menu and its sheets, but not New's", () => {
   const route = { screen: 'session', ref: R } as const;
   const s0 = stateWith([row('W2', [R])], { route, menu: { name: 'model' }, sheet: { name: 'switch-confirm', profileID: 'P1' } });
-  const s1 = applyEvent(s0, changed([], ['W2']));
+  const s1 = applyEvent(s0, changed([], ['W2'], []));
   assert.equal(s1.ui.menu, null);
   assert.equal(s1.ui.sheet, null);
   const sheet = { name: 'new', repoID: 'R1', repoName: 'acme' } as const;
-  const s2 = applyEvent({ ...s0, ui: { ...s0.ui, sheet } }, changed([], ['W2']));
+  const s2 = applyEvent({ ...s0, ui: { ...s0.ui, sheet } }, changed([], ['W2'], []));
   assert.equal(s2.ui.sheet, sheet);
   // While the route stands, the menu and the sheet stay.
   const s3 = applyEvent(s0, changed([row('W2', [R], 'renamed')]));

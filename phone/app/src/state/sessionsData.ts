@@ -36,6 +36,19 @@ export function applySessionsChanged(d: SessionsData, c: SessionsChangedData): S
   return { layout: c.layout ?? d.layout, rows };
 }
 
+/**
+ * Whether every row the layout places has arrived. After a snapshot with `more` set, the list
+ * is not complete until the `sessions.changed` events that follow it bring the rest.
+ */
+export function isComplete(d: SessionsData): boolean {
+  for (const group of d.layout) {
+    for (const placement of group.rows) {
+      if (!Object.hasOwn(d.rows, placement.id)) return false;
+    }
+  }
+  return true;
+}
+
 /** The row with ID `id`, or null. Only the list's own rows count, never an inherited member. */
 export function rowByID(d: SessionsData, id: string): PhoneRow | null {
   return Object.hasOwn(d.rows, id) ? d.rows[id]! : null;

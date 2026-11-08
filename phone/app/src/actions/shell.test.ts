@@ -7,7 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError, SUPERSEDED_TEXT } from '../client/client.ts';
-import type { AppEvent, Method, ParamsOf, PhoneRow, PhoneSession, PhoneSessionRef, ResultOf, SessionsSubscribeResult } from '../protocol/types.ts';
+import type {
+  AppEvent, Method, ParamsOf, PhoneRow, PhoneSession, PhoneSessionRef, ResultOf, SessionsChangedData, SessionsSubscribeResult,
+} from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import { createStore, emptyRecord, initialState, SESSIONS_ROUTE } from '../state/store.ts';
@@ -161,6 +163,28 @@ test('a snapshot after a reconnect resolves the route and closes a transcript wh
   assert.deepEqual(h.calls, [['resumeTranscriptOnUp', 2], ['closeTranscript']]);
 });
 
+test('a partial snapshot after a reconnect keeps the open session until its row arrives', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.calls.length = 0;
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  // A new stream's snapshot that holds only W2; W1 and W3 follow as sessions.changed.
+  h.sent[1]!.resolve({
+    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: true, rows: [row('W2', [OTHER])],
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }, { id: 'W3', depth: 0 }] }],
+  });
+  await flush();
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
+  h.actions.onEvent(changed([row('W1', [R])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
+  assert.deepEqual(h.calls, [['resumeTranscriptOnUp', 2]]);
+  // The list completes, with the session gone from its row: back to the list.
+  h.actions.onEvent(changed([row('W3', []), row('W1', [R2])]));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.deepEqual(h.calls, [['resumeTranscriptOnUp', 2], ['closeTranscript']]);
+});
+
 test("a refused subscribe shows the daemon's message", async () => {
   const { actions, sent, state } = harness();
   actions.onChannelUp();
@@ -233,15 +257,21 @@ test('Try again with a first-time client subscribes with {}', async () => {
 
 // MARK: - Events
 
-function changed(rows: PhoneRow[], removedRowIDs: string[] = []): AppEvent {
-  return { event: 'sessions.changed', seq: 11, data: { rows, removedRowIDs } };
+/**
+ * A `sessions.changed`. With `placed`, it carries a layout whose one group places those rows,
+ * as the daemon's does whenever it removes a row.
+ */
+function changed(rows: PhoneRow[], removedRowIDs: string[] = [], placed?: string[]): AppEvent {
+  const data: SessionsChangedData = { rows, removedRowIDs };
+  if (placed !== undefined) data.layout = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: placed.map((id) => ({ id, depth: 0 })) }];
+  return { event: 'sessions.changed', seq: 11, data };
 }
 
 test('an event that sends the open session away closes its transcript', async () => {
   const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
   h.actions.openSession(R);
   h.calls.length = 0;
-  h.actions.onEvent(changed([], ['W1']));
+  h.actions.onEvent(changed([], ['W1'], ['W2']));
   assert.equal(h.state().ui.route, SESSIONS_ROUTE);
   assert.deepEqual(h.calls, [['closeTranscript']]);
 });

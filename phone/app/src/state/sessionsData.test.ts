@@ -1,12 +1,13 @@
-// Tests sessionsData.ts: a subscribe snapshot replaces the list, and each sessions.changed
-// upserts rows, removes rows and replaces the layout only when it carries one.
+// Tests sessionsData.ts: a subscribe snapshot replaces the list, each sessions.changed
+// upserts rows, removes rows and replaces the layout only when it carries one, and a list is
+// complete once every row its layout places has arrived.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { decodeEventData, decodeResult } from '../protocol/wire.ts';
 import type { PhoneGroupLayout, PhoneRow, PhoneSession, PhoneSessionRef, SessionsSubscribeResult } from '../protocol/types.ts';
-import { applySessionsChanged, applySnapshot, rowByID } from './sessionsData.ts';
+import { applySessionsChanged, applySnapshot, isComplete, rowByID } from './sessionsData.ts';
 
 const PROTOCOL_DIR = new URL('../../../protocol/', import.meta.url);
 
@@ -69,6 +70,20 @@ test('a snapshot with more keeps a layout that names rows still to come', () => 
   const d1 = applySessionsChanged(d, { rows: [rowB, row('C')], removedRowIDs: [] });
   assert.deepEqual(Object.keys(d1.rows).sort(), ['A', 'B', 'C']);
   assert.equal(d1.layout, d.layout);
+});
+
+test('a list is complete once every row its layout places has arrived', () => {
+  assert.equal(isComplete(d0), true);
+  assert.equal(isComplete(applySnapshot({ stream: 's1', seq: 1, replayed: false, omittedRows: 0, more: false })), true);
+  // An empty group, and a row no group places, leave it complete.
+  assert.equal(isComplete(applySnapshot(snapshot([group('repo:R1', ['A']), group('repo:R2', [])], [rowA, rowB]))), true);
+  const partial = applySnapshot(snapshot([group('repo:R1', ['A']), group('repo:R2', ['B', 'C'])], [rowA], true));
+  assert.equal(isComplete(partial), false);
+  const half = applySessionsChanged(partial, { rows: [rowB], removedRowIDs: [] });
+  assert.equal(isComplete(half), false);
+  assert.equal(isComplete(applySessionsChanged(half, { rows: [row('C')], removedRowIDs: [] })), true);
+  // A placement never reads an inherited member as a row.
+  assert.equal(isComplete(applySnapshot(snapshot([group('repo:R1', ['constructor'])], []))), false);
 });
 
 test('sessions.changed upserts rows, removes removedRowIDs, and keeps the layout when it has none', () => {

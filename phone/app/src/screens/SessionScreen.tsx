@@ -3,8 +3,10 @@
  * tab strip when the row has more than one session, then either the Codex note or the transcript
  * and the dock, and the header's menus over them.
  *
- * It shows the session the route names. When no row lists that session it renders nothing,
- * because the route goes back to the list with the event that removed it (`resolveRoute`).
+ * It shows the session the route names. When no row lists that session it renders nothing. That
+ * happens only while the list waits for rows a partial snapshot left for later: once the list is
+ * complete, the route goes back to the list with the update that left the session out
+ * (`resolveRoute`).
  */
 
 import { useMemo } from 'react';

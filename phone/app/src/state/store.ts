@@ -66,7 +66,8 @@ export interface UIState {
  *
  * A placement in `layout` can name a row that `rows` does not hold: a snapshot with `more` set
  * sends its remaining rows as later events. Everything that reads the list skips such a
- * placement until its row arrives.
+ * placement until its row arrives, and until then an open session stays open even when no row
+ * holds it yet (`resolveRoute` in `route.ts`).
  */
 export interface SessionsData {
   layout: readonly PhoneGroupLayout[];

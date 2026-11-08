@@ -1,5 +1,6 @@
 // Tests route.ts: finding a session in the list, sending a session route back to the list
-// when its session leaves every row, and pending opens that wait for the list to show them.
+// when its session leaves every row of a complete list, and pending opens that wait for the
+// list to show them.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -54,7 +55,8 @@ test('a session that leaves every row sends the route back to sessions', () => {
   assert.equal(resolveRoute(route, withR), route);
   const gone = applySessionsChanged(withR, { rows: [row('W2', [R2])], removedRowIDs: [] });
   assert.deepEqual(resolveRoute(route, gone), { screen: 'sessions' });
-  const rowGone = applySessionsChanged(withR, { rows: [], removedRowIDs: ['W2'] });
+  // The daemon sends a layout with every removal; this one places W1 alone.
+  const rowGone = applySessionsChanged(withR, { rows: [], removedRowIDs: ['W2'], layout: without.layout });
   assert.equal(resolveRoute(route, rowGone), SESSIONS_ROUTE);
 });
 
@@ -72,8 +74,26 @@ test('a layout placement whose row has not arrived is passed over', () => {
   const d = list([row('W1', [OTHER])], layout);
   assert.equal(findSession(d, R), null);
   assert.equal(findSession(d, OTHER)?.row.id, 'W1');
-  assert.equal(resolveRoute({ screen: 'session', ref: R }, d), SESSIONS_ROUTE);
   assert.equal(resolvePendingOpen({ worktreeID: 'W9', toast: null }, d), null);
+});
+
+test('a session route stands while a row the layout places has not arrived', () => {
+  const layout: PhoneGroupLayout[] = [{
+    id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }, { id: 'W3', depth: 0 }],
+  }];
+  const route: Route = { screen: 'session', ref: R };
+  // A snapshot with `more` set: W2 and W3 follow as sessions.changed.
+  const partial = applySnapshot({ stream: 's1', seq: 1, replayed: false, layout, rows: [row('W1', [OTHER])], omittedRows: 0, more: true });
+  assert.equal(resolveRoute(route, partial), route);
+  // A row that arrives without the session, with another still to come, keeps the route.
+  const half = applySessionsChanged(partial, { rows: [row('W3', [R2])], removedRowIDs: [] });
+  assert.equal(resolveRoute(route, half), route);
+  // The missing row arrives holding the session: the route stands.
+  const found = applySessionsChanged(half, { rows: [row('W2', [R])], removedRowIDs: [] });
+  assert.equal(resolveRoute(route, found), route);
+  // The list completes without the session: back to the list.
+  const complete = applySessionsChanged(half, { rows: [row('W2', [])], removedRowIDs: [] });
+  assert.equal(resolveRoute(route, complete), SESSIONS_ROUTE);
 });
 
 test('a pending open becomes the route once its session appears', () => {
