@@ -91,16 +91,17 @@ struct PhoneSendTests {
         #expect(h.actions.calls == [FakeSessionActions.Call(method: .wake, deviceID: h.peer.deviceID)])
     }
 
-    /// A message over `firstPromptMaxBytes` would ride a tmux respawn
-    /// command, so it wakes no parked tmux session and is `bad_request`;
-    /// exactly that many wakes it.
+    /// A message over `firstPromptMaxBytes` once shell-quoted would ride a
+    /// tmux respawn command, so it wakes no parked tmux session and is
+    /// `bad_request`; one whose quoted form is exactly that many bytes (the
+    /// text and its two outer quotes) wakes it.
     @Test func aWakeMessageTooLongForTmuxIsABadRequest() async throws {
         let h = try await PhoneServiceHarness.make()
         let terminal = try await h.seedTerminal()
         try await h.park(terminal.id)
         h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
         let outbox = await h.connect()
-        let longest = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes)
+        let longest = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes - 2)
 
         let (over, _) = try await h.request(
             .messageSend, params: Self.message(.local(terminalID: terminal.id), longest + "a"), on: outbox)
@@ -113,6 +114,44 @@ struct PhoneSendTests {
         #expect(try Self.outcome(bytes) == "woken")
         let prompts = h.actions.wakes.map(\.prompt)
         #expect(prompts == [longest])
+    }
+
+    /// Each `'` takes four bytes in the respawn command (`'\''`), so the cap
+    /// holds the quoted form: 11,000 bytes with 2,000 apostrophes quote to
+    /// 17,002 and wake nothing, and a message of apostrophes whose quoted
+    /// form is exactly the cap wakes the session.
+    @Test func aWakeMessageIsMeasuredShellQuoted() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal()
+        try await h.park(terminal.id)
+        h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
+        let outbox = await h.connect()
+        let quoted = String(repeating: "it's ", count: 2_000) + String(repeating: "a", count: 1_000)
+        #expect(quoted.utf8.count == 11_000)
+        // 1,000 apostrophes and 7,998 other bytes: 8,998 + 3,000 + 2 = 12,000.
+        let atCap = String(repeating: "'", count: 1_000) + String(repeating: "a", count: 7_998)
+
+        let (over, _) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), quoted), on: outbox)
+        #expect(over.error == PhoneAppError(code: .badRequest, message: PhoneAppService.firstMessageTooLongReason))
+        let (overByOne, _) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), atCap + "'"), on: outbox)
+        #expect(overByOne.error == PhoneAppError(
+            code: .badRequest, message: PhoneAppService.firstMessageTooLongReason))
+        #expect(h.actions.calls.isEmpty)
+
+        let (fits, _) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), atCap), on: outbox)
+        #expect(fits.error == nil)
+        let prompts = h.actions.wakes.map(\.prompt)
+        #expect(prompts == [atCap])
+    }
+
+    /// The quoted size is `shellEscape`'s output, byte for byte, counted
+    /// without building it.
+    @Test(arguments: ["", "plain", "it's", "'''", "naïve 'quoted' ✓", "a'b\nc'"])
+    func theQuotedSizeIsShellEscapesLength(_ text: String) {
+        #expect(PhoneAppService.shellQuotedByteCount(text) == shellEscape(text).utf8.count)
     }
 
     /// A parked pty-holder session respawns through no tmux command, so a

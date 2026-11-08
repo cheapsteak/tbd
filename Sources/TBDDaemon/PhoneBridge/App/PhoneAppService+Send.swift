@@ -26,8 +26,9 @@ enum PhoneSendPurpose: Sendable {
 extension PhoneAppService {
     static let emptyMessageReason = "Write a message first."
     static let messageTooLongReason = "That message is too long to send from a phone."
-    /// A message over `PhoneAppConstants.firstPromptMaxBytes` that would
-    /// start a session on the tmux transport.
+    /// A message over `PhoneAppConstants.firstPromptMaxBytes`, once
+    /// shell-quoted (`fitsTmuxFirstPrompt(_:)`), that would start a session
+    /// on the tmux transport.
     static let firstMessageTooLongReason =
         "That message is too long to start the session with. Shorten it, or open the session on the laptop first."
     /// The sessions list says the same when it marks `send` unavailable.
@@ -107,6 +108,28 @@ extension PhoneAppService {
         return count >= 1
     }
 
+    /// Whether `text`, as a first prompt on the tmux transport, fits
+    /// `PhoneAppConstants.firstPromptMaxBytes` in the form the spawn command
+    /// carries it: shell-quoted (`shellQuotedByteCount(_:)`). The limit is on
+    /// that form, since each `'` grows to four bytes there, so a message of
+    /// many apostrophes would otherwise pass the cap and still overrun tmux.
+    static func fitsTmuxFirstPrompt(_ text: String) -> Bool {
+        shellQuotedByteCount(text) <= PhoneAppConstants.firstPromptMaxBytes
+    }
+
+    /// The UTF-8 bytes `text` takes once quoted as one shell argument. It
+    /// mirrors `shellEscape(_:)` (`Base/ShellEscape.swift`), with which both
+    /// spawn builders quote a first prompt: two outer `'`, and each `'` in
+    /// the text replaced by the four bytes `'\''`, three more than it had.
+    /// Counted rather than built, so checking a long message copies nothing.
+    static func shellQuotedByteCount(_ text: String) -> Int {
+        var apostrophes = 0
+        for byte in text.utf8 where byte == UInt8(ascii: "'") {
+            apostrophes += 1
+        }
+        return text.utf8.count + 3 * apostrophes + 2
+    }
+
     // MARK: - Sending
 
     /// Sends `text` to `session` as the phone `deviceID`, the way the laptop's
@@ -133,7 +156,8 @@ extension PhoneAppService {
     ///   wake's prompt. `woken` when the wake respawned the session; a wake
     ///   that found it running delivered nothing, so it is `refused` and the
     ///   phone is asked to send again. On the tmux transport, text over
-    ///   `PhoneAppConstants.firstPromptMaxBytes` is `bad_request`
+    ///   `PhoneAppConstants.firstPromptMaxBytes` once shell-quoted
+    ///   (`fitsTmuxFirstPrompt(_:)`) is `bad_request`
     ///   (`firstMessageTooLongReason`) before anything is woken.
     ///
     /// **`woken` means the wake respawned the session with the message as its
@@ -143,7 +167,7 @@ extension PhoneAppService {
     /// that cannot resume exits with the prompt lost while the respawn still
     /// succeeds, and the phone does not wait. On the tmux transport the
     /// prompt rides the respawn command, which tmux refuses past about 16 KB
-    /// with "command too long", so the wake path holds it to
+    /// with "command too long", so the wake path holds its quoted form to
     /// `PhoneAppConstants.firstPromptMaxBytes`. A session keeps the
     /// transport it was born on, so the terminal row says which one the wake
     /// respawns onto; a pty-holder session takes up to `messageMaxBytes`.
@@ -194,7 +218,7 @@ extension PhoneAppService {
             guard response.success else { throw Self.refusal(response.error) }
             return ActionOutcomeResult(outcome: "sent")
         case .notRunning:
-            guard terminal.transport == .holder || text.utf8.count <= PhoneAppConstants.firstPromptMaxBytes else {
+            guard terminal.transport == .holder || Self.fitsTmuxFirstPrompt(text) else {
                 throw PhoneAppError(code: .badRequest, message: Self.firstMessageTooLongReason)
             }
             try Task.checkCancellation()

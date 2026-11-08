@@ -70,8 +70,9 @@ extension PhoneAppService {
     /// `PhoneAppConstants.worktreeSessionWait` for its first agent session.
     ///
     /// A message over `PhoneAppConstants.messageMaxBytes` is `bad_request`.
-    /// So is one over `PhoneAppConstants.firstPromptMaxBytes` when the new
-    /// session would spawn on the tmux transport (`phoneSpawnsOnHolder`),
+    /// So is one over `PhoneAppConstants.firstPromptMaxBytes` once
+    /// shell-quoted (`fitsTmuxFirstPrompt(_:)`) when the new session would
+    /// spawn on the tmux transport (`phoneSpawnsOnHolder`),
     /// whose spawn command the first message rides
     /// (`firstMessageTooLongReason`); on the pty-holder transport it is not
     /// held to that cap. A
@@ -95,7 +96,7 @@ extension PhoneAppService {
         }
         _ = try await visibleRepo(params.repoID)
         let prompt = PhoneMessageText.isBlank(params.message) ? nil : params.message
-        if let prompt, prompt.utf8.count > PhoneAppConstants.firstPromptMaxBytes {
+        if let prompt, !Self.fitsTmuxFirstPrompt(prompt) {
             guard await actions.phoneSpawnsOnHolder() else {
                 throw PhoneAppError(code: .badRequest, message: Self.firstMessageTooLongReason)
             }
