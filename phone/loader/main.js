@@ -60,6 +60,8 @@ import {
  */
 
 const RUNNER_URL = new URL('runner.html', import.meta.url).href;
+// What a redraw of the Laptops screen puts the focus back on, by position.
+const FOCUSABLE = 'button, input, textarea';
 const RELAY_HELP = 'Check that this phone is online. If it is, the relay may be down. TBD on the laptop shows the relay status in Settings, under Phone.';
 
 /**
@@ -269,10 +271,8 @@ class LoaderPage {
 
   /** Where the page goes without a link: by how many laptops there are. */
   async #route() {
-    const epoch = this.#leave();
-    this.#mount(renderLoading());
-    const list = await this.#list();
-    if (list === null || epoch !== this.#epoch) return;
+    const list = await this.#loadLaptops();
+    if (list === null) return;
     const route = bootRoute(list);
     if (route.kind === 'connect') {
       this.#connect(route.record);
@@ -363,15 +363,24 @@ class LoaderPage {
     }
   }
 
+  /**
+   * Leaves whatever is showing for the spinner, and lists the laptops afresh.
+   * @returns {Promise<{ laptops: LaptopRecord[], damaged: DamagedLaptop[] } | null>} null when
+   *   the read failed (the store failure shows) or the page moved on meanwhile
+   */
+  async #loadLaptops() {
+    const epoch = this.#leave();
+    this.#mount(renderLoading());
+    const list = await this.#list();
+    return epoch === this.#epoch ? list : null;
+  }
+
   // --- Laptops ----------------------------------------------------------------------------
 
   /** Opens the Laptops screen, listing the laptops afresh. */
   async #goLaptops() {
-    const epoch = this.#leave();
-    this.#mount(renderLoading());
-    const list = await this.#list();
-    if (list === null || epoch !== this.#epoch) return;
-    this.#showLaptops(list);
+    const list = await this.#loadLaptops();
+    if (list !== null) this.#showLaptops(list);
   }
 
   /** @param {{ laptops: LaptopRecord[], damaged: DamagedLaptop[] }} list */
@@ -382,36 +391,32 @@ class LoaderPage {
     const statuses = new Map();
     /** @type {Map<string, RowHandle>} Each laptop's row as now drawn, by laptop ID. */
     let rowsByID = new Map();
-    /** @type {{ key: IDBValidKey } | null} */
+    /** @type {IDBValidKey | null} The key of the row asking to Forget, if any. */
     let asking = null;
-    /** @param {{ key: IDBValidKey } | null} next */
-    const ask = (next) => {
-      asking = next;
+    /** @param {IDBValidKey | null} key */
+    const ask = (key) => {
+      asking = key;
       rerender();
     };
+    /** @param {IDBValidKey} key the row's laptop, damaged or not */
+    const forgetActions = (key) => ({
+      asking: asking === key,
+      onForget: () => ask(key),
+      onConfirm: () => this.#forget(key, 'laptops'),
+      onCancel: () => ask(null),
+    });
     const build = () => {
       const now = this.#clock.now();
       const rows = [
         ...list.laptops.map((record) => ({
           name: record.laptopName,
           line: presenceLine(statuses.get(record.id), record.lastConnectedAt, now, 'list'),
-          asking: asking?.key === record.id,
           onOpen: () => this.#connect(record),
-          onForget: () => ask({ key: record.id }),
-          onConfirm: () => this.#forget(record.id, 'laptops'),
-          onCancel: () => ask(null),
+          ...forgetActions(record.id),
         })),
         ...list.damaged.map((damaged) => {
           const name = damaged.laptopName ?? 'this laptop';
-          return {
-            name,
-            line: { dot: null, text: MESSAGES.keyMissing(name) },
-            asking: asking?.key === damaged.key,
-            onOpen: null,
-            onForget: () => ask({ key: damaged.key }),
-            onConfirm: () => this.#forget(damaged.key, 'laptops'),
-            onCancel: () => ask(null),
-          };
+          return { name, line: { dot: null, text: MESSAGES.keyMissing(name) }, onOpen: null, ...forgetActions(damaged.key) };
         }),
       ];
       const drawn = renderLaptops({ rows, onPair: () => this.#goPair(null) });
@@ -727,7 +732,7 @@ class LoaderPage {
         openSocket: this.#openSocket,
         onEvent: (event) => this.#onConnectionEvent(connection, event),
         absentGraceMs,
-        isVisible: () => this.#doc.visibilityState !== 'hidden',
+        isVisible: this.#visibility.isVisible,
         clock: this.#clock,
       });
     } catch {
@@ -1127,7 +1132,7 @@ class LoaderPage {
   #focusIndex(root) {
     const active = this.#doc.activeElement;
     if (active === null || !root.contains(active)) return -1;
-    return [...root.querySelectorAll('button, input, textarea')].indexOf(active);
+    return [...root.querySelectorAll(FOCUSABLE)].indexOf(active);
   }
 
   /**
@@ -1136,7 +1141,7 @@ class LoaderPage {
    */
   #restoreFocus(root, index) {
     if (index < 0) return;
-    const target = root.querySelectorAll('button, input, textarea')[index];
+    const target = root.querySelectorAll(FOCUSABLE)[index];
     if (target instanceof HTMLElement) target.focus();
   }
 }
