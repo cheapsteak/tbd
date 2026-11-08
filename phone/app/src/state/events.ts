@@ -6,8 +6,8 @@
 
 import type { AppEvent } from '../protocol/types.ts';
 import { applyPromptChanged } from './prompts.ts';
-import { findSession, resolvePendingOpen, resolveRoute, sameRoute } from './route.ts';
-import { applySessionsChanged, rowByID } from './sessionsData.ts';
+import { pendingOpenTarget, resolveRoute, sameRoute } from './route.ts';
+import { applySessionsChanged } from './sessionsData.ts';
 import { nextToast } from './store.ts';
 import type { AppState, PendingOpen, Route, SessionsData, UIState } from './store.ts';
 import { addReceipt, applyTranscriptEvent } from './transcript.ts';
@@ -81,28 +81,30 @@ export function withPendingOpen(state: AppState, p: PendingOpen): AppState {
 }
 
 function followList(ui: UIState, d: SessionsData): UIState {
-  const next = moveTo(ui, resolveRoute(ui.route, d), d);
+  // `resolveRoute` keeps the route or goes back to the list, so it leaves no row to mark.
+  const next = moveTo(ui, resolveRoute(ui.route, d), null);
   const pending = next.pendingOpen;
   if (pending === null) return next;
-  const opened = resolvePendingOpen(pending, d);
-  if (opened === null) return next;
-  const done: UIState = { ...moveTo(next, opened, d), pendingOpen: null };
+  const target = pendingOpenTarget(pending, d);
+  if (target === null) return next;
+  const done: UIState = { ...moveTo(next, target.route, target.row.id), pendingOpen: null };
   if ('ref' in pending || pending.toast === null) return done;
-  // The row is there: the open just resolved through it.
-  const name = rowByID(d, pending.worktreeID)?.name ?? '';
+  const name = target.row.name;
   // A function, so a `$` in the name is not read as a replacement pattern.
   return { ...done, toast: nextToast(done, pending.toast.replaceAll('{name}', () => name)) };
 }
 
-/** `ui` showing `route`, or `ui` itself when it shows that screen already. */
-function moveTo(ui: UIState, route: Route, d: SessionsData): UIState {
+/**
+ * `ui` showing `route`, with `rowID` marked as the row opened last when it is not null, or `ui`
+ * itself when it shows that screen already.
+ */
+function moveTo(ui: UIState, route: Route, rowID: string | null): UIState {
   if (sameRoute(ui.route, route)) return ui;
-  const found = route.screen === 'session' ? findSession(d, route.ref) : null;
   return {
     ...ui,
     route,
     menu: null,
     sheet: ui.sheet?.name === 'new' ? ui.sheet : null,
-    lastRowID: found === null ? ui.lastRowID : found.row.id,
+    lastRowID: rowID ?? ui.lastRowID,
   };
 }

@@ -44,7 +44,19 @@ export function sameRoute(a: Route, b: Route): boolean {
  * one: the row can arrive before its first session does.
  */
 export function resolvePendingOpen(p: PendingOpen, d: SessionsData): Route | null {
-  if ('ref' in p) return findSession(d, p.ref) === null ? null : { screen: 'session', ref: p.ref };
-  const first = rowByID(d, p.worktreeID)?.sessions[0];
-  return first === undefined ? null : { screen: 'session', ref: first.ref };
+  return pendingOpenTarget(p, d)?.route ?? null;
+}
+
+/**
+ * `resolvePendingOpen`'s route, with the row that lists its session, so a caller that needs the
+ * row does not look the session up again.
+ */
+export function pendingOpenTarget(p: PendingOpen, d: SessionsData): { route: Route; row: PhoneRow } | null {
+  if ('ref' in p) {
+    const found = findSession(d, p.ref);
+    return found === null ? null : { route: { screen: 'session', ref: p.ref }, row: found.row };
+  }
+  const row = rowByID(d, p.worktreeID);
+  const first = row?.sessions[0];
+  return row === null || first === undefined ? null : { route: { screen: 'session', ref: first.ref }, row };
 }

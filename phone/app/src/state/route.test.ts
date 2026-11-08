@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneGroupLayout, PhoneRow, PhoneSession, PhoneSessionRef } from '../protocol/types.ts';
-import { findSession, resolvePendingOpen, resolveRoute, sameRoute } from './route.ts';
+import { findSession, pendingOpenTarget, resolvePendingOpen, resolveRoute, sameRoute } from './route.ts';
 import { applySessionsChanged, applySnapshot } from './sessionsData.ts';
 import { SESSIONS_ROUTE } from './store.ts';
 import type { Route, SessionsData } from './store.ts';
@@ -111,6 +111,18 @@ test('a pending worktree open waits for the row with that ID and opens its first
   assert.deepEqual(resolvePendingOpen(p, ready), { screen: 'session', ref: R2 });
   // A session in another row is not the worktree's.
   assert.equal(resolvePendingOpen({ worktreeID: 'W1', toast: null }, list([row('W2', [R])])), null);
+});
+
+test('pendingOpenTarget gives the route resolvePendingOpen gives, with the row that lists it', () => {
+  assert.equal(pendingOpenTarget({ ref: R }, without), null);
+  const byRef = pendingOpenTarget({ ref: R }, withR);
+  assert.deepEqual(byRef?.route, { screen: 'session', ref: R });
+  assert.equal(byRef?.row, withR.rows.W2);
+  const d = list([row(WT, [R2, R], 'fix-login')]);
+  const byWorktree = pendingOpenTarget({ worktreeID: WT, toast: null }, d);
+  assert.deepEqual(byWorktree?.route, resolvePendingOpen({ worktreeID: WT, toast: null }, d));
+  assert.equal(byWorktree?.row, d.rows[WT]);
+  assert.equal(pendingOpenTarget({ worktreeID: WT, toast: null }, list([row(WT, [])])), null);
 });
 
 test('a pending worktree open never reads an inherited member as a row', () => {
