@@ -3,27 +3,57 @@
 
 WHAT THE NUMBERS ARE
 --------------------
-Two instruments, measured inside TBDApp, on both terminal transports, by one
-mechanism (`Sources/TBDApp/Terminal/TerminalLatencyTap.swift`):
+Two instruments, measured inside TBDApp, on both terminal transports and both
+terminal engines, by one mechanism
+(`Sources/TBDApp/Terminal/TerminalLatencyTap.swift`):
 
   echo  -- a token written through a panel's REAL keystroke path, stamped
            again when its first copy comes back at the app's feed seam. The
            loop spans the pty, the line discipline, and on tmux the server, so
            this is the transport's number and it is the only one here that
-           compares the two arms.
+           compares the two transports.
 
   draw  -- how long the OLDEST chunk in a frame sat parsed-but-undrawn before
            that panel's view started drawing. Identical in mechanism on both
-           arms, because both feed through the same line of code. It cannot
-           see anything BEFORE the app's read -- which is precisely where tmux
-           sits -- so it never compares transports by itself.
+           transports, because both feed through the same line of code. It
+           cannot see anything BEFORE the app's read -- which is precisely
+           where tmux sits -- so it never compares transports by itself.
+
+There are two modes. TRANSPORT MODE, the default, has one arm per transport,
+`tmux` and `holder`, and an arm holds every line its transport carries. ENGINE
+MODE (`--swiftterm-terminal`, `--ghostty-terminal`) has one arm per terminal
+engine, `swiftterm` and `libghostty`; see ENGINE MODE below.
 
 THE DRAW LINE IS THE CHECK ON THE ECHO LINE, AND THAT IS WHY BOTH PRINT
 ----------------------------------------------------------------------
 If the two arms' draw waits agree and their echoes differ, the difference is
 upstream of the app: the transport. If the draw waits DISAGREE, the arms are
 not being measured the same way and the echo comparison is suspect. Both are
-printed so that check is always in front of you rather than optional.
+printed so that check is always in front of you rather than optional. In
+engine mode the two lines swap roles.
+
+ENGINE MODE
+-----------
+Both arms are holder terminals, one on SwiftTerm and one on libghostty
+(`docs/specs/2026-11-07-libghostty-terminal-engine-design.md`). Every line
+carries `transport=holder`, so a line belongs to an arm by its terminal id
+alone, and lines from any other terminal are left out of every figure.
+
+  echo  -- the same loop on both arms. The token enters the outbound path
+           after the engine's own key handling, and its copy is stamped at the
+           feed seam BEFORE the engine parses it, so neither engine's work is
+           inside the number. In this mode the echo is the CHECK: matched arms
+           echo alike, and a gap means unmatched arms or an engine that keeps
+           the app's main or reader thread busy.
+
+  draw  -- the engines' own number: from a chunk reaching the feed seam, its
+           parse included, to the engine starting a draw. SwiftTerm stamps
+           that start in `viewWillDraw`, libghostty when it builds a frame.
+
+The latency lines do not name an engine, and only the app knows which engine
+a terminal is on. This script takes the two ids as given. The driver,
+`terminal-latency-probe.py`, confirms each id's engine from the app's own
+engine log lines before and after the run.
 
 WHAT IT CANNOT SHOW
 -------------------
@@ -40,19 +70,29 @@ WHAT IT CANNOT SHOW
 - Which panel a number came from, unless you say. A capture holds every panel
   that was open, so `--terminals` restricts the echo and draw figures to the
   ids that were probed; without it, an arm whose lines came from more than one
-  terminal is broken out per terminal so the contamination is visible.
-- Anything under the Metal renderer (`viewWillDraw` is not on that frame
-  path, so no draw lines are emitted at all) or on the control-mode attach
-  path.
+  terminal is broken out per terminal so the contamination is visible. Engine
+  mode always restricts to its two ids.
+- A draw wait under SwiftTerm's Metal renderer (`viewWillDraw` is not on that
+  frame path, so it emits no draw lines at all), or anything on the
+  control-mode attach path. libghostty always draws with Metal, and does emit
+  draw lines.
 
 THE VERDICT LINES
 -----------------
 The pty-holder transport spec's Rollout section makes graduation depend on a
 paired measurement: p90 keystroke echo at load no more than 2x p90 at idle,
 and no more than 5 ms. With `--load-map` and `--idle-max` this script prints
-both comparisons per transport. It supplies the numbers; the verdict over the
+both comparisons per arm. It supplies the numbers; the verdict over the
 spec's four conditions (workload, sample size, absolute bound, flatness bound)
 is a human judgement.
+
+In engine mode those lines carry the engine's name, and an ENGINES section
+sets libghostty's p90 against SwiftTerm's, on each echo band and on the
+on-screen draw wait. The libghostty engine spec's A/B section makes graduation
+need a clear win: a p90 at least 20% lower on one measure (0.80x or less),
+repeated in two A/B/B/A runs, with no regression beyond noise on the others.
+Each line says whether this run meets the 20% bar. The second run and the
+no-regression condition are a human judgement.
 
 USAGE
 -----
@@ -62,10 +102,19 @@ USAGE
         --worktree <name> \\
         --tmux-terminal <uuid> --holder-terminal <uuid>
 
+    # or an engine A/B:
+    scripts/diag/terminal-latency-probe.py \\
+        --worktree <name> \\
+        --swiftterm-terminal <uuid> --ghostty-terminal <uuid>
+
     # or read a capture by hand:
     log show --last 10m --info \\
       --predicate 'subsystem == "com.tbd.app" AND category == "terminallatency"' \\
       | scripts/diag/terminal-latency-report.py
+
+    # an engine-mode capture by hand:
+    ... | scripts/diag/terminal-latency-report.py \\
+        --swiftterm-terminal <uuid> --ghostty-terminal <uuid>
 
     scripts/diag/terminal-latency-report.py --self-test
 """
@@ -86,6 +135,48 @@ from dataclasses import dataclass, field
 LINE_RE = re.compile(r"\b(draw|echo|echolost|echorefused) ((?:[a-z]+=\S+)(?: [a-z]+=\S+)*)\s*$")
 
 TRANSPORTS = ("tmux", "holder")
+
+# Engine mode's arm labels, in A/B order. Both arms are on one transport.
+ENGINES = ("swiftterm", "libghostty")
+ENGINE_TRANSPORT = "holder"
+
+# The libghostty engine spec's bar for a clear win: libghostty's p90 at most
+# 0.80 of SwiftTerm's, which is 20% lower.
+ENGINE_WIN_RATIO = 0.80
+
+
+@dataclass(frozen=True, slots=True)
+class Arm:
+    """One side of the comparison, and which lines are its own.
+
+    In transport mode there is one arm per transport, and it holds every line
+    on that transport (`--terminals` has already removed foreign panels). In
+    engine mode there is one arm per engine, and it holds the lines of exactly
+    one terminal: both terminals are on the holder transport, so the id is the
+    only thing that tells their lines apart.
+    """
+
+    label: str
+    transport: str
+    # As given, for display. Compared case-insensitively.
+    terminal: str | None = None
+
+    def owns(self, record) -> bool:
+        if record.transport != self.transport:
+            return False
+        return self.terminal is None or record.terminal.lower() == self.terminal.lower()
+
+
+def transport_arms() -> list[Arm]:
+    return [Arm(label=transport, transport=transport) for transport in TRANSPORTS]
+
+
+def engine_arms(swiftterm_terminal: str, ghostty_terminal: str) -> list[Arm]:
+    swiftterm, libghostty = ENGINES
+    return [
+        Arm(label=swiftterm, transport=ENGINE_TRANSPORT, terminal=swiftterm_terminal),
+        Arm(label=libghostty, transport=ENGINE_TRANSPORT, terminal=ghostty_terminal),
+    ]
 
 
 @dataclass(slots=True)
@@ -147,6 +238,15 @@ class Capture:
                 continue
             out[record.transport] = out.get(record.transport, 0) + 1
         return out
+
+    def lost_count(self, arm: Arm, wanted: set[str] | None = None) -> int:
+        """Lost tokens on one arm, over the terminals asked for. In transport
+        mode this is `lost_counts(wanted)` for the arm's transport."""
+        return sum(
+            1
+            for record in self.lost
+            if (wanted is None or record.terminal.lower() in wanted) and arm.owns(record)
+        )
 
     def refusal_counts(self, wanted: set[str] | None = None) -> dict[str, int]:
         """Refusals per reason, over the terminals asked for.
@@ -259,18 +359,19 @@ def format_distribution(label: str, stats: dict[str, float]) -> str:
     )
 
 
-def load_for(load_map: dict | None, transport: str, seq: int) -> float | None:
+def load_for(load_map: dict | None, arm: str, seq: int) -> float | None:
     """The 1-minute load average recorded alongside one sample.
 
-    Shape, as the driver writes it: {"<transport>": {"<seq>": <load>}}. JSON
-    object keys are strings, so the sequence number is looked up as one.
+    Shape, as the driver writes it: {"<arm>": {"<seq>": <load>}}, where an arm
+    is a transport, or in engine mode an engine. JSON object keys are strings,
+    so the sequence number is looked up as one.
     """
     if not load_map:
         return None
-    arm = load_map.get(transport)
-    if not arm:
+    readings = load_map.get(arm)
+    if not readings:
         return None
-    value = arm.get(str(seq))
+    value = readings.get(str(seq))
     return None if value is None else float(value)
 
 
@@ -293,6 +394,54 @@ def by_terminal(records: list, transport: str) -> dict[str, list]:
     return grouped
 
 
+def split_bands(
+    samples: list[Echo], arm: str, idle_max: float, load_map: dict
+) -> tuple[list[float], list[float], int]:
+    """One arm's echoes split into the idle band and the load band, and how
+    many had no load recorded.
+
+    A sample whose load was never recorded belongs to NEITHER band. It used
+    to be counted as idle, which quietly put an under-load sample in the
+    denominator of the flatness ratio.
+    """
+    idle: list[float] = []
+    under_load: list[float] = []
+    unknown = 0
+    for sample in samples:
+        load = load_for(load_map, arm, sample.seq)
+        if load is None:
+            unknown += 1
+        elif load <= idle_max:
+            idle.append(sample.ms)
+        else:
+            under_load.append(sample.ms)
+    return idle, under_load, unknown
+
+
+def engine_comparison_line(name: str, ghostty: list[float], swiftterm: list[float]) -> str:
+    """libghostty's p90 against SwiftTerm's on one measure, and whether it is
+    the clear win the libghostty engine spec's graduation asks for."""
+    if not ghostty or not swiftterm:
+        return f"  {name:<22} (no samples on one arm)"
+    ghostty_p90 = percentile(sorted(ghostty), 0.90)
+    swiftterm_p90 = percentile(sorted(swiftterm), 0.90)
+    figures = f"libghostty {ghostty_p90:.3f} / swiftterm {swiftterm_p90:.3f}"
+    if swiftterm_p90 <= 0:
+        return f"  {name:<22} {figures} (no ratio: swiftterm's p90 is 0)"
+    ratio = ghostty_p90 / swiftterm_p90
+    # The small tolerance keeps a ratio that is exactly the bar, computed in
+    # floating point, on the side of the bar it is on.
+    if ratio <= ENGINE_WIN_RATIO + 1e-9:
+        verdict = f"libghostty {round((1 - ratio) * 100)}% lower: MEETS the 20% bar"
+    elif ratio < 1.0:
+        verdict = f"libghostty {round((1 - ratio) * 100)}% lower: SHORT of the 20% bar"
+    elif ratio == 1.0:
+        verdict = "no difference"
+    else:
+        verdict = f"libghostty {round((ratio - 1) * 100)}% higher"
+    return f"  {name:<22} {figures} = {ratio:.2f}x ({verdict})"
+
+
 def report(
     capture: Capture,
     out=sys.stdout,
@@ -300,6 +449,7 @@ def report(
     load_map: dict | None = None,
     terminals: set[str] | None = None,
     note: str | None = None,
+    arms: list[Arm] | None = None,
 ) -> None:
     """Print the run's figures.
 
@@ -307,7 +457,19 @@ def report(
     run that produced this capture finished. It is printed with the header,
     above every figure, so a reader cannot reach the table without having read
     it.
+
+    `arms` selects engine mode (`engine_arms`). Engine arms name their own
+    terminals, so `terminals` must be None with them. Omitted, the arms are
+    the two transports.
     """
+    engine_mode = arms is not None
+    if engine_mode:
+        if terminals is not None:
+            raise ValueError("engine arms name their own terminals; pass no `terminals`")
+        terminals = {arm.terminal for arm in arms if arm.terminal is not None}
+    else:
+        arms = transport_arms()
+
     # A capture is whatever the app logged in the window, which includes every
     # OTHER panel that happened to be open. Restricting to the probed ids is
     # the only way a pooled figure is known to be one terminal's.
@@ -319,18 +481,38 @@ def report(
         echoes = capture.echoes
         draws = capture.draws
 
-    print("terminal transport latency, milliseconds", file=out)
-    print(
-        "echo = keystroke round trip through the real input path (compares transports)",
-        file=out,
-    )
-    print(
-        "draw = oldest chunk's wait before its panel drew (does NOT compare transports)",
-        file=out,
-    )
+    if engine_mode:
+        print("terminal engine latency, milliseconds", file=out)
+        print(
+            "echo = keystroke round trip through the real input path"
+            " (the same loop on both engines: the check)",
+            file=out,
+        )
+        print(
+            "draw = oldest chunk's wait before its panel drew (compares engines)",
+            file=out,
+        )
+    else:
+        print("terminal transport latency, milliseconds", file=out)
+        print(
+            "echo = keystroke round trip through the real input path (compares transports)",
+            file=out,
+        )
+        print(
+            "draw = oldest chunk's wait before its panel drew (does NOT compare transports)",
+            file=out,
+        )
     if note:
         print(f"\n{note}", file=out)
-    if terminals is not None:
+    if engine_mode:
+        # As given, like the `only terminals` line: a reader is checking these
+        # against the ids they passed, and against the arm each one went to.
+        print(
+            "\narms: "
+            + ", ".join(f"{arm.label} = {short_terminal(arm.terminal or '-')}" for arm in arms),
+            file=out,
+        )
+    elif terminals is not None:
         # Echoed as given, not as compared: the lowercase form is an
         # implementation detail of the match, and a reader is checking these
         # against the ids they passed.
@@ -353,29 +535,36 @@ def report(
             file=out,
         )
 
-    # Restricted the same way, so a transport that contributed nothing to this
-    # run is absent rather than present with `(no samples)` beside another
-    # panel's lost token.
-    lost_counts = capture.lost_counts(wanted)
+    # Restricted the same way, so an arm that contributed nothing to this run
+    # is absent rather than present with `(no samples)` beside another panel's
+    # lost token.
     refusal_counts = capture.refusal_counts(wanted)
 
+    # Kept per arm for the ENGINES comparison, which sets one arm's figures
+    # against the other's after both have printed.
+    echo_all: dict[str, list[float]] = {}
+    echo_bands: dict[str, tuple[list[float], list[float]]] = {}
+    draws_on_screen: dict[str, list[float]] = {}
+
     print("\nECHO", file=out)
-    for transport in TRANSPORTS:
-        samples = [e for e in echoes if e.transport == transport]
-        if not samples and not lost_counts.get(transport):
+    for arm in arms:
+        label = arm.label
+        samples = [e for e in echoes if arm.owns(e)]
+        lost = capture.lost_count(arm, wanted)
+        if not samples and not lost:
             continue
-        print(format_distribution(f"{transport} all", distribution([e.ms for e in samples])), file=out)
-        lost = lost_counts.get(transport, 0)
+        echo_all[label] = [e.ms for e in samples]
+        print(format_distribution(f"{label} all", distribution(echo_all[label])), file=out)
         if lost:
-            print(f"  {transport + ' lost':<22} {lost} token(s) never came back", file=out)
+            print(f"  {label + ' lost':<22} {lost} token(s) never came back", file=out)
         # Unfiltered, an arm's figures may pool two panels. Break them out so
         # that is visible rather than assumed away.
-        groups = by_terminal(samples, transport)
+        groups = by_terminal(samples, arm.transport)
         if wanted is None and len(groups) > 1:
             for terminal, group in sorted(groups.items()):
                 print(
                     format_distribution(
-                        f"{transport} {short_terminal(terminal)}",
+                        f"{label} {short_terminal(terminal)}",
                         distribution([e.ms for e in group]),
                     ),
                     file=out,
@@ -385,24 +574,12 @@ def report(
         # comparison below is against a number.
         if idle_max is None or load_map is None:
             continue
-        # A sample whose load was never recorded belongs to NEITHER band. It
-        # used to be counted as idle, which quietly put an under-load sample in
-        # the denominator of the flatness ratio.
-        idle: list[float] = []
-        under_load: list[float] = []
-        unknown = 0
-        for sample in samples:
-            load = load_for(load_map, transport, sample.seq)
-            if load is None:
-                unknown += 1
-            elif load <= idle_max:
-                idle.append(sample.ms)
-            else:
-                under_load.append(sample.ms)
-        print(format_distribution(f"{transport} idle", distribution(idle)), file=out)
-        print(format_distribution(f"{transport} load", distribution(under_load)), file=out)
+        idle, under_load, unknown = split_bands(samples, label, idle_max, load_map)
+        echo_bands[label] = (idle, under_load)
+        print(format_distribution(f"{label} idle", distribution(idle)), file=out)
+        print(format_distribution(f"{label} load", distribution(under_load)), file=out)
         print(
-            f"  {transport + ' unbanded':<22} no load recorded: {unknown}"
+            f"  {label + ' unbanded':<22} no load recorded: {unknown}"
             f" (excluded from both bands)",
             file=out,
         )
@@ -418,14 +595,14 @@ def report(
             ratio = load_p90 / idle_p90 if idle_p90 else float("inf")
             flat = "WITHIN" if ratio <= 2.0 else "OVER"
             print(
-                f"  {transport + ' flatness':<22} p90 load / p90 idle = {ratio:.2f}x"
+                f"  {label + ' flatness':<22} p90 load / p90 idle = {ratio:.2f}x"
                 f" ({flat} the 2x bound)",
                 file=out,
             )
         if load_p90 is not None:
             bound = "WITHIN" if load_p90 <= 5.0 else "OVER"
             print(
-                f"  {transport + ' absolute':<22} p90 under load = {load_p90:.3f} ms"
+                f"  {label + ' absolute':<22} p90 under load = {load_p90:.3f} ms"
                 f" ({bound} the 5 ms bound)",
                 file=out,
             )
@@ -436,27 +613,27 @@ def report(
             print(f"  {reason:<22} {refusal_counts[reason]}", file=out)
 
     print("\nDRAW (oldest chunk's wait)", file=out)
-    for transport in TRANSPORTS:
-        arm = [d for d in draws if d.transport == transport]
-        if not arm:
+    for arm in arms:
+        label = arm.label
+        own = [d for d in draws if arm.owns(d)]
+        if not own:
             continue
-        visible = [d for d in arm if d.visible]
+        visible = [d for d in own if d.visible]
+        draws_on_screen[label] = [d.oldest_ms for d in visible]
         # On-screen first, because a panel the user never sees is work nobody
         # waited for; the all-draws line is kept beside it so an arm that drew
         # mostly off-screen cannot look like an arm that barely drew.
         print(
-            format_distribution(
-                f"{transport} on screen", distribution([d.oldest_ms for d in visible])
-            ),
+            format_distribution(f"{label} on screen", distribution(draws_on_screen[label])),
             file=out,
         )
         print(
             format_distribution(
-                f"{transport} all draws", distribution([d.oldest_ms for d in arm])
+                f"{label} all draws", distribution([d.oldest_ms for d in own])
             ),
             file=out,
         )
-        groups = by_terminal(arm, transport)
+        groups = by_terminal(own, arm.transport)
         if wanted is None and len(groups) > 1:
             # The draw line is the CHECK on the echo comparison, so an arm
             # whose draws came from two panels has to say so: one of them may
@@ -464,19 +641,57 @@ def report(
             for terminal, group in sorted(groups.items()):
                 print(
                     format_distribution(
-                        f"{transport} {short_terminal(terminal)}",
+                        f"{label} {short_terminal(terminal)}",
                         distribution([d.oldest_ms for d in group]),
                     ),
                     file=out,
                 )
-        parse_max = max((d.parse_max_ms for d in arm), default=0.0)
-        dropped = sum(d.dropped for d in arm)
-        chunks = sum(d.chunks for d in arm)
+        parse_max = max((d.parse_max_ms for d in own), default=0.0)
+        dropped = sum(d.dropped for d in own)
+        chunks = sum(d.chunks for d in own)
         print(
-            f"  {transport + ' chunks':<22} {chunks} fed, {dropped} dropped past the ring,"
+            f"  {label + ' chunks':<22} {chunks} fed, {dropped} dropped past the ring,"
             f" worst parse {parse_max:.3f} ms",
             file=out,
         )
+
+    if not engine_mode:
+        return
+
+    # Matched band against matched band, never pooled across bands when the
+    # bands exist. SwiftTerm under its Metal renderer emits no draw lines, so
+    # the draw comparison then says it has nothing to compare.
+    swiftterm, libghostty = ENGINES
+    print(
+        "\nENGINES (p90, libghostty / swiftterm; a clear win is 0.80x or less,"
+        " repeated in two runs)",
+        file=out,
+    )
+    if idle_max is not None and load_map is not None:
+        for index, band in enumerate(("idle", "load")):
+            print(
+                engine_comparison_line(
+                    f"echo {band}",
+                    echo_bands.get(libghostty, ([], []))[index],
+                    echo_bands.get(swiftterm, ([], []))[index],
+                ),
+                file=out,
+            )
+    else:
+        print(
+            engine_comparison_line(
+                "echo all", echo_all.get(libghostty, []), echo_all.get(swiftterm, [])
+            ),
+            file=out,
+        )
+    print(
+        engine_comparison_line(
+            "draw on screen",
+            draws_on_screen.get(libghostty, []),
+            draws_on_screen.get(swiftterm, []),
+        ),
+        file=out,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +750,36 @@ SELF_TEST_NEGATIVE_WAIT_LINES = """\
 2026-09-22 13:00:00.200000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=2 oldestms=4.000 newestms=-1.000 parsemaxms=0.100 dropped=0 vis=1
 2026-09-22 13:00:00.300000-0400 0x1  Default 0x0 900 0 TBDApp: (TBDApp) [com.tbd.app:terminallatency] draw transport=tmux terminal=AAAA chunks=1 oldestms=7.000 newestms=1.000 parsemaxms=0.100 dropped=0 vis=1
 """
+
+# Engine mode: two holder terminals, SSSS on SwiftTerm and GGGG on libghostty,
+# interleaved A/B/B/A with one sequence counter across both, as the driver
+# runs them. ZZZZ is a third holder panel nobody probed and TTTT a tmux one;
+# both must stay out of every figure. GGGG loses one token.
+SELF_TEST_ENGINE_LINES = """\
+2026-11-08 10:00:00.100000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=SSSS seq=1 ms=1.000
+2026-11-08 10:00:00.200000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=GGGG seq=2 ms=0.500
+2026-11-08 10:00:00.300000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=GGGG seq=3 ms=0.700
+2026-11-08 10:00:00.400000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=SSSS seq=4 ms=3.000
+2026-11-08 10:00:00.500000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=SSSS seq=5 ms=2.000
+2026-11-08 10:00:00.600000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=GGGG seq=6 ms=3.000
+2026-11-08 10:00:00.700000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=GGGG seq=7 ms=5.000
+2026-11-08 10:00:00.800000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=SSSS seq=8 ms=4.000
+2026-11-08 10:00:00.900000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=holder terminal=ZZZZ seq=1 ms=90.000
+2026-11-08 10:00:01.000000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echo transport=tmux terminal=TTTT seq=1 ms=80.000
+2026-11-08 10:00:01.100000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echolost transport=holder terminal=GGGG seq=9
+2026-11-08 10:00:01.200000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echolost transport=holder terminal=ZZZZ seq=2
+2026-11-08 10:00:01.300000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] draw transport=holder terminal=SSSS chunks=2 oldestms=10.000 newestms=1.000 parsemaxms=0.200 dropped=0 vis=1
+2026-11-08 10:00:01.400000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] draw transport=holder terminal=GGGG chunks=3 oldestms=9.000 newestms=1.000 parsemaxms=0.100 dropped=0 vis=1
+2026-11-08 10:00:01.500000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] draw transport=holder terminal=ZZZZ chunks=5 oldestms=99.000 newestms=9.000 parsemaxms=7.000 dropped=4 vis=1
+2026-11-08 10:00:01.600000-0500 0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency] echorefused terminal=ZZZZ reason=noview
+"""
+
+# Engine mode's load map is keyed by engine. Each arm's first two samples at
+# idle, its last two under load.
+SELF_TEST_ENGINE_LOAD_MAP = {
+    "swiftterm": {"1": 1.0, "4": 2.0, "5": 30.0, "8": 41.0},
+    "libghostty": {"2": 1.0, "3": 2.0, "6": 30.0, "7": 41.0},
+}
 
 # seq 1-2 taken at idle, 3-4 under load, on both arms.
 SELF_TEST_LOAD_MAP = {
@@ -748,6 +993,96 @@ def self_test() -> int:
         if needle not in filtered_foreign_text:
             failures.append(f"filtered foreign-arm report is missing {needle!r}")
 
+    # Transport mode never prints engine mode's header, arms line or
+    # comparison, whatever it is given.
+    for absent in ("ENGINES", "arms:", "terminal engine latency", "swiftterm", "libghostty"):
+        if absent in text:
+            failures.append(f"a transport-mode report printed engine mode's {absent!r}")
+
+    # Engine mode: both arms are holder terminals, so a line is an arm's by its
+    # id alone. Lowercase ids on purpose: the app emits uppercase, and the
+    # arms line echoes them as given.
+    engine_capture = parse(io.StringIO(SELF_TEST_ENGINE_LINES))
+    check("engine echo count", len(engine_capture.echoes), 10)
+    arms = engine_arms("ssss", "gggg")
+    check("engine arm labels", [arm.label for arm in arms], list(ENGINES))
+    check("engine arms share the holder transport", {arm.transport for arm in arms}, {"holder"})
+    check("swiftterm arm owns SSSS", arms[0].owns(engine_capture.echoes[0]), True)
+    check("libghostty arm does not own SSSS", arms[1].owns(engine_capture.echoes[0]), False)
+    check("libghostty lost", engine_capture.lost_count(arms[1], {"ssss", "gggg"}), 1)
+    check("swiftterm lost", engine_capture.lost_count(arms[0], {"ssss", "gggg"}), 0)
+
+    engine_out = io.StringIO()
+    report(engine_capture, out=engine_out, idle_max=8.0, load_map=SELF_TEST_ENGINE_LOAD_MAP, arms=arms)
+    engine_text = engine_out.getvalue()
+    for needle in (
+        "terminal engine latency, milliseconds",
+        "(the same loop on both engines: the check)",
+        "(compares engines)",
+        "arms: swiftterm = ssss, libghostty = gggg",
+        "swiftterm all          n=4      p50=   2.000 p90=   4.000",
+        "libghostty all         n=4",
+        "libghostty lost        1 token(s) never came back",
+        "swiftterm idle         n=2",
+        "libghostty load        n=2",
+        "swiftterm unbanded     no load recorded: 0 (excluded from both bands)",
+        "swiftterm flatness     p90 load / p90 idle = 1.33x (WITHIN the 2x bound)",
+        "libghostty flatness    p90 load / p90 idle = 7.14x (OVER the 2x bound)",
+        "swiftterm absolute     p90 under load = 4.000 ms (WITHIN the 5 ms bound)",
+        "libghostty absolute    p90 under load = 5.000 ms (WITHIN the 5 ms bound)",
+        "swiftterm on screen",
+        "libghostty on screen",
+        "libghostty chunks      3 fed, 0 dropped past the ring",
+        "ENGINES (p90, libghostty / swiftterm",
+        "echo idle              libghostty 0.700 / swiftterm 3.000 = 0.23x"
+        " (libghostty 77% lower: MEETS the 20% bar)",
+        "echo load              libghostty 5.000 / swiftterm 4.000 = 1.25x (libghostty 25% higher)",
+        "draw on screen         libghostty 9.000 / swiftterm 10.000 = 0.90x"
+        " (libghostty 10% lower: SHORT of the 20% bar)",
+    ):
+        if needle not in engine_text:
+            failures.append(f"engine report is missing {needle!r}")
+    # The third holder panel, the tmux panel, and their lost token and
+    # refusal are another panel's traffic, and transport labels have no place.
+    for absent in ("90.000", "80.000", "99.000", "ZZZZ", "TTTT", "noview", "holder ", "tmux "):
+        if absent in engine_text:
+            failures.append(f"engine report printed {absent!r}")
+
+    # Unbanded, the comparison sets the pooled figures side by side instead.
+    engine_plain = io.StringIO()
+    report(engine_capture, out=engine_plain, arms=arms)
+    engine_plain_text = engine_plain.getvalue()
+    if "echo all               libghostty 5.000 / swiftterm 4.000 = 1.25x" not in engine_plain_text:
+        failures.append("unbanded engine report is missing the pooled echo comparison")
+    for absent in ("echo idle", "echo load", "flatness"):
+        if absent in engine_plain_text:
+            failures.append(f"unbanded engine report printed {absent!r}")
+
+    # SwiftTerm under its Metal renderer emits no draw lines: the comparison
+    # says there is nothing to compare rather than inventing a ratio.
+    metal = parse(
+        io.StringIO(
+            "".join(
+                line + "\n"
+                for line in SELF_TEST_ENGINE_LINES.splitlines()
+                if not ("draw " in line and "terminal=SSSS" in line)
+            )
+        )
+    )
+    metal_out = io.StringIO()
+    report(metal, out=metal_out, arms=arms)
+    if "draw on screen         (no samples on one arm)" not in metal_out.getvalue():
+        failures.append("engine report invented a draw comparison with one arm empty")
+
+    # The bar is inclusive, and the arms are refused alongside `terminals`.
+    check("ratio at the bar", "MEETS" in engine_comparison_line("x", [0.8], [1.0]), True)
+    check("ratio past the bar", "SHORT" in engine_comparison_line("x", [0.81], [1.0]), True)
+    try:
+        report(engine_capture, out=io.StringIO(), terminals={"ssss"}, arms=arms)
+        failures.append("report accepted engine arms together with terminals")
+    except ValueError:
+        pass
+
     if failures:
         for failure in failures:
             print(f"FAIL {failure}", file=sys.stderr)
@@ -765,7 +1100,8 @@ def main() -> int:
     parser.add_argument("logfile", nargs="?", help="`log show` output; defaults to stdin.")
     parser.add_argument(
         "--load-map",
-        help="JSON of {'<transport>': {'<seq>': <load1>}} written by the driver script.",
+        help="JSON of {'<arm>': {'<seq>': <load1>}} written by the driver script."
+        " An arm is a transport, or in engine mode an engine.",
     )
     parser.add_argument(
         "--idle-max",
@@ -776,6 +1112,16 @@ def main() -> int:
         "--terminals",
         help="Comma-separated terminal ids to restrict echo AND draw figures to."
         " Compared case-insensitively. Omit for a per-terminal breakdown instead.",
+    )
+    parser.add_argument(
+        "--swiftterm-terminal",
+        help="Engine mode: the holder terminal on SwiftTerm, reported as the swiftterm arm."
+        " Needs --ghostty-terminal.",
+    )
+    parser.add_argument(
+        "--ghostty-terminal",
+        help="Engine mode: the holder terminal on libghostty, reported as the libghostty arm."
+        " Needs --swiftterm-terminal.",
     )
     parser.add_argument("--self-test", action="store_true", help="Run the fixture self-test.")
     args = parser.parse_args()
@@ -790,6 +1136,30 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+
+    arms: list[Arm] | None = None
+    if args.swiftterm_terminal is not None or args.ghostty_terminal is not None:
+        if not args.swiftterm_terminal or not args.ghostty_terminal:
+            print(
+                "--swiftterm-terminal and --ghostty-terminal go together: an engine"
+                " comparison needs one terminal on each engine.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.swiftterm_terminal.lower() == args.ghostty_terminal.lower():
+            print(
+                "--swiftterm-terminal and --ghostty-terminal name the same terminal.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.terminals:
+            print(
+                "--terminals cannot be combined with engine mode, which already"
+                " restricts every figure to its two terminals.",
+                file=sys.stderr,
+            )
+            return 2
+        arms = engine_arms(args.swiftterm_terminal, args.ghostty_terminal)
 
     load_map = None
     if args.load_map:
@@ -819,7 +1189,7 @@ def main() -> int:
         )
         return 1
 
-    report(capture, idle_max=args.idle_max, load_map=load_map, terminals=terminals)
+    report(capture, idle_max=args.idle_max, load_map=load_map, terminals=terminals, arms=arms)
     return 0
 
 

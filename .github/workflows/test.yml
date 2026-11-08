@@ -390,6 +390,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/diag/terminal-latency-report.py --self-test
 
+      # The latency run's driver. Its tests replace every outside call: the
+      # engine check reads canned `log show` lines, and requests go to a temp
+      # directory. No `tbd`, `log`, `pgrep`, `ps` or app is reached.
+      - name: Test scripts/diag/terminal-latency-probe.py
+        if: ${{ !cancelled() }}
+        run: python3 -I -m unittest discover -s scripts/diag -p 'test_terminal_latency_probe.py'
+
       # The harness for the daemon layer check that the `lint` job runs. Its
       # fixtures are small sample trees of Swift that is scanned, never
       # compiled. It runs here under bash 5 and this runner's python3; the

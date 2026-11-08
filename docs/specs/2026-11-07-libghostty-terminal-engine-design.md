@@ -344,7 +344,11 @@ time, are a pair under the same load.
   - `SwiftTermEngine` fires them from `viewWillDraw` and `onFramePresented`, as today.
   - `GhosttyEngine` fires draw start when it builds a frame, and frame presented from the
     drawable's presented handler.
-- The `terminal-latency-probe.py` driver and its refusal reasons are unchanged.
+- The app's latency refusal reasons are unchanged. The `terminal-latency-probe.py`
+  driver has an engine mode (`--swiftterm-terminal`, `--ghostty-terminal`). Its two arms
+  are holder terminals, one on each engine, and the samples go to an arm by terminal id.
+  The driver confirms each arm's engine from the app's `terminalEngine` log lines before
+  and after the run.
 
 ## Testing
 
