@@ -3,7 +3,8 @@
 // STerm.swift (spikes/libghostty-vt/check/Sources/vtcheck/ on branch spike/libghostty-vt-poc).
 // The comparison and its category names are the proof of concept's, so a miss here names the
 // same category its handover.json does, except `mouseTracking` and `mouseEncoding`, which across
-// the engines take the place of its per-bit mouse modes.
+// the engines take the place of its per-bit mouse modes. Two libghostty terminals still compare
+// those bits too.
 import Foundation
 import SwiftTerm
 @testable import TBDGhosttyTerminal
@@ -79,7 +80,12 @@ struct HandoverSnap {
     var pending = false
     var cursorVisible = true
     var alt = false
+    /// The modes in `handoverComparedModes` other than the mouse modes, by name. A mode the
+    /// terminal gave no answer for is missing.
     var modes: [String: Bool] = [:]
+    /// libghostty's bit for each mouse mode, set ones included that a later mode replaced. nil for
+    /// SwiftTerm, which keeps only the ones in effect.
+    var mouseModeBits: [String: Bool]?
     /// The mouse tracking mode in effect: 9, 1000, 1002 or 1003, or 0 for none. nil when unread.
     var mouseTracking: Int?
     /// The mouse report encoding in effect: 1005, 1006, 1015 or 1016, or 0 for X10's. nil when unread.
@@ -104,6 +110,10 @@ struct HandoverSnap {
 /// compared as `mouseTracking` and `mouseEncoding`, the ones in effect.
 let handoverMouseTrackingModes: Set<Int> = [9, 1000, 1002, 1003]
 let handoverMouseEncodingModes: Set<Int> = [1005, 1006, 1015, 1016]
+
+private func isMouseMode(_ mode: (name: String, value: Int, decPrivate: Bool)) -> Bool {
+    mode.decPrivate && (handoverMouseTrackingModes.contains(mode.value) || handoverMouseEncodingModes.contains(mode.value))
+}
 
 /// The DEC private and ANSI modes compared. `decPrivate` false is ANSI.
 let handoverComparedModes: [(name: String, value: Int, decPrivate: Bool)] = [
@@ -201,7 +211,9 @@ private func compareCells(
 /// What is compared: every cell of the screen and the scrollback, soft wraps, the cursor's cell,
 /// pending wrap and visibility, the active screen, the modes in `handoverComparedModes`, the
 /// mouse tracking mode and encoding in effect, the scrolling region and margins, the pen and the
-/// kitty keyboard flags. What SwiftTerm cannot expose, and so is not compared:
+/// kitty keyboard flags. A mode one side gave no answer for differs. libghostty's bits for each
+/// mouse mode are compared when both sides have them. What SwiftTerm cannot expose, and so is not
+/// compared:
 ///
 /// - **Character sets and tab stops** – SwiftTerm keeps its G0 to G3 designations, the shift
 ///   state and the tab stops private.
@@ -245,8 +257,17 @@ func handoverCompare(_ expected: HandoverSnap, _ actual: HandoverSnap, history: 
     } else if marginsDiffer {
         tally.add("inertMargins", regionText)
     }
-    for (name, value) in expected.modes.sorted(by: { $0.key < $1.key }) {
-        if let other = actual.modes[name], other != value { tally.add("mode." + name, "\(value) vs \(other)") }
+    let unanswered = "no answer"
+    for name in Set(expected.modes.keys).union(actual.modes.keys).sorted() {
+        let lhs = expected.modes[name], rhs = actual.modes[name]
+        if lhs != rhs {
+            tally.add("mode." + name, "\(lhs.map { "\($0)" } ?? unanswered) vs \(rhs.map { "\($0)" } ?? unanswered)")
+        }
+    }
+    if let lhsBits = expected.mouseModeBits, let rhsBits = actual.mouseModeBits {
+        for (name, value) in lhsBits.sorted(by: { $0.key < $1.key }) where rhsBits[name] != value {
+            tally.add("mode." + name, "\(value) vs \(rhsBits[name].map { "\($0)" } ?? unanswered)")
+        }
     }
     let unread = "unread"
     if expected.mouseTracking != actual.mouseTracking {
@@ -345,9 +366,16 @@ extension GhosttyTerminal {
             snap.cursorY = cursor.row
             snap.pending = state.cursorPendingWrap
             snap.cursorVisible = state.isCursorVisible
+            var bits: [String: Bool] = [:]
             for mode in handoverComparedModes {
-                snap.modes[mode.name] = state.mode(UInt16(mode.value), ansi: !mode.decPrivate)
+                let value = state.mode(UInt16(mode.value), ansi: !mode.decPrivate)
+                if isMouseMode(mode) {
+                    bits[mode.name] = value
+                } else {
+                    snap.modes[mode.name] = value
+                }
             }
+            snap.mouseModeBits = bits
             snap.mouseTracking = state.mouseTrackingInEffect
             snap.mouseEncoding = state.mouseEncodingInEffect
             (snap.top, snap.bottom, snap.left, snap.right) = Self.region(state)
@@ -446,9 +474,10 @@ extension HandoverCell {
 
 extension HandoverSwiftTerm {
     /// Everything the comparison reads, in one locked reading. The modes are read with DECRQM,
-    /// which this fork answers for every compared mode. For the mouse modes it answers with the
-    /// one tracking mode and the one encoding in effect, so those fill `mouseTracking` and
-    /// `mouseEncoding` and stay out of `modes`.
+    /// which this fork answers for every compared mode. A mode it answers as unknown, or does not
+    /// answer, is left out of `modes`, and the comparison counts it. For the mouse modes it
+    /// answers with the one tracking mode and the one encoding in effect, so those fill
+    /// `mouseTracking` and `mouseEncoding`, nil when one of their modes went unanswered.
     func handoverSnap(history: Bool = true) -> HandoverSnap {
         locked { terminal in
             var snap = HandoverSnap()
@@ -479,16 +508,21 @@ extension HandoverSwiftTerm {
             snap.cursorY = terminal.buffer.y
             snap.pending = terminal.buffer.x >= terminal.cols
             snap.alt = terminal.isCurrentBufferAlternate
-            var tracking = 0, encoding = 0
+            // The mouse mode in effect after one more answer: nil once any of them went unanswered.
+            func inEffect(_ current: Int?, _ value: Int, _ isSet: Bool?) -> Int? {
+                guard let current, let isSet else { return nil }
+                return isSet ? value : current
+            }
+            var tracking: Int? = 0, encoding: Int? = 0
             for mode in handoverComparedModes {
-                guard let answer = collector.requestMode(mode.value, decPrivate: mode.decPrivate),
-                      answer == 1 || answer == 2 else { continue }
+                let answer = collector.requestMode(mode.value, decPrivate: mode.decPrivate)
+                let isSet: Bool? = answer == 1 ? true : answer == 2 ? false : nil
                 if mode.decPrivate, handoverMouseTrackingModes.contains(mode.value) {
-                    if answer == 1 { tracking = mode.value }
+                    tracking = inEffect(tracking, mode.value, isSet)
                 } else if mode.decPrivate, handoverMouseEncodingModes.contains(mode.value) {
-                    if answer == 1 { encoding = mode.value }
-                } else {
-                    snap.modes[mode.name] = answer == 1
+                    encoding = inEffect(encoding, mode.value, isSet)
+                } else if let isSet {
+                    snap.modes[mode.name] = isSet
                 }
             }
             snap.mouseTracking = tracking
