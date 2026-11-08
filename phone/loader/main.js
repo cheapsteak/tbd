@@ -7,7 +7,7 @@ import { systemClock, withVisibleTimeout } from './clock.js';
 import { LaptopConnection } from './connection.js';
 import { SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from './constants.js';
 import { AppFrame, readEnv } from './frame.js';
-import { KeyMissingError, unwrapPhoneKeyPair } from './keys.js';
+import { unwrapPhoneKeyPair } from './keys.js';
 import {
   deviceNameFromUserAgent, linkErrorMessage, normalizeDeviceName, readPairingLink, takePairingFragment,
 } from './links.js';
@@ -730,10 +730,9 @@ class LoaderPage {
     if (keyPair === undefined) {
       try {
         keyPair = await unwrapPhoneKeyPair(this.#subtle, record.wrapKey, record);
-      } catch (error) {
-        if (epoch !== this.#epoch) return;
-        if (error instanceof KeyMissingError) this.#showConnScreen('key-missing');
-        else this.#showConnScreen('reload');
+      } catch {
+        // unwrapPhoneKeyPair reports every failure as a KeyMissingError.
+        if (epoch === this.#epoch) this.#showConnScreen('key-missing');
         return;
       }
       if (epoch !== this.#epoch) return;

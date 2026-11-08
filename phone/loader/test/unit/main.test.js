@@ -528,6 +528,18 @@ test('a connection state that changes the screen under an open menu closes it to
   assert.equal(page.catcherShown(), false);
 });
 
+test('a key that does not unwrap shows the missing-key screen and opens no socket', async () => {
+  const record = await storedLaptop('acme-mbp');
+  record.wrappedKey[0] ^= 1;
+  const relay = relaySockets();
+  const page = bootPage({ laptops: [record], openSocket: (url) => relay.openSocket(url) });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => page.screen() === 'key-missing', 'the missing-key screen');
+  assert.ok(page.text().includes(MESSAGES.keyMissing('acme-mbp')));
+  assert.equal(relay.sockets.length, 0);
+});
+
 // --- presence, and a return to the page ---------------------------------------------------
 
 /** A presence fetch whose answers the test gives, call by call. */
