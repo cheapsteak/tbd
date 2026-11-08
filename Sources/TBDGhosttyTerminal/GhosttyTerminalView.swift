@@ -273,6 +273,38 @@ public final class GhosttyTerminalView: NSView {
     /// The view gained or lost keyboard focus.
     public var onFocusChanged: (@MainActor (Bool) -> Void)?
 
+    // MARK: Host hooks
+    //
+    // Each of these is nil by default, and while it is nil the view behaves as it does on its
+    // own. A host that embeds the view among others (the app's panels) sets the ones it needs.
+
+    /// Called on every left mouse-down, before the view handles it, so the host can move its own
+    /// focus to this view. Its answer is the host's to act on; the view handles the click either
+    /// way.
+    public var onMouseDownClaimFocus: (@MainActor () -> Bool)?
+
+    /// The view became the first responder (`true`) or stopped being it (`false`), however focus
+    /// moved. Unlike `onFocusChanged`, a window gaining or losing key status does not call it.
+    public var onFirstResponderChanged: (@MainActor (Bool) -> Void)?
+
+    /// Offered a paste's text, or a drop's, before the terminal brackets it. Returning `true`
+    /// consumes it: the view sends nothing. `false`, or no hook, pastes as usual.
+    public var onPaste: (@MainActor (String) -> Bool)?
+
+    /// ⌘W while this view is the first responder. Without it ⌘W goes on through the responder
+    /// chain to the menu.
+    public var onCloseTab: (@MainActor () -> Void)?
+
+    /// Called once, a main-queue turn after the first layout that gives the view a non-zero size,
+    /// so the grid it reports is the one the layout chose.
+    public var onReady: (@MainActor () -> Void)?
+
+    /// Called each time the view is put into a window.
+    public var onMovedToWindow: (@MainActor () -> Void)?
+
+    /// Whether the view takes the click that activates its window. On by default.
+    public var acceptsActivatingClick = true
+
     /// Whether Option acts as Meta (Option-b sends `ESC b`) rather than typing the layout's
     /// character (`∫`). On by default, as in SwiftTerm, so Option-Backspace deletes a word. Off is
     /// the macOS text default, and the only setting under which dead keys work.
@@ -308,8 +340,9 @@ public final class GhosttyTerminalView: NSView {
     private(set) var renderContext: TerminalRenderContext
 
     /// Whether `window` counts as visible. A seam: a test window is never on screen, so the tests
-    /// replace this to separate "hidden" from "occluded".
-    var windowVisibility: @MainActor (NSWindow) -> Bool = { $0.occlusionState.contains(.visible) }
+    /// replace this to separate "hidden" from "occluded". Set it before the view joins a window;
+    /// the view reads it when it moves to one and when the window's occlusion changes.
+    public var windowVisibility: @MainActor (NSWindow) -> Bool = { $0.occlusionState.contains(.visible) }
 
     // MARK: Private state
 
@@ -336,6 +369,7 @@ public final class GhosttyTerminalView: NSView {
     private var isTerminalFocused = false
     private var blinkTask: Task<Void, Never>?
     private weak var observedWindow: NSWindow?
+    private var didFireReady = false
     private let clock: any Clock<Duration>
     private lazy var selfRef = WeakRef(self)
 
@@ -405,7 +439,7 @@ public final class GhosttyTerminalView: NSView {
     public override var isFlipped: Bool { true }
     public override var acceptsFirstResponder: Bool { true }
     public override var wantsUpdateLayer: Bool { true }
-    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool { acceptsActivatingClick }
 
     // MARK: - Appearance
 
@@ -665,6 +699,11 @@ public final class GhosttyTerminalView: NSView {
             applyPendingGridResize()
             surface.markNeedsDisplay()
             renderNow()
+        } else if window == nil {
+            // A view outside a window gets no layout pass and no display tick, so nothing else
+            // would hand the terminal its new size. A host that sizes the view before it joins a
+            // window hears `onSizeChanged` at once, as it would from SwiftTerm.
+            applyPendingGridResize()
         } else {
             needsLayout = true
             requestFrame()
@@ -675,6 +714,12 @@ public final class GhosttyTerminalView: NSView {
         super.layout()
         updateAttachment()
         applyPendingGridResize()
+        if !didFireReady, bounds.width > 0, bounds.height > 0 {
+            didFireReady = true
+            let callback = onReady
+            onReady = nil
+            DispatchQueue.main.async { callback?() }
+        }
     }
 
     public override func viewWillStartLiveResize() {
@@ -771,6 +816,8 @@ public final class GhosttyTerminalView: NSView {
         mouseController.viewDidMoveToWindow()
         setFocused(window.isKeyWindow && window.firstResponder === self)
         requestFrame()
+        registerForDraggedTypes([.fileURL])
+        onMovedToWindow?()
     }
 
     private func stopObservingWindow() {
@@ -809,6 +856,13 @@ public final class GhosttyTerminalView: NSView {
     }
 
     // MARK: - The frame
+
+    /// Draws one frame now, outside the display link, if the view can be seen and anything
+    /// changed. For a host's instruments and tests, which cannot wait on a display link that an
+    /// offscreen window never runs.
+    public func drawFrameNow() {
+        renderTick()
+    }
 
     /// One display tick. Also the tests' entry point.
     ///
@@ -952,7 +1006,10 @@ public final class GhosttyTerminalView: NSView {
 
     public override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
-        if accepted { setFocused(window?.isKeyWindow ?? true) }
+        if accepted {
+            setFocused(window?.isKeyWindow ?? true)
+            onFirstResponderChanged?(true)
+        }
         return accepted
     }
 
@@ -963,6 +1020,7 @@ public final class GhosttyTerminalView: NSView {
             // that no longer takes the input method's keys.
             discardComposition()
             setFocused(false)
+            onFirstResponderChanged?(false)
         }
         return accepted
     }
@@ -986,9 +1044,49 @@ public final class GhosttyTerminalView: NSView {
         mouseController.copySelection()
     }
 
-    /// Edit > Paste: the pasteboard's text, bracketed and checked by libghostty.
+    /// Edit > Paste: the pasteboard's text, bracketed and checked by libghostty. `onPaste` sees
+    /// the text first.
     @objc func paste(_ sender: Any?) {
+        if let onPaste, let text = mouseController.pasteboard.string(forType: .string), !text.isEmpty,
+           onPaste(text) {
+            return
+        }
         mouseController.pasteFromPasteboard()
+    }
+
+    // MARK: - Drop
+
+    /// Text a drop produced, such as the shell-quoted paths of dropped files. `onPaste` sees it
+    /// first; otherwise it is sent as typed, unbracketed, as SwiftTerm sends a drop. Split from
+    /// `performDragOperation` so a test can drive it: `NSDraggingInfo` cannot be built in one.
+    public func deliverDroppedText(_ text: String) {
+        guard !text.isEmpty else { return }
+        if let onPaste, onPaste(text) { return }
+        send(Array(text.utf8))
+    }
+
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let fileURLsOnly: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: fileURLsOnly) else {
+            return []
+        }
+        return .copy
+    }
+
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let fileURLsOnly: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: fileURLsOnly)
+                as? [URL], !urls.isEmpty else { return false }
+        deliverDroppedText(urls.map { Self.shellQuoted($0.path) }.joined(separator: " "))
+        return true
+    }
+
+    /// `path` as one shell word: unchanged when every character is safe, single-quoted otherwise.
+    static func shellQuoted(_ path: String) -> String {
+        let safe = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-")
+        if !path.isEmpty, path.unicodeScalars.allSatisfy({ safe.contains($0) }) { return path }
+        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     // MARK: - Input forwarding
@@ -1020,10 +1118,18 @@ public final class GhosttyTerminalView: NSView {
     }
 
     public override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        forward(event) || super.performKeyEquivalent(with: event)
+        // `performKeyEquivalent` walks the whole view hierarchy, so only the first responder acts.
+        if let onCloseTab, window?.firstResponder === self, event.type == .keyDown,
+           event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "w" {
+            onCloseTab()
+            return true
+        }
+        return forward(event) || super.performKeyEquivalent(with: event)
     }
 
     public override func mouseDown(with event: NSEvent) {
+        _ = onMouseDownClaimFocus?()
         // Click-to-focus. `TerminalInputController.acceptsKeyDown` declines every event whose view
         // is not the first responder, so a pane that cannot take focus by being clicked cannot be
         // typed into at all.

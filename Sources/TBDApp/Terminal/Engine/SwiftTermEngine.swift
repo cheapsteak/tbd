@@ -147,6 +147,10 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
         }
     }
 
+    func deliverDroppedText(_ text: String) {
+        terminalView.deliverDroppedText(text)
+    }
+
     // MARK: - Input
 
     nonisolated func feed(_ bytes: ArraySlice<UInt8>) {

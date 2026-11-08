@@ -730,6 +730,22 @@ public final class GhosttyTerminal: @unchecked Sendable {
         }
     }
 
+    /// `withLocked`, plus the mouse encoder the view routes by, in the same lock hold: see
+    /// `GhosttyScreenAccess`. The access must not escape `body`.
+    ///
+    /// The encoder is made first, in a hold of its own, if no input has made it yet. Making it
+    /// writes nothing to the terminal.
+    public func withScreenAccess<T>(_ body: (GhosttyScreenAccess) throws -> T) rethrows -> T {
+        let binding = inputBindingIfOpen()
+        return try locked { core in
+            let state = GhosttyTerminalState(raw: core.raw, scoped: true)
+            defer { state.invalidate() }
+            let open = core.raw != nil
+            return try body(GhosttyScreenAccess(
+                state: state, raw: core.raw, binding: open ? binding : nil))
+        }
+    }
+
     /// While true, `writePty` and the effect callbacks are dropped, and the queries are not asked.
     /// For replaying a snapshot, whose replies must not reach the program.
     public var isMuted: Bool {

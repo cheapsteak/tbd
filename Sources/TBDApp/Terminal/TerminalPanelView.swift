@@ -2240,38 +2240,56 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 let location = event.locationInWindow
 
                 let consumed = MainActor.assumeIsolated { [weak self] in
-                    guard let self else { return false }
-                    guard let engine = ref.engine else { return false }
-                    let tv = engine.view
-                    guard tv.window != nil else { return false }
-                    // Short-circuit when a SwiftUI overlay is open on top of this
-                    // terminal — pass the event through so the overlay can handle it.
-                    if self.shouldSuppressEvents() { return false }
-                    let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return false }
-
-                    // Use actual scroll position so the session routes to the
-                    // correct pane. Grid math runs OUTSIDE the lock (view API);
-                    // the mouseMode guard and the sends ride one `withScreen`
-                    // block — the same calls, under the same lock, as
-                    // SwiftTerm's own native mouse-reporting path.
-                    let grid = engine.gridPosition(atWindowLocation: location)
-                    let cellHeight = engine.cellSize.height
-
-                    return engine.withScreen { screen -> Bool in
-                        let wheel = self.wheelAccumulator.reports(
-                            for: wheelEvent,
-                            cellHeight: cellHeight,
-                            mouseReporting: screen.mouseReporting,
-                            alternateScreen: screen.isAlternateScreen)
-                        guard wheel.claim else { return false }
-                        if let (col, row) = grid, wheel.lines != 0 {
-                            screen.sendWheelReports(lines: wheel.lines, column: col, row: row)
-                        }
-                        return true
-                    }
+                    guard let self, let engine = ref.engine else { return false }
+                    return self.consumeScrollWheel(wheelEvent, atWindowLocation: location, on: engine)
                 }
                 return consumed ? nil : event
+            }
+        }
+
+        /// The scroll monitor's decision for one wheel event over `engine`'s
+        /// view: true when the panel claims it, so the event never reaches the
+        /// view, and false when it passes through to whatever is under it.
+        ///
+        /// Engine-agnostic: the mode it routes by, the alternate-screen check
+        /// and the reports all come from `withScreen`, so a libghostty view is
+        /// routed exactly as a SwiftTerm one is, and the view's own wheel
+        /// handling runs only for an event this passes through. Split from the
+        /// monitor so a test can drive it, since a local monitor sees only
+        /// events the run loop dequeues.
+        @MainActor
+        func consumeScrollWheel(
+            _ wheelEvent: ScrollWheelAccumulator.Event,
+            atWindowLocation location: CGPoint,
+            on engine: any TerminalEngine
+        ) -> Bool {
+            let tv = engine.view
+            guard tv.window != nil else { return false }
+            // Short-circuit when a SwiftUI overlay is open on top of this
+            // terminal — pass the event through so the overlay can handle it.
+            if shouldSuppressEvents() { return false }
+            let point = tv.convert(location, from: nil)
+            guard tv.bounds.contains(point) else { return false }
+
+            // Use actual scroll position so the session routes to the
+            // correct pane. Grid math runs OUTSIDE the lock (view API);
+            // the mouseMode guard and the sends ride one `withScreen`
+            // block — the same calls, under the same lock, as
+            // SwiftTerm's own native mouse-reporting path.
+            let grid = engine.gridPosition(atWindowLocation: location)
+            let cellHeight = engine.cellSize.height
+
+            return engine.withScreen { screen -> Bool in
+                let wheel = self.wheelAccumulator.reports(
+                    for: wheelEvent,
+                    cellHeight: cellHeight,
+                    mouseReporting: screen.mouseReporting,
+                    alternateScreen: screen.isAlternateScreen)
+                guard wheel.claim else { return false }
+                if let (col, row) = grid, wheel.lines != 0 {
+                    screen.sendWheelReports(lines: wheel.lines, column: col, row: row)
+                }
+                return true
             }
         }
 

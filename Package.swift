@@ -460,6 +460,9 @@ let package = Package(
                 // just this target.
                 "TestProcessDefaults",
                 "TBDTerminalSerialization",
+                // The engine suites build a headless libghostty terminal to
+                // check what the engine does with its callbacks.
+                "TBDGhosttyTerminal",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             resources: [

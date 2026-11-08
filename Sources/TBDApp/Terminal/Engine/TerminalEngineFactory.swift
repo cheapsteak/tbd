@@ -1,20 +1,26 @@
 import AppKit
+import Metal
 import os
 
 private let engineLogger = Logger(subsystem: "com.tbd.app", category: "terminalEngine")
 
 /// Builds the terminal engine a coordinator runs.
 ///
-/// Every kind builds `SwiftTermEngine` for now. The libghostty engine, and the
-/// default-off `useGhosttyTerminalEngine` flag that chooses it, arrive with
-/// their own branch here. Until then a request for `.ghostty` falls back to
-/// SwiftTerm and logs the fallback the spec names, so the engine's `kind` and
-/// the log both say which engine a terminal really got.
+/// `.swiftTerm` always builds `SwiftTermEngine`. `.ghostty` builds
+/// `GhosttyEngine`, and falls back to SwiftTerm, logging the fallback the spec
+/// names, when libghostty cannot start: no Metal device, or a renderer or
+/// terminal that fails to build. The engine's `kind` and the log both say which
+/// engine a terminal really got.
 @MainActor
 enum TerminalEngineFactory {
     /// The kinds the engine contract suite runs over: every kind this build can
-    /// actually make. `nonisolated` so a test's `arguments:` can read it.
-    nonisolated static var availableKinds: [TerminalEngineKind] { [.swiftTerm] }
+    /// actually make on this machine. libghostty draws only with Metal, so on a
+    /// machine with no Metal device the suite runs SwiftTerm alone, where every
+    /// `.ghostty` request would fall back to it anyway. `nonisolated` so a
+    /// test's `arguments:` can read it.
+    nonisolated static var availableKinds: [TerminalEngineKind] {
+        MTLCreateSystemDefaultDevice() == nil ? [.swiftTerm] : [.swiftTerm, .ghostty]
+    }
 
     /// - Parameter onFallback: told the kind that was asked for and why it
     ///   could not be built, once per fallback. Defaults to the `.notice` log
@@ -30,8 +36,12 @@ enum TerminalEngineFactory {
         case .swiftTerm:
             return SwiftTermEngine(font: font, appearance: appearance, configuration: configuration)
         case .ghostty:
-            onFallback(.ghostty, "not built in this version")
-            return SwiftTermEngine(font: font, appearance: appearance, configuration: configuration)
+            do {
+                return try GhosttyEngine(font: font, appearance: appearance, configuration: configuration)
+            } catch {
+                onFallback(.ghostty, String(describing: error))
+                return SwiftTermEngine(font: font, appearance: appearance, configuration: configuration)
+            }
         }
     }
 

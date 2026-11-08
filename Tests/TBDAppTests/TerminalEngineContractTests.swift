@@ -13,10 +13,15 @@ import TestSupport
 /// Each test builds its engine through the factory, the way both coordinators
 /// do, and observes it only through the protocol and a recording
 /// `TerminalEngineDelegate`, so a second engine joins the suite by joining
-/// `availableKinds`. One check reaches below the protocol: the routing test
-/// drives a paste through `TBDTerminalView`'s drop entry, and records a known
-/// issue for an engine whose view has none. Design:
+/// `availableKinds`, which holds libghostty wherever this machine has a Metal
+/// device for it to draw with. The routing test drives its paste through the
+/// engine's headless drop entry, the one each view's real drop calls. Design:
 /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+///
+/// **Report payloads are compared parsed.** SwiftTerm forwards a report's raw
+/// bytes and libghostty hands over parsed fields that the engine writes back,
+/// so the two can differ in field order while meaning the same thing; the
+/// daemon reads both with `ProgramStatusParser`, and so do these checks.
 ///
 /// **Timing.** Every delegate method arrives on main, and a callback a parse
 /// provokes is queued there during the parse and delivered a later main-queue
@@ -46,7 +51,7 @@ struct TerminalEngineContractTests {
 
     private static let da1 = "\u{1b}[c"
     private static let probe = "\u{1b}]7501;?\u{07}"
-    private static let reportData = "state=working;app=claude-code"
+    private static let reportData = "state=working:app=claude-code"
     private static var report: String { "\u{1b}]7501;\(reportData)\u{07}" }
     private static let notify = "\u{1b}]777;notify;Contract;Body\u{07}"
     private static var probeReplyBytes: [UInt8] { Array(ProgramStatusProtocol.probeReply.utf8) }
@@ -56,6 +61,9 @@ struct TerminalEngineContractTests {
     /// returned.
     private func makeFixture(kind: TerminalEngineKind) async -> EngineFixture {
         let fixture = EngineFixture(kind: kind)
+        // A kind in `availableKinds` that fell back would run this suite
+        // against SwiftTerm twice and pass.
+        #expect(fixture.engine.kind == kind, "asked for \(kind), the factory built \(fixture.engine.kind)")
         await settle()
         fixture.recorder.reset()
         return fixture
@@ -186,7 +194,7 @@ struct TerminalEngineContractTests {
         #expect(fixture.recorder.notifications.count == 1)
         #expect(fixture.recorder.notifications.first?.title == "Contract")
         #expect(fixture.recorder.notifications.first?.body == "Body")
-        #expect(fixture.recorder.programStatusPayloads == [Array(Self.reportData.utf8)])
+        #expect(Self.parsed(fixture.recorder.programStatusPayloads) == [Self.parsedReport])
     }
 
     // MARK: - Parser replies
@@ -425,7 +433,7 @@ struct TerminalEngineContractTests {
         }
         guard delivered else { return }
         await settle()
-        #expect(fixture.recorder.programStatusPayloads == [Array(Self.reportData.utf8)])
+        #expect(Self.parsed(fixture.recorder.programStatusPayloads) == [Self.parsedReport])
     }
 
     // MARK: - Routing
@@ -435,10 +443,8 @@ struct TerminalEngineContractTests {
     ///
     /// A control-mode paste is driven as a drop, which asks the same paste
     /// hook a pasteboard paste does, because a paste reads the general
-    /// pasteboard and a test must not write it. The drop needs a headless
-    /// entry on the engine's view, which only `TBDTerminalView` has today;
-    /// for any other view the paste half is recorded as a known issue, until
-    /// the libghostty engine's PR gives its view an entry of its own.
+    /// pasteboard and a test must not write it. The drop goes through the
+    /// engine's `deliverDroppedText`, the entry each view's real drop calls.
     @Test("With click routing and paste interception off, no click, focus change or paste reaches the delegate; on, each does",
           arguments: TerminalEngineFactory.availableKinds)
     func routingOffReportsNoClickFocusOrPaste(kind: TerminalEngineKind) async throws {
@@ -465,16 +471,9 @@ struct TerminalEngineContractTests {
         #expect(clickCalls.contains("mouseDownClaimsFocus"), "a click with routing on must ask the delegate; observed \(clickCalls)")
         #expect(clickCalls.contains("focusChanged"), "a focus change with routing on must be reported; observed \(clickCalls)")
 
-        guard let dropTarget = fixture.engine.view as? TBDTerminalView else {
-            withKnownIssue("this engine's view has no headless drop entry, so its paste interception is unchecked") {
-                Issue.record("no headless drop entry for \(kind)")
-            }
-            return
-        }
-
         fixture.recorder.reset()
         fixture.engine.setControlModePasteInterception(enabled: false)
-        dropTarget.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
+        fixture.engine.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
         await settle()
         #expect(!fixture.recorder.calls.contains("controlModePaste"),
                 "paste interception is off, yet the paste was offered: \(fixture.recorder.calls)")
@@ -482,7 +481,7 @@ struct TerminalEngineContractTests {
         // Positive control: on, the same drop is offered to the delegate.
         fixture.recorder.reset()
         fixture.engine.setControlModePasteInterception(enabled: true)
-        dropTarget.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
+        fixture.engine.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
         await settle()
         #expect(fixture.recorder.calls.contains("controlModePaste"),
                 "a paste with interception on must be offered; observed \(fixture.recorder.calls)")
@@ -490,10 +489,12 @@ struct TerminalEngineContractTests {
 
     // MARK: - Factory
 
-    /// Not parameterised: it is about the kind this build cannot make. The
-    /// fallback is observed through the factory's `onFallback`, whose default
-    /// logs it at `.notice`.
-    @Test("A libghostty request in a build without it yields SwiftTerm and reports the fallback once; a SwiftTerm request reports none")
+    /// Not parameterised: it is about what a libghostty request yields on this
+    /// machine. With a Metal device it is libghostty and no fallback; without
+    /// one it is SwiftTerm and one fallback that says why. The fallback is
+    /// observed through the factory's `onFallback`, whose default logs it at
+    /// `.notice`.
+    @Test("A libghostty request yields libghostty where it can start and SwiftTerm, reported once, where it cannot; a SwiftTerm request reports none")
     func ghosttyRequestFallsBackToSwiftTerm() {
         let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract")
         defer { suite.tearDown() }
@@ -506,10 +507,15 @@ struct TerminalEngineContractTests {
             appearance: appearance,
             configuration: TerminalEngineConfiguration(),
             onFallback: { fallbacks.append((requested: $0, reason: $1)) })
-        #expect(ghostty.kind == .swiftTerm)
-        #expect(fallbacks.count == 1)
-        #expect(fallbacks.first?.requested == .ghostty)
-        #expect(fallbacks.first?.reason == "not built in this version")
+        if TerminalEngineFactory.availableKinds.contains(.ghostty) {
+            #expect(ghostty.kind == .ghostty)
+            #expect(fallbacks.isEmpty, "a libghostty request that could start reported a fallback: \(fallbacks)")
+        } else {
+            #expect(ghostty.kind == .swiftTerm)
+            #expect(fallbacks.count == 1)
+            #expect(fallbacks.first?.requested == .ghostty)
+            #expect(fallbacks.first?.reason.contains("Metal") == true, "reason: \(fallbacks.first?.reason ?? "none")")
+        }
 
         fallbacks = []
         let swiftTerm = TerminalEngineFactory.make(
@@ -523,6 +529,15 @@ struct TerminalEngineContractTests {
     }
 
     // MARK: - Helpers
+
+    /// The fixture report, parsed as the daemon parses it.
+    private static var parsedReport: ProgramStatusPayload? {
+        ProgramStatusParser.parse(Array(reportData.utf8))
+    }
+
+    private static func parsed(_ payloads: [[UInt8]]) -> [ProgramStatusPayload?] {
+        payloads.map { ProgramStatusParser.parse($0) }
+    }
 
     /// The delegate methods only click routing reaches.
     private static let clickRoutedCalls: Set<String> = ["mouseDownClaimsFocus", "focusChanged"]
