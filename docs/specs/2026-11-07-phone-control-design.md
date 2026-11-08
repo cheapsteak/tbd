@@ -818,20 +818,27 @@ Research: `ci-layout.md`.
   `test.yml` carries nothing phone-specific, because the release workflow, the flake fixer and the
   remote verification valve all read its result.
 - **Loader deploy, `phone-loader-deploy.yml`:**
-  - runs on pushes to `main` that touch `phone/loader/**` or the workflow itself, and on dispatch.
-    No pull request event can start it;
-  - a `verify` job runs `npm ci`, `npm run typecheck` and `npm test` in `phone/`. It does not run
-    `vectors:check`, which only `phone.yml`'s `loader` job runs. A PR that edits only this workflow
-    runs no phone part, so the classifier's harness pins `verify`'s Node setup and working directory
-    to the `loader` job's, and requires each of its npm commands to be one the `loader` job runs;
+  - runs on pushes to `main` that touch `phone/loader/**`, the staging script
+    `phone/scripts/stage-loader.sh` or the workflow itself, and on dispatch. No pull request event
+    can start it;
+  - a `verify` job runs `npm ci`, `npm run typecheck`, `npm test` and `npm run vendor:check` in
+    `phone/`. It does not run `vectors:check`, which only `phone.yml`'s `loader` job runs. A PR
+    that edits only this workflow runs no phone part, so the classifier's harness pins `verify`'s
+    Node setup and working directory to the `loader` job's, and requires each of its npm commands
+    to be one the `loader` job runs;
   - a `dispatch` job runs only after `verify` passed, only while the repository variable
     `PHONE_LOADER_DEPLOY_ENABLED` is `true`, and only from `main`, in an environment whose
     deployment branches admit only `main`;
   - that job mints a GitHub App token scoped to the loader repo, whose one permission is Actions:
     write, and asks the loader repo's deploy workflow to publish this commit;
-  - the loader repo's workflow checks that the commit is on `main` and that its loader is still the
-    newest, then publishes with GitHub's Pages deploy action. A leaked token can start, cancel,
-    re-run or disable the loader repo's workflow runs, but cannot change what is served.
+  - the loader repo's workflow checks that the commit is on `main`, that its `phone/loader` tree
+    equals `main`'s, and that its staging script's blob equals `main`'s too, since the script
+    decides which files are served and what it writes into them. Only then does it stage the site
+    with that script and publish it with GitHub's Pages deploy action. A commit whose loader or
+    staging script differs from `main`'s has a newer one on `main`, whose own deploy publishes
+    it, so a re-run or a late dispatch of an older commit publishes nothing. A leaked token can
+    start, cancel, re-run or disable the loader repo's workflow runs, but cannot change what is
+    served.
 
 ## 16. Build order
 
