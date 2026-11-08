@@ -201,6 +201,16 @@ extension GhosttyTerminal {
         }
     }
 
+    /// Whether wheel rows would scroll the viewport rather than reach the program, under one lock:
+    /// nothing is reported and the primary screen is showing, as `MouseEncoder.wheel` decides.
+    /// Read from what libghostty reports, like `isMouseReporting`, not from the mode bits. True
+    /// once the terminal is closed, when the wheel does nothing anyway.
+    var wheelScrollsViewport: Bool {
+        input("reading where the wheel goes", fallback: true) { raw, binding in
+            !binding.mouseEncoder.isReporting(terminal: raw) && !GhosttyTerminalState(raw: raw).isAlternateScreen
+        }
+    }
+
     /// Whole rows of wheel scrolling. With tracking on the reports are returned in `.report`. With
     /// tracking off, on the alternate screen under `?1007`, the arrow key and how many of it are
     /// returned in `.cursorKeys`; elsewhere the viewport is scrolled under the lock and the caller

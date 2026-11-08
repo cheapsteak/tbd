@@ -507,8 +507,9 @@ final class MouseController: NSObject {
         let geometry = pushedGeometry ?? pixelGeometry(of: view)
         // The arithmetic depends on where the rows go, which the terminal decides again under its
         // lock as it encodes. A mode change between the two reads costs one event the other
-        // arithmetic, nothing more.
-        let movesViewport = view.terminal.withLocked { !$0.isMouseTrackingEnabled && !$0.isAlternateScreen }
+        // arithmetic, nothing more. Both reads go by what libghostty reports, not the mode bits:
+        // after `?1000h ?1003h ?1003l` the bits say tracking, but the rows scroll the viewport.
+        let movesViewport = view.terminal.wheelScrollsViewport
         let rows = wheelRows(
             deltaY: deltaY,
             hasPreciseDeltas: hasPreciseDeltas,

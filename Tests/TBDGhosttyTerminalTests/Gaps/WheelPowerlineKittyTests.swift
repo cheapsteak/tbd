@@ -209,6 +209,26 @@ struct WheelPowerlineKittyTests {
         #expect(recorder.sent.isEmpty, "scrolling the primary screen sent \(recorder.sent)")
     }
 
+    /// After `?1000h ?1003h ?1003l` the 1000 bit is still set, but libghostty reports nothing, so
+    /// the wheel scrolls the viewport, and at the viewport's speed: a notch of 3 lines moves it 3
+    /// rows, not the one row a notch is when it goes to the program.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aNotchAfterTrackingWasResetScrollsTheViewportAtItsSpeed() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: (0..<60).map { "line \($0)\r\n" }.joined()
+            + "\u{1b}[?1006h\u{1b}[?1000h\u{1b}[?1003h\u{1b}[?1003l")
+        let bitStillSet = terminal.withLocked { $0.isMouseTrackingEnabled }
+        try #require(bitStillSet, "the 1000 bit is not set, so this proves nothing")
+        let reporting = terminal.isMouseReporting
+        try #require(!reporting, "libghostty still reports the mouse, so this proves nothing")
+
+        let before = try scrollMetrics(of: terminal).offset
+        let outcome = Self.wheel(view, deltaY: 3, precise: false, phase: .unphased, at: 1)
+        let moved = try scrollMetrics(of: terminal).offset - before
+        #expect(moved == -3, "a wheel-up notch of 3 lines moved the viewport \(moved) rows: \(describe(outcome))")
+        #expect(recorder.sent.isEmpty, "the notch sent \(recorder.sent)")
+    }
+
     /// A flick's momentum tail, 60 events of two lines each within 100 ms, types no more arrow keys
     /// than the bound lets through: the burst at once, then 100 a second, so at most 16 of the 120.
     /// The keys over the bound are dropped, not queued: an event after the tail sends only its own.
