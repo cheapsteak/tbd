@@ -72,3 +72,21 @@ test('applyTheme sets data-theme on the root element', () => {
   applyTheme(doc as unknown as Document, 'light');
   assert.equal(doc.documentElement.dataset.theme, 'light');
 });
+
+test('applyTheme writes data-theme only when the scheme changes', () => {
+  // A dataset that counts its writes, as the keyboard's env messages would make them.
+  const writes: string[] = [];
+  let theme: string | undefined;
+  const dataset = {
+    get theme() { return theme; },
+    set theme(value) { writes.push(value!); theme = value; },
+  };
+  const doc = { documentElement: { dataset } } as unknown as Document;
+  applyTheme(doc, 'dark');
+  applyTheme(doc, 'dark');
+  applyTheme(doc, 'dark');
+  assert.deepEqual(writes, ['dark']);
+  applyTheme(doc, 'light');
+  applyTheme(doc, 'light');
+  assert.deepEqual(writes, ['dark', 'light']);
+});

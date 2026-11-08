@@ -52,9 +52,14 @@ export function layoutVars(env: HostEnv | null): Record<LayoutVar, string> {
   };
 }
 
-/** Sets the theme the app's CSS keys on: `[data-theme="light"]` or `[data-theme="dark"]`. */
+/**
+ * Sets the theme the app's CSS keys on: `[data-theme="light"]` or `[data-theme="dark"]`. The
+ * loader posts an env once a frame while the keyboard moves, so it writes the attribute only
+ * when the scheme differs from the one set.
+ */
 export function applyTheme(doc: Document, scheme: 'light' | 'dark'): void {
-  doc.documentElement.dataset.theme = scheme;
+  const { dataset } = doc.documentElement;
+  if (dataset.theme !== scheme) dataset.theme = scheme;
 }
 
 /**
