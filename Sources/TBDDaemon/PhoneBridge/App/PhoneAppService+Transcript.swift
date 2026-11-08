@@ -137,9 +137,12 @@ actor TranscriptDeltaRelay {
 /// all with a `seq` at most its own. The feed and the prompt feed ran on
 /// while the phone was away, so the replay carries what the phone missed,
 /// the current prompt set included. Any other open starts over from the
-/// tail. The resume check runs right after a local tab's checks, before
-/// anything is built: a resumed remote open makes no remote call and builds
-/// no follower, since the kept feed's own follower runs on.
+/// tail. A resume first passes the checks a fresh open makes, with the same
+/// refusals (`checkTranscript`), so a phone that comes back inside the grace
+/// keeps a feed only for a session the laptop still shows it. The resume
+/// check runs right after them, before anything is built: a resumed remote
+/// open builds no follower and makes no sync, since the kept feed's own
+/// follower runs on.
 ///
 /// **Order.** Opens and closes take effect in the order the phone sent them,
 /// though their handlers can finish in any order. `handleAppMessage` stamps
@@ -169,9 +172,7 @@ extension PhoneAppService {
             Self.logger.fault("Phone transcript: an open arrived with no stamp")
             throw PhoneAppError(code: .internalError, message: Self.internalErrorReason)
         }
-        if case .local(let terminalID) = params.session {
-            try await checkLocalTranscript(terminalID)
-        }
+        try await checkTranscript(params.session)
         if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
             return .onQueue { service in
                 service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
@@ -180,7 +181,9 @@ extension PhoneAppService {
         let source: TranscriptFeedSource
         switch params.session {
         case .remote(let provider, let sessionID):
-            source = .remote(try await remoteTranscriptFollower(provider: provider, sessionID: sessionID))
+            try Task.checkCancellation()
+            source = .remote(RemoteTranscriptFollower(
+                provider: provider, sessionID: sessionID, actions: actions, clock: clock))
         case .local(let terminalID):
             source = .local(terminalID: terminalID, resolvePath: { [weak self] in
                 await self?.transcriptPath(of: terminalID)
@@ -198,6 +201,18 @@ extension PhoneAppService {
         return .onQueue { service in
             service.queueOpenedTranscript(
                 params, feed: feed, token: token, stamp: stamp, page: page, requestID: requestID, deviceID: deviceID)
+        }
+    }
+
+    /// Checks that the phone may open `session`'s transcript, for a fresh
+    /// open and a resume alike: a local tab (`checkLocalTranscript`) or a
+    /// remote session (`checkRemoteTranscript`) the laptop still shows it.
+    private nonisolated func checkTranscript(_ session: PhoneSessionRef) async throws {
+        switch session {
+        case .local(let terminalID):
+            try await checkLocalTranscript(terminalID)
+        case .remote(let provider, let sessionID):
+            try await checkRemoteTranscript(provider: provider, sessionID: sessionID)
         }
     }
 
@@ -219,15 +234,13 @@ extension PhoneAppService {
         }
     }
 
-    /// The follower of a remote session whose transcript the phone may open.
-    /// Its provider must be registered (`not_found` otherwise) and declare
+    /// Checks that the phone may open a remote session's transcript. Its
+    /// provider must be registered (`not_found` otherwise) and declare
     /// `transcript.read`, as the sessions list reads it (`unsupported`
     /// otherwise), and the session must be in the laptop's remote session
     /// list and not dismissed, as the sessions list shows it (`not_found`
     /// otherwise). A list the daemon refuses to give is `refused`.
-    private nonisolated func remoteTranscriptFollower(
-        provider: String, sessionID: String
-    ) async throws -> RemoteTranscriptFollower {
+    private nonisolated func checkRemoteTranscript(provider: String, sessionID: String) async throws {
         let capabilities = try await remoteCapabilities(ofProvider: provider)
         try Self.requireCapability(capabilities.transcript, orElse: Self.noTranscriptReadReason)
         let response = try await actions.phoneRemoteSessions()
@@ -235,8 +248,6 @@ extension PhoneAppService {
         guard sessions.contains(where: { $0.provider == provider && $0.payload.id == sessionID && !$0.dismissed }) else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
         }
-        try Task.checkCancellation()
-        return RemoteTranscriptFollower(provider: provider, sessionID: sessionID, actions: actions, clock: clock)
     }
 
     /// Whether `params` may keep the device's open feed: the connection's

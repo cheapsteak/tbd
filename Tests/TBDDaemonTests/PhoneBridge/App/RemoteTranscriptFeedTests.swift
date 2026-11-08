@@ -434,31 +434,14 @@ struct RemoteTranscriptFeedTests {
     }
 
     /// A resumed open keeps the feed, whose follower ran on while the phone
-    /// was away, and makes no remote call: no provider list, no session list,
-    /// and no follower of its own.
-    @Test func aResumedOpenMakesNoRemoteCall() async throws {
+    /// was away. It builds no follower of its own, so it makes no sync.
+    @Test func aResumedOpenKeepsTheFeedAndBuildsNoFollower() async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
         let cache = try FakeCache(CacheLine.conversation("m", messages: 2))
         defer { cache.remove() }
-        try Self.serve(h, cache: cache, prompt: Self.makePrompt)
-        let first = try await Self.liveConnection(h)
-        let opened = try await Self.open(h, id: "open", on: first)
-        #expect(!opened.resumed)
-        // The prompt feed's first read of the session list is behind us.
-        _ = try await Self.promptEvent(0, in: first)
-        let feed = try #require(await h.service.transcriptFeed(for: deviceID))
-        let streamID = try #require(await h.service.streamID(for: deviceID))
-        let seq = try #require(await h.service.lastSeq(for: deviceID))
-
-        await h.service.phoneDisconnected(h.peer)
-        let outbox = await h.connect()
-        let (subscribed, bytes) = try await h.request(
-            .sessionsSubscribe, params: SessionsSubscribeParams(stream: streamID, sinceSeq: seq), on: outbox)
-        #expect(subscribed.error == nil)
-        let result = try JSONDecoder().decode(PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bytes).result
-        #expect(result.replayed)
-        let callsBefore = h.actions.calls.count
+        let (feed, outbox) = try await Self.reconnectToReplay(h, cache: cache)
+        let syncsBefore = h.actions.remoteSyncs.count
 
         let resumed = try await Self.open(h, id: "resume", resume: true, on: outbox)
 
@@ -466,10 +449,43 @@ struct RemoteTranscriptFeedTests {
         #expect(resumed.page == nil)
         let kept = await h.service.transcriptFeed(for: deviceID)
         #expect(kept === feed)
-        let methods = h.actions.calls.dropFirst(callsBefore).map(\.method)
-        let remoteReads = methods.filter { method in method == .remoteProviders || method == .remoteSessions }
-        #expect(remoteReads.isEmpty)
+        #expect(h.actions.remoteSyncs.count == syncsBefore)
         await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// A resume makes the checks a fresh open makes, with its refusals: a
+    /// session the laptop dismissed while the phone was away is `not_found`,
+    /// and nothing resumes.
+    @Test func aResumeOfASessionTheLaptopDismissedIsNotFound() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let cache = try FakeCache(CacheLine.conversation("m", messages: 2))
+        defer { cache.remove() }
+        let (_, outbox) = try await Self.reconnectToReplay(h, cache: cache)
+        try Self.listSession(h, prompt: Self.makePrompt, dismissed: true)
+
+        let bytes = try await Self.ask(
+            h, .transcriptOpen, id: "resume", Self.openParams(Self.session, resume: true), on: outbox)
+
+        #expect(try Self.error(bytes) == PhoneAppError(code: .notFound, message: PhoneAppService.noSuchSessionReason))
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
+    }
+
+    /// A resume of a session whose provider no longer declares
+    /// `transcript.read` is `unsupported`, as a fresh open is, and nothing
+    /// resumes.
+    @Test func aResumeWithoutTranscriptReadIsUnsupported() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let cache = try FakeCache(CacheLine.conversation("m", messages: 2))
+        defer { cache.remove() }
+        let (_, outbox) = try await Self.reconnectToReplay(h, cache: cache)
+        try h.actions.registerProvider(Self.provider, capabilities: [RemoteCapability.answer])
+
+        let bytes = try await Self.ask(
+            h, .transcriptOpen, id: "resume", Self.openParams(Self.session, resume: true), on: outbox)
+
+        #expect(try Self.error(bytes) == PhoneAppError(
+            code: .unsupported, message: PhoneAppService.noTranscriptReadReason))
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
     /// A prompt read that waits for the phone's answer to a prompt that
@@ -619,6 +635,34 @@ struct RemoteTranscriptFeedTests {
             provider: provider, payload: RemoteSessionPayload(id: "rs-1", state: .running, pendingPrompt: prompt),
             gone: false, dismissed: dismissed, lastSeen: Date(timeIntervalSince1970: 1_800_000_000))
         h.actions.respond(to: .remoteSessions, with: try RPCResponse(result: RemoteSessionsResult(sessions: [info])))
+    }
+
+    /// Opens the remote session's transcript on a live connection, then
+    /// reconnects inside the grace and subscribes again from the old stream's
+    /// place, so the subscribe replays and a resumed open may keep the feed.
+    /// Returns the open feed and the new connection.
+    private static func reconnectToReplay(
+        _ h: PhoneServiceHarness, cache: FakeCache
+    ) async throws -> (feed: TranscriptFeed, outbox: CapturingOutbox) {
+        let deviceID = h.peer.deviceID
+        try Self.serve(h, cache: cache, prompt: Self.makePrompt)
+        let first = try await Self.liveConnection(h)
+        let opened = try await Self.open(h, id: "open", on: first)
+        #expect(!opened.resumed)
+        // The prompt feed's first read of the session list is behind us.
+        _ = try await Self.promptEvent(0, in: first)
+        let feed = try #require(await h.service.transcriptFeed(for: deviceID))
+        let streamID = try #require(await h.service.streamID(for: deviceID))
+        let seq = try #require(await h.service.lastSeq(for: deviceID))
+
+        await h.service.phoneDisconnected(h.peer)
+        let outbox = await h.connect()
+        let (subscribed, bytes) = try await h.request(
+            .sessionsSubscribe, params: SessionsSubscribeParams(stream: streamID, sinceSeq: seq), on: outbox)
+        #expect(subscribed.error == nil)
+        let result = try JSONDecoder().decode(PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bytes).result
+        #expect(result.replayed)
+        return (feed, outbox)
     }
 
     /// Connects the phone and makes the connection live with a fresh
