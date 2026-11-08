@@ -267,10 +267,14 @@ between engines. So both engines must look the same to the program.
 - **libghostty cannot start a terminal** (no Metal device, an init error):
   - The factory builds a SwiftTerm terminal instead, for that terminal only.
   - It logs a `.notice` on `com.tbd.app` / `terminalEngine` saying which engine was
-    requested, that it fell back, and why.
-  - A terminal that does start on libghostty logs "libghostty engine active" at
-    `.notice`. That line, not the absence of an error, is the evidence that the engine
+    requested, for which terminal, that it fell back, and why.
+  - A terminal that does start on libghostty logs "libghostty engine active for <id>"
+    at `.notice`. That line, not the absence of an error, is the evidence that the engine
     engaged.
+  - While the flag is on, a terminal built on SwiftTerm, after a switch or a fallback
+    included, logs "SwiftTerm engine active for <id>" at `.notice`. So the latest of
+    these lines for a terminal names its engine. With the flag off, a SwiftTerm build
+    logs nothing.
 - **The flag changes while terminals are open** – it takes effect only when a terminal is
   created. Open terminals keep their engine until they close, or until the per-terminal
   switch below moves them. Mixed engines are safe, because the daemon is always SwiftTerm
@@ -347,8 +351,8 @@ time, are a pair under the same load.
 - The app's latency refusal reasons are unchanged. The `terminal-latency-probe.py`
   driver has an engine mode (`--swiftterm-terminal`, `--ghostty-terminal`). Its two arms
   are holder terminals, one on each engine, and the samples go to an arm by terminal id.
-  The driver confirms each arm's engine from the app's `terminalEngine` log lines before
-  and after the run.
+  The driver confirms each arm's engine from the latest "engine active" line for its id,
+  before and after the run.
 
 ## Testing
 

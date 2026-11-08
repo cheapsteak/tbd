@@ -562,8 +562,8 @@ struct TerminalEngineContractTests {
     /// Not parameterised: it is about what a libghostty request yields on this
     /// machine. With a Metal device it is libghostty and no fallback; without
     /// one it is SwiftTerm and one fallback that says why. The fallback is
-    /// observed through the factory's `onFallback`, whose default logs it at
-    /// `.notice`.
+    /// observed through the factory's `onFallback`; the factory also logs it
+    /// at `.notice`.
     @Test("A libghostty request yields libghostty where it can start and SwiftTerm, reported once, where it cannot; a SwiftTerm request reports none")
     func ghosttyRequestFallsBackToSwiftTerm() {
         let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract")

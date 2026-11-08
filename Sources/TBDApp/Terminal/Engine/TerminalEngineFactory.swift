@@ -65,29 +65,39 @@ enum TerminalEngineFactory {
         }
     }
 
+    /// - Parameter experimentEnabled: whether `useGhosttyTerminalEngine` is
+    ///   on. While it is, every build logs which engine it got, SwiftTerm
+    ///   included, so the latest line for a terminal names its engine. Off,
+    ///   a SwiftTerm build logs nothing.
     /// - Parameter makeGhostty: builds the libghostty engine; the default is
     ///   `GhosttyEngine`'s initializer.
     /// - Parameter onFallback: told the kind that was asked for and why it
-    ///   could not be built, once per fallback. Defaults to the `.notice` log
-    ///   line; a test passes its own to observe the fallback.
+    ///   could not be built, once per fallback, beside the `.notice` line the
+    ///   factory logs for it. A test passes its own to observe the fallback.
     static func make(
         kind: TerminalEngineKind,
         font: NSFont,
         appearance: AppearanceSettings,
         configuration: TerminalEngineConfiguration,
+        experimentEnabled: Bool = false,
         makeGhostty: GhosttyMaker = TerminalEngineFactory.makeGhosttyEngine,
-        onFallback: (_ requested: TerminalEngineKind, _ reason: String) -> Void = TerminalEngineFactory.logFallback
+        onFallback: (_ requested: TerminalEngineKind, _ reason: String) -> Void = { _, _ in }
     ) -> any TerminalEngine {
         switch kind {
         case .swiftTerm:
+            if experimentEnabled { logActive(.swiftTerm, configuration: configuration) }
             return SwiftTermEngine(font: font, appearance: appearance, configuration: configuration)
         case .ghostty:
             do {
                 let engine = try makeGhostty(font, appearance, configuration)
-                logActive(configuration: configuration)
+                logActive(.ghostty, configuration: configuration)
                 return engine
             } catch {
-                onFallback(.ghostty, Self.reason(for: error))
+                let reason = Self.reason(for: error)
+                onFallback(.ghostty, reason)
+                logFallback(configuration: configuration, reason: reason)
+                // A `.ghostty` request means the experiment is on.
+                logActive(.swiftTerm, configuration: configuration)
                 return SwiftTermEngine(font: font, appearance: appearance, configuration: configuration)
             }
         }
@@ -106,16 +116,30 @@ enum TerminalEngineFactory {
     }
 
     /// The fallback notice the spec names. `.ghostty` is the only kind that
-    /// falls back, so the line names libghostty.
-    nonisolated static func logFallback(requested: TerminalEngineKind, reason: String) {
+    /// falls back, so the line names libghostty. Like `logActive`'s lines,
+    /// `scripts/diag/terminal-latency-probe.py` matches it word for word.
+    nonisolated static func logFallback(configuration: TerminalEngineConfiguration, reason: String) {
+        let terminal = describe(configuration)
         engineLogger.notice(
-            "libghostty engine unavailable, fell back to SwiftTerm: \(reason, privacy: .public)")
+            "libghostty engine unavailable for \(terminal, privacy: .public), fell back to SwiftTerm: \(reason, privacy: .public)")
     }
 
-    /// The success notice the spec names, so a log shows which terminals the
-    /// experiment really reached.
-    nonisolated static func logActive(configuration: TerminalEngineConfiguration) {
-        let terminal = configuration.terminalID?.uuidString ?? "a local PTY"
-        engineLogger.notice("libghostty engine active for \(terminal, privacy: .public)")
+    /// The build notice the spec names, so a log shows which engine each
+    /// terminal got. `scripts/diag/terminal-latency-probe.py` matches both
+    /// forms word for word, "libghostty engine active for <id>" and
+    /// "SwiftTerm engine active for <id>".
+    nonisolated static func logActive(_ kind: TerminalEngineKind, configuration: TerminalEngineConfiguration) {
+        // Exhaustive, so a new kind cannot be logged under another's name.
+        let engine: String
+        switch kind {
+        case .swiftTerm: engine = "SwiftTerm"
+        case .ghostty: engine = "libghostty"
+        }
+        let terminal = describe(configuration)
+        engineLogger.notice("\(engine, privacy: .public) engine active for \(terminal, privacy: .public)")
+    }
+
+    private nonisolated static func describe(_ configuration: TerminalEngineConfiguration) -> String {
+        configuration.terminalID?.uuidString ?? "a local PTY"
     }
 }
