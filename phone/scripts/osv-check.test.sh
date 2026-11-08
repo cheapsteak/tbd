@@ -78,5 +78,63 @@ if [ "$rc" -eq 2 ] && ! printf '%s' "$out" | grep -q 'no advisories'; then
   ok "a vendor lock that is a directory exits 2"
 else bad "directory vendor lock rc=$rc $out"; fi
 
+# Batching. A fake curl on PATH records each request and answers it with one result per query,
+# naming an advisory only for the package "zz-last", which sorts after every other name and so
+# lands in the last batch.
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+n=$(( $(cat "$FAKE_CURL_DIR/count" 2>/dev/null || echo 0) + 1 ))
+echo "$n" >"$FAKE_CURL_DIR/count"
+cat >"$FAKE_CURL_DIR/request-$n.json"
+jq -c '{results: [.queries[] | if .package.name == "zz-last" then {vulns: [{id: "GHSA-last"}]} else {} end]}' \
+  "$FAKE_CURL_DIR/request-$n.json"
+SH
+chmod +x "$tmp/bin/curl"
+
+# lock_with N: a lockfile of N packages p0..p(N-1) plus zz-last, all at 1.0.0.
+lock_with() {
+  jq -n --argjson n "$1" '{lockfileVersion: 3, packages: ([range($n) | "p\(.)"] + ["zz-last"]
+    | map({key: ("node_modules/" + .), value: {version: "1.0.0"}}) | from_entries)}'
+}
+# run_batched LOCK [VENDOR_LOCK]: runs the check against the fake curl; sets rc, out and sizes
+# (the query count of each request, space-separated).
+run_batched() {
+  rm -rf "$tmp/requests"; mkdir -p "$tmp/requests"
+  rc=0
+  out="$(PATH="$tmp/bin:$PATH" FAKE_CURL_DIR="$tmp/requests" VENDOR_LOCK="${2:-$tmp/vendor.lock}" \
+    bash "$osv" "$1" 2>&1)" || rc=$?
+  sizes=""
+  local i=1
+  while [ -f "$tmp/requests/request-$i.json" ]; do
+    sizes="$sizes$(jq '.queries | length' "$tmp/requests/request-$i.json") "
+    i=$((i + 1))
+  done
+}
+
+# With jsQR from the vendor lock: 998 + zz-last + jsqr = exactly 1000 queries, one request.
+lock_with 998 >"$tmp/lock-1000.json"
+run_batched "$tmp/lock-1000.json"
+if [ "$rc" -eq 1 ] && [ "$sizes" = "1000 " ] && printf '%s' "$out" | grep -q 'zz-last@1.0.0: GHSA-last'; then
+  ok "exactly 1000 queries go in one request"
+else bad "1000 queries rc=$rc sizes=$sizes $out"; fi
+
+# 1001 queries: two requests, and the second batch's answer is read against the second batch.
+lock_with 999 >"$tmp/lock-1001.json"
+run_batched "$tmp/lock-1001.json"
+if [ "$rc" -eq 1 ] && [ "$sizes" = "1000 1 " ] && printf '%s' "$out" | grep -q 'zz-last@1.0.0: GHSA-last' \
+  && [ "$(printf '%s\n' "$out" | grep -c 'GHSA-last')" -eq 1 ]; then
+  ok "1001 queries split into requests of 1000 and 1"
+else bad "1001 queries rc=$rc sizes=$sizes $out"; fi
+
+# No queries at all: one request with an empty list, and a clean result.
+printf '# name\tversion\tkind\tvalue\n' >"$tmp/empty-vendor.lock"
+printf '{"lockfileVersion":3,"packages":{"":{"name":"root","version":"0.0.0"}}}\n' >"$tmp/lock-0.json"
+run_batched "$tmp/lock-0.json" "$tmp/empty-vendor.lock"
+if [ "$rc" -eq 0 ] && [ "$sizes" = "0 " ] && printf '%s' "$out" | grep -q 'no advisories in 0 package(s)'; then
+  ok "no queries make one empty request and a clean result"
+else bad "0 queries rc=$rc sizes=$sizes $out"; fi
+
 [ "$failures" -eq 0 ] || { echo "osv-check.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "osv-check.test.sh: all passed"

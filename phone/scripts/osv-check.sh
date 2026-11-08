@@ -62,8 +62,12 @@ if [ "$print_queries" -eq 1 ]; then
   exit 0
 fi
 
-# Split into batches of 1000, one file per batch.
-jq -c '.queries | _nwise(1000) | {queries: .}' "$work/queries.json" >"$work/batches"
+# Split into batches of 1000, one line per batch. Only documented builtins, so jq 1.6 through
+# 1.8 all run it. No queries still makes one empty batch, so that run asks OSV like any other.
+jq -c '.queries as $q
+  | if ($q | length) == 0 then {queries: []}
+    else range(0; $q | length; 1000) as $i | {queries: $q[$i:$i + 1000]} end' \
+  "$work/queries.json" >"$work/batches"
 n=0
 hits=0
 : >"$work/report"
