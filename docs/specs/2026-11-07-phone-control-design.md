@@ -620,19 +620,33 @@ Research: `phone-app-stack.md`.
   - names the loader's origin explicitly (stamped at deploy), never `'self'`, because WebKit
     changed what `'self'` means in a sandboxed document twice in 2026;
   - allows scripts only from that origin and from `blob:`;
-  - sets `connect-src 'none'`, so the frame has no network and reaches the laptop only through its
-    message port;
+  - sets `connect-src 'none'`, which blocks `fetch`, XHR, WebSocket, EventSource and `sendBeacon`,
+    so the app reaches the laptop through its message port;
+  - allows images only from `data:` and `blob:` and styles only from `blob:`, sets
+    `worker-src 'none'`, and leaves every other fetch directive at `default-src 'none'`, so no
+    style, image, font, media or frame loads from a server, and no worker starts;
   - enforces Trusted Types with one policy, for the runner, so app code cannot write HTML strings.
-- The loader treats a second `load` event on the frame as a fault and tears the frame down. A
-  sandboxed frame can still navigate itself away, so this closes that hole.
+- Two ways out of the frame are outside that policy:
+  - **Self-navigation.** The sandbox stops the frame from navigating the top page, opening
+    windows or submitting forms, but not from navigating itself, and no directive stops that
+    either. The request leaves before the loader can see it. The loader treats a second `load`
+    event on the frame as a fault and tears the frame down, so the page it went to does not stay.
+    Whatever the navigation's URL carried has already been sent.
+  - **WebRTC.** No directive in the policy covers it, and `connect-src` does not reach it, so the
+    policy does not stop a script in the frame from opening an `RTCPeerConnection` and sending
+    traffic to servers that script names. Neither the loader nor the runner blocks it. Besides
+    `runner.js`, the only script the frame runs is the bundle the runner checked against its hash,
+    and the script rules above (no inline script, no `eval`, Trusted Types) keep text the app
+    displays from becoming script.
 - `srcdoc` is not used. A `srcdoc` frame inherits the loader's policy, which blocks the bundle.
 
 **The app bundle.**
 
 - **React 19.3 with TypeScript.** The React ecosystem is available, within the frame's limits: no
-  styles injected at runtime, no network, no `eval`, no HTML strings. CSS-in-JS libraries that inject
-  styles at runtime are therefore out. Static CSS, CSS modules, or a build-time CSS tool work. A
-  library that fetches data works through a function that asks over the message port.
+  styles injected at runtime, no `fetch` or WebSocket, no `eval`, no HTML strings. CSS-in-JS
+  libraries that inject styles at runtime are therefore out. Static CSS, CSS modules, or a
+  build-time CSS tool work. A library that fetches data works through a function that asks over
+  the message port.
 - **Build.** esbuild, pinned to an exact version, bundles the sources and production React into one
   minified JavaScript file. CSS is embedded as text and applied with `adoptedStyleSheets`. The file
   is committed under `Sources/TBDDaemon/Resources/phone-app/` and copied into the TBD install as a

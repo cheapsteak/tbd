@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- The policy blocks fetch, XHR, WebSocket, EventSource and sendBeacon (connect-src);
+     scripts from anywhere but the loader's origin and blob:; styles, images, fonts, media and
+     frames from any server; and workers. Two ways out are outside it. A self-navigation sends
+     its request before the loader can see it: frame.js counts the frame's second load as a
+     fault and removes the frame, but what the URL carried has gone. No directive here covers
+     WebRTC, so the policy does not stop a script in the frame from opening a peer connection. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://loader-origin.invalid blob:; worker-src 'none'; style-src blob:; img-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types runner">
 <meta name="color-scheme" content="light dark">
 <title>TBD</title>
