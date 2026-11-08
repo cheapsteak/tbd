@@ -134,7 +134,9 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 ///    phone paired, and saving the URL again checks a relay that failed.
 ///    Saving the URL checks the relay before it saves it, so that reconcile
 ///    takes the save's answer as the check rather than ask again. Every link
-///    checks it again before each connect.
+///    checks it again before each connect. The newest answer stands: one
+///    from a check that began before another check or the save, and lands
+///    after its answer, changes nothing.
 /// 5. Each paired phone without a link gets one; each link whose phone is
 ///    gone is stopped.
 ///
@@ -259,6 +261,13 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// How many times the relay check has refused the relay. A reconcile
     /// reads it as it begins and starts no link once it has moved.
     private var relayRefusals: UInt64 = 0
+    /// The number of the newest relay check started, or seed taken. Each
+    /// check takes the next number as it starts, so the numbers rise in the
+    /// order the checks began.
+    private var checkSequence: UInt64 = 0
+    /// The number of the newest check or seed whose answer stands. An answer
+    /// from a check with a lower number began before that one and is stale.
+    private var answeredSequence: UInt64 = 0
     /// The rows of undone Allows, which the next reconcile deletes again.
     private var undoneRows: Set<UUID> = []
     private var checkTask: Task<Void, Never>?
@@ -303,6 +312,12 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// How many paired phones have a link. For tests and diagnostics.
     var linkCount: Int {
         links.count
+    }
+
+    /// Waits until the relay check a reconcile last started, and every one
+    /// before it, has answered. For tests and diagnostics.
+    func waitForRelayCheck() async {
+        await checkTask?.value
     }
 
     // MARK: - PhoneBridgeControlling
@@ -541,8 +556,9 @@ actor PhoneBridge: PhoneBridgeControlling {
         }
         if let seed, seed.url.absoluteString == relayURL.absoluteString {
             // The save asked this relay a moment ago; asking again would only
-            // repeat its answer.
-            setCheck(.ok(seed.info), for: relayURL, announce: false)
+            // repeat its answer. The seed takes a number of its own, so a
+            // check that began before it and answers after it is stale.
+            setCheck(.ok(seed.info), for: relayURL, sequence: nextCheckSequence(), announce: false)
         } else if needsRelayCheck {
             startRelayCheck(relayURL)
         }
@@ -634,13 +650,15 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// Stops the relay check, every link and the pairing service, sending
     /// nothing, and waits for them and for every refused link's stop. The
-    /// next start checks the relay afresh.
+    /// next start checks the relay afresh, and every check begun before
+    /// this is stale.
     private func stopEverything(reason: String) async {
         let checking = checkTask
         checkTask = nil
         checking?.cancel()
         check = nil
         refusal = nil
+        answeredSequence = checkSequence
         let stopping = running
         running = nil
         let closing = links.values.map(\.connection)
@@ -790,7 +808,9 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// Only a reconcile starts one, and its own delta shows the check in
     /// flight; the answer broadcasts when it lands.
     private func startRelayCheck(_ relayURL: URL) {
-        setCheck(.inFlight, for: relayURL, announce: false)
+        if running?.relayURL == relayURL {
+            check = .inFlight
+        }
         let previous = checkTask
         previous?.cancel()
         checkTask = Task {
@@ -803,37 +823,81 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// An answer that is not a TBD relay's info object is a refusal, as a
     /// wrong `name` or a missing API is; a relay that could not be read this
     /// time is a failure the links retry.
+    ///
+    /// The check takes its number as it starts. When a check that began
+    /// later, or a later seed, has answered first, this answer is stale: it
+    /// changes nothing, and the link that asked acts on the answer that
+    /// stands instead.
     private func checkRelay(at relayURL: URL) async -> RelayPreflight {
+        let sequence = nextCheckSequence()
+        let answer: RelayCheck
+        var newRefusal: PhoneBridgeError?
         do {
             let info = try await infoClient.info(relay: relayURL)
             try RelayCompatibility.check(info)
-            setCheck(.ok(info), for: relayURL)
-            return .proceed
+            answer = .ok(info)
         } catch is CancellationError {
             return .retryLater("the relay check was cancelled")
         } catch let error as PhoneBridgeError where error.refusesTheRelay {
-            let detail = error.localizedDescription
-            setCheck(.incompatible(detail), for: relayURL, refusal: error)
-            PhoneBridgeLog.record(.relayRefused(reason: detail))
-            return .refuse(detail)
+            answer = .incompatible(error.localizedDescription)
+            newRefusal = error
         } catch {
-            let detail = error.localizedDescription
-            setCheck(.failed(detail), for: relayURL)
+            answer = .failed(error.localizedDescription)
+        }
+        guard setCheck(answer, for: relayURL, sequence: sequence, refusal: newRefusal) else {
+            // Stale, or the bridge has stopped or moved to another relay. On
+            // this relay the newer answer stands; otherwise the link is
+            // stopping, and its own answer will do.
+            if running?.relayURL == relayURL, let standing = check {
+                return Self.verdict(of: standing)
+            }
+            return Self.verdict(of: answer)
+        }
+        if case .incompatible(let detail) = answer {
+            PhoneBridgeLog.record(.relayRefused(reason: detail))
+        }
+        return Self.verdict(of: answer)
+    }
+
+    /// What a link does on the relay check's `answer`: connect, back off and
+    /// try again, or stop.
+    private static func verdict(of answer: RelayCheck) -> RelayPreflight {
+        switch answer {
+        case .ok:
+            return .proceed
+        case .inFlight:
+            return .retryLater("the relay is being checked again")
+        case .failed(let detail):
             return .retryLater(detail)
+        case .incompatible(let detail):
+            return .refuse(detail)
         }
     }
 
-    /// Keeps `answer` as the relay check, unless the bridge has stopped or
-    /// moved to another relay since the check began. An `.incompatible`
-    /// answer keeps `newRefusal` as the refusal; only an `.ok` answer clears
-    /// it. A check in flight, or one that failed, leaves the refusal as it
-    /// was: it says nothing about whether the relay is usable now.
+    /// A number for a relay check starting now, or a seed taken now.
+    private func nextCheckSequence() -> UInt64 {
+        checkSequence &+= 1
+        return checkSequence
+    }
+
+    /// Keeps `answer`, from the check or seed numbered `sequence`, as the
+    /// relay check, and returns whether it did. It does not when the bridge
+    /// has stopped or moved to another relay since the check began, or when
+    /// a check that began later, or a later seed, has answered already: that
+    /// answer is newer, so this one is stale and changes nothing, refusal
+    /// included.
+    ///
+    /// An `.incompatible` answer keeps `newRefusal` as the refusal; only an
+    /// `.ok` answer clears it. One that failed leaves the refusal as it was:
+    /// it says nothing about whether the relay is usable now.
     ///
     /// A changed answer broadcasts the status, unless `announce` is false
     /// because a reconcile in progress will.
-    private func setCheck(_ answer: RelayCheck, for relayURL: URL, refusal newRefusal: PhoneBridgeError? = nil,
-                          announce: Bool = true) {
-        guard running?.relayURL == relayURL else { return }
+    @discardableResult
+    private func setCheck(_ answer: RelayCheck, for relayURL: URL, sequence: UInt64,
+                          refusal newRefusal: PhoneBridgeError? = nil, announce: Bool = true) -> Bool {
+        guard running?.relayURL == relayURL, sequence > answeredSequence else { return false }
+        answeredSequence = sequence
         switch answer {
         case .ok:
             refusal = nil
@@ -843,11 +907,13 @@ actor PhoneBridge: PhoneBridgeControlling {
         case .inFlight, .failed:
             break
         }
-        guard check != answer else { return }
-        check = answer
-        if announce {
-            broadcast(.phoneStatusChanged)
+        if check != answer {
+            check = answer
+            if announce {
+                broadcast(.phoneStatusChanged)
+            }
         }
+        return true
     }
 
     // MARK: - Link events

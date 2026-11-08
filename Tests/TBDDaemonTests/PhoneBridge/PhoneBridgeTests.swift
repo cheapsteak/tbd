@@ -539,6 +539,36 @@ struct PhoneBridgeTests {
         }
     }
 
+    /// A check the bridge started is still out when the relay URL is saved
+    /// again. The save's answer is the newer one, so the older check, which
+    /// answers last, changes nothing: neither the status nor a refusal.
+    @Test(arguments: [PhoneBridgeError.relayCheckFailed("HTTP 503"), .notATBDRelay])
+    func aCheckThatBeganBeforeASaveCannotOverwriteTheSavesAnswer(failure: PhoneBridgeError) async throws {
+        try await withBridge { h in
+            // The first reconcile's own check waits on the relay.
+            await h.info.hold()
+            await h.bridge.reconcile()
+            try await h.waitUntil("the reconcile's check to wait on the relay") { await h.info.heldCalls == 1 }
+
+            // The relay URL is saved again; the save's check found it usable.
+            let url = try #require(URL(string: relayAddress))
+            await h.bridge.reconcile(afterSavingRelay: url, checkedAs: currentRelay)
+            let seeded = try await h.bridge.status()
+            #expect(seeded.relay.state == .connected)
+
+            // The older check answers last, with a failure.
+            await h.info.fail(with: failure)
+            await h.info.release()
+            await h.bridge.waitForRelayCheck()
+            let after = try await h.bridge.status()
+            #expect(after.relay.state == .connected)
+            #expect(after.relay.detail == nil)
+            // No refusal stands, so pairing starts.
+            let offer = try await h.bridge.pairStart()
+            #expect(offer.state == .waitingForPhone)
+        }
+    }
+
     @Test func aRefusedLinksSlowStopHoldsUpNoOtherLink() async throws {
         try await withBridge(devices: 2, holdSends: true) { h in
             let transport = try #require(h.holdingTransport)
