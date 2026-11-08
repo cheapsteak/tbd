@@ -298,11 +298,14 @@ actor PhoneBridge: PhoneBridgeControlling {
         return info
     }
 
-    func status() async -> PhoneStatusResult {
-        let config = try? await db.config.get()
+    /// Throws when the saved settings cannot be read, as `phone.status` does
+    /// with no bridge: a status made without them would show phone control
+    /// off and not set up while it may be running.
+    func status() async throws -> PhoneStatusResult {
+        let config = try await db.config.get()
         let pairing = await running?.pairing.status
         // Everything below reads the bridge's state in one turn.
-        let relayURL = config?.phoneRelayURL
+        let relayURL = config.phoneRelayURL
         // A stopped bridge checks nothing and runs no link, so its relay has
         // no answer: `checking`, which `running == false` qualifies. Never
         // `unknown`, which means a state a newer daemon added.
@@ -314,8 +317,8 @@ actor PhoneBridge: PhoneBridgeControlling {
             linksConnecting: states.filter { $0 == nil }.count)
         let connected = links.filter { $0.value.isConnected }.map { $0.key }.sorted { $0.uuidString < $1.uuidString }
         return PhoneStatusResult(
-            enabled: config?.phoneControlEnabled ?? Config.phoneControlEnabledDefault,
-            relayURL: relayURL, loaderURLOverride: config?.phoneLoaderURL,
+            enabled: config.phoneControlEnabled,
+            relayURL: relayURL, loaderURLOverride: config.phoneLoaderURL,
             running: running != nil, problem: problem, relay: relay,
             connectedDeviceIDs: connected, pairing: pairing)
     }

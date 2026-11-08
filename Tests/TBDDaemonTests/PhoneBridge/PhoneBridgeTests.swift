@@ -121,16 +121,17 @@ private struct PhoneBridgeHarness: Sendable {
     }
 
     /// Waits until `condition` holds, or throws naming `what` and the
-    /// bridge's status, the open rooms and the app's log as they stand.
-    func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
+    /// bridge's status, the open rooms and the app's log as they stand. A
+    /// condition that throws counts as not holding yet.
+    func waitUntil(_ what: String, _ condition: () async throws -> Bool) async throws {
         let deadline = TestDeadlines.saturatedPass
-        switch await pollUntilTrue(timeout: deadline, condition) {
+        switch await pollUntilTrue(timeout: deadline, { (try? await condition()) ?? false }) {
         case .satisfied:
             return
         case .cancelled:
             throw CancellationError()
         case .timedOut:
-            let status = await bridge.status()
+            let status = (try? await bridge.status()).map { "\($0)" } ?? "unreadable"
             let log = await app.log
             throw BoundedWaitTimeout(
                 what: what, observed: "status \(status), open rooms \(relay.openLaptopRooms()), app log \(log)",
@@ -139,7 +140,7 @@ private struct PhoneBridgeHarness: Sendable {
     }
 
     func waitForPairingState(_ state: PhonePairingState) async throws {
-        try await waitUntil("the pairing state \(state)") { await bridge.status().pairing?.state == state }
+        try await waitUntil("the pairing state \(state)") { try await bridge.status().pairing?.state == state }
     }
 
     /// The phone with the paired key, joined to its room once the laptop is
@@ -348,7 +349,7 @@ struct PhoneBridgeTests {
             #expect(log.isEmpty)
             let links = await h.bridge.linkCount
             #expect(links == 0)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.enabled == false && status.running == false && status.problem == nil)
             // A defined state, never `unknown`, which means one a newer daemon
             // added: the relay has no answer, because nothing checks it.
@@ -362,7 +363,7 @@ struct PhoneBridgeTests {
         try await withBridge(loaderURL: nil) { h in
             await h.bridge.reconcile()
             await #expect(throws: PhoneBridgeError.loaderNotSetUp) { try await h.bridge.pairStart() }
-            let refused = await h.bridge.status()
+            let refused = try await h.bridge.status()
             #expect(refused.pairing == nil)
             #expect(refused.loaderURLOverride == nil)
             #expect(h.relay.connectAttempts.isEmpty)
@@ -385,7 +386,7 @@ struct PhoneBridgeTests {
             #expect(h.relay.connectAttempts.isEmpty)
             let calls = await h.info.calls
             #expect(calls == 0)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.enabled && status.running == false && status.relay.state == .notSetUp)
         }
     }
@@ -395,7 +396,7 @@ struct PhoneBridgeTests {
     @Test func flagOnChecksTheRelayThenOpensOneLinkPerDevice() async throws {
         try await withBridge(devices: 2) { h in
             await h.bridge.reconcile()
-            let running = await h.bridge.status()
+            let running = try await h.bridge.status()
             #expect(running.running && running.problem == nil)
             try await h.waitUntil("both device rooms to open") { h.relay.openLaptopRooms() == h.rooms }
             #expect(h.relay.connectAttempts.count == 2)
@@ -405,9 +406,9 @@ struct PhoneBridgeTests {
             let relays = await h.info.relays
             #expect(relays.allSatisfy { $0.absoluteString == relayAddress })
             try await h.waitUntil("the relay to show as connected") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.relay.version == currentRelay.version)
             #expect(status.connectedDeviceIDs.isEmpty)
         }
@@ -418,12 +419,12 @@ struct PhoneBridgeTests {
             await h.info.answer(with: PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [2]))
             await h.bridge.reconcile()
             try await h.waitUntil("both links to stop on the refused relay") {
-                let state = await h.bridge.status().relay.state
+                let state = try await h.bridge.status().relay.state
                 let links = await h.bridge.linkCount
                 return state == .incompatible && links == 0
             }
             #expect(h.relay.connectAttempts.isEmpty)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.relay.detail == PhoneBridgeError.unsupportedRelayAPI([2]).localizedDescription)
             await #expect(throws: PhoneBridgeError.unsupportedRelayAPI([2])) { try await h.bridge.pairStart() }
             #expect(h.relay.connectAttempts.isEmpty)
@@ -433,7 +434,7 @@ struct PhoneBridgeTests {
             await h.bridge.reconcile()
             try await h.waitUntil("both rooms to open on the fixed relay") { h.relay.openLaptopRooms() == h.rooms }
             try await h.waitUntil("the relay to show as connected") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
         }
     }
@@ -443,7 +444,7 @@ struct PhoneBridgeTests {
             await h.info.answer(with: PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [2]))
             await h.bridge.reconcile()
             try await h.waitUntil("the relay to show as incompatible") {
-                await h.bridge.status().relay.state == .incompatible
+                try await h.bridge.status().relay.state == .incompatible
             }
 
             // The relay is redeployed and its address saved again, so the
@@ -453,18 +454,18 @@ struct PhoneBridgeTests {
             await h.info.hold()
             await h.bridge.reconcile()
             try await h.waitUntil("the re-check to wait on the relay") { await h.info.heldCalls == 1 }
-            let checking = await h.bridge.status()
+            let checking = try await h.bridge.status()
             #expect(checking.relay.state == .checking)
             // Until the relay answers, it is still the one found unusable: no
             // offer, so no QR code that the relay would then interrupt.
             await #expect(throws: PhoneBridgeError.unsupportedRelayAPI([2])) { try await h.bridge.pairStart() }
-            let pairing = await h.bridge.status().pairing
+            let pairing = try await h.bridge.status().pairing
             #expect(pairing == nil)
 
             // A usable answer clears the refusal.
             await h.info.release()
             try await h.waitUntil("the relay to show as connected") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
             let offer = try await h.bridge.pairStart()
             #expect(offer.state == .waitingForPhone)
@@ -480,7 +481,7 @@ struct PhoneBridgeTests {
             // From here a request would wait, and so show as one.
             await h.info.hold()
             await h.bridge.reconcile(afterSavingRelay: url, checkedAs: info)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running && status.relay.state == .connected)
             #expect(status.relay.version == currentRelay.version)
             let calls = await h.info.calls
@@ -501,7 +502,7 @@ struct PhoneBridgeTests {
             let relays = await h.info.relays
             let checked = relays.map(\.absoluteString)
             #expect(checked == [otherRelayAddress, relayAddress])
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.relay.state == .checking)
         }
     }
@@ -517,7 +518,7 @@ struct PhoneBridgeTests {
             try await h.waitUntil("both rooms to open") { h.relay.openLaptopRooms() == h.rooms }
             _ = try await h.connectedPhone(slow)
             try await h.waitUntil("the first phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [slow.device.id]
+                try await h.bridge.status().connectedDeviceIDs == [slow.device.id]
             }
 
             // A frame for the first phone that cannot leave keeps its
@@ -542,7 +543,7 @@ struct PhoneBridgeTests {
             // connection's events still reach the status.
             _ = try await h.connectedPhone(other)
             try await h.waitUntil("the other phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [other.device.id]
+                try await h.bridge.status().connectedDeviceIDs == [other.device.id]
             }
         }
     }
@@ -554,9 +555,9 @@ struct PhoneBridgeTests {
             // The reconcile's own check and the link's first both fail; the
             // link backs off for 1 s.
             try await h.waitUntil("the relay to show as unreachable") {
-                await h.bridge.status().relay.state == .unreachable
+                try await h.bridge.status().relay.state == .unreachable
             }
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.relay.detail == PhoneBridgeError.relayCheckFailed("HTTP 503").localizedDescription)
             try await h.waitUntil("the link's first check") { await h.info.calls >= 2 }
             try await h.clock.requireAdvanceWhenArmed(by: .seconds(1))
@@ -576,23 +577,23 @@ struct PhoneBridgeTests {
             let room = h.phones[0].device.roomID
             try await h.waitUntil("the room to open") { h.relay.laptopPresent(room: room) }
             try await h.waitUntil("the relay to show as connected") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
 
             // The relay drops the only room socket; the link backs off on the
             // test clock, so it stays down until the clock moves.
             h.relay.closeLaptop(room: room, code: 1011)
             try await h.waitUntil("the relay to show as connecting again") {
-                await h.bridge.status().relay.state == .checking
+                try await h.bridge.status().relay.state == .checking
             }
-            let down = await h.bridge.status()
+            let down = try await h.bridge.status()
             #expect(down.running && down.relay.version == currentRelay.version)
 
             try await h.clock.advanceUntil("the room to open again", by: .seconds(1)) {
                 h.relay.laptopPresent(room: room)
             }
             try await h.waitUntil("the relay to show as connected again") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
         }
     }
@@ -603,7 +604,7 @@ struct PhoneBridgeTests {
             let paired = h.phones[0]
             let phone = try await h.connectedPhone(paired)
             try await h.waitUntil("the phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [paired.device.id]
+                try await h.bridge.status().connectedDeviceIDs == [paired.device.id]
             }
             try await h.db.config.setPhoneControlEnabled(false)
             await h.bridge.reconcile()
@@ -618,7 +619,7 @@ struct PhoneBridgeTests {
             // The phone stays paired.
             let row = try await h.db.phoneDevices.device(id: paired.device.id)
             #expect(row?.id == paired.device.id)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running == false && status.connectedDeviceIDs.isEmpty)
         }
     }
@@ -631,7 +632,7 @@ struct PhoneBridgeTests {
             let paired = h.phones[0]
             let phone = try await h.connectedPhone(paired)
             try await h.waitUntil("the phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [paired.device.id]
+                try await h.bridge.status().connectedDeviceIDs == [paired.device.id]
             }
             try await h.bridge.revoke(deviceID: paired.device.id)
             let message = try await phone.next()
@@ -640,7 +641,7 @@ struct PhoneBridgeTests {
             #expect(left == "peer-left")
             let row = try await h.db.phoneDevices.device(id: paired.device.id)
             #expect(row == nil)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(!status.connectedDeviceIDs.contains(paired.device.id))
             let links = await h.bridge.linkCount
             #expect(links == 0)
@@ -660,7 +661,7 @@ struct PhoneBridgeTests {
             let deviceID = paired.device.id
             let phone = try await h.connectedPhone(paired)
             try await h.waitUntil("the phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [deviceID]
+                try await h.bridge.status().connectedDeviceIDs == [deviceID]
             }
 
             // `revoked` cannot leave, so the revoke waits inside the
@@ -695,7 +696,7 @@ struct PhoneBridgeTests {
             let offlinePhone = h.phones[1]
             let phone = try await h.connectedPhone(onlinePhone)
             try await h.waitUntil("the phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [onlinePhone.device.id]
+                try await h.bridge.status().connectedDeviceIDs == [onlinePhone.device.id]
             }
             let later = RecordingPhoneApp()
             await h.bridge.setAppHandler(later)
@@ -810,7 +811,7 @@ struct PhoneBridgeTests {
             let reply = try await phone.next()
             #expect(errorCode(of: reply) == "unavailable")
             try await h.waitUntil("the phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [paired.device.id]
+                try await h.bridge.status().connectedDeviceIDs == [paired.device.id]
             }
             let names = try await h.db.phoneDevices.list().map(\.name)
             #expect(names == ["iPhone"])
@@ -898,7 +899,7 @@ struct PhoneBridgeTests {
             await #expect(throws: PhoneBridgeError.noSuchOffer) { try await bridge.pairDeny(offerID: stale.offerID) }
             let rows = try await h.db.phoneDevices.list()
             #expect(rows.isEmpty)
-            let pending = await bridge.status().pairing
+            let pending = try await bridge.status().pairing
             #expect(pending?.offerID == live.offerID)
             #expect(pending?.state == .awaitingApproval)
 
@@ -1028,7 +1029,7 @@ struct PhoneBridgeTests {
             // Allow returns only after the undo's reconcile.
             let links = await bridge.linkCount
             #expect(links == 0)
-            let status = await bridge.status()
+            let status = try await bridge.status()
             #expect(status.running && status.connectedDeviceIDs.isEmpty)
         }
     }
@@ -1103,7 +1104,7 @@ struct PhoneBridgeTests {
             // `onPaired` runs only after `stop()` has stopped everything
             // and is waiting for that commit.
             let stopping = Task { await bridge.stop() }
-            try await h.waitUntil("the bridge to stop") { await bridge.status().running == false }
+            try await h.waitUntil("the bridge to stop") { try await bridge.status().running == false }
             transport.release()
             let device = try await allowing.value
             await stopping.value
@@ -1121,7 +1122,7 @@ struct PhoneBridgeTests {
             let room = device.roomID
             let openedTheRoom = h.relay.connectAttempts.contains { $0.url.path.hasSuffix(room) }
             #expect(!openedTheRoom)
-            let status = await bridge.status()
+            let status = try await bridge.status()
             #expect(status.running == false)
         }
     }
@@ -1152,7 +1153,7 @@ struct PhoneBridgeTests {
         }
         try await withBridge(devices: 1, bundleLoader: oversized) { h in
             await h.bridge.reconcile()
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running == false)
             let problem = try #require(status.problem)
             #expect(problem.hasPrefix("The phone app bundle is "))
@@ -1165,7 +1166,7 @@ struct PhoneBridgeTests {
     @Test func aLooseKeyFileStopsTheBridgeWithAReason() async throws {
         try await withBridge(devices: 1, keyFile: .loose) { h in
             await h.bridge.reconcile()
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running == false)
             #expect(status.problem?.contains("0644") == true)
             #expect(h.relay.connectAttempts.isEmpty)
@@ -1200,7 +1201,7 @@ struct PhoneBridgeTests {
     @Test func aMissingKeyWithPairedPhonesIsNotRegenerated() async throws {
         try await withBridge(devices: 2, keyFile: .missing) { h in
             await h.bridge.reconcile()
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running == false)
             #expect(status.problem?.contains("missing") == true)
             #expect(!FileManager.default.fileExists(atPath: h.keyPath.path))
@@ -1209,7 +1210,7 @@ struct PhoneBridgeTests {
             // Revoking works while the bridge is stopped. With a phone still
             // paired, the key is not made again.
             try await h.bridge.revoke(deviceID: h.phones[0].device.id)
-            let halfway = await h.bridge.status()
+            let halfway = try await h.bridge.status()
             #expect(halfway.running == false)
             #expect(halfway.problem?.contains("missing") == true)
             #expect(!FileManager.default.fileExists(atPath: h.keyPath.path))
@@ -1218,7 +1219,7 @@ struct PhoneBridgeTests {
             // With no phone left, a new key unpairs nobody: revoking the last
             // phone starts the bridge with one at once, and pairing works.
             try await h.bridge.revoke(deviceID: h.phones[1].device.id)
-            let after = await h.bridge.status()
+            let after = try await h.bridge.status()
             #expect(after.running && after.problem == nil)
             #expect(FileManager.default.fileExists(atPath: h.keyPath.path))
             let offer = try await h.bridge.pairStart()
@@ -1227,6 +1228,22 @@ struct PhoneBridgeTests {
     }
 
     // MARK: Serialized reconciles
+
+    /// A settings read that fails reaches the `phone.status` caller, so a
+    /// failing database never shows phone control as off and not set up
+    /// while the bridge runs.
+    @Test func aSettingsReadThatFailsReachesTheStatusCaller() async throws {
+        try await withBridge(devices: 1) { h in
+            await h.bridge.reconcile()
+            let running = try await h.bridge.status()
+            #expect(running.enabled && running.running)
+            try await h.db.writerForTests.write { conn in
+                try conn.execute(sql: "DROP TABLE config")
+            }
+            let bridge = h.bridge
+            await #expect(throws: (any Error).self) { _ = try await bridge.status() }
+        }
+    }
 
     @Test func concurrentReconcilesSettleOnTheLastConfig() async throws {
         try await withBridge(devices: 1) { h in
@@ -1246,7 +1263,7 @@ struct PhoneBridgeTests {
             #expect(h.relay.openLaptopRooms().isEmpty)
             let links = await h.bridge.linkCount
             #expect(links == 0)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running == false)
             // Nothing outlives the last reconcile: no link backs off or keeps
             // its socket alive.
@@ -1268,7 +1285,7 @@ struct PhoneBridgeTests {
         try await withBridge { h in
             await h.bridge.reconcile()
             try await h.waitUntil("the relay to show as connected") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
 
             // Turning phone control off: one delta.
@@ -1285,13 +1302,13 @@ struct PhoneBridgeTests {
             await h.bridge.reconcile()
             try await h.waitUntil("the relay check to wait on the relay") { await h.info.heldCalls == 1 }
             #expect(h.statusDeltaCount == beforeOn + 1)
-            let status = await h.bridge.status()
+            let status = try await h.bridge.status()
             #expect(status.running && status.relay.state == .checking)
 
             // The answer is a change of its own, and broadcasts when it lands.
             await h.info.release()
             try await h.waitUntil("the relay to show as connected again") {
-                await h.bridge.status().relay.state == .connected
+                try await h.bridge.status().relay.state == .connected
             }
             #expect(h.statusDeltaCount == beforeOn + 2)
         }

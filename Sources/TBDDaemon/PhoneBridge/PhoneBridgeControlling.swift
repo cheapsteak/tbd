@@ -29,7 +29,10 @@ protocol PhoneBridgeControlling: Sendable {
     /// cannot be reached, is not a TBD relay, or does not speak API 1.
     func checkRelay(_ url: URL) async throws -> PhoneRelayInfo
 
-    func status() async -> PhoneStatusResult
+    /// The bridge's status for `phone.status`. Throws when the saved
+    /// settings cannot be read, so a failing database never reads as phone
+    /// control being off.
+    func status() async throws -> PhoneStatusResult
 
     /// Starts a pairing offer and returns its status, link included.
     func pairStart() async throws -> PhonePairingStatus

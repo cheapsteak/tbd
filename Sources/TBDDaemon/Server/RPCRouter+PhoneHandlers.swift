@@ -92,10 +92,12 @@ extension RPCRouter {
 
     /// The bridge's status. Without a bridge, the saved settings,
     /// `phoneUnavailableRefusal` as the problem, and the relay state a stopped
-    /// bridge reports, so the pane can still show what is set.
+    /// bridge reports, so the pane can still show what is set. Either way, a
+    /// settings read that fails throws.
     private func handlePhoneStatus() async throws -> RPCResponse {
         if let bridge = phoneBridge {
-            return try RPCResponse(result: await bridge.status())
+            let status = try await bridge.status()
+            return try RPCResponse(result: status)
         }
         let config = try await db.config.get()
         let status = PhoneStatusResult(
