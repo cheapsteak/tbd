@@ -282,6 +282,8 @@ function bootPage({
     stripButton: () => stripEl.children.find((/** @type {any} */ node) => node.tagName === 'button'),
     /** Whether the strip shows its laptop menu. */
     menuShown: () => [...stripEl.descendants()].some((node) => node.getAttribute('data-state') === 'lapmenu'),
+    /** Whether the layer that catches taps outside the menu is in the strip. */
+    catcherShown: () => [...stripEl.descendants()].some((node) => node.className === 'lapcatch'),
     /** @param {'visible' | 'hidden'} state */
     setVisibility(state) {
       doc.visibilityState = state;
@@ -456,4 +458,38 @@ test('a menu read that fails only closes the menu, and a store that closes still
   /** @type {any} */ (page.idb.db).onclose();
   assert.equal(page.screen(), 'reload');
   assert.deepEqual(relay.sockets[0].closes, [1000], 'the connection stops with the page');
+});
+
+test('a full screen that arrives while the menu is open closes the menu and its tap catcher', async () => {
+  const { page, relay } = await bootOnOfflineLaptop();
+  page.idb.plan.push('answer');
+  page.stripButton().dispatchEvent(new Event('click'));
+  await until(() => page.menuShown(), 'the menu');
+  assert.equal(page.catcherShown(), true);
+
+  // Another tab takes the room: the connection ends and its screen replaces the offline one.
+  relay.sockets[0].onclose?.({ code: 4000 });
+  await until(() => page.screen() === 'replaced', 'the replaced screen');
+  assert.equal(page.menuShown(), false);
+  assert.equal(page.catcherShown(), false, 'nothing is left to swallow the first tap on the new screen');
+  assert.equal(page.stripButton()?.getAttribute('aria-expanded'), 'false');
+
+  // The strip still names the laptop, and its menu opens afresh.
+  page.idb.plan.push('answer');
+  page.stripButton().dispatchEvent(new Event('click'));
+  await until(() => page.menuShown(), 'the menu again');
+  assert.equal(page.screen(), 'replaced');
+});
+
+test('a connection state that changes the screen under an open menu closes it too', async () => {
+  const { page, relay } = await bootOnOfflineLaptop();
+  page.idb.plan.push('answer');
+  page.stripButton().dispatchEvent(new Event('click'));
+  await until(() => page.menuShown(), 'the menu');
+
+  // The laptop comes back: the handshake starts, and the connecting screen replaces offline.
+  relay.signal(0, 'peer-joined');
+  await until(() => page.screen() === 'connecting', 'the connecting screen');
+  assert.equal(page.menuShown(), false);
+  assert.equal(page.catcherShown(), false);
 });

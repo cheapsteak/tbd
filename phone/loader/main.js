@@ -301,8 +301,10 @@ class LoaderPage {
 
   /**
    * Shows `node` as the screen, in place of the app frame. Every screen is shown through here,
-   * and a screen replaces the app: any frame is destroyed and the strip is drawn again, so
-   * nothing in the strip (such as "Reconnecting…") outlives the frame it spoke for.
+   * and a screen replaces the app: any frame is destroyed, an open strip menu closes (with the
+   * layer that catches taps outside it, which would otherwise swallow the first tap on the new
+   * screen), and the strip is drawn again, so nothing in the strip (such as "Reconnecting…")
+   * outlives the frame it spoke for.
    * @param {HTMLElement} node
    * @param {(() => void) | null} [onLeave]
    */
@@ -310,6 +312,7 @@ class LoaderPage {
     if (this.#dead) return;
     this.#leaveScreen?.();
     this.#leaveScreen = onLeave;
+    this.#closeMenu(false);
     this.#destroyFrame();
     this.#screen.replaceChildren(node);
     this.#screen.hidden = false;
