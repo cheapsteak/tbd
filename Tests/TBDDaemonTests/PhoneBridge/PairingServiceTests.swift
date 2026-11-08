@@ -547,7 +547,53 @@ struct PairingServiceTests {
         }
     }
 
-    @Test func aPhoneThatLeavesBeforePairedReachesTheRelayUndoesThePairing() async throws {
+    /// A `paired` still in flight at the flush limit counts as sent: Allow
+    /// keeps the row and, once the send ends, closes the room and ends as
+    /// paired, with `onPaired`. Undoing it would strand a phone that reads
+    /// `paired` late, with a room that has no row.
+    @Test func aPairedSendStillInFlightAtTheFlushLimitKeepsThePairing() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withPairing(relay: relay, transport: transport) { h in
+            // However the test ends, nothing stays held for `cancel()` to
+            // wait on.
+            defer { transport.release() }
+            let (status, link) = try await h.startOffer()
+            let (phone, _) = try await h.phoneAwaitingApproval(link)
+
+            transport.hold()
+            let service = h.service
+            let offerID = status.offerID
+            let allowing = Task { try await service.allow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+            // The pairing room's keepalive, the offer's expiry and Allow's
+            // wait for `paired`, the only one due at the flush limit.
+            try await h.clock.requireSleepersArmed(count: 3)
+            await h.clock.advance(by: PhoneBridgeConstants.flushLimit)
+            // Allow decides at the flush limit, before the pairing room
+            // closes, so the send's release below comes too late to sway it.
+            try await h.waitUntil("the laptop to leave the pairing room") { !h.relay.laptopPresent(room: link.room) }
+            let left = try await phone.nextSignal()
+            #expect(left == "peer-left")
+            transport.release()
+
+            let device = try await allowing.value
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows == [device])
+            #expect(h.paired.values == [device])
+            #expect(h.undone.values.isEmpty)
+            let after = await h.service.status
+            #expect(after?.state == .paired)
+            #expect(after?.deviceID == device.id)
+        }
+    }
+
+    /// Once `paired` is queued, the phone's leaving changes nothing, because
+    /// the phone leaves as soon as it reads `paired`: the send's own outcome
+    /// decides. A send that then fails undoes the pairing; one that then
+    /// reaches the relay keeps it.
+    @Test(arguments: [true, false])
+    func aPhoneThatLeavesOncePairedIsQueuedLeavesTheOutcomeToTheSend(failing: Bool) async throws {
         let relay = FakeRelay()
         let transport = HoldingTransport(relay: relay)
         try await withPairing(relay: relay, transport: transport) { h in
@@ -555,24 +601,38 @@ struct PairingServiceTests {
             let (status, link) = try await h.startOffer()
             let (phone, _) = try await h.phoneAwaitingApproval(link)
 
-            // `paired` is held at the socket while the phone leaves, so the
-            // phone can never hear it.
+            // `paired` is held at the socket while the phone leaves.
             transport.hold()
             let service = h.service
             let offerID = status.offerID
             let allowing = Task { try await service.allow(offerID: offerID) }
             try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
             phone.close()
-            // The relay's `peer-left` ends Allow's wait at once, with `paired`
-            // still held.
-            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+            // Time for the relay's `peer-left` to reach Allow, which leaves
+            // the row and the held send alone.
+            await settle()
             #expect(transport.heldSends == 1)
+            let whileHeld = try await h.db.phoneDevices.list()
+            #expect(whileHeld.count == 1)
+            transport.release(failing: failing)
 
-            let rows = try await h.db.phoneDevices.list()
-            #expect(rows.isEmpty)
-            #expect(h.paired.values.isEmpty)
-            let after = await h.service.status
-            #expect(after?.state == .interrupted)
+            if failing {
+                await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+                let rows = try await h.db.phoneDevices.list()
+                #expect(rows.isEmpty)
+                #expect(h.paired.values.isEmpty)
+                #expect(h.undone.values.count == 1)
+                let after = await h.service.status
+                #expect(after?.state == .interrupted)
+            } else {
+                let device = try await allowing.value
+                let rows = try await h.db.phoneDevices.list()
+                #expect(rows == [device])
+                #expect(h.paired.values == [device])
+                #expect(h.undone.values.isEmpty)
+                let after = await h.service.status
+                #expect(after?.state == .paired)
+            }
         }
     }
 

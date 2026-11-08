@@ -178,7 +178,7 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// the user did not make is visible.
 ///
 /// **An undone Allow** stored the phone's row and deleted it again, because
-/// `paired` cannot have reached the phone. A reconcile in between listed the
+/// `paired` definitely did not leave (see `PairingService`). A reconcile in between listed the
 /// row and opened a link for it, so the undo reconciles, and that link stops.
 /// Before it lists the phones, that reconcile deletes the row once more, in
 /// case Allow's own delete failed; were the row left, the phone, which never

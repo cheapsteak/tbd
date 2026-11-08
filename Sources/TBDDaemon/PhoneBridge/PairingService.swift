@@ -50,17 +50,25 @@ import TBDShared
 ///   pairing room, tells the phone that room in `paired`, closes the pairing
 ///   room for good, and then calls `onPaired`. The row is stored first,
 ///   because the phone may connect to its room as soon as it reads `paired`.
-/// - When `paired` cannot have reached the phone, Allow undoes the pairing:
-///   the row is deleted again, the offer is interrupted, `onPairingUndone` is
+/// - When `paired` definitely did not leave, Allow undoes the pairing: the
+///   row is deleted again, the offer is interrupted, `onPairingUndone` is
 ///   called, `allow` throws `.pairingNotFinished`, and `onPaired` is not
-///   called. That is when the send fails or is still in flight at the flush
-///   limit, and when `peer-joined`, `peer-left`, a link `.closed` or a
-///   refusal arrives before `paired` has reached the relay; such an event
-///   ends Allow's wait at once. One that arrives after is the phone leaving
-///   with its room. A reconcile that ran while the row existed may have
-///   opened a link for it; `onPairingUndone` is how the owner stops it. It
-///   gets the row's ID, so the owner can try the delete again when Allow's
-///   own delete failed.
+///   called. That is when the send throws, the pairing room's socket is not
+///   open, or the room closed before `paired` could be queued, and when
+///   `peer-joined`, `peer-left`, a link `.closed` or a refusal arrives
+///   before Allow queues `paired`. A reconcile that ran while the row existed
+///   may have opened a link for it; `onPairingUndone` is how the owner stops
+///   it. It gets the row's ID, so the owner can try the delete again when
+///   Allow's own delete failed.
+/// - A `paired` still in flight at the flush limit counts as sent: Allow
+///   keeps the row and ends as paired. This is the design, because the two
+///   mistakes cost differently. A phone that read `paired` from a send Allow
+///   undid would hold a room with no row: it could never connect, and
+///   nothing would show for the user to revoke. A row kept for a phone that
+///   never read `paired` costs one Revoke. For the same reason, once
+///   `paired` is queued an event changes nothing and only the send's outcome
+///   decides: the phone leaves the pairing room as soon as it reads `paired`,
+///   and its leaving cannot be told from a loss.
 /// - `deny`, expiry, an interruption, `cancel` and a replacing `start` close
 ///   the pairing room. Deny and expiry first send `pairDenied`, but only to a
 ///   confirmed phone, the only one with a channel to receive it.
@@ -112,22 +120,15 @@ actor PairingService {
     }
 
     /// Allow's progress with the confirmed phone, from the claim until
-    /// `paired` has reached the relay.
+    /// `paired` has left or the flush limit has passed.
     private struct Allowing {
         let confirmed: Confirmed
-        /// Set by the writer, off the actor, the moment `paired` reaches the
-        /// relay, so an event the phone's reading of it caused is never taken
-        /// for one that came first. Nil until Allow queues `paired`.
-        var sent: OSAllocatedUnfairLock<Bool>?
-        /// Ends Allow's wait for `paired` early.
-        var stopWaiting: AsyncStream<Void>.Continuation?
+        /// Whether Allow has queued `paired`. From then on only the send's
+        /// own outcome decides whether the pairing stands.
+        var queued = false
         /// Why the phone cannot hear `paired`: an event that ended its
-        /// channel before `paired` reached the relay.
+        /// channel before Allow queued it.
         var lost: String?
-
-        var hasSent: Bool {
-            sent?.withLock { $0 } ?? false
-        }
     }
 
     private enum Phase {
@@ -308,14 +309,16 @@ actor PairingService {
     /// The user allowed the confirmed phone: stores it with a fresh device
     /// room, sends it `paired` with that room, waits up to the flush limit,
     /// closes the pairing room for good, and calls `onPaired`, whose
-    /// reconcile opens the device room.
+    /// reconcile opens the device room. A `paired` still in flight at the
+    /// flush limit counts as sent, by design (see the type's "Ending"), and
+    /// the room's close waits for that send to end.
     ///
     /// Throws `.notAwaitingApproval` while the offer still waits for a
     /// phone, `.offerExpired` once it has expired, and `.noSuchOffer` for any
     /// other offer that is not awaiting approval, including one that is not
-    /// the current offer. Throws `.pairingNotFinished` when `paired` cannot
-    /// have reached the phone; Allow has tried to delete the row, the offer is
-    /// interrupted, `onPairingUndone` has returned with the row's ID, and
+    /// the current offer. Throws `.pairingNotFinished` when `paired`
+    /// definitely did not leave; Allow has tried to delete the row, the offer
+    /// is interrupted, `onPairingUndone` has returned with the row's ID, and
     /// `onPaired` is not called.
     ///
     /// Both callbacks run on the caller's task once the commit has cleared,
@@ -463,7 +466,7 @@ actor PairingService {
             case .waiting, .awaitingApproval:
                 interrupt(because: "the relay was refused")
             case .allowing:
-                loseAllow(because: "the relay was refused before the phone heard it was paired")
+                loseAllow(because: "the relay was refused before the phone could be told its room")
             case .paired, .ended:
                 return
             }
@@ -474,7 +477,7 @@ actor PairingService {
             case .awaitingApproval:
                 interrupt(because: "the phone's socket changed")
             case .allowing:
-                loseAllow(because: "the phone's socket changed before it heard it was paired")
+                loseAllow(because: "the phone's socket changed before it could be told its room")
             case .waiting(.none), .paired, .ended:
                 return
             }
@@ -668,8 +671,8 @@ actor PairingService {
 
     /// The rest of Allow, in its own task so that `cancel` and `start` can
     /// wait for it. While the offer is `allowing`, expiry and Deny leave it
-    /// alone, and an event that ends the phone's channel before `paired`
-    /// reaches the relay makes the pairing undone.
+    /// alone, and an event that ends the phone's channel before Allow queues
+    /// `paired` makes the pairing undone.
     private func commitAllow(offerID: UUID, claim: Claim) async throws -> PhoneDevice {
         let device = PhoneDevice(id: UUID(), name: claim.confirmed.deviceName, publicKey: claim.confirmed.phoneKey,
                                  roomID: claim.deviceRoom, pairedAt: now())
@@ -699,10 +702,17 @@ actor PairingService {
         return device
     }
 
-    /// Queues `paired` and waits, up to the flush limit, until it reaches the
-    /// relay. Nil once it has, with the phone's channel still standing;
-    /// otherwise why the phone cannot have heard it. An event that ends the
-    /// channel first ends the wait at once.
+    /// Queues `paired` and waits, up to the flush limit, for it to leave.
+    /// Nil unless `paired` definitely did not leave; then why the phone
+    /// cannot have heard it.
+    ///
+    /// Only a definite failure undoes the Allow: an event before `paired` is
+    /// queued, a room that closed first, or a send that throws, as one does
+    /// on a socket that is not open. A send still in flight at the flush
+    /// limit counts as sent, and an event once `paired` is queued changes
+    /// nothing. Both are by design, as the type's "Ending" says: keeping the
+    /// row for a phone that never heard `paired` costs one Revoke, and
+    /// deleting it under a phone that did leaves that phone unable to connect.
     private func sendPaired(_ frame: Data, offerID: UUID) async -> String? {
         let unsent = "the phone's new room did not reach the relay"
         guard let current = offer, current.id == offerID, case .allowing(var allowing) = current.phase,
@@ -712,39 +722,42 @@ actor PairingService {
         if let lost = allowing.lost {
             return lost
         }
-        let sent = OSAllocatedUnfairLock(initialState: false)
-        let (left, signal) = AsyncStream.makeStream(of: Void.self)
-        allowing.sent = sent
-        allowing.stopWaiting = signal
+        allowing.queued = true
         offer?.phase = .allowing(allowing)
+        // Nil while the send is in flight; then whether it reached the relay.
+        let outcome = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+        let (left, signal) = AsyncStream.makeStream(of: Void.self)
         let outgoing = Outgoing(frame: frame, onLeft: { reached in
-            if reached {
-                sent.withLock { $0 = true }
-            }
+            outcome.withLock { $0 = reached }
             signal.finish()
         })
         guard case .enqueued = outbox.yield(outgoing) else { return unsent }
         await waitUntilLeft(left, clock: clock)
-        if case .allowing(let after) = offer?.phase, let lost = after.lost {
-            return lost
+        switch outcome.withLock({ $0 }) {
+        case .some(true):
+            return nil
+        case .some(false):
+            return unsent
+        case .none:
+            PhoneBridgeLog.record(.frameNotSent(
+                deviceID: nil,
+                detail: "the phone's new room was still on its way at the flush limit, so the pairing stands"))
+            return nil
         }
-        return sent.withLock { $0 } ? nil : unsent
     }
 
-    /// An event ended the confirmed phone's channel while Allow was storing
-    /// it or sending `paired`. Before `paired` has reached the relay, the
-    /// phone can no longer hear it, so Allow stops waiting and undoes the
-    /// pairing. After, the event is the phone leaving with its new room, and
-    /// changes nothing.
+    /// An event ended the confirmed phone's channel during Allow. Before
+    /// `paired` is queued, the phone can no longer hear it, so Allow undoes
+    /// the pairing. Once `paired` is queued, the event changes nothing: the
+    /// send's own outcome decides, as `sendPaired` says.
     private func loseAllow(because reason: String) {
-        guard case .allowing(var allowing) = offer?.phase, !allowing.hasSent, allowing.lost == nil else { return }
+        guard case .allowing(var allowing) = offer?.phase, !allowing.queued, allowing.lost == nil else { return }
         allowing.lost = reason
         offer?.phase = .allowing(allowing)
-        allowing.stopWaiting?.finish()
     }
 
-    /// `paired` cannot have reached the phone: the row Allow stored goes
-    /// again, and the offer ends as interrupted. `allow` then calls
+    /// `paired` definitely did not leave: the row Allow stored goes again,
+    /// and the offer ends as interrupted. `allow` then calls
     /// `onPairingUndone` with the row's ID and throws, so `onPaired` is not
     /// called: no pairing notification. A delete that fails here leaves the
     /// row to the owner, which tries again. `cancel` and `start` wait for the
