@@ -161,6 +161,114 @@ struct TerminalEngineSwitchTests {
         #expect(fixture.identity == base, "a returning row's panel carries the closed terminal's override")
     }
 
+    /// A holder terminal opened while the experiment was off runs on
+    /// SwiftTerm with no override. Once the flag is on it already resolves to
+    /// libghostty, so a switch that compared its target with that would do
+    /// nothing; the switch moves the panel off the engine it is actually on.
+    /// The rebuilt panel is libghostty wherever this machine can draw with it,
+    /// and elsewhere its start falls back as any would, so what is checked on
+    /// every runner is that it asked for libghostty.
+    @Test("A holder terminal opened while the flag was off switches to libghostty once the flag is on, and its tab then names the engine")
+    func switchMovesATerminalOpenedBeforeTheFlagWasOn() async throws {
+        let fixture = SwitchFixture(label: "OpenedBeforeTheFlag", flag: false)
+        defer { fixture.tearDown() }
+        let first = fixture.makePanel()
+        try #require(first.engine.kind == .swiftTerm, "with the flag off the panel was built on \(first.engine.kind)")
+        await first.coordinator.startHolderClient(engine: first.engine)
+        try #require(fixture.daemon.events == ["attach", "ready"], "\(fixture.daemon.events)")
+
+        fixture.suite.defaults.set(true, forKey: AppState.useGhosttyTerminalEngineKey)
+        try #require(fixture.state.terminalEngineKind(for: fixture.terminalID) == .ghostty,
+                     "with the flag on a holder terminal does not ask for libghostty, so this tests nothing")
+        let identity = fixture.identity
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        #expect(fixture.identity != identity,
+                "the switch left the identity alone, so the panel would stay on SwiftTerm")
+        #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
+        #expect(fixture.daemon.events == ["attach", "ready"], "\(fixture.daemon.events)")
+
+        fixture.dismantle(first)
+        let attempts = MakerAttemptLog()
+        let second = fixture.makePanel(
+            makeGhostty: { font, appearance, configuration in
+                attempts.count += 1
+                return try TerminalEngineFactory.makeGhosttyEngine(
+                    font: font, appearance: appearance, configuration: configuration)
+            },
+            fallbacks: attempts)
+        #expect(attempts.count == 1, "the rebuilt panel did not ask for libghostty")
+        let expected: TerminalEngineKind = EngineTestSupport.canBuildGhostty ? .ghostty : .swiftTerm
+        #expect(second.engine.kind == expected, "the rebuilt panel was built on \(second.engine.kind)")
+        await second.coordinator.startHolderClient(engine: second.engine)
+        #expect(fixture.daemon.events == ["attach", "ready", "detach", "attach", "ready"],
+                "\(fixture.daemon.events)")
+
+        await EngineTestSupport.mainQueueTurn()
+        let label = TerminalEngineLabel.text(
+            experimentEnabled: fixture.state.ghosttyTerminalEngineEnabled,
+            kind: fixture.state.terminalEngineKindInUse(for: fixture.terminalID))
+        #expect(label != nil, "the switched terminal's tab names no engine")
+        #expect(label == TerminalEngineLabel.text(experimentEnabled: true, kind: expected))
+    }
+
+    /// A panel built before AppState loaded its row resolves as tmux, so it is
+    /// SwiftTerm; once the row is seen as holder, the terminal resolves to
+    /// libghostty, and the switch must still move the panel.
+    @Test("A panel built before its holder row loaded switches to libghostty once the row is in")
+    func switchMovesAPanelBuiltBeforeItsRowLoaded() {
+        let fixture = SwitchFixture(label: "BuiltBeforeItsRow", flag: true)
+        defer { fixture.tearDown() }
+        fixture.state.terminals[fixture.worktreeID] = []
+        let panel = fixture.makePanel()
+        #expect(panel.engine.kind == .swiftTerm, "a panel with no row was built on \(panel.engine.kind)")
+
+        fixture.state.terminals[fixture.worktreeID] = [fixture.row]
+        #expect(fixture.state.terminalEngineKind(for: fixture.terminalID) == .ghostty)
+        let identity = fixture.identity
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        #expect(fixture.identity != identity,
+                "the switch left the identity alone, so the panel would stay on SwiftTerm")
+        #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
+        #expect(fixture.state.terminalEngineKind(for: fixture.terminalID) == .ghostty)
+    }
+
+    /// Every branch of the decision, including the one where the override
+    /// already names the target but the panel was built on the other engine:
+    /// writing it again would change nothing, so the override goes and the
+    /// default, libghostty, rebuilds the panel.
+    @Test("A switch writes the override that moves the panel off the engine it is on, and skips only a fallback, a pending rebuild and a state nothing moves")
+    func switchPlanMovesThePanelOffItsEngine() {
+        typealias Plan = TerminalEngineSwitchPlan
+        func plan(
+            requested: TerminalEngineKind, builtOn: TerminalEngineKind,
+            builtWith: TerminalEngineKind?, now: TerminalEngineKind?
+        ) -> Plan {
+            Plan.plan(
+                build: TerminalEngineBuild(requested: requested, override: builtWith),
+                builtOn: builtOn, currentOverride: now)
+        }
+
+        // Opened while the flag was off, or before its row loaded.
+        #expect(plan(requested: .swiftTerm, builtOn: .swiftTerm, builtWith: nil, now: nil) == .setOverride(.ghostty))
+        #expect(plan(requested: .ghostty, builtOn: .ghostty, builtWith: nil, now: nil) == .setOverride(.swiftTerm))
+        #expect(plan(requested: .swiftTerm, builtOn: .swiftTerm, builtWith: .swiftTerm, now: .swiftTerm)
+                == .setOverride(.ghostty))
+        #expect(plan(requested: .ghostty, builtOn: .ghostty, builtWith: .ghostty, now: .ghostty)
+                == .setOverride(.swiftTerm))
+        // Built on SwiftTerm while the flag was off, under a libghostty
+        // override left from before: the override already names the target.
+        #expect(plan(requested: .swiftTerm, builtOn: .swiftTerm, builtWith: .ghostty, now: .ghostty)
+                == .setOverride(nil))
+        #expect(TerminalEngineFactory.requestedKind(flagEnabled: true, host: .panel(.holder), override: nil) == .ghostty,
+                "removing the override no longer asks for libghostty, so the case above would not move the panel")
+
+        #expect(plan(requested: .ghostty, builtOn: .swiftTerm, builtWith: nil, now: nil) == .skipFellBack)
+        #expect(plan(requested: .ghostty, builtOn: .swiftTerm, builtWith: .ghostty, now: .ghostty) == .skipFellBack)
+        #expect(plan(requested: .swiftTerm, builtOn: .swiftTerm, builtWith: nil, now: .ghostty) == .skipRebuildPending)
+        #expect(plan(requested: .ghostty, builtOn: .ghostty, builtWith: nil, now: .swiftTerm) == .skipRebuildPending)
+        #expect(plan(requested: .ghostty, builtOn: .ghostty, builtWith: .swiftTerm, now: .swiftTerm) == .skipNothingMoves)
+    }
+
     @Test("The override is kept across panel rebuilds, a fresh AppState has none, and it goes with the terminal")
     func overrideSurvivesRebuildAndIsGoneAfterRelaunch() {
         let fixture = SwitchFixture(label: "Relaunch", flag: true)
@@ -533,8 +641,9 @@ private final class SwitchFixture {
         clock: any Clock<Duration> = ContinuousClock(),
         readerBeforeClose: (@Sendable (HolderStreamReader) -> Void)? = nil
     ) -> SwitchPanel {
+        let requested = state.terminalEngineKind(for: terminalID)
         let engine = TerminalEngineFactory.make(
-            kind: state.terminalEngineKind(for: terminalID),
+            kind: requested,
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(terminalID: terminalID),
@@ -550,7 +659,7 @@ private final class SwitchFixture {
         coordinator.engine = engine
         engine.delegate = coordinator
         TerminalPanelRepresentable.registerEngineRecords(
-            of: coordinator, builtOn: engine.kind, in: state, terminalID: terminalID)
+            of: coordinator, requested: requested, builtOn: engine.kind, in: state, terminalID: terminalID)
         let panel = SwitchPanel(coordinator: coordinator, engine: engine)
         panels.append(panel)
         return panel

@@ -484,8 +484,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // libghostty while `useGhosttyTerminalEngine` is on, or on whichever
         // engine Switch Terminal Engine chose for it, and every other panel
         // stays on SwiftTerm. A panel whose row AppState has not loaded yet
-        // resolves as tmux, as `panelTransport()` does, and so stays on
-        // SwiftTerm for its life.
+        // resolves as tmux, as `panelTransport()` does, and so is built on
+        // SwiftTerm, where it stays unless a switch moves it once its row is
+        // in.
         let engineKind = appState.terminalEngineKind(for: terminalID)
         // Wire up Cmd+Click file path detection: the worktree path is what a
         // clicked relative path resolves against.
@@ -623,7 +624,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         appState.registerTerminalView(engine.view, for: terminalID)
         Self.registerEngineRecords(
-            of: coordinator, builtOn: engine.kind, in: appState, terminalID: terminalID)
+            of: coordinator, requested: engineKind, builtOn: engine.kind, in: appState, terminalID: terminalID)
 
         return engine.view
     }
@@ -631,7 +632,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     /// Enters a newly made panel in AppState's per-terminal engine records:
     /// Switch Terminal Engine reaches the panel through
     /// `terminalEngineSwitchers`, and the tab's engine label names the engine
-    /// it was actually built on from `terminalEnginesInUse`.
+    /// it was actually built on from `terminalEnginesInUse`. The coordinator
+    /// keeps what the panel asked for, `requested`, beside the override its
+    /// identity carries, for the switch to decide by (`TerminalEngineBuild`).
     ///
     /// The label's record is observed, so it is written a main-queue turn
     /// later rather than inside the view update that made the panel;
@@ -647,9 +650,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     /// while the flag was off gets its label when it is next built.
     @MainActor
     static func registerEngineRecords(
-        of coordinator: Coordinator, builtOn kind: TerminalEngineKind,
+        of coordinator: Coordinator, requested: TerminalEngineKind, builtOn kind: TerminalEngineKind,
         in appState: AppState, terminalID: UUID
     ) {
+        coordinator.engineBuild = TerminalEngineBuild(
+            requested: requested, override: appState.terminalEngineOverrides[terminalID])
         let owner = coordinator.engineSwitchToken
         appState.registerTerminalEngineSwitcher(for: terminalID, owner: owner) { [weak coordinator] in
             coordinator?.switchEngine()
@@ -988,6 +993,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// (`terminalEngineSwitchers`, `terminalEnginesInUse`), so a
         /// predecessor's teardown leaves its successor's entries alone.
         let engineSwitchToken = UUID()
+        /// What this panel asked the factory for, and the override its
+        /// identity carries, recorded by `registerEngineRecords`. Nil until
+        /// then, and a panel with none does not switch.
+        var engineBuild: TerminalEngineBuild?
 
         init(clock: any Clock<Duration> = ContinuousClock()) {
             self.clock = clock
@@ -2071,28 +2080,48 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// whatever is in flight, as for a closed tab. Nothing is awaited here,
         /// so nothing can land after a teardown or a close that follows.
         ///
-        /// The other engine is the other of the one this panel was actually
-        /// built on. When that is already what the terminal asks for (a second
-        /// press before the rebuild, or a panel whose libghostty start fell
-        /// back to SwiftTerm), the write would change no identity, so nothing
-        /// happens and the log says why. With `useGhosttyTerminalEngine` off,
-        /// where an override would count for nothing, nothing happens at all.
+        /// The other engine is the other of the one this panel is actually
+        /// on, and what to write is `TerminalEngineSwitchPlan.plan`'s answer:
+        /// the override that changes this panel's identity and makes the
+        /// rebuilt panel ask for that engine. That holds for a panel built
+        /// while `useGhosttyTerminalEngine` was off, or before its row loaded,
+        /// which runs on SwiftTerm and already resolves to libghostty now. Two
+        /// presses do nothing more: one after a libghostty start fell back to
+        /// SwiftTerm, which would only fall back again, and a second press
+        /// before the rebuild. The log says which. With the flag off, where an
+        /// override counts for nothing, nothing happens at all.
         @MainActor
         func switchEngine() {
-            guard !isTornDown, let appState, let engine,
+            guard !isTornDown, let appState, let engine, let engineBuild,
                   appState.ghosttyTerminalEngineEnabled,
                   panelTransport() == .holder else { return }
-            let target = engine.kind.other
-            guard appState.terminalEngineKind(for: panelID) != target else {
+            let builtOn = engine.kind
+            let target = builtOn.other
+            let plan = TerminalEngineSwitchPlan.plan(
+                build: engineBuild, builtOn: builtOn,
+                currentOverride: appState.terminalEngineOverrides[panelID])
+            let skipped: String
+            switch plan {
+            case .setOverride(let override):
                 terminalEngineSwitchLog.info(
-                    "terminal engine switch skipped terminal=\(self.panelID, privacy: .public): it already asks for \(target.rawValue, privacy: .public), so nothing would rebuild the panel, which stays on \(engine.kind.rawValue, privacy: .public)"
+                    "switching terminal engine terminal=\(self.panelID, privacy: .public) from=\(builtOn.rawValue, privacy: .public) to=\(target.rawValue, privacy: .public) override=\(override?.rawValue ?? "none", privacy: .public)"
                 )
+                if let override {
+                    appState.terminalEngineOverrides[panelID] = override
+                } else {
+                    appState.terminalEngineOverrides.removeValue(forKey: panelID)
+                }
                 return
+            case .skipFellBack:
+                skipped = "libghostty did not start here and would fall back again"
+            case .skipRebuildPending:
+                skipped = "a switch is already rebuilding the panel"
+            case .skipNothingMoves:
+                skipped = "no override would rebuild the panel on \(target.rawValue)"
             }
             terminalEngineSwitchLog.info(
-                "switching terminal engine terminal=\(self.panelID, privacy: .public) from=\(engine.kind.rawValue, privacy: .public) to=\(target.rawValue, privacy: .public)"
+                "terminal engine switch skipped terminal=\(self.panelID, privacy: .public): \(skipped, privacy: .public), so the panel stays on \(builtOn.rawValue, privacy: .public)"
             )
-            appState.terminalEngineOverrides[panelID] = target
         }
 
         /// Serialize this panel's terminal as the byte stream that reconstructs

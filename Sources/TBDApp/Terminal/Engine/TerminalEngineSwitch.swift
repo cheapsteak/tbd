@@ -68,6 +68,62 @@ extension TerminalEngineKind {
     }
 }
 
+/// What a mounted panel asked the factory for, and the terminal's override
+/// then, recorded when the panel is built. The switch reads it to decide what
+/// to write: the panel's identity carries the override, so only a change to
+/// the override rebuilds it.
+struct TerminalEngineBuild: Equatable, Sendable {
+    /// The kind the panel asked for. The engine it got differs only when a
+    /// libghostty start fell back to SwiftTerm.
+    let requested: TerminalEngineKind
+    /// `AppState.terminalEngineOverrides` for the terminal, as the panel's
+    /// identity read it.
+    let override: TerminalEngineKind?
+}
+
+/// What Switch Terminal Engine does for a holder panel while the experiment
+/// is on.
+enum TerminalEngineSwitchPlan: Equatable, Sendable {
+    /// Record this override, or remove it when nil. Either one changes the
+    /// panel's identity, and the rebuilt panel asks for the other engine.
+    case setOverride(TerminalEngineKind?)
+    /// libghostty was asked for and did not start, so asking again would
+    /// only fall back again.
+    case skipFellBack
+    /// The override has changed since the panel was built (a second press),
+    /// so its rebuild is already on the way.
+    case skipRebuildPending
+    /// No override both changes the identity and asks for the other engine.
+    /// Not reached by any sequence of switches and flag changes; kept so the
+    /// plan is total.
+    case skipNothingMoves
+
+    /// The plan for a panel built as `build` describes and actually running
+    /// on `builtOn`, while the terminal's override is `currentOverride`.
+    ///
+    /// The target is the other of the engine the panel runs on, never the
+    /// other of what the flag and override resolve to now: a terminal opened
+    /// while the flag was off runs on SwiftTerm and, once the flag is on,
+    /// resolves to libghostty already, and a switch must still move it. The
+    /// override written is the target where that changes the identity, and
+    /// otherwise none at all where no override asks for the target (an
+    /// override of libghostty left from before the flag went off and on).
+    static func plan(
+        build: TerminalEngineBuild, builtOn: TerminalEngineKind, currentOverride: TerminalEngineKind?
+    ) -> TerminalEngineSwitchPlan {
+        guard build.requested == builtOn else { return .skipFellBack }
+        guard currentOverride == build.override else { return .skipRebuildPending }
+        let target = builtOn.other
+        for candidate in [target, nil] as [TerminalEngineKind?]
+        where candidate != currentOverride
+            && TerminalEngineFactory.requestedKind(
+                flagEnabled: true, host: .panel(.holder), override: candidate) == target {
+            return .setOverride(candidate)
+        }
+        return .skipNothingMoves
+    }
+}
+
 /// The engine a mounted panel was built on, and which panel said so.
 struct TerminalEngineInUse: Equatable, Sendable {
     let kind: TerminalEngineKind
