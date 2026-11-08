@@ -24,7 +24,7 @@ trap 'rm -rf "$work"' EXIT
 : >"$work/listed"
 tab="$(printf '\t')"
 
-while IFS="$tab" read -r name version kind value sha || [ -n "$name" ]; do
+while IFS="$tab" read -r name _ kind value sha || [ -n "$name" ]; do
   case "$name" in '' | '#'*) continue ;; esac
   [ "$kind" = file ] || continue
   rel="$name/$value"
@@ -38,7 +38,6 @@ while IFS="$tab" read -r name version kind value sha || [ -n "$name" ]; do
   if [ "$actual" != "$sha" ]; then
     fail "$rel: sha256 mismatch (lock $sha, disk $actual)"
   fi
-  : "$version"
 done <"$lock"
 
 # Every regular file on disk (except the lock) must be listed.
