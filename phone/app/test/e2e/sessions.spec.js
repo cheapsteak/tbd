@@ -519,3 +519,22 @@ test("switching tabs changes the header's status", async ({ page, appHost }) => 
   await expect(head.getByRole('button', { name: 'Account: acme-work. Switch account' })).toBeVisible();
   await expect(head.getByRole('button', { name: 'Model: opus. Change model' })).toBeVisible();
 });
+
+test('a Codex tab shows the note, and no Details switch, menu or composer', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Codex');
+  const head = app(page).locator('.s-head');
+  await expect(head.locator('.t2a')).toContainText('Working');
+  await expect(head.locator('.t2b')).toHaveText('Codex');
+  await expect(head.getByRole('button', { name: 'Back to sessions' })).toBeVisible();
+  await expect(head.getByRole('switch')).toHaveCount(0);
+  await expect(head.getByRole('button', { name: 'Session menu' })).toHaveCount(0);
+  await expect(head.locator('.prof')).toHaveCount(0);
+  const note = app(page).locator('.tx-wrap .tx .codex-note');
+  await expect(note.locator('b')).toHaveText('Codex transcripts arrive in a later TBD release.');
+  await expect(note.locator('span')).toHaveText('This tab shows its status only. Open it on the laptop to read or reply.');
+  await expect(note.locator('svg')).toHaveCount(1);
+  await expect(app(page).locator('textarea')).toHaveCount(0);
+  await expect(app(page).getByRole('button', { name: 'Send' })).toHaveCount(0);
+  await expect(app(page).getByRole('tab', { name: 'Codex' })).toHaveAttribute('aria-selected', 'true');
+});

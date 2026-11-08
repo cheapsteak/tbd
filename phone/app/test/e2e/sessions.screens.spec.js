@@ -94,3 +94,9 @@ test('working', async ({ page, appHost }) => {
   await expect(app(page).getByRole('tab')).toHaveCount(3);
   await capture(page, 'working', app(page).locator('.tabs'));
 });
+
+test('codex', async ({ page, appHost }) => {
+  await openSession(page, appHost, 'Checkout v2', 'Codex');
+  await expect(app(page).locator('.codex-note')).toBeVisible();
+  await capture(page, 'codex', app(page).locator('.codex-note'));
+});
