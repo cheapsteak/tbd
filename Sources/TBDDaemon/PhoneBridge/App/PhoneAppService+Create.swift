@@ -36,16 +36,20 @@ extension PhoneAppService {
     static let notAFormFieldReason = "The form has a value this provider does not ask for."
     static let tooManyFormValuesReason = "The form has too many values."
     static let formValueTooLongReason = "A value in the form is too long."
+    static let notAChoiceReason = "A value in the form is not one of its choices."
     static let incompleteFormReason = "The form is not complete."
     static let providerNotReadyReason = "This provider is not ready on this laptop."
     static let providerNeedsSignInReason = "Sign in to this provider on your laptop."
     static let noCreateFormReason = "This provider has not reported its create form yet."
     static let repoHasNoRemoteReason = "This repo has no remote that this provider can use."
+    static let worktreeCreateFailedReason = "The worktree could not be created. Check the laptop."
 
     /// The create field TBD fills with the phone's first message.
     static let promptFieldName = "prompt"
     /// The field type whose value is a bool, not a string.
     static let boolFieldType = "bool"
+    /// The field type whose value is one of the field's choices.
+    static let enumFieldType = "enum"
     /// The most values one `remote.create` may carry, strings and bools
     /// together, and the most fields of one provider's form the phone is
     /// sent.
@@ -76,7 +80,8 @@ extension PhoneAppService {
     /// The reply carries the worktree's ID and, when the wait found one, its
     /// first agent session (`firstAgentSession(inWorktree:)`). When the wait
     /// runs out the session is absent, and the phone picks it up from
-    /// `sessions.changed`.
+    /// `sessions.changed`. A create that fails in the background during the
+    /// wait is `refused` with `worktreeCreateFailedReason`.
     nonisolated func worktreeCreate(
         _ params: PhoneWorktreeCreateParams, _ context: DeviceContext
     ) async throws -> PhoneWorktreeCreateResult {
@@ -95,17 +100,24 @@ extension PhoneAppService {
             worktreeID: worktree.id, session: terminalID.map { PhoneSessionRef.local(terminalID: $0) })
     }
 
-    /// The first agent tab of `worktreeID` (`firstAgentTerminal`), waiting up
-    /// to `PhoneAppConstants.worktreeSessionWait` for one to appear, or nil
+    /// The first agent tab of `worktreeID` (`lookForAgentTerminal`), waiting
+    /// up to `PhoneAppConstants.worktreeSessionWait` for one to appear, or nil
     /// when none did in time.
     ///
     /// `worktree.create` returns before its agent's tab exists, so this
     /// subscribes to state deltas, looks once right after subscribing, so a
     /// tab made before the subscription is not missed, and looks again after
-    /// every delta, bursts folded into one look. The looks race a sleep on
-    /// the service's clock in a task group, and the loser is cancelled. The
-    /// subscriber is removed on every way out: found, timed out, or the
+    /// every delta, bursts folded into one look. The first look runs before
+    /// the wait's clock starts; the later looks race a sleep on the service's
+    /// clock in a task group, and the loser is cancelled. The subscriber is
+    /// removed on every way out: found, timed out, the create failed, or the
     /// request cancelled.
+    ///
+    /// **A create that fails in the background ends the wait.** It runs after
+    /// `worktree.create` has replied, and its rollback deletes the worktree
+    /// row and broadcasts a delta, so the next look finds the row gone and
+    /// the wait ends `refused` with `worktreeCreateFailedReason`, never a
+    /// success naming a worktree that no longer exists.
     ///
     /// It takes the first agent tab, Claude or Codex, whichever the user's
     /// primary agent setting started; a shell tab is not a session the phone
@@ -121,15 +133,18 @@ extension PhoneAppService {
             subscriptions.removeSubscriber(subscriberID)
             continuation.finish()
         }
-        // The first look, after the subscriber is in place, so no tab falls
-        // between them.
-        continuation.yield()
         let db = self.db
+        // The first look, after the subscriber is in place, so no tab falls
+        // between them. A delta that lands while it reads is kept in the
+        // stream and looked at again below.
+        if let terminalID = try await Self.lookForAgentTerminal(inWorktree: worktreeID, db: db) {
+            return terminalID
+        }
         let clock = self.clock
         return try await withThrowingTaskGroup(of: UUID?.self, returning: UUID?.self) { group in
             group.addTask {
                 for await _ in wakeups {
-                    if let terminalID = await Self.firstAgentTerminal(inWorktree: worktreeID, db: db) {
+                    if let terminalID = try await Self.lookForAgentTerminal(inWorktree: worktreeID, db: db) {
                         return terminalID
                     }
                 }
@@ -146,22 +161,33 @@ extension PhoneAppService {
         }
     }
 
-    /// The first tab of `worktreeID`, in the order tabs were made, that runs
-    /// an agent by the sessions list's reading (`PhoneSnapshotBuilder.agent`).
-    /// A read that fails is logged and counts as no tab yet, so the next
-    /// delta or the wait's end decides; one the wait's end cancelled is not
-    /// logged.
-    private static func firstAgentTerminal(inWorktree worktreeID: UUID, db: TBDDatabase) async -> UUID? {
+    /// One look at `worktreeID`: the first of its tabs, in the order tabs
+    /// were made, that runs an agent by the sessions list's reading
+    /// (`PhoneSnapshotBuilder.agent`), or nil when it has none yet.
+    ///
+    /// A worktree row that is gone means the create failed and rolled back:
+    /// `refused` with `worktreeCreateFailedReason`. A read that fails is
+    /// logged and counts as no tab yet, so the next delta or the wait's end
+    /// decides; one the wait's end cancelled is not logged.
+    private static func lookForAgentTerminal(inWorktree worktreeID: UUID, db: TBDDatabase) async throws -> UUID? {
+        let worktree: Worktree?
+        let terminals: [TBDShared.Terminal]
         do {
-            return try await db.terminals.list(worktreeID: worktreeID)
-                .first { terminal in PhoneSnapshotBuilder.agent(of: terminal) != nil }?.id
+            worktree = try await db.worktrees.get(id: worktreeID)
+            terminals = try await db.terminals.list(worktreeID: worktreeID)
         } catch is CancellationError {
             return nil
         } catch {
             createLogger.error(
-                "Phone worktree.create: could not read the new worktree's tabs: \(Self.errorType(error), privacy: .public)")
+                "Phone worktree.create: could not read the new worktree: \(Self.errorType(error), privacy: .public)")
             return nil
         }
+        guard worktree != nil else {
+            createLogger.notice(
+                "Phone worktree.create: worktree \(worktreeID, privacy: .public) is gone, so its create failed")
+            throw PhoneAppError(code: .refused, message: worktreeCreateFailedReason)
+        }
+        return terminals.first { terminal in PhoneSnapshotBuilder.agent(of: terminal) != nil }?.id
     }
 
     // MARK: - remote.providers
@@ -359,12 +385,14 @@ extension PhoneAppService {
     /// 2. Every key of `strings` must name a field of the form that is not a
     ///    bool, and every key of `bools` a bool field, and neither may name
     ///    `repo` or `prompt`, which TBD fills; any other key is `bad_request`.
-    /// 3. The message (`remoteFirstMessage`).
-    /// 4. The plan (`createPlan`, from `repo`, the laptop's defaults and
+    /// 3. The string values (`vettedFormStrings`): no control characters, and
+    ///    an `enum` field's value one of its choices.
+    /// 4. The message (`remoteFirstMessage`).
+    /// 5. The plan (`createPlan`, from `repo`, the laptop's defaults and
     ///    `generatedSlug`), with the phone's values laid over it, and the
     ///    message as `prompt`, empty when there is none, so a stored default
     ///    never stands in for a message the phone did not send.
-    /// 5. `RemoteCreateFormLogic.buildParamsJSON`, whose failure, such as a
+    /// 6. `RemoteCreateFormLogic.buildParamsJSON`, whose failure, such as a
     ///    required field left blank, is `bad_request` with its description.
     static func remoteCreateParamsJSON(
         _ params: PhoneRemoteCreateParams, status: RemoteProviderStatus, repo: Repo,
@@ -386,11 +414,12 @@ extension PhoneAppService {
                 throw PhoneAppError(code: .badRequest, message: notAFormFieldReason)
             }
         }
+        let phoneStrings = try vettedFormStrings(params.strings, fields: byName)
         let acceptsPrompt = byName[promptFieldName] != nil
         let prompt = try remoteFirstMessage(params.message, acceptsPrompt: acceptsPrompt)
         var strings = plan.stringValues
         var bools = plan.boolValues
-        strings.merge(params.strings) { _, phone in phone }
+        strings.merge(phoneStrings) { _, phone in phone }
         bools.merge(params.bools) { _, phone in phone }
         if acceptsPrompt {
             strings[promptFieldName] = prompt ?? ""
@@ -401,6 +430,39 @@ extension PhoneAppService {
         case .failure(let error):
             throw PhoneAppError(code: .badRequest, message: error.errorDescription ?? incompleteFormReason)
         }
+    }
+
+    /// The phone's string form values, held to what the laptop's create sheet
+    /// lets its user enter. `fields` is the form by field name, and every key
+    /// of `strings` names one of them.
+    ///
+    /// 1. Every CRLF becomes LF, and a value holding a control character is
+    ///    `refused` with `PhoneMessageText.controlCharacterRefusal`, the code
+    ///    and words the phone's message gets for the same text. A provider can
+    ///    paste a value into its session as it does the message.
+    /// 2. An `enum` field's value must be one of the field's choices, the only
+    ///    values the sheet's picker offers, or `bad_request` with
+    ///    `notAChoiceReason`. A blank value passes here: the picker offers it
+    ///    on a field that is not required, and `buildParamsJSON` refuses it on
+    ///    one that is.
+    ///
+    /// Every value is checked for control characters before any for its
+    /// choices, so the answer does not depend on the order of the keys.
+    static func vettedFormStrings(
+        _ strings: [String: String], fields: [String: ProviderCreateParamField]
+    ) throws -> [String: String] {
+        let normalized = strings.mapValues { value in PhoneMessageText.lineEndingsNormalized(value) }
+        guard !normalized.values.contains(where: { value in PhoneMessageText.hasControlCharacter(value) }) else {
+            throw PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal)
+        }
+        for (name, value) in normalized {
+            guard let field = fields[name], field.type == enumFieldType,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            guard (field.values ?? []).contains(value) else {
+                throw PhoneAppError(code: .badRequest, message: notAChoiceReason)
+            }
+        }
+        return normalized
     }
 
     /// The phone's message as a new remote session's first message, held to

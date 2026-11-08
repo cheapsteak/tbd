@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import TBDShared
 import Testing
 import TestSupport
@@ -66,6 +67,17 @@ struct PhoneCreateTests {
         try await h.db.terminals.create(worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: kind)
     }
 
+    /// A tab of `kind` made at `createdAt`, written to the table as it is,
+    /// so its place in the order tabs were made is certain.
+    private static func seedTab(
+        _ h: PhoneServiceHarness, in worktree: TBDShared.Worktree, kind: TerminalKind, createdAt: Date
+    ) async throws -> TBDShared.Terminal {
+        let terminal = TBDShared.Terminal(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", createdAt: createdAt, kind: kind)
+        try await h.db.writerForTests.write { try TerminalRecord(from: terminal).insert($0) }
+        return terminal
+    }
+
     /// A registered provider with `fields` as its form. Its command, its
     /// arguments and its remediation command carry text that must never
     /// reach the phone.
@@ -125,7 +137,9 @@ struct PhoneCreateTests {
             .worktreeCreate, id: "create", params: PhoneWorktreeCreateParams(repoID: repo.id, message: "Add a search box."))
 
         await h.service.handleAppMessage(body, from: h.peer)
-        // The wait has subscribed and is sleeping.
+        // The wait has subscribed, and is sleeping, which it starts only once
+        // its first look has run and found no tab. So only the delta below
+        // can lead it to the tab.
         try await h.clock.requireSleeperArmed()
         let tab = try await Self.seedTab(h, in: worktree, kind: .claude)
         h.subscriptions.broadcast(delta: .terminalCreated(
@@ -140,13 +154,17 @@ struct PhoneCreateTests {
     }
 
     /// A tab made before the wait subscribed is found by the first look,
-    /// with no delta and no time passing. A shell tab is not a session.
+    /// with no delta and no time passing. A shell tab is not a session: it
+    /// was made seconds before the agent's tab, so the look passes over it.
     @Test func createWorktreeFindsASessionMadeBeforeTheWait() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
         let worktree = try await Self.seedCreatedWorktree(h, in: repo)
-        _ = try await Self.seedTab(h, in: worktree, kind: .shell)
-        let tab = try await Self.seedTab(h, in: worktree, kind: .claude)
+        let made = Date(timeIntervalSince1970: 1_800_000_000)
+        let shell = try await Self.seedTab(h, in: worktree, kind: .shell, createdAt: made)
+        let tab = try await Self.seedTab(h, in: worktree, kind: .claude, createdAt: made.addingTimeInterval(5))
+        let order = try await h.db.terminals.list(worktreeID: worktree.id).map(\.id)
+        try #require(order == [shell.id, tab.id])
         let outbox = await h.connect()
 
         let (reply, bytes) = try await h.request(
@@ -173,6 +191,46 @@ struct PhoneCreateTests {
         let result = try Self.result(PhoneWorktreeCreateResult.self, from: bytes)
         #expect(result.worktreeID == worktree.id)
         #expect(result.session == nil)
+        #expect(h.subscriptions.subscriberCount == 0)
+    }
+
+    /// A create that fails in the background, after `worktree.create`
+    /// replied, deletes its worktree row and broadcasts that. The wait ends
+    /// there, `refused`, without waiting out its time, and never names a
+    /// worktree that is gone.
+    @Test func aCreateThatFailsDuringTheWaitIsRefused() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
+        let outbox = await h.connect()
+        let body = try PhoneTestRequests.body(
+            .worktreeCreate, id: "create", params: PhoneWorktreeCreateParams(repoID: repo.id, message: "Add a search box."))
+
+        await h.service.handleAppMessage(body, from: h.peer)
+        // The first look found the worktree with no tab, and the wait sleeps.
+        try await h.clock.requireSleeperArmed()
+        try await h.db.worktrees.delete(id: worktree.id)
+        h.subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktree.id, creationFailed: true)))
+        let bytes = try await outbox.body(at: 0)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneAppService.worktreeCreateFailedReason))
+        #expect(h.subscriptions.subscriberCount == 0)
+    }
+
+    /// A create that failed before the wait began is refused by the first
+    /// look.
+    @Test func aCreateThatFailedBeforeTheWaitIsRefused() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
+        try await h.db.worktrees.delete(id: worktree.id)
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .worktreeCreate, params: PhoneWorktreeCreateParams(repoID: repo.id, message: "Add a search box."), on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneAppService.worktreeCreateFailedReason))
         #expect(h.subscriptions.subscriberCount == 0)
     }
 
@@ -533,6 +591,69 @@ struct PhoneCreateTests {
             #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
         }
         #expect(h.actions.remoteCreates.isEmpty)
+    }
+
+    /// A form value is held to the message's character rule: one holding a
+    /// control character is refused with the words the message gets, and a
+    /// CRLF in one becomes a bare line feed.
+    @Test func remoteCreateHoldsFormValuesToTheMessageRule() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        try Self.offer(h, [Self.status()])
+        try Self.startsSession(h)
+        let outbox = await h.connect()
+
+        for value in ["main\u{1b}[201~", "ma\u{0}in", "ma\rin", "main\u{7f}", "ma\u{85}in"] {
+            let (reply, _) = try await h.request(
+                .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["branch": value]), on: outbox)
+            #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
+        }
+        #expect(h.actions.remoteCreates.isEmpty)
+
+        let (reply, _) = try await h.request(
+            .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["branch": "acme\r\nfix"]), on: outbox)
+
+        #expect(reply.error == nil)
+        let sent = try Self.sentForm(h)
+        let branch = sent["branch"] as? String
+        #expect(branch == "acme\nfix")
+    }
+
+    /// An `enum` field takes only one of its choices, as the laptop's picker
+    /// does, and a blank value where the field is not required, which leaves
+    /// it out.
+    @Test func remoteCreateRefusesAnEnumValueThatIsNotAChoice() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let fields = Self.form + [
+            ProviderCreateParamField(name: "size", type: "enum", label: "Machine size", values: ["small", "large"]),
+        ]
+        try Self.offer(h, [Self.status(fields: fields)])
+        try Self.startsSession(h)
+        let outbox = await h.connect()
+
+        for value in ["huge", "Small"] {
+            let (reply, _) = try await h.request(
+                .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["size": value]), on: outbox)
+            #expect(reply.error == PhoneAppError(code: .badRequest, message: PhoneAppService.notAChoiceReason))
+        }
+        #expect(h.actions.remoteCreates.isEmpty)
+
+        let (chosen, _) = try await h.request(
+            .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["size": "large"]), on: outbox)
+        let (blank, _) = try await h.request(
+            .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["size": ""]), on: outbox)
+
+        #expect(chosen.error == nil)
+        #expect(blank.error == nil)
+        let creates = h.actions.remoteCreates
+        try #require(creates.count == 2)
+        let sizes = try creates.map { create in
+            let object = try JSONSerialization.jsonObject(with: Data(create.paramsJSON.utf8)) as? [String: Any]
+            return object?["size"] as? String
+        }
+        let expected: [String?] = ["large", nil]
+        #expect(sizes == expected)
     }
 
     /// A blank message sends no prompt, even where a stored value would
