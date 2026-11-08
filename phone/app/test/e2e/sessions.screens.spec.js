@@ -11,7 +11,7 @@
 
 import { readFileSync } from 'node:fs';
 
-import { app, capture, expect, hostCall, openApp, rowNames, test } from './fixtures.js';
+import { app, capture, expect, hostCall, openApp, openSessionByName, rowNames, test } from './fixtures.js';
 
 test.skip(({ browserName }) => browserName !== 'webkit', 'the screenshots are taken in WebKit only');
 test.use({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
@@ -45,4 +45,33 @@ test('bump', async ({ page, appHost }) => {
   await expect(app(page).locator('.repo').first()).toHaveText('acme-mobile');
   await expect(app(page).locator('.row .n').first()).toHaveText('Legacy pane');
   await capture(page, 'bump', app(page).locator('.list-foot'));
+});
+
+// --- the session screen ------------------------------------------------------------------
+//
+// - `remote`: a remote session (Triage flaky test), with the provider in place of the account.
+// - `error`, `rate`, `gone`, `unknown`: a session with each stopped status and its band.
+// - `working`: Checkout v2, with its three tabs. It has no "Working…" line or transcript until
+//   part 6c; 6c saves its own as `transcript-working`.
+// - `codex`: Checkout v2's Codex tab and its note.
+
+/**
+ * Opens the app, then the session of the row named `name` (and its tab `tab`), and waits for
+ * the header.
+ * @param {import('@playwright/test').Page} page
+ * @param {any} appHost
+ * @param {string} name
+ * @param {string} [tab]
+ */
+async function openSession(page, appHost, name, tab) {
+  await openApp(page, appHost);
+  await expect.poll(() => rowNames(page)).toEqual(MOCK_NAMES);
+  await openSessionByName(page, name, tab);
+  await expect(app(page).locator('.s-head .t1')).toContainText(name);
+}
+
+test('remote', async ({ page, appHost }) => {
+  await openSession(page, appHost, 'Triage flaky test');
+  await expect(app(page).locator('.s-head .rb2')).toHaveText('remote');
+  await capture(page, 'remote', app(page).locator('.s-head'));
 });

@@ -349,3 +349,92 @@ test('rows that follow a snapshot with more appear', async ({ page, appHost }) =
   });
   await expect.poll(() => shownOutline(page)).toEqual(expectedOutline(MOCK));
 });
+
+// --- the session screen's frame (header, bands, tabs, Codex note) ------------------------
+//
+// Menus and sheets belong to part 6d, so these tests check that the account, model and menu
+// buttons exist with the right names and are enabled per capability, not that a menu opens.
+
+/**
+ * A scenario in which the mock row named `name` has its first session changed by `patch`.
+ * @param {string} name
+ * @param {(session: any) => any} patch
+ */
+function withSession(name, patch) {
+  const row = mockRow(name);
+  return withRows(MOCK, [{ ...row, sessions: [patch(row.sessions[0]), ...row.sessions.slice(1)] }]);
+}
+
+test('the header names the status, age, account and model', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  // SSE reconnect's session uses the acme-work profile in mock.json; most use Personal.
+  await openSessionByName(page, 'SSE reconnect');
+  const head = app(page).locator('.s-head');
+  await expect(head).toHaveClass(/(^| )st-wait( |$)/);
+  await expect(head.locator('.t1')).toHaveText('SSE reconnect');
+  await expect(head.locator('.t2a')).toHaveText('Waiting for you· 6m');
+  await expect(head.locator('.rb2')).toHaveCount(0);
+  const account = head.getByRole('button', { name: 'Account: acme-work. Switch account' });
+  const model = head.getByRole('button', { name: 'Model: opus. Change model' });
+  await expect(account).toBeEnabled();
+  await expect(model).toBeEnabled();
+  await expect(account).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(account).toHaveAttribute('aria-expanded', 'false');
+  await expect(head.locator('.t2b')).toHaveText('acme-work · opus');
+  await expect(head.getByRole('switch', { name: 'Show details' })).not.toBeChecked();
+  await expect(head.getByRole('button', { name: 'Session menu' })).toBeEnabled();
+
+  // The Details switch is the app's setting: it carries over to the next session.
+  await head.getByRole('switch', { name: 'Show details' }).check({ force: true });
+  await expect(head.getByRole('switch', { name: 'Show details' })).toBeChecked();
+  await head.getByRole('button', { name: 'Back to sessions' }).click();
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(app(page).locator('.s-head').getByRole('switch', { name: 'Show details' })).toBeChecked();
+  await expect(app(page).locator('.s-head .t2b')).toHaveText('Personal · opus');
+});
+
+test('the account and model are plain text where the capability is unavailable, and fall back to new copy when missing', async ({ page, appHost }) => {
+  const scenario = withSession('Docs refresh', (s) => {
+    const { profileName: _p, model: _m, ...rest } = s;
+    return { ...rest, capabilities: { ...s.capabilities, switchProfile: { available: false, reason: 'No.' }, model: { available: false, reason: 'No.' } } };
+  });
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Docs refresh');
+  const head = app(page).locator('.s-head');
+  await expect(head.locator('.t2b')).toHaveText('Default account · Model');
+  await expect(head.locator('.t2b button')).toHaveCount(0);
+  await expect(head.getByRole('button', { name: 'Session menu' })).toBeEnabled();
+});
+
+test('a session with a profile and no model names the model "Model"', async ({ page, appHost }) => {
+  const scenario = withSession('Docs refresh', (s) => {
+    const { model: _m, ...rest } = s;
+    return rest;
+  });
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Docs refresh');
+  const head = app(page).locator('.s-head');
+  await expect(head.getByRole('button', { name: 'Account: Personal. Switch account' })).toBeVisible();
+  await expect(head.getByRole('button', { name: 'Model: Model. Change model' })).toBeVisible();
+});
+
+test('a remote session shows its provider in place of the account', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Triage flaky test');
+  const head = app(page).locator('.s-head');
+  await expect(head.locator('.t1')).toHaveText('Triage flaky testremote');
+  await expect(head.locator('.rb2')).toHaveText('remote');
+  await expect(head.locator('.t2b')).toHaveText('acme-cloud · opus');
+  await expect(head.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
+  await expect(head.getByRole('button', { name: 'Model: opus. Change model' })).toBeEnabled();
+  await expect(head).toHaveClass(/(^| )st-work( |$)/);
+});
+
+test('back returns to the list', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'session');
+  await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+  await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'sessions');
+  await expect(app(page).locator('.list-foot')).toBeVisible();
+});
