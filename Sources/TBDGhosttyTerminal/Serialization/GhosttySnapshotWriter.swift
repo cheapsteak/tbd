@@ -142,6 +142,11 @@ public enum GhosttySnapshotWriter {
     /// - **The 8-bit ST.** SwiftTerm, like libghostty, reads 0x9C inside an OSC as content, so the
     ///   opener does not end on it. libghostty does end an APC, SOS or PM on 0x9C, so after one that
     ///   ends that way the opener takes in the output up to the next ESC or BEL.
+    /// - **The next attach.** The opener lasts only until a viewer attaches again. The daemon's
+    ///   attach preamble asks its live SwiftTerm emulator for each mode with DECRQM, fed into it as
+    ///   `CSI ? Pd $ p`, and on an alternate screen also feeds it `?1049l` and a repaint. The first
+    ///   ESC of those ends the opener, so if the program is still writing the sequence when a
+    ///   viewer attaches, the rest after that point prints as text.
     static let overlongSequenceSink: [UInt8] = Array("\u{1b}]9999;".utf8)
 
     /// An alternate screen, with the primary screen behind it written first, from a clone that has
