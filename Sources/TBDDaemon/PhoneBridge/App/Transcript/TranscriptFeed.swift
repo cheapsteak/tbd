@@ -129,6 +129,17 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 ///   at most one `detailLimitBytes` text or one subagent read bounded by
 ///   `subagentCountLimit`, so they hold a few megabytes at most.
 ///
+/// **Every file read runs off the cooperative pool**
+/// (`PhoneAppService.readOffThePool(_:)`): the first page, an older page with
+/// its cursor's anchor scan, each live step, a remote cursor's rebase, and
+/// the subagent counts shaping asks for. **One read section runs at a time,
+/// in the order they asked** (`acquireReadTurn()`): a worker read with what
+/// it applies, an older page with what it keeps. So reads and the state they
+/// change apply in the order they would have run inline. Calls that read no
+/// file (`noteDelta(_:)`, `close()`, the detail cache) still run during a
+/// read; a section reads the feed's state it needs before its read and
+/// applies the result after it, so the state they see is whole.
+///
 /// The live `IncrementalTranscript` holds the items appended since it
 /// started, which it needs to patch late results. It starts over on every
 /// reset, and also once it holds `liveItemLimit` items, since compaction
@@ -201,6 +212,10 @@ actor TranscriptFeed {
     /// The reads the worker has finished, each with its events emitted. For
     /// tests, which wait on it to know a read is behind them.
     private(set) var readCount = 0
+    /// Whether a read section holds the feed's reads (`acquireReadTurn()`).
+    private var readTurnHeld = false
+    /// The read sections waiting for their turn, first come first served.
+    private var readTurnWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// What the last sync, or load of earlier history, said about a remote
     /// session's cache. Nil for a local source.
@@ -225,6 +240,47 @@ actor TranscriptFeed {
         /// Whether a load reached the start in this generation, so no later
         /// sync offers earlier history again.
         var earlierEnded = false
+    }
+
+    /// A first page read off the pool, with the append cursor built at its
+    /// end and the lines that cursor's first step read.
+    private struct FirstPageRead: Sendable {
+        let build: PageBuild
+        let page: TranscriptPage
+        let cursor: TranscriptAppendCursor
+        let held: (lines: [String], start: UInt64)?
+    }
+
+    /// A waiting row whose result arrived live, with what reshaping it needs.
+    private struct WaitingResolution: Sendable {
+        let row: PhoneItem
+        let result: ToolResult
+        /// The subagent's ID, for a subagent row whose ID the feed kept.
+        let agentID: String?
+    }
+
+    /// An older page read off the pool: what the feed keeps from it, and the
+    /// page as the phone gets it (`phonePage`).
+    private struct OlderRead: Sendable {
+        let build: PageBuild
+        let page: TranscriptPage
+    }
+
+    /// What the first read of a remote older page found.
+    private enum CachedOlderPage {
+        /// The page needed no earlier history, and was kept as this.
+        case kept(TranscriptPage)
+        /// The page, read from `path` in `generation`, reaches the top of the
+        /// cache with too few messages while earlier history can be loaded.
+        case needsEarlier(path: String, generation: Int, cached: OlderRead)
+    }
+
+    /// The rows one batch of live lines shaped off the pool.
+    private struct ShapedBatch: Sendable {
+        let appended: [PhoneItem]
+        let updated: [PhoneItem]
+        /// Every item of a live transcript being set aside, shaped.
+        let aside: [PhoneItem]
     }
 
     /// A detail the phone was sent, for the generation it was read in.
@@ -263,7 +319,9 @@ actor TranscriptFeed {
             let result = try await follower.sync()
             adopt(result)
         }
-        return loadFirstPage(generation: generation) ?? Self.emptyPage
+        await acquireReadTurn()
+        defer { releaseReadTurn() }
+        return await loadFirstPage(generation: generation) ?? Self.emptyPage
     }
 
     /// Starts the live part: the worker, the watcher (for a remote session,
@@ -376,22 +434,7 @@ actor TranscriptFeed {
     private func runWanted() async {
         while !closed,
               sessionCheckWanted || stepWanted || heldLines != nil || pendingSync != nil || pendingReset != nil {
-            // With no file read yet, any wakeup looks for the file again.
-            let checkSession = sessionCheckWanted || cursor == nil
-            sessionCheckWanted = false
-            stepWanted = false
-            let events: [TranscriptFeedEvent]
-            if let reason = pendingReset {
-                pendingReset = nil
-                events = [reset(reason: reason)]
-            } else if let result = pendingSync {
-                pendingSync = nil
-                events = applySync(result)
-            } else if checkSession {
-                events = await refreshSession()
-            } else {
-                events = step()
-            }
+            guard let events = await nextEvents() else { return }
             if watcher == nil {
                 startWatcher()
             }
@@ -401,6 +444,55 @@ actor TranscriptFeed {
             }
             readCount += 1
         }
+    }
+
+    /// One read of what the wakeups asked for, in its read turn, and the
+    /// events it makes. Nil once the feed is closed.
+    private func nextEvents() async -> [TranscriptFeedEvent]? {
+        await acquireReadTurn()
+        defer { releaseReadTurn() }
+        guard !closed else { return nil }
+        // With no file read yet, any wakeup looks for the file again.
+        let checkSession = sessionCheckWanted || cursor == nil
+        sessionCheckWanted = false
+        stepWanted = false
+        if let reason = pendingReset {
+            pendingReset = nil
+            return [await reset(reason: reason)]
+        } else if let result = pendingSync {
+            pendingSync = nil
+            return await applySync(result)
+        } else if checkSession {
+            return await refreshSession()
+        } else {
+            return await step()
+        }
+    }
+
+    // MARK: - The read turn
+
+    /// Waits until no other read section runs, and every section that asked
+    /// before this one has run, then holds the turn until
+    /// `releaseReadTurn()`. A section that reads off the pool suspends, so
+    /// without the turn another could read the feed's state halfway through
+    /// its change, or overwrite it with what it read before the change.
+    private func acquireReadTurn() async {
+        guard readTurnHeld else {
+            readTurnHeld = true
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            readTurnWaiters.append(continuation)
+        }
+    }
+
+    /// Hands the turn to the section that asked first, or frees it.
+    private func releaseReadTurn() {
+        guard !readTurnWaiters.isEmpty else {
+            readTurnHeld = false
+            return
+        }
+        readTurnWaiters.removeFirst().resume()
     }
 
     // MARK: - Reading
@@ -414,24 +506,24 @@ actor TranscriptFeed {
         case .local(_, let resolve):
             resolvePath = resolve
         case .remote:
-            return step()
+            return await step()
         }
         let resolved = await resolvePath()
         guard !closed else { return [] }
-        guard let resolved, resolved != path else { return step() }
+        guard let resolved, resolved != path else { return await step() }
         path = resolved
         stopWatcher()
-        return [reset(reason: Self.rolloverReason)]
+        return [await reset(reason: Self.rolloverReason)]
     }
 
-    /// One read of the lines appended since the last.
-    private func step() -> [TranscriptFeedEvent] {
+    /// One read of the lines appended since the last. Runs in the read turn.
+    private func step() async -> [TranscriptFeedEvent] {
         guard let path else { return [] }
         guard var cursor else {
             // The file has not been read: once it reads, its first page goes
             // out as a reset.
             let next = generation + 1
-            guard let page = loadFirstPage(generation: next) else { return [] }
+            guard let page = await loadFirstPage(generation: next) else { return [] }
             generation = next
             return [.reset(TranscriptResetData(session: session, reason: Self.rewriteReason, page: page))]
         }
@@ -440,27 +532,42 @@ actor TranscriptFeed {
         var held = heldLines
         heldLines = nil
         var start = held?.start ?? cursor.offset
-        var outcome = cursor.step(path: path)
-        if outcome == .reset, case .remote = source, let shift = rebaseCursor(), let rebased = self.cursor {
+        let first = await Self.stepOffThePool(cursor, path: path)
+        cursor = first.cursor
+        var outcome = first.outcome
+        if outcome == .reset, case .remote = source, let shift = await rebaseCursor(), let rebased = self.cursor {
             // Within a generation a remote cache only grows at either end, so
             // a change before the cursor is earlier history that a load
             // prepended before any sync reported it: read on past it.
             held = held.map { (lines: $0.lines, start: $0.start + shift) }
-            cursor = rebased
-            start = held?.start ?? cursor.offset
-            outcome = cursor.step(path: path)
+            start = held?.start ?? rebased.offset
+            let again = await Self.stepOffThePool(rebased, path: path)
+            cursor = again.cursor
+            outcome = again.outcome
         }
         var lines = held?.lines ?? []
         switch outcome {
         case .unreadable, .unchanged:
             break
         case .reset:
-            return [reset(reason: Self.rewriteReason)]
+            return [await reset(reason: Self.rewriteReason)]
         case .appended(let appended):
             lines += appended
             self.cursor = cursor
         }
-        return ingest(lines, from: start, to: cursor.offset)
+        return await ingest(lines, from: start, to: cursor.offset)
+    }
+
+    /// `cursor` after one `step(path:)` on a GCD thread, and what the step
+    /// found. A step that reads nothing leaves the cursor as it was.
+    private static func stepOffThePool(
+        _ cursor: TranscriptAppendCursor, path: String
+    ) async -> (cursor: TranscriptAppendCursor, outcome: TranscriptAppendCursor.Step) {
+        await PhoneAppService.readOffThePool {
+            var stepped = cursor
+            let outcome = stepped.step(path: path)
+            return (cursor: stepped, outcome: outcome)
+        }
     }
 
     // MARK: - A remote cache
@@ -477,34 +584,40 @@ actor TranscriptFeed {
     /// over with reason `rewrite` when it cannot. A result from a sync that
     /// read the cache before something the feed already applied (an older
     /// generation or `head`) changes nothing but the step.
-    private func applySync(_ result: RemoteTranscriptSyncResult) -> [TranscriptFeedEvent] {
-        guard var cache = remote else { return step() }
+    private func applySync(_ result: RemoteTranscriptSyncResult) async -> [TranscriptFeedEvent] {
+        guard var cache = remote else { return await step() }
         if result.generation > cache.generation || result.path != path {
             adopt(result)
-            return [reset(reason: Self.generationReason)]
+            return [await reset(reason: Self.generationReason)]
         }
-        guard result.generation == cache.generation, result.head >= cache.head else { return step() }
+        guard result.generation == cache.generation, result.head >= cache.head else { return await step() }
         let prepended = result.head > cache.head
         cache.head = result.head
         cache.hasEarlier = result.hasEarlier && !cache.earlierEnded
         remote = cache
-        if prepended, rebaseCursor() == nil {
-            return [reset(reason: Self.rewriteReason)]
+        if prepended, await rebaseCursor() == nil {
+            return [await reset(reason: Self.rewriteReason)]
         }
-        return step()
+        return await step()
     }
 
     /// Moves the cursor past earlier history prepended to a remote cache,
     /// with every offset the feed keeps beside it, and returns how many bytes
     /// were prepended. Nil, with nothing moved, when there is no cursor or
     /// the bytes it read are not found within `anchorScanLimit` past it; the
-    /// caller then starts over.
-    private func rebaseCursor() -> UInt64? {
-        guard var moved = cursor else { return nil }
-        let before = moved.offset
-        guard moved.rebaseAfterPrepend(limit: PhoneAppConstants.anchorScanLimit), moved.offset >= before else {
-            return nil
+    /// caller then starts over. The scan runs off the pool; the caller holds
+    /// the read turn, so the cursor cannot change meanwhile.
+    private func rebaseCursor() async -> UInt64? {
+        guard let current = cursor else { return nil }
+        let before = current.offset
+        let rebased = await PhoneAppService.readOffThePool { () -> TranscriptAppendCursor? in
+            var moved = current
+            guard moved.rebaseAfterPrepend(limit: PhoneAppConstants.anchorScanLimit), moved.offset >= before else {
+                return nil
+            }
+            return moved
         }
+        guard let moved = rebased else { return nil }
         let shift = moved.offset - before
         cursor = moved
         if shift > 0 {
@@ -527,13 +640,18 @@ actor TranscriptFeed {
         }
     }
 
-    /// `build`'s page as the phone gets it, `build` read in `generation`. A
-    /// remote page that reached the top of the cache while earlier history
-    /// can be loaded has not reached the start: its cursor names offset 0, so
-    /// the phone asks for the page before it, which loads that history. Any
-    /// other page is as built.
-    private func phonePage(_ build: PageBuild, generation: Int) -> TranscriptPage {
-        guard build.page.reachedStart, remote?.hasEarlier == true, let path,
+    /// `build`'s page as the phone gets it, `build` read from `path` in
+    /// `generation`, `hasEarlier` saying whether the last sync said earlier
+    /// history of a remote cache can be loaded. A remote page that reached
+    /// the top of the cache while earlier history can be loaded has not
+    /// reached the start: its cursor names offset 0, so the phone asks for
+    /// the page before it, which loads that history. Any other page is as
+    /// built. Making the cursor reads the file, so this runs off the pool
+    /// with the read that built the page.
+    private static func phonePage(
+        _ build: PageBuild, generation: Int, path: String, hasEarlier: Bool
+    ) -> TranscriptPage {
+        guard build.page.reachedStart, hasEarlier,
               let cursor = TranscriptPager.makeCursor(generation: generation, offset: 0, filePath: path) else {
             return build.page
         }
@@ -541,17 +659,35 @@ actor TranscriptFeed {
             items: build.page.items, cursor: cursor, reachedStart: false, omittedItems: build.page.omittedItems)
     }
 
-    /// Starts over at the file's tail in a new generation.
-    private func reset(reason: String) -> TranscriptFeedEvent {
-        generation += 1
-        let page = loadFirstPage(generation: generation) ?? Self.emptyPage
+    /// Starts over at the file's tail in a new generation. Runs in the read
+    /// turn.
+    private func reset(reason: String) async -> TranscriptFeedEvent {
+        let next = generation + 1
+        let page = await loadFirstPage(generation: next) ?? Self.emptyPage
+        generation = next
         return .reset(TranscriptResetData(session: session, reason: reason, page: page))
     }
 
-    /// Drops everything built from the file, reads the first page in
-    /// `generation`, and keeps what the live part needs from it. Nil, with
-    /// no cursor, when there is no path or the file cannot be read.
-    private func loadFirstPage(generation: Int) -> TranscriptPage? {
+    /// Reads the first page in `generation` off the pool, then drops
+    /// everything built from the file and keeps what the live part needs
+    /// from the page. Nil, with no cursor, when there is no path or the file
+    /// cannot be read. Runs in the read turn, so what it drops and keeps
+    /// changes all at once, after the read.
+    private func loadFirstPage(generation: Int) async -> TranscriptPage? {
+        // A cache: dropping it before the read costs at most a count read
+        // again, and keeps counts of the file as it was out of the page.
+        subagentCounts.removeAll()
+        var read: FirstPageRead?
+        if let path {
+            let showDetails = self.showDetails
+            let hasEarlier = remote?.hasEarlier == true
+            let subagentItemCount = subagentCount(path: path)
+            read = await PhoneAppService.readOffThePool {
+                Self.readFirstPage(
+                    path: path, generation: generation, showDetails: showDetails, hasEarlier: hasEarlier,
+                    subagentItemCount: subagentItemCount)
+            }
+        }
         cursor = nil
         heldLines = nil
         transcript = IncrementalTranscript()
@@ -562,14 +698,24 @@ actor TranscriptFeed {
         liveFileEdits.removeAll()
         liveAgentIDs.removeAll()
         pageAgentIDs.removeAll()
-        subagentCounts.removeAll()
         recentDetails.removeAll()
-        guard let path,
-              let build = TranscriptPager.firstPage(
-                filePath: path, generation: generation,
-                ctx: ShapingContext(showDetails: showDetails, subagentItemCount: subagentCount(path: path)))
-        else { return nil }
-        keepIndexes(of: build)
+        guard let read else { return nil }
+        keepIndexes(of: read.build)
+        heldLines = read.held
+        cursor = read.cursor
+        return read.page
+    }
+
+    /// The first page of the file at `path` in `generation`, and an append
+    /// cursor at its end that has taken its first step. Nil when the file
+    /// cannot be read. Blocking: `loadFirstPage` calls it off the pool.
+    private static func readFirstPage(
+        path: String, generation: Int, showDetails: Bool, hasEarlier: Bool,
+        subagentItemCount: @escaping @Sendable (String) -> Int?
+    ) -> FirstPageRead? {
+        guard let build = TranscriptPager.firstPage(
+            filePath: path, generation: generation,
+            ctx: ShapingContext(showDetails: showDetails, subagentItemCount: subagentItemCount)) else { return nil }
         var fresh = TranscriptAppendCursor(path: path, offset: build.endOffset) { path, offset in
             TranscriptAppendCursor.diskTailWindow(path: path, endingAt: offset)
         }
@@ -577,15 +723,20 @@ actor TranscriptFeed {
         // while the page is fresh: a rewrite before the next step is then a
         // reset rather than a splice. A fresh cursor never resets, and what
         // it reads waits for the next step.
+        var held: (lines: [String], start: UInt64)?
         if case .appended(let lines) = fresh.step(path: path), !lines.isEmpty {
-            heldLines = (lines: lines, start: build.endOffset)
+            held = (lines: lines, start: build.endOffset)
         }
-        cursor = fresh
-        return phonePage(build, generation: generation)
+        return FirstPageRead(
+            build: build, page: phonePage(build, generation: generation, path: path, hasEarlier: hasEarlier),
+            cursor: fresh, held: held)
     }
 
-    /// The events for `lines`, read from `start` to `end`.
-    private func ingest(_ lines: [String], from start: UInt64, to end: UInt64) -> [TranscriptFeedEvent] {
+    /// The events for `lines`, read from `start` to `end`. Shaping can read
+    /// subagent transcripts for their item counts, so it runs off the pool;
+    /// the caller holds the read turn, so nothing else changes the live
+    /// transcript meanwhile.
+    private func ingest(_ lines: [String], from start: UInt64, to end: UInt64) async -> [TranscriptFeedEvent] {
         guard !lines.isEmpty, let path else { return [] }
         let span = lines.reduce(UInt64(0)) { $0 + UInt64($1.utf8.count) + 1 }
         let exact = span == end - start
@@ -628,37 +779,46 @@ actor TranscriptFeed {
             }
         }
 
+        let subagentItemCount = subagentCount(path: path)
         let ctx = ShapingContext(
             showDetails: showDetails, fileEdits: liveFileEdits.dictionary,
-            subagentAgentIDs: liveAgentIDs.dictionary, subagentItemCount: subagentCount(path: path))
-        let appended = transcript.items[firstNew...].compactMap { TranscriptShaper.shape($0, ctx) }
-        var updated = patched.sorted().compactMap { TranscriptShaper.shape(transcript.items[$0], ctx) }
+            subagentAgentIDs: liveAgentIDs.dictionary, subagentItemCount: subagentItemCount)
+        var resolutions: [WaitingResolution] = []
         for id in resolved {
             guard let result = transcript.toolResult(for: id).map(Self.statusOnly) else { continue }
             results.set(result, for: id)
             if let row = waitingCalls.remove(id) {
-                updated.append(resolvedRow(row, result: result, path: path))
+                let agentID = row.kind == .subagent ? liveAgentIDs[row.id] : nil
+                resolutions.append(WaitingResolution(row: row, result: result, agentID: agentID))
             }
         }
-        if transcript.items.count >= liveItemLimit {
-            setLiveTranscriptAside(ctx)
+        let waiting = resolutions
+        let appendedItems = Array(transcript.items[firstNew...])
+        let patchedItems = patched.sorted().map { transcript.items[$0] }
+        let asideItems = transcript.items.count >= liveItemLimit ? transcript.items : []
+        let shaped = await PhoneAppService.readOffThePool {
+            ShapedBatch(
+                appended: appendedItems.compactMap { TranscriptShaper.shape($0, ctx) },
+                updated: patchedItems.compactMap { TranscriptShaper.shape($0, ctx) }
+                    + waiting.map { Self.resolvedRow($0, subagentItemCount: subagentItemCount) },
+                aside: asideItems.compactMap { TranscriptShaper.shape($0, ctx) })
         }
-        let appendEvents = Self.frames(appended, session: session, budget: PhoneFrameBudget.eventDataBytes)
+        if !asideItems.isEmpty {
+            setLiveTranscriptAside(shaped: shaped.aside)
+        }
+        let appendEvents = Self.frames(shaped.appended, session: session, budget: PhoneFrameBudget.eventDataBytes)
             .map(TranscriptFeedEvent.append)
-        let updateEvents = Self.frames(updated, session: session, budget: PhoneFrameBudget.eventDataBytes)
+        let updateEvents = Self.frames(shaped.updated, session: session, budget: PhoneFrameBudget.eventDataBytes)
             .map(TranscriptFeedEvent.update)
         return appendEvents + updateEvents
     }
 
     /// Starts a fresh live transcript in place of the current one, whose
-    /// rows the phone already holds. Its calls still `running`, shaped with
-    /// `ctx`, join the calls waiting, so their results update them as they
-    /// would have updated the live rows.
-    private func setLiveTranscriptAside(_ ctx: ShapingContext) {
-        for item in transcript.items {
-            guard let row = TranscriptShaper.shape(item, ctx), row.toolStatus == TranscriptShaper.runningStatus else {
-                continue
-            }
+    /// rows the phone already holds. Its calls still `running`, among
+    /// `shaped`, its items as shaped, join the calls waiting, so their
+    /// results update them as they would have updated the live rows.
+    private func setLiveTranscriptAside(shaped: [PhoneItem]) {
+        for row in shaped where row.toolStatus == TranscriptShaper.runningStatus {
             waitingCalls.set(row, for: row.id)
         }
         transcript = IncrementalTranscript()
@@ -671,11 +831,16 @@ actor TranscriptFeed {
     }
 
     /// A waiting row that was `running`, with its result's status and, for
-    /// a subagent, its item count.
-    private func resolvedRow(_ row: PhoneItem, result: ToolResult, path: String) -> PhoneItem {
+    /// a subagent whose ID the feed kept, its item count, which
+    /// `subagentItemCount` can read from disk.
+    private static func resolvedRow(
+        _ resolution: WaitingResolution, subagentItemCount: @Sendable (String) -> Int?
+    ) -> PhoneItem {
+        let row = resolution.row
+        let result = resolution.result
         var itemCount = row.itemCount
-        if row.kind == .subagent, let agentID = liveAgentIDs[row.id] {
-            itemCount = subagentCount(path: path)(agentID).map(TranscriptShaper.boundedItemCount)
+        if let agentID = resolution.agentID {
+            itemCount = subagentItemCount(agentID).map(TranscriptShaper.boundedItemCount)
         }
         return PhoneItem(
             id: row.id, kind: row.kind, at: row.at, text: row.text, truncated: row.truncated,
@@ -746,12 +911,15 @@ actor TranscriptFeed {
     /// no longer names a line of the file. A remote session's page can load
     /// earlier history first (`remoteOlderPage`).
     func olderPage(cursor: String) async throws -> TranscriptPage {
-        guard let path else { throw Self.staleCursor }
         switch source {
         case .local:
-            return try keep(olderBuild(cursor: cursor, path: path))
+            await acquireReadTurn()
+            defer { releaseReadTurn() }
+            guard let path else { throw Self.staleCursor }
+            let read = try await olderBuild(cursor: cursor, path: path)
+            return keep(read)
         case .remote(let follower):
-            return try await remoteOlderPage(cursor: cursor, path: path, follower: follower)
+            return try await remoteOlderPage(cursor: cursor, follower: follower)
         }
     }
 
@@ -776,12 +944,22 @@ actor TranscriptFeed {
     ///   `rewrite`, and the cursor is stale.
     /// - **A feed that started over or closed** while the load ran makes the
     ///   cursor stale.
-    private func remoteOlderPage(
-        cursor: String, path: String, follower: RemoteTranscriptFollower
-    ) async throws -> TranscriptPage {
-        let pageGeneration = generation
-        let cached = try olderBuild(cursor: cursor, path: path)
-        guard needsEarlier(cached) else { return keep(cached) }
+    ///
+    /// The page read, and what follows the load, each run in a read turn of
+    /// their own; the load does not hold one, so the live part goes on
+    /// meanwhile, as the checks after it expect.
+    private func remoteOlderPage(cursor: String, follower: RemoteTranscriptFollower) async throws -> TranscriptPage {
+        let path: String
+        let pageGeneration: Int
+        let cached: OlderRead
+        switch try await cachedOlderPage(cursor: cursor) {
+        case .kept(let page):
+            return page
+        case .needsEarlier(let readPath, let readGeneration, let read):
+            path = readPath
+            pageGeneration = readGeneration
+            cached = read
+        }
         let loaded: RemoteTranscriptLoadEarlierResult
         do {
             loaded = try await follower.loadEarlier()
@@ -789,10 +967,14 @@ actor TranscriptFeed {
             if error is CancellationError { throw error }
             Self.logger.error(
                 "Phone transcript: loading earlier remote history failed: \(PhoneAppService.errorType(error), privacy: .public)")
+            await acquireReadTurn()
+            defer { releaseReadTurn() }
             guard !closed, generation == pageGeneration, self.path == path else { throw Self.staleCursor }
-            guard !cached.page.items.isEmpty else { throw error }
+            guard !cached.build.page.items.isEmpty else { throw error }
             return keep(cached)
         }
+        await acquireReadTurn()
+        defer { releaseReadTurn() }
         guard !closed, generation == pageGeneration, self.path == path, var cache = remote else {
             throw Self.staleCursor
         }
@@ -811,20 +993,44 @@ actor TranscriptFeed {
         let prepended = loaded.head > cache.head
         cache.head = max(cache.head, loaded.head)
         remote = cache
-        if prepended, rebaseCursor() == nil {
+        if prepended, await rebaseCursor() == nil {
             pendingReset = Self.rewriteReason
             wakeups?.yield()
             throw Self.staleCursor
         }
-        let rebuilt = try olderBuild(cursor: cursor, path: path)
+        let rebuilt = try await olderBuild(cursor: cursor, path: path)
         return keep(rebuilt)
+    }
+
+    /// The first part of `remoteOlderPage`, in a read turn of its own: the
+    /// page before `cursor` from the cache as it is, kept in this same turn
+    /// when it needs no earlier history.
+    private func cachedOlderPage(cursor: String) async throws -> CachedOlderPage {
+        await acquireReadTurn()
+        defer { releaseReadTurn() }
+        guard let path else { throw Self.staleCursor }
+        let pageGeneration = generation
+        let cached = try await olderBuild(cursor: cursor, path: path)
+        guard needsEarlier(cached.build) else { return .kept(keep(cached)) }
+        return .needsEarlier(path: path, generation: pageGeneration, cached: cached)
     }
 
     /// The page before `cursor` in the file at `path`, shaped with
     /// `pageContext(path:)`, or `stale_cursor` when the cursor names no line
-    /// of it.
-    private func olderBuild(cursor: String, path: String) throws -> PageBuild {
-        try TranscriptPager.olderPage(filePath: path, cursor: cursor, generation: generation, ctx: pageContext(path: path))
+    /// of it. The read, the cursor's anchor scan included, runs off the
+    /// pool; the caller holds the read turn.
+    private func olderBuild(cursor: String, path: String) async throws -> OlderRead {
+        let generation = self.generation
+        let ctx = pageContext(path: path)
+        let hasEarlier = remote?.hasEarlier == true
+        let read = await PhoneAppService.readOffThePool { () -> Result<OlderRead, any Error> in
+            Result<OlderRead, any Error>(catching: {
+                let build = try TranscriptPager.olderPage(filePath: path, cursor: cursor, generation: generation, ctx: ctx)
+                return OlderRead(
+                    build: build, page: Self.phonePage(build, generation: generation, path: path, hasEarlier: hasEarlier))
+            })
+        }
+        return try read.get()
     }
 
     /// Whether a remote page needs earlier history loaded: it reaches the top
@@ -844,9 +1050,9 @@ actor TranscriptFeed {
 
     /// Keeps an older page's indexes (`keepIndexes(of:)`) and returns the
     /// page as the phone gets it.
-    private func keep(_ build: PageBuild) -> TranscriptPage {
-        keepIndexes(of: build)
-        return phonePage(build, generation: generation)
+    private func keep(_ read: OlderRead) -> TranscriptPage {
+        keepIndexes(of: read.build)
+        return read.page
     }
 
     /// Keeps a page's results, its rows' offsets, its calls still `running`
