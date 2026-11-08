@@ -682,35 +682,41 @@ Metal, libghostty's input to draw start was 9.2 ms at p50 and 14.3 ms at p90.
 Run on 2026-11-08 against a release build of TBD at `ee15bf8b2`, on the same
 laptop as the earlier rounds. That build includes the four parity fixes that
 "A/B under heavy output" lists. This round takes the fourth of the spec's
-measures, app CPU and memory footprint with 8 and with 24 terminals open. Its
-CPU is the app's CPU at idle: no workload was driven during the sample.
+measures, app CPU and memory footprint with 8 and with 24 terminals open. No
+workload was driven during its CPU samples.
 
 **How TBD mounts terminals.** A terminal costs the app memory only while it has
 a panel.
 
 - **Tabs** – within a worktree, only the active tab is built. Selecting a tab
-  builds its panel, and the engine settings are read then.
+  builds its panel, or one per terminal when its layout is split, and the
+  engine settings are read then.
 - **Worktrees** – the app keeps the views of up to 8 recently visited worktrees
   mounted (`keepAliveLimit` in `Sources/TBDApp/AppState.swift`), plus the
   selected worktree and any worktree whose agent is working.
+- **Pinned terminals** – a terminal pinned to the dock keeps its panel while it
+  is pinned.
 - **The rest** – a terminal with no panel lives in the daemon alone.
 - **Parked sessions** – selecting a worktree wakes its parked Claude session
   (`wakeHibernatedTerminalsOnFocus` in `AppState+Hibernation.swift`), which
   restarts the agent process.
 
 So "N terminals open" costs the app only what its mounted panels cost. With 24
-worktrees open, the keep-alive limit mounts about 9 of them, and more only
-while agents in the others are working. The run with 8 kept-alive worktrees
-therefore covers the mounted cost of 24, and 24 was not run separately. It
-would also have meant waking parked sessions: the machine had 12 running
-sessions and 18 parked ones, and visiting a parked one restarts its agent. The
-8-worktree run used only worktrees whose sessions were already running.
+worktrees open, the keep-alive limit mounts about 9 of them. Panels beyond
+those come only from worktrees whose agents are working, pinned terminals and
+split panes. The 8-worktree run measured what each kept-alive worktree adds,
+about 3 MB on every engine, so 24 worktrees should cost what 9 do, plus about
+3 MB for each extra panel. That extrapolation is why 24 was not run
+separately. Running it would also have meant waking parked sessions: the
+machine had 12 running sessions and 18 parked ones, and visiting a parked one
+restarts its agent. The 8-worktree run used only worktrees whose sessions were
+already running.
 
 **Method.**
 
 - **Footprint** – macOS `footprint -p` on the app process: the physical
   footprint, with its breakdown by category.
-- **Idle CPU** – the change in the app's CPU time over 30 s, as a percentage of
+- **App CPU** – the change in the app's CPU time over 30 s, as a percentage of
   one core.
 - **Arms** – `useGhosttyTerminalEngine` and `useMetalTerminalRenderer` chose
   each arm: libghostty, SwiftTerm on Metal, or SwiftTerm on CoreGraphics. Both
@@ -769,13 +775,13 @@ lists the runs in the order they ran, with memory in MB.
   sample. All 8 worktrees were visited in every run, which left 9 kept alive:
   the selected one and the 8 visited.
 - **Live output** – several of the visited sessions were working agents, so
-  their output was live during the CPU sample.
+  their output was live during the CPU sample, and the app was not idle.
 - **Load** – the 1-minute load was 3.9 to 7.3.
 
 The table lists the six runs in the order they ran, with memory in MB.
 IOAccelerator did not change between the two samples.
 
-| run | engine | base | after 8 visits | IOAccelerator | Malloc Large, base | Malloc Large, after | idle CPU, % |
+| run | engine | base | after 8 visits | IOAccelerator | Malloc Large, base | Malloc Large, after | CPU, % |
 |---|---|---|---|---|---|---|---|
 | 1 | libghostty | 167 | 191 | 9.0 | 9.5 | 32 | 1.6 |
 | 2 | SwiftTerm Metal | 155 | 178 | 1.7 | 4.0 | 26 | 1.7 |
@@ -801,20 +807,23 @@ IOAccelerator did not change between the two samples.
   terminal, not with each mounted panel. That is an inference from the two
   measurements. Two Metal views visible at once, such as a terminal in the main
   pane and another in the side panel, were not measured.
-- **Idle CPU** – libghostty used 1.6 and 1.3% of a core, SwiftTerm on Metal
-  1.7 and 1.7%, and SwiftTerm on CoreGraphics 1.4 and 1.5%. libghostty's range
+- **App CPU with live background output** – libghostty used 1.6 and 1.3% of a
+  core, SwiftTerm on Metal 1.7 and 1.7%, and SwiftTerm on CoreGraphics 1.4 and
+  1.5%. The working agents' output fell in the sample, so these are not idle
+  figures, and they compare the engines only roughly. libghostty's range
   overlapped both of SwiftTerm's.
 
 **What the numbers show.**
 
-- **No footprint or idle-CPU win for libghostty** – it cost the same per visit
-  as SwiftTerm and about 11 to 16 MB more in fixed cost. While visible it held
-  the same ~100 MB of GPU memory as SwiftTerm's Metal path. Its idle CPU fell
-  between SwiftTerm's two paths with one visible panel, and overlapped both
-  with 8 panels mounted.
+- **No footprint or CPU win for libghostty** – it cost the same per visit as
+  SwiftTerm and about 11 to 16 MB more in fixed cost. While visible it held the
+  same ~100 MB of GPU memory as SwiftTerm's Metal path. Its idle CPU fell
+  between SwiftTerm's two paths with one visible panel, and its CPU overlapped
+  both with 8 panels mounted.
 - **Both Metal renderers cost GPU memory** – against SwiftTerm's default
   CoreGraphics path, either Metal renderer held about 100 MB more GPU memory
-  for the visible terminal, and used 0.3 to 0.6 points more idle CPU.
+  for the visible terminal, and used 0.3 to 0.6 points more idle CPU with one
+  visible panel.
 - **The graduation rule** – this measure gives no win toward graduation.
   Against SwiftTerm on Metal, libghostty shows no regression beyond its fixed
   11 to 16 MB. Against the default CoreGraphics path, it also carries the GPU
