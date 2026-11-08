@@ -39,7 +39,21 @@ enum PhoneHandlerReply: Sendable {
     /// replies are not remembered may use it (see
     /// `PhoneAppService.remembersReplies(of:)`); for the others it is an
     /// `internal` error.
-    case onQueue(@Sendable (isolated PhoneAppService) -> Void)
+    ///
+    /// `dropped` runs instead of the work whenever the work will never run:
+    /// the phone is not connected when the request finishes, a revoke
+    /// cancelled the request, or the method's replies are remembered. Work
+    /// that would hand over something the handler built, such as an opened
+    /// transcript feed, releases it there.
+    case onQueue(@Sendable (isolated PhoneAppService) -> Void, dropped: (@Sendable () -> Void)? = nil)
+
+    /// Says the reply will never go out: runs an `onQueue` reply's
+    /// `dropped`. Does nothing for a body.
+    func discard() {
+        if case .onQueue(_, let dropped) = self {
+            dropped?()
+        }
+    }
 }
 
 /// What a connection's `sessions.subscribe` decided about the phone's event
@@ -566,15 +580,22 @@ actor PhoneAppService: PhoneAppHandling {
 
     /// Sends a finished request's reply through the connection the phone has
     /// now, or runs the handler's work in its place while the phone is
-    /// connected. A request cancelled by a revoke sends nothing.
+    /// connected. A request cancelled by a revoke sends nothing. Work that
+    /// does not run is discarded, so its `dropped` runs.
     private func requestFinished(_ token: UInt64, deviceID: UUID, reply: PhoneHandlerReply) {
         endRequest(token, deviceID: deviceID)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            reply.discard()
+            return
+        }
         switch reply {
         case .body(let body):
             send(body, to: deviceID)
-        case .onQueue(let work):
-            guard devices[deviceID]?.outbox != nil else { return }
+        case .onQueue(let work, let dropped):
+            guard devices[deviceID]?.outbox != nil else {
+                dropped?()
+                return
+            }
             work(self)
         }
     }
@@ -615,10 +636,12 @@ actor PhoneAppService: PhoneAppHandling {
                 }
             },
             work: { [self] in
-                switch await self.perform(method, body: body, context: context) {
+                let performed = await self.perform(method, body: body, context: context)
+                switch performed {
                 case .body(let reply):
                     return reply
                 case .onQueue:
+                    performed.discard()
                     // Work on the service cannot be kept for a resend.
                     Self.logger.fault("Phone app: \(method.rawValue, privacy: .public) is remembered and cannot run on the queue")
                     return Self.failure(requestID, .internalError, Self.internalErrorReason)
@@ -657,7 +680,10 @@ actor PhoneAppService: PhoneAppHandling {
                 recorder.record(PhoneActionRecord(deviceName: context.peer.deviceName, action: method.rawValue, target: target))
             }
             let reply = try await handler(body, context)
-            guard !Task.isCancelled else { return .body(Self.stopped(requestID)) }
+            guard !Task.isCancelled else {
+                reply.discard()
+                return .body(Self.stopped(requestID))
+            }
             return reply
         } catch let error as PhoneAppError {
             return .body(PhoneAppCoding.errorReply(requestID: requestID, error))

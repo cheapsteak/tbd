@@ -211,12 +211,34 @@ extension PhoneAppService {
                 await self?.emitTranscript(event, to: deviceID, token: token)
             },
             clock: clock)
-        let page = try await feed.open()
-        try Task.checkCancellation()
-        return .onQueue { service in
+        let page: TranscriptPage
+        do {
+            page = try await feed.open()
+            try Task.checkCancellation()
+        } catch {
+            await feed.close()
+            throw error
+        }
+        return Self.openedTranscriptReply(
+            params, feed: feed, token: token, stamp: stamp, page: page, requestID: requestID, deviceID: deviceID)
+    }
+
+    /// The reply of a fresh open whose `feed` has its first `page`: work on
+    /// the queue that installs the feed (`queueOpenedTranscript`), or, when
+    /// that work never runs because the phone went away or a revoke
+    /// cancelled the request, closes the feed and with it the follower.
+    static func openedTranscriptReply(
+        _ params: TranscriptOpenParams, feed: TranscriptFeed, token: UInt64, stamp: UInt64, page: TranscriptPage,
+        requestID: String, deviceID: UUID
+    ) -> PhoneHandlerReply {
+        .onQueue({ service in
             service.queueOpenedTranscript(
                 params, feed: feed, token: token, stamp: stamp, page: page, requestID: requestID, deviceID: deviceID)
-        }
+        }, dropped: {
+            Task {
+                await feed.close()
+            }
+        })
     }
 
     /// Checks that the phone may open `session`'s transcript, for a fresh
@@ -326,7 +348,8 @@ extension PhoneAppService {
     /// connection is live. Until then the earlier session's prompt feed is
     /// stopped, and this session's starts with the live part. When a later
     /// open or close came after this open, it installs nothing, replies
-    /// `transcriptChangedReason` and closes `feed`.
+    /// `transcriptChangedReason` and closes `feed`; a reply that does not
+    /// encode closes `feed` too.
     func queueOpenedTranscript(
         _ params: TranscriptOpenParams, feed: TranscriptFeed, token: UInt64, stamp: UInt64, page: TranscriptPage,
         requestID: String, deviceID: UUID
@@ -342,6 +365,9 @@ extension PhoneAppService {
         guard let reply = try? PhoneAppCoding.reply(requestID: requestID, result: result) else {
             Self.logger.error("Phone transcript: the open reply does not encode")
             send(Self.failure(requestID, .internalError, Self.internalErrorReason), to: deviceID)
+            Task {
+                await feed.close()
+            }
             return
         }
         let earlier = state.transcript

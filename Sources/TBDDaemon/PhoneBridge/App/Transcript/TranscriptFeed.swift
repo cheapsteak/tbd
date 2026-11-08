@@ -366,6 +366,11 @@ actor TranscriptFeed {
         pendingReset = nil
     }
 
+    /// Whether `close()` ran. For tests.
+    var isClosed: Bool {
+        closed
+    }
+
     /// Whether a watcher task runs. For tests.
     var isWatching: Bool {
         watcher != nil

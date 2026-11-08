@@ -678,6 +678,41 @@ struct TranscriptFeedTests {
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
+    /// An open whose phone disconnects before its reply is queued installs
+    /// nothing and closes the feed it built, so neither the feed nor its
+    /// follower outlives the request. The stand-in handler builds and opens
+    /// the feed itself, so the test holds it, and replies the way
+    /// `transcriptOpen` does.
+    @Test func anOpenWhosePhoneLeftBeforeItsReplyClosesItsFeed() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let terminalID = UUID()
+        let session = PhoneSessionRef.local(terminalID: terminalID)
+        let feed = TranscriptFeed(
+            session: session, showDetails: false, source: .local(terminalID: terminalID, resolvePath: { nil }),
+            emit: { _ in }, clock: h.clock)
+        let page = try await feed.open()
+        let gate = PhoneTestGate()
+        await h.service.setHandler({ body, context in
+            let params = try PhoneAppCoding.params(TranscriptOpenParams.self, from: body)
+            await gate.wait()
+            return PhoneAppService.openedTranscriptReply(
+                params, feed: feed, token: 1, stamp: context.transcriptStamp ?? 0, page: page,
+                requestID: context.requestID, deviceID: context.peer.deviceID)
+        }, for: .transcriptOpen)
+        let outbox = try await Self.liveConnection(h)
+
+        let openBody = try PhoneTestRequests.body(.transcriptOpen, id: "open", params: Self.openParams(session))
+        await h.service.handleAppMessage(openBody, from: h.peer)
+        await h.service.phoneDisconnected(h.peer)
+        gate.open()
+
+        try await waitUntil("the dropped open to close its feed") { await feed.isClosed }
+        #expect(Self.replyIndices("open", in: outbox).isEmpty)
+        #expect(await h.service.transcriptFeed(for: deviceID) == nil)
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
     /// The phone comes back inside the grace, its `sessions.subscribe`
     /// replays the stream, and its `transcript.open` with `resume` keeps the
     /// feed: the reply has no page, and the line appended while it was away
