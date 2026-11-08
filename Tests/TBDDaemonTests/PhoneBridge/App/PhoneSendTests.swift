@@ -148,8 +148,14 @@ struct PhoneSendTests {
     }
 
     /// The quoted size is `shellEscape`'s output, byte for byte, counted
-    /// without building it.
-    @Test(arguments: ["", "plain", "it's", "'''", "naïve 'quoted' ✓", "a'b\nc'"])
+    /// without building it. The last three put a mark after an apostrophe
+    /// (a combining acute accent, an emoji variation selector, an enclosing
+    /// keycap), which joins it into one `Character`; both still count that
+    /// apostrophe.
+    @Test(arguments: [
+        "", "plain", "it's", "'''", "naïve 'quoted' ✓", "a'b\nc'",
+        "x'\u{301}; y'\u{FE0F}", "'\u{20E3}", "a'\u{301}'\u{301}b",
+    ])
     func theQuotedSizeIsShellEscapesLength(_ text: String) {
         #expect(PhoneAppService.shellQuotedByteCount(text) == shellEscape(text).utf8.count)
     }

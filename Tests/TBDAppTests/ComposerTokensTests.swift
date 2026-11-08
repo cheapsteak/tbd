@@ -82,6 +82,16 @@ struct ComposerTokensTests {
             == "look at '/tmp/a.png' and tell me")
     }
 
+    /// An apostrophe a combining mark follows forms one `Character` with it,
+    /// and is escaped all the same, so the path stays one shell word.
+    /// Compared as bytes, because `String` equality is canonical equivalence.
+    @Test func flatteningEscapesAnApostropheAMarkFollows() {
+        let flattened = ComposerTokens.flattened(
+            text: "see [Image #1]", paths: [1: "/tmp/x'\u{301}; echo injected; '.png"])
+        let expected = "see '/tmp/x'\\''\u{301}; echo injected; '\\''.png'"
+        #expect(Array(flattened.utf8) == Array(expected.utf8))
+    }
+
     @Test func flatteningLeavesAnUnstagedTokenAlone() {
         #expect(ComposerTokens.flattened(text: "see [Image #9]", paths: [:])
             == "see [Image #9]")

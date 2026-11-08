@@ -1409,17 +1409,14 @@ extension RPCRouter {
 
     /// Build the fresh-shell revive command: a dimmed divider banner, an
     /// optional `cat` of the raw capture file (escapes intact → colors render),
-    /// then `exec <shell>`. Single-quote escaping matches `preSessionCommand` /
-    /// `shellWrapped`, so a capture path containing a single quote is safe.
+    /// then `exec <shell>`. Quoted with `shellEscape`, as in `preSessionCommand`
+    /// and `shellWrapped`, so a capture path containing a single quote is safe.
     static func reviveShellCommand(capturePath: String?, closedAt: Date, shell: String) -> String {
-        func quoted(_ s: String) -> String {
-            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }
         let stamp = Self.reviveBannerDateFormatter.string(from: closedAt)
         // Dim (SGR 2) divider; `\033`/`\n` interpreted by printf's format string.
-        var command = "printf \(quoted("\\033[2m── restored from close on %s ──\\033[0m\\n")) \(quoted(stamp)); "
+        var command = "printf \(shellEscape("\\033[2m── restored from close on %s ──\\033[0m\\n")) \(shellEscape(stamp)); "
         if let capturePath {
-            command += "/bin/cat \(quoted(capturePath)); "
+            command += "/bin/cat \(shellEscape(capturePath)); "
         }
         command += "exec \(shell)"
         return command
@@ -5427,7 +5424,7 @@ extension RPCRouter {
     /// the same path inside a sentence stays literal text. So the quoting is not
     /// decoration and the part must not be concatenated with its neighbours.
     static func quotedImagePath(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+        shellEscape(path)
     }
 
     /// How long the parts arm waits after pasting an image path, before it

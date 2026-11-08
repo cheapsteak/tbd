@@ -122,6 +122,11 @@ extension PhoneAppService {
     /// spawn builders quote a first prompt: two outer `'`, and each `'` in
     /// the text replaced by the four bytes `'\''`, three more than it had.
     /// Counted rather than built, so checking a long message copies nothing.
+    ///
+    /// `shellEscape` replaces every U+0027 scalar, including one a combining
+    /// mark follows, and counting the byte `'` counts exactly those: UTF-8
+    /// encodes U+0027 as that one byte, and no other scalar's encoding
+    /// contains it.
     static func shellQuotedByteCount(_ text: String) -> Int {
         var apostrophes = 0
         for byte in text.utf8 where byte == UInt8(ascii: "'") {

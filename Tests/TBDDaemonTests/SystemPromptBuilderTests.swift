@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -36,6 +37,69 @@ struct SystemPromptBuilderTests {
     func shellEscapeSpecialChars() {
         let result = shellEscape("$HOME `cmd` $(eval)")
         #expect(result == "'$HOME `cmd` $(eval)'")
+    }
+
+    /// Text whose apostrophe a neighbouring scalar joins into one `Character`:
+    /// a combining acute accent (U+0301), an emoji variation selector
+    /// (U+FE0F) and a combining enclosing keycap (U+20E3) after it, and a
+    /// prepended concatenation mark (U+0600) before it. Each continues with a
+    /// command, so an apostrophe left unescaped ends the quoted word and the
+    /// shell runs `echo injected`, which writes only to stdout.
+    static let joinedApostrophes: [String] = [
+        "x'\u{301}; echo injected; echo '",
+        "y'\u{FE0F}; echo injected; echo '",
+        "z'\u{20E3}; echo injected; echo '",
+        "\u{600}'; echo injected; echo '",
+        "a'\u{301}'\u{FE0F}'\u{20E3}b",
+    ]
+
+    @Test("shellEscape writes one '\\'' per apostrophe scalar, whatever mark follows it",
+          arguments: joinedApostrophes)
+    func shellEscapeEscapesEveryApostropheScalar(_ text: String) {
+        let apostrophes = text.unicodeScalars.filter { $0 == "'" }.count
+        let escaped = shellEscape(text)
+        // Counted over scalars: a `String` search would compare composed
+        // character sequences and miss an escape a mark follows.
+        let escapes = Self.scalarOccurrences(of: #"'\''"#, in: escaped)
+        #expect(escapes == apostrophes)
+        // Two outer quotes, and three for each escaped apostrophe.
+        let quotes = escaped.unicodeScalars.filter { $0 == "'" }.count
+        #expect(quotes == 2 + 3 * apostrophes)
+    }
+
+    /// Tier 2: spawns `/bin/sh`, the shell the tmux transport runs a spawn
+    /// command through. The output is compared as bytes, because `String`
+    /// equality is canonical equivalence.
+    @Test("shellEscape round-trips through /bin/sh whatever mark follows an apostrophe",
+          .fastPassBounded, arguments: joinedApostrophes)
+    func shellEscapeRoundTripsThroughTheShell(_ text: String) async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "printf %s \(shellEscape(text))"]
+        process.environment = ["PATH": "/usr/bin:/bin"]
+        // An immediate end-of-file on stdin, and no cooperative-pool thread
+        // parked on the child.
+        let output = try await collectOutput(of: process, stdin: Data())
+        #expect(output.status == 0)
+        #expect(output.stdout == Data(text.utf8),
+                "printed \(String(decoding: output.stdout, as: UTF8.self).debugDescription)")
+    }
+
+    /// How many times `needle`'s scalars occur in `haystack`'s, without overlap.
+    private static func scalarOccurrences(of needle: String, in haystack: String) -> Int {
+        let pattern = Array(needle.unicodeScalars)
+        let scalars = Array(haystack.unicodeScalars)
+        var count = 0
+        var index = 0
+        while index + pattern.count <= scalars.count {
+            if scalars[index..<index + pattern.count].elementsEqual(pattern) {
+                count += 1
+                index += pattern.count
+            } else {
+                index += 1
+            }
+        }
+        return count
     }
 
     // MARK: - Build Prompt

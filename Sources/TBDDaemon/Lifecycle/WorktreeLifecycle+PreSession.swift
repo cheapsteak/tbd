@@ -127,16 +127,13 @@ extension WorktreeLifecycle {
 
     /// Wraps the hook so its exit code lands in the marker file and the pane
     /// stays alive as a usable shell afterward (same rationale as
-    /// `shellWrapped`). Single-quote escaping matches `shellWrapped`.
+    /// `shellWrapped`). Paths are quoted with `shellEscape`, as in `shellWrapped`.
     static func preSessionCommand(
         hookPath: String, runtimeDir: String, markerPath: String, shell: String
     ) -> String {
-        func quoted(_ s: String) -> String {
-            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }
-        return "\(quoted(hookPath)); __tbd_rc=$?; "
-            + "/bin/mkdir -p \(quoted(runtimeDir)); "
-            + "/bin/echo $__tbd_rc > \(quoted(markerPath)); "
+        return "\(shellEscape(hookPath)); __tbd_rc=$?; "
+            + "/bin/mkdir -p \(shellEscape(runtimeDir)); "
+            + "/bin/echo $__tbd_rc > \(shellEscape(markerPath)); "
             + "exec \(shell)"
     }
 

@@ -350,7 +350,7 @@ enum DevServerDeclarationParser {
         if !argument.isEmpty, argument.unicodeScalars.allSatisfy({ shellSafe.contains($0) }) {
             return argument
         }
-        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return shellEscape(argument)
     }
 
     /// JSON with comments → JSON: drops `//` and `/* */` comments and

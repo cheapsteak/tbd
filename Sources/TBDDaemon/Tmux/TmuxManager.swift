@@ -462,8 +462,7 @@ public struct TmuxManager: Sendable {
     static func envExportPrefixed(_ shellCommand: String, env: [String: String]) -> String {
         var envPrefix = ""
         for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
-            envPrefix += "export \(key)='\(escaped)'; "
+            envPrefix += "export \(key)=\(shellEscape(value)); "
         }
         return envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
     }

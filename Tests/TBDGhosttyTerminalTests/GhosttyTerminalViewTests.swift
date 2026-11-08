@@ -857,3 +857,18 @@ struct GhosttyTerminalViewTests {
                 "the surface was built at \(String(describing: view.surface.metrics)), not at the new font's metrics")
     }
 }
+
+/// `GhosttyTerminalView.shellQuoted(_:)`, which quotes a dropped file's path for the shell.
+@Suite
+@MainActor
+struct GhosttyShellQuotingTests {
+    /// An apostrophe a combining acute accent, an emoji variation selector or an enclosing keycap
+    /// follows forms one `Character` with it, and is escaped all the same, so the path stays one
+    /// shell word. Compared as bytes, because `String` equality is canonical equivalence.
+    @Test(arguments: ["\u{301}", "\u{FE0F}", "\u{20E3}"])
+    func anApostropheAMarkFollowsIsEscaped(_ mark: String) {
+        let quoted = GhosttyTerminalView.shellQuoted("/tmp/x'\(mark); echo injected; '.png")
+        let expected = "'/tmp/x'\\''\(mark); echo injected; '\\''.png'"
+        #expect(Array(quoted.utf8) == Array(expected.utf8))
+    }
+}
