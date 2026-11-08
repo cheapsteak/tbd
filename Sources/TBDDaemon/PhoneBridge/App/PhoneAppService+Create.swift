@@ -104,11 +104,12 @@ extension PhoneAppService {
     /// `worktree.create` returns before its agent's tab exists, so this
     /// subscribes to state deltas, looks once right after subscribing, so a
     /// tab made before the subscription is not missed, and looks again after
-    /// every delta, bursts folded into one look. The first look runs before
-    /// the wait's clock starts; the later looks race a sleep on the service's
-    /// clock in a task group, and the loser is cancelled. The subscriber is
-    /// removed on every way out: found, timed out, the create failed, or the
-    /// request cancelled.
+    /// every delta that names the worktree (`worktreeWakeups`), bursts folded
+    /// into one look. Every other delta costs a byte search and no read. The
+    /// first look runs before the wait's clock starts; the later looks race a
+    /// sleep on the service's clock in a task group, and the loser is
+    /// cancelled. The subscriber is removed on every way out: found, timed
+    /// out, the create failed, or the request cancelled.
     ///
     /// **A create that fails in the background ends the wait.** It runs after
     /// `worktree.create` has replied, and its rollback deletes the worktree
@@ -120,16 +121,8 @@ extension PhoneAppService {
     /// primary agent setting started; a shell tab is not a session the phone
     /// shows.
     nonisolated func firstAgentSession(inWorktree worktreeID: UUID) async throws -> UUID? {
-        let (wakeups, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        let subscriptions = self.subscriptions
-        let subscriberID = subscriptions.addSubscriber { _ in
-            continuation.yield()
-            return true
-        }
-        defer {
-            subscriptions.removeSubscriber(subscriberID)
-            continuation.finish()
-        }
+        let (wakeups, stopWakeups) = Self.worktreeWakeups(worktreeID, subscriptions: subscriptions)
+        defer { stopWakeups() }
         let db = self.db
         // The first look, after the subscriber is in place, so no tab falls
         // between them. A delta that lands while it reads is kept in the
@@ -156,6 +149,35 @@ extension PhoneAppService {
             group.cancelAll()
             return first
         }
+    }
+
+    /// A wakeup for every state delta that names `worktreeID`, bursts folded
+    /// into one, and `stop`, which removes the subscriber and ends the
+    /// stream.
+    ///
+    /// The subscriber searches each encoded delta for the worktree's ID
+    /// before anything else, as `TranscriptDeltaRelay` does for a terminal's.
+    /// Every delta that can change what `lookForAgentTerminal` finds names
+    /// it: a tab made in the worktree (`terminalCreated`), a tab's provider
+    /// replaced (`terminalReplaced`, the whole row) or its session recorded
+    /// (`terminalSessionUpdated`), and any change to the worktree itself,
+    /// its failed create's rollback included.
+    static func worktreeWakeups(
+        _ worktreeID: UUID, subscriptions: StateSubscriptionManager
+    ) -> (wakeups: AsyncStream<Void>, stop: @Sendable () -> Void) {
+        let (wakeups, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        // `StateSubscriptionManager` encodes a UUID as its uppercase string.
+        let marker = Data(worktreeID.uuidString.utf8)
+        let subscriberID = subscriptions.addSubscriber { data in
+            if data.range(of: marker) != nil {
+                continuation.yield()
+            }
+            return true
+        }
+        return (wakeups, {
+            subscriptions.removeSubscriber(subscriberID)
+            continuation.finish()
+        })
     }
 
     /// One look at `worktreeID`: the first of its tabs, in the order tabs

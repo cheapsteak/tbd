@@ -342,6 +342,57 @@ struct PhoneCreateTests {
         }
     }
 
+    /// The wait looks again only on a delta that names its worktree: each
+    /// wakeup is one look (`firstAgentSession`), so the deltas of other
+    /// worktrees, tabs and repos cause no read. Each stream is stopped
+    /// before it is read, so it holds exactly what the deltas yielded.
+    @Test func theWaitWakesOnlyOnDeltasThatNameItsWorktree() async throws {
+        let subscriptions = StateSubscriptionManager()
+        let worktreeID = UUID()
+        let otherWorktreeID = UUID()
+        let unrelated: [StateDelta] = [
+            .terminalCreated(TerminalDelta(terminalID: UUID(), worktreeID: otherWorktreeID, label: nil)),
+            .terminalSessionUpdated(TerminalSessionDelta(
+                terminalID: UUID(), worktreeID: otherWorktreeID, sessionID: "acme-session", transcriptPath: nil)),
+            .terminalRemoved(TerminalIDDelta(terminalID: UUID())),
+            .worktreeArchived(WorktreeIDDelta(worktreeID: otherWorktreeID, creationFailed: true)),
+            .repoRenamed(RepoRenameDelta(repoID: UUID(), displayName: "acme-api")),
+            .modelProfilesChanged,
+            .remoteSessionsChanged,
+        ]
+        let (quiet, stopQuiet) = PhoneAppService.worktreeWakeups(worktreeID, subscriptions: subscriptions)
+        for delta in unrelated {
+            subscriptions.broadcast(delta: delta)
+        }
+        stopQuiet()
+        var quietWakeups = 0
+        for await _ in quiet {
+            quietWakeups += 1
+        }
+        #expect(quietWakeups == 0)
+        #expect(subscriptions.subscriberCount == 0)
+
+        let tab = TBDShared.Terminal(worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+        let named: [StateDelta] = [
+            .terminalCreated(TerminalDelta(terminalID: tab.id, worktreeID: worktreeID, label: nil)),
+            .terminalReplaced(tab),
+            .terminalSessionUpdated(TerminalSessionDelta(
+                terminalID: tab.id, worktreeID: worktreeID, sessionID: "acme-session", transcriptPath: nil)),
+            .worktreeArchived(WorktreeIDDelta(worktreeID: worktreeID, creationFailed: true)),
+        ]
+        for delta in named {
+            let (wakeups, stop) = PhoneAppService.worktreeWakeups(worktreeID, subscriptions: subscriptions)
+            subscriptions.broadcast(delta: delta)
+            stop()
+            var namedWakeups = 0
+            for await _ in wakeups {
+                namedWakeups += 1
+            }
+            #expect(namedWakeups == 1)
+        }
+        #expect(subscriptions.subscriberCount == 0)
+    }
+
     /// A resent create creates once and gets the first reply's bytes.
     @Test func aResentCreateCreatesOnce() async throws {
         let h = try await PhoneServiceHarness.make()
