@@ -15,14 +15,16 @@
  *
  * **Details** (`DetailPane`, and `state/detail.ts` for the chunk rules). A row whose detail is
  * open (it has a record) reads `aria-expanded="true"` and turns its triangle down.
- * - A tool row draws its box under the button: Input and Result, or the loading line.
+ * - A tool row draws its box under the button: Input and Result, or the loading line. A tap
+ *   collapses it, a failed one too, and the next tap starts over.
  * - "Show more" puts the message's whole text in place of the cut text, through `Markdown`,
  *   once it arrived, and the button goes, as in the mock. Its box shows the loading line, the
  *   too-large line or the laptop's message. After a failure the button comes back, and a tap
  *   starts over.
  * - A subagent row draws its items in `.nest`, each through this component as a nested row,
  *   under one budget for the whole nest (`nest.ts`): items past it are not drawn, and the row
- *   shows "Too large for the phone. Open on the laptop." under the nest.
+ *   shows "Too large for the phone. Open on the laptop." under the nest. It collapses as a tool
+ *   row does.
  *
  * **Nested rows draw, and never open.** A nested row has no row key, so it has no record in
  * `details`, and the laptop could not serve one anyway: it finds a detail by looking the item ID

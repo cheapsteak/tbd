@@ -224,12 +224,36 @@ test("a detail the laptop no longer holds shows 'That detail is not in the trans
   await expect(detail).toHaveText(TEXT.detailNotFound);
   await expect(bash).toHaveAttribute('aria-expanded', 'true');
 
-  // A tap after the failure starts over.
+  // A tap on the failed detail collapses it, and asks for nothing.
   await hostCall(page, 'setReply', 'transcript.detail', null);
+  await bash.click();
+  await expect(bash).toHaveAttribute('aria-expanded', 'false');
+  await expect(detail).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0]]);
+
+  // The next tap starts over.
   await bash.click();
   await expect(detail.locator('.dl')).toHaveText(['Input', 'Result']);
   await expect(detail).not.toContainText(TEXT.detailNotFound);
   await expect(bash).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('a failed Show more brings its button back, and a tap on it starts over', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const say = tx.locator('.say').last();
+  await hostCall(page, 'setReply', 'transcript.detail', { error: { code: 'not_found', message: TEXT.detailNotFound } });
+  await say.locator('.morebtn').click();
+  await expect(tx.locator('.detail')).toHaveText(TEXT.detailNotFound);
+  await expect(say.locator('.morebtn')).toHaveText('Show more');
+
+  await hostCall(page, 'setReply', 'transcript.detail', null);
+  await say.locator('.morebtn').click();
+  await expect(say).toContainText('Both cases have a line in isLocalPath with a comment that says why.');
+  await expect(tx.locator('.morebtn')).toHaveCount(0);
+  await expect(tx.locator('.detail')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 0]]);
 });
 
 test('collapsing while the chunks load asks for no more of them', async ({ page, appHost }) => {

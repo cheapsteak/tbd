@@ -352,16 +352,47 @@ test('an error on a later part keeps what arrived', async () => {
   assert.deepEqual(d.text, { input: 'input0' });
 });
 
-test('a tap after a failure starts over', async () => {
+test('a tap on a failed tool detail collapses it, and the next tap starts over', async () => {
   const h = harness();
   const first = h.actions.toggleDetail(h.key(0), 'input');
   h.last().reject(new AppError('not_found', NOT_FOUND_TEXT));
   await first;
+  assert.equal(h.t().details[h.key(0)]?.phase, 'failed');
+  await h.actions.toggleDetail(h.key(0), 'input');
+  assert.equal(h.t().details[h.key(0)], undefined, 'the tap collapsed it');
+  assert.deepEqual(h.asked(), [['input', 0]], 'and asked for nothing');
   const again = h.actions.toggleDetail(h.key(0), 'input');
   assert.deepEqual(h.asked(), [['input', 0], ['input', 0]]);
   assert.equal(h.t().details[h.key(0)]?.phase, 'loading');
   answer(h.last(), 1);
   await flush();
+  answer(h.last(), 1);
+  await again;
+  assert.equal(h.t().details[h.key(0)]?.phase, 'open');
+});
+
+test('a tap on a failed subagent detail collapses it', async () => {
+  const agent: PhoneItem = { id: 'a1', kind: 'subagent', text: 'Explore', truncated: false };
+  const h = harness([agent]);
+  const first = h.actions.toggleDetail(h.key(0), 'subagent');
+  h.last().reject(new AppError('not_found', NOT_FOUND_TEXT));
+  await first;
+  assert.equal(h.t().details[h.key(0)]?.phase, 'failed');
+  await h.actions.toggleDetail(h.key(0), 'subagent');
+  assert.equal(h.t().details[h.key(0)], undefined);
+  assert.deepEqual(h.asked(), [['subagent', 0]]);
+});
+
+test('a tap on a failed Show more starts over, since it has no collapse', async () => {
+  const cut: PhoneItem = { id: 'm1', kind: 'assistant', text: 'The start', truncated: true };
+  const h = harness([cut]);
+  const first = h.actions.toggleDetail(h.key(0), 'text');
+  h.last().reject(new AppError('not_found', NOT_FOUND_TEXT));
+  await first;
+  assert.equal(h.t().details[h.key(0)]?.phase, 'failed');
+  const again = h.actions.toggleDetail(h.key(0), 'text');
+  assert.deepEqual(h.asked(), [['text', 0], ['text', 0]]);
+  assert.equal(h.t().details[h.key(0)]?.phase, 'loading');
   answer(h.last(), 1);
   await again;
   assert.equal(h.t().details[h.key(0)]?.phase, 'open');
