@@ -76,7 +76,10 @@ struct PhonePresentationTests {
     @Test func endedOffersAndStatusErrors() {
         #expect(PhonePresentation.endedSentence(.denied) == "Pairing was denied.")
         #expect(PhonePresentation.endedSentence(.expired) == "The code expired.")
-        #expect(PhonePresentation.endedSentence(.interrupted) == "The code was used by another device. Start again.")
+        // No cause is claimed: most interruptions are a reload or a refusal,
+        // not another device.
+        #expect(PhonePresentation.endedSentence(.interrupted)
+            == "Pairing was interrupted. Start again to pair this phone.")
         #expect(PhonePresentation.isLive(.waitingForPhone))
         #expect(PhonePresentation.isLive(.awaitingApproval))
         #expect(!PhonePresentation.isLive(.paired))

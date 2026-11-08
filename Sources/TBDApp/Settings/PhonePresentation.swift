@@ -96,11 +96,14 @@ enum PhonePresentation {
     }
 
     /// The pairing sheet's sentence for an offer that ended without a phone.
+    /// An interrupted offer names no cause: a page reload, a relay refusal, a
+    /// row that could not be stored and an undone Allow all end that way, and
+    /// the status does not say which.
     static func endedSentence(_ state: PhonePairingState) -> String {
         switch state {
         case .denied: return "Pairing was denied."
         case .expired: return "The code expired."
-        case .interrupted: return "The code was used by another device. Start again."
+        case .interrupted: return "Pairing was interrupted. Start again to pair this phone."
         case .waitingForPhone, .awaitingApproval, .paired, .unknown: return "Pairing stopped."
         }
     }
