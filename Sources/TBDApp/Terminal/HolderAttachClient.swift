@@ -522,9 +522,6 @@ final class HolderStreamReader: @unchecked Sendable {
     /// `defaultSequenceBoundaryBudget`.
     static let defaultSequenceBoundaryBudget: Duration = .milliseconds(250)
     private static let sequenceBoundaryPollMilliseconds: Int32 = 5
-    /// Bufferfuls per poll of that wait, so a job that never stops writing
-    /// cannot hold the thread past the budget: 1 MiB.
-    private static let sequenceBoundaryMaxReads = 64
 
     init(
         label: String, fd: Int32,
@@ -656,9 +653,12 @@ final class HolderStreamReader: @unchecked Sendable {
                     // would lose output outright — and on the detach path it
                     // would lose exactly the output the handback preamble is
                     // about to be serialized from. One further chunk after a
-                    // stop is bounded and harmless; the sink outlives the
-                    // close by construction (`detachHolderSession` clears it
-                    // only after `awaitClosed()`).
+                    // stop is bounded, and so is what `finishOpenSequence`
+                    // reads after it. Whenever a handback follows, the sink and
+                    // the panel's write side both outlive the close
+                    // (`detachHolderSession` clears and closes them only after
+                    // `awaitClosed()`), so these bytes reach the handback and
+                    // the replies they provoke reach the child.
                     onChunk(Data(buffer[0..<count]))
                     if isStopped {
                         stoppedReading = true
@@ -690,9 +690,11 @@ final class HolderStreamReader: @unchecked Sendable {
     /// the pty, would print as text in the daemon's emulator, whose parser
     /// starts in the ground state. Bounded on `clock`, because a child can
     /// leave a sequence open for good; output that has ended ends the wait at
-    /// once, with no notice. Nothing waits on main meanwhile: the handback is
-    /// parked in `awaitClosed()`, and the sink outlives this as it outlives
-    /// the loop's last chunk.
+    /// once, with no notice. One read per look, and the budget is checked
+    /// before each, so a child that never stops writing holds the wait past
+    /// the budget by at most one bufferful and its parse. Nothing waits on
+    /// main meanwhile: the handback is parked in `awaitClosed()`, and the sink
+    /// outlives this as it outlives the loop's last chunk.
     private func finishOpenSequence(into buffer: inout [UInt8]) {
         let elapsed = ClockStopwatch.start(on: clock)
         while !isAtSequenceBoundary() {
@@ -712,25 +714,12 @@ final class HolderStreamReader: @unchecked Sendable {
             if ready < 0, errno != EINTR { return }
             guard ready > 0 else { continue }
             if Int32(descriptor.revents) & POLLNVAL != 0 { return }
-            guard readAvailable(into: &buffer) else { return }
-        }
-    }
-
-    /// Feeds what the descriptor holds right now, at most
-    /// `sequenceBoundaryMaxReads` bufferfuls.
-    ///
-    /// - Returns: false once the output has ended.
-    private func readAvailable(into buffer: inout [UInt8]) -> Bool {
-        for _ in 0..<Self.sequenceBoundaryMaxReads {
             let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
             if count > 0 {
                 onChunk(Data(buffer[0..<count]))
-                continue
+            } else if count == 0 || (errno != EINTR && errno != EAGAIN) {
+                return
             }
-            if count == 0 { return false }
-            if errno == EINTR { continue }
-            return errno == EAGAIN
         }
-        return true
     }
 }

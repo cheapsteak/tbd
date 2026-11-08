@@ -1,4 +1,5 @@
 import AppKit
+import Clocks
 import Darwin
 import Foundation
 import SwiftTerm
@@ -168,7 +169,14 @@ struct HolderDetachHandbackTests {
         private let defaults: UserDefaults
         private let suite: TestDefaultsSuite
 
-        init(preamble: String = "", readyFails: Bool = false) throws {
+        /// - Parameter clock: the coordinator's, which its holder reader
+        ///   bounds a wait for an open sequence on. A test whose verdict
+        ///   needs that wait to end by the sequence, not by the bound, passes
+        ///   one that does not move.
+        init(
+            preamble: String = "", readyFails: Bool = false,
+            clock: any Clock<Duration> = ContinuousClock()
+        ) throws {
             var pair: [Int32] = [-1, -1]
             #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             let vended = pair[0]
@@ -228,7 +236,7 @@ struct HolderDetachHandbackTests {
                 return .unreadable(errno: read < 0 ? errno : -1)
             }
 
-            coordinator = TerminalPanelRepresentable.Coordinator()
+            coordinator = TerminalPanelRepresentable.Coordinator(clock: clock)
             coordinator.appState = state
             coordinator.panelID = terminalID
             coordinator.holderAttachClient = stub
@@ -272,12 +280,34 @@ struct HolderDetachHandbackTests {
         /// left its loop, through the reader's `beforeClose` hook: bytes that
         /// only a reader which reads on after its stop can see. Call it before
         /// `attach()`, which hands the hook to the reader it builds.
-        func sessionWritesOnceTheReaderStops(_ text: String) {
+        ///
+        /// - Returns: where the hook records the reader it ran for.
+        @discardableResult
+        func sessionWritesOnceTheReaderStops(_ text: String) -> StoppedReader {
             let far = sessionEnd
             let bytes = [UInt8](text.utf8)
-            coordinator.holderReaderBeforeClose = { _ in
+            let stopped = StoppedReader()
+            coordinator.holderReaderBeforeClose = { reader in
+                stopped.record(reader)
                 _ = bytes.withUnsafeBytes { Darwin.write(far, $0.baseAddress, $0.count) }
             }
+            return stopped
+        }
+
+        /// Everything the panel has written to the session and nobody has
+        /// read yet. The far end is non-blocking, so this stops at the first
+        /// read that finds nothing, or at the end once the panel has closed.
+        func sessionReads() -> String {
+            var collected: [UInt8] = []
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let count = buffer.withUnsafeMutableBytes {
+                    Darwin.read(sessionEnd, $0.baseAddress, $0.count)
+                }
+                guard count > 0 else { break }
+                collected.append(contentsOf: buffer[0..<count])
+            }
+            return String(bytes: collected, encoding: .utf8) ?? "<not UTF-8: \(collected)>"
         }
 
         /// One viewport row, read through the production locked accessor.
@@ -290,6 +320,16 @@ struct HolderDetachHandbackTests {
             if sessionEnd >= 0 { Darwin.close(sessionEnd) }
             suite.tearDown()
         }
+    }
+
+    /// The panel's holder reader, as its `beforeClose` hook saw it.
+    private final class StoppedReader: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: HolderStreamReader?
+
+        var reader: HolderStreamReader? { lock.withLock { stored } }
+
+        func record(_ reader: HolderStreamReader) { lock.withLock { stored = reader } }
     }
 
     /// Replays a handback preamble into a terminal that has never seen the
@@ -502,11 +542,13 @@ struct HolderDetachHandbackTests {
     /// rest, left on the pty, would print as text in the daemon's emulator,
     /// whose parser starts in the ground state. The rest is written just after
     /// the reader has left its loop, so only a reader that reads on until the
-    /// sequence ends can put it in the handback.
+    /// sequence ends can put it in the handback. On a clock that never moves,
+    /// so the wait can end only by the sequence ending, however long a loaded
+    /// machine keeps the reader thread from its first look.
     @MainActor
     @Test("the handback waits for a sequence the session is part-way through")
     func theHandbackWaitsForAnOpenSequence() async throws {
-        let fixture = try Fixture()
+        let fixture = try Fixture(clock: ImmediateClock<Duration>())
         defer { fixture.tearDown() }
         fixture.sessionWritesOnceTheReaderStops("TITLE-PAYLOAD\u{07}AFTER\r\n")
         await fixture.attach()
@@ -535,6 +577,104 @@ struct HolderDetachHandbackTests {
             for the daemon to print as text: \(painted)
             """)
         #expect(!painted.contains("PAYLOAD"), "the title's rest painted as text: \(painted)")
+    }
+
+    /// The child can finish its sequence and ask something in the same write,
+    /// and the reader reads that question while it waits. Its reply has to
+    /// reach the child, which would otherwise wait for an answer that never
+    /// comes, so the panel's write side stays open until the reader closes.
+    @MainActor
+    @Test("a query the session sends as it finishes its sequence is answered")
+    func aQueryReadDuringTheWaitIsAnswered() async throws {
+        let fixture = try Fixture(clock: ImmediateClock<Duration>())
+        defer { fixture.tearDown() }
+        // The reply is read below. The stub's probe would take its first byte.
+        fixture.stub.descriptorProbe = nil
+        fixture.sessionWritesOnceTheReaderStops("TITLE\u{07}\u{1b}[6n")
+        await fixture.attach()
+
+        fixture.sessionWrites("BEFORE\r\n\u{1b}]0;HALF-OF-A-")
+        try await waitFor(
+            "the session's half-written title to reach the panel",
+            observed: { await MainActor.run { "row0=\(fixture.rowText(0))" } }
+        ) {
+            await MainActor.run { fixture.rowText(0) == "BEFORE" && !fixture.view.isAtSequenceBoundary }
+        }
+
+        fixture.coordinator.cleanup()
+        try await waitForDetach(fixture)
+
+        // The cursor is at the start of the second row.
+        let answered = fixture.sessionReads()
+        #expect(answered.contains("\u{1b}[2;1R"), """
+            the session asked where the cursor was as the panel closed, and no answer reached it: \
+            \(answered.debugDescription)
+            """)
+    }
+
+    /// A teardown while `attach.ready` is in flight still hands the attach
+    /// back with its screen once the ack is answered, so it waits for an open
+    /// sequence like any other handback.
+    @MainActor
+    @Test("a panel torn down while its ack is in flight finishes the session's sequence first")
+    func aTeardownDuringTheAckWaitsForTheSequence() async throws {
+        let fixture = try Fixture(clock: ImmediateClock<Duration>())
+        defer { fixture.tearDown() }
+        let coordinator = fixture.coordinator
+        fixture.sessionWritesOnceTheReaderStops("TITLE-PAYLOAD\u{07}AFTER\r\n")
+        fixture.stub.beforeReadyReturns = {
+            await MainActor.run { fixture.sessionWrites("BEFORE\r\n\u{1b}]0;HALF-OF-A-") }
+            _ = try? await waitFor("the session's half-written title to reach the panel") {
+                await MainActor.run { fixture.rowText(0) == "BEFORE" && !fixture.view.isAtSequenceBoundary }
+            }
+            await MainActor.run { coordinator.cleanup() }
+        }
+
+        await fixture.attach()
+        try await waitForDetach(fixture)
+
+        let detach = try #require(fixture.stub.detaches.first)
+        let replay = HeadlessReplay()
+        replay.feed(detach.preamble)
+        let painted = replay.screenText()
+        #expect(painted.contains("AFTER"), """
+            a panel torn down during its ack closed part-way through the session's title, so the \
+            rest stayed on the pty for the daemon to print as text: \(painted)
+            """)
+        #expect(!painted.contains("PAYLOAD"), "the title's rest painted as text: \(painted)")
+    }
+
+    /// No handback follows a refused ack, so the reader does not read on for
+    /// one: the holder is cleared before the stop, and bytes the reader took
+    /// would reach no view and be lost to the daemon, whose they are. Each
+    /// reading of the clock is 100 ms later than the last, so a reader that
+    /// did wait would give up within three looks and say so.
+    @MainActor
+    @Test("a panel whose ack was refused closes without waiting for an open sequence")
+    func aRefusedAckDoesNotWait() async throws {
+        let fixture = try Fixture(readyFails: true, clock: SteppingClock(step: .milliseconds(100)))
+        defer { fixture.tearDown() }
+        let stopped = fixture.sessionWritesOnceTheReaderStops("TITLE-PAYLOAD\u{07}AFTER\r\n")
+        fixture.stub.beforeReadyReturns = {
+            await MainActor.run { fixture.sessionWrites("BEFORE\r\n\u{1b}]0;HALF-OF-A-") }
+            _ = try? await waitFor("the session's half-written title to reach the panel") {
+                await MainActor.run { fixture.rowText(0) == "BEFORE" && !fixture.view.isAtSequenceBoundary }
+            }
+        }
+
+        await fixture.attach()
+        try await waitForDetach(fixture)
+
+        let reader = try #require(stopped.reader, "the panel's reader never reached its close")
+        #expect(!reader.closedMidSequence, """
+            the reader waited for a sequence with no handback to follow, reading bytes that reached \
+            no view
+            """)
+        let rows = (0..<6).map { fixture.rowText($0) }
+        let fedTheRest = rows.contains { $0.contains("AFTER") }
+        #expect(!fedTheRest, """
+            the reader read on after a refused ack and fed the view: \(rows)
+            """)
     }
 
     @MainActor

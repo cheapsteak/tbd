@@ -23,6 +23,9 @@ struct HolderStreamReaderSequenceBoundaryTests {
 
     private static let esc = "\u{1b}"
 
+    /// On a clock that never moves, because nothing sleeps on it: the wait
+    /// can end only by the sequence ending, however long a loaded machine
+    /// keeps the reader thread from its first look.
     @Test("a stopped reader reads on until the session's sequence ends")
     func readsOnUntilTheSequenceEnds() async throws {
         let session = try Session()
@@ -38,7 +41,8 @@ struct HolderStreamReaderSequenceBoundaryTests {
                 if asks.next() == 1 { session.write(rest) }
                 return terminal.isAtSequenceBoundary
             },
-            onChunk: { terminal.feed($0) })
+            onChunk: { terminal.feed($0) },
+            clock: ImmediateClock<Duration>())
         reader.start()
         session.write(Array("BEFORE\r\n\(Self.esc)]0;HALF-OF-A-".utf8))
         try await waitFor(
@@ -221,32 +225,32 @@ struct HolderStreamReaderSequenceBoundaryTests {
 
         var count: Int { lock.withLock { value } }
     }
+}
 
-    /// A clock whose every reading is `step` later than the one before, so a
-    /// wait bounded on it ends after a known number of readings however fast
-    /// or slow the machine is. Sleeping moves it to the deadline at once.
-    private final class SteppingClock: Clock, @unchecked Sendable {
-        typealias Instant = ImmediateClock<Duration>.Instant
+/// A clock whose every reading is `step` later than the one before, so a
+/// wait bounded on it ends after a known number of readings however fast
+/// or slow the machine is. Sleeping moves it to the deadline at once.
+final class SteppingClock: Clock, @unchecked Sendable {
+    typealias Instant = ImmediateClock<Duration>.Instant
 
-        private let lock = NSLock()
-        private var current = Instant()
-        private let step: Duration
+    private let lock = NSLock()
+    private var current = Instant()
+    private let step: Duration
 
-        init(step: Duration) { self.step = step }
+    init(step: Duration) { self.step = step }
 
-        var now: Instant {
-            lock.withLock {
-                current = current.advanced(by: step)
-                return current
-            }
+    var now: Instant {
+        lock.withLock {
+            current = current.advanced(by: step)
+            return current
         }
+    }
 
-        var minimumResolution: Duration { .zero }
+    var minimumResolution: Duration { .zero }
 
-        func sleep(until deadline: Instant, tolerance: Duration?) async throws {
-            lock.withLock {
-                if current < deadline { current = deadline }
-            }
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        lock.withLock {
+            if current < deadline { current = deadline }
         }
     }
 }
