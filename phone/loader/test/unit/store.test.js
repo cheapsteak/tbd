@@ -344,7 +344,8 @@ test('bundleCacheDeletions deletes damaged and unreadable meta rows and text row
 /**
  * A scripted IDBFactory that stands in for the open request only: it records the schema an
  * upgrade creates, and lets a test fire the open and connection events. No data sits behind
- * it; the IndexedDB methods are covered by the Playwright suite.
+ * it: `transaction` records what it was asked for and throws, as a closing database does. The
+ * IndexedDB methods are covered by the Playwright suite.
  */
 function scriptedFactory() {
   /** @type {any[]} */
@@ -361,7 +362,18 @@ function scriptedFactory() {
         closed: false,
         /** @type {any} */ onversionchange: null,
         /** @type {any} */ onclose: null,
+        /** @type {Array<{ names: string[], mode: string, options: unknown }>} */
+        transactions: [],
         close() { this.closed = true; },
+        /**
+         * @param {string[]} names
+         * @param {string} mode
+         * @param {unknown} options
+         */
+        transaction(names, mode, options) {
+          this.transactions.push({ names, mode, options });
+          throw new DOMException('the database connection is closing', 'InvalidStateError');
+        },
         /**
          * @param {string} storeName
          * @param {object} options
@@ -427,6 +439,26 @@ test('onClosed fires once when the browser closes the connection', async () => {
   assert.deepEqual(calls, ['close']);
   assert.equal(store.closed, 'close');
   assert.equal(db.closed, false, 'the browser closed it; the store does not close it again');
+});
+
+test('a write of keys is strict; the bundle cache and timestamps are relaxed; a read asks for neither', async () => {
+  const { store, db } = await scriptedStore();
+  /** @type {Array<[string, () => Promise<unknown>, string, string]>} */
+  const calls = [
+    ['putLaptop', () => store.putLaptop(good), 'readwrite', 'strict'],
+    ['forgetLaptop', () => store.forgetLaptop(good.id), 'readwrite', 'strict'],
+    ['putBundle', () => store.putBundle(goodBundle), 'readwrite', 'relaxed'],
+    ['markBundleUsed', () => store.markBundleUsed(good.id, goodBundle.sha256, 1_800_000_000_001), 'readwrite', 'relaxed'],
+    ['touchLaptop', () => store.touchLaptop(good.id, { lastConnectedAt: 1_800_000_000_001, laptopName: 'acme-mbp' }), 'readwrite', 'relaxed'],
+    ['listLaptops', () => store.listLaptops(), 'readonly', 'default'],
+    ['getLaptop', () => store.getLaptop(good.id), 'readonly', 'default'],
+    ['getBundle', () => store.getBundle(good.id, goodBundle.sha256), 'readonly', 'default'],
+  ];
+  for (const [name, call, mode, durability] of calls) {
+    db.transactions.length = 0;
+    await assert.rejects(call(), (error) => error instanceof DOMException && error.name === 'InvalidStateError', name);
+    assert.deepEqual(db.transactions.map((t) => [t.mode, t.options]), [[mode, { durability }]], name);
+  }
 });
 
 test('a store closed before anyone listened still says so', async () => {

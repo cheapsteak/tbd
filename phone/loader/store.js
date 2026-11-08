@@ -15,6 +15,12 @@
 // awaits anything while it runs, so none commits early. Every record read is validated, so a
 // damaged record surfaces as an error or as a damaged row, never as missing fields.
 //
+// A write that touches a laptop's keys (`putLaptop`, `forgetLaptop`) is `strict`: it resolves
+// only once it is on disk, so a key just paired, or a laptop just forgotten, survives a crash.
+// The bundle cache and the timestamps (`putBundle`, `markBundleUsed`, `touchLaptop`) are
+// `relaxed`, and may resolve first: a lost write costs a bundle fetched or hashed again, or an
+// older time, never a key.
+//
 // A damaged laptop record never blocks the loader: `listLaptops` reports it beside the good
 // ones, `getLaptop` throws DamagedRecordError for it, and `forgetLaptop` deletes it by its
 // key. Nothing here deletes a laptop record on its own.
@@ -172,7 +178,7 @@ export class Store {
    * @returns {Promise<{ laptops: LaptopRecord[], damaged: DamagedLaptop[] }>}
    */
   listLaptops() {
-    return this.#run([LAPTOPS], 'readonly', (tx, ask) => {
+    return this.#run([LAPTOPS], 'readonly', 'default', (tx, ask) => {
       const laptops = tx.objectStore(LAPTOPS);
       /** @type {StoredRow[]} */
       let rows = [];
@@ -187,7 +193,7 @@ export class Store {
    * @throws {DamagedRecordError} for a record that cannot be read or fails validation
    */
   getLaptop(id) {
-    return this.#run([LAPTOPS], 'readonly', (tx, ask) => {
+    return this.#run([LAPTOPS], 'readonly', 'default', (tx, ask) => {
       /** @type {StoredRow} */
       const row = { key: id, value: undefined };
       ask(tx.objectStore(LAPTOPS).get(id), (value) => { row.value = value; }, (error) => { row.error = error; });
@@ -203,7 +209,7 @@ export class Store {
    */
   async putLaptop(record) {
     const valid = validateLaptopRecord(record);
-    await this.#run([LAPTOPS], 'readwrite', (tx, ask) => {
+    await this.#run([LAPTOPS], 'readwrite', 'strict', (tx, ask) => {
       ask(tx.objectStore(LAPTOPS).put(valid));
       return () => undefined;
     });
@@ -219,7 +225,7 @@ export class Store {
    * @throws {TypeError} for an update the record cannot take
    */
   async touchLaptop(id, update) {
-    await this.#run([LAPTOPS], 'readwrite', (tx, ask) => {
+    await this.#run([LAPTOPS], 'readwrite', 'relaxed', (tx, ask) => {
       const laptops = tx.objectStore(LAPTOPS);
       ask(laptops.get(id), (value) => {
         if (value !== undefined) {
@@ -242,7 +248,7 @@ export class Store {
     if (Range !== undefined && key instanceof Range) {
       throw new TypeError('forgetLaptop takes one key, not a range');
     }
-    await this.#run([LAPTOPS, BUNDLES, BUNDLE_META], 'readwrite', (tx, ask) => {
+    await this.#run([LAPTOPS, BUNDLES, BUNDLE_META], 'readwrite', 'strict', (tx, ask) => {
       ask(tx.objectStore(LAPTOPS).delete(key));
       if (typeof key === 'string') {
         for (const name of [BUNDLES, BUNDLE_META]) {
@@ -266,7 +272,7 @@ export class Store {
    * @returns {Promise<BundleRecord | null>}
    */
   getBundle(laptopID, sha256) {
-    return this.#run([BUNDLES, BUNDLE_META], 'readonly', (tx, ask) => {
+    return this.#run([BUNDLES, BUNDLE_META], 'readonly', 'default', (tx, ask) => {
       const key = [laptopID, sha256];
       /** @type {unknown} */
       let meta;
@@ -295,7 +301,7 @@ export class Store {
    */
   async putBundle(record) {
     const { laptopID, sha256, text, size, usedAt } = validateBundleRecord(record);
-    return this.#run([LAPTOPS, BUNDLES, BUNDLE_META], 'readwrite', (tx, ask) => {
+    return this.#run([LAPTOPS, BUNDLES, BUNDLE_META], 'readwrite', 'relaxed', (tx, ask) => {
       const bundles = tx.objectStore(BUNDLES);
       const meta = tx.objectStore(BUNDLE_META);
       let written = false;
@@ -332,7 +338,7 @@ export class Store {
    * @throws {TypeError} for a damaged meta row or an `at` that is not a finite number
    */
   async markBundleUsed(laptopID, sha256, at) {
-    await this.#run([BUNDLE_META], 'readwrite', (tx, ask) => {
+    await this.#run([BUNDLE_META], 'readwrite', 'relaxed', (tx, ask) => {
       const meta = tx.objectStore(BUNDLE_META);
       ask(meta.get([laptopID, sha256]), (value) => {
         if (value === undefined) {
@@ -366,17 +372,18 @@ export class Store {
    * @template T
    * @param {string[]} names
    * @param {IDBTransactionMode} mode
+   * @param {IDBTransactionDurability} durability `strict` for a write of keys, `relaxed` for
+   *   the cache and timestamps, `default` for a read (see the top of this file). An engine
+   *   without durability hints ignores it.
    * @param {(tx: IDBTransaction, ask: Ask) => () => T} body
    * @returns {Promise<T>}
    */
-  #run(names, mode, body) {
+  #run(names, mode, durability, body) {
     return new Promise((resolve, reject) => {
       /** @type {IDBTransaction} */
       let tx;
       try {
-        // `strict`: a write is on disk when it resolves, so a key just paired survives a
-        // crash. An engine without durability hints ignores the option.
-        tx = this.#db.transaction(names, mode, { durability: 'strict' });
+        tx = this.#db.transaction(names, mode, { durability });
       } catch (error) {
         reject(error);
         return;
