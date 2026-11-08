@@ -451,6 +451,8 @@ for (const [title, name, cls, text] of [
     await expect(band).toContainClass(cls);
     await expect(band).toHaveText(text);
     await expect(band.locator('svg')).toHaveCount(1);
+    // It appears and changes while the screen is open, so a screen reader announces it.
+    await expect(band).toHaveAttribute('role', 'status');
   });
 }
 
@@ -464,13 +466,27 @@ test('the other statuses have no band', async ({ page, appHost }) => {
   }
 });
 
+/**
+ * Each element's visible name: its text without the text of any `.sr` or `small` inside it,
+ * white space collapsed, as `openSessionByName` names a tab. Playwright runs it in the frame.
+ * @param {Element[]} els
+ * @returns {string[]}
+ */
+function visibleNames(els) {
+  return els.map((el) => {
+    const copy = /** @type {Element} */ (el.cloneNode(true));
+    for (const extra of copy.querySelectorAll('.sr, small')) extra.remove();
+    return (copy.textContent ?? '').replace(/\s+/g, ' ').trim();
+  });
+}
+
 test('a worktree with several sessions shows one tab each, marking the open one', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Checkout v2');
   const tabs = app(page).getByRole('tab');
   await expect(app(page).getByRole('tablist')).toHaveCount(1);
   await expect(tabs).toHaveCount(3);
-  expect(await tabs.evaluateAll((els) => els.map((el) => el.firstElementChild?.nextSibling?.textContent))).toEqual(['Claude', 'Review', 'Codex']);
+  expect(await tabs.evaluateAll(visibleNames)).toEqual(['Claude', 'Review', 'Codex']);
   // The row opens its working Claude tab.
   await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
   await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'false');

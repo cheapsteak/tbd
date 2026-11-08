@@ -26,7 +26,7 @@ export function StatusBand({ session }: { session: PhoneSession }): JSX.Element 
 
 function Band({ cls, glyph, text }: { cls: string; glyph: 'octa' | 'glass' | 'unk' | 'power'; text: string }): JSX.Element {
   return (
-    <div className={`banner st-${cls}`}>
+    <div className={`banner st-${cls}`} role="status">
       <Icon name={glyph} />
       <span>{text}</span>
     </div>

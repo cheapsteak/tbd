@@ -14,10 +14,9 @@ import type { JSX } from 'react';
 import type { PhoneRow, PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { ago, STATUS } from '../state/status.ts';
-import { Dots, Icon } from '../ui/Icon.tsx';
+import { Icon } from '../ui/Icon.tsx';
 import { useNow } from '../ui/now.ts';
-
-const AGE_REFRESH_MS = 30_000;
+import { AGE_REFRESH_MS, StatusGlyph } from './StatusGlyph.tsx';
 
 export function SessionHeader({ row, session }: { row: PhoneRow; session: PhoneSession }): JSX.Element {
   const actions = useActions();
@@ -66,7 +65,7 @@ export function SessionHeader({ row, session }: { row: PhoneRow; session: PhoneS
         <span className="t2">
           <span className="t2a">
             <span className="w">
-              {st.glyph === 'dots' ? <Dots /> : st.glyph !== null && <Icon name={st.glyph} />}
+              <StatusGlyph chip={session.status.chip} />
               {st.word}
             </span>
             · {ago(now, session.status.changedAt)}

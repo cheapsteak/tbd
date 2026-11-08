@@ -16,10 +16,9 @@ import { useActions, useAppState } from '../state/context.tsx';
 import { sessionsView } from '../state/sessionsView.ts';
 import type { GroupView, RowView } from '../state/sessionsView.ts';
 import { ago, STATUS } from '../state/status.ts';
-import { Dots, Icon } from '../ui/Icon.tsx';
+import { AGE_REFRESH_MS, StatusGlyph } from '../session/StatusGlyph.tsx';
+import { Icon } from '../ui/Icon.tsx';
 import { useNow } from '../ui/now.ts';
-
-const AGE_REFRESH_MS = 30_000;
 
 export function SessionsList(): JSX.Element {
   const sessions = useAppState((s) => s.sessions);
@@ -99,7 +98,7 @@ function Row({ view, selected, now }: { view: RowView; selected: boolean; now: n
       )}
       <span className="t">{ago(now, row.statusChangedAt)}</span>
       <span className="g">
-        {st.glyph === 'dots' ? <Dots /> : st.glyph !== null && <Icon name={st.glyph} />}
+        <StatusGlyph chip={best.status.chip} />
         <span className="sr">{st.word}</span>
       </span>
     </button>
