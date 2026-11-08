@@ -53,9 +53,9 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     /// No `phone_device` row has that ID.
     case noSuchDevice
 
-    /// Whether a relay check that throws this found a relay this laptop can
-    /// never use as it stands, so its links stop until the relay is saved
-    /// again, rather than one it could not read this time.
+    /// Whether a relay check that throws this found a relay this laptop
+    /// cannot use as it stands, so its links stop until a later check finds
+    /// it usable, rather than one it could not read this time.
     var refusesTheRelay: Bool {
         switch self {
         case .notATBDRelay, .unsupportedRelayAPI:
@@ -130,15 +130,16 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// 3. A changed relay URL stops everything and starts again on the new one,
 ///    with a new pairing service and a fresh relay check.
 /// 4. The relay is checked on its own when this address has no answer yet or
-///    its last answer was a failure, so the Phone pane has a status with no
-///    phone paired, and saving the URL again checks a relay that failed.
+///    its last answer was a failure or a refusal, so the Phone pane has a
+///    status with no phone paired, and saving the URL again checks a relay
+///    that failed.
 ///    Saving the URL checks the relay before it saves it, so that reconcile
 ///    takes the save's answer as the check rather than ask again. Every link
 ///    checks it again before each connect. The newest answer stands: one
 ///    from a check that began before another check or the save, and lands
 ///    after its answer, changes nothing.
-/// 5. Each paired phone without a link gets one; each link whose phone is
-///    gone is stopped.
+/// 5. Each paired phone without a link gets one, unless the relay stands
+///    refused; each link whose phone is gone is stopped.
 ///
 /// **The status delta.** Each `reconcile()` broadcasts `.phoneStatusChanged`
 /// once, when it is done, whatever it did; nothing it does on the way
@@ -147,13 +148,18 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// change that comes later, such as the relay check's answer, broadcasts
 /// when it lands.
 ///
-/// **A refused relay** (one that is not a TBD relay, or lacks API 1) stops
-/// each link it refuses, for good; a later reconcile starts them again.
-/// Saving the relay URL is how the user asks. A reconcile starts no link once
-/// the relay has been refused since it began, so a link refused while the
-/// reconcile waits is not started again from the list it read before. The
-/// refused connection stops in a task of its own, so its stop never holds up
-/// another link's events; halting and `stop()` wait for it.
+/// **A refused relay** (one whose answer is not a TBD relay's info object, or
+/// that lacks API 1) stops each link it refuses, and pairing is refused. No
+/// reconcile starts a link while the refusal stands, nor once the relay has
+/// been refused since the reconcile began, so a link refused while it waits
+/// is not started again from the list it read before. The refusal stands
+/// until a check finds the relay usable: the one a save of the relay URL
+/// makes, the one each reconcile makes while the relay is refused, or the
+/// re-check the bridge runs on its own every `refusedRelayRecheckInterval`
+/// on the injected clock, so one bad answer does not stop every phone for
+/// good. The check that clears the refusal reconciles, and the links start
+/// again. A refused connection stops in a task of its own, so its stop
+/// never holds up another link's events; halting and `stop()` wait for it.
 ///
 /// **Revoking** deletes the phone's row before anything else, so no later
 /// handshake from that phone is accepted, whatever its link is doing. Then
@@ -253,10 +259,11 @@ actor PhoneBridge: PhoneBridgeControlling {
     private var links: [UUID: Link] = [:]
     private var check: RelayCheck?
     /// The error of the relay check's last `.incompatible` answer;
-    /// `pairStart` throws it. It stands while a re-check is in flight and
-    /// when one fails, and clears only when the relay answers as usable or
-    /// the bridge stops or moves to another relay, so no pairing slips
-    /// through the window of a re-check.
+    /// `pairStart` throws it, and no reconcile starts a link while it
+    /// stands. It stands while a re-check is in flight and when one fails,
+    /// and clears only when the relay answers as usable or the bridge stops
+    /// or moves to another relay, so no pairing slips through the window of
+    /// a re-check.
     private var refusal: PhoneBridgeError?
     /// How many times the relay check has refused the relay. A reconcile
     /// reads it as it begins and starts no link once it has moved.
@@ -271,6 +278,12 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// The rows of undone Allows, which the next reconcile deletes again.
     private var undoneRows: Set<UUID> = []
     private var checkTask: Task<Void, Never>?
+    /// While the relay stands refused, checks it again every
+    /// `refusedRelayRecheckInterval`; nil otherwise.
+    private var recheckTask: Task<Void, Never>?
+    /// The re-checks that a check, a seed or a stop replaced, in line, so
+    /// `stopEverything` waits for every one.
+    private var endedRechecks: Task<Void, Never>?
     /// Why the bridge is not running although phone control is on and a
     /// relay is set.
     private var problem: String?
@@ -467,13 +480,30 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// returns its result. The work runs in a task of its own, so a caller
     /// that is cancelled does not cut it short.
     private func serialized<T: Sendable>(_ work: @escaping @Sendable () async -> T) async -> T {
+        await enqueue(work).value
+    }
+
+    /// Puts `work` in the line of changes, after every change called before
+    /// it, and returns its task without waiting for it.
+    @discardableResult
+    private func enqueue<T: Sendable>(_ work: @escaping @Sendable () async -> T) -> Task<T, Never> {
         let previous = tail
         let task = Task<T, Never> {
             await previous?.value
             return await work()
         }
         tail = Task { _ = await task.value }
-        return await task.value
+        return task
+    }
+
+    /// Puts a reconcile in the line of changes without waiting for it. A
+    /// check that finds a refused relay usable again calls this from outside
+    /// the line, and must not wait on it: `stopEverything`, in the line,
+    /// waits for that check. `stop()`, being in the line too, waits for the
+    /// reconcile.
+    private func enqueueReconcile() {
+        guard !isStopped else { return }
+        enqueue { await self.reconcileAndAnnounce() }
     }
 
     /// A reconcile, then its one status delta.
@@ -557,7 +587,9 @@ actor PhoneBridge: PhoneBridgeControlling {
         if let seed, seed.url.absoluteString == relayURL.absoluteString {
             // The save asked this relay a moment ago; asking again would only
             // repeat its answer. The seed takes a number of its own, so a
-            // check that began before it and answers after it is stale.
+            // check that began before it and answers after it is stale. It
+            // replaces any re-check of a refused relay.
+            cancelRelayRecheck()
             setCheck(.ok(seed.info), for: relayURL, sequence: nextCheckSequence(), announce: false)
         } else if needsRelayCheck {
             startRelayCheck(relayURL)
@@ -570,11 +602,11 @@ actor PhoneBridge: PhoneBridgeControlling {
         }
         await Self.stopAll(gone.values.map(\.connection))
         for device in devices where links[device.id] == nil {
-            // `devices` was read before this pass's awaits. A link the relay
-            // refused meanwhile has left `links`, and starting it from that
-            // list would undo the refusal; like any refused link, it waits
-            // for a later reconcile.
-            guard relayRefusals == refusalsAtStart else { break }
+            // No link starts while the relay stands refused; the check that
+            // finds it usable again reconciles. And `devices` was read before
+            // this pass's awaits: a link the relay refused meanwhile has left
+            // `links`, and starting it from that list would undo the refusal.
+            guard refusal == nil, relayRefusals == refusalsAtStart else { break }
             await startLink(for: device, in: current)
         }
     }
@@ -656,6 +688,9 @@ actor PhoneBridge: PhoneBridgeControlling {
         let checking = checkTask
         checkTask = nil
         checking?.cancel()
+        cancelRelayRecheck()
+        let rechecks = endedRechecks
+        endedRechecks = nil
         check = nil
         refusal = nil
         answeredSequence = checkSequence
@@ -664,6 +699,7 @@ actor PhoneBridge: PhoneBridgeControlling {
         let closing = links.values.map(\.connection)
         links = [:]
         await checking?.value
+        await rechecks?.value
         await Self.stopAll(closing)
         await finishRefusedStops()
         await stopping?.pairing.cancel()
@@ -806,11 +842,13 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// Checks the relay in a task of its own. The task first waits for the
     /// one it replaces, so awaiting `checkTask` awaits every check started.
     /// Only a reconcile starts one, and its own delta shows the check in
-    /// flight; the answer broadcasts when it lands.
+    /// flight; the answer broadcasts when it lands. It replaces any re-check
+    /// of a refused relay.
     private func startRelayCheck(_ relayURL: URL) {
         if running?.relayURL == relayURL {
             check = .inFlight
         }
+        cancelRelayRecheck()
         let previous = checkTask
         previous?.cancel()
         checkTask = Task {
@@ -828,6 +866,9 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// later, or a later seed, has answered first, this answer is stale: it
     /// changes nothing, and the link that asked acts on the answer that
     /// stands instead.
+    ///
+    /// An answer that clears a refusal puts a reconcile in line, which starts
+    /// the links the refusal stopped.
     private func checkRelay(at relayURL: URL) async -> RelayPreflight {
         let sequence = nextCheckSequence()
         let answer: RelayCheck
@@ -844,6 +885,7 @@ actor PhoneBridge: PhoneBridgeControlling {
         } catch {
             answer = .failed(error.localizedDescription)
         }
+        let wasRefused = refusal != nil
         guard setCheck(answer, for: relayURL, sequence: sequence, refusal: newRefusal) else {
             // Stale, or the bridge has stopped or moved to another relay. On
             // this relay the newer answer stands; otherwise the link is
@@ -855,6 +897,9 @@ actor PhoneBridge: PhoneBridgeControlling {
         }
         if case .incompatible(let detail) = answer {
             PhoneBridgeLog.record(.relayRefused(reason: detail))
+        }
+        if wasRefused, refusal == nil {
+            enqueueReconcile()
         }
         return Self.verdict(of: answer)
     }
@@ -887,9 +932,10 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// answer is newer, so this one is stale and changes nothing, refusal
     /// included.
     ///
-    /// An `.incompatible` answer keeps `newRefusal` as the refusal; only an
-    /// `.ok` answer clears it. One that failed leaves the refusal as it was:
-    /// it says nothing about whether the relay is usable now.
+    /// An `.incompatible` answer keeps `newRefusal` as the refusal, and arms
+    /// the re-check that asks the relay again on its own; only an `.ok`
+    /// answer clears it. One that failed leaves the refusal as it was: it
+    /// says nothing about whether the relay is usable now.
     ///
     /// A changed answer broadcasts the status, unless `announce` is false
     /// because a reconcile in progress will.
@@ -904,6 +950,7 @@ actor PhoneBridge: PhoneBridgeControlling {
         case .incompatible:
             refusal = newRefusal
             relayRefusals &+= 1
+            armRelayRecheck(relayURL)
         case .inFlight, .failed:
             break
         }
@@ -914,6 +961,62 @@ actor PhoneBridge: PhoneBridgeControlling {
             }
         }
         return true
+    }
+
+    // MARK: - Re-checking a refused relay
+
+    /// Arms the re-check of the refused relay at `relayURL`, unless one is
+    /// armed already: one bad answer, such as a TLS-inspecting proxy's or a
+    /// relay's in the middle of a redeploy, must not stop every phone until
+    /// the user saves the relay again. Every `refusedRelayRecheckInterval`
+    /// on the injected clock the task asks the relay again, until an answer
+    /// clears the refusal, which reconciles. `stop()`, a halt, and a
+    /// reconcile that checks the relay itself or takes a save's answer end
+    /// it.
+    private func armRelayRecheck(_ relayURL: URL) {
+        guard recheckTask == nil, !isStopped else { return }
+        let clock = self.clock
+        recheckTask = Task { [weak self] in
+            while true {
+                do {
+                    try await clock.sleep(for: PhoneBridgeConstants.refusedRelayRecheckInterval)
+                } catch {
+                    return
+                }
+                guard let bridge = self, await bridge.recheckRefusedRelay(relayURL) else { return }
+            }
+        }
+    }
+
+    /// One re-check of the refused relay at `relayURL`, on the re-check's
+    /// task. Returns whether to ask again later: the relay still stands
+    /// refused, or could not be read this time.
+    private func recheckRefusedRelay(_ relayURL: URL) async -> Bool {
+        // A cancelled re-check was replaced, and its handle has gone with it.
+        guard !Task.isCancelled else { return false }
+        guard running?.relayURL == relayURL, refusal != nil else {
+            recheckTask = nil
+            return false
+        }
+        // An answer that clears the refusal reconciles from `checkRelay`.
+        _ = await checkRelay(at: relayURL)
+        guard !Task.isCancelled else { return false }
+        guard refusal == nil else { return true }
+        recheckTask = nil
+        return false
+    }
+
+    /// Ends the re-check of a refused relay, if one is armed, in line behind
+    /// any ended before it, so `stopEverything` can wait for all of them.
+    private func cancelRelayRecheck() {
+        guard let rechecking = recheckTask else { return }
+        recheckTask = nil
+        rechecking.cancel()
+        let earlier = endedRechecks
+        endedRechecks = Task {
+            await earlier?.value
+            await rechecking.value
+        }
     }
 
     // MARK: - Link events
@@ -951,8 +1054,9 @@ actor PhoneBridge: PhoneBridgeControlling {
             // The connection has recorded it; the status does not change.
             return
         case .linkRefused:
-            // The relay was refused, and the link has stopped for good. A
-            // later reconcile starts it again.
+            // The relay was refused, and the link has stopped for good. The
+            // reconcile that follows the check clearing the refusal starts a
+            // new one.
             links[item.deviceID] = nil
             broadcast(.phoneStatusChanged)
             stopRefused(link.connection)

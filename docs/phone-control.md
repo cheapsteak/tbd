@@ -34,7 +34,8 @@ not offer relay API 1. It tells you which.
 - `http://localhost` and `http://127.0.0.1` are accepted only for a local test relay.
 - An address is the server name and an optional port, with no path after it, because the pairing
   QR code carries only those.
-- TBD checks the relay again every time it connects.
+- TBD checks the relay again every time it connects. While it refuses the relay, it asks again every
+  minute, so phones reconnect on their own once the relay answers as a TBD relay.
 
 ## Turn on phone control
 

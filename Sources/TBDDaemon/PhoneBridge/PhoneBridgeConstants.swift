@@ -19,6 +19,13 @@ enum PhoneBridgeConstants {
     /// for the phone's first transport message to decrypt. A channel that
     /// reaches it is dropped.
     static let handshakeTimeout: Duration = .seconds(10)
+    /// How long the bridge waits between checks of a relay it refused, for
+    /// as long as the refusal stands. One minute, the reconnect backoff's
+    /// cap: a refused relay is asked no more often than an unreachable one
+    /// at its slowest, and the phones come back within a minute of the relay
+    /// answering as a TBD relay again, as after a redeploy, or once a proxy
+    /// stops answering in its place.
+    static let refusedRelayRecheckInterval: Duration = .seconds(60)
     /// The longest `GET /v1/info` may take, from connect to its last byte.
     static let relayInfoTimeoutSeconds: TimeInterval = 10
     /// The most `GET /v1/info` body bytes the laptop reads. A TBD relay's

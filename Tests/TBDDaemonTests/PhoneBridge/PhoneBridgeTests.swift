@@ -193,6 +193,22 @@ private struct PhoneBridgeHarness: Sendable {
         return PairedByLink(phone: phone, device: device, link: link)
     }
 
+    /// Reconciles while the relay answers as something that is not a TBD
+    /// relay, and returns once the reconcile's own check has answered and
+    /// every link it started has been refused. So every check made so far
+    /// has read that answer, and a reply set from here reaches only checks
+    /// made later.
+    func reconcileOnARefusedRelay() async throws {
+        await info.fail(with: .notATBDRelay)
+        await bridge.reconcile()
+        await bridge.waitForRelayCheck()
+        try await waitUntil("every link to stop on the refused relay") {
+            let state = try await bridge.status().relay.state
+            let links = await bridge.linkCount
+            return state == .incompatible && links == 0
+        }
+    }
+
     /// How many `.phoneStatusChanged` deltas the bridge broadcast.
     var statusDeltaCount: Int {
         deltas.values.filter { delta in
@@ -443,7 +459,8 @@ struct PhoneBridgeTests {
 
     /// A 200 whose body is not a TBD relay's info object is refused as a
     /// wrong name is: the links stop rather than retry, pairing is refused,
-    /// and saving the relay again is what starts them.
+    /// and a check that finds the relay usable, here a reconcile's, is what
+    /// starts them.
     @Test func anAnswerFromSomethingThatIsNotATBDRelayIsRefusedAndShown() async throws {
         try await withBridge(devices: 2) { h in
             await h.info.fail(with: .notATBDRelay)
@@ -501,6 +518,69 @@ struct PhoneBridgeTests {
             }
             let offer = try await h.bridge.pairStart()
             #expect(offer.state == .waitingForPhone)
+        }
+    }
+
+    /// One bad answer does not stop the phones for good. The bridge asks the
+    /// refused relay again on its own, and once the relay answers as a TBD
+    /// relay, the links start again with nothing saved.
+    @Test func aRefusedRelayThatAnswersAgainComesBackAfterOneRecheck() async throws {
+        try await withBridge(devices: 1) { h in
+            try await h.reconcileOnARefusedRelay()
+            #expect(h.relay.connectAttempts.isEmpty)
+
+            // The relay answers as a TBD relay again, as after a redeploy.
+            // The re-check's timer is the only sleeper.
+            await h.info.answer(with: currentRelay)
+            try await h.clock.requireAdvanceWhenArmed(by: PhoneBridgeConstants.refusedRelayRecheckInterval)
+            let room = h.phones[0].device.roomID
+            try await h.waitUntil("the room to open on the relay that answers again") {
+                h.relay.laptopPresent(room: room)
+            }
+            try await h.waitUntil("the relay to show as connected") {
+                try await h.bridge.status().relay.state == .connected
+            }
+            let offer = try await h.bridge.pairStart()
+            #expect(offer.state == .waitingForPhone)
+        }
+    }
+
+    @Test func aRelayThatStaysRefusedIsAskedAgainAndOpensNoLink() async throws {
+        try await withBridge(devices: 1) { h in
+            try await h.reconcileOnARefusedRelay()
+            let before = await h.info.calls
+            try await h.clock.requireAdvanceWhenArmed(by: PhoneBridgeConstants.refusedRelayRecheckInterval)
+            try await h.waitUntil("the re-check to ask the relay") { await h.info.calls == before + 1 }
+
+            // Still refused: the re-check waits for the next interval, and no
+            // link starts.
+            try await h.clock.requireSleeperArmed()
+            let links = await h.bridge.linkCount
+            #expect(links == 0)
+            #expect(h.relay.connectAttempts.isEmpty)
+            let status = try await h.bridge.status()
+            #expect(status.relay.state == .incompatible)
+            await #expect(throws: PhoneBridgeError.notATBDRelay) { try await h.bridge.pairStart() }
+        }
+    }
+
+    /// A reconcile while the relay stands refused, such as a settings save's,
+    /// starts no link; only a check that finds the relay usable does.
+    @Test func aReconcileWhileTheRelayStandsRefusedOpensNoLink() async throws {
+        try await withBridge(devices: 1) { h in
+            try await h.reconcileOnARefusedRelay()
+
+            // From here a check waits, so a link started again would stay in
+            // place, waiting on its own check.
+            await h.info.hold()
+            await h.bridge.reconcile()
+            let links = await h.bridge.linkCount
+            #expect(links == 0)
+            #expect(h.relay.connectAttempts.isEmpty)
+            // The reconcile asks the relay itself; until it answers, the
+            // refusal stands.
+            try await h.waitUntil("the reconcile's check to wait on the relay") { await h.info.heldCalls == 1 }
+            await #expect(throws: PhoneBridgeError.notATBDRelay) { try await h.bridge.pairStart() }
         }
     }
 
