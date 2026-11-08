@@ -22,8 +22,8 @@
 // older time, never a key.
 //
 // A damaged laptop record never blocks the loader: `listLaptops` reports it beside the good
-// ones, `getLaptop` throws DamagedRecordError for it, and `forgetLaptop` deletes it by its
-// key. Nothing here deletes a laptop record on its own.
+// ones, and `forgetLaptop` deletes it by its key. Nothing here deletes a laptop record on its
+// own.
 
 import { base64urlDecode, base64urlEncode } from './channel/pairingLink.js';
 import {
@@ -184,20 +184,6 @@ export class Store {
       let rows = [];
       readRows(ask, laptops.getAllKeys(), laptops, (read) => { rows = read; });
       return () => readLaptopRows(rows);
-    });
-  }
-
-  /**
-   * @param {string} id
-   * @returns {Promise<LaptopRecord | undefined>} undefined when there is no such laptop
-   * @throws {DamagedRecordError} for a record that cannot be read or fails validation
-   */
-  getLaptop(id) {
-    return this.#run([LAPTOPS], 'readonly', 'default', (tx, ask) => {
-      /** @type {StoredRow} */
-      const row = { key: id, value: undefined };
-      ask(tx.objectStore(LAPTOPS).get(id), (value) => { row.value = value; }, (error) => { row.error = error; });
-      return () => (row.value === undefined && !('error' in row) ? undefined : laptopFromRow(id, row.value, row.error));
     });
   }
 
@@ -546,7 +532,7 @@ export function validateLaptopRecord(obj) {
 }
 
 /**
- * One stored laptop row as a record: `getLaptop` and `listLaptops` read every row through
+ * One stored laptop row as a record: `listLaptops` and `touchLaptop` read every row through
  * this. A row is damaged when it could not be read, fails `validateLaptopRecord`, or has an
  * `id` other than the key it is stored under.
  * @param {IDBValidKey} key

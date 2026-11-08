@@ -451,7 +451,6 @@ test('a write of keys is strict; the bundle cache and timestamps are relaxed; a 
     ['markBundleUsed', () => store.markBundleUsed(good.id, goodBundle.sha256, 1_800_000_000_001), 'readwrite', 'relaxed'],
     ['touchLaptop', () => store.touchLaptop(good.id, { lastConnectedAt: 1_800_000_000_001, laptopName: 'acme-mbp' }), 'readwrite', 'relaxed'],
     ['listLaptops', () => store.listLaptops(), 'readonly', 'default'],
-    ['getLaptop', () => store.getLaptop(good.id), 'readonly', 'default'],
     ['getBundle', () => store.getBundle(good.id, goodBundle.sha256), 'readonly', 'default'],
   ];
   for (const [name, call, mode, durability] of calls) {
