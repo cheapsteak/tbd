@@ -318,6 +318,49 @@ extension PhoneAppService {
         return (terminal, worktree)
     }
 
+    /// Checks that the phone may act on the remote session
+    /// `provider`/`sessionID`, needing the capability `needed` picks from its
+    /// capabilities as the sessions list shows them
+    /// (`PhoneSessionStatus.remoteCapabilities`):
+    /// - a provider that is not registered is `not_found` with
+    ///   `noSuchProviderReason`;
+    /// - an unavailable capability is `unsupported` with its reason, as the
+    ///   list shows it, or `fallback` when it gives none;
+    /// - a session the list places in no row is `not_found` with
+    ///   `noSuchSessionReason`: one missing from the laptop's remote session
+    ///   list, dismissed, or matched to a hidden repo. The rule is the list's
+    ///   own (`PhoneSnapshotBuilder.listsRemoteSession`), over the rows
+    ///   `gatherSnapshot` reads, so the two cannot drift. A session list the
+    ///   daemon refuses to give is `refused` with its reason.
+    ///
+    /// A phone can keep a session reference from a list it was sent before
+    /// the repo was hidden or the session dismissed, and it acts on nothing
+    /// the laptop no longer shows it, as `phoneVisibleTerminal` holds a local
+    /// session. So every action on a remote session checks it here, and
+    /// nowhere else: `message.send` and `session.setModel` (`sendText`),
+    /// `prompt.answer` and `transcript.open`.
+    nonisolated func checkPhoneCapableRemoteSession(
+        provider: String, sessionID: String,
+        needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, orElse fallback: String
+    ) async throws {
+        let providers = try await providerStatuses()
+        let capabilities = try Self.remoteCapabilities(ofProvider: provider, in: providers)
+        try Self.requireCapability(needed(capabilities), orElse: fallback)
+        let response = try await actions.phoneRemoteSessions()
+        let sessions = try Self.succeeded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
+        let repos = try await db.repos.list()
+        let worktrees = try await db.worktrees.list(excludeArchived: true)
+        let scratch = try await db.worktrees.listScratch().filter { $0.status != .archived }
+        // Placing a remote session reads none of the fields left empty here.
+        let input = PhoneSnapshotInput(
+            repos: repos, worktrees: worktrees, scratch: scratch, terminals: [:],
+            tabOrder: [:], tabLabels: [:], profiles: [], states: [:],
+            openPrompts: [:], remoteSessions: sessions, providers: providers)
+        guard PhoneSnapshotBuilder.listsRemoteSession(provider: provider, sessionID: sessionID, in: input) else {
+            throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
+        }
+    }
+
     /// The terminal row behind a local session, with its capabilities as the
     /// sessions list shows them (`PhoneSessionStatus.localCapabilities`),
     /// when the phone can see it (`phoneVisibleTerminal`, else `not_found`),

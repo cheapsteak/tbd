@@ -140,6 +140,24 @@ enum PhoneSnapshotBuilder {
         return PhoneSnapshot(layout: groupLayout, rows: kept.map(\.row), omittedRows: omitted)
     }
 
+    /// Whether the list places the remote session `provider`/`sessionID` in
+    /// any row: the same walk `build` takes its rows from, so an action on a
+    /// remote session and the list cannot disagree about which sessions the
+    /// phone can see. A session missing from `input.remoteSessions`,
+    /// dismissed, or matched only to a hidden repo is placed in none.
+    ///
+    /// The walk reads only the repos, the worktree and scratch rows, the
+    /// remote sessions and the providers to place a remote session, so a
+    /// caller may leave the other fields of `input` empty. A row `build`
+    /// would leave out for its size still counts: the size limits keep the
+    /// list within its frames and say nothing about what the phone may see.
+    static func listsRemoteSession(provider: String, sessionID: String, in input: PhoneSnapshotInput) -> Bool {
+        let ref = PhoneSessionRef.remote(provider: provider, sessionID: sessionID)
+        return orderedRows(input).entries.contains { entry in
+            entry.row.sessions.contains { $0.ref == ref }
+        }
+    }
+
     // MARK: - IDs
 
     static func worktreeRowID(_ worktree: Worktree) -> String {

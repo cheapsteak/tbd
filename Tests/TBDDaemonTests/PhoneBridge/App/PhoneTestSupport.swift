@@ -120,6 +120,20 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         respond(to: .remoteProviders, with: try RPCResponse(result: RemoteProvidersResult(providers: [provider])))
     }
 
+    /// Every later `phoneRemoteSessions` lists one running session,
+    /// `sessionID` of `provider`, resolved to `repoID` when one is given, so
+    /// an action on it passes the phone's visibility check once its provider
+    /// is registered.
+    func listRemoteSession(
+        _ provider: String, _ sessionID: String, resolvedRepoID: UUID? = nil, dismissed: Bool = false
+    ) throws {
+        let info = RemoteSessionInfo(
+            provider: provider, payload: RemoteSessionPayload(id: sessionID, state: .running),
+            gone: false, dismissed: dismissed, lastSeen: Date(timeIntervalSince1970: 1_800_000_000),
+            resolvedRepoID: resolvedRepoID)
+        respond(to: .remoteSessions, with: try RPCResponse(result: RemoteSessionsResult(sessions: [info])))
+    }
+
     /// Records a call of `method` and answers what `answering`, `method`
     /// unless given, is set to answer.
     private func record(

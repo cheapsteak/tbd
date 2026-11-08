@@ -858,7 +858,8 @@ extension PhoneAppService {
     ///   the terminal, the prompt and the answer.
     /// - **A remote session** needs its provider's `answer` capability, as the
     ///   sessions list shows it, or it is `unsupported` with the same reason;
-    ///   a provider that is not registered is `not_found`. Then
+    ///   a provider that is not registered, and a session the phone cannot
+    ///   see, are `not_found` (`checkPhoneCapableRemoteSession`). Then
     ///   `phoneAnswerRemotePrompt` with the provider, the session, the prompt
     ///   and the answer.
     ///
@@ -884,8 +885,8 @@ extension PhoneAppService {
                 try await self.actions.phoneAnswerPrompt(core, deviceID: deviceID)
             }
         case .remote(let provider, let sessionID):
-            let capabilities = try await remoteCapabilities(ofProvider: provider)
-            try Self.requireCapability(capabilities.answer, orElse: Self.noAnswerReason)
+            try await checkPhoneCapableRemoteSession(
+                provider: provider, sessionID: sessionID, needing: { $0.answer }, orElse: Self.noAnswerReason)
             let core = RemoteAnswerParams(
                 provider: provider, sessionID: sessionID, promptID: params.promptID, answer: params.answer)
             let promptQuestions = await sentQuestionTexts(for: key)

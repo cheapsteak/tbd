@@ -458,6 +458,7 @@ struct PhoneSendTests {
     @Test func aRemoteSendWithSendSubmitIsSent() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
         h.actions.respond(to: .remoteSendMessage, with: try RPCResponse(result: RemoteSendMessageResult(outcome: .sent)))
         let outbox = await h.connect()
 
@@ -476,6 +477,7 @@ struct PhoneSendTests {
     @Test func aRemoteSendWithNoExitStatusIsUnknown() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
         h.actions.respond(to: .remoteSendMessage, with: try RPCResponse(result: RemoteSendMessageResult(outcome: .unknown)))
         let outbox = await h.connect()
 
@@ -492,6 +494,7 @@ struct PhoneSendTests {
     @Test func aRefusedRemoteSendKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
         let outbox = await h.connect()
         let cases: [(daemon: String, phone: String)] = [
             (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
@@ -535,6 +538,7 @@ struct PhoneSendTests {
     @Test func setModelOnARemoteSessionSendsTheSlashCommand() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
         h.actions.respond(to: .remoteSendMessage, with: try RPCResponse(result: RemoteSendMessageResult(outcome: .sent)))
         let outbox = await h.connect()
 

@@ -116,8 +116,8 @@ actor TranscriptDeltaRelay {
 /// shows it, and opens only a Claude session in a local worktree. The
 /// transcript path comes from the terminal row (`locateTranscript`), never
 /// from the phone. A remote session needs its provider registered and
-/// declaring `transcript.read` (`unsupported` otherwise), and must be in the
-/// laptop's remote session list and not dismissed (`not_found` otherwise);
+/// declaring `transcript.read` (`unsupported` otherwise), and must be one the
+/// sessions list shows (`not_found` otherwise, `checkPhoneCapableRemoteSession`);
 /// its transcript is the daemon's cache, whose path comes from a sync
 /// (`RemoteTranscriptFollower`), and a sync that fails is the reply's error,
 /// only in words TBD wrote (`tbdRemoteTranscriptRefusals`).
@@ -274,17 +274,13 @@ extension PhoneAppService {
     /// Checks that the phone may open a remote session's transcript. Its
     /// provider must be registered (`not_found` otherwise) and declare
     /// `transcript.read`, as the sessions list reads it (`unsupported`
-    /// otherwise), and the session must be in the laptop's remote session
-    /// list and not dismissed, as the sessions list shows it (`not_found`
-    /// otherwise). A list the daemon refuses to give is `refused`.
+    /// otherwise), and the session must be one the sessions list shows: in
+    /// the laptop's remote session list, not dismissed, and not matched to a
+    /// hidden repo (`not_found` otherwise). A list the daemon refuses to give
+    /// is `refused`. See `checkPhoneCapableRemoteSession`.
     private nonisolated func checkRemoteTranscript(provider: String, sessionID: String) async throws {
-        let capabilities = try await remoteCapabilities(ofProvider: provider)
-        try Self.requireCapability(capabilities.transcript, orElse: Self.noTranscriptReadReason)
-        let response = try await actions.phoneRemoteSessions()
-        let sessions = try Self.succeeded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
-        guard sessions.contains(where: { $0.provider == provider && $0.payload.id == sessionID && !$0.dismissed }) else {
-            throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
-        }
+        try await checkPhoneCapableRemoteSession(
+            provider: provider, sessionID: sessionID, needing: { $0.transcript }, orElse: Self.noTranscriptReadReason)
     }
 
     /// Whether `params` may keep the device's open feed: the connection's

@@ -336,6 +336,7 @@ struct PhonePromptTests {
     @Test func aRemoteAnswerGoesToItsProvider() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
         h.actions.respond(to: .answerRemotePrompt, with: try Self.answered(.delivered))
         let outbox = await h.connect()
         let answer = PromptAnswer.permission(decision: .deny, message: "Not yet")
@@ -353,6 +354,7 @@ struct PhonePromptTests {
         ])
         #expect(h.actions.calls == [
             FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil),
+            FakeSessionActions.Call(method: .remoteSessions, deviceID: nil),
             FakeSessionActions.Call(method: .answerRemotePrompt, deviceID: h.peer.deviceID),
         ])
         #expect(h.recorder.records == [PhoneActionRecord(
@@ -382,6 +384,7 @@ struct PhonePromptTests {
     @Test func aRefusedRemoteAnswerKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
         let outbox = await h.connect()
         let question = PromptAnswer.question(answers: ["Which branch?": "main"])
         let cases: [(daemon: String, answer: PromptAnswer, phone: String)] = [

@@ -151,7 +151,8 @@ extension PhoneAppService {
     /// **A remote session** needs the capability `purpose` names, as the
     /// sessions list shows it (`PhoneSessionStatus.remoteCapabilities`), or
     /// it is `unsupported` with the same reason; a provider that is not
-    /// registered is `not_found`. Then `phoneRemoteSendMessage`: the
+    /// registered, and a session the phone cannot see, are `not_found`
+    /// (`checkPhoneCapableRemoteSession`). Then `phoneRemoteSendMessage`: the
     /// provider's `sent` is `sent` and its `unknown` is `unknown`. A refusal
     /// reaches the phone only in words TBD wrote
     /// (`remoteRefusal(_:method:tbdRefusals:)`).
@@ -210,15 +211,17 @@ extension PhoneAppService {
     private nonisolated func sendRemote(
         _ text: String, provider: String, sessionID: String, deviceID: UUID, purpose: PhoneSendPurpose
     ) async throws -> ActionOutcomeResult {
-        let capabilities = try await remoteCapabilities(ofProvider: provider)
-        let needed: PhoneCapability
-        switch purpose {
-        case .message:
-            needed = capabilities.send
-        case .model:
-            needed = capabilities.model
-        }
-        try Self.requireCapability(needed, orElse: Self.cannotTakeMessagesReason)
+        try await checkPhoneCapableRemoteSession(
+            provider: provider, sessionID: sessionID,
+            needing: { capabilities in
+                switch purpose {
+                case .message:
+                    return capabilities.send
+                case .model:
+                    return capabilities.model
+                }
+            },
+            orElse: Self.cannotTakeMessagesReason)
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteSendMessage(
             RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text), deviceID: deviceID)
@@ -233,10 +236,19 @@ extension PhoneAppService {
     /// The capabilities of `provider`'s sessions, from what it declares, read
     /// the way the sessions list reads them. A provider list the daemon
     /// refuses to give is `refused` with its reason; one that does not decode
-    /// is `internal`; a provider missing from it is `not_found`.
-    /// `prompt.answer` and `transcript.open` read them the same way.
+    /// is `internal`; a provider missing from it is `not_found`. Every action
+    /// on a remote session reads them through
+    /// `checkPhoneCapableRemoteSession`, which reads them the same way.
     nonisolated func remoteCapabilities(ofProvider provider: String) async throws -> PhoneCapabilities {
-        let providers = try await providerStatuses()
+        try Self.remoteCapabilities(ofProvider: provider, in: try await providerStatuses())
+    }
+
+    /// The capabilities of `provider`'s sessions among `providers`, as
+    /// `remoteCapabilities(ofProvider:)` reads them: `not_found` for a
+    /// provider missing from them.
+    static func remoteCapabilities(
+        ofProvider provider: String, in providers: [RemoteProviderStatus]
+    ) throws -> PhoneCapabilities {
         guard let declared = PhoneSessionStatus.declaredCapabilities(providers)[provider] else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProviderReason)
         }
