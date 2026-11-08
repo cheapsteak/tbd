@@ -447,8 +447,14 @@ the phone does not show it until tapped.
 - **Live updates** – new lines are parsed incrementally from the last offset. A new item arrives as
   `transcript.append`. A result for an existing tool row arrives as `transcript.update`, by the
   item's ID.
-- **Reconnect** – items have stable IDs, and every event carries a sequence number. A reconnecting
-  phone sends the last number it saw and gets only what changed.
+- **Item IDs** – an item's ID names it in `transcript.update` and `transcript.detail`. A line with
+  no `uuid` takes its byte offset as its ID, `at-<offset>`. A remote session's transcript is a
+  cache on the laptop, and older history can be added to the front of it. That shifts the
+  offsets, so an item can get a new ID. The app therefore keys rows its own way: each row gets a
+  key the app assigns as the row enters, never the item ID. The app never deduplicates a page by
+  item ID. It treats a detail's `not_found` as an ordinary outcome.
+- **Reconnect** – every event carries a sequence number. A reconnecting phone sends the last
+  number it saw and gets only what changed.
 - **Reset** – `/clear`, a resume, or a session rollover sends `transcript.reset`, and the phone
   starts over at the new tail.
 
