@@ -28,7 +28,8 @@ extension PhoneAppService {
 
     static let emptyMessageReason = "Write a message first."
     static let messageTooLongReason = "That message is too long to send from a phone."
-    static let cannotTakeMessagesReason = "This session cannot take messages."
+    /// The sessions list says the same when it marks `send` unavailable.
+    static let cannotTakeMessagesReason = PhoneSessionStatus.cannotTakeMessagesReason
     static let alreadyRunningReason =
         "This session was already running, so the message was not delivered. Send it again."
     static let notAModelNameReason = "That is not a model name."

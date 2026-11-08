@@ -136,10 +136,17 @@ enum PhoneSessionStatus {
     static let codexStatusOnlyReason = "Codex sessions show status only."
     static let remoteLaneTabReason = "This tab belongs to a remote lane. Use its remote session."
     static let remoteOnlyReason = "Not available for remote sessions."
+    static let cannotTakeMessagesReason = "This session cannot take messages."
 
     /// A local session's capabilities. A Claude session has all six; a Codex
     /// session shows its status only. A tab in a remote lane's row has none,
     /// since the lane's remote session stands for it.
+    ///
+    /// `send` and `model` follow the laptop's composer, because both go
+    /// through the send path, which asks `ComposerState.resolve` with the
+    /// same two inputs: where the composer is hidden (a row saved before
+    /// terminals recorded their kind, say), both are unavailable, so the list
+    /// never offers what every send would refuse.
     static func localCapabilities(terminal: TBDShared.Terminal, isRemoteWorktree: Bool) -> PhoneCapabilities {
         if isRemoteWorktree {
             let none = unavailable(remoteLaneTabReason)
@@ -151,9 +158,16 @@ enum PhoneSessionStatus {
                 transcript: unavailable(codexTranscriptReason), send: statusOnly, answer: statusOnly,
                 switchProfile: statusOnly, fork: statusOnly, model: statusOnly)
         }
+        let messages: PhoneCapability
+        switch ComposerState.resolve(terminal: terminal, isRemoteWorktree: isRemoteWorktree) {
+        case .hidden, .unavailable:
+            messages = unavailable(cannotTakeMessagesReason)
+        case .running, .notRunning, .blocked:
+            messages = available
+        }
         return PhoneCapabilities(
-            transcript: available, send: available, answer: available,
-            switchProfile: available, fork: available, model: available)
+            transcript: available, send: messages, answer: available,
+            switchProfile: available, fork: available, model: messages)
     }
 
     /// Each provider's declared capabilities, by provider name, from its

@@ -236,6 +236,33 @@ struct PhoneSnapshotBuilderTests {
             switchProfile: Self.available, fork: Self.available, model: Self.available))
     }
 
+    /// A row saved before terminals recorded their kind is listed as Claude
+    /// once it has a Claude session, but the laptop's composer is hidden for
+    /// it (`ComposerState.resolve`), so every send would be refused. The list
+    /// does not offer Send or Model for it.
+    @Test func aKindlessClaudeRowOffersNoSendOrModel() throws {
+        let a = UUID()
+        let w = Self.worktree("fix-login", repo: a)
+        let kindlessClaude = Self.terminal(in: w.id, kind: nil)
+        var parkedKindless = Self.terminal(in: w.id, kind: nil, createdAt: Self.base.addingTimeInterval(1))
+        parkedKindless.hibernatedAt = Self.base
+
+        let s = PhoneSnapshotBuilder.build(Self.input(
+            repos: [Repo(id: a, path: "/tmp/acme", displayName: "acme")], worktrees: [w],
+            terminals: [kindlessClaude, parkedKindless]))
+
+        let sessions = try Self.row(w.id.uuidString, in: s).sessions
+        try #require(sessions.count == 2)
+        let noMessages = PhoneCapability(available: false, reason: "This session cannot take messages.")
+        let expected = PhoneCapabilities(
+            transcript: Self.available, send: noMessages, answer: Self.available,
+            switchProfile: Self.available, fork: Self.available, model: noMessages)
+        #expect(sessions[0].capabilities == expected)
+        #expect(sessions[1].capabilities == expected)
+        // The send path refuses it with the same words.
+        #expect(PhoneAppService.cannotTakeMessagesReason == noMessages.reason)
+    }
+
     @Test func everyStateMapsToItsChip() {
         let until = Self.base.addingTimeInterval(3_600)
         let question = AwaitingInputReason(
