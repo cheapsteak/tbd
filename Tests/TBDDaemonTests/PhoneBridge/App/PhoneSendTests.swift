@@ -12,8 +12,6 @@ import TestSupport
 @Suite("Phone message.send and session.setModel", .fastPassBounded)
 struct PhoneSendTests {
     private static let remoteSession = PhoneSessionRef.remote(provider: "acme-cloud", sessionID: "rs-1")
-    /// A provider's error that quotes a URL with an access token in it.
-    private static let providerSecret = "POST https://acme-control.example/v1?access_token=sk-test"
 
     /// The fields of a `TerminalSendParams`, which is not `Equatable`, so a
     /// test can compare whole sends.
@@ -437,7 +435,7 @@ struct PhoneSendTests {
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
         let outbox = await h.connect()
         let cases: [(daemon: String, phone: String)] = [
-            (Self.providerSecret, PhoneAppService.remoteRefusedReason),
+            (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
             (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
             (RemoteSendMessageRefusal.waitingInput, RemoteSendMessageRefusal.waitingInput),
         ]
@@ -447,8 +445,7 @@ struct PhoneSendTests {
             let (reply, bytes) = try await h.request(
                 .messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
             #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
-            let text = String(decoding: bytes, as: UTF8.self)
-            #expect(!text.contains("access_token") && !text.contains("sk-test"), "the daemon said \(daemon)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
         }
     }
 

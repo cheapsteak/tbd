@@ -373,6 +373,59 @@ struct PhonePromptTests {
         #expect(h.actions.remoteAnswers.isEmpty)
     }
 
+    /// A remote answer's refusal reaches the phone only in words TBD wrote:
+    /// the setting's, a session state's, the remote gates' and a validation
+    /// message about the phone's own answer pass as they are, and a
+    /// provider's own words, which can quote a token, become
+    /// `remoteRefusedReason`, as does a validation message naming a question
+    /// the answer did not name.
+    @Test func aRefusedRemoteAnswerKeepsOnlyTBDsOwnWords() async throws {
+        let h = try await PhoneServiceHarness.make()
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        let outbox = await h.connect()
+        let question = PromptAnswer.question(answers: ["Which branch?": "main"])
+        let cases: [(daemon: String, answer: PromptAnswer, phone: String)] = [
+            (PhoneProviderSecret.error, Self.allow, PhoneAppService.remoteRefusedReason),
+            ("invalid_params: \(PhoneProviderSecret.error)", Self.allow, PhoneAppService.remoteRefusedReason),
+            ("", Self.allow, PhoneAppService.remoteRefusedReason),
+            (PromptAnswerRefusal.disabled, Self.allow, PromptAnswerRefusal.disabled),
+            (RPCRouter.promptAnswerDisabledRefusal, Self.allow, RPCRouter.promptAnswerDisabledRefusal),
+            (PromptAnswerRefusal.notMirrored, Self.allow, PromptAnswerRefusal.notMirrored),
+            (RemoteSendMessageRefusal.exited, Self.allow, RemoteSendMessageRefusal.exited),
+            (RemoteGateRefusal.backendsDisabled, Self.allow, RemoteGateRefusal.backendsDisabled),
+            (PromptAnswerValidation.kindMismatch.message, Self.allow, PromptAnswerValidation.kindMismatch.message),
+            (PromptAnswerValidation.unknownQuestion("Which branch?").message, question,
+             PromptAnswerValidation.unknownQuestion("Which branch?").message),
+            (PromptAnswerValidation.missingAnswer(question: "Which repo?").message, question,
+             PhoneAppService.remoteRefusedReason),
+        ]
+
+        for (daemon, answer, phone) in cases {
+            h.actions.respond(to: .answerRemotePrompt, with: RPCResponse(error: daemon))
+            let (reply, bytes) = try await h.request(
+                .promptAnswer,
+                params: PhonePromptAnswerParams(session: Self.remoteSession, promptID: "rp-1", answer: answer),
+                on: outbox)
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
+        }
+        #expect(h.actions.remoteAnswers.count == cases.count)
+    }
+
+    /// A local answer's refusal is TBD's own, so any text the core sends
+    /// reaches the phone as it is: the filter is the remote path's alone.
+    @Test func aLocalAnswersRefusalIsNotFiltered() async throws {
+        let h = try await PhoneServiceHarness.make()
+        h.actions.respond(to: .answerPrompt, with: RPCResponse(error: "invalid_params: the prompt has no question \"x\""))
+        let outbox = await h.connect()
+
+        let terminalID = try await h.seedTerminal().id
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
+
+        #expect(reply.error == PhoneAppError(
+            code: .refused, message: "invalid_params: the prompt has no question \"x\""))
+    }
+
     // MARK: - The ledger of phone answers
 
     /// A phone's answer is kept for `answeredBy` when it was delivered or may

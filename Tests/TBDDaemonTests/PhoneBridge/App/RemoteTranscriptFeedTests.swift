@@ -182,12 +182,14 @@ struct RemoteTranscriptFeedTests {
 
     /// A load that fails leaves the cache as it was: the phone gets the
     /// cache's page, whose cursor still asks for more, and with nothing left
-    /// in the cache the load's refusal is the error. A later try loads.
+    /// in the cache the load's refusal is the error, only in words TBD wrote:
+    /// a provider's error, which can quote a token, is `remoteRefusedReason`,
+    /// and TBD's own refusal passes as it is. A later try loads.
     @Test func aFailedLoadShowsTheCacheThenRefuses() async throws {
         let cache = try FakeCache(
             CacheLine.conversation("m", messages: 6), earlier: [[CacheLine.prompt("e1", "placeholder earlier 1")]])
         defer { cache.remove() }
-        cache.failLoads(Self.unreachable)
+        cache.failLoads(PhoneProviderSecret.error)
         let d = RemoteDirectFeed(cache: cache)
         let page = try await d.feed.open()
         let cursor = try #require(page.cursor)
@@ -200,10 +202,15 @@ struct RemoteTranscriptFeedTests {
         let top = try #require(cached.cursor)
         #expect(d.actions.remoteLoadEarliers.count == 1)
 
-        await #expect(throws: PhoneAppError(code: .refused, message: Self.unreachable)) {
-            _ = try await d.feed.olderPage(cursor: top)
-        }
+        let providerRefusal = try await Self.olderPageError(d.feed, cursor: top)
+        #expect(providerRefusal == PhoneAppError(code: .refused, message: PhoneAppService.remoteRefusedReason))
+        #expect(!PhoneProviderSecret.leaks(PhoneAppCoding.errorReply(requestID: "page", providerRefusal)))
         #expect(d.actions.remoteLoadEarliers.count == 2)
+
+        cache.failLoads(RemoteTranscriptRefusal.loadEarlierOff)
+        let tbdRefusal = try await Self.olderPageError(d.feed, cursor: top)
+        #expect(tbdRefusal == PhoneAppError(code: .refused, message: RemoteTranscriptRefusal.loadEarlierOff))
+        #expect(d.actions.remoteLoadEarliers.count == 3)
 
         cache.failLoads(nil)
         let loaded = try await d.feed.olderPage(cursor: top)
@@ -372,21 +379,36 @@ struct RemoteTranscriptFeedTests {
         await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
-    /// A sync that fails at open is the reply's error, with the laptop's
-    /// reason, and leaves nothing open.
+    /// A sync that fails at open is the reply's error, only in words TBD
+    /// wrote, and leaves nothing open: a provider's error, which can quote a
+    /// token (`RemoteTranscriptSyncError.providerFailed`), is
+    /// `remoteRefusedReason`, and TBD's own refusals pass as they are.
     @Test func aFailedOpenSyncIsRefused() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider(Self.provider, capabilities: [RemoteCapability.transcriptRead])
         try Self.listSession(h)
-        h.actions.respond(to: .remoteTranscriptSync, with: RPCResponse(error: Self.unreachable))
         let outbox = try await Self.liveConnection(h)
+        let discarded = RemoteTranscriptSyncError.discarded.localizedDescription
+        let cases: [(daemon: String, phone: String)] = [
+            (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
+            ("transcript read failed (exit 1)", PhoneAppService.remoteRefusedReason),
+            (RemoteTranscriptRefusal.dismissed, RemoteTranscriptRefusal.dismissed),
+            (RPCRouter.transcriptSyncDismissedRefusal, RPCRouter.transcriptSyncDismissedRefusal),
+            (discarded, discarded),
+            (RemoteGateRefusal.backendsDisabled, RemoteGateRefusal.backendsDisabled),
+        ]
 
-        let bytes = try await Self.ask(h, .transcriptOpen, id: "open", Self.openParams(Self.session), on: outbox)
+        for (index, (daemon, phone)) in cases.enumerated() {
+            h.actions.respond(to: .remoteTranscriptSync, with: RPCResponse(error: daemon))
+            let bytes = try await Self.ask(
+                h, .transcriptOpen, id: "open-\(index)", Self.openParams(Self.session), on: outbox)
 
-        #expect(try Self.error(bytes) == PhoneAppError(code: .refused, message: Self.unreachable))
-        #expect(h.actions.remoteSyncs.count == 1)
-        let feed = await h.service.transcriptFeed(for: h.peer.deviceID)
-        #expect(feed == nil)
+            #expect(try Self.error(bytes) == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
+            let feed = await h.service.transcriptFeed(for: h.peer.deviceID)
+            #expect(feed == nil, "the daemon said \(daemon)")
+        }
+        #expect(h.actions.remoteSyncs.count == cases.count)
         await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
@@ -708,6 +730,18 @@ struct RemoteTranscriptFeedTests {
         let bodies = outbox.bodies
         let index = replyIndices(id, in: outbox)[before]
         return bodies[index]
+    }
+
+    /// The error `feed.olderPage(cursor:)` throws, which must be a
+    /// `PhoneAppError`.
+    private static func olderPageError(_ feed: TranscriptFeed, cursor: String) async throws -> PhoneAppError {
+        do {
+            _ = try await feed.olderPage(cursor: cursor)
+        } catch let error as PhoneAppError {
+            return error
+        }
+        Issue.record("transcript.page did not refuse")
+        return PhoneAppError(code: .internalError, message: "no refusal")
     }
 
     /// The error a reply carries, or nil for a result.

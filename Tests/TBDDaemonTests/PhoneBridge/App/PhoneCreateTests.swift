@@ -817,19 +817,20 @@ struct PhoneCreateTests {
     }
 
     /// A remote create's refusal reaches the phone only in words TBD wrote:
-    /// the phone message rule's pass as they are, and a provider's own words,
-    /// which can quote a token, become `remoteRefusedReason`.
+    /// the phone message rule's and the remote gates' pass as they are, and a
+    /// provider's own words, which can quote a token, become
+    /// `remoteRefusedReason`.
     @Test func aRefusedRemoteCreateKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
         try Self.offer(h, [Self.status()])
         let outbox = await h.connect()
-        let secret = "POST https://acme-control.example/v1?access_token=sk-test"
         let cases: [(daemon: String, phone: String)] = [
-            (secret, PhoneAppService.remoteRefusedReason),
+            (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
             ("acme-cloud: quota reached", PhoneAppService.remoteRefusedReason),
             (PhoneMessageText.emptyRefusal, PhoneMessageText.emptyRefusal),
             (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
+            (RemoteGateRefusal.claudeCloudDisabled, RemoteGateRefusal.claudeCloudDisabled),
         ]
 
         for (daemon, phone) in cases {
@@ -837,8 +838,7 @@ struct PhoneCreateTests {
             let (reply, bytes) = try await h.request(
                 .remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
             #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
-            let text = String(decoding: bytes, as: UTF8.self)
-            #expect(!text.contains("access_token") && !text.contains("sk-test"), "the daemon said \(daemon)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
         }
     }
 }

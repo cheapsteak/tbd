@@ -359,6 +359,18 @@ enum PhoneTestRequests {
     }
 }
 
+/// A provider's error that quotes a URL with an access token in it, for the
+/// tests that prove a provider's words never reach a phone.
+enum PhoneProviderSecret {
+    static let error = "POST https://acme-control.example/v1?access_token=sk-test"
+
+    /// Whether `bytes`, a body sent to a phone, hold any part of the secret.
+    static func leaks(_ bytes: Data) -> Bool {
+        let text = String(decoding: bytes, as: UTF8.self)
+        return text.contains("access_token") || text.contains("sk-test")
+    }
+}
+
 // MARK: - PhoneServiceHarness
 
 /// A `PhoneAppService` over an in-memory database with phone control on and

@@ -30,8 +30,9 @@ enum AnswerAuthority: Sendable {
 /// once the mod has receipted the decision, the terminal has answered first,
 /// or the wait for either ran out.
 extension RPCRouter {
-    static let promptAnswerDisabledRefusal =
-        "answering prompts from the transcript is off (config.transcript_prompt_answer_enabled)"
+    /// In `Base` (`PromptAnswerRefusal`), so the phone app service can let it
+    /// through to a phone as TBD's own words.
+    static let promptAnswerDisabledRefusal = PromptAnswerRefusal.disabled
     /// No wait request picked the decision up within the pickup window, as
     /// when the session's mod is reconnecting. The prompt stays open.
     static let promptHookDetachedRefusal = "the prompt's session is not picking up answers right now; try again"

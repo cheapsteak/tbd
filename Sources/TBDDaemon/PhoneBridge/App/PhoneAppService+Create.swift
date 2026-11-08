@@ -16,9 +16,9 @@ import TBDShared
 /// the repo and the first message, and `phoneRemoteCreate`, which keeps only
 /// the provider and the form values. A refusal is `refused`: a worktree
 /// create's with the daemon's reason, and a remote create's only in words TBD
-/// wrote (`remoteRefusal(_:method:)`), since a provider's own can quote a
-/// secret. A success whose result does not decode is `internal`, never a
-/// success. Both creates are in the request memory (`remembersReplies(of:)`),
+/// wrote (`remoteRefusal(_:method:tbdRefusals:)`), since a provider's own can
+/// quote a secret. A success whose result does not decode is `internal`,
+/// never a success. Both creates are in the request memory (`remembersReplies(of:)`),
 /// so a resend creates once and gets the first reply. Their records name the
 /// repo or the provider, never the message or a form value.
 ///
@@ -354,7 +354,7 @@ extension PhoneAppService {
     ///    and the provider's readiness.
     /// 4. **`phoneRemoteCreate`** with the provider and the form's JSON. A
     ///    refusal reaches the phone only in words TBD wrote
-    ///    (`remoteRefusal(_:method:)`).
+    ///    (`remoteRefusal(_:method:tbdRefusals:)`).
     nonisolated func remoteCreate(_ params: PhoneRemoteCreateParams, _ context: DeviceContext) async throws -> SessionRefResult {
         try Self.checkFormSize(params)
         let repo = try await visibleRepo(params.repoID)

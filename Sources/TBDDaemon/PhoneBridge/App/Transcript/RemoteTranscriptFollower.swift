@@ -46,26 +46,32 @@ actor RemoteTranscriptFollower {
         self.clock = clock
     }
 
-    /// One `remote.transcriptSync`. A refusal is `refused` with the laptop's
-    /// reason; a result that does not decode is `internal`.
+    /// One `remote.transcriptSync`. A refusal is `refused`, only in words TBD
+    /// wrote (`PhoneAppService.tbdRemoteTranscriptRefusals`): a failed read's
+    /// error is the provider's, which can quote a secret, so the phone gets
+    /// `remoteRefusedReason` for it. A result that does not decode is
+    /// `internal`.
     func sync() async throws -> RemoteTranscriptSyncResult {
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteTranscriptSync(
             RemoteTranscriptSyncParams(provider: provider, sessionID: sessionID))
-        let result = try PhoneAppService.succeeded(
-            RemoteTranscriptSyncResult.self, from: response, method: "remote.transcriptSync")
+        let result = try PhoneAppService.remoteSucceeded(
+            RemoteTranscriptSyncResult.self, from: response, method: "remote.transcriptSync",
+            tbdRefusals: PhoneAppService.tbdRemoteTranscriptRefusals)
         caughtUp = result.caughtUp
         return result
     }
 
-    /// One `remote.transcriptLoadEarlier`. A refusal is `refused` with the
-    /// laptop's reason; a result that does not decode is `internal`.
+    /// One `remote.transcriptLoadEarlier`. A refusal is `refused`, only in
+    /// words TBD wrote, as `sync()` reads it. A result that does not decode is
+    /// `internal`.
     func loadEarlier() async throws -> RemoteTranscriptLoadEarlierResult {
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteTranscriptLoadEarlier(
             RemoteTranscriptLoadEarlierParams(provider: provider, sessionID: sessionID))
-        return try PhoneAppService.succeeded(
-            RemoteTranscriptLoadEarlierResult.self, from: response, method: "remote.transcriptLoadEarlier")
+        return try PhoneAppService.remoteSucceeded(
+            RemoteTranscriptLoadEarlierResult.self, from: response, method: "remote.transcriptLoadEarlier",
+            tbdRefusals: PhoneAppService.tbdRemoteTranscriptRefusals)
     }
 
     /// One sync per `interval`, each result as it lands, until the stream's

@@ -83,12 +83,12 @@ extension RPCRouter {
     /// Internal rather than private because `worktree.archive` /
     /// `worktree.revive` branch into the remote path too and must refuse with
     /// the same words when the subsystem is off.
-    static let remoteBackendsDisabledResponse = RPCResponse(error: "remote backends disabled")
+    static let remoteBackendsDisabledResponse = RPCResponse(error: RemoteGateRefusal.backendsDisabled)
 
     /// The inner gate's refusal. A separate string from the outer one because
     /// they are separate conditions: the outer flag says remote backends are
     /// off entirely, this says the compiled cloud provider is.
-    private static let claudeCloudDisabledResponse = RPCResponse(error: "claude cloud sessions disabled")
+    private static let claudeCloudDisabledResponse = RPCResponse(error: RemoteGateRefusal.claudeCloudDisabled)
 
     /// `remote.delete`'s own refusal, and the only feature-flag refusal in this
     /// file. It names the flag and how to lift it, because a refusal that only
@@ -977,21 +977,19 @@ extension RPCRouter {
 
     /// What `remote.transcriptLoadEarlier` answers while
     /// `remote_transcript_live_sync_enabled` is off.
-    static let loadEarlierFlagOffRefusal =
-        "loading earlier transcript history is off (remote_transcript_live_sync_enabled)"
+    static let loadEarlierFlagOffRefusal = RemoteTranscriptRefusal.loadEarlierOff
 
     /// What `remote.transcriptLoadEarlier` answers for a cache with no
     /// `before`: one built by forward reads, one that already reached the
     /// conversation's beginning, or none at all.
-    static let loadEarlierNothingAboveRefusal = "no earlier transcript history to load"
+    static let loadEarlierNothingAboveRefusal = RemoteTranscriptRefusal.nothingEarlier
 
     private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
         try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
     }
 
     /// What `remote.transcriptSync` answers for a dismissed session.
-    static let transcriptSyncDismissedRefusal =
-        "this session is dismissed; its transcript is no longer kept"
+    static let transcriptSyncDismissedRefusal = RemoteTranscriptRefusal.dismissed
 
     /// Why `remote.sendMessage` declines a session in its mirrored state, or
     /// nil when it may send. Separate from the handler so the wording lives in
