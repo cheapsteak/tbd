@@ -2,8 +2,10 @@
 // link leaves the address before anything else, links opened later are stripped whatever the
 // page is doing, a store that does not answer ends in "Reload this page", never a blank page,
 // and time while the page is hidden never counts against it. The strip's menu reads the store
-// too, and a read of its that stalls only closes it. What needs a real browser (a handshake,
-// the app frame) is in the e2e suite.
+// too, and a read of its that stalls only closes it. A scripted laptop on a fake relay runs the
+// handshake: what a connection records in the store, and when, and what the app frame hears
+// about its channel. What needs a real browser (the runner inside the frame) is in the e2e
+// suite.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,6 +20,10 @@ import { MESSAGES } from '../../messages.js';
 import { validateLaptopRecord } from '../../store.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { FakeDocument, FakeWindow } from '../support/fake-dom.js';
+import { createFakeRelay } from '../support/fake-relay.js';
+import { fakeSocketFactory } from '../support/fake-websocket.js';
+import { quiet, until as waitFor } from '../support/helpers.js';
+import { createScriptedLaptop } from '../support/scripted-laptop.js';
 
 const vectors = JSON.parse(readFileSync(new URL('../../../test-vectors/pairing-link.json', import.meta.url), 'utf8'));
 const NOW = vectors.now * 1000;
@@ -65,8 +71,16 @@ class PageWindow extends FakeWindow {
     this.navigator = { userAgent: IPHONE_UA, maxTouchPoints: 5 };
   }
 
+  innerWidth = 390;
+  innerHeight = 844;
+
   matchMedia() {
     return new EventTarget();
+  }
+
+  /** What `readEnv` reads off the safe-area probe: no insets. */
+  getComputedStyle() {
+    return { paddingTop: '0px', paddingRight: '0px', paddingBottom: '0px', paddingLeft: '0px' };
   }
 
   /**
@@ -82,10 +96,12 @@ class PageWindow extends FakeWindow {
 
 /**
  * A transaction that reads `laptops` (the stored rows): every request answers on a later
- * turn, and the transaction completes once none is left.
+ * turn, and the transaction completes once none is left. A `put` answers too, and is recorded
+ * in `writes` without changing the rows.
  * @param {any[]} laptops
+ * @param {any[]} writes
  */
-function answeringTransaction(laptops) {
+function answeringTransaction(laptops, writes) {
   let pending = 0;
   const tx = {
     /** @type {(() => void) | null} */
@@ -96,6 +112,10 @@ function answeringTransaction(laptops) {
     objectStore: () => ({
       getAllKeys: () => answer(laptops.map((row) => row.id)),
       get: (/** @type {string} */ key) => answer(laptops.find((row) => row.id === key)),
+      put: (/** @type {unknown} */ value) => {
+        writes.push(value);
+        return answer(undefined);
+      },
     }),
   };
   /** @param {unknown} result */
@@ -115,9 +135,10 @@ function answeringTransaction(laptops) {
 
 /**
  * An IndexedDB whose `open` answers only when the test says so. The opened database runs each
- * transaction as `plan` says, in turn: `answer` reads `laptops`, `fail` throws as a closing
- * database does, and `stall` (also once the plan runs out) starts and never finishes, as a
- * stalled store does.
+ * transaction as `plan` says, in turn: `answer` reads `laptops` (and records each `put` in
+ * `writes`), `fail` throws as a closing database does, and `stall` (also once the plan runs
+ * out) starts and never finishes, as a stalled store does. `calls` records the store names and
+ * mode of each transaction.
  * @param {string[]} log
  * @param {any[]} laptops the stored laptop rows
  */
@@ -126,25 +147,34 @@ function fakeIndexedDB(log, laptops) {
   const requests = [];
   /** @type {Array<'answer' | 'stall' | 'fail'>} */
   const plan = [];
-  let transactions = 0;
+  /** @type {Array<{ names: string[], mode: string }>} */
+  const calls = [];
+  /** @type {any[]} */
+  const writes = [];
   const db = {
     /** @type {(() => void) | null} */
     onclose: null,
     onversionchange: null,
-    transaction() {
-      transactions += 1;
+    /**
+     * @param {string[]} names
+     * @param {string} mode
+     */
+    transaction(names, mode) {
+      calls.push({ names, mode });
       const how = plan.shift() ?? 'stall';
       if (how === 'fail') throw new DOMException('the database connection is closing', 'InvalidStateError');
-      if (how === 'answer') return answeringTransaction(laptops);
-      return { objectStore: () => ({ getAllKeys: () => ({}), get: () => ({}) }), abort() {} };
+      if (how === 'answer') return answeringTransaction(laptops, writes);
+      return { objectStore: () => ({ getAllKeys: () => ({}), get: () => ({}), put: () => ({}) }), abort() {} };
     },
     close() {},
   };
   return {
     requests,
     plan,
+    calls,
+    writes,
     db,
-    transactions: () => transactions,
+    transactions: () => calls.length,
     open() {
       log.push('indexedDB.open');
       const request = {};
@@ -247,6 +277,8 @@ function bootPage({
   for (const [tag, id] of [['header', 'strip'], ['main', 'screen'], ['div', 'frame-host'], ['div', 'safe-probe']]) {
     const el = doc.createElement(tag);
     el.setAttribute('id', id);
+    // What `readEnv` measures the app frame's host by: the whole layout viewport.
+    /** @type {any} */ (el).getBoundingClientRect = () => ({ top: 0, right: win.innerWidth, bottom: win.innerHeight, left: 0 });
     doc.body.append(el);
   }
   // ui.js builds with the global document.
@@ -492,4 +524,99 @@ test('a connection state that changes the screen under an open menu closes it to
   await until(() => page.screen() === 'connecting', 'the connecting screen');
   assert.equal(page.menuShown(), false);
   assert.equal(page.catcherShown(), false);
+});
+
+// --- a connection, against a scripted laptop -----------------------------------------------
+
+/**
+ * Boots on a store holding one laptop, stored as `storedName`, that a scripted laptop on a fake
+ * relay already waits for in its room. The page connects to it at once. After the store's
+ * first read, each transaction runs as `plan` says.
+ * @param {{ plan?: Array<'answer' | 'stall' | 'fail'>, prepare?: (laptop: any) => void }} [options]
+ *   `prepare` runs with the scripted laptop before the page boots
+ */
+async function bootOnScriptedLaptop({ plan = [], prepare = () => {} } = {}) {
+  const relay = createFakeRelay();
+  const laptop = await createScriptedLaptop({ relay });
+  const id = base64urlEncode(laptop.publicKey);
+  const keys = await createWrappedPhoneKey(crypto.subtle, id);
+  const room = base64urlEncode(new Uint8Array(randomBytes(32)));
+  const record = validateLaptopRecord({
+    id,
+    relay: laptop.relayOrigin,
+    room,
+    laptopKey: laptop.publicKey,
+    laptopName: 'old-name',
+    phoneName: 'iPhone',
+    phoneKey: keys.publicRaw,
+    wrapKey: keys.wrapKey,
+    wrappedKey: keys.wrappedKey,
+    wrapIV: keys.wrapIV,
+    pairedAt: NOW - 86_400_000,
+    lastConnectedAt: NOW - 3_600_000,
+  });
+  laptop.devices.set(room, { phoneKey: keys.publicRaw, deviceName: 'iPhone' });
+  laptop.join(room);
+  prepare(laptop);
+  const page = bootPage({ laptops: [record], openSocket: fakeSocketFactory(relay, { origin: laptop.relayOrigin }) });
+  page.idb.plan.push('answer', ...plan);
+  page.idb.succeed();
+  /** The store names and mode of each transaction, as `names/mode`. */
+  const calls = () => page.idb.calls.map(({ names, mode }) => `${names.join('+')}/${mode}`);
+  return { page, laptop, room, record, calls };
+}
+
+test('a session that ends incompatible after message 2 records nothing, though the strip shows the handshake\'s name', async () => {
+  const { page, laptop, calls } = await bootOnScriptedLaptop({ prepare: (l) => l.setIncompatible('laptop') });
+  await waitFor(() => page.screen() === 'update', 'the Update TBD screen');
+  assert.ok(laptop.counts.ikHandshakes >= 1, 'message 2 was read');
+  assert.ok(page.stripButton()?.textContent.includes('acme-mbp'), 'the strip names the laptop as its handshake did');
+  await quiet();
+  assert.deepEqual(calls(), ['laptops/readonly'], 'no write: lastConnectedAt and the stored name stay as they were');
+  assert.deepEqual(page.idb.writes, []);
+});
+
+/**
+ * Boots on the scripted laptop and waits until the app frame runs its bundle and the page has
+ * recorded the connection. The store answers the cache read (a miss), stalls the cache write
+ * and answers the record of the visit. Returns the runner's end of the frame's channel, and
+ * the `channel` messages it receives.
+ * @param {import('node:test').TestContext} t
+ */
+async function readyWithFrame(t) {
+  const env = await bootOnScriptedLaptop({ plan: ['answer', 'stall', 'answer'] });
+  const { page } = env;
+  await waitFor(() => page.idb.writes.length === 1, 'the visit recorded');
+  const iframe = page.doc.created.find((element) => element.tagName === 'iframe');
+  assert.ok(iframe !== undefined, 'the app frame');
+  // The runner's `ready`, as the sandboxed frame posts it: the page answers with the bundle
+  // and the frame's end of the channel, which kept every message posted before it.
+  const frameWindow = /** @type {any} */ (iframe).frameWindow;
+  page.win.message({
+    data: { type: 'ready', nonce: iframe.src.slice(iframe.src.indexOf('#n=') + 3) }, source: frameWindow, origin: 'null',
+  });
+  const port = /** @type {MessagePort} */ (frameWindow.posts[0].transfer[0]);
+  t.after(() => port.close());
+  /** @type {string[]} */
+  const channel = [];
+  port.addEventListener('message', (event) => {
+    if (event.data?.t === 'channel') channel.push(event.data.state);
+  });
+  port.start();
+  return { ...env, channel };
+}
+
+test('only a session that reaches ready records the visit, with the handshake\'s name, after its bundle', async (t) => {
+  const { page, record, calls } = await readyWithFrame(t);
+  assert.deepEqual(calls(), [
+    'laptops/readonly', // the laptops, at boot
+    'bundles+bundleMeta/readonly', // the cache read, a miss
+    'laptops+bundles+bundleMeta/readwrite', // the bundle cached
+    'laptops/readwrite', // the visit, once ready
+  ]);
+  const [written] = page.idb.writes;
+  assert.equal(written.id, record.id);
+  assert.equal(written.laptopName, 'acme-mbp');
+  assert.equal(written.lastConnectedAt, page.clock.now());
+  assert.equal(page.stripButton()?.textContent.includes('acme-mbp'), true);
 });

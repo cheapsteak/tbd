@@ -800,6 +800,7 @@ class LoaderPage {
   /** @param {ConnectionState} state */
   #onState(state) {
     this.#state = state;
+    if (state === 'ready') this.#recordConnection();
     if (state === 'replaced') {
       // Another tab of this page took the room. The connection has ended, so the frame goes.
       this.#endConnection('replaced');
@@ -814,13 +815,28 @@ class LoaderPage {
     if (screen !== null) this.#showConnScreen(screen);
   }
 
-  /** @param {string} laptopName */
+  /**
+   * The handshake named the laptop: the strip shows the name at once. Nothing is stored yet,
+   * since the session may still end `incompatible` or in a protocol error.
+   * @param {string} laptopName
+   */
   #onConnected(laptopName) {
     const current = this.#current;
     if (current === null) return;
-    const lastConnectedAt = this.#clock.now();
-    this.#current = { ...current, laptopName, lastConnectedAt };
+    this.#current = { ...current, laptopName };
     this.#renderStrip();
+  }
+
+  /**
+   * The connection reached `ready`: it records the visit, and the name the handshake reported,
+   * in the laptop's record. Only a session that got this far counts as connected.
+   */
+  #recordConnection() {
+    const current = this.#current;
+    if (current === null) return;
+    const lastConnectedAt = this.#clock.now();
+    this.#current = { ...current, lastConnectedAt };
+    const { laptopName } = current;
     // Recording the visit is not worth failing a working connection over.
     /** @type {Store} */ (this.#store).touchLaptop(current.id, { lastConnectedAt, laptopName }).catch(() => {});
   }
