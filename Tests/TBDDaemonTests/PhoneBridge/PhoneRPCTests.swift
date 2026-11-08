@@ -363,6 +363,8 @@ struct PhoneRPCTests {
         let f = try await makeFixture()
         let pasted = ConfigSetPhoneURLParams(url: "https://ACME-relay.acme.workers.dev/")
         let check = "checkRelay \(Self.relayURL)"
+        // The check's answer goes to the reconcile, so the relay is asked once.
+        let seeded = "reconcile seeded \(Self.relayURL)"
 
         // The check fails: its text comes back and nothing is saved.
         let refusal = PhoneBridgeError.unsupportedRelayAPI([2])
@@ -382,7 +384,7 @@ struct PhoneRPCTests {
         config = try await f.db.config.get()
         #expect(config.phoneRelayURL == Self.relayURL)
         calls = await f.fake.calls
-        #expect(calls == [check, check, "reconcile"])
+        #expect(calls == [check, check, seeded])
         // The reconcile's own delta, and none from the handler.
         #expect(f.deltas.count == 1)
 
@@ -390,7 +392,7 @@ struct PhoneRPCTests {
         let again = try await appCall(f, RPCMethod.configSetPhoneRelayURL, pasted)
         #expect(again.success, "\(again.error ?? "no error")")
         calls = await f.fake.calls
-        #expect(calls == [check, check, "reconcile", check, "reconcile"])
+        #expect(calls == [check, check, seeded, check, seeded])
         #expect(f.deltas.count == 2)
 
         // A failed check of another URL leaves the saved one in place.
@@ -622,6 +624,11 @@ private actor FakePhoneBridgeController: PhoneBridgeControlling {
     /// Broadcasts the status once, as `PhoneBridgeControlling` requires.
     func reconcile() async {
         calls.append("reconcile")
+        broadcast(.phoneStatusChanged)
+    }
+
+    func reconcile(afterSavingRelay url: URL, checkedAs info: PhoneRelayInfo) async {
+        calls.append("reconcile seeded \(url.absoluteString)")
         broadcast(.phoneStatusChanged)
     }
 

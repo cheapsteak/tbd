@@ -182,11 +182,14 @@ extension RPCRouter {
 
     /// Saves the relay URL, but only one that passed both `PhoneURLValidation`
     /// and the bridge's relay check; nil or blank removes it. The check runs on
-    /// every save, so saving the same URL again checks it again.
+    /// every save, so saving the same URL again checks it again. Its answer
+    /// goes to the bridge's reconcile as the relay check, so one save asks the
+    /// relay once.
     private func handleConfigSetPhoneRelayURL(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetPhoneURLParams.self, from: paramsData)
         let bridge = phoneBridge
         let stored: String?
+        var checked: (url: URL, info: PhoneRelayInfo)?
         if let raw = Self.nonBlank(params.url) {
             let url: URL
             do {
@@ -196,7 +199,8 @@ extension RPCRouter {
             }
             guard let bridge else { return RPCResponse(error: Self.phoneUnavailableRefusal) }
             do {
-                _ = try await bridge.checkRelay(url)
+                let info = try await bridge.checkRelay(url)
+                checked = (url, info)
             } catch {
                 return RPCResponse(error: error.localizedDescription)
             }
@@ -208,7 +212,11 @@ extension RPCRouter {
         // The bridge's reconcile broadcasts the new status; without a
         // bridge, the handler does.
         if let bridge {
-            await bridge.reconcile()
+            if let checked {
+                await bridge.reconcile(afterSavingRelay: checked.url, checkedAs: checked.info)
+            } else {
+                await bridge.reconcile()
+            }
         } else {
             subscriptions.broadcast(delta: .phoneStatusChanged)
         }

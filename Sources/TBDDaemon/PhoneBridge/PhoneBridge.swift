@@ -107,7 +107,9 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// 4. The relay is checked on its own when this address has no answer yet or
 ///    its last answer was a failure, so the Phone pane has a status with no
 ///    phone paired, and saving the URL again checks a relay that failed.
-///    Every link checks it again before each connect.
+///    Saving the URL checks the relay before it saves it, so that reconcile
+///    takes the save's answer as the check rather than ask again. Every link
+///    checks it again before each connect.
 /// 5. Each paired phone without a link gets one; each link whose phone is
 ///    gone is stopped.
 ///
@@ -154,6 +156,12 @@ actor PhoneBridge: PhoneBridgeControlling {
         var isOpen: Bool?
         /// Whether the phone's channel is established.
         var isConnected = false
+    }
+
+    /// A relay check's answer from the save that just stored `url`.
+    private struct RelaySeed: Sendable {
+        let url: URL
+        let info: PhoneRelayInfo
     }
 
     /// One event of one connection, in the order the connection emitted it.
@@ -248,6 +256,13 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     func reconcile() async {
         await serialized { await self.reconcileAndAnnounce() }
+    }
+
+    func reconcile(afterSavingRelay url: URL, checkedAs info: PhoneRelayInfo) async {
+        // Only an answer the bridge would itself take as usable stands in for
+        // its check.
+        let seed = (try? RelayCompatibility.check(info)) == nil ? nil : RelaySeed(url: url, info: info)
+        await serialized { await self.reconcileAndAnnounce(seed: seed) }
     }
 
     func checkRelay(_ url: URL) async throws -> PhoneRelayInfo {
@@ -372,14 +387,15 @@ actor PhoneBridge: PhoneBridgeControlling {
     }
 
     /// A reconcile, then its one status delta.
-    private func reconcileAndAnnounce() async {
-        await reconcileNow()
+    private func reconcileAndAnnounce(seed: RelaySeed? = nil) async {
+        await reconcileNow(seed: seed)
         broadcast(.phoneStatusChanged)
     }
 
     /// Brings the bridge in line with the saved settings. Broadcasts
-    /// nothing: its caller sends the one delta once it is done.
-    private func reconcileNow() async {
+    /// nothing: its caller sends the one delta once it is done. A `seed` for
+    /// the saved relay stands as its check.
+    private func reconcileNow(seed: RelaySeed? = nil) async {
         guard !isStopped else { return }
         startPump()
         let config: Config
@@ -446,7 +462,11 @@ actor PhoneBridge: PhoneBridgeControlling {
             running = current
             PhoneBridgeLog.record(.started(devices: devices.count))
         }
-        if needsRelayCheck {
+        if let seed, seed.url.absoluteString == relayURL.absoluteString {
+            // The save asked this relay a moment ago; asking again would only
+            // repeat its answer.
+            setCheck(.ok(seed.info), for: relayURL, announce: false)
+        } else if needsRelayCheck {
             startRelayCheck(relayURL)
         }
 

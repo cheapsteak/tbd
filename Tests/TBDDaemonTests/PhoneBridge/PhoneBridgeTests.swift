@@ -431,6 +431,41 @@ struct PhoneBridgeTests {
         }
     }
 
+    @Test func savingARelayURLAsksTheRelayOnce() async throws {
+        try await withBridge(relayURL: nil) { h in
+            let url = try #require(URL(string: relayAddress))
+            // The check `config.setPhoneRelayURL` makes before it saves.
+            let info = try await h.bridge.checkRelay(url)
+            try await h.db.config.setPhoneRelayURL(relayAddress)
+            // From here a request would wait, and so show as one.
+            await h.info.hold()
+            await h.bridge.reconcile(afterSavingRelay: url, checkedAs: info)
+            let status = await h.bridge.status()
+            #expect(status.running && status.relay.state == .connected)
+            #expect(status.relay.version == currentRelay.version)
+            let calls = await h.info.calls
+            #expect(calls == 1)
+            let held = await h.info.heldCalls
+            #expect(held == 0)
+        }
+    }
+
+    @Test func aSavedRelaysCheckIsNotTakenForAnother() async throws {
+        try await withBridge { h in
+            let other = try #require(URL(string: otherRelayAddress))
+            let info = try await h.bridge.checkRelay(other)
+            // `relayAddress` is the saved relay, so the bridge asks it itself.
+            await h.info.hold()
+            await h.bridge.reconcile(afterSavingRelay: other, checkedAs: info)
+            try await h.waitUntil("the bridge to check the saved relay") { await h.info.heldCalls == 1 }
+            let relays = await h.info.relays
+            let checked = relays.map(\.absoluteString)
+            #expect(checked == [otherRelayAddress, relayAddress])
+            let status = await h.bridge.status()
+            #expect(status.relay.state == .checking)
+        }
+    }
+
     @Test func anUnreachableInfoBacksOffAndRetries() async throws {
         try await withBridge(devices: 1) { h in
             await h.info.fail(with: .relayCheckFailed("HTTP 503"))
