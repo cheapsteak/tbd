@@ -97,6 +97,14 @@ export function emptyTranscript(): TranscriptState {
 }
 
 /**
+ * `s` with no transcript open: every field as `emptyTranscript` has it, except `nextKey`, which
+ * only grows, so a key never names a second row.
+ */
+export function clearTranscript(s: TranscriptState): TranscriptState {
+  return { ...emptyTranscript(), nextKey: s.nextKey };
+}
+
+/**
  * `s` opening `ref`'s transcript, the open's token being `requestID`. Opening the session the
  * slice holds already keeps its rows, cursor and details on screen until a page replaces them.
  * Opening another starts with none. Either way, an older page still on its way is dropped
@@ -104,7 +112,7 @@ export function emptyTranscript(): TranscriptState {
  * unanswered no longer matters, since the open replaces whatever the laptop had open.
  */
 export function beginOpen(s: TranscriptState, ref: PhoneSessionRef, showDetails: boolean, requestID: string): TranscriptState {
-  const base = s.ref !== null && sameRef(s.ref, ref) ? s : { ...emptyTranscript(), nextKey: s.nextKey };
+  const base = s.ref !== null && sameRef(s.ref, ref) ? s : clearTranscript(s);
   return {
     ...base, ref, showDetails, openRequestID: requestID, phase: 'opening', error: null, loadingOlder: false, olderFailed: false,
     pendingClose: false,

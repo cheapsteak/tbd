@@ -24,7 +24,7 @@ export function Markdown(p: { text: string; inline?: boolean; nodes?: readonly M
 }
 
 /**
- * Looks for the blocks the mock never shows, which app.css has no rule for: an ordered list
+ * Styles for the blocks the mock never shows, which app.css has no rule for: an ordered list
  * spaced like `.say ul`, a quote ruled like `.nest`, and a code block that wraps, so a long line
  * never widens the transcript past the screen.
  */

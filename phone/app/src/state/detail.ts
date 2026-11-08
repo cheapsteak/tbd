@@ -204,6 +204,10 @@ export function isOpen(d: DetailState | undefined): d is DetailState {
   return d !== undefined && !d.cancelled;
 }
 
-function badReply(d: DetailState): { next: DetailState; ask: null } {
+/**
+ * `d` failed for a reply that does not answer its request, with the client's words for a reply it
+ * cannot read (`BAD_REPLY_TEXT`), and nothing more to ask.
+ */
+export function badReply(d: DetailState): { next: DetailState; ask: null } {
   return { next: failDetail(d, BAD_REPLY_TEXT), ask: null };
 }

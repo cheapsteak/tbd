@@ -43,6 +43,14 @@ async function scrollToTop(row) {
   });
 }
 
+/**
+ * How far `.tx` is above its bottom.
+ * @param {Locator} tx
+ */
+function fromBottom(tx) {
+  return tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+}
+
 test('tool-open', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Login redirect fix');
@@ -90,18 +98,10 @@ test('pill', async ({ page, appHost }) => {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
   await expect(tx.locator('.me')).toBeInViewport();
-  expect(await tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(30);
+  expect(await fromBottom(tx)).toBeGreaterThan(30);
   await hostCall(page, 'emit', 'transcript.append', { session: CHECKOUT_REF, items: [live(LIVE.length)] });
   await capture(page, 'pill', app(page).locator('.pill'));
 });
-
-/**
- * How far `.tx` is above its bottom.
- * @param {Locator} tx
- */
-function fromBottom(tx) {
-  return tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
-}
 
 test('transcript-working', async ({ page, appHost }) => {
   await openApp(page, appHost);

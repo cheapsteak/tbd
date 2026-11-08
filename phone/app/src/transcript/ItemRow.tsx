@@ -61,8 +61,8 @@ export interface ItemRowProps {
 }
 
 export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | null {
-  const { row } = p;
-  const toggle = p.toggle === null ? null : (part: RowPart): void => p.toggle?.(row.key, part);
+  const { row, toggle: onToggle } = p;
+  const toggle = onToggle === null ? null : (part: RowPart): void => onToggle(row.key, part);
   const detail = toggle !== null && isOpen(p.detail) ? p.detail : null;
   const expanded = detail !== null;
   if (row.kind === 'receipt') {
@@ -101,50 +101,33 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
       );
     }
     case 'tool': {
-      const mark = it.toolStatus === 'running' ? (
-        <Dots />
-      ) : it.toolStatus === 'error' ? (
-        <span className="fail">failed</span>
-      ) : name === 'Bash' ? (
-        <span className="okm">
-          <Icon name="check" />
-        </span>
-      ) : null;
-      if (toggle === null) {
-        return (
-          <div className="tool">
-            <span className="sp" />
-            <Icon name={toolGlyph(name)} cls="ti" />
-            <b>{name}</b>
-            <code>{it.target ?? ''}</code>
-            {mark}
-          </div>
-        );
-      }
+      const label = (
+        <>
+          <Icon name={toolGlyph(name)} cls="ti" />
+          <b>{name}</b>
+          <code>{it.target ?? ''}</code>
+          {toolMark(it.toolStatus, name)}
+        </>
+      );
       return (
         <>
-          <button className="tool" type="button" aria-expanded={expanded} onClick={() => toggle('input')}>
-            <Icon name={expanded ? 'tri-d' : 'tri-r'} cls="tri" />
-            <Icon name={toolGlyph(name)} cls="ti" />
-            <b>{name}</b>
-            <code>{it.target ?? ''}</code>
-            {mark}
-          </button>
+          {toolLine(label, expanded, toggle === null ? null : () => toggle('input'))}
           {detail !== null && <DetailPane detail={detail} parts />}
         </>
       );
     }
-    case 'fileEdit':
-      return (
-        <div className="tool">
-          <span className="sp" />
+    case 'fileEdit': {
+      const label = (
+        <>
           <Icon name="pen" cls="ti" />
           <b>{name}</b>
           <code>{it.target ?? ''}</code>
           <span className="plus">+{it.added ?? 0}</span>
           <span className="minus">{`−${it.removed ?? 0}`}</span>
-        </div>
+        </>
       );
+      return toolLine(label, false, null);
+    }
     case 'subagent': {
       const label = (
         <>
@@ -154,20 +137,9 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
           <span className="cnt">{it.itemCount ?? 0} items</span>
         </>
       );
-      if (toggle === null) {
-        return (
-          <div className="tool">
-            <span className="sp" />
-            {label}
-          </div>
-        );
-      }
       return (
         <>
-          <button className="tool" type="button" aria-expanded={expanded} onClick={() => toggle('subagent')}>
-            <Icon name={expanded ? 'tri-d' : 'tri-r'} cls="tri" />
-            {label}
-          </button>
+          {toolLine(label, expanded, toggle === null ? null : () => toggle('subagent'))}
           {detail !== null && (detail.phase === 'loading' ? <DetailPane detail={detail} parts={false} /> : <Nest detail={detail} />)}
         </>
       );
@@ -204,6 +176,40 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
       );
   }
 });
+
+/**
+ * A tool, file edit or subagent row's line, `label` after the triangle: a button that opens the
+ * row's detail with `onTap`, or, with no `onTap`, a plain `div.tool` with the spacer in the
+ * triangle's place, as a file edit and every nested row draw.
+ */
+function toolLine(label: JSX.Element, expanded: boolean, onTap: (() => void) | null): JSX.Element {
+  if (onTap === null) {
+    return (
+      <div className="tool">
+        <span className="sp" />
+        {label}
+      </div>
+    );
+  }
+  return (
+    <button className="tool" type="button" aria-expanded={expanded} onClick={onTap}>
+      <Icon name={expanded ? 'tri-d' : 'tri-r'} cls="tri" />
+      {label}
+    </button>
+  );
+}
+
+/** A tool row's mark: the dots while it runs, "failed" after an error, and a check after a Bash call that did not fail. */
+function toolMark(status: string | undefined, name: string): JSX.Element | null {
+  if (status === 'running') return <Dots />;
+  if (status === 'error') return <span className="fail">failed</span>;
+  if (name !== 'Bash') return null;
+  return (
+    <span className="okm">
+      <Icon name="check" />
+    </span>
+  );
+}
 
 /**
  * A subagent's items in `.nest`, as `planNest` plans them, then the detail's box: the

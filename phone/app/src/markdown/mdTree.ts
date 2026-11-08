@@ -148,7 +148,7 @@ export function mdTree(src: string, budget?: MdBudget): MdNode[] {
     tree = blocks(new CappedLexer(lexOptions()).lex(head), 0, walk);
   } catch {
     const plain = startWalk(budget);
-    const out = [count(plain, { t: 'p' as const, children: lines(all, plain) })];
+    const out = [count(plain, { t: 'p', children: lines(all, plain) })];
     spend(budget, head.length, plain);
     return out;
   }

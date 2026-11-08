@@ -41,13 +41,16 @@ export function atBottom(m: Metrics): boolean {
   return fromBottom(m) <= STICK_PX;
 }
 
+/** The slice's fields that say whether the list may ask for the page above its rows. */
+export type Paging = Pick<TranscriptState, 'cursor' | 'loadingOlder' | 'reachedStart' | 'olderFailed'>;
+
 /**
  * Whether the list should ask for the page above its rows: the view is within two of its own
  * heights of the top, the laptop gave a cursor for that page, and none of these holds: a page
  * is on its way, the start is reached, or the last page failed (which the reader's next scroll
  * clears).
  */
-export function wantsOlder(m: Metrics, s: Pick<TranscriptState, 'cursor' | 'loadingOlder' | 'reachedStart' | 'olderFailed'>): boolean {
+export function wantsOlder(m: Metrics, s: Paging): boolean {
   return m.scrollTop < 2 * m.clientHeight && s.cursor !== null && !s.loadingOlder && !s.reachedStart && !s.olderFailed;
 }
 

@@ -81,7 +81,7 @@ import { useCallback, useLayoutEffect, useRef, useState, type JSX } from 'react'
 import { elementScroll, observeElementRect, useVirtualizer, type Rect, type Virtualizer } from '@tanstack/react-virtual';
 import { useActions, useAppState } from '../state/context.tsx';
 import type { DetailState } from '../state/detail.ts';
-import type { TranscriptRow, TranscriptState } from '../state/transcript.ts';
+import type { TranscriptRow } from '../state/transcript.ts';
 import type { PhoneSession } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
 import { dur } from '../state/status.ts';
@@ -92,7 +92,7 @@ import {
   anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, sticksAfterScroll,
   wantsOlder,
 } from './scroll.ts';
-import type { Anchor, Metrics, SeenRows } from './scroll.ts';
+import type { Anchor, Metrics, Paging, SeenRows } from './scroll.ts';
 
 /** The height the virtualizer gives a row it has not measured yet. */
 const ESTIMATE_PX = 48;
@@ -104,9 +104,6 @@ const OVERSCAN = 8;
 const WORKING_REFRESH_MS = 1_000;
 
 const NO_ROWS: readonly TranscriptRow[] = [];
-
-/** The slice's fields that say whether the list may ask for the page above its rows. */
-type Paging = Pick<TranscriptState, 'cursor' | 'loadingOlder' | 'reachedStart' | 'olderFailed'>;
 
 export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
   const actions = useActions();
@@ -207,9 +204,7 @@ function List(p: {
   const toBottom = useCallback(
     (el: HTMLElement): void => {
       el.scrollTop = el.scrollHeight - el.clientHeight;
-      const m = metricsOf(el);
-      view.top = m.scrollTop;
-      view.seen = fromBottom(m);
+      noteWrite(view, el);
     },
     [view],
   );
@@ -251,9 +246,7 @@ function List(p: {
       if (start === undefined) return;
       const top = restoreTop(anchor, topIn(el, list) + start);
       if (Math.abs(el.scrollTop - top) > 0.5) el.scrollTop = top;
-      const m = metricsOf(el);
-      view.top = m.scrollTop;
-      view.seen = fromBottom(m);
+      noteWrite(view, el);
     },
     [view, virtualizer],
   );
@@ -458,6 +451,13 @@ function observeRect(instance: Virtualizer<HTMLDivElement, HTMLDivElement>, cb: 
 
 function metricsOf(el: HTMLElement): Metrics {
   return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
+}
+
+/** Notes where the list's own write left the view, so the scroll event it fires does not read as a swipe (`moved`). */
+function noteWrite(view: ViewState, el: HTMLElement): void {
+  const m = metricsOf(el);
+  view.top = m.scrollTop;
+  view.seen = fromBottom(m);
 }
 
 /** Where `list` starts in the content of the scroll element `el`, which scrolling does not change. */

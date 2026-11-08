@@ -30,14 +30,14 @@
  * Every action resolves and never rejects (`actions/index.ts`); `superseded` is silent.
  */
 
-import { AppError, BAD_REPLY_TEXT, newRequestID } from '../client/client.ts';
+import { AppError, newRequestID } from '../client/client.ts';
 import type {
   PhoneSessionRef, TranscriptDetailParams, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult, TranscriptPage,
 } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
-import { addChunk, askOf, cancelDetail, detailParts, failDetail, isOpen, startDetail } from '../state/detail.ts';
+import { addChunk, askOf, badReply, cancelDetail, detailParts, failDetail, isOpen, startDetail } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
-import { applyPage, beginOpen, beginResume, emptyTranscript, prependPage } from '../state/transcript.ts';
+import { applyPage, beginOpen, beginResume, clearTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import type { ActionContext, Actions } from './index.ts';
 
@@ -109,8 +109,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
           return;
         }
         setTranscript((t) => ({
-          ...emptyTranscript(), nextKey: t.nextKey, ref: t.ref, showDetails: t.showDetails, openRequestID: t.openRequestID,
-          phase: 'failed', error: messageOf(error),
+          ...clearTranscript(t), ref: t.ref, showDetails: t.showDetails, openRequestID: t.openRequestID, phase: 'failed',
+          error: messageOf(error),
         }));
       },
     );
@@ -124,7 +124,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
   function close(): void {
     const token = newRequestID();
     closeToken = token;
-    setTranscript((t) => ({ ...emptyTranscript(), nextKey: t.nextKey, pendingClose: true }));
+    setTranscript((t) => ({ ...clearTranscript(t), pendingClose: true }));
     const answered = (): void => {
       if (closeToken !== token) return;
       closeToken = null;
@@ -306,7 +306,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
           return;
         }
         const { result } = outcome;
-        const step = result.itemID === itemID ? addChunk(d, result) : { next: failDetail(d, BAD_REPLY_TEXT), ask: null };
+        const step = result.itemID === itemID ? addChunk(d, result) : badReply(d);
         putDetail(rowKey, d, step.next);
         if (step.ask === null) return;
         d = step.next;
