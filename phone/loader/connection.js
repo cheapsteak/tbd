@@ -171,7 +171,8 @@ export class LaptopConnection {
   #peerAbsent = false;
   /**
    * Handshakes in a row that got no message 2 in time: the round so far. Message 2, `ready`,
-   * `peer-absent`, `peer-left` and `resume()` end the round (0). While one lasts, a retry's
+   * `peer-absent`, `peer-left` and a `resume()` that replaces the socket end the round (0); a
+   * `resume()` that only probes, or coalesces, leaves it as it is. While one lasts, a retry's
    * handshake and a retry socket that fails leave the state as it is, so the screen does not
    * flip from "Laptop offline" to connecting and back on every retry. Above HANDSHAKE_RETRIES
    * the round is over: no more retries, until one of those starts the next.
@@ -253,16 +254,17 @@ export class LaptopConnection {
    * runs one at a time.) Should that socket hang, the signal timeout still ends it. A later
    * call is a later return to the page, and replaces the socket at once like any other.
    *
-   * A return to the page also starts a fresh round of handshake retries. A socket that waits
-   * after a round went unanswered gets no new `peer-joined`, so it is replaced, and the new
-   * one handshakes at once.
+   * A return to the page that replaces the socket also starts a fresh round of handshake
+   * retries. A socket that waits after a round went unanswered gets no new `peer-joined`, so
+   * it is replaced, and the new one handshakes at once. A probe, or a call that coalesces,
+   * leaves a round in progress as it is: a retry socket that then fails, or is found dead,
+   * still reads offline.
    */
   resume() {
     if (!this.#started) return;
     this.#tasks.enqueue(() => {
       // An open socket left waiting by an unanswered round, with no handshake under way.
       const afterRound = this.#roundOver() && this.#session === null;
-      this.#unanswered = 0;
       if (this.#socketOpen && !afterRound) {
         this.#socket?.probe();
         return;
@@ -272,6 +274,7 @@ export class LaptopConnection {
       this.#closeSocket();
       this.#reconnectTimer = this.#tasks.disarm(this.#reconnectTimer);
       this.#attempt = 0;
+      this.#unanswered = 0;
       this.#connect();
       this.#resumeSocket = this.#socket;
       this.#resumedAt = now;

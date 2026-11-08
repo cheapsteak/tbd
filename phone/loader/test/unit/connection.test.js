@@ -618,6 +618,57 @@ test('during a round of unanswered handshakes, a retry socket that closes or get
   c.conn.stop();
 });
 
+/**
+ * Starts a connection to a laptop that does not know the phone, and runs it to the first
+ * retry: its handshake went unanswered once, and the retry socket's message 1 is out.
+ * @param {Awaited<ReturnType<typeof setup>>} env
+ */
+async function onFirstRetry(env) {
+  env.laptop.devices.clear();
+  const c = connection(env);
+  c.conn.start();
+  await until(() => env.laptop.counts.refused === 1, 'refusal 1');
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+  await until(() => c.states().includes('offline') && env.clock.pending === 1, 'offline, with a retry armed');
+  await env.clock.advance(1000);
+  await until(() => env.laptop.counts.refused === 2, 'the retry socket\'s message 1');
+  await quiet();
+  return c;
+}
+
+test('a resume during a round probes the retry socket and leaves the round as it is: that socket closing still reads offline', async () => {
+  const env = await setup();
+  const c = await onFirstRetry(env);
+  const pings = () => env.relay.stats.pings.get(env.room) ?? 0;
+  c.conn.resume();
+  await until(() => pings() === 1, 'the probe, which the relay answers');
+  await quiet();
+  assert.equal(env.joins(), 2, 'the retry socket stays');
+
+  // The relay drops the retry socket. The round goes on, and the next retry waits 2 s.
+  env.net.sockets[1].close(1000);
+  await until(() => env.net.log.some((e) => e.dir === 'closed') && env.clock.pending === 1, 'the retry socket ended, with the next armed');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline'], 'never reconnecting');
+  await env.clock.advance(2000);
+  await until(() => env.laptop.counts.refused === 3, 'the next retry\'s message 1');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline']);
+  c.conn.stop();
+});
+
+test('a resume during a round whose probe finds the retry socket dead still reads offline', async () => {
+  const env = await setup();
+  const c = await onFirstRetry(env);
+  env.relay.blackHole(env.room, true);
+  c.conn.resume();
+  await until(() => env.relay.stats.swallowed.get(env.room) === 1, 'the probe, swallowed');
+  env.relay.blackHole(env.room, false);
+  await env.clock.advance(RESUME_PONG_TIMEOUT_MS);
+  await until(() => env.joins() === 3, 'a socket at once in place of the dead one');
+  await until(() => env.laptop.counts.refused === 3, 'its message 1');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline'], 'never reconnecting');
+  c.conn.stop();
+});
+
 test('a lost message 2 ends the socket after 10 s; the next one, after the backoff, handshakes afresh and reaches ready', async () => {
   const env = await setup();
   // The relay loses the laptop's first frame to the phone: message 2. The laptop's socket
