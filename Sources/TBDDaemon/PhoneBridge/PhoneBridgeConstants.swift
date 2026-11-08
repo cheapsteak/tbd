@@ -19,8 +19,12 @@ enum PhoneBridgeConstants {
     /// for the phone's first transport message to decrypt. A channel that
     /// reaches it is dropped.
     static let handshakeTimeout: Duration = .seconds(10)
-    /// The request timeout for `GET /v1/info`.
+    /// The longest `GET /v1/info` may take, from connect to its last byte.
     static let relayInfoTimeoutSeconds: TimeInterval = 10
+    /// The most `GET /v1/info` body bytes the laptop reads. A TBD relay's
+    /// info object is well under 100 bytes; an answer over this is refused
+    /// unread past the limit.
+    static let relayInfoMaxBodyBytes = 64 * 1024
     /// The relay API version this laptop speaks; a relay whose `api` list
     /// lacks it is refused.
     static let relayAPIVersion = 1

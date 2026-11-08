@@ -25,17 +25,10 @@ private func withRoomSocket(
     await socket.close(code: 1000)
 }
 
-/// Runs `body` with an info client on its own ephemeral session, and
-/// invalidates the session afterwards.
+/// Runs `body` with a production info client. Each check makes and
+/// invalidates a session of its own, so there is nothing to tear down.
 private func withInfoClient(_ body: (URLSessionRelayInfoClient) async throws -> Void) async throws {
-    let session = URLSession(configuration: .ephemeral)
-    do {
-        try await body(URLSessionRelayInfoClient(session: session))
-    } catch {
-        session.invalidateAndCancel()
-        throw error
-    }
-    session.invalidateAndCancel()
+    try await body(URLSessionRelayInfoClient())
 }
 
 /// A loopback URL nothing listens on: a server's address after it has shut
@@ -268,6 +261,64 @@ struct URLSessionRelayTransportTests {
                 server.setInfoResponse(status: 200, body: #"{"name":"tbd-relay","version":"1.1.0","api":[1]}"#)
                 let version = try await client.info(relay: server.baseURL).version
                 #expect(version == "1.1.0")
+            }
+        }
+    }
+
+    /// A relay cannot move the check elsewhere: the redirect target here
+    /// answers as a usable relay, and the check never asks it.
+    @Test func aRedirectIsRefusedAndNotFollowed() async throws {
+        try await withLoopbackRelay { server in
+            let target = server.baseURL.absoluteString + LoopbackRelayServer.redirectTargetPath
+            server.setInfoResponse(status: 302, body: "", location: target)
+            try await withInfoClient { client in
+                let error = await #expect(throws: PhoneBridgeError.self) {
+                    _ = try await client.info(relay: server.baseURL)
+                }
+                guard case .relayCheckFailed(let detail) = error else {
+                    Issue.record("expected relayCheckFailed, got \(String(describing: error))")
+                    return
+                }
+                #expect(detail.contains("redirect (HTTP 302)"))
+            }
+            let paths = server.requests.map(\.path)
+            #expect(paths == ["/v1/info"])
+        }
+    }
+
+    /// An answer one byte over the limit is refused, whether or not it
+    /// declares its length. The body is a valid info object padded with
+    /// whitespace, which a reader that kept going, or one that cut it at the
+    /// limit and decoded what it had, would accept.
+    @Test(arguments: [true, false])
+    func anOversizedInfoBodyIsRefused(declaresLength: Bool) async throws {
+        try await withLoopbackRelay { server in
+            let info = #"{"name":"tbd-relay","version":"1.0.0","api":[1]}"#
+            let limit = PhoneBridgeConstants.relayInfoMaxBodyBytes
+            let padding = String(repeating: " ", count: limit + 1 - info.utf8.count)
+            server.setInfoResponse(status: 200, body: info + padding, declaresLength: declaresLength)
+            try await withInfoClient { client in
+                let error = await #expect(throws: PhoneBridgeError.self) {
+                    _ = try await client.info(relay: server.baseURL)
+                }
+                guard case .relayCheckFailed(let detail) = error else {
+                    Issue.record("expected relayCheckFailed, got \(String(describing: error))")
+                    return
+                }
+                #expect(detail.contains("larger than \(PhoneBridgeConstants.relayInfoMaxBodyBytes) bytes"))
+            }
+        }
+    }
+
+    /// The limit itself is allowed: a body of exactly that many bytes reads.
+    @Test func anInfoBodyAtTheLimitIsRead() async throws {
+        try await withLoopbackRelay { server in
+            let info = #"{"name":"tbd-relay","version":"1.0.0","api":[1]}"#
+            let padding = String(repeating: " ", count: PhoneBridgeConstants.relayInfoMaxBodyBytes - info.utf8.count)
+            server.setInfoResponse(status: 200, body: info + padding, declaresLength: false)
+            try await withInfoClient { client in
+                let read = try await client.info(relay: server.baseURL)
+                #expect(read == PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [1]))
             }
         }
     }

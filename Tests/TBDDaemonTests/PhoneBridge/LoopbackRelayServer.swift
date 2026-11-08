@@ -18,8 +18,10 @@ struct LoopbackRelayRequest: Sendable, Equatable {
 /// picks, for the tests of the URLSession relay transport and info client.
 ///
 /// - It records every request's method, path, query and `User-Agent`.
-/// - `GET /v1/info` answers with the status and body `setInfoResponse` last
-///   set: 200 and a TBD relay's info object at first.
+/// - `GET /v1/info` answers with the status, body and headers
+///   `setInfoResponse` last set: 200 and a TBD relay's info object at first.
+/// - `GET /v1/redirect-target` answers 200 with a TBD relay's info object,
+///   so a client that follows a redirect there would read a usable relay.
 /// - `GET /v1/rooms/<anything>` upgrades to a WebSocket that echoes binary
 ///   frames, answers the text `ping` with `pong`, and closes with code 4000
 ///   on the text `close-4000`.
@@ -81,9 +83,17 @@ final class LoopbackRelayServer: Sendable {
         state.silentConnections
     }
 
-    /// Sets the status and body every later `GET /v1/info` gets.
-    func setInfoResponse(status: Int, body: String) {
-        state.setInfoResponse(status: status, body: body)
+    /// The path a test can redirect `GET /v1/info` to; it answers like a
+    /// TBD relay's `/v1/info`.
+    static let redirectTargetPath = "/v1/redirect-target"
+
+    /// Sets the status and body every later `GET /v1/info` gets, with a
+    /// `Location` header when `location` is set. With `declaresLength`
+    /// false, the answer carries no `Content-Length`, so a client learns the
+    /// body's size only by reading it.
+    func setInfoResponse(status: Int, body: String, location: String? = nil, declaresLength: Bool = true) {
+        state.setInfoResponse(LoopbackInfoResponse(
+            status: status, body: body, location: location, declaresLength: declaresLength))
     }
 
     /// Closes the listener and every connection, and stops the event loop.
@@ -164,6 +174,14 @@ enum LoopbackRelayServerError: Error, LocalizedError {
     }
 }
 
+/// What `GET /v1/info` answers.
+private struct LoopbackInfoResponse: Sendable {
+    var status: Int
+    var body: String
+    var location: String?
+    var declaresLength: Bool
+}
+
 /// The server's shared state, written on the event loop and read by tests.
 private final class LoopbackRelayState: @unchecked Sendable {
     // @unchecked: every stored property is read and written only under `lock`.
@@ -172,23 +190,20 @@ private final class LoopbackRelayState: @unchecked Sendable {
 
     private let lock = NSLock()
     private var recorded: [LoopbackRelayRequest] = []
-    private var infoStatus = 200
-    private var infoBody = LoopbackRelayState.tbdRelayInfo
+    private var info = LoopbackInfoResponse(
+        status: 200, body: LoopbackRelayState.tbdRelayInfo, location: nil, declaresLength: true)
     private var silentOpen = 0
 
     var requests: [LoopbackRelayRequest] {
         lock.withLock { recorded }
     }
 
-    var infoResponse: (status: Int, body: String) {
-        lock.withLock { (infoStatus, infoBody) }
+    var infoResponse: LoopbackInfoResponse {
+        lock.withLock { info }
     }
 
-    func setInfoResponse(status: Int, body: String) {
-        lock.withLock {
-            infoStatus = status
-            infoBody = body
-        }
+    func setInfoResponse(_ response: LoopbackInfoResponse) {
+        lock.withLock { info = response }
     }
 
     func record(_ request: LoopbackRelayRequest) {
@@ -213,8 +228,9 @@ private final class LoopbackRelayState: @unchecked Sendable {
     }
 }
 
-/// Answers the requests that are not upgraded: `GET /v1/info`, nothing for
-/// `/v1/silent`, and 404 for the rest. Each answer closes its connection.
+/// Answers the requests that are not upgraded: `GET /v1/info`,
+/// `GET /v1/redirect-target`, nothing for `/v1/silent`, and 404 for the
+/// rest. Each answer closes its connection.
 private final class LoopbackHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -243,7 +259,10 @@ private final class LoopbackHTTPHandler: ChannelInboundHandler, RemovableChannel
             let request = LoopbackRelayState.request(from: requestHead)
             if requestHead.method == .GET, request.path == "/v1/info" {
                 let info = state.infoResponse
-                respond(context: context, status: info.status, body: info.body)
+                respond(context: context, status: info.status, body: info.body, location: info.location,
+                        declaresLength: info.declaresLength)
+            } else if requestHead.method == .GET, request.path == LoopbackRelayServer.redirectTargetPath {
+                respond(context: context, status: 200, body: LoopbackRelayState.tbdRelayInfo)
             } else if request.path == "/v1/silent" {
                 holdsSilentRequest = true
                 state.silentConnection(opened: true)
@@ -261,11 +280,19 @@ private final class LoopbackHTTPHandler: ChannelInboundHandler, RemovableChannel
         context.fireChannelInactive()
     }
 
-    private func respond(context: ChannelHandlerContext, status: Int, body: String) {
+    /// Without `declaresLength`, the answer carries no `Content-Length`, so
+    /// the client learns the body's size only by reading it.
+    private func respond(context: ChannelHandlerContext, status: Int, body: String, location: String? = nil,
+                         declaresLength: Bool = true) {
         let bytes = Array(body.utf8)
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
-        headers.add(name: "Content-Length", value: "\(bytes.count)")
+        if declaresLength {
+            headers.add(name: "Content-Length", value: "\(bytes.count)")
+        }
+        if let location {
+            headers.add(name: "Location", value: location)
+        }
         headers.add(name: "Connection", value: "close")
         let responseHead = HTTPResponseHead(
             version: .http1_1, status: HTTPResponseStatus(statusCode: status), headers: headers)
