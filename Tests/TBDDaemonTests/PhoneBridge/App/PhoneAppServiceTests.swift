@@ -637,6 +637,132 @@ struct PhoneAppServiceTests {
         #expect(first.bodies.isEmpty)
     }
 
+    /// The same, with the new connection's resend arriving while the old
+    /// subscribe is still suspended in its read: the disconnect stopped
+    /// counting the old one as running, so the resend is no resend of it.
+    /// It runs and is answered on the new connection, and the old one, once
+    /// its read returns, is abandoned and decides nothing.
+    @Test func aSubscribeResentOnANewConnectionDuringTheOldOnesFlagReadRuns() async throws {
+        let held = HeldPhoneControlRead()
+        defer { held.gate.open() }
+        let h = try await PhoneServiceHarness.make(phoneControlRead: held)
+        let deviceID = h.peer.deviceID
+        await h.service.setHandler(Self.subscribeStub(h.service), for: .sessionsSubscribe)
+        let first = await h.connect()
+        let subscribe = SessionsSubscribeParams(stream: nil, sinceSeq: nil)
+        let body = try PhoneTestRequests.body(.sessionsSubscribe, id: "sub-1", params: subscribe)
+
+        let arrival = Task { await h.service.handleAppMessage(body, from: h.peer) }
+        try await waitUntil("the first subscribe to suspend in its flag read") { held.reads == 1 }
+        #expect(await h.service.requestsRunning(for: deviceID) == 1)
+        await h.service.phoneDisconnected(h.peer)
+        #expect(await h.service.requestsRunning(for: deviceID) == 0)
+        let second = await h.connect()
+
+        let (reply, _) = try await h.request(.sessionsSubscribe, id: "sub-1", params: subscribe, on: second)
+        #expect(reply.requestID == "sub-1")
+        #expect(reply.error == nil)
+        #expect(await h.service.resumeDecision(for: deviceID) == .snapshot)
+
+        held.gate.open()
+        await arrival.value
+        #expect(await h.service.requestsRunning(for: deviceID) == 0)
+        #expect(await h.service.resumeDecision(for: deviceID) == .snapshot)
+        #expect(first.bodies.isEmpty)
+        #expect(second.bodies.count == 1)
+    }
+
+    /// A request counts as running from the moment it is accepted, before
+    /// any suspension. So a resend of a `sessions.subscribe` that arrives
+    /// while the first waits in its flag read starts nothing and reads
+    /// nothing: the subscribe runs once and replies once.
+    @Test func aSubscribeResentDuringItsFlagReadRunsOnce() async throws {
+        let held = HeldPhoneControlRead()
+        defer { held.gate.open() }
+        let h = try await PhoneServiceHarness.make(phoneControlRead: held)
+        let deviceID = h.peer.deviceID
+        let runs = FireRecorder<String>()
+        let service = h.service
+        let countingStub = PhoneAppService.typed(SessionsSubscribeParams.self) { _, context -> SessionsSubscribeResult in
+            runs.record(context.requestID)
+            let stream = await service.streamID(for: context.peer.deviceID) ?? ""
+            return SessionsSubscribeResult(
+                stream: stream, seq: 0, replayed: false, layout: nil, rows: nil, omittedRows: 0, more: false)
+        }
+        await h.service.setHandler(countingStub, for: .sessionsSubscribe)
+        let outbox = await h.connect()
+        let body = try PhoneTestRequests.body(
+            .sessionsSubscribe, id: "sub-1", params: SessionsSubscribeParams(stream: nil, sinceSeq: nil))
+
+        let arrival = Task { await h.service.handleAppMessage(body, from: h.peer) }
+        try await waitUntil("the first subscribe to suspend in its flag read") { held.reads == 1 }
+        #expect(await h.service.requestsRunning(for: deviceID) == 1)
+
+        await h.service.handleAppMessage(body, from: h.peer)
+        #expect(held.reads == 1)
+        #expect(await h.service.requestsRunning(for: deviceID) == 1)
+
+        held.gate.open()
+        await arrival.value
+        try await waitUntil("the subscribe to end") { await h.service.requestsRunning(for: deviceID) == 0 }
+        // The subscribe's reply is queued by now, and the outbox sends in
+        // order: its reply, then this last request's.
+        let flush = Data(#"{"kind":"request","method":"acme.unknown","params":{},"requestID":"flush"}"#.utf8)
+        await h.service.handleAppMessage(flush, from: h.peer)
+        let last = try await outbox.body(at: 1)
+        #expect(try JSONDecoder().decode(PhoneTestReply.self, from: last).requestID == "flush")
+        let subscribeBytes = try await outbox.body(at: 0)
+        let subscribeReply = try JSONDecoder().decode(PhoneTestReply.self, from: subscribeBytes)
+        #expect(subscribeReply.requestID == "sub-1")
+        #expect(subscribeReply.error == nil)
+        #expect(outbox.bodies.count == 2)
+        #expect(runs.values == ["sub-1"])
+    }
+
+    /// A burst that arrives while a `sessions.subscribe` waits in its flag
+    /// read counts the subscribe: it fills the device only up to the cap,
+    /// and the request past it is refused.
+    @Test func aBurstDuringASubscribesFlagReadCannotPassTheCap() async throws {
+        let held = HeldPhoneControlRead()
+        let gate = PhoneTestGate()
+        defer {
+            held.gate.open()
+            gate.open()
+        }
+        let h = try await PhoneServiceHarness.make(phoneControlRead: held)
+        let deviceID = h.peer.deviceID
+        await h.service.setHandler(Self.subscribeStub(h.service), for: .sessionsSubscribe)
+        let pageStub = PhoneAppService.typed(TranscriptPageParams.self) { _, _ -> TranscriptPage in
+            await gate.wait()
+            return TranscriptPage(items: [], cursor: nil, reachedStart: true, omittedItems: 0)
+        }
+        await h.service.setHandler(pageStub, for: .transcriptPage)
+        let outbox = await h.connect()
+        let subscribe = try PhoneTestRequests.body(
+            .sessionsSubscribe, id: "sub-1", params: SessionsSubscribeParams(stream: nil, sinceSeq: nil))
+        let page = TranscriptPageParams(session: .local(terminalID: terminalID), cursor: "0")
+
+        let arrival = Task { await h.service.handleAppMessage(subscribe, from: h.peer) }
+        try await waitUntil("the subscribe to suspend in its flag read") { held.reads == 1 }
+
+        let limit = PhoneAppConstants.requestsInFlightPerDevice
+        for index in 0..<(limit - 1) {
+            let body = try PhoneTestRequests.body(.transcriptPage, id: "page-\(index)", params: page)
+            await h.service.handleAppMessage(body, from: h.peer)
+        }
+        #expect(await h.service.requestsRunning(for: deviceID) == limit)
+
+        let (refused, _) = try await h.request(.transcriptPage, id: "one-more", params: page, on: outbox)
+        #expect(refused.requestID == "one-more")
+        #expect(refused.error?.code == .refused)
+
+        held.gate.open()
+        await arrival.value
+        #expect(await h.service.requestsRunning(for: deviceID) <= limit)
+        gate.open()
+        try await waitUntil("every request to end") { await h.service.requestsRunning(for: deviceID) == 0 }
+    }
+
     // MARK: - Revoke
 
     @Test func revokeDropsStateAndRequestMemory() async throws {

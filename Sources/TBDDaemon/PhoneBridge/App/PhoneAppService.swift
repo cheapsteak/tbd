@@ -180,6 +180,13 @@ final class PhoneOutboxQueue: Sendable {
 /// request's ID for another method is no resend: it starts nothing and is
 /// answered `bad_request` at once, so the phone does not wait out its timeout.
 ///
+/// **A request counts as running from the moment it passes those checks.**
+/// `handleAppMessage` records it before its first suspension, so a resend or
+/// a burst that arrives while a `sessions.subscribe` waits for its resume
+/// decision sees it: the resend starts nothing, and the burst cannot take the
+/// device past the cap. A subscribe abandoned because its connection ended
+/// stops counting at once (see `dropUnstartedRequests(deviceID:)`).
+///
 /// **The work, in order:**
 /// 1. **The flag.** `phone_control_enabled` is read for every request. Off:
 ///    the reply is `phone_control_off` and nothing else happens, with the
@@ -252,10 +259,14 @@ actor PhoneAppService: PhoneAppHandling {
     private struct RunningRequest {
         let requestID: String
         let method: PhoneAppMethod
-        let task: Task<Void, Never>
+        /// Nil while `handleAppMessage` holds the request before starting
+        /// it, as a `sessions.subscribe` does while its resume decision reads
+        /// the flag.
+        var task: Task<Void, Never>?
     }
-    /// Each device's requests still running, by a token per request. No two
-    /// of a device's running requests share an ID.
+    /// Each device's requests still running, by a token per request, from
+    /// the moment `handleAppMessage` accepts one until it ends or is
+    /// abandoned. No two of a device's running requests share an ID.
     private var requests: [UUID: [UInt64: RunningRequest]] = [:]
     private var nextToken: UInt64 = 0
 
@@ -302,6 +313,7 @@ actor PhoneAppService: PhoneAppHandling {
         state.live = false
         state.pendingTranscriptResume = nil
         devices[peer.deviceID] = state
+        dropUnstartedRequests(deviceID: peer.deviceID)
     }
 
     /// Drops the device's way out and starts the grace: the state, with its
@@ -329,6 +341,19 @@ actor PhoneAppService: PhoneAppHandling {
             await self.graceEnded(deviceID: deviceID, token: token)
         }
         devices[deviceID] = state
+        dropUnstartedRequests(deviceID: deviceID)
+    }
+
+    /// Forgets the device's requests that `handleAppMessage` accepted and
+    /// has not started, each a `sessions.subscribe` waiting for its resume
+    /// decision. Each waits on the connection that just ended and abandons
+    /// itself when its read returns, so it will start nothing: dropping it
+    /// now keeps the next connection's own resend of it from being taken for
+    /// a request still running, and frees its place under the cap.
+    private func dropUnstartedRequests(deviceID: UUID) {
+        guard let running = requests[deviceID] else { return }
+        let started = running.filter { $0.value.task != nil }
+        requests[deviceID] = started.isEmpty ? nil : started
     }
 
     /// Drops the device's state at once, grace and all, cancels the device's
@@ -343,7 +368,7 @@ actor PhoneAppService: PhoneAppHandling {
     func phoneRevoked(deviceID: UUID) async {
         let state = devices.removeValue(forKey: deviceID)
         for request in (requests[deviceID] ?? [:]).values {
-            request.task.cancel()
+            request.task?.cancel()
         }
         await state?.shutDown()
         await memory.forget(deviceID: deviceID)
@@ -423,10 +448,15 @@ actor PhoneAppService: PhoneAppHandling {
             send(Self.failure(requestID, .refused, Self.tooManyRequests), to: deviceID)
             return
         }
+        // Counted from here, before the first suspension, so a resend or a
+        // burst that arrives during `decideResume` sees this request.
+        let token = mintToken()
+        requests[deviceID, default: [:]][token] = RunningRequest(requestID: requestID, method: method, task: nil)
         if method == .sessionsSubscribe {
             guard await decideResume(body, deviceID: deviceID, connection: connection) else {
                 Self.logger.debug(
                     "Phone app: abandoned a sessions.subscribe from phone \(deviceID, privacy: .public), whose connection ended while it was read")
+                endRequest(token, deviceID: deviceID)
                 return
             }
         }
@@ -434,7 +464,7 @@ actor PhoneAppService: PhoneAppHandling {
         if method == .transcriptOpen || method == .transcriptClose {
             transcriptStamp = stampTranscriptRequest(deviceID: deviceID)
         }
-        start(method, body: body, context: DeviceContext(
+        start(token, method, body: body, context: DeviceContext(
             peer: peer, requestID: requestID, transcriptStamp: transcriptStamp))
     }
 
@@ -463,9 +493,11 @@ actor PhoneAppService: PhoneAppHandling {
     /// When `connection`, the queue the request arrived through, is no
     /// longer the device's once the read returns, the request is abandoned:
     /// it decides nothing and `handleAppMessage` starts nothing, so the new
-    /// connection's decision stays its own, and its own `sessions.subscribe`
-    /// (a phone resends what it has no reply for) is not taken for a resend
-    /// of one still running.
+    /// connection's decision stays its own. Nor is the new connection's own
+    /// `sessions.subscribe` (a phone resends what it has no reply for) taken
+    /// for a resend of this one, even while this read is still suspended:
+    /// the disconnect or connect already stopped counting this request as
+    /// running (`dropUnstartedRequests(deviceID:)`).
     private func decideResume(_ body: Data, deviceID: UUID, connection: PhoneOutboxQueue) async -> Bool {
         guard let params = try? PhoneAppCoding.params(SessionsSubscribeParams.self, from: body) else {
             return true
@@ -483,11 +515,11 @@ actor PhoneAppService: PhoneAppHandling {
         return true
     }
 
-    /// Starts the request's work in a task of the service's own. Only
-    /// `phoneRevoked` cancels it.
-    private func start(_ method: PhoneAppMethod, body: Data, context: DeviceContext) {
+    /// Starts the work of the request `handleAppMessage` accepted under
+    /// `token`, in a task of the service's own. Only `phoneRevoked` cancels
+    /// it.
+    private func start(_ token: UInt64, _ method: PhoneAppMethod, body: Data, context: DeviceContext) {
         let deviceID = context.peer.deviceID
-        let token = mintToken()
         // The task runs on this actor between its suspensions, so it cannot
         // finish before it is stored.
         let task = Task {
@@ -498,14 +530,20 @@ actor PhoneAppService: PhoneAppHandling {
             requestID: context.requestID, method: method, task: task)
     }
 
-    /// Sends a finished request's reply through the connection the phone has
-    /// now, or runs the handler's work in its place while the phone is
-    /// connected. A request cancelled by a revoke sends nothing.
-    private func requestFinished(_ token: UInt64, deviceID: UUID, reply: PhoneHandlerReply) {
+    /// Stops counting the request under `token` as running. Does nothing
+    /// when it is gone already.
+    private func endRequest(_ token: UInt64, deviceID: UUID) {
         requests[deviceID]?[token] = nil
         if requests[deviceID]?.isEmpty == true {
             requests[deviceID] = nil
         }
+    }
+
+    /// Sends a finished request's reply through the connection the phone has
+    /// now, or runs the handler's work in its place while the phone is
+    /// connected. A request cancelled by a revoke sends nothing.
+    private func requestFinished(_ token: UInt64, deviceID: UUID, reply: PhoneHandlerReply) {
+        endRequest(token, deviceID: deviceID)
         guard !Task.isCancelled else { return }
         switch reply {
         case .body(let body):
@@ -807,7 +845,7 @@ actor PhoneAppService: PhoneAppHandling {
     }
 
     /// How many of the device's requests are still running, cancelled ones
-    /// included until they end.
+    /// included until they end, and accepted ones not started yet included.
     func requestsRunning(for deviceID: UUID) -> Int {
         requests[deviceID]?.count ?? 0
     }
