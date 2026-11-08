@@ -114,10 +114,13 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
     /**
      * "Try again" after a refused subscribe. It does nothing unless an error shows and no
      * subscribe is in flight, so a second tap sends nothing more and never a second subscribe
-     * beside one a channel up sent.
+     * beside one a channel up sent. Nor does it while the channel is down: a subscribe sent then
+     * could not go out before the next channel up, which sends its own. So the message stays,
+     * under the loader's "Reconnecting…", until `onChannelUp` clears it.
      */
     retrySubscribe(): void {
-      if (store.get().conn.error === null || subscribesInFlight > 0) return;
+      const { conn } = store.get();
+      if (!conn.up || conn.error === null || subscribesInFlight > 0) return;
       setConn({ error: null });
       subscribe();
     },

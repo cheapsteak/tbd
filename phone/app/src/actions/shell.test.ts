@@ -284,6 +284,30 @@ test('Try again sends nothing while a subscribe is in flight, even with an error
   assert.equal(h.sent.length, 5);
 });
 
+test('Try again while the channel is down sends nothing and keeps the message, and the next channel up subscribes', async () => {
+  const h = harness();
+  h.actions.onChannelUp();
+  h.sent[0]!.reject(new AppError('refused', 'Too many requests are in progress.'));
+  await flush();
+  h.actions.onChannelDown();
+  h.actions.retrySubscribe();
+  // No subscribe, and the message and its Try again stay, under the loader's "Reconnecting…".
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.state().conn.error, 'Too many requests are in progress.');
+  assert.equal(h.state().conn.subscribed, false);
+  // The channel comes back: its own subscribe goes out and the message clears.
+  h.actions.onChannelUp();
+  assert.equal(h.state().conn.error, null);
+  assert.deepEqual(h.requests(), [['sessions.subscribe', {}], ['sessions.subscribe', {}]]);
+  // Refused again with the channel up, Try again sends one subscribe, as before.
+  h.sent[1]!.reject(new AppError('refused', 'Too many requests are in progress.'));
+  await flush();
+  h.actions.retrySubscribe();
+  h.actions.retrySubscribe();
+  assert.equal(h.state().conn.error, null);
+  assert.deepEqual(h.requests(), [['sessions.subscribe', {}], ['sessions.subscribe', {}], ['sessions.subscribe', {}]]);
+});
+
 test('Try again with no error showing sends nothing', () => {
   const h = harness();
   h.actions.retrySubscribe();
