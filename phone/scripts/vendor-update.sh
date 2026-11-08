@@ -64,16 +64,43 @@ plain_file() {
 work="$(mktemp -d "${TMPDIR:-/tmp}/vendor-update.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-# 1. Metadata.
+# 1. Metadata. The version document is parsed as JSON, and only its own `dist` object is read:
+#    `dist.tarball` and `dist.integrity` must be strings, and `dist.attestations` an object for
+#    provenance. A key of the same name anywhere else in the document counts for nothing.
+#    Node reads it, since this package needs Node anyway.
+command -v node >/dev/null 2>&1 || die "node is required to read the registry metadata"
 curl -fsSL "$registry/$name/$version" -o "$work/meta.json" || die "could not fetch metadata for $name@$version"
-tarball_rows="$(sed -n 's/.*"tarball" *: *"\([^"]*\)".*/\1/p' "$work/meta.json")"
-integrity_rows="$(sed -n 's/.*"integrity" *: *"\([^"]*\)".*/\1/p' "$work/meta.json")"
-[ -n "$tarball_rows" ] && [ "$(printf '%s\n' "$tarball_rows" | wc -l | tr -d ' ')" -eq 1 ] || die "metadata must name exactly one tarball"
-[ -n "$integrity_rows" ] && [ "$(printf '%s\n' "$integrity_rows" | wc -l | tr -d ' ')" -eq 1 ] || die "metadata must name exactly one integrity"
-tarball="$tarball_rows"
-integrity="$integrity_rows"
+# shellcheck disable=SC2016 # JavaScript, not shell: nothing in it is meant to expand
+read_dist='
+const fs = require("node:fs");
+const refuse = (why) => {
+  process.stderr.write(`vendor-update: ${why}; nothing changed\n`);
+  process.exit(1);
+};
+let doc;
+try {
+  doc = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+} catch {
+  refuse("the metadata is not JSON");
+}
+const dist = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc.dist : undefined;
+if (dist === null || typeof dist !== "object" || Array.isArray(dist)) refuse("the metadata has no dist object");
+const field = (key) => {
+  const value = Object.hasOwn(dist, key) ? dist[key] : undefined;
+  if (typeof value !== "string" || value === "") refuse(`the metadata has no dist.${key} string`);
+  // One value per line below, and lock rows are tab-separated: no control characters.
+  if (/[\u0000-\u001f\u007f]/.test(value)) refuse(`dist.${key} holds a control character`);
+  return value;
+};
+const tarball = field("tarball");
+const integrity = field("integrity");
+const attestations = Object.hasOwn(dist, "attestations") ? dist.attestations : null;
+const provenance = attestations !== null && typeof attestations === "object" && !Array.isArray(attestations) ? "yes" : "no";
+process.stdout.write(`${tarball}\n${integrity}\n${provenance}\n`);
+'
+node --input-type=commonjs -e "$read_dist" "$work/meta.json" >"$work/dist" || exit 1
+{ IFS= read -r tarball && IFS= read -r integrity && IFS= read -r provenance; } <"$work/dist" || die "could not read the metadata's dist fields"
 case "$integrity" in sha512-*) ;; *) die "integrity is not sha512: $integrity" ;; esac
-if grep -q '"attestations"' "$work/meta.json"; then provenance=yes; else provenance=no; fi
 
 # 2. Tarball and integrity.
 curl -fsSL "$tarball" -o "$work/pkg.tgz" || die "could not download $tarball"

@@ -22,6 +22,7 @@ make_registry() {
   if [ -n "$prepare" ]; then "$prepare" "$src/package"; fi
   tar -czf "$dir/x-1.0.0.tgz" -C "$src" package
   sum="$(openssl dgst -sha512 -binary "$dir/x-1.0.0.tgz" | base64 | tr -d '\n')"
+  printf '%s' "$sum" >"$dir/sum"
   printf '{"name":"x","version":"1.0.0","dist":{"tarball":"file://%s/x-1.0.0.tgz","integrity":"sha512-%s"%s}}\n' \
     "$dir" "$sum" "$extra" >"$dir/x/1.0.0"
 }
@@ -118,6 +119,39 @@ reg9="$tmp/reg9"; root9="$tmp/root9"; make_registry "$reg9" yes "" odd_license
 mkdir -p "$root9/x"; printf 'old\n' >"$root9/x/old.js"
 rc=0; VENDOR_REGISTRY="file://$reg9" VENDOR_ROOT="$root9" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 1 ] && [ -f "$root9/x/old.js" ] && [ ! -e "$root9/x/dist" ]; then ok "a license named outside the rule refuses, old files kept"; else bad "odd license rc=$rc"; fi
+
+# Only the version document's own `dist` object counts. Registry JSON is minified onto one line,
+# so a key of the same name elsewhere in it must neither stand in for a missing dist field nor
+# override a present one.
+reg10="$tmp/reg10"; make_registry "$reg10" yes ""
+tarball10="file://$reg10/x-1.0.0.tgz"; integrity10="sha512-$(cat "$reg10/sum")"
+# with_meta <label> <expected rc> <document>: runs the update with this version document.
+with_meta() {
+  local label="$1" want="$2" rc=0
+  rm -rf "$tmp/root10"
+  printf '%s\n' "$3" >"$reg10/x/1.0.0"
+  VENDOR_REGISTRY="file://$reg10" VENDOR_ROOT="$tmp/root10" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq "$want" ] && { [ "$want" -eq 0 ] || [ ! -e "$tmp/root10/x" ]; }; then ok "$label"; else bad "$label: rc=$rc"; fi
+}
+with_meta "a decoy integrity and tarball after dist are ignored" 0 \
+  "{\"name\":\"x\",\"dist\":{\"tarball\":\"$tarball10\",\"integrity\":\"$integrity10\"},\"decoy\":{\"tarball\":\"file:///nonexistent.tgz\",\"integrity\":\"sha512-AAAA\",\"attestations\":{}}}"
+if grep -qF "$(printf 'x\t1.0.0\tintegrity\t%s' "$integrity10")" "$tmp/root10/vendor.lock" \
+  && grep -qF "$(printf 'x\t1.0.0\ttarball\t%s' "$tarball10")" "$tmp/root10/vendor.lock" \
+  && grep -qF "$(printf 'x\t1.0.0\tprovenance\tno')" "$tmp/root10/vendor.lock"; then
+  ok "the lock records dist's own tarball and integrity, and no provenance from a decoy"
+else bad "lock rows from dist"; fi
+with_meta "a dist without integrity refuses, even with the right one elsewhere" 1 \
+  "{\"versions\":{\"tarball\":\"$tarball10\",\"integrity\":\"$integrity10\"},\"dist\":{\"tarball\":\"$tarball10\"}}"
+with_meta "a dist without tarball refuses, even with the right one elsewhere" 1 \
+  "{\"versions\":{\"tarball\":\"$tarball10\"},\"dist\":{\"integrity\":\"$integrity10\"}}"
+with_meta "an integrity that is not a string refuses" 1 \
+  "{\"dist\":{\"tarball\":\"$tarball10\",\"integrity\":[\"$integrity10\"]}}"
+with_meta "a tarball that is not a string refuses" 1 \
+  "{\"dist\":{\"tarball\":{\"url\":\"$tarball10\"},\"integrity\":\"$integrity10\"}}"
+with_meta "an integrity holding a newline refuses" 1 \
+  "{\"dist\":{\"tarball\":\"$tarball10\",\"integrity\":\"$integrity10\\nsha512-AAAA\"}}"
+with_meta "a dist that is not an object refuses" 1 "{\"dist\":\"$tarball10\"}"
+with_meta "a document that is not JSON refuses" 1 "{\"dist\":{\"tarball\":\"$tarball10\","
 
 [ "$failures" -eq 0 ] || { echo "vendor-update.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "vendor-update.test.sh: all passed"
