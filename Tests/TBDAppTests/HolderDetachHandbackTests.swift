@@ -268,6 +268,18 @@ struct HolderDetachHandbackTests {
             _ = bytes.withUnsafeBytes { Darwin.write(sessionEnd, $0.baseAddress, $0.count) }
         }
 
+        /// Plays the session writing `text` the moment the panel's reader has
+        /// left its loop, through the reader's `beforeClose` hook: bytes that
+        /// only a reader which reads on after its stop can see. Call it before
+        /// `attach()`, which hands the hook to the reader it builds.
+        func sessionWritesOnceTheReaderStops(_ text: String) {
+            let far = sessionEnd
+            let bytes = [UInt8](text.utf8)
+            coordinator.holderReaderBeforeClose = { _ in
+                _ = bytes.withUnsafeBytes { Darwin.write(far, $0.baseAddress, $0.count) }
+            }
+        }
+
         /// One viewport row, read through the production locked accessor.
         func rowText(_ row: Int) -> String {
             view.withTerminal { $0.getLine(row: row)?.translateToString(trimRight: true) ?? "" }
@@ -482,6 +494,47 @@ struct HolderDetachHandbackTests {
             output the reader had already taken off the pty was dropped on the way out — no other \
             reader can ever see those bytes: \(replay.screenText())
             """)
+    }
+
+    /// The handback feeds its `DECRQM` probe into this terminal's parser, so
+    /// the panel must not close part-way through one of the session's
+    /// sequences: the probe's first `ESC` would end it early here, and the
+    /// rest, left on the pty, would print as text in the daemon's emulator,
+    /// whose parser starts in the ground state. The rest is written just after
+    /// the reader has left its loop, so only a reader that reads on until the
+    /// sequence ends can put it in the handback.
+    @MainActor
+    @Test("the handback waits for a sequence the session is part-way through")
+    func theHandbackWaitsForAnOpenSequence() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+        fixture.sessionWritesOnceTheReaderStops("TITLE-PAYLOAD\u{07}AFTER\r\n")
+        await fixture.attach()
+
+        fixture.sessionWrites("BEFORE\r\n\u{1b}]0;HALF-OF-A-")
+        try await waitFor(
+            "the session's half-written title to reach the panel",
+            observed: {
+                await MainActor.run {
+                    "row0=\(fixture.rowText(0)) between sequences=\(fixture.view.isAtSequenceBoundary)"
+                }
+            }
+        ) {
+            await MainActor.run { fixture.rowText(0) == "BEFORE" && !fixture.view.isAtSequenceBoundary }
+        }
+
+        fixture.coordinator.cleanup()
+        try await waitForDetach(fixture)
+
+        let detach = try #require(fixture.stub.detaches.first)
+        let replay = HeadlessReplay()
+        replay.feed(detach.preamble)
+        let painted = replay.screenText()
+        #expect(painted.contains("AFTER"), """
+            the panel closed part-way through the session's title, so the rest stayed on the pty \
+            for the daemon to print as text: \(painted)
+            """)
+        #expect(!painted.contains("PAYLOAD"), "the title's rest painted as text: \(painted)")
     }
 
     @MainActor

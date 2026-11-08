@@ -56,15 +56,18 @@ let package = Package(
         // reporting the way Shift-drag does, which TBD turns on with "Send
         // clicks and drags to apps that use the mouse"; verbatim, so a later
         // sync with upstream applies cleanly whether or not #705 has merged.
-        // The pinned revision is upstream `9c2518e` plus twenty-seven commits
+        // The pinned revision is upstream `9c2518e` plus twenty-nine commits
         // (branch `tbd/parser-sequence-boundary`): one making `withTerminal`
         // public, one adding `showsProgressBar`, #705, a test pinning #705's
         // behavior, twenty-one that fix two bugs with their tests, one that
         // makes the buffer's saved origin, wrap and margin modes public, so
         // the snapshot writer can carry the primary screen's values across
-        // an alt-screen replay, and one adding `isAtSequenceBoundary`, so an
+        // an alt-screen replay, one adding `isAtSequenceBoundary`, so an
         // attach can wait for the child to finish a sequence before the
-        // snapshot feeds its own queries into the terminal. A terminal
+        // snapshot feeds its own queries into the terminal, one testing it in
+        // every parser state that is not a boundary, and one letting a view
+        // answer it from any thread, so the app's holder reader can wait the
+        // same way before the handback snapshot. A terminal
         // created or set up wider than 80
         // columns gets default tab stops across its whole width, where it
         // otherwise has none past column 80.
@@ -100,7 +103,7 @@ let package = Package(
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "3b845d102bb03c4571357a599a0c22be5a22536e"),
+        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "b4db5b0ecd62db7a8ebdc4dbff8b82b8ed704e9a"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
