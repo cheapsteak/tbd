@@ -368,21 +368,30 @@ public enum GhosttySnapshotWriter {
     /// libghostty has no getter for it, so each probe event is encoded with the terminal's
     /// settings, from the one only any-motion tracking reports to the one even X10 reports. nil
     /// when a probe fails.
+    ///
+    /// Each probe goes to its own libghostty encoder, as `MouseEncoder`'s own probe of the flags
+    /// does, and not through `MouseEncoder.encode`: that sends a release only for a press it
+    /// reported, and tells libghostty a button is held only while one is, so a fresh one reports
+    /// neither the release that tells 1000 from X10 nor the drag that tells 1002 from 1000.
     static func effectiveMouseMode(_ terminal: VtTerminal) -> Int? {
         // A 10 by 10 grid of 10-pixel cells, with every probe inside its first cell.
         let geometry = TerminalPixelGeometry(screenWidth: 100, screenHeight: 100, cellWidth: 10, cellHeight: 10)
-        let inside = SurfacePoint(x: 5, y: 5)
-        let probes: [(mode: Int, press: MousePress)] = [
-            (1003, MousePress(action: .motion, button: nil, position: inside)),
-            (1002, MousePress(action: .motion, button: .left, position: inside)),
-            (1000, MousePress(action: .release, button: .left, position: inside)),
-            (9, MousePress(action: .press, button: .left, position: inside)),
+        let inside = GhosttyMousePosition(x: 5, y: 5)
+        let left = GHOSTTY_MOUSE_BUTTON_LEFT
+        // A drag is a move with a button held, and button-event tracking reports one only while
+        // the encoder is told a button is.
+        let probes: [(mode: Int, action: GhosttyMouseAction, button: GhosttyMouseButton?, held: Bool)] = [
+            (1003, GHOSTTY_MOUSE_ACTION_MOTION, nil, false),
+            (1002, GHOSTTY_MOUSE_ACTION_MOTION, left, true),
+            (1000, GHOSTTY_MOUSE_ACTION_RELEASE, left, false),
+            (9, GHOSTTY_MOUSE_ACTION_PRESS, left, true),
         ]
         do {
             for probe in probes {
-                // A fresh encoder each time, so no probe is dropped as a repeat of the last cell.
-                let encoder = try MouseEncoder(geometry: geometry)
-                if try encoder.encode(probe.press, terminal: terminal) != nil { return probe.mode }
+                let report = try probeReport(
+                    terminal, action: probe.action, button: probe.button, buttonHeld: probe.held,
+                    at: inside, in: geometry)
+                if report != nil { return probe.mode }
             }
             return 0
         } catch {
@@ -397,34 +406,15 @@ public enum GhosttySnapshotWriter {
     /// tracks, in a cell and at a pixel whose numbers tell the five apart. nil when the probe fails.
     static func effectiveMouseEncoding(_ terminal: VtTerminal) -> Int? {
         do {
-            let encoder = try GhosttyMouseEncoderHandle()
-            var event: GhosttyMouseEvent?
-            try ghosttyCheck(ghostty_mouse_event_new(nil, &event), "ghostty_mouse_event_new")
-            guard let event else {
-                throw GhosttyCallError(result: GHOSTTY_OUT_OF_MEMORY, operation: "ghostty_mouse_event_new")
-            }
-            defer { ghostty_mouse_event_free(event) }
-            try ghosttyCheck(
-                ghostty_mouse_encoder_set_from_terminal(encoder.raw, terminal), "ghostty_mouse_encoder_set_from_terminal")
-            var tracking = GHOSTTY_MOUSE_TRACKING_ANY
-            try ghosttyCheck(
-                ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &tracking), "MOUSE_ENCODER_OPT_EVENT")
             // 300 columns of 10-pixel cells. The probe is in column 151, past the 95 in which X10's
             // single bytes and UTF-8's characters still agree, at pixel 1505.
-            var size = TerminalPixelGeometry(screenWidth: 3_000, screenHeight: 100, cellWidth: 10, cellHeight: 10).ghostty
-            try ghosttyCheck(
-                ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size), "MOUSE_ENCODER_OPT_SIZE")
-            _ = ghostty_mouse_event_set_action(event, GHOSTTY_MOUSE_ACTION_MOTION)
-            _ = ghostty_mouse_event_clear_button(event)
-            _ = ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: 1_505, y: 5))
-            var report = [UInt8](repeating: 0, count: 64)
-            var written = 0
-            let result = report.withUnsafeMutableBufferPointer { buffer in
-                ghostty_mouse_encoder_encode(encoder.raw, event, buffer.baseAddress, buffer.count, &written)
-            }
-            try ghosttyCheck(result, "ghostty_mouse_encoder_encode")
-            guard let encoding = mouseEncoding(ofReport: report.prefix(written)) else {
-                terminalEngineLog.error("libghostty handback: the mouse encoding probe wrote \(written, privacy: .public) unreadable bytes")
+            let geometry = TerminalPixelGeometry(screenWidth: 3_000, screenHeight: 100, cellWidth: 10, cellHeight: 10)
+            let report = try probeReport(
+                terminal, action: GHOSTTY_MOUSE_ACTION_MOTION, button: nil, buttonHeld: false,
+                at: GhosttyMousePosition(x: 1_505, y: 5), in: geometry, tracking: GHOSTTY_MOUSE_TRACKING_ANY)
+            guard let report, let encoding = mouseEncoding(ofReport: report[...]) else {
+                terminalEngineLog.error(
+                    "libghostty handback: the mouse encoding probe wrote \(report?.count ?? 0, privacy: .public) unreadable bytes")
                 return nil
             }
             return encoding
@@ -432,6 +422,51 @@ public enum GhosttySnapshotWriter {
             terminalEngineLog.error("libghostty handback: mouse encoding probe failed: \(String(describing: error), privacy: .public)")
             return nil
         }
+    }
+
+    /// The report a new encoder, set from the terminal's mouse flags, writes for one event, or nil
+    /// when it writes none. `tracking`, when given, replaces the terminal's tracking mode, and
+    /// `buttonHeld` is what the encoder is told of the buttons down.
+    private static func probeReport(
+        _ terminal: VtTerminal, action: GhosttyMouseAction, button: GhosttyMouseButton?, buttonHeld: Bool,
+        at position: GhosttyMousePosition, in geometry: TerminalPixelGeometry,
+        tracking: GhosttyMouseTrackingMode? = nil
+    ) throws -> [UInt8]? {
+        let encoder = try GhosttyMouseEncoderHandle()
+        var event: GhosttyMouseEvent?
+        try ghosttyCheck(ghostty_mouse_event_new(nil, &event), "ghostty_mouse_event_new")
+        guard let event else {
+            throw GhosttyCallError(result: GHOSTTY_OUT_OF_MEMORY, operation: "ghostty_mouse_event_new")
+        }
+        defer { ghostty_mouse_event_free(event) }
+        try ghosttyCheck(
+            ghostty_mouse_encoder_set_from_terminal(encoder.raw, terminal), "ghostty_mouse_encoder_set_from_terminal")
+        if var tracking {
+            try ghosttyCheck(
+                ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_EVENT, &tracking), "MOUSE_ENCODER_OPT_EVENT")
+        }
+        var size = geometry.ghostty
+        try ghosttyCheck(
+            ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size), "MOUSE_ENCODER_OPT_SIZE")
+        // Setting the encoder from the terminal leaves this option alone, so it is set each time.
+        var held = buttonHeld
+        try ghosttyCheck(
+            ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &held),
+            "MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED")
+        _ = ghostty_mouse_event_set_action(event, action)
+        if let button {
+            _ = ghostty_mouse_event_set_button(event, button)
+        } else {
+            _ = ghostty_mouse_event_clear_button(event)
+        }
+        _ = ghostty_mouse_event_set_position(event, position)
+        var report = [UInt8](repeating: 0, count: 64)
+        var written = 0
+        let result = report.withUnsafeMutableBufferPointer { buffer in
+            ghostty_mouse_encoder_encode(encoder.raw, event, buffer.baseAddress, buffer.count, &written)
+        }
+        try ghosttyCheck(result, "ghostty_mouse_encoder_encode")
+        return written > 0 ? Array(report.prefix(written)) : nil
     }
 
     /// Which encoding wrote the probe's report of column 151, row 1, pixel 1505: `ESC [ M` and
