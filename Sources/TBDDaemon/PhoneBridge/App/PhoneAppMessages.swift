@@ -346,7 +346,9 @@ enum PhoneAnsweredBy: String, Codable, CaseIterable, Sendable {
 struct PhonePromptResolution: Codable, Equatable, Sendable {
     let promptID: String
     let answeredBy: PhoneAnsweredBy
-    /// The answering phone, set only when `answeredBy` is `phone`.
+    /// The answering phone, set only when `answeredBy` is `phone`, and then
+    /// absent when TBD cannot tell which phone answered: several phones'
+    /// answers may have landed, and none is known to have.
     let deviceID: UUID?
 }
 

@@ -252,10 +252,13 @@ enum PhonePromptShaper {
 ///
 /// `prompt.answer` begins an attempt before it calls the core and finishes it
 /// when the core replies. An attempt whose answer was `delivered`, or may have
-/// been (`unknown`), settles and is kept; one that met `already_resolved` or
-/// an error is dropped. Several phones may answer one prompt at once, each
-/// with an attempt of its own; a prompt takes one answer, so at most one of
-/// them is kept.
+/// been (`unknown`), settles and is kept with how it ended; one that met
+/// `already_resolved` or an error is dropped. Several phones may answer one
+/// prompt at once, each with an attempt of its own, and every attempt that
+/// settles is kept. A prompt takes one answer, so `answeredBy` names the
+/// phone whose answer was delivered; with none delivered, the phone whose
+/// answer may have landed when only one phone's may have, and no phone in
+/// particular when several may have, since any of them may be the one.
 ///
 /// **Bounded.** Running attempts are bounded by the requests a device may have
 /// in flight. A kept attempt is dropped `lifetime` after it settled, and at
@@ -271,11 +274,36 @@ struct PhonePromptAnswerLedger: Sendable {
         let promptID: String
     }
 
+    /// How a kept attempt's answer ended.
+    enum Settlement: Sendable, Equatable {
+        /// The core delivered the answer.
+        case delivered
+        /// The answer may have landed: the core could not tell.
+        case unknown
+    }
+
+    /// Who answered a prompt, as the kept attempts tell it.
+    enum Answerer: Sendable, Equatable {
+        /// This phone answered.
+        case device(UUID)
+        /// A phone answered, but which one is not known: more than one
+        /// phone's answer may have landed, and none is known to have.
+        case unknownDevice
+
+        /// The answering phone, when it is known.
+        var deviceID: UUID? {
+            guard case .device(let deviceID) = self else { return nil }
+            return deviceID
+        }
+    }
+
     private struct Attempt: Sendable {
         let token: UInt64
         let deviceID: UUID
         /// When the attempt settled and was kept; nil while its call runs.
         var settledAt: Date?
+        /// How the kept attempt's answer ended; nil while its call runs.
+        var settlement: Settlement?
     }
 
     private struct Settled: Sendable {
@@ -299,15 +327,19 @@ struct PhonePromptAnswerLedger: Sendable {
     /// A phone's answer to the prompt under `key` is about to reach the core.
     mutating func begin(_ key: Key, token: UInt64, deviceID: UUID, now: Date) {
         prune(now: now)
-        attempts[key, default: []].append(Attempt(token: token, deviceID: deviceID, settledAt: nil))
+        attempts[key, default: []].append(Attempt(token: token, deviceID: deviceID, settledAt: nil, settlement: nil))
     }
 
-    /// The attempt `token` finished: kept with `keep`, dropped otherwise.
-    /// Returns the waiters to resume, once no attempt on `key` still runs.
-    mutating func finish(_ key: Key, token: UInt64, keep: Bool, now: Date) -> [CheckedContinuation<Void, Never>] {
+    /// The attempt `token` finished: kept with how it ended, `settled`, or
+    /// dropped when that is nil. Returns the waiters to resume, once no
+    /// attempt on `key` still runs.
+    mutating func finish(
+        _ key: Key, token: UInt64, settled: Settlement?, now: Date
+    ) -> [CheckedContinuation<Void, Never>] {
         if var list = attempts[key], let index = list.firstIndex(where: { $0.token == token }) {
-            if keep {
+            if let settled {
                 list[index].settledAt = now
+                list[index].settlement = settled
                 settledOrder.append(Settled(key: key, token: token, at: now))
             } else {
                 list.remove(at: index)
@@ -324,14 +356,25 @@ struct PhonePromptAnswerLedger: Sendable {
         attempts[key]?.contains { $0.settledAt == nil } ?? false
     }
 
-    /// The phone whose answer to the prompt under `key` was kept, counting
-    /// only an answer that settled at or after `openedAt` when it is given.
-    func answeredBy(_ key: Key, openedAt: Date? = nil) -> UUID? {
-        attempts[key]?.first { attempt in
+    /// Who answered the prompt under `key`, from its kept attempts, counting
+    /// only one that settled at or after `openedAt` when it is given:
+    /// - **the phone whose answer was `delivered`**, when one was;
+    /// - otherwise **the phone whose answer may have landed** (`unknown`),
+    ///   when only one phone's may have, however many attempts it made;
+    /// - **`unknownDevice`** when several phones' may have;
+    /// - nil when no attempt counts.
+    func answeredBy(_ key: Key, openedAt: Date? = nil) -> Answerer? {
+        let kept = (attempts[key] ?? []).filter { attempt in
             guard let settledAt = attempt.settledAt else { return false }
             guard let openedAt else { return true }
             return settledAt >= openedAt
-        }?.deviceID
+        }
+        if let delivered = kept.first(where: { attempt in attempt.settlement == .delivered }) {
+            return .device(delivered.deviceID)
+        }
+        guard let first = kept.first else { return nil }
+        let devices = Set(kept.map { attempt in attempt.deviceID })
+        return devices.count == 1 ? .device(first.deviceID) : .unknownDevice
     }
 
     /// Waits on `key`'s running attempts. Call only while `isAnswering(key)`.
@@ -358,9 +401,12 @@ struct PhonePromptAnswerLedger: Sendable {
 /// What tells who answered each prompt that closed.
 ///
 /// `answeredBy` is:
-/// - **`phone`, with its device**, when a phone's answer to it was kept by the
-///   ledger. For a local prompt, only when the store says TBD's decision
-///   reached Claude (`answered`), or has no record of how it ended.
+/// - **`phone`**, when the ledger kept a phone's answer to it, with the
+///   phone's device when the ledger can name it
+///   (`PhonePromptAnswerLedger.answeredBy`) and none when several phones'
+///   answers may have landed. For a local prompt, only when the store says
+///   TBD's decision reached Claude (`answered`), or has no record of how it
+///   ended.
 /// - **`laptop`** for a local prompt the terminal answered
 ///   (`answeredInTerminal`), or that TBD's decision ended with no phone's
 ///   answer kept (`answered`): the laptop's TBD app answered it.
@@ -369,8 +415,8 @@ struct PhonePromptAnswerLedger: Sendable {
 ///   prompt is `unknown` unless a phone answered it, as nothing else records
 ///   who answered one.
 struct PhonePromptAttribution: Sendable, Equatable {
-    /// The phone whose answer the ledger kept, by prompt ID.
-    var phoneAnswers: [String: UUID] = [:]
+    /// Who the ledger says answered, by prompt ID.
+    var phoneAnswers: [String: PhonePromptAnswerLedger.Answerer] = [:]
     /// How the store resolved each recently closed local prompt, by prompt
     /// ID. Nil for a remote session.
     var localResolutions: [String: PendingPromptStore.Resolution]?
@@ -379,7 +425,9 @@ struct PhonePromptAttribution: Sendable, Equatable {
         let phone = phoneAnswers[promptID]
         let laptop = PhonePromptResolution(promptID: promptID, answeredBy: .laptop, deviceID: nil)
         let unknown = PhonePromptResolution(promptID: promptID, answeredBy: .unknown, deviceID: nil)
-        let byPhone = phone.map { PhonePromptResolution(promptID: promptID, answeredBy: .phone, deviceID: $0) }
+        let byPhone = phone.map { answerer in
+            PhonePromptResolution(promptID: promptID, answeredBy: .phone, deviceID: answerer.deviceID)
+        }
         guard let localResolutions else {
             return byPhone ?? unknown
         }
@@ -774,8 +822,9 @@ extension PhoneAppService {
     }
 
     /// Runs `call`, a core answer, inside a ledger attempt for `key`, and
-    /// reads its result. The attempt is kept when the answer was delivered or
-    /// may have been, and dropped on `already_resolved` and on every error.
+    /// reads its result. The attempt is kept, with how it ended, when the
+    /// answer was delivered or may have been, and dropped on
+    /// `already_resolved` and on every error.
     private nonisolated func answerInLedger(
         _ key: PhonePromptAnswerLedger.Key, deviceID: UUID, _ call: () async throws -> RPCResponse
     ) async throws -> PromptAnswerResult {
@@ -789,10 +838,19 @@ extension PhoneAppService {
             }
             result = try Self.decoded(PromptAnswerResult.self, from: response, method: "prompt.answer")
         } catch {
-            await finishPhoneAnswer(key, token: token, keep: false)
+            await finishPhoneAnswer(key, token: token, settled: nil)
             throw error
         }
-        await finishPhoneAnswer(key, token: token, keep: result.outcome != .alreadyResolved)
+        let settled: PhonePromptAnswerLedger.Settlement?
+        switch result.outcome {
+        case .delivered:
+            settled = .delivered
+        case .unknown:
+            settled = .unknown
+        case .alreadyResolved:
+            settled = nil
+        }
+        await finishPhoneAnswer(key, token: token, settled: settled)
         return result
     }
 
@@ -805,18 +863,21 @@ extension PhoneAppService {
         return token
     }
 
-    /// Finishes the ledger attempt `token`, and wakes the reads waiting on
+    /// Finishes the ledger attempt `token`, kept with how it ended,
+    /// `settled`, or dropped when that is nil, and wakes the reads waiting on
     /// it once no other attempt on the prompt runs.
-    func finishPhoneAnswer(_ key: PhonePromptAnswerLedger.Key, token: UInt64, keep: Bool) {
-        for waiter in phoneAnswerLedger.finish(key, token: token, keep: keep, now: now()) {
+    func finishPhoneAnswer(
+        _ key: PhonePromptAnswerLedger.Key, token: UInt64, settled: PhonePromptAnswerLedger.Settlement?
+    ) {
+        for waiter in phoneAnswerLedger.finish(key, token: token, settled: settled, now: now()) {
             waiter.resume()
         }
     }
 
-    /// The phone whose answer the ledger kept for each closed prompt in
-    /// `keys`, by prompt ID. With a prompt's time in `openedAt`, an answer
-    /// that settled before it answered an earlier opening of the prompt and
-    /// does not count.
+    /// Who the ledger says answered each closed prompt in `keys`
+    /// (`PhonePromptAnswerLedger.answeredBy`), by prompt ID. With a prompt's
+    /// time in `openedAt`, an answer that settled before it answered an
+    /// earlier opening of the prompt and does not count.
     ///
     /// It first waits for every phone's answer to those prompts still
     /// running, so a race is told right: a phone whose answer lost to the
@@ -829,16 +890,16 @@ extension PhoneAppService {
     /// `prompt.changed` waits with it.
     func phoneAnswers(
         for keys: [PhonePromptAnswerLedger.Key], openedAt: [String: Date] = [:]
-    ) async -> [String: UUID] {
-        var answers: [String: UUID] = [:]
+    ) async -> [String: PhonePromptAnswerLedger.Answerer] {
+        var answers: [String: PhonePromptAnswerLedger.Answerer] = [:]
         for key in keys {
             while phoneAnswerLedger.isAnswering(key) {
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     phoneAnswerLedger.wait(key, continuation)
                 }
             }
-            if let deviceID = phoneAnswerLedger.answeredBy(key, openedAt: openedAt[key.promptID]) {
-                answers[key.promptID] = deviceID
+            if let answerer = phoneAnswerLedger.answeredBy(key, openedAt: openedAt[key.promptID]) {
+                answers[key.promptID] = answerer
             }
         }
         return answers

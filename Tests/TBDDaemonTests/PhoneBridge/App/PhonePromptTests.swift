@@ -396,7 +396,8 @@ struct PhonePromptTests {
 
             let key = PhonePromptAnswerLedger.Key(session: .local(terminalID: terminalID), promptID: "toolu-1")
             let answers = await h.service.phoneAnswers(for: [key])
-            #expect(answers == (kept ? ["toolu-1": h.peer.deviceID] : [:]), "response: \(response)")
+            let expected: [String: PhonePromptAnswerLedger.Answerer] = kept ? ["toolu-1": .device(h.peer.deviceID)] : [:]
+            #expect(answers == expected, "response: \(response)")
         }
     }
 
@@ -413,13 +414,59 @@ struct PhonePromptTests {
         ledger.begin(key, token: 1, deviceID: winner, now: now)
         ledger.begin(key, token: 2, deviceID: loser, now: now)
         #expect(ledger.isAnswering(key))
-        _ = ledger.finish(key, token: 2, keep: false, now: now)
+        _ = ledger.finish(key, token: 2, settled: nil, now: now)
         #expect(ledger.isAnswering(key), "the winner's call still runs")
         #expect(ledger.answeredBy(key) == nil)
-        _ = ledger.finish(key, token: 1, keep: true, now: now)
+        _ = ledger.finish(key, token: 1, settled: .delivered, now: now)
 
         #expect(!ledger.isAnswering(key))
-        #expect(ledger.answeredBy(key) == winner)
+        #expect(ledger.answeredBy(key) == .device(winner))
+    }
+
+    /// A delivered answer beats one whose outcome is unknown, whichever
+    /// began first: the prompt took the delivered one.
+    @Test func aDeliveredAnswerBeatsAnUnknownOne() {
+        var ledger = PhonePromptAnswerLedger()
+        let key = PhonePromptAnswerLedger.Key(session: .local(terminalID: UUID()), promptID: "toolu-1")
+        let unsure = UUID()
+        let delivered = UUID()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        ledger.begin(key, token: 1, deviceID: unsure, now: now)
+        ledger.begin(key, token: 2, deviceID: delivered, now: now)
+        _ = ledger.finish(key, token: 1, settled: .unknown, now: now)
+        _ = ledger.finish(key, token: 2, settled: .delivered, now: now)
+
+        #expect(ledger.answeredBy(key) == .device(delivered))
+    }
+
+    /// Two phones whose answers both ended unknown: either may have landed,
+    /// so the ledger names no phone, and the resolution says a phone
+    /// answered with no device. One phone with two unknown answers is still
+    /// named.
+    @Test func twoPhonesWhoseAnswersBothEndedUnknownNameNoPhone() {
+        let key = PhonePromptAnswerLedger.Key(session: .local(terminalID: UUID()), promptID: "toolu-1")
+        let first = UUID()
+        let second = UUID()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        var two = PhonePromptAnswerLedger()
+        two.begin(key, token: 1, deviceID: first, now: now)
+        two.begin(key, token: 2, deviceID: second, now: now)
+        _ = two.finish(key, token: 1, settled: .unknown, now: now)
+        _ = two.finish(key, token: 2, settled: .unknown, now: now)
+        #expect(two.answeredBy(key) == .unknownDevice)
+
+        var one = PhonePromptAnswerLedger()
+        one.begin(key, token: 1, deviceID: first, now: now)
+        one.begin(key, token: 2, deviceID: first, now: now)
+        _ = one.finish(key, token: 1, settled: .unknown, now: now)
+        _ = one.finish(key, token: 2, settled: .unknown, now: now)
+        #expect(one.answeredBy(key) == .device(first))
+
+        let attribution = PhonePromptAttribution(phoneAnswers: ["toolu-1": .unknownDevice], localResolutions: nil)
+        #expect(attribution.resolution(of: "toolu-1") == PhonePromptResolution(
+            promptID: "toolu-1", answeredBy: .phone, deviceID: nil))
     }
 
     @Test func theLedgerDropsAnswersPastItsLifetimeAndItsLimit() {
@@ -432,7 +479,7 @@ struct PhonePromptTests {
 
         var aged = PhonePromptAnswerLedger()
         aged.begin(key("old"), token: 1, deviceID: device, now: now)
-        _ = aged.finish(key("old"), token: 1, keep: true, now: now)
+        _ = aged.finish(key("old"), token: 1, settled: .delivered, now: now)
         aged.begin(key("new"), token: 2, deviceID: device, now: now.addingTimeInterval(PhonePromptAnswerLedger.lifetime + 1))
         #expect(aged.answeredBy(key("old")) == nil)
 
@@ -440,11 +487,11 @@ struct PhonePromptTests {
         let count = PhonePromptAnswerLedger.settledLimit + 1
         for index in 0..<count {
             full.begin(key("p-\(index)"), token: UInt64(index + 1), deviceID: device, now: now)
-            _ = full.finish(key("p-\(index)"), token: UInt64(index + 1), keep: true, now: now)
+            _ = full.finish(key("p-\(index)"), token: UInt64(index + 1), settled: .delivered, now: now)
         }
         #expect(full.answeredBy(key("p-0")) == nil)
-        #expect(full.answeredBy(key("p-1")) == device)
-        #expect(full.answeredBy(key("p-\(count - 1)")) == device)
+        #expect(full.answeredBy(key("p-1")) == .device(device))
+        #expect(full.answeredBy(key("p-\(count - 1)")) == .device(device))
     }
 
     /// A prompt opened again under the same ID: an answer that settled
@@ -455,10 +502,10 @@ struct PhonePromptTests {
         let device = UUID()
         let opened = Date(timeIntervalSince1970: 1_800_000_000)
         ledger.begin(key, token: 1, deviceID: device, now: opened.addingTimeInterval(5))
-        _ = ledger.finish(key, token: 1, keep: true, now: opened.addingTimeInterval(6))
+        _ = ledger.finish(key, token: 1, settled: .delivered, now: opened.addingTimeInterval(6))
 
-        #expect(ledger.answeredBy(key) == device)
-        #expect(ledger.answeredBy(key, openedAt: opened) == device)
+        #expect(ledger.answeredBy(key) == .device(device))
+        #expect(ledger.answeredBy(key, openedAt: opened) == .device(device))
         #expect(ledger.answeredBy(key, openedAt: opened.addingTimeInterval(60)) == nil)
     }
 
@@ -467,7 +514,10 @@ struct PhonePromptTests {
     @Test func aLocalPromptsResolutionSaysWhoAnswered() {
         let phone = UUID()
         let attribution = PhonePromptAttribution(
-            phoneAnswers: ["by-phone": phone, "phone-then-terminal": phone, "phone-unrecorded": phone, "phone-gone": phone],
+            phoneAnswers: [
+                "by-phone": .device(phone), "phone-then-terminal": .device(phone),
+                "phone-unrecorded": .device(phone), "phone-gone": .device(phone),
+            ],
             localResolutions: [
                 "by-phone": .answered,
                 "by-app": .answered,
@@ -494,7 +544,7 @@ struct PhonePromptTests {
 
     @Test func aRemotePromptsResolutionIsPhoneOrUnknown() {
         let phone = UUID()
-        let attribution = PhonePromptAttribution(phoneAnswers: ["by-phone": phone], localResolutions: nil)
+        let attribution = PhonePromptAttribution(phoneAnswers: ["by-phone": .device(phone)], localResolutions: nil)
 
         #expect(attribution.resolution(of: "by-phone") == PhonePromptResolution(
             promptID: "by-phone", answeredBy: .phone, deviceID: phone))
