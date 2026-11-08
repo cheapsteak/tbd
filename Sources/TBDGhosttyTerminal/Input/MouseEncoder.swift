@@ -206,10 +206,15 @@ enum WheelOutcome: Sendable, Equatable {
 final class MouseEncoder {
     private let handle: GhosttyMouseEncoderHandle
     private let event: GhosttyMouseEvent
-    /// Buttons currently held. `setopt_from_terminal` explicitly does *not* touch
-    /// `OPT_ANY_BUTTON_PRESSED`, so the encoder has to keep this itself and push it on every
-    /// encode. Internal rather than private so tests can assert it never leaks a wheel "press".
-    private(set) var heldButtons: Set<MouseButton> = []
+    /// Buttons held as far as the program knows: those whose press was reported and whose release
+    /// has not gone out. `setopt_from_terminal` explicitly does *not* touch
+    /// `OPT_ANY_BUTTON_PRESSED`, so the encoder pushes this on every encode.
+    ///
+    /// The keys of `pressEncodings`, so the two cannot disagree. A press that went out unreported
+    /// never joins: the controller passes on only the releases of reported presses, so its release
+    /// would never come here, and the button would stay held until focus was lost. Internal rather
+    /// than private so tests can assert it never leaks a wheel "press".
+    var heldButtons: Set<MouseButton> { Set(pressEncodings.keys) }
     /// For each reported, still-held button, an encoder set from the terminal as its press went
     /// out. The release is encoded with it, so a program that turned reporting off, or changed
     /// format, while the button was down still gets the release, in the press's encoding.
@@ -292,7 +297,6 @@ final class MouseEncoder {
     /// Forget motion de-duplication state and which buttons are held. Call on focus loss and when
     /// the terminal is reset.
     func reset() {
-        heldButtons.removeAll()
         pressEncodings.removeAll()
         lastMotion = nil
         _ = ghostty_mouse_encoder_reset(handle.raw)
@@ -393,18 +397,17 @@ final class MouseEncoder {
         case .press:
             lastMotion = nil
             guard let button = press.button else { return try encodeEvent(press, with: handle) }
-            heldButtons.insert(button)
             pressEncodings[button] = nil
-            let bytes = try encodeEvent(press, with: handle)
-            // Only a reported press earns a release. Without its own encoder, the release goes
-            // out under the flags in force when it comes.
+            // The encoder is told this button is down while it encodes the press itself.
+            let bytes = try encodeEvent(press, with: handle, anyPressed: true)
+            // Only a reported press earns a release, and only a reported press is held. Without
+            // its own encoder, the release goes out under the flags in force when it comes.
             if bytes != nil { pressEncodings[button] = pressEncoder(from: terminal) ?? handle }
             return bytes
 
         case .release:
             lastMotion = nil
             guard let button = press.button else { return try encodeEvent(press, with: handle) }
-            heldButtons.remove(button)
             // A press that went out unreported has nothing to close, even if the program has
             // turned reporting on since: a release alone would tell it a button came up that it
             // never saw go down.
@@ -419,12 +422,12 @@ final class MouseEncoder {
     }
 
     /// Hands `press` to libghostty through `encoder`, whose options are already set, and returns
-    /// the report it wrote. nil when it wrote none. `anyPressed` defaults to the held buttons,
-    /// which a press has already joined and a release has already left.
+    /// the report it wrote. nil when it wrote none. `anyPressed` defaults to whether any button is
+    /// held, which a release has already left; a press passes true itself.
     private func encodeEvent(
         _ press: MousePress, with encoder: GhosttyMouseEncoderHandle, anyPressed: Bool? = nil
     ) throws -> [UInt8]? {
-        var pressed = anyPressed ?? !heldButtons.isEmpty
+        var pressed = anyPressed ?? !pressEncodings.isEmpty
         _ = ghostty_mouse_encoder_set(encoder.raw, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed)
 
         _ = ghostty_mouse_event_set_action(event, press.action.ghostty)
@@ -490,8 +493,8 @@ final class MouseEncoder {
         var bytes: [UInt8] = []
         for _ in 0..<abs(rows) {
             // A wheel "click" is a press with no release. It goes straight to the encoder, so it
-            // never joins `heldButtons`, where button-event tracking would think a button is held,
-            // nor `pressEncodings`. The encoder is still told a button is down, as for any press.
+            // never joins `pressEncodings`, where it would count as a held button. The encoder is
+            // still told a button is down, as for any press.
             if let encoded = try encodeEvent(press, with: handle, anyPressed: true) { bytes += encoded }
         }
         return bytes.isEmpty ? .none : .report(bytes)

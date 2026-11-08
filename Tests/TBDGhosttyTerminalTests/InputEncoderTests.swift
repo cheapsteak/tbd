@@ -133,6 +133,30 @@ struct MouseEncoderTests {
         #expect(click != nil, "with 1000 set a press still encoded as nothing")
     }
 
+    /// A press that went out unreported leaves no button held. X10 tracking (`?9h`) reports only
+    /// left, middle and right presses, so a back-button press goes out as nothing, and its release
+    /// never reaches the encoder: the controller passes on only the releases of reported presses.
+    /// Held, it would tell libghostty a button is down until focus was lost. libghostty reads that
+    /// only for a move outside the viewport, which any-event tracking then reports as if dragged.
+    @Test func anUnreportedPressLeavesNoButtonHeld() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        terminal.feed(text: "\u{1b}[?9h")
+
+        let press = try encode(MousePress(action: .press, button: .eight, position: Self.point), with: encoder, on: terminal)
+        try #require(press == nil, "X10 tracking reported a back-button press as \(String(describing: press))")
+        #expect(encoder.heldButtons.isEmpty, "the unreported press left \(encoder.heldButtons) held")
+
+        terminal.feed(text: "\u{1b}[?1003h")
+        // Past the right edge of the 100-pixel screen.
+        let outside = try encode(Self.motion(toX: 150), with: encoder, on: terminal)
+        #expect(outside == nil, "a move outside the viewport with no button held encoded as \(String(describing: outside))")
+        // Any-event tracking is on, or the nil above proves nothing.
+        let inside = try encode(Self.motion(toX: 5), with: encoder, on: terminal)
+        #expect(inside != nil, "under any-event tracking a move inside the viewport encoded as nothing")
+    }
+
     /// Under any-event tracking a move is reported once per cell, not once per pixel: the encoder
     /// drops a motion report that repeats the last one, and forgets it when the modes change.
     /// Driven through the terminal's own input seam, so the encoder is the one bound to the
