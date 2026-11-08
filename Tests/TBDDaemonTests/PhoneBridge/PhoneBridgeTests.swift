@@ -475,6 +475,47 @@ struct PhoneBridgeTests {
         }
     }
 
+    @Test func aRefusedLinksSlowStopHoldsUpNoOtherLink() async throws {
+        try await withBridge(devices: 2, holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            await h.bridge.reconcile()
+            let slow = h.phones[0]
+            let other = h.phones[1]
+            try await h.waitUntil("both rooms to open") { h.relay.openLaptopRooms() == h.rooms }
+            _ = try await h.connectedPhone(slow)
+            try await h.waitUntil("the first phone to show as connected") {
+                await h.bridge.status().connectedDeviceIDs == [slow.device.id]
+            }
+
+            // A frame for the first phone that cannot leave keeps its
+            // connection's writer, and so its stop, waiting.
+            transport.hold(room: slow.device.roomID)
+            let latest = await h.app.lastOutbox
+            let outbox = try #require(latest)
+            let queued = await outbox.send(appBody: Data(#"{"note":"held"}"#.utf8))
+            #expect(queued)
+            try await h.waitUntil("the frame to reach the socket") { transport.heldSends == 1 }
+
+            // The relay, redeployed without API 1, drops the first phone's
+            // room socket. That link's next check refuses the relay, and its
+            // connection's stop waits behind the held frame.
+            await h.info.answer(with: PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [2]))
+            h.relay.closeLaptop(room: slow.device.roomID, code: 1011)
+            try await h.clock.advanceUntil("the first link to be refused", by: .seconds(1)) {
+                await h.bridge.linkCount == 1
+            }
+
+            // The other phone's room socket stayed open, and its
+            // connection's events still reach the status.
+            _ = try await h.connectedPhone(other)
+            try await h.waitUntil("the other phone to show as connected") {
+                await h.bridge.status().connectedDeviceIDs == [other.device.id]
+            }
+        }
+    }
+
     @Test func anUnreachableInfoBacksOffAndRetries() async throws {
         try await withBridge(devices: 1) { h in
             await h.info.fail(with: .relayCheckFailed("HTTP 503"))

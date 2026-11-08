@@ -8,6 +8,8 @@ final class HoldingTransport: RelayTransport, @unchecked Sendable {
     private let relay: FakeRelay
     private let lock = NSLock()
     private var holding = false
+    /// The one room whose sends are held; nil holds every room's.
+    private var heldRoom: String?
     private var held: [CheckedContinuation<Void, Never>] = []
 
     init(relay: FakeRelay) {
@@ -16,13 +18,25 @@ final class HoldingTransport: RelayTransport, @unchecked Sendable {
 
     func connect(url: URL, userAgent: String) async throws -> any RelaySocket {
         let socket = try await relay.connect(url: url, userAgent: userAgent)
-        return HoldingSocket(base: socket, transport: self)
+        return HoldingSocket(base: socket, transport: self, room: url.lastPathComponent)
     }
 
     /// From now on, a binary frame a laptop socket sends waits until
     /// `release()`.
     func hold() {
-        lock.withLock { holding = true }
+        lock.withLock {
+            holding = true
+            heldRoom = nil
+        }
+    }
+
+    /// From now on, a binary frame a laptop socket in `room` sends waits
+    /// until `release()`; the other rooms' frames still leave.
+    func hold(room: String) {
+        lock.withLock {
+            holding = true
+            heldRoom = room
+        }
     }
 
     /// How many sends are waiting.
@@ -43,10 +57,10 @@ final class HoldingTransport: RelayTransport, @unchecked Sendable {
         }
     }
 
-    fileprivate func waitWhileHolding() async {
+    fileprivate func waitWhileHolding(room: String) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let parked = lock.withLock { () -> Bool in
-                guard holding else { return false }
+                guard holding, heldRoom == nil || heldRoom == room else { return false }
                 held.append(continuation)
                 return true
             }
@@ -61,10 +75,12 @@ final class HoldingTransport: RelayTransport, @unchecked Sendable {
 private struct HoldingSocket: RelaySocket {
     let base: any RelaySocket
     let transport: HoldingTransport
+    /// The relay room the socket is in.
+    let room: String
 
     func send(_ frame: RelayFrame) async throws {
         if case .binary = frame {
-            await transport.waitWhileHolding()
+            await transport.waitWhileHolding(room: room)
         }
         try await base.send(frame)
     }

@@ -123,6 +123,8 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 ///
 /// **A refused relay** stops each link it refuses, for good; a later
 /// reconcile starts them again. Saving the relay URL is how the user asks.
+/// The refused connection stops in a task of its own, so its stop never
+/// holds up another link's events; halting and `stop()` wait for it.
 ///
 /// **Revoking** deletes the phone's row before anything else, so no later
 /// handshake from that phone is accepted, whatever its link is doing. Then
@@ -228,6 +230,9 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// The last serialized change; the next one waits for it.
     private var tail: Task<Void, Never>?
     private var pump: Task<Void, Never>?
+    /// The stops of connections whose link the relay check refused, by an
+    /// ID of their own. Each removes itself when done.
+    private var refusedStops: [UUID: Task<Void, Never>] = [:]
     private var isStopped = false
 
     init(db: TBDDatabase, keyStore: LaptopKeyStore, transport: any RelayTransport,
@@ -345,6 +350,7 @@ actor PhoneBridge: PhoneBridgeControlling {
         await serialized { await self.stopEverything(reason: "TBD is stopping") }
         linkEventSink.finish()
         await pump?.value
+        await finishRefusedStops()
     }
 
     // MARK: - The relay's status
@@ -564,7 +570,8 @@ actor PhoneBridge: PhoneBridgeControlling {
     }
 
     /// Stops the relay check, every link and the pairing service, sending
-    /// nothing, and waits for them. The next start checks the relay afresh.
+    /// nothing, and waits for them and for every refused link's stop. The
+    /// next start checks the relay afresh.
     private func stopEverything(reason: String) async {
         let checking = checkTask
         checkTask = nil
@@ -577,6 +584,7 @@ actor PhoneBridge: PhoneBridgeControlling {
         links = [:]
         await checking?.value
         await Self.stopAll(closing)
+        await finishRefusedStops()
         await stopping?.pairing.cancel()
         if stopping != nil || !closing.isEmpty {
             PhoneBridgeLog.record(.stopped(reason: reason))
@@ -755,13 +763,15 @@ actor PhoneBridge: PhoneBridgeControlling {
         pump = Task { await self.drainLinkEvents() }
     }
 
+    /// Handles each event in one actor turn, awaiting nothing, so no
+    /// connection can hold up the events of another.
     private func drainLinkEvents() async {
         for await item in linkEvents {
-            await handle(item)
+            handle(item)
         }
     }
 
-    private func handle(_ item: LinkEvent) async {
+    private func handle(_ item: LinkEvent) {
         // An event of a connection that is gone, or that another replaced,
         // says nothing about the current one.
         guard var link = links[item.deviceID], link.token == item.token else { return }
@@ -785,12 +795,32 @@ actor PhoneBridge: PhoneBridgeControlling {
             // later reconcile starts it again.
             links[item.deviceID] = nil
             broadcast(.phoneStatusChanged)
-            await link.connection.stop()
+            stopRefused(link.connection)
             return
         }
         links[item.deviceID] = link
         if before != (link.isOpen, link.isConnected) {
             broadcast(.phoneStatusChanged)
+        }
+    }
+
+    /// Stops a refused link's connection, so its writer task ends, in a task
+    /// of its own: a stop that waits on a send still leaving must not keep
+    /// the pump from the other links' events.
+    private func stopRefused(_ connection: PhoneConnection) {
+        let id = UUID()
+        refusedStops[id] = Task { await self.runRefusedStop(id: id, connection) }
+    }
+
+    private func runRefusedStop(id: UUID, _ connection: PhoneConnection) async {
+        await connection.stop()
+        refusedStops[id] = nil
+    }
+
+    /// Waits until every refused link's stop has finished.
+    private func finishRefusedStops() async {
+        while let stopping = refusedStops.values.first {
+            await stopping.value
         }
     }
 }
