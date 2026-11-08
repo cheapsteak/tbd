@@ -266,6 +266,10 @@ public final class GhosttyTerminalView: NSView {
     /// A drawn frame reached the screen. From the drawable's presented handler, hopped to main.
     public var onFramePresented: (@MainActor () -> Void)?
 
+    /// A frame has been encoded and committed to the GPU: the last work the app does on it, on the
+    /// main thread, right after `onDrawStart`'s frame. Not called for a frame that drew nothing.
+    public var onFrameEncoded: (@MainActor () -> Void)?
+
     /// The user ⌘-clicked an OSC 8 link. The view opens nothing itself: a program controls this
     /// string entirely, so the host decides what it may open.
     public var onOpenLink: (@MainActor (String) -> Void)?
@@ -919,7 +923,10 @@ public final class GhosttyTerminalView: NSView {
                 surface: surface, layer: layer,
                 willEncode: { self.onDrawStart?() },
                 onPresented: presented)
-            if outcome.didEncode { framesCommitted += 1 }
+            if outcome.didEncode {
+                framesCommitted += 1
+                onFrameEncoded?()
+            }
         } catch {
             if !renderFailing {
                 terminalEngineLog.error("rendering a frame failed: \(String(describing: error), privacy: .public)")

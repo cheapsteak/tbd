@@ -225,8 +225,22 @@ final class GhosttyEngine: TerminalEngine {
             guard let self else { return }
             self.delegate?.engineMovedToWindow(self)
         }
+        // The instruments stamp the same points of a draw as SwiftTerm's
+        // `viewWillDraw` and draw end, in the same order: the engine's hook,
+        // then the latency tap, then the commit probe.
         terminalView.onDrawStart = { [weak self] in
-            self?.onDrawStart?()
+            guard let self else { return }
+            self.onDrawStart?()
+            if let tap = self.latencyTap {
+                // The screen check walks the view hierarchy, so it is taken
+                // before the tap stamps the draw under its lock.
+                let isOnScreen = TerminalCommitLatencyProbe.isOnScreen(self.terminalView)
+                tap.noteDrawWillBegin(isOnScreen: isOnScreen)
+            }
+            TerminalCommitLatencyProbe.recordEngineDrawWillBegin(view: self.terminalView)
+        }
+        terminalView.onFrameEncoded = {
+            TerminalCommitLatencyProbe.recordEngineFrameDrawn()
         }
     }
 
@@ -403,12 +417,18 @@ final class GhosttyEngine: TerminalEngine {
 
     // MARK: - Instruments
 
+    /// Called as each frame begins encoding, from the view's `onDrawStart`;
+    /// see `installForwarders`. The chunks it reports are the ones
+    /// `TerminalViewHolder` stamped, as on SwiftTerm.
     var latencyTap: TerminalLatencyTap?
 
     var onDrawStart: (@MainActor () -> Void)?
 
-    /// Installed on the view only while set: the view registers a presented
-    /// handler on every drawable it presents while its own hook is set.
+    /// Metal's present, from the drawable's presented handler hopped to main;
+    /// see `TerminalEngine.onFramePresented` for how that differs from
+    /// SwiftTerm's. Installed on the view only while set: the view registers
+    /// a presented handler on every drawable it presents while its own hook is
+    /// set.
     var onFramePresented: (@MainActor () -> Void)? {
         didSet {
             terminalView.onFramePresented = onFramePresented == nil ? nil : { [weak self] in

@@ -220,9 +220,17 @@ class TBDTerminalView: TerminalView {
     /// The terminal engine's `onDrawStart`; nil unless something installed it.
     var onDrawStart: (@MainActor () -> Void)?
 
+    /// Called when a frame this view began drawing has been painted. The
+    /// terminal engine's `onFramePresented`; nil unless something installed
+    /// it. SwiftTerm's own hook is one process-wide static that names no view,
+    /// so `SwiftTermFramePresentedFanOut` delivers it: a view that begins
+    /// drawing with this set waits there for the next present.
+    var onFramePresented: (@MainActor () -> Void)?
+
     /// Instrumented only while a terminal diagnostic is on. With both flags
-    /// off this is `super.viewWillDraw()` plus three nil-checks (the third is
-    /// `onDrawStart`): no timestamps, no completion block, no logging.
+    /// off and no engine hook installed this is `super.viewWillDraw()` plus
+    /// four nil-checks (`onDrawStart` and `onFramePresented` are the other
+    /// two): no timestamps, no completion block, no logging.
     ///
     /// The two instruments are independent and neither gates the other. The
     /// latency tap reports the wait BEFORE this draw (how long the oldest
@@ -239,6 +247,9 @@ class TBDTerminalView: TerminalView {
     override func viewWillDraw() {
         super.viewWillDraw()
         onDrawStart?()
+        if onFramePresented != nil {
+            SwiftTermFramePresentedFanOut.noteDrawWillBegin(self)
+        }
         if let tap = latencyTap {
             // The screen check walks the view hierarchy, so it is taken FIRST
             // and the tap is called last. The tap stamps the draw itself, under

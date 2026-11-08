@@ -119,6 +119,11 @@ protocol TerminalEngine: AnyObject, Sendable {
     var latencyTap: TerminalLatencyTap? { get set }
     /// Called as each frame begins drawing.
     var onDrawStart: (@MainActor () -> Void)? { get set }
-    /// Called when a frame has been presented.
+    /// Called when a frame has been presented, as each emulator can say it,
+    /// and the two say different things. SwiftTerm: its Core Graphics draw
+    /// has returned, the app's last work on the frame. libghostty: Metal has
+    /// reported the drawable presented, a frame or so later and closer to the
+    /// glass. Compare the two engines with the latency tap and the commit
+    /// probe, which stamp the same points in both, not with this.
     var onFramePresented: (@MainActor () -> Void)? { get set }
 }
