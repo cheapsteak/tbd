@@ -153,5 +153,72 @@ with_meta "an integrity holding a newline refuses" 1 \
 with_meta "a dist that is not an object refuses" 1 "{\"dist\":\"$tarball10\"}"
 with_meta "a document that is not JSON refuses" 1 "{\"dist\":{\"tarball\":\"$tarball10\","
 
+# A run that fails while it vendors changes nothing: the old files and the old lock stay as they
+# were, and no scratch directory is left in the vendor root. The shims stand in for a cp or mv
+# that fails: cp for any argument ending in /$FAIL_CP_ON, mv for a source matching the pattern
+# $FAIL_MV_FROM. Otherwise each runs the real tool.
+shim="$tmp/shim"
+mkdir -p "$shim"
+cat >"$shim/cp" <<'EOF'
+#!/bin/sh
+if [ -n "${FAIL_CP_ON:-}" ]; then
+  for a in "$@"; do
+    case "$a" in */"$FAIL_CP_ON") echo "cp: $a: Permission denied" >&2; exit 1 ;; esac
+  done
+fi
+exec "$REAL_CP" "$@"
+EOF
+cat >"$shim/mv" <<'EOF'
+#!/bin/sh
+if [ -n "${FAIL_MV_FROM:-}" ]; then
+  case "$1" in $FAIL_MV_FROM) echo "mv: $1: Permission denied" >&2; exit 1 ;; esac
+fi
+exec "$REAL_MV" "$@"
+EOF
+chmod +x "$shim/cp" "$shim/mv"
+real_cp="$(command -v cp)"
+real_mv="$(command -v mv)"
+
+# The library as vendored from reg (dist/x.js is 'var x = 1;'), and a package whose x.js differs.
+base11="$tmp/root11.base"
+VENDOR_REGISTRY="file://$reg" VENDOR_ROOT="$base11" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1
+two() { printf 'var x = 2;\n' >"$1/dist/x.js"; }
+reg11="$tmp/reg11"; make_registry "$reg11" yes "" two
+# update_with <root> <VAR=value>...: runs the update from reg11 into <root> through the shims.
+update_with() {
+  local into="$1"
+  shift
+  rc=0
+  env "$@" REAL_CP="$real_cp" REAL_MV="$real_mv" PATH="$shim:$PATH" \
+    VENDOR_REGISTRY="file://$reg11" VENDOR_ROOT="$into" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 || rc=$?
+}
+# fails_unchanged <label> <VAR=value>...
+fails_unchanged() {
+  local label="$1"
+  shift
+  rm -rf "$tmp/root11"
+  cp -R "$base11" "$tmp/root11"
+  update_with "$tmp/root11" "$@"
+  if [ "$rc" -eq 1 ] && diff -r "$tmp/root11" "$base11" >/dev/null && bash "$check" "$tmp/root11" >/dev/null 2>&1; then
+    ok "$label"
+  else bad "$label: rc=$rc $(diff -r "$tmp/root11" "$base11" 2>&1 | head -5)"; fi
+}
+fails_unchanged "a copy that fails leaves the old files and the old lock" FAIL_CP_ON=x.js
+fails_unchanged "a new library that cannot move into place puts the old one back" FAIL_MV_FROM='*/.vendor-update.*/x'
+fails_unchanged "a lock that cannot be replaced puts the old library back" FAIL_MV_FROM='*/.vendor-update.*/vendor.lock'
+
+update_with "$tmp/root12" FAIL_CP_ON=x.js
+if [ "$rc" -eq 1 ] && [ ! -e "$tmp/root12" ]; then ok "a copy that fails into a new vendor root leaves no root behind"; else bad "new root copy failure: rc=$rc"; fi
+
+rm -rf "$tmp/root11"
+cp -R "$base11" "$tmp/root11"
+printf 'old\n' >"$tmp/root11/x/old.js"
+update_with "$tmp/root11"
+if [ "$rc" -eq 0 ] && [ "$(cat "$tmp/root11/x/dist/x.js")" = 'var x = 2;' ] && [ ! -e "$tmp/root11/x/old.js" ] \
+  && [ "$(cd "$tmp/root11" && find . -mindepth 1 -maxdepth 1 | LC_ALL=C sort | tr '\n' ' ')" = './vendor.lock ./x ' ] \
+  && bash "$check" "$tmp/root11" >/dev/null 2>&1; then
+  ok "an update over a library replaces its files whole and leaves no scratch directory"
+else bad "update over a library: rc=$rc"; fi
+
 [ "$failures" -eq 0 ] || { echo "vendor-update.test.sh: $failures failure(s)" >&2; exit 1; }
 echo "vendor-update.test.sh: all passed"

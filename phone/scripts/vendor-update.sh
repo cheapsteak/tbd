@@ -7,8 +7,11 @@
 # stage-loader.sh serves vendored files under: segments of A-Z a-z 0-9 . _ - that do not
 # start with '.', so no '..', no absolute path and no empty segment. The license files the
 # tarball brings must pass it too, and no vendored file may be, or sit behind, a symlink.
-# So nothing it removes or writes lies outside vendor/<name>/, and nothing it copies lies
-# outside the package.
+# So nothing it removes or writes lies outside vendor/<name>/, vendor.lock and a scratch
+# directory of its own in the vendor root, and nothing it copies lies outside the package.
+#
+# The new files are staged first and moved into place by rename, and the lock is replaced only
+# after them, so a run that fails at any step leaves the old files and the old lock as they were.
 #
 # env: VENDOR_REGISTRY (default https://registry.npmjs.org), VENDOR_ROOT.
 # Exit status: 0 vendored, 1 refused (nothing changed), 2 bad usage.
@@ -62,7 +65,20 @@ plain_file() {
 }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/vendor-update.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+stage=''
+made_root=0
+# On any exit: a run stopped between step 4's two renames puts the old library back, the
+# scratch directories go, and a vendor root this run made and left empty goes too.
+finish() {
+  if [ -n "$stage" ] && { [ -e "$stage/old" ] || [ -L "$stage/old" ]; } \
+    && ! { [ -e "$root/$name" ] || [ -L "$root/$name" ]; }; then
+    mv "$stage/old" "$root/$name" || true
+  fi
+  rm -rf "$work"
+  if [ -n "$stage" ]; then rm -rf "$stage"; fi
+  if [ "$made_root" -eq 1 ]; then rmdir "$root" 2>/dev/null || true; fi
+}
+trap finish EXIT
 
 # 1. Metadata. The version document is parsed as JSON, and only its own `dist` object is read:
 #    `dist.tarball` and `dist.integrity` must be strings, and `dist.attestations` an object for
@@ -137,29 +153,51 @@ done <<EOT
 $all
 EOT
 
-# 4. Replace the library directory and rewrite its lock rows.
-mkdir -p "$root"
-[ -f "$root/vendor.lock" ] || printf '# name\tversion\tkind\tvalue\t[sha256]\n' >"$root/vendor.lock"
-rm -rf "${root:?}/$name"
-{
-  while IFS= read -r f; do
-    mkdir -p "$root/$name/$(dirname "$f")"
-    cp "$work/x/package/$f" "$root/$name/$f"
-  done <<EOT
+# 4. Build the new library and lock in a stage inside the vendor root, on its file system, so
+#    each step into place is a rename. The old library directory goes aside and the new one in,
+#    and only then does the new lock replace the old. A failure while staging changes nothing;
+#    a failed rename puts the old directory back, so it matches the old lock again.
+if [ ! -d "$root" ]; then
+  mkdir -p "$root"
+  made_root=1
+fi
+stage="$(mktemp -d "$root/.vendor-update.XXXXXX")"
+while IFS= read -r f; do
+  mkdir -p "$stage/$name/$(dirname "$f")"
+  cp "$work/x/package/$f" "$stage/$name/$f" || die "could not copy $f; nothing changed"
+done <<EOT
 $all
 EOT
-}
 {
-  awk -F'\t' -v n="$name" '$1 != n' "$root/vendor.lock"
+  if [ -f "$root/vendor.lock" ]; then
+    awk -F'\t' -v n="$name" '$1 != n' "$root/vendor.lock"
+  else
+    printf '# name\tversion\tkind\tvalue\t[sha256]\n'
+  fi
   printf '%s\t%s\ttarball\t%s\n' "$name" "$version" "$tarball"
   printf '%s\t%s\tintegrity\t%s\n' "$name" "$version" "$integrity"
   printf '%s\t%s\tprovenance\t%s\n' "$name" "$version" "$provenance"
   while IFS= read -r f; do
-    sum="$(shasum -a 256 "$root/$name/$f" | awk '{print $1}')"
+    sum="$(shasum -a 256 "$stage/$name/$f" | awk '{print $1}')"
     printf '%s\t%s\tfile\t%s\t%s\n' "$name" "$version" "$f" "$sum"
   done <<EOT
 $all
 EOT
-} >"$work/new.lock"
-cp "$work/new.lock" "$root/vendor.lock"
+} >"$stage/vendor.lock"
+
+# Puts the old library directory, if there was one, back where it was.
+put_back() {
+  if [ -e "$stage/old" ] || [ -L "$stage/old" ]; then mv "$stage/old" "$root/$name"; fi
+}
+if [ -e "$root/$name" ] || [ -L "$root/$name" ]; then
+  mv "$root/$name" "$stage/old" || die "could not move the old $name aside; nothing changed"
+fi
+if ! mv "$stage/$name" "$root/$name"; then
+  put_back
+  die "could not move the new $name into place; nothing changed"
+fi
+if ! mv "$stage/vendor.lock" "$root/vendor.lock"; then
+  mv "$root/$name" "$stage/$name" && put_back
+  die "could not replace vendor.lock; nothing changed"
+fi
 echo "vendor-update: vendored $name@$version (provenance $provenance)"
