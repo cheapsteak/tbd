@@ -47,12 +47,12 @@ function rateLimitText(untilAt: number | undefined, now: number, timeZone: strin
 }
 
 /** A time of day as `3:00 pm`, `12:05 am`. */
-function clockTime(hour: number, minute: number): string {
+export function clockTime(hour: number, minute: number): string {
   const h = hour % 12 === 0 ? 12 : hour % 12;
   return `${h}:${String(minute).padStart(2, '0')} ${hour < 12 ? 'am' : 'pm'}`;
 }
 
-interface WallClock {
+export interface WallClock {
   /** The calendar day, as days since 1 January 1970. */
   day: number;
   /** 0 for Sunday to 6 for Saturday. */
@@ -71,7 +71,12 @@ function wallClock(ms: number, timeZone: string | undefined): WallClock {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
   }).formatToParts(ms);
+  return wallClockFromParts(parts);
+}
+
+/** The fields of `parts` as a `WallClock`. Some engines read midnight as hour 24, so the hour is taken mod 24. */
+export function wallClockFromParts(parts: Intl.DateTimeFormatPart[]): WallClock {
   const field = (type: Intl.DateTimeFormatPartTypes): number => Number(parts.find((p) => p.type === type)?.value);
   const day = Date.UTC(field('year'), field('month') - 1, field('day')) / DAY_MS;
-  return { day, weekday: new Date(day * DAY_MS).getUTCDay(), hour: field('hour'), minute: field('minute') };
+  return { day, weekday: new Date(day * DAY_MS).getUTCDay(), hour: field('hour') % 24, minute: field('minute') };
 }

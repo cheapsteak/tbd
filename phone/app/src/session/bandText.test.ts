@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneStatus } from '../protocol/types.ts';
-import { bandText } from './bandText.ts';
+import { bandText, clockTime, wallClockFromParts } from './bandText.ts';
 
 /** Friday 7 August 2026, 10:00 UTC. */
 const NOW = Date.UTC(2026, 7, 7, 10, 0);
@@ -83,11 +83,15 @@ test('the other statuses have no band', () => {
 });
 
 test("with no time zone, the phone's own zone is used", () => {
-  const untilAt = at(15, 0);
-  const local = new Date(untilAt);
-  const h = local.getHours();
-  const time = `${h % 12 === 0 ? 12 : h % 12}:${String(local.getMinutes()).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`;
-  const sameDay = new Date(NOW).toDateString() === local.toDateString();
-  const day = sameDay ? '' : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][local.getDay()]} `;
-  assert.equal(bandText(rate({ untilAt }), NOW), `Usage limit reached. It resets at ${day}${time}.`);
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  for (const untilAt of [at(15, 0), at(15, 0, 1), at(0, 5, 3)]) {
+    assert.equal(bandText(rate({ untilAt }), NOW), bandText(rate({ untilAt }), NOW, zone));
+  }
+});
+
+test('an hour of 24 at midnight reads as 12:05 am', () => {
+  const parts = (['year', 'month', 'day', 'hour', 'minute'] as const).map((type, i) => ({ type, value: ['2026', '8', '8', '24', '5'][i] as string }));
+  const clock = wallClockFromParts(parts);
+  assert.equal(clock.hour, 0);
+  assert.equal(clockTime(clock.hour, clock.minute), '12:05 am');
 });

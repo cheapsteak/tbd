@@ -5,6 +5,7 @@
  * `TabStrip({ row, session })`, where `session` is the open one of `row`'s sessions.
  */
 
+import { useEffect, useRef } from 'react';
 import type { JSX, KeyboardEvent } from 'react';
 import type { PhoneRow, PhoneSession } from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
@@ -30,8 +31,14 @@ function moveFocus(e: KeyboardEvent<HTMLDivElement>): void {
 export function TabStrip({ row, session }: { row: PhoneRow; session: PhoneSession }): JSX.Element {
   const actions = useActions();
   const open = refKey(session.ref);
+  const strip = useRef<HTMLDivElement>(null);
+  // The strip scrolls sideways, so the open tab is brought into view; the page does not move up or down.
+  useEffect(() => {
+    const tab = strip.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    if (typeof tab?.scrollIntoView === 'function') tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [open]);
   return (
-    <div className="tabs" role="tablist" aria-label={row.name} onKeyDown={moveFocus}>
+    <div ref={strip} className="tabs" role="tablist" aria-label={row.name} onKeyDown={moveFocus}>
       {row.sessions.map((s) => {
         const st = STATUS[s.status.chip];
         const key = refKey(s.ref);

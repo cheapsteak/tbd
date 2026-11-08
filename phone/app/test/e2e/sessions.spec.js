@@ -277,6 +277,13 @@ test('an empty repo still shows its header and "+"', async ({ page, appHost }) =
   await expect(docs).not.toHaveAttribute('aria-expanded', /.*/);
   await expect(app(page).getByRole('button', { name: 'acme-api', exact: true })).toHaveAttribute('aria-expanded', 'true');
   await expect(app(page).getByRole('button', { name: 'New session in acme-docs' })).toBeVisible();
+
+  // A tap on the empty group's name does not collapse it: the row that arrives next is shown.
+  await docs.click();
+  const arrived = { ...rowLike('main', { id: shellOnly.id, name: 'Shell only', agoMinutes: 0 }), id: shellOnly.id };
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [arrived], removedRowIDs: [] });
+  await expect(app(page).locator('.row .n', { hasText: 'Shell only' })).toBeVisible();
+  await expect(docs).toHaveAttribute('aria-expanded', 'true');
 });
 
 // --- the live list ----------------------------------------------------------------------
@@ -470,24 +477,25 @@ test.describe('in UTC', () => {
     const bulk = mockRow('Bulk import');
     /** @param {number | undefined} untilAt */
     const limited = (untilAt) => ({ ...bulk, sessions: [{ ...bulk.sessions[0], status: { chip: 'rateLimited', agoMinutes: 40, ...(untilAt === undefined ? {} : { untilAt }) } }] });
-    const today = new Date();
-    const at = (/** @type {number} */ days, /** @type {number} */ hour, /** @type {number} */ minute) =>
-      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + days, hour, minute);
+    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const clock = (/** @type {Date} */ d) => `${d.getUTCHours() % 12 || 12}:${String(d.getUTCMinutes()).padStart(2, '0')} ${d.getUTCHours() < 12 ? 'am' : 'pm'}`;
     // A limit that lifts in a few minutes: a time still to come, whatever hour the test runs at.
+    // Whether it is "today" is read from the clock at assertion time, so midnight cannot split it.
     const soon = Date.now() + 10 * 60_000;
-    const soonDate = new Date(soon);
-    const soonClock = `${soonDate.getUTCHours() % 12 || 12}:${String(soonDate.getUTCMinutes()).padStart(2, '0')} ${soonDate.getUTCHours() < 12 ? 'am' : 'pm'}`;
-    const soonDay = soonDate.getUTCDate() === today.getUTCDate() ? '' : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][soonDate.getUTCDay()]} `;
     await openApp(page, appHost, { scenario: withRows(MOCK, [limited(soon)]) });
     await openSessionByName(page, 'Bulk import');
     const band = app(page).locator('.banner');
     await expect(band).toContainClass('st-rate');
-    await expect(band).toHaveText(`Usage limit reached. It resets at ${soonDay}${soonClock}.`);
+    await expect(async () => {
+      const lifts = new Date(soon);
+      const day = lifts.getUTCDate() === new Date().getUTCDate() ? '' : `${WEEKDAYS[lifts.getUTCDay()]} `;
+      await expect(band).toHaveText(`Usage limit reached. It resets at ${day}${clock(lifts)}.`, { timeout: 500 });
+    }).toPass();
 
-    // On another day, the weekday comes first. The band changes while the screen is open.
-    const tomorrow = at(1, 9, 5);
-    const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(tomorrow).getUTCDay()];
-    await hostCall(page, 'emit', 'sessions.changed', { rows: [limited(tomorrow)], removedRowIDs: [] });
+    // Two days on is another day whenever the app reads the clock, however close to midnight. The band changes while the screen is open.
+    const later = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 2, 9, 5);
+    const weekday = WEEKDAYS[new Date(later).getUTCDay()];
+    await hostCall(page, 'emit', 'sessions.changed', { rows: [limited(later)], removedRowIDs: [] });
     await expect(band).toHaveText(`Usage limit reached. It resets at ${weekday} 9:05 am.`);
 
     await hostCall(page, 'emit', 'sessions.changed', { rows: [limited(undefined)], removedRowIDs: [] });
@@ -519,6 +527,26 @@ function visibleNames(els) {
     return (copy.textContent ?? '').replace(/\s+/g, ' ').trim();
   });
 }
+
+test('the open tab is scrolled into view in a strip of many tabs', async ({ page, appHost }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  const row = mockRow('Checkout v2');
+  const sessions = Array.from({ length: 8 }, (_, i) => ({
+    ...CLAUDE,
+    ref: { kind: 'local', terminalID: `00000000-0000-4000-8000-0000000009${String(i).padStart(2, '0')}` },
+    tabName: `Session ${i + 1}`,
+    status: { chip: i === 7 ? 'waitingForYou' : 'idle', agoMinutes: 30 + i },
+  }));
+  await openApp(page, appHost, { scenario: withRows(MOCK, [{ ...row, sessions }]) });
+  await openSessionByName(page, 'Checkout v2');
+  const selected = app(page).getByRole('tab', { selected: true });
+  await expect(selected).toContainText('Session 8');
+  const strip = await app(page).locator('.tabs').boundingBox();
+  await expect(async () => {
+    const box = await selected.boundingBox();
+    expect(box && strip && box.x >= strip.x - 1 && box.x + box.width <= strip.x + strip.width + 1).toBe(true);
+  }).toPass();
+});
 
 test('a worktree with several sessions shows one tab each, marking the open one', async ({ page, appHost }) => {
   await openApp(page, appHost);
