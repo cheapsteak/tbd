@@ -338,6 +338,77 @@ test('back clears a pending open, so a worktree the user moved away from never o
   assert.deepEqual(h.calls, []);
 });
 
+test('a navigation between the mark and the reply drops the open', async () => {
+  // openSession while a fork of R is in flight, then back while a create is.
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  const forkMark = h.actions.navMark();
+  h.actions.openSession(OTHER);
+  h.actions.openPending({ ref: R2 }, forkMark);
+  assert.equal(h.state().ui.pendingOpen, null);
+  const createMark = h.actions.navMark();
+  h.actions.back();
+  h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' }, createMark);
+  assert.equal(h.state().ui.pendingOpen, null);
+  h.calls.length = 0;
+  h.actions.onEvent(changed([row('W1', [R, R2]), row(WT, [R2], 'fix-login')]));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.equal(h.state().ui.toast, null);
+  assert.deepEqual(h.calls, []);
+});
+
+test('a reply whose user stayed put opens at its mark', async () => {
+  const h = await subscribed([row('W1', [R])]);
+  h.actions.openSession(R);
+  const mark = h.actions.navMark();
+  // The same session again, a menu and a sheet are none of them a navigation.
+  h.actions.openSession(R);
+  h.actions.openMenu({ name: 'model' });
+  h.actions.openSheet({ name: 'fork' });
+  h.actions.openPending({ ref: R2 }, mark);
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: R2 });
+  h.calls.length = 0;
+  h.actions.onEvent(changed([row('W1', [R, R2])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R2 });
+  assert.deepEqual(h.calls, [['openTranscript', R2]]);
+  // One the list shows already opens at once.
+  const h2 = await subscribed([row('W1', [R]), row('W2', [R2])]);
+  h2.actions.openSession(R);
+  h2.actions.openPending({ ref: R2 }, h2.actions.navMark());
+  assert.deepEqual(h2.state().ui.route, { screen: 'session', ref: R2 });
+});
+
+test('openPending with no mark waits whatever the user did before', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openSession(OTHER);
+  h.actions.back();
+  h.actions.openPending({ ref: R2 });
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: R2 });
+  h.actions.onEvent(changed([row('W1', [R, R2])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R2 });
+});
+
+test("only the user's navigations move the mark", async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  assert.equal(h.actions.navMark(), 0);
+  h.actions.back();                     // on the list already
+  h.actions.openSession(R2);            // no row lists it
+  assert.equal(h.actions.navMark(), 0);
+  h.actions.openSession(R);
+  h.actions.openSession(R);             // shown already
+  assert.equal(h.actions.navMark(), 1);
+  h.actions.openSession(OTHER);
+  h.actions.back();
+  assert.equal(h.actions.navMark(), 3);
+  // A pending open that opens, and an event that sends the route back, are not the user's.
+  h.actions.openPending({ ref: R });
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
+  h.actions.onEvent(changed([], ['W1'], ['W2']));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.equal(h.actions.navMark(), 3);
+});
+
 test("a pending open that opens is not the user's navigation: the user's own state stays", async () => {
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
@@ -350,7 +421,7 @@ test("a pending open that opens is not the user's navigation: the user's own sta
   const ui = h.state().ui;
   assert.deepEqual(ui.route, { screen: 'session', ref: R2 });
   assert.equal(ui.pendingOpen, null);
-  for (const key of ['sheet', 'showDetails', 'collapsed', 'toast', 'refusal', 'drafts'] as const) {
+  for (const key of ['sheet', 'showDetails', 'collapsed', 'toast', 'nav', 'refusal', 'drafts'] as const) {
     assert.equal(ui[key], before[key], key);
   }
 });
@@ -549,7 +620,7 @@ test('no two action modules share an action name', () => {
 test('createActions holds every action the plan names', () => {
   const actions = createActions(refusingContext());
   const names = [
-    'onEvent', 'onChannelUp', 'onChannelDown', 'retrySubscribe', 'openSession', 'back', 'openPending', 'openSheet',
+    'onEvent', 'onChannelUp', 'onChannelDown', 'retrySubscribe', 'openSession', 'back', 'navMark', 'openPending', 'openSheet',
     'closeSheet', 'openMenu', 'closeMenu', 'toast', 'clearToast', 'setShowDetails', 'setLastRow', 'toggleRepo', 'openLink',
     'openTranscript', 'closeTranscript', 'resumeTranscriptOnUp', 'onShowDetailsChanged', 'loadOlder', 'toggleDetail',
     'answerPrompt', 'dismissPrompt', 'setDraft', 'sendMessage',

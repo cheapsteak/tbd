@@ -39,6 +39,9 @@ export type MenuState = { name: 'account'; askProfileID: string | null } | { nam
  *
  * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`
  * (`actions/shell.ts`), so a fork or create the user has moved away from never takes them to it.
+ * A navigation made while the fork or create is still in flight counts too, though no open waits
+ * yet: its action takes a mark (`navMark`) when it sends the request and passes it to
+ * `openPending` with the reply, which drops the open when the user has navigated since (`nav`).
  */
 export type PendingOpen = { ref: PhoneSessionRef } | { worktreeID: string; toast: string | null };
 
@@ -54,6 +57,11 @@ export interface UIState {
   /** The toast showing. Each new toast has a new `id`, so the same text twice shows twice. */
   toast: { id: number; text: string } | null;
   pendingOpen: PendingOpen | null;
+  /**
+   * How many navigations the user has made: each `openSession` or `back` that changed the
+   * route. A route change an event or a pending open makes does not count. `navMark` reads it.
+   */
+  nav: number;
   /** Why the laptop refused the last action on a session, shown with it, by `refKey` of the session. */
   refusal: Readonly<Record<string, string>>;
   /** Unsent composer text, by `refKey` of the session. */
@@ -125,6 +133,7 @@ export function initialState(): AppState {
       lastRowID: null,
       toast: null,
       pendingOpen: null,
+      nav: 0,
       refusal: emptyRecord(),
       drafts: emptyRecord(),
     },

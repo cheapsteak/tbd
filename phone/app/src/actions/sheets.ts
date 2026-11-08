@@ -11,20 +11,24 @@
 // - `switchProfile(profileID): Promise<void>` – `session.switchProfile` on the open session.
 // - `fork(profileID): Promise<void>` – `session.fork` on the open session, under `profileID`
 //   or, when it is null, the session's own profile. The new tab opens once the list shows it
-//   (`openPending` with `{ ref }`).
+//   (`openPending` with `{ ref }` and the mark, below).
 // - `setModel(model): Promise<void>` – `session.setModel` on the open session.
 // - `loadProviders(repoID): Promise<void>` – `remote.providers`, prefilled for `repoID`.
 // - `createWorktree(repoID, message): Promise<void>` – `worktree.create`. The new session
-//   opens once the list shows it: `openPending` with `{ worktreeID, toast: 'Created {name}' }`,
-//   which opens the new row's first session and toasts "Created <row name>". The reply's
-//   `session`, when it has one, is that first session.
-// - `createRemote(params): Promise<void>` – `remote.create`, then `openPending` with `{ ref }`.
+//   opens once the list shows it: `openPending` with `{ worktreeID, toast: 'Created {name}' }`
+//   and the mark, which opens the new row's first session and toasts "Created <row name>".
+//   The reply's `session`, when it has one, is that first session.
+// - `createRemote(params): Promise<void>` – `remote.create`, then `openPending` with `{ ref }`
+//   and the mark.
 // Each resolves once the laptop replied or the request failed. Like every action, none
 // rejects (`actions/index.ts`); `superseded` is silent.
 //
 // A pending open waits only while the user stays put: `openSession` and `back` clear it
 // (`PendingOpen` in `state/store.ts`), so a new tab or worktree the user has moved away from
-// never pulls them back to it.
+// never pulls them back to it. The user can move before the reply comes, too, while no open
+// waits yet. So `fork`, `createWorktree` and `createRemote` each call `self().navMark()` when
+// they send the request, and pass that mark to `openPending` with the reply:
+// `openPending(p, mark)` does nothing when the user has navigated since the mark.
 //
 // **Never retry one of these automatically under a new request ID.** Each but the two loads
 // acts, and one that failed with `not_confirmed`, `bad_reply`, `internal` or `too_large` may

@@ -106,7 +106,8 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
      * pending open: the user chose where to go, so a fork or create still on its way no longer
      * takes them anywhere. A ref no row lists does nothing: the laptop acts only on sessions its
      * list shows. Nor does the session the route shows already: a tap on it goes nowhere, so it
-     * keeps the transcript as it is and leaves a pending open waiting.
+     * keeps the transcript as it is, leaves a pending open waiting, and is not a navigation
+     * (`navMark`).
      */
     openSession(ref: PhoneSessionRef): void {
       const s = store.get();
@@ -115,6 +116,7 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
       if (found === null) return;
       setUI((ui) => ({
         ...ui, route: { screen: 'session', ref }, lastRowID: found.row.id, menu: null, sheet: null, pendingOpen: null,
+        nav: ui.nav + 1,
       }));
       self().openTranscript(ref);
     },
@@ -125,15 +127,26 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
      */
     back(): void {
       if (store.get().ui.route.screen === 'sessions') return;
-      setUI((ui) => ({ ...ui, route: SESSIONS_ROUTE, menu: null, sheet: null, pendingOpen: null }));
+      setUI((ui) => ({ ...ui, route: SESSIONS_ROUTE, menu: null, sheet: null, pendingOpen: null, nav: ui.nav + 1 }));
       self().closeTranscript();
     },
 
     /**
-     * Waits to open `p` until the list shows it, and opens it at once when it does already
-     * (`PendingOpen` in `state/store.ts`). It replaces any open still waiting.
+     * The count of the user's navigations so far (`UIState.nav`). A fork or create takes it when
+     * it sends its request, and passes it to `openPending` with the reply.
      */
-    openPending(p: PendingOpen): void {
+    navMark(): number {
+      return store.get().ui.nav;
+    },
+
+    /**
+     * Waits to open `p` until the list shows it, and opens it at once when it does already
+     * (`PendingOpen` in `state/store.ts`). It replaces any open still waiting. With `since`, a
+     * mark from `navMark`, it does nothing when the user has navigated since that mark: they
+     * chose where to go while the request that made `p` was in flight.
+     */
+    openPending(p: PendingOpen, since?: number): void {
+      if (since !== undefined && since !== store.get().ui.nav) return;
       updateAndFollowRoute((s) => withPendingOpen(s, p));
     },
 

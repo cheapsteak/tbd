@@ -18,6 +18,7 @@ test('the initial state', () => {
   assert.equal(s.ui.showDetails, false);
   assert.equal(s.ui.toast, null);
   assert.equal(s.ui.pendingOpen, null);
+  assert.equal(s.ui.nav, 0);
   assert.equal(s.ui.lastRowID, null);
   assert.deepEqual(s.sessions.layout, []);
   for (const record of [s.sessions.rows, s.ui.collapsed, s.ui.refusal, s.ui.drafts]) {
