@@ -223,6 +223,10 @@ actor PhoneAppService: PhoneAppHandling {
     let subscriptions: StateSubscriptionManager
     let pendingPrompts: PendingPromptStore
     let recorder: any PhoneActionRecording
+    /// Reads `phone_control_enabled`, for every request and every resume
+    /// decision: `db.config`, unless the init was handed a reader, as a test
+    /// does to hold a read still.
+    let readPhoneControl: @Sendable () async throws -> Bool
     /// The transcript file of a terminal in the worktree at the path given,
     /// as the terminal row names it (`ClaudeTranscriptLocator.filePath` under
     /// the daemon's `projects/` roots), or nil.
@@ -254,6 +258,7 @@ actor PhoneAppService: PhoneAppHandling {
          pendingPrompts: PendingPromptStore,
          locateTranscript: @escaping @Sendable (TBDShared.Terminal, _ worktreePath: String) -> String?,
          recorder: any PhoneActionRecording = LoggerPhoneActionRecorder(),
+         readPhoneControl: (@Sendable () async throws -> Bool)? = nil,
          now: @escaping @Sendable () -> Date = { Date() },
          clock: any Clock<Duration> = ContinuousClock()) {
         self.db = db
@@ -262,6 +267,11 @@ actor PhoneAppService: PhoneAppHandling {
         self.pendingPrompts = pendingPrompts
         self.locateTranscript = locateTranscript
         self.recorder = recorder
+        if let readPhoneControl {
+            self.readPhoneControl = readPhoneControl
+        } else {
+            self.readPhoneControl = { [db] in try await db.config.get().phoneControlEnabled }
+        }
         self.now = now
         self.clock = clock
         self.memory = PhoneRequestMemory(clock: clock)
@@ -353,7 +363,9 @@ actor PhoneAppService: PhoneAppHandling {
     /// `PhoneAppConstants.requestIDMaxBytes`, or for a resend of a request
     /// still running, which gets no reply of its own; a device with
     /// `PhoneAppConstants.requestsInFlightPerDevice` requests running is
-    /// refused. None of these reach the request memory or the flag.
+    /// refused. None of these reach the request memory or the flag. Nor does
+    /// anything run for a `sessions.subscribe` whose connection ended while
+    /// `decideResume` read the flag (see there).
     func handleAppMessage(_ body: Data, from peer: PhonePeer) async {
         let head: PhoneRequestHead
         do {
@@ -367,7 +379,9 @@ actor PhoneAppService: PhoneAppHandling {
             return
         }
         let deviceID = peer.deviceID
-        guard devices[deviceID]?.outbox != nil else {
+        // The connection the request arrived through, which a `phoneConnected`
+        // replaces with a new queue.
+        guard let connection = devices[deviceID]?.outbox else {
             Self.logger.error("Phone app: dropped a request from phone \(deviceID, privacy: .public), which is not connected")
             return
         }
@@ -398,7 +412,11 @@ actor PhoneAppService: PhoneAppHandling {
             return
         }
         if method == .sessionsSubscribe {
-            await decideResume(body, deviceID: deviceID)
+            guard await decideResume(body, deviceID: deviceID, connection: connection) else {
+                Self.logger.debug(
+                    "Phone app: abandoned a sessions.subscribe from phone \(deviceID, privacy: .public), whose connection ended while it was read")
+                return
+            }
         }
         var transcriptStamp: UInt64?
         if method == .transcriptOpen || method == .transcriptClose {
@@ -427,17 +445,30 @@ actor PhoneAppService: PhoneAppHandling {
     /// so the decision holds exactly the events the stream held at that
     /// moment. Params that do not decode leave the decision alone; the
     /// request's work answers them `bad_request`.
-    private func decideResume(_ body: Data, deviceID: UUID) async {
-        guard let params = try? PhoneAppCoding.params(SessionsSubscribeParams.self, from: body),
-              (try? await db.config.get().phoneControlEnabled) == true,
-              let state = devices[deviceID], state.outbox != nil else {
-            return
+    ///
+    /// **Returns false when the request's connection is gone.** The service
+    /// can run a disconnect and a connect while the flag read is suspended.
+    /// When `connection`, the queue the request arrived through, is no
+    /// longer the device's once the read returns, the request is abandoned:
+    /// it decides nothing and `handleAppMessage` starts nothing, so the new
+    /// connection's decision stays its own, and its own `sessions.subscribe`
+    /// (a phone resends what it has no reply for) is not taken for a resend
+    /// of one still running.
+    private func decideResume(_ body: Data, deviceID: UUID, connection: PhoneOutboxQueue) async -> Bool {
+        guard let params = try? PhoneAppCoding.params(SessionsSubscribeParams.self, from: body) else {
+            return true
         }
+        let enabled = (try? await readPhoneControl()) == true
+        guard let state = devices[deviceID], state.outbox === connection else {
+            return false
+        }
+        guard enabled else { return true }
         if let missed = state.stream.replay(stream: params.stream, sinceSeq: params.sinceSeq) {
             devices[deviceID]?.resume = .replay(missed)
         } else {
             devices[deviceID]?.resume = .snapshot
         }
+        return true
     }
 
     /// Starts the request's work in a task of the service's own. Only
@@ -479,7 +510,7 @@ actor PhoneAppService: PhoneAppHandling {
         let requestID = context.requestID
         let enabled: Bool
         do {
-            enabled = try await db.config.get().phoneControlEnabled
+            enabled = try await readPhoneControl()
         } catch {
             Self.logger.error(
                 "Phone app: could not read the phone control setting: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")

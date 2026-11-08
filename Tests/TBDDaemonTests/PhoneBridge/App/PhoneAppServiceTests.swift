@@ -538,6 +538,39 @@ struct PhoneAppServiceTests {
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
+    /// A `sessions.subscribe` whose connection ends, and is replaced, while
+    /// its flag read is suspended is abandoned: it decides nothing for the
+    /// new connection and starts nothing, so the new connection's own
+    /// subscribe, resent with the same request ID, runs and is answered there.
+    @Test func aSubscribeWhoseConnectionEndsDuringItsFlagReadIsAbandoned() async throws {
+        let held = HeldPhoneControlRead()
+        defer { held.gate.open() }
+        let h = try await PhoneServiceHarness.make(phoneControlRead: held)
+        let deviceID = h.peer.deviceID
+        await h.service.setHandler(Self.subscribeStub(h.service), for: .sessionsSubscribe)
+        let first = await h.connect()
+        let subscribe = SessionsSubscribeParams(stream: nil, sinceSeq: nil)
+        let body = try PhoneTestRequests.body(.sessionsSubscribe, id: "sub-1", params: subscribe)
+
+        let arrival = Task { await h.service.handleAppMessage(body, from: h.peer) }
+        try await waitUntil("the first subscribe to suspend in its flag read") { held.reads == 1 }
+        await h.service.phoneDisconnected(h.peer)
+        let second = await h.connect()
+        held.gate.open()
+        await arrival.value
+
+        // An old request that carried on would decide `snapshot` for the new
+        // connection and start, and the resend below would be taken for it.
+        #expect(await h.service.resumeDecision(for: deviceID) == .undecided)
+        #expect(await h.service.requestsRunning(for: deviceID) == 0)
+
+        let (reply, _) = try await h.request(.sessionsSubscribe, id: "sub-1", params: subscribe, on: second)
+        #expect(reply.requestID == "sub-1")
+        #expect(reply.error == nil)
+        #expect(await h.service.resumeDecision(for: deviceID) == .snapshot)
+        #expect(first.bodies.isEmpty)
+    }
+
     // MARK: - Revoke
 
     @Test func revokeDropsStateAndRequestMemory() async throws {

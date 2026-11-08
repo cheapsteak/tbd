@@ -269,6 +269,34 @@ final class PhoneTestGate: @unchecked Sendable {
     }
 }
 
+// MARK: - HeldPhoneControlRead
+
+/// A phone control read for `PhoneAppService(readPhoneControl:)` whose first
+/// call waits until `gate` opens, so a test can act while a request is
+/// suspended in it. Every call, the first included, then reads the flag from
+/// the database it is given.
+final class HeldPhoneControlRead: @unchecked Sendable {
+    let gate = PhoneTestGate()
+    private let lock = NSLock()
+    private var count = 0
+
+    init() {}
+
+    /// How many reads have started, the held one included.
+    var reads: Int { lock.withLock { count } }
+
+    func read(_ db: TBDDatabase) async throws -> Bool {
+        let isFirst = lock.withLock { () -> Bool in
+            count += 1
+            return count == 1
+        }
+        if isFirst {
+            await gate.wait()
+        }
+        return try await db.config.get().phoneControlEnabled
+    }
+}
+
 // MARK: - Waiting
 
 /// Waits until `condition` holds, or throws naming `what`.
@@ -318,7 +346,9 @@ struct PhoneServiceHarness: Sendable {
     let service: PhoneAppService
     let peer: PhonePeer
 
-    static func make() async throws -> PhoneServiceHarness {
+    /// With `phoneControlRead`, the service reads the phone control flag
+    /// through it, so a test can hold the first read still.
+    static func make(phoneControlRead: HeldPhoneControlRead? = nil) async throws -> PhoneServiceHarness {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPhoneControlEnabled(true)
         let peer = PhonePeer(deviceID: UUID(), deviceName: "Acme Phone")
@@ -330,10 +360,14 @@ struct PhoneServiceHarness: Sendable {
         let clock = EventDrivenTestClock()
         let subscriptions = StateSubscriptionManager()
         let pendingPrompts = PendingPromptStore()
+        var readPhoneControl: (@Sendable () async throws -> Bool)?
+        if let phoneControlRead {
+            readPhoneControl = { try await phoneControlRead.read(db) }
+        }
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, locateTranscript: Self.locateTranscript,
-            recorder: recorder, clock: clock)
+            recorder: recorder, readPhoneControl: readPhoneControl, clock: clock)
         return PhoneServiceHarness(
             db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, service: service, peer: peer)
