@@ -11,8 +11,10 @@
 
 import { expect, test as base } from '@playwright/test';
 
-import { base64urlDecode, base64urlEncode } from '../../channel/pairingLink.js';
+import { base64urlDecode } from '../../channel/pairingLink.js';
 import { startFakeLaptop } from './fake-laptop.js';
+
+export { linkFromFields } from './fake-laptop.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
 /** @typedef {import('./fake-laptop.js').FakeLaptopServer} FakeLaptopServer */
@@ -34,7 +36,6 @@ import { startFakeLaptop } from './fake-laptop.js';
  *   offer, false otherwise.
  */
 
-const utf8 = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 
 export const test = base.extend({
@@ -101,16 +102,6 @@ export function linkFields(link) {
   const bytes = base64urlDecode(payload);
   if (bytes === null) throw new TypeError('not a base64url payload');
   return JSON.parse(utf8Decoder.decode(bytes));
-}
-
-/**
- * A pairing link on `origin` carrying `fields` as given.
- * @param {string} origin
- * @param {Record<string, unknown>} fields
- * @returns {string}
- */
-export function linkFromFields(origin, fields) {
-  return `${origin}/#p=${base64urlEncode(utf8.encode(JSON.stringify(fields)))}`;
 }
 
 /**

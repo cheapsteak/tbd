@@ -179,10 +179,7 @@ export async function startFakeLaptop({
       server.laptops.push(laptop);
       return laptop;
     },
-    pairingLink: (laptop, options = {}) => {
-      const fields = laptop.makeOffer(options);
-      return `${server.origin}/#p=${base64urlEncode(utf8.encode(JSON.stringify(fields)))}`;
-    },
+    pairingLink: (laptop, options = {}) => linkFromFields(server.origin, laptop.makeOffer(options)),
     debugBundle: (variant) => `globalThis.__debugVariant = ${JSON.stringify(String(variant))};\n${debugText}`,
     holdPresence: (room) => {
       /** @type {() => void} */
@@ -431,6 +428,16 @@ export async function startFakeLaptop({
       for (const deliver of pending.splice(0)) deliver(opened);
     });
   }
+}
+
+/**
+ * A pairing link on `origin` carrying `fields` as given.
+ * @param {string} origin
+ * @param {Record<string, unknown>} fields
+ * @returns {string}
+ */
+export function linkFromFields(origin, fields) {
+  return `${origin}/#p=${base64urlEncode(utf8.encode(JSON.stringify(fields)))}`;
 }
 
 /** The routes under `/__test/` that the second origin serves too. */
