@@ -6,8 +6,8 @@ import { deflateRawSync } from 'node:zlib';
 import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../channel/noise.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, KEEPALIVE_MS, LOADER_VERSION, MAX_CHUNK_BYTES,
-  PAIRED_GRACE_MS, RESUME_COALESCE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
+  BUNDLE_CHUNK_TIMEOUT_MS, CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, KEEPALIVE_MS, LOADER_VERSION,
+  MAX_CHUNK_BYTES, PAIRED_GRACE_MS, RESUME_COALESCE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS, WELCOME_TIMEOUT_MS,
 } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
 import { relaySocketURL } from '../../links.js';
@@ -1087,6 +1087,178 @@ test('sixty chunks delivered back to back assemble in order', async () => {
   assert.equal(env.cache.calls.put.length, 1);
   assert.equal(env.laptop.counts.bundleGet, 1);
   c.conn.stop();
+});
+
+// --- waits on the laptop after the handshake ---------------------------------------------------
+
+/**
+ * The `welcome` and `bundle.chunk` messages plan 3's laptop sends for `text`, for a test that
+ * stands in for the laptop by hand.
+ * @param {string} text
+ */
+function bundleMessages(text) {
+  const compressed = deflateRawSync(Buffer.from(text));
+  const sha256 = sha256Hex(text);
+  const count = Math.max(1, Math.ceil(compressed.length / MAX_CHUNK_BYTES));
+  return {
+    sha256,
+    welcome: { type: 'welcome', protocol: 1, minProtocol: 1, tbdVersion: '0.0.0-test', bundle: { sha256, size: compressed.length } },
+    chunks: Array.from({ length: count }, (_, index) => ({
+      type: 'bundle.chunk',
+      sha256,
+      index,
+      count,
+      data: compressed.subarray(index * MAX_CHUNK_BYTES, (index + 1) * MAX_CHUNK_BYTES).toString('base64'),
+    })),
+  };
+}
+
+test('a laptop that never sends welcome is a dead link: the socket ends after WELCOME_TIMEOUT_MS, and the next one, after the backoff, handshakes afresh', async () => {
+  const env = await setup();
+  const laptop = await manualLaptop(env);
+  const c = connection(env);
+  c.conn.start();
+  const peer = await laptop.accept();
+  assert.deepEqual(await peer.hello(), HELLO);
+  await quiet();
+  await env.clock.advance(WELCOME_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(env.net.count('close()'), 0, 'still waiting 1 ms before the deadline');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking']);
+
+  await env.clock.advance(1);
+  await until(() => c.states().includes('reconnecting') && env.clock.pending === 1, 'reconnecting, with a reconnect armed');
+  assert.deepEqual(env.net.log.filter((e) => e.dir === 'close()'), [{ dir: 'close()', code: 1000 }]);
+  await env.clock.advance(999);
+  await quiet();
+  assert.equal(env.joins(), 1, 'the reconnect waits out the backoff');
+  await env.clock.advance(1);
+  await until(() => env.joins() === 2, 'a second socket');
+
+  const text = 'globalThis.acme = 1;\n';
+  const { sha256, welcome, chunks } = bundleMessages(text);
+  const again = await laptop.accept();
+  assert.deepEqual(await again.hello(), HELLO);
+  await again.send(welcome);
+  assert.deepEqual(await again.read(), { type: 'bundle.get', sha256 });
+  await again.send(chunks[0]);
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'reconnecting', 'handshaking', 'loading', 'ready']);
+  assert.equal(env.net.message1s().length, 2, 'a fresh handshake on the new socket');
+  assert.deepEqual(c.of('bundle'), [{ kind: 'bundle', sha256, text }]);
+  assert.deepEqual(c.of('fatal'), []);
+  c.conn.stop();
+});
+
+test('a download that stalls mid-bundle is a dead link: the socket ends after BUNDLE_CHUNK_TIMEOUT_MS, nothing is cached, and the next connection fetches it whole', async () => {
+  const text = textWithChunks(2);
+  const env = await setup({ bundleText: text });
+  /** @type {number[]} */
+  const offered = [];
+  env.laptop.onChunk((/** @type {number} */ index) => {
+    offered.push(index);
+    return index === 1 ? 'stop' : undefined;
+  });
+  const c = connection(env);
+  c.conn.start();
+  await until(() => offered.includes(1), 'the laptop stopping after chunk 0');
+  await quiet();
+  await env.clock.advance(BUNDLE_CHUNK_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(env.net.count('close()'), 0, 'still waiting 1 ms before the deadline');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading']);
+
+  await env.clock.advance(1);
+  await until(() => c.states().includes('reconnecting') && env.clock.pending === 1, 'reconnecting, with a reconnect armed');
+  assert.deepEqual(env.net.log.filter((e) => e.dir === 'close()'), [{ dir: 'close()', code: 1000 }]);
+  await quiet();
+  assert.deepEqual(env.cache.calls.put, [], 'a partial bundle is never cached');
+  assert.deepEqual(c.of('bundle'), []);
+
+  env.laptop.onChunk(null);
+  await env.clock.advance(1000);
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'reconnecting', 'handshaking', 'loading', 'ready']);
+  assert.equal(c.of('bundle')[0].text, text);
+  assert.equal(env.cache.calls.put.length, 1);
+  assert.equal(env.cache.calls.put[0].text, text);
+  assert.equal(env.laptop.counts.bundleGet, 2);
+  assert.equal(env.joins(), 2);
+  assert.deepEqual(c.of('fatal'), []);
+  c.conn.stop();
+});
+
+test('chunks that each come within BUNDLE_CHUNK_TIMEOUT_MS never trip the wait, however long the whole download takes', async () => {
+  const text = textWithChunks(3);
+  const { sha256, welcome, chunks } = bundleMessages(text);
+  assert.equal(chunks.length, 3);
+  const env = await setup();
+  const laptop = await manualLaptop(env);
+  const c = connection(env);
+  c.conn.start();
+  const peer = await laptop.accept();
+  await peer.hello();
+  await peer.send(welcome);
+  assert.deepEqual(await peer.read(), { type: 'bundle.get', sha256 });
+  for (const chunk of chunks) {
+    await quiet();
+    await env.clock.advance(BUNDLE_CHUNK_TIMEOUT_MS - 1);
+    await quiet();
+    assert.equal(env.net.count('close()'), 0, `the socket is open before chunk ${chunk.index}`);
+    await peer.send(chunk);
+  }
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.ok(env.clock.now() - START > 2 * BUNDLE_CHUNK_TIMEOUT_MS, 'the download outlasted two deadlines in all');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready']);
+  assert.deepEqual(c.of('bundle'), [{ kind: 'bundle', sha256, text }]);
+  assert.equal(env.cache.calls.put.length, 1);
+  assert.equal(env.joins(), 1);
+  assert.equal(env.net.count('close()'), 0);
+  c.conn.stop();
+});
+
+test('the waits for welcome and for the next chunk count only visible time: one that falls due while hidden does nothing, and the return gives a full window', async () => {
+  const env = await setup();
+  const { sha256, welcome, chunks } = bundleMessages(textWithChunks(2));
+  const laptop = await manualLaptop(env);
+  const page = fakeVisibility();
+  const c = connection(env, { visibility: page });
+  c.conn.start();
+  const peer = await laptop.accept();
+  await peer.hello();
+  await quiet();
+  // The wait for welcome: iOS hides the page, and the deadline falls due before its
+  // visibilitychange arrives.
+  await env.clock.advance(WELCOME_TIMEOUT_MS - 1000);
+  page.freeze();
+  await env.clock.advance(60_000);
+  await quiet();
+  page.show();
+  await env.clock.advance(WELCOME_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(env.net.count('close()'), 0, 'welcome still has 1 ms of its visible window');
+  await peer.send(welcome);
+  assert.deepEqual(await peer.read(), { type: 'bundle.get', sha256 });
+
+  // The wait for the next chunk, the same way.
+  await peer.send(chunks[0]);
+  await quiet();
+  await env.clock.advance(BUNDLE_CHUNK_TIMEOUT_MS - 1000);
+  page.freeze();
+  await env.clock.advance(60_000);
+  await quiet();
+  assert.equal(env.net.count('close()'), 0);
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading']);
+  page.show();
+  await env.clock.advance(BUNDLE_CHUNK_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(env.net.count('close()'), 0, 'the return gave a full window');
+  await env.clock.advance(1);
+  await until(() => c.states().includes('reconnecting'), 'reconnecting');
+  assert.equal(env.net.count('close()'), 1);
+  assert.deepEqual(env.cache.calls.put, []);
+  c.conn.stop();
+  assert.equal(page.listeners(), 0, 'no timer is left listening');
 });
 
 // --- fatal answers --------------------------------------------------------------------------

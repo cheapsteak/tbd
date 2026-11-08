@@ -24,6 +24,18 @@ export const HANDSHAKE_TIMEOUT_MS = 10_000;
 // message 1s, not one per backoff step for as long as the page is open. A return to the page,
 // and Try again, start a new round.
 export const HANDSHAKE_RETRIES = 3;
+// After message 2 the phone sends `hello` and waits this long for `welcome`: one small message
+// each way, the same round trip as message 1 and 2, so the handshake's bound fits it. A laptop
+// silent this long is taken for a dead link: the socket closes and a fresh one follows through
+// the backoff. Only time while the page is visible counts.
+export const WELCOME_TIMEOUT_MS = HANDSHAKE_TIMEOUT_MS;
+// While a bundle downloads, the most time between `bundle.get` and the first chunk, and between
+// one chunk and the next, before the link is taken for dead the same way. A chunk carries up to
+// MAX_CHUNK_BYTES (45,000) compressed bytes, about 60 KB on the wire once base64 and encryption
+// are added, which a link as slow as 16 kbit/s (a weak cellular signal) still delivers in
+// 30 seconds. The wait restarts with each chunk, so a slow link may take as long as it needs
+// over the whole bundle. Only time while the page is visible counts.
+export const BUNDLE_CHUNK_TIMEOUT_MS = 30_000;
 // Right after pairing, a laptop that is away or does not answer reads `connecting`, not
 // `offline`, for one full signal wait plus one handshake, counted as they are, in time while the
 // page is visible: the laptop's device link may join the new room any time within a signal

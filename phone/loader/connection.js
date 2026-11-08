@@ -11,11 +11,12 @@
 // in hand, as checking a download's does, so a slow phone hashing a large bundle never turns a
 // good cache entry into a miss.
 //
-// Time. The signal and handshake timeouts, the relay socket's waits for a pong, and the
-// post-pairing grace count only time while the page is visible: iOS freezes a hidden page, so a
-// timer that falls due while it is hidden must not tear down a session whose answer simply could
-// not arrive, nor end a grace sized from those waits. Each return to the page gives them a fresh
-// window. The other timers (backoff, cache read) run on the clock alone.
+// Time. The signal and handshake timeouts, the waits for `welcome` and for each bundle chunk,
+// the relay socket's waits for a pong, and the post-pairing grace count only time while the page
+// is visible: iOS freezes a hidden page, so a timer that falls due while it is hidden must not
+// tear down a session whose answer simply could not arrive, nor end a grace sized from those
+// waits. Each return to the page gives them a fresh window. The other timers (backoff, cache
+// read) run on the clock alone.
 //
 // Sessions. Each `peer-joined` starts a new session: a fresh initiator, and later its
 // transport, welcome and bundle assembly. Anything an older session started that finishes
@@ -27,7 +28,8 @@ import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
 import { TaskChain } from './chain.js';
 import { alwaysVisible, isSoonAfter, systemClock } from './clock.js';
 import {
-  CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS,
+  BUNDLE_CHUNK_TIMEOUT_MS, CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS,
+  SIGNAL_TIMEOUT_MS, WELCOME_TIMEOUT_MS,
 } from './constants.js';
 import { relaySocketURL } from './links.js';
 import { isObject, isPlainObject } from './objects.js';
@@ -106,8 +108,8 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  *   device link joins the new room.
  * @property {Visibility} [visibility] The page's visibility. Default: always visible. While
  *   the page is hidden, a reconnect waits for `resume()`, and the signal and handshake
- *   timeouts, the socket's waits for a pong and the post-pairing grace stop
- *   (`startVisibleTimer`).
+ *   timeouts, the waits for `welcome` and for each bundle chunk, the socket's waits for a pong
+ *   and the post-pairing grace stop (`startVisibleTimer`).
  * @property {() => string | null} [runningBundle] The SHA-256 of the bundle the page's app
  *   frame runs now, or null. Default `() => null`. A `welcome` naming it skips the cache read
  *   and the download, so a reconnect under a running app reads no 16 MB row and hashes nothing.
@@ -121,7 +123,8 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * @property {RelaySocket} socket
  * @property {NoiseInitiator | null} initiator Set once message 1 is out, until message 2.
  * @property {NoiseTransport | null} transport Set by message 2.
- * @property {Timer | null} timer The handshake timeout.
+ * @property {Timer | null} timer The wait on the laptop under way: for message 2 (the handshake
+ *   timeout), then for `welcome`, then, while a bundle downloads, for its next chunk.
  * @property {Timer | null} cacheTimer Armed while the bundle cache is read; null before the
  *   read, and again once it has answered or timed out.
  * @property {WelcomeMessage | null} welcome
@@ -519,6 +522,7 @@ export class LaptopConnection {
     this.#emit({ kind: 'connected', laptopName });
     // The laptop counts the phone as connected once this first transport message decrypts.
     await this.#send(session, makeHello());
+    if (this.#isCurrent(session)) this.#awaitLaptop(session, WELCOME_TIMEOUT_MS);
   }
 
   /**
@@ -563,6 +567,7 @@ export class LaptopConnection {
       throw new ProtocolError('welcome.repeated');
     }
     session.welcome = welcome;
+    session.timer = this.#tasks.disarm(session.timer);
     if (checkCompat(welcome) === 'loaderTooOld') {
       this.#fail('incompatibleLoader');
       return;
@@ -602,6 +607,7 @@ export class LaptopConnection {
     await this.#send(session, { type: 'bundle.get', sha256 });
     if (!this.#isCurrent(session)) return;
     this.#setState('loading');
+    this.#awaitLaptop(session, BUNDLE_CHUNK_TIMEOUT_MS);
   }
 
   /**
@@ -614,7 +620,12 @@ export class LaptopConnection {
     if (assembler === null || welcome === null) {
       throw new ProtocolError('bundle.chunk.unasked');
     }
-    if (!assembler.add(chunk)) return;
+    if (!assembler.add(chunk)) {
+      this.#awaitLaptop(session, BUNDLE_CHUNK_TIMEOUT_MS);
+      return;
+    }
+    // The last chunk is in. Inflating and hashing are the phone's work, so they are not timed.
+    session.timer = this.#tasks.disarm(session.timer);
     const text = await assembler.finish();
     if (!this.#isCurrent(session)) return;
     session.assembler = null;
@@ -671,6 +682,25 @@ export class LaptopConnection {
   async #send(session, message) {
     const frame = await /** @type {NoiseTransport} */ (session.transport).encrypt(encodeMessage(message));
     if (this.#isCurrent(session)) session.socket.send(frame);
+  }
+
+  /**
+   * Starts, or starts over, the wait for the laptop's next message on a session past its
+   * handshake. Only time while the page is visible counts. A laptop silent for `ms` is taken for
+   * a dead link, as a lost socket is: the socket closes and a fresh one follows through the
+   * backoff, and the laptop resets on the `peer-left` this causes. A download cut short this way
+   * caches nothing, since only a finished bundle is stored.
+   * @param {Session} session
+   * @param {number} ms
+   */
+  #awaitLaptop(session, ms) {
+    this.#tasks.disarm(session.timer);
+    session.timer = this.#tasks.armVisible(ms, () => {
+      if (!this.#isCurrent(session)) return;
+      this.#closeSocket();
+      this.#setState(this.#lostState());
+      this.#reconnectWithBackoff();
+    });
   }
 
   /** @param {Session} session */
