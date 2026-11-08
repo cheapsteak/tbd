@@ -13,7 +13,7 @@ export const TOAST_MS = 2_600;
 export function Toast(): JSX.Element | null {
   const toast = useAppState((s) => s.ui.toast);
   const actions = useActions();
-  const id = toast === null ? null : toast.id;
+  const id = toast?.id ?? null;
 
   useEffect(() => {
     if (id === null) return;

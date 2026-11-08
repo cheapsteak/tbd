@@ -363,8 +363,7 @@ export class AppClient {
   #channelDown(): void {
     if (!this.#up) return;
     this.#up = false;
-    for (const pending of this.#posted) this.#hold(pending);
-    this.#posted.clear();
+    this.#holdPosted();
     // A released resend still waiting for a slot is held again, so the next connection's
     // subscribe reply must confirm it afresh.
     for (const pending of this.#resends) this.#hold(pending);

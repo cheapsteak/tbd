@@ -10,7 +10,7 @@ import { applyEvent, applySessions, withPendingOpen } from '../state/events.ts';
 import { findSession, sameRoute } from '../state/route.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import { emptyRecord, nextToast, SESSIONS_ROUTE } from '../state/store.ts';
-import type { AppState, MenuState, PendingOpen, Route, SheetState, UIState } from '../state/store.ts';
+import type { AppState, MenuState, PendingOpen, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
 
 export function shellActions(ctx: ActionContext, self: () => Actions) {
@@ -28,10 +28,13 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
   }
 
   /**
-   * Opens or closes the transcript after a change of route that a state change made, not a
-   * tap: a pending open that became the route, or an open session that left every row.
+   * Updates the state with `fn`, then opens or closes the transcript when that moved the route
+   * rather than a tap did: a pending open that became the route, or an open session that left
+   * every row.
    */
-  function followRoute(before: Route): void {
+  function updateAndFollowRoute(fn: (s: AppState) => AppState): void {
+    const before = store.get().ui.route;
+    store.update(fn);
     const after = store.get().ui.route;
     if (sameRoute(before, after)) return;
     if (after.screen === 'session') self().openTranscript(after.ref);
@@ -53,12 +56,10 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
    * the list as it is, because the events it replays follow and update it.
    */
   function subscribed(result: SessionsSubscribeResult): void {
-    const before = store.get().ui.route;
-    store.update((s) => {
+    updateAndFollowRoute((s) => {
       const next = { ...s, conn: { ...s.conn, subscribed: true, error: null } };
       return result.replayed ? next : applySessions(next, applySnapshot(result));
     });
-    followRoute(before);
   }
 
   /**
@@ -75,9 +76,7 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
   return {
     /** One event from the client, folded into the state; a change of route it makes opens or closes the transcript. */
     onEvent(event: AppEvent): void {
-      const before = store.get().ui.route;
-      store.update((s) => applyEvent(s, event));
-      followRoute(before);
+      updateAndFollowRoute((s) => applyEvent(s, event));
     },
 
     /**
@@ -124,9 +123,7 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
      * (`PendingOpen` in `state/store.ts`). It replaces any open still waiting.
      */
     openPending(p: PendingOpen): void {
-      const before = store.get().ui.route;
-      store.update((s) => withPendingOpen(s, p));
-      followRoute(before);
+      updateAndFollowRoute((s) => withPendingOpen(s, p));
     },
 
     /** Opens `sheet` over the screen, closing any menu. */

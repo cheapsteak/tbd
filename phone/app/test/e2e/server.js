@@ -203,14 +203,8 @@ async function sendFile(req, res, root, rel) {
     notFound(req, res);
     return;
   }
-  let stat;
-  try {
-    stat = await lstat(full);
-  } catch {
-    notFound(req, res);
-    return;
-  }
-  if (!stat.isFile()) {
+  const stat = await lstat(full).catch(() => null);
+  if (stat === null || !stat.isFile()) {
     notFound(req, res);
     return;
   }

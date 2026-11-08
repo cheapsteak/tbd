@@ -82,8 +82,8 @@ export const test = base.extend({
  */
 function describeError(error) {
   const stack = error.stack ?? '';
-  if (stack !== '' && stack.includes(error.message)) return stack;
-  return stack === '' ? String(error) : `${String(error)}\n${stack}`;
+  if (stack === '') return String(error);
+  return stack.includes(error.message) ? stack : `${String(error)}\n${stack}`;
 }
 
 /**

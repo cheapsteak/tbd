@@ -248,23 +248,23 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
   /** The channel came up: a new connection, not live until its subscribe reply goes out. */
   function connect() {
     state.connection = { live: false, replayed: false };
-    afterLive = [];
-    dropConnectionRequests();
+    endConnection();
   }
 
-  /** The channel went down. Anything waiting for the connection to go live is dropped. */
+  /** The channel went down. */
   function disconnect() {
     state.connection = null;
-    afterLive = [];
-    dropConnectionRequests();
+    endConnection();
   }
 
   /**
-   * Stops counting the requests that could reply only on the connection that just ended: a
-   * subscribe, and a request still waiting for that connection to go live (the daemon's
-   * `dropUnstartedRequests`). Any other request keeps running, and replies on the next one.
+   * Drops what only the connection that just ended could finish: the work waiting for it to go
+   * live, and the requests that could reply only on it, which are a subscribe and a request
+   * still waiting for it to go live (the daemon's `dropUnstartedRequests`). Any other request
+   * keeps running, and replies on the next one.
    */
-  function dropConnectionRequests() {
+  function endConnection() {
+    afterLive = [];
     for (const [requestID, entry] of running) {
       if (!entry.queued || entry.method === 'sessions.subscribe') running.delete(requestID);
     }
@@ -623,7 +623,7 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       state.transcripts[key] = [...(state.transcripts[key] ?? []), item];
       if (isOpen(session)) sendEvent('transcript.append', { session: found.session.ref, items: [item] });
       setChip(found, 'working');
-      sendEvent('sessions.changed', { rows: [found.row], removedRowIDs: [] });
+      announceRow(found.row);
     },
 
     'prompt.answer': (request) => {
@@ -648,7 +648,7 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
         delete found.session.openPromptID;
         if (found.session.status?.chip === 'waitingForYou') setChip(found, 'working');
       }
-      sendEvent('sessions.changed', { rows: [found.row], removedRowIDs: [] });
+      announceRow(found.row);
     },
 
     'profiles.list': (request) => {
@@ -669,10 +669,9 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       }
       reply(request, { result: { session: found.session.ref } });
       defer(() => {
-        found.session.profileID = profile.id;
-        found.session.profileName = profile.name;
+        setProfile(found.session, profile);
         setChip(found, 'idle');
-        sendEvent('sessions.changed', { rows: [found.row], removedRowIDs: [] });
+        announceRow(found.row);
       });
     },
 
@@ -697,14 +696,11 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
           status: { chip: 'idle', changedAt: now() },
         };
         delete fork.openPromptID;
-        if (profile !== null) {
-          fork.profileID = profile.id;
-          fork.profileName = profile.name;
-        }
+        if (profile !== null) setProfile(fork, profile);
         found.row.sessions.push(fork);
         found.row.statusChangedAt = newest(found.row.sessions);
         state.transcripts[refKey(ref)] = structuredClone(state.transcripts[refKey(parent.ref)] ?? []);
-        sendEvent('sessions.changed', { rows: [found.row], removedRowIDs: [] });
+        announceRow(found.row);
       });
     },
 
@@ -719,7 +715,7 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       reply(request, { result: { outcome: 'sent' } });
       defer(() => {
         found.session.model = model;
-        sendEvent('sessions.changed', { rows: [found.row], removedRowIDs: [] });
+        announceRow(found.row);
       });
     },
 
@@ -737,10 +733,7 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       const session = {
         ref, agent: 'claude', tabName: 'Claude', status: { chip: 'working', changedAt: now() }, capabilities: CLAUDE_CAPABILITIES,
       };
-      if (profile !== undefined) {
-        session.profileID = profile.id;
-        session.profileName = profile.name;
-      }
+      if (profile !== undefined) setProfile(session, profile);
       const row = {
         id: worktreeID, kind: 'worktree', name: `new-worktree-${++worktreesMade}`, remote: false,
         statusChangedAt: session.status.changedAt, sessions: [session],
@@ -808,6 +801,20 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       if (session !== undefined) return { row, session };
     }
     return null;
+  }
+
+  /**
+   * Sends `row`, changed in place, as a `sessions.changed`.
+   * @param {any} row
+   */
+  function announceRow(row) {
+    sendEvent('sessions.changed', { rows: [row], removedRowIDs: [] });
+  }
+
+  /** @param {any} session @param {any} profile */
+  function setProfile(session, profile) {
+    session.profileID = profile.id;
+    session.profileName = profile.name;
   }
 
   /** @param {{ row: any, session: any }} found @param {string} chip */

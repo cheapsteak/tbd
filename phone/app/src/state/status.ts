@@ -65,6 +65,6 @@ const TOOL_GLYPHS: Readonly<Record<string, GlyphName>> = {
 
 /** The glyph for a tool's name. An unknown or missing tool gets the terminal. */
 export function toolGlyph(toolName: string | undefined): GlyphName {
-  if (toolName === undefined) return 'term';
-  return Object.hasOwn(TOOL_GLYPHS, toolName) ? TOOL_GLYPHS[toolName] ?? 'term' : 'term';
+  if (toolName === undefined || !Object.hasOwn(TOOL_GLYPHS, toolName)) return 'term';
+  return TOOL_GLYPHS[toolName]!;
 }

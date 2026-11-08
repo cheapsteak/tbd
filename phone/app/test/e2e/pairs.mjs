@@ -207,6 +207,4 @@ function shot(src, caption, alt) {
   return `<figure><figcaption>${caption}</figcaption><a href="${src}"><img src="${src}" width="195" alt="${alt}"></a></figure>`;
 }
 
-if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exitCode = await main(process.argv.slice(2));
-}
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
