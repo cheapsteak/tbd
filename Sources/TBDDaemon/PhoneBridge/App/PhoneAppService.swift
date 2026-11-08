@@ -190,7 +190,9 @@ final class PhoneOutboxQueue: Sendable {
 ///    finish, as they do after a disconnect. Only a revoke cancels them.
 /// 2. **The request memory**, for the methods that act on a session or create
 ///    something (see `remembersReplies(of:)`). The steps below run once per
-///    request ID; a repeat gets the first run's reply.
+///    request ID; a repeat gets the first run's reply, and a request that
+///    reuses a remembered ID for another method runs nothing and is answered
+///    `bad_request`.
 /// 3. **The pairing.** The phone's `phone_device` row must still exist, or the
 ///    reply is `refused`. A failed read fails closed with `internal`. This
 ///    closes the window where a request starts just before a revoke and
@@ -536,10 +538,18 @@ actor PhoneAppService: PhoneAppHandling {
         }
         let deviceID = context.peer.deviceID
         let (reply, _) = await memory.reply(
-            deviceID: deviceID, requestID: requestID,
-            refusal: {
-                Self.logger.notice("Phone app: refused a request from phone \(deviceID, privacy: .public): too many in progress")
-                return Self.failure(requestID, .refused, Self.tooManyRequests)
+            deviceID: deviceID, requestID: requestID, method: method,
+            refusal: { reason in
+                switch reason {
+                case .tooManyInFlight:
+                    Self.logger.notice(
+                        "Phone app: refused a request from phone \(deviceID, privacy: .public): too many in progress")
+                    return Self.failure(requestID, .refused, Self.tooManyRequests)
+                case .requestIDInUse:
+                    Self.logger.error(
+                        "Phone app: refused a request from phone \(deviceID, privacy: .public) whose ID is remembered for another method")
+                    return Self.failure(requestID, .badRequest, Self.requestIDInUse)
+                }
             },
             work: { [self] in
                 switch await self.perform(method, body: body, context: context) {
@@ -805,8 +815,8 @@ actor PhoneAppService: PhoneAppHandling {
     // MARK: - Replies
 
     private static let tooManyRequests = "Too many requests are in progress. Try again in a moment."
-    /// The reply to a request that reuses a running request's ID for another
-    /// method.
+    /// The reply to a request that reuses the ID of a request still running,
+    /// or of one whose reply the request memory keeps, for another method.
     static let requestIDInUse = "That request ID is already in use."
     /// The `internal` error's words for a failure on the laptop.
     static let internalErrorReason = "Something went wrong on the laptop."

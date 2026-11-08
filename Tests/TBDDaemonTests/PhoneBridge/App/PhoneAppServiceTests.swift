@@ -320,6 +320,44 @@ struct PhoneAppServiceTests {
         #expect(h.actions.sends.count == 1)
     }
 
+    /// A finished action's ID reused by another remembered method is no
+    /// resend either: the request memory answers it `bad_request` at once,
+    /// and the answer neither records nor reaches the daemon. A true resend
+    /// of the send still gets the send's bytes.
+    @Test func aRememberedIDReusedForAnotherMethodIsABadRequest() async throws {
+        let h = try await PhoneServiceHarness.make()
+        await h.service.setHandler(Self.sendStub(h.actions), for: .messageSend)
+        let actions = h.actions
+        let answerStub = PhoneAppService.typed(PhonePromptAnswerParams.self) { p, context -> PromptAnswerResult in
+            guard case .local(let terminalID) = p.session else {
+                throw PhoneAppError(code: .unsupported, message: "Local sessions only.")
+            }
+            _ = try await actions.phoneAnswerPrompt(
+                PromptAnswerParams(terminalID: terminalID, promptID: p.promptID, answer: p.answer),
+                deviceID: context.peer.deviceID)
+            return PromptAnswerResult(outcome: .delivered)
+        }
+        await h.service.setHandler(answerStub, for: .promptAnswer)
+        let outbox = await h.connect()
+
+        let (sent, sentBytes) = try await h.request(.messageSend, id: "r1", params: sendParams, on: outbox)
+        #expect(sent.error == nil)
+
+        let answer = PhonePromptAnswerParams(
+            session: .local(terminalID: terminalID), promptID: "p1",
+            answer: .permission(decision: .allow, message: nil))
+        let (reused, _) = try await h.request(.promptAnswer, id: "r1", params: answer, on: outbox)
+        #expect(reused.requestID == "r1")
+        #expect(reused.error == PhoneAppError(code: .badRequest, message: "That request ID is already in use."))
+        #expect(h.actions.answers.isEmpty)
+        let recorded = h.recorder.records.map(\.action)
+        #expect(recorded == ["message.send"])
+
+        let (_, resentBytes) = try await h.request(.messageSend, id: "r1", params: sendParams, on: outbox)
+        #expect(resentBytes == sentBytes)
+        #expect(h.actions.sends.count == 1)
+    }
+
     /// A device with the most requests running is refused at once; the
     /// requests already running carry on.
     @Test func aDeviceWithTooManyRequestsRunningIsRefused() async throws {

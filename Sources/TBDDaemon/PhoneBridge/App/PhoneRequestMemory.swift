@@ -1,12 +1,19 @@
 import Foundation
 
-/// Remembers each phone request's ID and reply, so a resent request does not
-/// act twice (spec section 4.4, "No double actions").
+/// Remembers each phone request's ID, method and reply, so a resent request
+/// does not act twice (spec section 4.4, "No double actions").
 ///
 /// A phone resends a request when its connection drops before the reply
 /// arrives. The first call with a (device, request ID) pair runs `work`; every
-/// later call with the same pair, while the first is still running or after it
-/// finished, gets the first run's reply bytes and never calls its own `work`.
+/// later call with the same pair and the same method, while the first is
+/// still running or after it finished, gets the first run's reply bytes and
+/// never calls its own `work`.
+///
+/// **A request ID names one method.** A later call with a remembered pair and
+/// another method is no resend: it runs nothing, stores nothing, and returns
+/// the caller's refusal for ``Refusal/requestIDInUse`` at once, without
+/// waiting for a run in flight. So a finished `message.send`'s reply is never
+/// handed to a `prompt.answer` that reuses its ID.
 ///
 /// **Runs belong to the memory, not to their callers.** `work` runs in a task
 /// the memory starts, so neither the first caller nor any repeat can cancel
@@ -31,12 +38,22 @@ import Foundation
 /// evicted and never expires, `perDeviceLimit` bounds nothing while runs are
 /// going. So a device may have at most `inFlightLimit` runs going at once. A
 /// call with a new request ID while the device is at that cap runs nothing,
-/// stores nothing and returns the caller's refusal; a repeat of an ID already
+/// stores nothing and returns the caller's refusal for
+/// ``Refusal/tooManyInFlight``; a repeat of an ID already
 /// in flight still joins its run, and a repeat of a finished one still gets
 /// its reply. The app service enforces the same cap before it calls here, so
 /// this cap is defense in depth: the memory stays bounded on its own for any
 /// caller that skips the service's check.
 actor PhoneRequestMemory {
+    /// Why ``reply(deviceID:requestID:method:refusal:work:)`` returned the
+    /// caller's refusal without running `work`.
+    enum Refusal: Equatable, Sendable {
+        /// The device has `inFlightLimit` runs going.
+        case tooManyInFlight
+        /// The request ID is remembered for a request with another method.
+        case requestIDInUse
+    }
+
     private enum State {
         case inFlight(Task<Data, Never>)
         case done(Data)
@@ -51,6 +68,9 @@ actor PhoneRequestMemory {
         /// Tells this entry from a later one under the same key, so a run or a
         /// timer that outlives its entry cannot touch its successor.
         let id: UInt64
+        /// The method of the request that made the entry. A later call with
+        /// the same ID is a repeat only when it names this method too.
+        let method: PhoneAppMethod
         var state: State
         /// The retention timer, armed once the run finishes.
         var expiry: Task<Void, Never>?
@@ -86,18 +106,23 @@ actor PhoneRequestMemory {
         self.clock = clock
     }
 
-    /// Runs `work` once per (deviceID, requestID) within `retention`; a repeat, in flight or done,
-    /// returns the first run's reply bytes and does not call `work`.
+    /// Runs `work` once per (deviceID, requestID) within `retention`; a repeat with the same
+    /// `method`, in flight or done, returns the first run's reply bytes and does not call `work`.
     ///
-    /// `repeated` is false for the call that ran `work`, and for a call
-    /// refused at the in-flight cap, which returns `refusal()` without running
-    /// `work` or storing anything. The entry is stored before this method first
-    /// suspends, so two calls that interleave on the actor cannot both find the
-    /// pair unknown.
-    func reply(deviceID: UUID, requestID: String,
-               refusal: @Sendable () -> Data,
+    /// `repeated` is false for the call that ran `work`, and for a refused
+    /// call, which returns `refusal` of its reason without running `work` or
+    /// storing anything: a pair remembered for another method is refused
+    /// ``Refusal/requestIDInUse``, and a new pair while the device is at the
+    /// in-flight cap ``Refusal/tooManyInFlight``. The entry is stored before
+    /// this method first suspends, so two calls that interleave on the actor
+    /// cannot both find the pair unknown.
+    func reply(deviceID: UUID, requestID: String, method: PhoneAppMethod,
+               refusal: @Sendable (Refusal) -> Data,
                work: @escaping @Sendable () async -> Data) async -> (reply: Data, repeated: Bool) {
         if let entry = devices[deviceID]?.entries[requestID] {
+            guard entry.method == method else {
+                return (refusal(.requestIDInUse), false)
+            }
             switch entry.state {
             case .done(let reply):
                 return (reply, true)
@@ -116,7 +141,7 @@ actor PhoneRequestMemory {
         // runs are going, so the memory must stay safe for a caller that
         // skips that check.
         guard (devices[deviceID]?.inFlight ?? 0) < inFlightLimit else {
-            return (refusal(), false)
+            return (refusal(.tooManyInFlight), false)
         }
 
         let entryID = nextEntryID
@@ -128,7 +153,8 @@ actor PhoneRequestMemory {
             self.finish(deviceID: deviceID, requestID: requestID, entryID: entryID, reply: reply)
             return reply
         }
-        insert(Entry(id: entryID, state: .inFlight(run), expiry: nil), deviceID: deviceID, requestID: requestID)
+        insert(Entry(id: entryID, method: method, state: .inFlight(run), expiry: nil),
+               deviceID: deviceID, requestID: requestID)
         let reply = await run.value
         return (reply, false)
     }

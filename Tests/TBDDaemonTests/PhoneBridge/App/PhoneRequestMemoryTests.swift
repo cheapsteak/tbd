@@ -70,12 +70,18 @@ private func job(_ name: String, tally: RunTally, gate: RunGate? = nil) -> @Send
 /// by mistake shows up as these bytes.
 private let capRefusal = Data("refused at the cap".utf8)
 
+/// The refusal for a request ID remembered under another method.
+private let inUseRefusal = Data("request ID in use".utf8)
+
 private extension PhoneRequestMemory {
-    /// `reply(deviceID:requestID:refusal:work:)` with the shared refusal, for
-    /// the tests that stay below the in-flight cap.
-    func reply(deviceID: UUID, requestID: String,
+    /// `reply(deviceID:requestID:method:refusal:work:)` with `message.send`
+    /// and the shared refusals, for the tests that stay below the in-flight
+    /// cap and use one method.
+    func reply(deviceID: UUID, requestID: String, method: PhoneAppMethod = .messageSend,
                work: @escaping @Sendable () async -> Data) async -> (reply: Data, repeated: Bool) {
-        await reply(deviceID: deviceID, requestID: requestID, refusal: { capRefusal }, work: work)
+        await reply(deviceID: deviceID, requestID: requestID, method: method, refusal: { reason in
+            reason == .requestIDInUse ? inUseRefusal : capRefusal
+        }, work: work)
     }
 }
 
@@ -203,6 +209,60 @@ struct PhoneRequestMemoryTests {
         // The timer starts with the reply.
         try await clock.requireAdvanceWhenArmed(by: .seconds(600))
         try await waitUntil("the entry to expire") { await !memory.remembers(deviceID: phone, requestID: "r1") }
+        await memory.forget(deviceID: phone)
+    }
+
+    /// A request ID names one method. A finished `message.send`'s ID reused
+    /// by a `prompt.answer` is refused as in use: the answer runs nothing and
+    /// gets none of the send's bytes, and the entry stays as it was, so a
+    /// true resend of the send still gets its reply.
+    @Test func aFinishedIDReusedByAnotherMethodIsRefusedAndRunsNothing() async {
+        let memory = PhoneRequestMemory(clock: EventDrivenTestClock())
+        let tally = RunTally()
+
+        let sent = await memory.reply(deviceID: phone, requestID: "r1", method: .messageSend, work: job("send", tally: tally))
+        let answered = await memory.reply(
+            deviceID: phone, requestID: "r1", method: .promptAnswer, work: job("answer", tally: tally))
+
+        #expect(answered.reply == inUseRefusal)
+        #expect(!answered.repeated)
+        #expect(await tally.count("answer") == 0)
+
+        let resent = await memory.reply(deviceID: phone, requestID: "r1", method: .messageSend, work: job("send", tally: tally))
+        #expect(resent.repeated)
+        #expect(resent.reply == sent.reply)
+        #expect(resent.reply == Data("send run 1".utf8))
+        #expect(await tally.count("send") == 1)
+        await memory.forget(deviceID: phone)
+    }
+
+    /// The same holds while the first run is going: another method's call is
+    /// refused at once, without waiting for the run, and does not join it.
+    @Test func anIDInFlightReusedByAnotherMethodIsRefusedAtOnce() async throws {
+        let memory = PhoneRequestMemory(clock: EventDrivenTestClock())
+        let tally = RunTally()
+        let gate = RunGate()
+        defer { gate.open() }
+        let phone = self.phone
+
+        let first = Task {
+            await memory.reply(deviceID: phone, requestID: "r1", method: .messageSend, work: job("send", tally: tally, gate: gate))
+        }
+        try await waitUntil("the first run to start") { await tally.count("send") == 1 }
+
+        // Returns with the gate still shut, so it cannot have waited on the run.
+        let answered = await memory.reply(
+            deviceID: phone, requestID: "r1", method: .promptAnswer, work: job("answer", tally: tally))
+        #expect(answered.reply == inUseRefusal)
+        #expect(!answered.repeated)
+        #expect(await memory.waitingRepeats == 0)
+        #expect(await tally.count("answer") == 0)
+
+        gate.open()
+        let sent = await first.value
+        #expect(sent.reply == Data("send run 1".utf8))
+        #expect(!sent.repeated)
+        #expect(await tally.count("send") == 1)
         await memory.forget(deviceID: phone)
     }
 
@@ -356,17 +416,21 @@ struct PhoneRequestMemoryTests {
             return started == [1, 1]
         }
 
-        let c = await memory.reply(deviceID: phone, requestID: "c", refusal: { refusal }, work: job("c", tally: tally))
+        let c = await memory.reply(
+            deviceID: phone, requestID: "c", method: .messageSend, refusal: { _ in refusal }, work: job("c", tally: tally))
         #expect(c.reply == refusal)
         #expect(!c.repeated)
         #expect(await tally.count("c") == 0)
         #expect(await !memory.remembers(deviceID: phone, requestID: "c"))
 
-        let theirs = await memory.reply(deviceID: other, requestID: "c", refusal: { refusal }, work: job("theirs", tally: tally))
+        let theirs = await memory.reply(
+            deviceID: other, requestID: "c", method: .messageSend, refusal: { _ in refusal }, work: job("theirs", tally: tally))
         #expect(theirs.reply == Data("theirs run 1".utf8))
 
         let aAgain = Task {
-            await memory.reply(deviceID: phone, requestID: "a", refusal: { refusal }, work: job("a", tally: tally, gate: gate))
+            await memory.reply(
+                deviceID: phone, requestID: "a", method: .messageSend, refusal: { _ in refusal },
+                work: job("a", tally: tally, gate: gate))
         }
         try await waitUntil("the repeat to join A's run") { await memory.waitingRepeats == 1 }
         gate.open()
@@ -377,7 +441,8 @@ struct PhoneRequestMemoryTests {
         #expect(repeated.reply == first.reply)
         #expect(await tally.count("a") == 1)
 
-        let cAgain = await memory.reply(deviceID: phone, requestID: "c", refusal: { refusal }, work: job("c", tally: tally))
+        let cAgain = await memory.reply(
+            deviceID: phone, requestID: "c", method: .messageSend, refusal: { _ in refusal }, work: job("c", tally: tally))
         #expect(!cAgain.repeated)
         #expect(cAgain.reply == Data("c run 1".utf8))
         await memory.forget(deviceID: phone)
