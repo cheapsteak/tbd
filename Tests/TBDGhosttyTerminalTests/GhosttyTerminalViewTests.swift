@@ -97,12 +97,6 @@ private func otherButtonEvent(_ type: CGEventType, number: Int64) throws -> NSEv
     return event
 }
 
-/// Draws `surface` offscreen with `renderer` and waits for the GPU. Synchronous on purpose: an
-/// async test cannot call `waitUntilCompleted` itself, which is unavailable in an async context.
-private func drawAndWait(_ surface: TerminalSurface, with renderer: TerminalRenderer, into texture: MTLTexture) throws {
-    try renderer.render(surface: surface, to: texture).commandBuffer?.waitUntilCompleted()
-}
-
 /// True when `bytes` is one SGR mouse report for `button`: `ESC [ < button ; … final`.
 private func isSGRReport(_ bytes: [UInt8], button: Int, final: Character) -> Bool {
     bytes.starts(with: Array("\u{1b}[<\(button);".utf8)) && bytes.last == final.asciiValue
@@ -591,9 +585,18 @@ struct GhosttyTerminalViewTests {
         view.setFocused(true)
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
 
+        // The close reaches the view one main-actor hop later, through the render signal relay's
+        // unstructured task, which nothing can await. Cancelling the timer drops its sleeper at
+        // once, so the poll is satisfied on its first look after that hop.
         fixture.terminal.close()
+        let closedAt = ContinuousClock.now
         let stopped = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in !clock.hasSleeper }
-        if stopped == .timedOut { Issue.record("the blink timer was still running after the close") }
+        if stopped == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the close to stop the blink timer",
+                observed: "the timer still armed \(ContinuousClock.now - closedAt) after the close",
+                deadline: TestDeadlines.saturatedPass))
+        }
         let committedAtClose = view.framesCommitted
 
         // Another surface on the shared renderer clears the atlas. A block the size of the atlas
@@ -612,7 +615,8 @@ struct GhosttyTerminalViewTests {
         try other.attach(otherTerminal)
         let size = renderer.drawableSize(columns: 10, rows: 3)
         let texture = try #require(renderer.makeOffscreenTexture(width: size.width, height: size.height))
-        try drawAndWait(other, with: renderer, into: texture)
+        // No wait for the GPU: the atlas is cleared on the CPU, inside `render`.
+        try renderer.render(surface: other, to: texture)
         try #require(atlas.rebuildCount == rebuildsBeforeOther + 1,
                      "the other surface's frame cleared the atlas \(atlas.rebuildCount - rebuildsBeforeOther) times, not once")
 
