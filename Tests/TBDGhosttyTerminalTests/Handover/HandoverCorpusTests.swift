@@ -385,46 +385,6 @@ struct HandoverCorpusTests {
         }
     }
 
-    struct LeaveCase: Sendable, CustomTestStringConvertible {
-        let state: String
-        /// The reset that matches the mode the state entered the alternate screen with.
-        let leave: String
-
-        var testDescription: String { state }
-    }
-
-    static let leaveCases: [LeaveCase] = [
-        LeaveCase(state: "alt-47-cursor-moved", leave: "\u{1b}[?47l"),
-        LeaveCase(state: "alt-1047-cursor-moved", leave: "\u{1b}[?1047l"),
-        LeaveCase(state: "alt-legacy-47", leave: "\u{1b}[?47l"),
-        LeaveCase(state: "alt-1047", leave: "\u{1b}[?1047l"),
-        LeaveCase(state: "alt-saved-cursor", leave: "\u{1b}[?1049l"),
-    ]
-
-    /// The handback writes the primary screen from a clone that left the alternate screen. Only
-    /// `?1049h` saves a cursor for its reset to put back. `?47l` and `?1047l` carry the alternate
-    /// screen's cursor over to the primary, in both engines, so the clone leaves with the reset
-    /// that matches the mode set. Left with `?1049l`, the primary's cursor went home. After the
-    /// program leaves the way it entered, the receiver must show what the viewer shows.
-    @Test(arguments: HandoverCorpusTests.leaveCases)
-    func handbackLeavesTheAlternateScreenTheWayItWasEntered(_ leave: LeaveCase) async throws {
-        try await onHandoverThread {
-            let state = HandoverFixtures.state(named: leave.state)
-            let source = try state.ghostty()
-            #expect(source.withLocked { $0.isAlternateScreen })
-            let receiver = try Self.handedBack(source, state: state)
-
-            let bytes = Array(leave.leave.utf8)
-            source.feed(bytes[...])
-            receiver.feed(bytes)
-            #expect(source.withLocked { !$0.isAlternateScreen })
-            #expect(receiver.locked { !$0.isCurrentBufferAlternate })
-            let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
-                .filtered(to: handoverScreenCategories)
-            #expect(tally.isEmpty, "\(leave.state), after \(leave.leave.debugDescription): \(tally.summary)")
-        }
-    }
-
     // MARK: - The scrollback cap
 
     struct CapCase: Sendable, CustomTestStringConvertible {

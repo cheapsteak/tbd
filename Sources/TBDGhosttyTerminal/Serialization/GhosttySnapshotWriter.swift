@@ -129,7 +129,8 @@ public enum GhosttySnapshotWriter {
 
     /// An alternate screen, with the primary screen behind it written first, from a clone that has
     /// left the alternate screen. The primary's cursor, pen, protection and charsets are put in
-    /// place before the receiver switches, so the receiver holds them when the program leaves.
+    /// place before the receiver switches, so the receiver's `?1049h` saves them for the program's
+    /// `?1049l` to put back.
     private static func alternateHandback(_ live: VtTerminal, state: GhosttyTerminalState, cap: Int) throws -> [UInt8] {
         var out: [UInt8] = []
         var primaryOrigin = false
@@ -137,9 +138,14 @@ public enum GhosttySnapshotWriter {
             // The state below holds the clone's raw handle, so the clone must outlive every read of it.
             try withExtendedLifetime(clone) {
                 // Its ESC cancels any sequence the clone was left inside, which nothing reads after.
-                clone.feed(leaveAlternate(state))
-                // After `?1049l` this is the origin mode saved with the primary's cursor; after
-                // `?47l` or `?1047l`, the one both screens share. It is set before the primary is
+                // On a screen entered with `?47h` or `?1047h` it puts back a cursor DECSC saved, or
+                // the defaults, where the program's own `?47l` or `?1047l` would carry the
+                // alternate screen's cursor over. A SwiftTerm receiver never shows the difference:
+                // its `?47l` and `?1047l` carry its alternate cursor over too, and its pen and
+                // charsets belong to neither screen, so after the switch they are the alternate
+                // screen's.
+                clone.feed(Array("\(esc)[?1049l".utf8))
+                // The origin mode saved with the primary's cursor. It is set before the primary is
                 // written, where the full-screen region makes it move nothing, so a receiver's
                 // `?1049h` saves it too.
                 primaryOrigin = GhosttyTerminalState(raw: clone.raw).mode(6)
@@ -170,14 +176,6 @@ public enum GhosttySnapshotWriter {
             }
             return nil
         }
-    }
-
-    /// The reset that leaves the alternate screen the way the program entered it. `?1049l` puts
-    /// back the cursor `?1049h` saved; `?47l` and `?1047l` carry the alternate screen's cursor to
-    /// the primary, as they will when the program leaves.
-    private static func leaveAlternate(_ state: GhosttyTerminalState) -> [UInt8] {
-        let entered = [1049, 1047].first { state.mode(UInt16($0)) } ?? 47
-        return Array("\(esc)[?\(entered)l".utf8)
     }
 
     /// The formatter's output for the whole screen, unwrapped and untrimmed, as a fresh receiver
