@@ -391,8 +391,9 @@ struct GhosttyTerminalViewTests {
     /// The click that brings a background window forward only activates it, as the SwiftTerm
     /// panel's does: the view takes first responder, and the press, its drags and its release
     /// reach neither the program, as mouse reports, nor the selection, which would drop the
-    /// selection the user came back to copy. The next click in the window is an ordinary one.
-    /// The view starts without first responder, since taking it is part of what is tested.
+    /// selection the user came back to copy, nor the responder chain, as a drag and a release of
+    /// a press nobody saw begin. The next click in the window is an ordinary one. The view starts
+    /// without first responder, since taking it is part of what is tested.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func theActivatingClickFocusesTheViewAndGoesNoFurther() throws {
         let fixture = try ViewFixture()
@@ -400,8 +401,7 @@ struct GhosttyTerminalViewTests {
         let recorder = ViewRecorder()
         let window = makeOffscreenWindow()
         defer { window.contentView = nil }
-        let content = try #require(window.contentView)
-        place(view, in: content)
+        let counter = try placeInCounter(view, in: window)
         view.onSend = { recorder.sent.append($0) }
         view.onMouseDownClaimFocus = { recorder.claimsPress }
         fixture.terminal.feed(text: "\u{1b}[?1002h\u{1b}[?1006h")
@@ -421,6 +421,9 @@ struct GhosttyTerminalViewTests {
         #expect(sentByActivation.isEmpty, "the activating click reached the program: \(sentByActivation)")
         let pending = view.mouseController.pendingReportReleases
         #expect(pending.isEmpty, "\(pending) wait for a release")
+        let passedOn = [counter.draggedCount, counter.upCount]
+        #expect(passedOn == [0, 0],
+                "the activating press's drags and releases went up the responder chain: \(passedOn)")
 
         // Control: an ordinary click, now the window is active, is reported.
         view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window, eventNumber: 43))
@@ -448,6 +451,9 @@ struct GhosttyTerminalViewTests {
         #expect(refocused, "the second activating click did not focus the terminal")
         let sentBySecond = recorder.sent
         #expect(sentBySecond.isEmpty, "the activating click sent \(sentBySecond)")
+        let passedOnBySecond = [counter.draggedCount, counter.upCount]
+        #expect(passedOnBySecond == [0, 0],
+                "the second activating press's drags and releases went up the responder chain: \(passedOnBySecond)")
 
         // Control: an ordinary press selects.
         view.mouseDown(with: try mouseEvent(.leftMouseDown, at: point, in: window, eventNumber: 45))

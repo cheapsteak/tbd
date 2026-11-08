@@ -1149,8 +1149,9 @@ public final class GhosttyTerminalView: NSView {
     private var activationClickEventNumber: Int?
 
     /// Set while the left press under way is the window's activating click, which the view
-    /// consumed: its drags and its release go nowhere either, since neither the program nor the
-    /// selection saw it begin. A release with no press would reach the program as a click.
+    /// consumed: its drags and its release go nowhere either. The mouse controller saw no press
+    /// begin, so it declines them, and without this they would go on up the responder chain as a
+    /// drag and a release of a press nobody saw begin.
     private var pressIsConsumed = false
 
     /// Set while the host declined the left press under way (`onMouseDownClaimFocus` answered
