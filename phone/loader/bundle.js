@@ -4,6 +4,7 @@
 // hash and decoded it, so a damaged or partial bundle never reaches the cache.
 
 import { MAX_BUNDLE_COMPRESSED, MAX_BUNDLE_TEXT, MAX_CHUNK_BYTES } from './constants.js';
+import { isSHA256 } from './protocol.js';
 
 /**
  * Why a bundle was refused.
@@ -27,7 +28,6 @@ import { MAX_BUNDLE_COMPRESSED, MAX_BUNDLE_TEXT, MAX_CHUNK_BYTES } from './const
 
 /** @typedef {import('./protocol.js').ChunkMessage} ChunkMessage */
 
-const SHA256_HEX = /^[0-9a-f]{64}$/;
 const STRICT_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 // Compressed bytes are fed to the decompressor this many at a time, one slice in flight. A
 // browser inflates each written chunk whole before the reader can stop it, so the slice bounds
@@ -65,8 +65,7 @@ export class BundleAssembler {
    * @throws {BundleError}
    */
   constructor({ sha256, size }) {
-    if (typeof sha256 !== 'string' || !SHA256_HEX.test(sha256)
-      || !Number.isInteger(size) || size < 1 || size > MAX_BUNDLE_COMPRESSED) {
+    if (!isSHA256(sha256) || !Number.isInteger(size) || size < 1 || size > MAX_BUNDLE_COMPRESSED) {
       throw new BundleError('welcome');
     }
     this.#sha256 = sha256;

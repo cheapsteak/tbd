@@ -25,6 +25,7 @@ import {
 } from './constants.js';
 import { isWrapKey } from './keys.js';
 import { isRoomID, relaySocketURL } from './links.js';
+import { isSHA256 } from './protocol.js';
 
 /** @typedef {import('./types.js').LaptopRecord} LaptopRecord */
 /** @typedef {import('./types.js').DamagedLaptop} DamagedLaptop */
@@ -56,7 +57,6 @@ const BY_LAPTOP = 'byLaptop';
 
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
-const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** Another tab holds the database open at an older version, so this one cannot upgrade it. */
 export class StoreBlockedError extends Error {
@@ -731,7 +731,7 @@ function bundleKeyFields(r, kind) {
   if (typeof laptopID !== 'string' || base64urlDecode(laptopID)?.length !== KEY_BYTES) {
     throw new TypeError(`${kind}: laptopID is not a laptop ID`);
   }
-  if (typeof sha256 !== 'string' || !SHA256_HEX.test(sha256)) {
+  if (!isSHA256(sha256)) {
     throw new TypeError(`${kind}: sha256 is not lowercase hex SHA-256`);
   }
   return { laptopID, sha256 };

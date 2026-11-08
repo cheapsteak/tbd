@@ -218,8 +218,8 @@ function isIntegerIn(value, min, max = Infinity) {
 
 /**
  * @param {unknown} value
- * @returns {value is string}
+ * @returns {value is string} a lowercase hex SHA-256
  */
-function isSHA256(value) {
+export function isSHA256(value) {
   return typeof value === 'string' && SHA256_HEX.test(value);
 }
