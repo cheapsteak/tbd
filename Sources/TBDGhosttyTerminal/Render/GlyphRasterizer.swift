@@ -10,9 +10,13 @@
 //
 // `thicken` turns on CoreText "font smoothing" for grayscale glyphs. On an alpha-only context that
 // is not LCD filtering but a stem-darkening pass (Ghostty's `font-thicken`): about 17 % more
-// coverage at 12.5 pt, which is the difference between JetBrains Mono looking like itself and
-// looking like a lighter cut. It dilates edges by up to a pixel, so the transparent padding grows by
-// one to hold it. Colour glyphs are bitmaps and unaffected.
+// coverage at 12.5 pt. It dilates edges by up to a pixel, so the transparent padding grows by one to
+// hold it. Colour glyphs are bitmaps and unaffected.
+//
+// It is off by default, as Ghostty's own `font-thicken` is, so libghostty text has the stroke weight
+// of SwiftTerm, which draws without it. With it on, a 2x screenshot shows every stroke about one
+// device pixel heavier than SwiftTerm's, with a grey fringe, and beside a SwiftTerm terminal that
+// reads as soft, non-Retina text.
 
 import CoreGraphics
 import CoreText
@@ -47,14 +51,14 @@ final class GlyphRasterizer {
     /// Transparent border kept around every glyph so bilinear sampling never bleeds a neighbour
     /// (one pixel more when `thicken` is on, for the dilation).
     let padding: Int
-    /// Font smoothing (stem darkening) on grayscale glyphs — see the file header.
+    /// Font smoothing (stem darkening) on grayscale glyphs, off by default — see the file header.
     let thicken: Bool
 
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     // Ignored for an alpha-only context, but Swift's CGContext initializer requires a non-nil space.
     private let grayColorSpace = CGColorSpaceCreateDeviceGray()
 
-    init(fontSet: FontSet, metrics: CellMetrics, padding: Int = 1, thicken: Bool = true) {
+    init(fontSet: FontSet, metrics: CellMetrics, padding: Int = 1, thicken: Bool = false) {
         self.fontSet = fontSet
         self.metrics = metrics
         self.thicken = thicken

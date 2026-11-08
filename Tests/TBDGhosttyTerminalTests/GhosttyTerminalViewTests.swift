@@ -856,6 +856,38 @@ struct GhosttyTerminalViewTests {
         #expect(view.surface.metrics == view.renderContext.metrics,
                 "the surface was built at \(String(describing: view.surface.metrics)), not at the new font's metrics")
     }
+
+    /// A view draws text at SwiftTerm's stroke weight. Font smoothing on an alpha-only bitmap is a
+    /// stem-darkening pass that makes every stroke about a device pixel heavier, and SwiftTerm draws
+    /// without it, so the glyph cache a view is given leaves it off. Checked on the cache the view
+    /// really draws from: its glyphs are the bitmaps an unthickened rasterizer makes, and they carry
+    /// less ink than a thickened rasterizer's.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aViewDrawsGlyphsWithoutThickening() throws {
+        let fixture = try ViewFixture()
+        let cache = fixture.view.renderContext.renderer.glyphCache
+        let unthickened = GlyphRasterizer(fontSet: cache.fontSet, metrics: cache.metrics, thicken: false)
+        let thickened = GlyphRasterizer(fontSet: cache.fontSet, metrics: cache.metrics, thicken: true)
+        /// The glyph's total coverage: the sum of its alpha bytes.
+        func ink(_ glyph: RasterizedGlyph) -> Int { glyph.pixels.reduce(0) { $0 + Int($1) } }
+
+        let letters: [Character] = ["l", "m"]
+        for letter in letters {
+            let shaped = cache.shaper.shape(letter)
+            let drawn = try #require(cache.rasterizer.rasterize(shaped), "the view's glyph cache drew no \(letter)")
+            let plain = try #require(unthickened.rasterize(shaped), "the unthickened rasterizer drew no \(letter)")
+            let heavy = try #require(thickened.rasterize(shaped), "the thickened rasterizer drew no \(letter)")
+            try #require(!drawn.isColor, "the \(letter) was drawn as a colour glyph")
+            let drawnInk = ink(drawn)
+            let plainInk = ink(plain)
+            let heavyInk = ink(heavy)
+            let sameBitmap = drawn == plain
+            #expect(sameBitmap,
+                    "the view's \(letter) (\(drawn.width)×\(drawn.height) px, ink \(drawnInk)) is not the unthickened one (\(plain.width)×\(plain.height) px, ink \(plainInk))")
+            #expect(drawnInk < heavyInk,
+                    "the view's \(letter) carries ink \(drawnInk), no less than the thickened one's \(heavyInk)")
+        }
+    }
 }
 
 /// `GhosttyTerminalView.shellQuoted(_:)`, which quotes a dropped file's path for the shell.

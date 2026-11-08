@@ -339,12 +339,13 @@ final class GlyphCache {
     }
     private var entries: [Key: CacheEntry] = [:]
 
-    /// - Parameter thicken: font smoothing on grayscale glyphs (`GlyphRasterizer.thicken`).
+    /// - Parameter thicken: font smoothing on grayscale glyphs (`GlyphRasterizer.thicken`). Off by
+    ///   default, and `TerminalRenderContext` passes none, so text has SwiftTerm's stroke weight.
     init(fontSet: FontSet,
          device: MTLDevice?,
          grayscaleInitialSize: Int? = nil,
          colorInitialSize: Int? = nil,
-         thicken: Bool = true) {
+         thicken: Bool = false) {
         let metrics = CellMetrics(fontSet: fontSet)
         let rasterizer = GlyphRasterizer(fontSet: fontSet, metrics: metrics, thicken: thicken)
         self.fontSet = fontSet
