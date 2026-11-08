@@ -651,8 +651,8 @@ struct PhoneConnectionTests {
             let log = await h.app.log
             #expect(log == ["connected", "disconnected"])
             // The handler that heard the channel, for `phoneRevoked`.
-            let channelHandler = handler as? RecordingPhoneApp
-            #expect(channelHandler === h.app)
+            let sameHandler = (handler as? RecordingPhoneApp) === h.app
+            #expect(sameHandler)
             let connected = await h.connection.isConnected
             #expect(connected == false)
         }
@@ -675,12 +675,12 @@ struct PhoneConnectionTests {
             let holding = FireRecorder<Void>()
             let writer = h.db.writerForTests
             let hold = gateHoldingTask { holdWrites(writer, until: release, holding: holding) }
-            let held = await holding.next()
-            try #require(held != nil)
+            let held = await holding.next() != nil
+            try #require(held)
 
             try await phone.sendHello()
-            let stamped = await lastSeenStamps.next()
-            try #require(stamped != nil)
+            let stamped = await lastSeenStamps.next() != nil
+            try #require(stamped)
             let connection = h.connection
             let revoking = Task { await connection.revokeAndStop() }
             // The socket closes once the revoke has begun stopping.

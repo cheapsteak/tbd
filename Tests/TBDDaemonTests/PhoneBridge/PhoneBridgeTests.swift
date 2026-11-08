@@ -660,20 +660,20 @@ struct PhoneBridgeTests {
     @Test func revokeGoesToTheHandlerTheChannelKept() async throws {
         try await withBridge(devices: 2) { h in
             await h.bridge.reconcile()
-            let connectedPhone = h.phones[0]
+            let onlinePhone = h.phones[0]
             let offlinePhone = h.phones[1]
-            let phone = try await h.connectedPhone(connectedPhone)
+            let phone = try await h.connectedPhone(onlinePhone)
             try await h.waitUntil("the phone to show as connected") {
-                await h.bridge.status().connectedDeviceIDs == [connectedPhone.device.id]
+                await h.bridge.status().connectedDeviceIDs == [onlinePhone.device.id]
             }
             let later = RecordingPhoneApp()
             await h.bridge.setAppHandler(later)
 
-            try await h.bridge.revoke(deviceID: connectedPhone.device.id)
+            try await h.bridge.revoke(deviceID: onlinePhone.device.id)
             let message = try await phone.next()
             #expect(message["type"] as? String == "revoked")
             let first = await h.app.log
-            #expect(first == ["connected", "disconnected", "revoked:\(connectedPhone.device.id)"])
+            #expect(first == ["connected", "disconnected", "revoked:\(onlinePhone.device.id)"])
             let laterFirst = await later.log
             #expect(laterFirst.isEmpty)
 
