@@ -105,6 +105,19 @@ struct ProjectionParityTests {
         }
     }
 
+    /// The outcome check itself, on a fake entry: a state that differs in every field its entry
+    /// names passes, and one that has stopped differing in one of them fails, naming it.
+    @Test func aListedFieldThatMatchesFailsTheOutcome() {
+        let misses = ["fake-state": Miss(reason: "a fake miss", fields: ["lines", "cursor"])]
+        let both = ["lines": "fake", "cursor": "fake"]
+        let passing = Self.outcomeFailures("fake-state", differences: both, misses: misses, walk: "fake walk")
+        #expect(passing.isEmpty, "\(passing)")
+
+        let failures = Self.outcomeFailures("fake-state", differences: ["lines": "fake"], misses: misses, walk: "fake walk")
+        #expect(failures.count == 1, "\(failures)")
+        #expect(failures.first?.contains("now matches SwiftTerm in [\"cursor\"]") == true, "\(failures)")
+    }
+
     @Test func knownMissesNameCorpusStates() {
         let names = Set(HandoverCorpus.names)
         for (name, miss) in Array(Self.projectionMisses) + Array(Self.captureMisses) {
@@ -114,20 +127,34 @@ struct ProjectionParityTests {
     }
 
     private static func expectOutcome(_ name: String, differences: [String: String], misses: [String: Miss], walk: String) {
+        for failure in outcomeFailures(name, differences: differences, misses: misses, walk: walk) {
+            Issue.record(HandoverOutcomeFailure(description: failure))
+        }
+    }
+
+    /// Why a state's differences in one walk fail, one message each: a field its entry does not
+    /// name, or any field of a state with no entry, and a field its entry names that no longer
+    /// differs, which leaves the list stale. Empty when the differences are what the list says.
+    static func outcomeFailures(
+        _ name: String, differences: [String: String], misses: [String: Miss], walk: String
+    ) -> [String] {
         func summary(_ fields: [String: String]) -> String {
             fields.keys.sorted().map { "\($0): \(fields[$0] ?? "")" }.joined(separator: " | ")
         }
-        if let miss = misses[name] {
-            let matching = miss.fields.subtracting(differences.keys)
-            #expect(
-                matching.isEmpty,
-                "\(name) is a known \(walk) miss (\(miss.reason)) but now matches SwiftTerm in \(matching.sorted()): remove them from its entry")
-            let unexplained = differences.filter { !miss.fields.contains($0.key) }
-            #expect(
-                unexplained.isEmpty,
-                "\(name): the \(walk) differs from SwiftTerm's beyond its known miss (\(miss.reason)): \(summary(unexplained))")
-        } else {
-            #expect(differences.isEmpty, "\(name): the \(walk) differs from SwiftTerm's: \(summary(differences))")
+        guard let miss = misses[name] else {
+            return differences.isEmpty ? [] : ["\(name): the \(walk) differs from SwiftTerm's: \(summary(differences))"]
         }
+        var failures: [String] = []
+        let matching = miss.fields.subtracting(differences.keys)
+        if !matching.isEmpty {
+            failures.append(
+                "\(name) is a known \(walk) miss (\(miss.reason)) but now matches SwiftTerm in \(matching.sorted()): remove them from its entry")
+        }
+        let unexplained = differences.filter { !miss.fields.contains($0.key) }
+        if !unexplained.isEmpty {
+            failures.append(
+                "\(name): the \(walk) differs from SwiftTerm's beyond its known miss (\(miss.reason)): \(summary(unexplained))")
+        }
+        return failures
     }
 }

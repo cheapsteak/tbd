@@ -150,6 +150,12 @@ struct HandoverMiss: Sendable {
     let categories: Set<String>
 }
 
+/// One reason a state's outcome against its list of misses fails. Recorded as an error, so the
+/// message is the failure's first line, which a CI summary keeps.
+struct HandoverOutcomeFailure: Error, CustomStringConvertible {
+    let description: String
+}
+
 /// Counts of differing things, by category, with the first example of each.
 struct HandoverTally {
     var counts: [String: Int] = [:]

@@ -161,6 +161,23 @@ struct HandoverCorpusTests {
         }
     }
 
+    /// The outcome check itself, on a fake entry: a state that differs in every category its
+    /// entry names passes, and one that has stopped differing in one of them fails, naming it.
+    @Test func aListedCategoryThatMatchesFailsTheOutcome() {
+        let misses = ["fake-state": HandoverMiss(reason: "a fake miss", categories: ["text", "wide"])]
+        var differsInBoth = HandoverTally()
+        differsInBoth.add("text", "fake")
+        differsInBoth.add("wide", "fake")
+        let passing = Self.outcomeFailures("fake-state", tally: differsInBoth, misses: misses, crossing: "fake crossing")
+        #expect(passing.isEmpty, "\(passing)")
+
+        var differsInText = HandoverTally()
+        differsInText.add("text", "fake")
+        let failures = Self.outcomeFailures("fake-state", tally: differsInText, misses: misses, crossing: "fake crossing")
+        #expect(failures.count == 1, "\(failures)")
+        #expect(failures.first?.contains("now matches in [\"wide\"]") == true, "\(failures)")
+    }
+
     @Test func handoverMissesNameStatesAndCategories() {
         let names = Set(HandoverFixtures.names)
         for (name, miss) in Array(Self.freshMisses) + Array(Self.handbackMisses) {
@@ -698,18 +715,31 @@ struct HandoverCorpusTests {
     }
 
     private static func expectOutcome(_ name: String, tally: HandoverTally, misses: [String: HandoverMiss], crossing: String) {
-        if let miss = misses[name] {
-            let matching = miss.categories.subtracting(tally.categories)
-            #expect(
-                matching.isEmpty,
-                "\(name) is a known miss for the \(crossing) (\(miss.reason)) but now matches in \(matching.sorted()): remove them from its entry")
-            let unexplained = tally.excluding(miss.categories)
-            #expect(
-                unexplained.isEmpty,
-                "\(name): the \(crossing) differs beyond its known miss (\(miss.reason)): \(unexplained.summary)")
-        } else {
-            #expect(tally.isEmpty, "\(name): the \(crossing) differs: \(tally.summary)")
+        for failure in outcomeFailures(name, tally: tally, misses: misses, crossing: crossing) {
+            Issue.record(HandoverOutcomeFailure(description: failure))
         }
+    }
+
+    /// Why a state's tally in one crossing fails, one message each: a difference in a category
+    /// its entry does not name, or in a state with no entry, and a category its entry names that
+    /// no longer differs, which leaves the list stale. Empty when the tally is what the list says.
+    static func outcomeFailures(
+        _ name: String, tally: HandoverTally, misses: [String: HandoverMiss], crossing: String
+    ) -> [String] {
+        guard let miss = misses[name] else {
+            return tally.isEmpty ? [] : ["\(name): the \(crossing) differs: \(tally.summary)"]
+        }
+        var failures: [String] = []
+        let matching = miss.categories.subtracting(tally.categories)
+        if !matching.isEmpty {
+            failures.append(
+                "\(name) is a known miss for the \(crossing) (\(miss.reason)) but now matches in \(matching.sorted()): remove them from its entry")
+        }
+        let unexplained = tally.excluding(miss.categories)
+        if !unexplained.isEmpty {
+            failures.append("\(name): the \(crossing) differs beyond its known miss (\(miss.reason)): \(unexplained.summary)")
+        }
+        return failures
     }
 }
 
