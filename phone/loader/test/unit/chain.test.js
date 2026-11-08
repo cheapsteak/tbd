@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { TaskChain } from '../../chain.js';
 import { FakeClock } from '../support/fake-clock.js';
+import { fakeVisibility } from '../support/helpers.js';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -107,4 +108,55 @@ test('disarm stops a timer before it fires, and work it already queued', async (
   for (let i = 0; i < 5; i += 1) await flush();
   assert.equal(fired, 0);
   assert.equal(chain.disarm(null), null);
+});
+
+test('armVisible counts only visible time: a timer that falls due while hidden does nothing, and the return gives a fresh window', async () => {
+  const clock = new FakeClock();
+  const page = fakeVisibility();
+  const chain = new TaskChain({ isEnded: () => false, onError: () => {}, visibility: page, clock });
+  let fired = 0;
+  chain.armVisible(1000, () => {
+    fired += 1;
+  });
+  await clock.advance(600);
+  // iOS hides the page, and the timer falls due before its visibilitychange arrives.
+  page.freeze();
+  await clock.advance(60_000);
+  await flush();
+  assert.equal(fired, 0);
+  page.show();
+  await clock.advance(999);
+  await flush();
+  assert.equal(fired, 0, 'a fresh 1000 from the return');
+  await clock.advance(1);
+  await flush();
+  assert.equal(fired, 1);
+  assert.equal(page.listeners(), 0);
+  assert.equal(clock.pending, 0);
+
+  // disarm stops the timer and its listener, hidden or not.
+  const timer = chain.armVisible(1000, () => {
+    fired += 1;
+  });
+  page.hide();
+  assert.equal(clock.pending, 0, 'hidden, the timer stops');
+  assert.equal(chain.disarm(timer), null);
+  assert.equal(page.listeners(), 0);
+  page.show();
+  await clock.advance(5000);
+  await flush();
+  assert.equal(fired, 1);
+});
+
+test('without a visibility, armVisible runs on the clock as arm does', async () => {
+  const { clock, chain } = makeChain();
+  let fired = 0;
+  chain.armVisible(100, () => {
+    fired += 1;
+  });
+  await clock.advance(99);
+  assert.equal(fired, 0);
+  await clock.advance(1);
+  await flush();
+  assert.equal(fired, 1);
 });

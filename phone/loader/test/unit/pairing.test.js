@@ -18,7 +18,7 @@ import { FakeClock } from '../support/fake-clock.js';
 import { createFakeRelay } from '../support/fake-relay.js';
 import { fakeSocketFactory } from '../support/fake-websocket.js';
 import {
-  WAIT_MS, b64, decode, encode, hangingSockets, quiet, until,
+  WAIT_MS, b64, decode, encode, fakeVisibility, hangingSockets, quiet, until,
 } from '../support/helpers.js';
 import { createResponder } from '../support/noise-responder.js';
 import { createScriptedLaptop } from '../support/scripted-laptop.js';
@@ -699,6 +699,47 @@ test('no signal within 10 s rejects offline; a socket that never opens rejects r
   await failsWith(q, 'relayUnreachable');
   assert.deepEqual(hanging.sockets[0].closes, [1000]);
   assert.equal(second.clock.pending, 0);
+});
+
+test('the signal and handshake timeouts count only visible time: one that falls due while hidden does nothing, and the return gives a full window', async () => {
+  // The signal timeout, on a socket that never opens.
+  const env = await setup();
+  const hanging = hangingSockets();
+  const page = fakeVisibility();
+  const p = pair(env, { openSocket: hanging.factory, visibility: page });
+  await until(() => hanging.sockets.length === 1, 'the socket');
+  await env.clock.advance(SIGNAL_TIMEOUT_MS - 1000);
+  // iOS hides the page, and the timeout falls due before its visibilitychange arrives.
+  page.freeze();
+  await env.clock.advance(60_000);
+  await quiet();
+  assert.equal(p.settled(), null);
+  page.show();
+  await env.clock.advance(SIGNAL_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(p.settled(), null);
+  await env.clock.advance(1);
+  await failsWith(p, 'relayUnreachable');
+  assert.equal(page.listeners(), 0);
+
+  // The handshake timeout, with a laptop that never answers message 1.
+  const second = await manualSetup();
+  const laptop = laptopSocket(second);
+  const shown = fakeVisibility();
+  const q = pair(second, { visibility: shown });
+  await until(() => laptop.frames.length === 1, 'message 1');
+  await second.clock.advance(HANDSHAKE_TIMEOUT_MS - 1000);
+  shown.freeze();
+  await second.clock.advance(60_000);
+  await quiet();
+  assert.equal(q.settled(), null);
+  shown.show();
+  await second.clock.advance(HANDSHAKE_TIMEOUT_MS - 1);
+  await quiet();
+  assert.equal(q.settled(), null);
+  await second.clock.advance(1);
+  await failsWith(q, 'invalid');
+  assert.equal(shown.listeners(), 0);
 });
 
 // --- the pairing socket ---------------------------------------------------------------------

@@ -18,7 +18,7 @@
 import { TaskChain } from './chain.js';
 import { confirmationCode } from './channel/confirm.js';
 import { NoiseError, createInitiator, phonePrologue } from './channel/noise.js';
-import { systemClock } from './clock.js';
+import { alwaysVisible, systemClock } from './clock.js';
 import { HANDSHAKE_TIMEOUT_MS, PAIRING_EXPIRY_GRACE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { createWrappedPhoneKey } from './keys.js';
 import { relaySocketURL } from './links.js';
@@ -29,6 +29,7 @@ import { REPLACED, RelaySocket } from './relay.js';
 import { laptopIDFromKey } from './store.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
+/** @typedef {import('./clock.js').Visibility} Visibility */
 /** @typedef {import('./links.js').PairingLinkData} PairingLinkData */
 /** @typedef {import('./types.js').WebSocketLike} WebSocketLike */
 /** @typedef {import('./relay.js').RelayEvent} RelayEvent */
@@ -76,6 +77,10 @@ import { laptopIDFromKey } from './store.js';
  * @property {(code: string) => void} onCode Called once, with the 6-digit code, when message 2
  *   has been read; never after pairing has ended.
  * @property {SubtleCrypto} [subtle] For the phone's key. Default `crypto.subtle`.
+ * @property {Visibility} [visibility] The page's visibility. Default: always visible. The
+ *   signal and handshake timeouts count only time while the page is visible
+ *   (`startVisibleTimer`), so a phone that locks mid-pairing is not failed for answers it could
+ *   not hear. The link's expiry is a wall-clock deadline, and counts all time.
  * @property {Clock} [clock]
  */
 
@@ -175,7 +180,9 @@ class Pairing {
   #expiryTimer = null;
 
   /** @param {PairingOptions} options */
-  constructor({ link, deviceName, openSocket, onCode, subtle = globalThis.crypto.subtle, clock = systemClock }) {
+  constructor({
+    link, deviceName, openSocket, onCode, subtle = globalThis.crypto.subtle, visibility = alwaysVisible, clock = systemClock,
+  }) {
     this.#link = link;
     this.#deviceName = deviceName;
     this.#openSocket = openSocket;
@@ -183,7 +190,9 @@ class Pairing {
     this.#subtle = subtle;
     this.#clock = clock;
     // Anything a task throws ends pairing with `invalid`.
-    this.#tasks = new TaskChain({ isEnded: () => this.#ended, onError: (error) => this.#fail('invalid', error), clock });
+    this.#tasks = new TaskChain({
+      isEnded: () => this.#ended, onError: (error) => this.#fail('invalid', error), visibility, clock,
+    });
     this.#url = relaySocketURL(link.fields.relay, link.fields.room);
     this.#prologue = phonePrologue(link.room);
     this.#laptopID = laptopIDFromKey(link.laptopKey);
@@ -225,7 +234,7 @@ class Pairing {
     });
     this.#socket = socket;
     // One bound for the WebSocket connecting and the first relay signal together.
-    this.#signalTimer = this.#tasks.arm(SIGNAL_TIMEOUT_MS, () => {
+    this.#signalTimer = this.#tasks.armVisible(SIGNAL_TIMEOUT_MS, () => {
       this.#signalTimer = null;
       if (!this.#gotSignal) this.#fail(this.#opened ? 'offline' : 'relayUnreachable');
     });
@@ -293,7 +302,7 @@ class Pairing {
     if (this.#ended) return;
     this.#initiator = initiator;
     /** @type {RelaySocket} */ (this.#socket).send(message1);
-    this.#handshakeTimer = this.#tasks.arm(HANDSHAKE_TIMEOUT_MS, () => {
+    this.#handshakeTimer = this.#tasks.armVisible(HANDSHAKE_TIMEOUT_MS, () => {
       this.#handshakeTimer = null;
       // Plan 3 refuses a used or unknown offer without a reply, and under a wrong secret
       // message 2 cannot be read.

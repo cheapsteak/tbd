@@ -15,7 +15,9 @@ import { validateLaptopRecord } from '../../store.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { createFakeRelay } from '../support/fake-relay.js';
 import { fakeSocketFactory } from '../support/fake-websocket.js';
-import { b64, decode, encode, hangingSockets, quiet, until } from '../support/helpers.js';
+import {
+  b64, decode, encode, fakeVisibility, hangingSockets, quiet, until,
+} from '../support/helpers.js';
 import { createResponder } from '../support/noise-responder.js';
 import { createScriptedLaptop } from '../support/scripted-laptop.js';
 import { importPair } from '../support/x25519.js';
@@ -1565,19 +1567,19 @@ test('only resumes close together coalesce: a later one replaces a socket still 
 
 test('a reconnect waits while hidden and runs on resume', async () => {
   const env = await setup();
-  let visible = true;
-  const c = connection(env, { isVisible: () => visible });
+  const page = fakeVisibility();
+  const c = connection(env, { visibility: page });
   c.conn.start();
   await until(() => c.states().includes('ready'), 'ready');
 
   // A close while hidden arms nothing.
-  visible = false;
+  page.freeze();
   env.net.sockets[0].close(1000);
   await until(() => c.states().includes('reconnecting'), 'reconnecting');
   await env.clock.advance(120_000);
   await quiet();
   assert.equal(env.joins(), 1);
-  visible = true;
+  page.show();
   await env.clock.advance(120_000);
   await quiet();
   assert.equal(env.joins(), 1, 'only resume() reconnects');
@@ -1588,15 +1590,67 @@ test('a reconnect waits while hidden and runs on resume', async () => {
   // A reconnect that falls due while hidden waits too.
   env.net.sockets[1].close(1000);
   await until(() => c.count('reconnecting') === 2 && env.clock.pending === 1, 'the reconnect timer');
-  visible = false;
+  page.freeze();
   await env.clock.advance(1000);
   await quiet();
   assert.equal(env.joins(), 2);
-  visible = true;
+  page.show();
   c.conn.resume();
   await until(() => c.count('ready') === 3, 'ready after the second resume');
   assert.equal(env.joins(), 3);
   c.conn.stop();
+});
+
+test('the signal timeout counts only visible time: one that falls due while hidden does nothing, and the return gives a full window', async () => {
+  const env = await setup();
+  const hanging = hangingSockets();
+  const page = fakeVisibility();
+  const c = connection(env, { openSocket: hanging.factory, visibility: page });
+  c.conn.start();
+  await quiet();
+  await env.clock.advance(SIGNAL_TIMEOUT_MS - 1000);
+  // iOS hides the page, and the timeout falls due before its visibilitychange arrives.
+  page.freeze();
+  await env.clock.advance(60_000);
+  await quiet();
+  assert.deepEqual(hanging.sockets[0].closes, []);
+  assert.deepEqual(c.states(), ['connecting']);
+
+  page.show();
+  await env.clock.advance(SIGNAL_TIMEOUT_MS - 1);
+  await quiet();
+  assert.deepEqual(hanging.sockets[0].closes, []);
+  await env.clock.advance(1);
+  await until(() => c.states().includes('relayUnreachable'), 'relayUnreachable');
+  assert.deepEqual(hanging.sockets[0].closes, [1000]);
+  c.conn.stop();
+  assert.equal(page.listeners(), 0, 'no timer is left listening');
+});
+
+test('the handshake timeout counts only visible time: one that falls due while hidden does nothing, and the return gives a full window', async () => {
+  const env = await setup();
+  env.laptop.devices.clear();
+  const page = fakeVisibility();
+  const c = connection(env, { visibility: page });
+  c.conn.start();
+  await until(() => env.laptop.counts.refused === 1, 'message 1 at the laptop');
+  await quiet();
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS - 1000);
+  page.freeze();
+  await env.clock.advance(60_000);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking']);
+  assert.equal(env.net.count('close()'), 0);
+
+  page.show();
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS - 1);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking']);
+  await env.clock.advance(1);
+  await until(() => c.states().includes('offline'), 'offline');
+  assert.equal(env.net.count('close()'), 1, 'the socket ends, for a retry');
+  c.conn.stop();
+  assert.equal(page.listeners(), 0, 'no timer is left listening');
 });
 
 test('stop closes the socket, cancels its timers and reports nothing more', async () => {

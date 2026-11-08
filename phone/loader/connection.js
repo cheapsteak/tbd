@@ -11,6 +11,11 @@
 // in hand, as checking a download's does, so a slow phone hashing a large bundle never turns a
 // good cache entry into a miss.
 //
+// Time. The signal and handshake timeouts count only time while the page is visible: iOS
+// freezes a hidden page, so a timer that falls due while it is hidden must not tear down a
+// session whose answer simply could not arrive. Each return to the page gives them a fresh
+// window. The other timers (backoff, grace, cache read) run on the clock alone.
+//
 // Sessions. Each `peer-joined` starts a new session: a fresh initiator, and later its
 // transport, welcome and bundle assembly. Anything an older session started that finishes
 // late (an encrypted send, say) sees that its session is no longer current and is dropped.
@@ -19,7 +24,7 @@ import { NoiseError, createInitiator, phonePrologue, MAX_PLAINTEXT_LENGTH } from
 import { base64urlDecode } from './channel/pairingLink.js';
 import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
 import { TaskChain } from './chain.js';
-import { systemClock } from './clock.js';
+import { alwaysVisible, systemClock } from './clock.js';
 import {
   CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS,
 } from './constants.js';
@@ -31,6 +36,7 @@ import {
 import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
+/** @typedef {import('./clock.js').Visibility} Visibility */
 /** @typedef {import('./types.js').LaptopRecord} LaptopRecord */
 /** @typedef {import('./types.js').BundleRecord} BundleRecord */
 /** @typedef {import('./types.js').WebSocketLike} WebSocketLike */
@@ -96,8 +102,9 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  *   or a handshake under way, reads `offline` only from its own outcome. Default 0; `main.js`
  *   passes `PAIRED_GRACE_MS` (a signal wait plus a handshake) right after pairing, while the
  *   laptop's device link joins the new room.
- * @property {() => boolean} [isVisible] Default `() => true`. While it is false, a reconnect
- *   waits for `resume()`.
+ * @property {Visibility} [visibility] The page's visibility. Default: always visible. While
+ *   the page is hidden, a reconnect waits for `resume()`, and the signal and handshake
+ *   timeouts stop (`startVisibleTimer`).
  * @property {() => string | null} [runningBundle] The SHA-256 of the bundle the page's app
  *   frame runs now, or null. Default `() => null`. A `welcome` naming it skips the cache read
  *   and the download, so a reconnect under a running app reads no 16 MB row and hashes nothing.
@@ -132,7 +139,7 @@ export class LaptopConnection {
   #openSocket;
   #onEvent;
   #absentGraceMs;
-  #isVisible;
+  #visibility;
   #runningBundle;
   #random;
   #clock;
@@ -184,7 +191,7 @@ export class LaptopConnection {
    * @throws {RangeError} for a record whose relay or room `relaySocketURL` refuses
    */
   constructor({
-    record, keyPair, cache, openSocket, onEvent, absentGraceMs = 0, isVisible = () => true,
+    record, keyPair, cache, openSocket, onEvent, absentGraceMs = 0, visibility = alwaysVisible,
     runningBundle = () => null, random = Math.random, clock = systemClock,
   }) {
     this.#record = record;
@@ -193,7 +200,7 @@ export class LaptopConnection {
     this.#openSocket = openSocket;
     this.#onEvent = onEvent;
     this.#absentGraceMs = Number.isFinite(absentGraceMs) && absentGraceMs > 0 ? absentGraceMs : 0;
-    this.#isVisible = isVisible;
+    this.#visibility = visibility;
     this.#runningBundle = runningBundle;
     this.#random = random;
     this.#clock = clock;
@@ -204,6 +211,7 @@ export class LaptopConnection {
       onError: (error) => {
         if (!this.#ended) this.#fail(error instanceof BundleError ? 'badBundle' : 'protocol');
       },
+      visibility,
       clock,
     });
     // relaySocketURL checks the room, so the decode below has 32 bytes to work with.
@@ -314,7 +322,7 @@ export class LaptopConnection {
     this.#peerAbsent = false;
     // One bound for the WebSocket connecting and the first relay signal together: every phone
     // join gets a signal at once, so a socket without one by now is no use.
-    this.#signalTimer = this.#tasks.arm(SIGNAL_TIMEOUT_MS, () => {
+    this.#signalTimer = this.#tasks.armVisible(SIGNAL_TIMEOUT_MS, () => {
       this.#signalTimer = null;
       if (socket !== this.#socket || this.#gotSignal) return;
       this.#closeSocket();
@@ -400,7 +408,7 @@ export class LaptopConnection {
 
   /** Reconnects unless the page is hidden, in which case `resume()` reconnects. */
   #reconnectNow() {
-    if (this.#socket !== null || !this.#isVisible()) return;
+    if (this.#socket !== null || !this.#visibility.isVisible()) return;
     this.#connect();
   }
 
@@ -429,7 +437,7 @@ export class LaptopConnection {
     if (!this.#isCurrent(session)) return;
     session.initiator = initiator;
     socket.send(message1);
-    session.timer = this.#tasks.arm(HANDSHAKE_TIMEOUT_MS, () => {
+    session.timer = this.#tasks.armVisible(HANDSHAKE_TIMEOUT_MS, () => {
       if (!this.#isCurrent(session) || session.transport !== null) return;
       // No message 2. Plan 3 refuses an unknown key without a reply, so a phone removed while
       // it was away reads as offline. But message 1 or 2 may have been lost instead (a relay

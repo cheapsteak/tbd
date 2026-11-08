@@ -3,20 +3,24 @@
 // every timer through one, so asynchronous work (decrypting, say) never lets a later event
 // overtake an earlier one.
 
-import { systemClock } from './clock.js';
+import { alwaysVisible, startVisibleTimer, systemClock } from './clock.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
+/** @typedef {import('./clock.js').Visibility} Visibility */
 
 /**
  * One timer, armed through the clock. When it fires, its work is queued on the chain, and
- * `cancelled` stops work that was queued but has not run yet.
- * @typedef {{ id: unknown, cancelled: boolean }} Timer
+ * `cancelled` stops work that was queued but has not run yet. `stop` cancels the clock's
+ * timer (and, for a visible-time timer, its visibility listener); it is idempotent.
+ * @typedef {{ cancelled: boolean, stop: () => void }} Timer
  */
 
 /**
  * @typedef {object} TaskChainOptions
  * @property {() => boolean} isEnded Once true, queued tasks no longer run.
  * @property {(error: unknown) => void} onError Gets whatever a task throws or rejects with.
+ * @property {Visibility} [visibility] The page's visibility, for `armVisible`. Default:
+ *   always visible.
  * @property {Clock} [clock]
  */
 
@@ -25,12 +29,14 @@ export class TaskChain {
   #tail = Promise.resolve();
   #isEnded;
   #onError;
+  #visibility;
   #clock;
 
   /** @param {TaskChainOptions} options */
-  constructor({ isEnded, onError, clock = systemClock }) {
+  constructor({ isEnded, onError, visibility = alwaysVisible, clock = systemClock }) {
     this.#isEnded = isEnded;
     this.#onError = onError;
+    this.#visibility = visibility;
     this.#clock = clock;
   }
 
@@ -56,11 +62,25 @@ export class TaskChain {
    */
   arm(ms, fn) {
     /** @type {Timer} */
-    const timer = { id: null, cancelled: false };
-    timer.id = this.#clock.setTimeout(() => {
-      timer.id = null;
-      this.enqueue(() => (timer.cancelled ? undefined : fn()));
-    }, ms);
+    const timer = { cancelled: false, stop: () => {} };
+    const id = this.#clock.setTimeout(() => this.#run(timer, fn), ms);
+    timer.stop = () => this.#clock.clearTimeout(id);
+    return timer;
+  }
+
+  /**
+   * Like `arm`, but only time while the page is visible counts (`startVisibleTimer`): iOS
+   * freezes a hidden page, so a timer that falls due while it is hidden does nothing, and each
+   * return to the page starts a fresh `ms`. For a wait on the network, which a frozen page
+   * cannot hear back from.
+   * @param {number} ms
+   * @param {() => void | Promise<void>} fn runs on the chain
+   * @returns {Timer}
+   */
+  armVisible(ms, fn) {
+    /** @type {Timer} */
+    const timer = { cancelled: false, stop: () => {} };
+    timer.stop = startVisibleTimer(ms, this.#visibility, () => this.#run(timer, fn), this.#clock);
     return timer;
   }
 
@@ -71,8 +91,17 @@ export class TaskChain {
   disarm(timer) {
     if (timer !== null) {
       timer.cancelled = true;
-      if (timer.id !== null) this.#clock.clearTimeout(timer.id);
+      timer.stop();
     }
     return null;
+  }
+
+  /**
+   * Queues a fired timer's work, which `disarm` can still stop before it runs.
+   * @param {Timer} timer
+   * @param {() => void | Promise<void>} fn
+   */
+  #run(timer, fn) {
+    this.enqueue(() => (timer.cancelled ? undefined : fn()));
   }
 }

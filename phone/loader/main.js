@@ -114,9 +114,10 @@ function takeLinkFromAddress(win) {
 }
 
 /**
- * The document's visibility, for the store timeouts and the app frame's start timeout: only
- * time while the page is visible counts, because iOS freezes a hidden page with its store
- * requests, or a bundle starting, in flight.
+ * The document's visibility, for the store timeouts, the app frame's start timeout, presence
+ * requests, and the signal and handshake timeouts of a connection or a pairing: only time while
+ * the page is visible counts, because iOS freezes a hidden page with its store requests, a
+ * bundle starting, or a relay's answer in flight.
  * @param {Document} doc
  * @returns {Visibility}
  */
@@ -612,6 +613,7 @@ class LoaderPage {
       deviceName: phoneName,
       openSocket: this.#openSocket,
       subtle: this.#subtle,
+      visibility: this.#visibility,
       clock: this.#clock,
       onCode: (code) => {
         if (this.#pairing === run) this.#mount(renderCode({ laptopName, phoneName, code, onCancel }));
@@ -752,7 +754,7 @@ class LoaderPage {
         openSocket: this.#openSocket,
         onEvent: (event) => this.#onConnectionEvent(connection, event),
         absentGraceMs,
-        isVisible: this.#visibility.isVisible,
+        visibility: this.#visibility,
         // A reconnect under a running app finds its bundle here, and goes on without reading
         // or downloading it again; `ready` brings the app's channel back up.
         runningBundle: () => (this.#connection === connection && this.#frame !== null ? this.#frameSha : null),

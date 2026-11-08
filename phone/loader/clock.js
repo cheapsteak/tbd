@@ -21,6 +21,15 @@ export const systemClock = {
  *   change, and returns what removes it
  */
 
+/**
+ * A page that is always visible: the default where no document's visibility is passed in.
+ * @type {Visibility}
+ */
+export const alwaysVisible = Object.freeze({
+  isVisible: () => true,
+  onChange: () => () => {},
+});
+
 /** What `withVisibleTimeout` rejects with when time runs out first. */
 export class TimeoutError extends Error {
   /** @param {number} ms */

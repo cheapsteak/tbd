@@ -13,7 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { base64urlEncode } from '../../channel/pairingLink.js';
-import { STORE_TIMEOUT_MS } from '../../constants.js';
+import { SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
 import { boot } from '../../main.js';
 import { MESSAGES } from '../../messages.js';
@@ -538,6 +538,38 @@ test('a key that does not unwrap shows the missing-key screen and opens no socke
   await until(() => page.screen() === 'key-missing', 'the missing-key screen');
   assert.ok(page.text().includes(MESSAGES.keyMissing('acme-mbp')));
   assert.equal(relay.sockets.length, 0);
+});
+
+test('the connection\'s signal timeout counts only time while the page is visible', async () => {
+  const relay = relaySockets();
+  const page = bootPage({ laptops: [await storedLaptop('acme-mbp')], openSocket: (url) => relay.openSocket(url) });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => relay.sockets.length === 1, 'the laptop\'s socket');
+  relay.open(0);
+  page.setVisibility('hidden');
+  await page.clock.advance(SIGNAL_TIMEOUT_MS * 3);
+  await flush();
+  assert.deepEqual(relay.sockets[0].closes, [], 'no signal yet, but the page was hidden');
+  assert.equal(relay.sockets.length, 1);
+  assert.equal(page.screen(), 'connecting');
+});
+
+test('the pairing\'s signal timeout counts only time while the page is visible', async () => {
+  const relay = relaySockets();
+  const page = bootPage({ href: V1.url, openSocket: (url) => relay.openSocket(url) });
+  page.idb.succeed();
+  await flush();
+  assert.equal(page.screen(), 'name');
+  const form = page.doc.created.find((element) => element.tagName === 'form');
+  form?.dispatchEvent(new Event('submit'));
+  await waitFor(() => relay.sockets.length === 1, 'the pairing socket');
+  relay.open(0);
+  page.setVisibility('hidden');
+  await page.clock.advance(SIGNAL_TIMEOUT_MS * 3);
+  await flush();
+  assert.deepEqual(relay.sockets[0].closes, [], 'no signal yet, but the page was hidden');
+  assert.equal(page.screen(), 'pairing');
 });
 
 // --- presence, and a return to the page ---------------------------------------------------
