@@ -370,16 +370,19 @@ public enum GhosttySnapshotWriter {
     /// when a probe fails.
     ///
     /// Each probe goes to its own libghostty encoder, as `MouseEncoder`'s own probe of the flags
-    /// does, and not through `MouseEncoder.encode`: that sends a release only for a press it
-    /// reported, and tells libghostty a button is held only while one is, so a fresh one reports
-    /// neither the release that tells 1000 from X10 nor the drag that tells 1002 from 1000.
+    /// does, and not through `MouseEncoder.encode`, which sends a release only for a press it
+    /// reported: a fresh one reports no release, so it would read 1000 as X10.
     static func effectiveMouseMode(_ terminal: VtTerminal) -> Int? {
         // A 10 by 10 grid of 10-pixel cells, with every probe inside its first cell.
         let geometry = TerminalPixelGeometry(screenWidth: 100, screenHeight: 100, cellWidth: 10, cellHeight: 10)
         let inside = GhosttyMousePosition(x: 5, y: 5)
         let left = GHOSTTY_MOUSE_BUTTON_LEFT
-        // A drag is a move with a button held, and button-event tracking reports one only while
-        // the encoder is told a button is.
+        // Each event is reported under its own mode and the modes listed before it, and under none
+        // after it: a move with no button only under any-event tracking, a move with a button
+        // under button-event tracking too, a release under normal tracking too, and a press under
+        // X10 too. libghostty tells the two moves apart by the event's button. The held flag is
+        // set as a real press or drag would set it; libghostty reads it only for a move outside
+        // the viewport, and every probe is inside.
         let probes: [(mode: Int, action: GhosttyMouseAction, button: GhosttyMouseButton?, held: Bool)] = [
             (1003, GHOSTTY_MOUSE_ACTION_MOTION, nil, false),
             (1002, GHOSTTY_MOUSE_ACTION_MOTION, left, true),
