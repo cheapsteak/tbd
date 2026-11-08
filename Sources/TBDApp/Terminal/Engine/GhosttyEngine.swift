@@ -440,8 +440,12 @@ final class GhosttyEngine: TerminalEngine {
     /// set.
     var onFramePresented: (@MainActor () -> Void)? {
         didSet {
-            terminalView.onFramePresented = onFramePresented == nil ? nil : { [weak self] in
-                self?.onFramePresented?()
+            if onFramePresented == nil {
+                terminalView.onFramePresented = nil
+            } else {
+                terminalView.onFramePresented = { [weak self] in
+                    self?.onFramePresented?()
+                }
             }
         }
     }
