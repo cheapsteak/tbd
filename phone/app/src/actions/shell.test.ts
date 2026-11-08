@@ -240,6 +240,50 @@ test('Try again clears the error and subscribes the same way, and its reply clea
   assert.equal(h.state().conn.error, null);
 });
 
+test('a channel up after a refused subscribe clears the error while its subscribe is in flight', async () => {
+  const h = harness();
+  h.actions.onChannelUp();
+  h.sent[0]!.reject(new AppError('phone_control_off', 'Phone control is off on this laptop.'));
+  await flush();
+  h.actions.onChannelDown();
+  assert.equal(h.state().conn.error, 'Phone control is off on this laptop.');
+  h.actions.onChannelUp();
+  assert.equal(h.state().conn.error, null);
+  assert.equal(h.state().conn.subscribed, false);
+  // So no "Try again" shows, and a tap on the one that showed sends no second subscribe.
+  h.actions.retrySubscribe();
+  assert.deepEqual(h.requests(), [['sessions.subscribe', {}], ['sessions.subscribe', {}]]);
+  h.sent[1]!.resolve(snapshot([row('W1', [R])]));
+  await flush();
+  assert.equal(h.state().conn.subscribed, true);
+});
+
+test('Try again sends nothing while a subscribe is in flight, even with an error showing', async () => {
+  const h = harness();
+  h.actions.onChannelUp();
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  // The first subscribe's refusal comes while the second is still in flight.
+  h.sent[0]!.reject(new AppError('refused', 'Too many requests are in progress.'));
+  await flush();
+  assert.equal(h.state().conn.error, 'Too many requests are in progress.');
+  h.actions.retrySubscribe();
+  assert.equal(h.sent.length, 2);
+  // Once the second is refused too, nothing is in flight, and Try again subscribes.
+  h.sent[1]!.reject(new AppError('refused', 'Too many requests are in progress.'));
+  await flush();
+  h.actions.retrySubscribe();
+  assert.equal(h.sent.length, 3);
+  // A reconnect supersedes that one and sends its own; once both settle, Try again works again.
+  h.actions.onChannelDown();
+  h.actions.onChannelUp();
+  h.sent[2]!.reject(new AppError('superseded', SUPERSEDED_TEXT));
+  h.sent[3]!.reject(new AppError('refused', 'Too many requests are in progress.'));
+  await flush();
+  h.actions.retrySubscribe();
+  assert.equal(h.sent.length, 5);
+});
+
 test('Try again with no error showing sends nothing', () => {
   const h = harness();
   h.actions.retrySubscribe();

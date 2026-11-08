@@ -42,13 +42,29 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
   }
 
   /**
+   * How many subscribes are unanswered, superseded ones included until the client fails them.
+   * Kept here and not in the store, since nothing renders it: `retrySubscribe` reads it.
+   */
+  let subscribesInFlight = 0;
+
+  /**
    * Sends `sessions.subscribe`: with the stream and the last `seq` the client saw, so the
    * laptop can replay what the phone missed, or with `{}` when the client has not both.
    */
   function subscribe(): void {
     const { stream, lastSeq } = ctx.client;
     const params: SessionsSubscribeParams = stream !== null && lastSeq !== null ? { stream, sinceSeq: lastSeq } : {};
-    ctx.client.request('sessions.subscribe', params).then(subscribed, subscribeFailed);
+    subscribesInFlight++;
+    ctx.client.request('sessions.subscribe', params).then(
+      (result) => {
+        subscribesInFlight--;
+        subscribed(result);
+      },
+      (error: unknown) => {
+        subscribesInFlight--;
+        subscribeFailed(error);
+      },
+    );
   }
 
   /**
@@ -82,10 +98,11 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
     /**
      * The channel came up. The client calls this inside its `onUp`, so the requests made here
      * go out first: `sessions.subscribe`, then the transcript's resume, which does not wait
-     * for the subscribe reply.
+     * for the subscribe reply. It clears a refused subscribe's error, so the loading screen
+     * shows while the new subscribe is in flight, in place of the old message and "Try again".
      */
     onChannelUp(): void {
-      setConn({ up: true });
+      setConn({ up: true, error: null });
       subscribe();
       self().resumeTranscriptOnUp();
     },
@@ -94,9 +111,13 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
       setConn({ up: false });
     },
 
-    /** "Try again" after a refused subscribe. It does nothing unless an error shows, so a second tap sends nothing more. */
+    /**
+     * "Try again" after a refused subscribe. It does nothing unless an error shows and no
+     * subscribe is in flight, so a second tap sends nothing more and never a second subscribe
+     * beside one a channel up sent.
+     */
     retrySubscribe(): void {
-      if (store.get().conn.error === null) return;
+      if (store.get().conn.error === null || subscribesInFlight > 0) return;
       setConn({ error: null });
       subscribe();
     },

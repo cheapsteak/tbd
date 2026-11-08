@@ -88,6 +88,7 @@ export interface AppState {
    * The channel to the laptop. `subscribed` turns true at the first `sessions.subscribe` reply
    * and stays true across drops, so the list stays on screen while the loader reconnects.
    * `error` is a refused subscribe's message, shown with "Try again" while `subscribed` is false.
+   * It clears when the next subscribe goes out, from a channel up or from "Try again".
    */
   conn: { up: boolean; subscribed: boolean; error: string | null };
   /** The loader's view of the screen, null until its first `env` message. */
