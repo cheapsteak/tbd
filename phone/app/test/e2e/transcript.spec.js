@@ -718,6 +718,72 @@ for (const [what, step, n] of /** @type {const} */ ([['a pixel', 1, 60], ['a thi
   });
 }
 
+/**
+ * The transcript's live region, and the lines it says now.
+ * @param {Page} page
+ */
+function liveRegion(page) {
+  const region = app(page).locator('.tx-wrap > [aria-live="polite"]');
+  return { region, lines: region.locator(':scope > div > div') };
+}
+
+test('the live region says the rows that arrive at the bottom in their own words, a few at most', async ({ page, appHost }) => {
+  const tx = await openTall(page, appHost);
+  const { region, lines } = liveRegion(page);
+  // The list is no live region, and the rows of the open are not said.
+  expect(await tx.getAttribute('aria-live')).toBeNull();
+  expect(await app(page).locator('[aria-live]').count()).toBe(1);
+  await expect(region).toHaveText('');
+  const box = await region.boundingBox();
+  expect(box === null || (box.width <= 1 && box.height <= 1)).toBe(true);
+
+  // Rows the virtualizer draws as the reader scrolls are not said.
+  await scrollTx(tx, 0);
+  await frames(tx, 3);
+  await scrollTx(tx, 'bottom');
+  await frames(tx, 3);
+  await expect(region).toHaveText('');
+
+  const item = (/** @type {object} */ x) => ({ truncated: false, ...x });
+  await appendToCheckout(page, [
+    item({ id: 'say-1', kind: 'user', text: 'Run the *auth* tests' }),
+    item({ id: 'say-2', kind: 'tool', toolName: 'Bash', target: 'npm test -- auth', toolStatus: 'running' }),
+    item({ id: 'say-3', kind: 'thinking', text: 'Check the lockfile first.' }),
+    item({ id: 'say-4', kind: 'assistant', text: 'Both **pass**.\n\n- `isLocalPath` refuses [other sites](https://acme.example).' }),
+  ]);
+  await expect(lines).toHaveText(['Run the auth tests', 'Bash npm test -- auth', 'Both pass. isLocalPath refuses other sites.']);
+
+  // A burst says its last three rows, each cut to 500 characters.
+  const long = 'word '.repeat(400);
+  await appendToCheckout(page, Array.from({ length: 10 }, (_, i) => item({ id: `burst-${i}`, kind: 'assistant', text: `${i} ${long}` })));
+  await expect(lines).toHaveCount(3);
+  const said = await lines.allTextContents();
+  expect(said.map((l) => l.slice(0, 2))).toEqual(['7 ', '8 ', '9 ']);
+  expect(said.every((l) => l.length === 500)).toBe(true);
+
+  // An update in place is not an arrival; a page in place of the rows empties the region.
+  await hostCall(page, 'emit', 'transcript.update', { session: CHECKOUT_REF, items: [item({ id: 'burst-9', kind: 'assistant', text: 'Changed.' })] });
+  await expect(tx.locator('.say', { hasText: 'Changed.' })).toHaveCount(1);
+  expect(await lines.allTextContents()).toEqual(said);
+  await hostCall(page, 'emit', 'transcript.reset', {
+    session: CHECKOUT_REF, reason: 'rollover', page: { items: bashRows('reset', 5), reachedStart: true, omittedItems: 0 },
+  });
+  await expect(tx.locator('button.tool', { hasText: 'npm run reset-4' })).toBeVisible();
+  await expect(region).toHaveText('');
+});
+
+test('the rows of an older page are not said', async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: checkoutWith(shortItems()) });
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  const { region } = liveRegion(page);
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(1);
+  await expect.poll(async () => { const m = await metricsOf(tx); return m.scrollHeight > m.clientHeight; }).toBe(true);
+  await frames(tx, 3);
+  await expect(region).toHaveText('');
+});
+
 test('a page in place of the rows starts at the bottom and takes the pill away', async ({ page, appHost }) => {
   const tx = await openTall(page, appHost);
   const { pill } = await pillAfterScrollingUp(page, tx);

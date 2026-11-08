@@ -22,9 +22,16 @@
  * **The "Working…" line** (`Working`, mock 932) follows `.tx-list` inside `.tx`, outside the
  * virtual rows, while the session's chip is `working`. It reads how long since the chip changed
  * (`status.changedAt`), the one start time the wire has, again every second, and only while it
- * shows: no timer runs for a session that is not working. Its elapsed time is not announced on
- * each beat, though `.tx` is a live region. The line's coming and going is a layout like any
- * other, so a view that keeps to the bottom stays there (`settle`, below).
+ * shows: no timer runs for a session that is not working. The line's coming and going is a
+ * layout like any other, so a view that keeps to the bottom stays there (`settle`, below).
+ *
+ * **What a screen reader is told** (`announce.ts`). `.tx` is no live region, since the rows the
+ * virtualizer draws as the reader scrolls would read as if they had just arrived. A visually
+ * hidden polite live region beside it, styled inline, since app.css is not this file's, says
+ * the rows that came in at the bottom (`rowsChange` reads `appended`) since it last spoke, in
+ * their own words: at most the last `ANNOUNCE_ROWS` of them that say anything, each cut to
+ * `ANNOUNCE_CHARS` characters. The rows of an open, a reopen or a reset, an older page, and
+ * rows drawn as the reader scrolls are never said, and a page in place of the rows empties it.
  *
  * **Keeping to the bottom**, by the rules in `scroll.ts`. The view keeps to the bottom at mount
  * and after a page replaces the rows (an open, a reopen, a reset), and from then on while the
@@ -82,7 +89,7 @@
  * for that frame the virtualizer draws the rows for the old size, with the overscan around them.
  */
 
-import { useCallback, useLayoutEffect, useRef, useState, type JSX } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, type JSX } from 'react';
 import { elementScroll, observeElementRect, useVirtualizer, type Rect, type Virtualizer } from '@tanstack/react-virtual';
 import { useActions, useAppState } from '../state/context.tsx';
 import type { DetailState } from '../state/detail.ts';
@@ -92,6 +99,7 @@ import { sameRef } from '../protocol/wire.ts';
 import { dur } from '../state/status.ts';
 import { Dots, Icon } from '../ui/Icon.tsx';
 import { useNow } from '../ui/now.ts';
+import { announcement, rowsAfter } from './announce.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
   anchorAt, atBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, takeScroll, wantsOlder,
@@ -111,6 +119,21 @@ const GESTURES = ['touchstart', 'pointerdown', 'wheel'] as const;
 const WORKING_REFRESH_MS = 1_000;
 
 const NO_ROWS: readonly TranscriptRow[] = [];
+
+/** The live region's style: out of sight and still read, the usual clip pattern (this file's header). */
+const OUT_OF_SIGHT: CSSProperties = {
+  position: 'absolute', width: 1, height: 1, margin: -1, padding: 0, border: 0, overflow: 'hidden', clip: 'rect(0 0 0 0)',
+  clipPath: 'inset(50%)', whiteSpace: 'nowrap',
+};
+
+/**
+ * What the live region says: its lines, and a count that names each announcement, so lines the
+ * same as the last ones are drawn anew and said again.
+ */
+interface Said {
+  n: number;
+  lines: readonly string[];
+}
 
 export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
   const actions = useActions();
@@ -187,6 +210,7 @@ function List(p: {
     restoring: null,
   }).current;
   const [pill, setPill] = useState(false);
+  const [said, setSaid] = useState<Said>({ n: 0, lines: [] });
   // A new function only when the rows change, so the virtualizer lays the rows out again then.
   const getItemKey = useCallback((index: number) => rows[index]!.key, [rows]);
   // The virtualizer's own writes, as when it corrects for a row measured above the view, are
@@ -355,22 +379,28 @@ function List(p: {
     view.paging = paging;
   });
 
-  // Rows that came in. A page in place of the rows starts at the bottom; rows below a view that
-  // does not keep to the bottom show the pill; a page above the rows holds the reader's place.
+  // Rows that came in. A page in place of the rows starts at the bottom and empties the live
+  // region; rows below say themselves in it, and show the pill below a view that does not keep to
+  // the bottom; a page above the rows holds the reader's place.
   useLayoutEffect(() => {
     const change = rowsChange(view.rows, rows, appended);
     const above = prepended(view.rows, rows);
+    const arrived = change === 'appended' ? rowsAfter(rows, view.rows.lastKey) : NO_ROWS;
     view.rows = seenRows(rows, appended);
     const el = scrollRef.current;
     if (change === 'replaced') {
       dropAnchor();
       view.stuck = true;
       setPill(false);
+      setSaid((s) => (s.lines.length === 0 ? s : { n: s.n + 1, lines: [] }));
       if (el !== null) toBottom(el);
       return;
     }
     if (above && view.anchor !== null && el !== null) startRestore(el);
-    if (change === 'appended' && !view.stuck) setPill(true);
+    if (change !== 'appended') return;
+    if (!view.stuck) setPill(true);
+    const lines = announcement(arrived);
+    if (lines.length > 0) setSaid((s) => ({ n: s.n + 1, lines }));
   }, [view, rows, appended, toBottom, dropAnchor, startRestore]);
 
   // After every render, since rows can change height in any of them.
@@ -386,7 +416,7 @@ function List(p: {
 
   return (
     <div className="tx-wrap" ref={wrapRef}>
-      <div className="tx" id="tx" aria-live="polite" ref={scrollRef}>
+      <div className="tx" id="tx" ref={scrollRef}>
         <div className="tx-list" ref={listRef} style={{ height: virtualizer.getTotalSize() }}>
           {virtualizer.getVirtualItems().map((v) => {
             const row = rows[v.index]!;
@@ -407,6 +437,13 @@ function List(p: {
         </div>
         {p.workingSince !== null && <Working since={p.workingSince} />}
       </div>
+      <div aria-live="polite" style={OUT_OF_SIGHT}>
+        <div key={said.n}>
+          {said.lines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      </div>
       {pill && (
         <button className="pill" type="button" onClick={onPill}>
           New messages <Icon name="down" />
@@ -419,8 +456,8 @@ function List(p: {
 /**
  * The "Working…" line (mock 932): the dots, "Working… " and how long since `since`, read again
  * every `WORKING_REFRESH_MS`. A component of its own, so each beat draws this line again and
- * not the list, and its timer runs only while the line shows. The elapsed time opts out of
- * `.tx`'s live region (`aria-live="off"`), so a screen reader is not told the time every second.
+ * not the list, and its timer runs only while the line shows. It sits in no live region, so a
+ * screen reader is not told the time every second.
  */
 function Working(p: { since: number }): JSX.Element {
   const now = useNow(WORKING_REFRESH_MS);
@@ -428,7 +465,7 @@ function Working(p: { since: number }): JSX.Element {
     <div className="working">
       <Dots />
       {'Working… '}
-      <span aria-live="off">{dur(now - p.since)}</span>
+      <span>{dur(now - p.since)}</span>
     </div>
   );
 }
