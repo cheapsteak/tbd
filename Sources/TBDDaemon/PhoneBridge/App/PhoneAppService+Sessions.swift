@@ -69,7 +69,7 @@ extension PhoneAppService {
         guard let state = devices[deviceID] else { return }
         // Every event after the phone's `seq`, as the stream holds them now,
         // so the reply's `seq` and the events agree. The decision only says
-        // the stream carries on; its own list stays for `transcript.open`.
+        // the stream carries on.
         if snapshot == nil, case .replay = state.resume, state.sessions != nil,
            let missed = state.stream.replay(stream: params.stream, sinceSeq: params.sinceSeq) {
             let result = SessionsSubscribeResult(

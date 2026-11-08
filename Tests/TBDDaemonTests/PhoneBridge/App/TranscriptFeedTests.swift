@@ -851,7 +851,7 @@ struct TranscriptFeedTests {
             .sessionsSubscribe, id: "subscribe", params: SessionsSubscribeParams(stream: streamID, sinceSeq: seq))
         await h.service.handleAppMessage(subscribeBody, from: h.peer)
         let decision = await h.service.resumeDecision(for: deviceID)
-        #expect(decision == PhoneResumeDecision.replay([]))
+        #expect(decision == PhoneResumeDecision.replay)
 
         let reopened = try await Self.open(h, session, id: "resume", resume: true, on: outbox)
         #expect(!reopened.resumed)

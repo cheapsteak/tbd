@@ -373,7 +373,7 @@ struct PhoneSessionsPublisherTests {
         let twoBytes = try PhoneAppCoding.event(.sessionsChanged, seq: first.seq + 2, data: two)
         #expect(try await again.body(at: 1) == oneBytes)
         #expect(try await again.body(at: 2) == twoBytes)
-        #expect(await h.service.resumeDecision(for: deviceID) == .replay([oneBytes, twoBytes]))
+        #expect(await h.service.resumeDecision(for: deviceID) == .replay)
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 

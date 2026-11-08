@@ -597,7 +597,7 @@ struct PhoneAppServiceTests {
         #expect(resumed.error == nil)
         let awayBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 3, data: away)
         let heldBytes = try PhoneAppCoding.event(.sessionsChanged, seq: 4, data: early)
-        #expect(await h.service.resumeDecision(for: deviceID) == .replay([awayBytes, heldBytes]))
+        #expect(await h.service.resumeDecision(for: deviceID) == .replay)
         #expect(try await again.body(at: 1) == awayBytes)
         #expect(try await again.body(at: 2) == heldBytes)
         #expect(outbox.bodies.count == 2)

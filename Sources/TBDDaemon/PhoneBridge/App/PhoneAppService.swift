@@ -47,9 +47,11 @@ enum PhoneHandlerReply: Sendable {
 enum PhoneResumeDecision: Equatable, Sendable {
     /// No `sessions.subscribe` on this connection yet.
     case undecided
-    /// The phone's stream carries on. These are the events it missed, oldest
-    /// first, as the stream held them when the decision was made.
-    case replay([Data])
+    /// The phone's stream carries on: the stream still held every event
+    /// after the phone's place when the decision was made. The subscribe
+    /// reply replays the events it missed as the stream holds them when the
+    /// reply is queued (`queueSubscribeReply`).
+    case replay
     /// The phone's stream was unknown or reached too far back: it starts over
     /// from a fresh snapshot.
     case snapshot
@@ -483,10 +485,10 @@ actor PhoneAppService: PhoneAppHandling {
     /// before `handleAppMessage` returns, so the phone's next message sees it.
     ///
     /// The flag is read first, so a request made while phone control is off
-    /// changes nothing. From the replay to the store there is no suspension,
-    /// so the decision holds exactly the events the stream held at that
-    /// moment. Params that do not decode leave the decision alone; the
-    /// request's work answers them `bad_request`.
+    /// changes nothing. From the stream's check to the store there is no
+    /// suspension, so the decision says whether the stream reached back to
+    /// the phone's place at that moment. Params that do not decode leave the
+    /// decision alone; the request's work answers them `bad_request`.
     ///
     /// **Returns false when the request's connection is gone.** The service
     /// can run a disconnect and a connect while the flag read is suspended.
@@ -507,11 +509,8 @@ actor PhoneAppService: PhoneAppHandling {
             return false
         }
         guard enabled else { return true }
-        if let missed = state.stream.replay(stream: params.stream, sinceSeq: params.sinceSeq) {
-            devices[deviceID]?.resume = .replay(missed)
-        } else {
-            devices[deviceID]?.resume = .snapshot
-        }
+        let carriesOn = state.stream.replay(stream: params.stream, sinceSeq: params.sinceSeq) != nil
+        devices[deviceID]?.resume = carriesOn ? .replay : .snapshot
         return true
     }
 
