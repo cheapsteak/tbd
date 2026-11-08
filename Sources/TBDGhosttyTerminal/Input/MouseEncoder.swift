@@ -494,6 +494,11 @@ final class MouseEncoder {
         guard isReporting(terminal: terminal) else {
             let state = GhosttyTerminalState(raw: terminal)
             if state.isAlternateScreen {
+                // Arrow keys here match SwiftTerm's own view, and are what makes the wheel work
+                // in less and vim. TBD's holder panels drop these wheel events instead, because
+                // arrow keys typed into an agent's composer recall its history; they get that
+                // policy from the app's scroll monitor (`ScrollWheelAccumulator`) in front of
+                // this view, so this view does not repeat it.
                 guard state.mode(Self.alternateScrollMode) else { return .none }
                 let key = Self.alternateScrollKey(
                     up: rows < 0, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode))
