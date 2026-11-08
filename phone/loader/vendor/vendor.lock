@@ -1,0 +1,6 @@
+# name	version	kind	value	[sha256]
+jsqr	1.4.0	tarball	https://registry.npmjs.org/jsqr/-/jsqr-1.4.0.tgz
+jsqr	1.4.0	integrity	sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==
+jsqr	1.4.0	provenance	no
+jsqr	1.4.0	file	LICENSE	c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08
+jsqr	1.4.0	file	dist/jsQR.js	bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859

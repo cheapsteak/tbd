@@ -109,8 +109,10 @@ Research: `transports.md` section 7, `phone-clients.md` sections 1.3–1.5.
   owner-only files the same way (`ModelProfileKeychain` stores tokens under `~/tbd/claude-tokens/`).
 - **Phone:** one X25519 key pair per paired laptop, made with Web Crypto (iOS 17 and later). WebKit
   bug 312279 loses a non-extractable X25519 key stored in IndexedDB, while non-extractable AES-GCM
-  keys survive. So the loader stores each private key wrapped by a non-extractable AES-GCM key. This
-  gives up nothing real: any code on the loader origin could use a stored key anyway.
+  keys survive. So the loader stores each private key wrapped by a non-extractable AES-GCM key. Each
+  laptop's key has its own wrap key, stored with it. This gives up nothing real: any code on the
+  loader origin could unwrap and export a stored key anyway, so the loader origin is the trust
+  boundary.
 - **The laptop stores only each phone's public key.** It keeps no per-phone secret.
 
 **Pairing, once per phone per laptop.**
@@ -591,8 +593,15 @@ Research: `phone-app-stack.md`.
 
 **Folders.**
 
-- `phone/loader/` – the loader and the runner. Plain JavaScript ES modules with JSDoc types, served
-  exactly as committed, with no build step. `tsc --noEmit` checks the types in CI.
+- `phone/loader/` – the loader and the runner. Plain JavaScript ES modules with JSDoc types, with no
+  build step. `tsc --noEmit` checks the types in CI.
+  - The deploy publishes the served files as committed. A staging script,
+    `phone/scripts/stage-loader.sh`, names them with an allowlist, so tests, fixtures, the vendor
+    lock and Markdown never reach the key-holding origin.
+  - The deploy stamps one string, the loader's origin, into `runner.html`'s policy, and changes
+    nothing else. The runner's sandboxed frame has an opaque origin, so its policy must name the
+    loader's origin explicitly. The repo cannot know which origin a deploy serves from, because
+    forks differ. An unstamped runner names a placeholder origin and fails closed.
 - `phone/app/` – the app bundle's sources. TypeScript and React.
 - `phone/protocol/` – the app-protocol fixtures (section 4.4).
 - `phone/test-vectors/` – the Noise vectors and TBD's framing vectors, read by Swift and
@@ -608,22 +617,36 @@ Research: `phone-app-stack.md`.
 - The runner checks the hash, creates a `blob:` URL inside the frame, and starts the bundle as one
   classic script.
 - The runner's security policy, set by its own `<meta>` tag:
-  - names the loader's origin explicitly, never `'self'`, because WebKit changed what `'self'`
-    means in a sandboxed document twice in 2026;
+  - names the loader's origin explicitly (stamped at deploy), never `'self'`, because WebKit
+    changed what `'self'` means in a sandboxed document twice in 2026;
   - allows scripts only from that origin and from `blob:`;
-  - sets `connect-src 'none'`, so the frame has no network and reaches the laptop only through its
-    message port;
+  - sets `connect-src 'none'`, which blocks `fetch`, XHR, WebSocket, EventSource and `sendBeacon`,
+    so the app reaches the laptop through its message port;
+  - allows images only from `data:` and `blob:` and styles only from `blob:`, sets
+    `worker-src 'none'`, and leaves every other fetch directive at `default-src 'none'`, so no
+    style, image, font, media or frame loads from a server, and no worker starts;
   - enforces Trusted Types with one policy, for the runner, so app code cannot write HTML strings.
-- The loader treats a second `load` event on the frame as a fault and tears the frame down. A
-  sandboxed frame can still navigate itself away, so this closes that hole.
+- Two ways out of the frame are outside that policy:
+  - **Self-navigation.** The sandbox stops the frame from navigating the top page, opening
+    windows or submitting forms, but not from navigating itself, and no directive stops that
+    either. The request leaves before the loader can see it. The loader treats a second `load`
+    event on the frame as a fault and tears the frame down, so the page it went to does not stay.
+    Whatever the navigation's URL carried has already been sent.
+  - **WebRTC.** No directive in the policy covers it, and `connect-src` does not reach it, so the
+    policy does not stop a script in the frame from opening an `RTCPeerConnection` and sending
+    traffic to servers that script names. Neither the loader nor the runner blocks it. Besides
+    `runner.js`, the only script the frame runs is the bundle the runner checked against its hash,
+    and the script rules above (no inline script, no `eval`, Trusted Types) keep text the app
+    displays from becoming script.
 - `srcdoc` is not used. A `srcdoc` frame inherits the loader's policy, which blocks the bundle.
 
 **The app bundle.**
 
 - **React 19.3 with TypeScript.** The React ecosystem is available, within the frame's limits: no
-  styles injected at runtime, no network, no `eval`, no HTML strings. CSS-in-JS libraries that inject
-  styles at runtime are therefore out. Static CSS, CSS modules, or a build-time CSS tool work. A
-  library that fetches data works through a function that asks over the message port.
+  styles injected at runtime, no `fetch` or WebSocket, no `eval`, no HTML strings. CSS-in-JS
+  libraries that inject styles at runtime are therefore out. Static CSS, CSS modules, or a
+  build-time CSS tool work. A library that fetches data works through a function that asks over
+  the message port.
 - **Build.** esbuild, pinned to an exact version, bundles the sources and production React into one
   minified JavaScript file. CSS is embedded as text and applied with `adoptedStyleSheets`. The file
   is committed under `Sources/TBDDaemon/Resources/phone-app/` and copied into the TBD install as a
@@ -647,8 +670,9 @@ which includes iPhone Safari. It loads only on the pairing screen. jsQR has had 
 `shasum`) updates them. CI verifies the checksums. A scheduled job checks every pinned version, in
 the loader and in the app's lockfile, against the OSV advisory database.
 
-**Review.** A CODEOWNERS entry requires the maintainer's review for `phone/loader/**` and
-`relay/**`. Merging to `main` deploys the loader, and the loader holds the keys.
+**Review.** A CODEOWNERS entry requires the maintainer's review for `phone/loader/**`,
+`phone/scripts/**` (the staging and vendor scripts decide what the loader serves) and `relay/**`.
+Merging to `main` deploys the loader, and the loader holds the keys.
 
 ## 10. Laptop UI
 
@@ -808,20 +832,27 @@ Research: `ci-layout.md`.
   `test.yml` carries nothing phone-specific, because the release workflow, the flake fixer and the
   remote verification valve all read its result.
 - **Loader deploy, `phone-loader-deploy.yml`:**
-  - runs on pushes to `main` that touch `phone/loader/**` or the workflow itself, and on dispatch.
-    No pull request event can start it;
-  - a `verify` job runs `npm ci`, `npm run typecheck` and `npm test` in `phone/`. It does not run
-    `vectors:check`, which only `phone.yml`'s `loader` job runs. A PR that edits only this workflow
-    runs no phone part, so the classifier's harness pins `verify`'s Node setup and working directory
-    to the `loader` job's, and requires each of its npm commands to be one the `loader` job runs;
+  - runs on pushes to `main` that touch `phone/loader/**`, the staging script
+    `phone/scripts/stage-loader.sh` or the workflow itself, and on dispatch. No pull request event
+    can start it;
+  - a `verify` job runs `npm ci`, `npm run typecheck`, `npm test` and `npm run vendor:check` in
+    `phone/`. It does not run `vectors:check`, which only `phone.yml`'s `loader` job runs. A PR
+    that edits only this workflow runs no phone part, so the classifier's harness pins `verify`'s
+    Node setup and working directory to the `loader` job's, and requires each of its npm commands
+    to be one the `loader` job runs;
   - a `dispatch` job runs only after `verify` passed, only while the repository variable
     `PHONE_LOADER_DEPLOY_ENABLED` is `true`, and only from `main`, in an environment whose
     deployment branches admit only `main`;
   - that job mints a GitHub App token scoped to the loader repo, whose one permission is Actions:
     write, and asks the loader repo's deploy workflow to publish this commit;
-  - the loader repo's workflow checks that the commit is on `main` and that its loader is still the
-    newest, then publishes with GitHub's Pages deploy action. A leaked token can start, cancel,
-    re-run or disable the loader repo's workflow runs, but cannot change what is served.
+  - the loader repo's workflow checks that the commit is on `main`, that its `phone/loader` tree
+    equals `main`'s, and that its staging script's blob equals `main`'s too, since the script
+    decides which files are served and what it writes into them. Only then does it stage the site
+    with that script and publish it with GitHub's Pages deploy action. A commit whose loader or
+    staging script differs from `main`'s has a newer one on `main`, whose own deploy publishes
+    it, so a re-run or a late dispatch of an older commit publishes nothing. A leaked token can
+    start, cancel, re-run or disable the loader repo's workflow runs, but cannot change what is
+    served.
 
 ## 16. Build order
 

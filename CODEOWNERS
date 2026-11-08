@@ -8,3 +8,8 @@
 /phone/loader/ @cheapsteak
 /.github/workflows/phone-loader-deploy.yml @cheapsteak
 /relay/ @cheapsteak
+
+# The loader's staging script runs inside the loader deploy, and the vendor
+# scripts decide which third-party bytes the loader serves.
+/phone/scripts/ @cheapsteak
+/CODEOWNERS @cheapsteak

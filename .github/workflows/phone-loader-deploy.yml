@@ -1,11 +1,12 @@
 name: Phone loader deploy
 
-# Deploys the phone loader, `phone/loader/`, when a change to it reaches
-# main. This workflow does not publish anything itself. It tests the loader,
-# then asks the loader repo's own `deploy.yml` to publish this commit; that
-# workflow checks out `phone/loader/` from this public repo, exactly as
-# committed, and publishes it only when the commit is on main and its loader
-# is still the newest. The setup, the names below and the loader repo's
+# Deploys the phone loader, `phone/loader/`, when a change to it, or to its
+# staging script `phone/scripts/stage-loader.sh`, reaches main. This workflow
+# does not publish anything itself. It tests the loader, then asks the loader
+# repo's own `deploy.yml` to publish this commit; that workflow checks the
+# commit out from this public repo, exactly as committed, and publishes it only
+# when the commit is on main and both its `phone/loader` tree and its staging
+# script's blob equal main's. The setup, the names below and the loader repo's
 # workflow: docs/phone-control-loader-repo.md. Design:
 # docs/specs/2026-11-07-phone-control-design.md, section 15.
 #
@@ -28,6 +29,7 @@ on:
     branches: [main]
     paths:
       - 'phone/loader/**'
+      - 'phone/scripts/stage-loader.sh'
       - '.github/workflows/phone-loader-deploy.yml'
   workflow_dispatch:
 
@@ -39,7 +41,8 @@ permissions: {}
 # across refs it would cancel an in-flight run on main, leaving the merged
 # loader unpublished until the next loader change. Within main, a newer push
 # supersedes an older run: it dispatches its own, newer commit, and the loader
-# repo's deploy refuses a commit whose loader is not the newest anyway.
+# repo's deploy refuses a commit whose loader tree or staging script differs
+# from main's anyway.
 concurrency:
   group: phone-loader-deploy-${{ github.ref }}
   cancel-in-progress: true
@@ -70,6 +73,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run vendor:check
 
   dispatch:
     name: Dispatch the loader deploy

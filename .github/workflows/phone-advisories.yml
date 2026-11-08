@@ -1,0 +1,23 @@
+name: Phone advisories
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phone-advisories
+  cancel-in-progress: true
+
+jobs:
+  osv:
+    name: OSV advisory check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check pinned dependencies against OSV
+        run: bash phone/scripts/osv-check.sh phone/package-lock.json relay/cloudflare/package-lock.json
