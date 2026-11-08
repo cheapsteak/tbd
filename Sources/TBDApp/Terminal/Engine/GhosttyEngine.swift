@@ -264,8 +264,17 @@ final class GhosttyEngine: TerminalEngine {
     /// The program changed the grid itself, with DECCOLM (`CSI ? 3 h` once
     /// `CSI ? 40 h` allows it). SwiftTerm reports that as a size change, and so
     /// does this engine, so the pty follows in both.
-    private func programChangedGrid(_ grid: GhosttyEngineGrid) {
-        reportGrid(grid)
+    ///
+    /// The feed posts this a main-queue turn after it read the grid, and the
+    /// grid can change again in between: a resize of the view applies its own
+    /// grid at once and reports it. So the grid is read again here and the
+    /// one reported is the grid as it is now, never the one the feed saw. A
+    /// grid the view has already reported is then not reported a second time.
+    private func programChangedGrid() {
+        let current = terminal.withLocked { GhosttyEngineGrid(cols: $0.cols, rows: $0.rows) }
+        guard current.cols > 0, current.rows > 0 else { return }
+        relay.grid.record(current)
+        reportGrid(current)
     }
 
     func setClickRouting(enabled: Bool) {
@@ -310,7 +319,7 @@ final class GhosttyEngine: TerminalEngine {
         guard grid.cols > 0, grid.rows > 0, relay.grid.record(grid) else { return }
         let relay = self.relay
         DispatchQueue.main.async {
-            MainActor.assumeIsolated { relay.engine?.programChangedGrid(grid) }
+            MainActor.assumeIsolated { relay.engine?.programChangedGrid() }
         }
     }
 

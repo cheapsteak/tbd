@@ -275,6 +275,42 @@ struct TerminalEngineContractTests {
         #expect(change.gridRows == change.rows, "gridSize inside sizeChanged read \(change.gridRows) rows")
     }
 
+    /// libghostty changes its grid for DECCOLM inside the parse, and the
+    /// engine reads the grid back after the feed and reports it a main-queue
+    /// turn later. A resize of the view in between applies a grid of its own
+    /// and reports it at once, so the late report must not put the DECCOLM
+    /// grid back: the delegate's last word is the grid as the terminal has
+    /// it. Only libghostty, the engine that reads its grid back after a feed.
+    /// DECCOLM needs `CSI ? 40 h` first.
+    @Test("A view resize just after a DECCOLM leaves the delegate with the grid the terminal has, not the DECCOLM one",
+          .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
+    func resizeJustAfterDeccolmReportsTheCurrentGrid() async throws {
+        let fixture = await makeFixture(kind: .ghostty)
+        defer { fixture.tearDown() }
+        feed("\u{1b}[?40h", into: fixture.engine)
+        await settle()
+        fixture.recorder.reset()
+        let before = fixture.engine.gridSize
+
+        // One main-queue turn: the program changes the grid, and the view is
+        // resized before the engine's report of that change runs.
+        feed("\u{1b}[?3h", into: fixture.engine)
+        let deccolm = fixture.engine.gridSize
+        try #require(deccolm.cols != before.cols, "DECCOLM left the grid at \(deccolm.cols) columns")
+        fixture.engine.view.setFrameSize(NSSize(width: 400, height: 240))
+        let resized = fixture.engine.gridSize
+        try #require(resized.cols != deccolm.cols, "the frame change left the grid at \(resized.cols) columns")
+        await settle()
+
+        let last = try #require(fixture.recorder.sizeChanges.last, "neither change was reported")
+        let lastCols = last.cols
+        let lastRows = last.rows
+        #expect(lastCols == resized.cols && lastRows == resized.rows, """
+            the delegate last heard \(lastCols)x\(lastRows), the DECCOLM grid being \(deccolm.cols)x\(deccolm.rows), \
+            while the terminal has \(resized.cols)x\(resized.rows)
+            """)
+    }
+
     // MARK: - Preamble into a used engine
 
     /// A viewer can be reused: the engine a preamble lands in may hold a
