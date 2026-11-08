@@ -23,6 +23,8 @@ import { MAX_BUNDLE_TEXT } from '../loader/constants.js';
 import { BANNER, GZIP_BUDGET } from './build.mjs';
 
 const BUILD = fileURLToPath(new URL('build.mjs', import.meta.url));
+// Outside phone/: the classifier's `Sources/TBDDaemon/Resources/phone-app/*` route
+// (scripts/ci/phone-parts-needed.sh) runs these tests when it changes.
 const BUNDLE = new URL('../../Sources/TBDDaemon/Resources/phone-app/app.js', import.meta.url);
 /** `phone/`, where `npm run build:app` runs. */
 const PHONE = fileURLToPath(new URL('../', import.meta.url));

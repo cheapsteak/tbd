@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+// Outside phone/: the classifier's `docs/design/phone-control/*` route
+// (scripts/ci/phone-parts-needed.sh) runs these tests when the mock changes.
 const mock = readFileSync(fileURLToPath(new URL('../../../../docs/design/phone-control/phone-control-mocks.html', import.meta.url)), 'utf8');
 const appCss = readFileSync(fileURLToPath(new URL('./app.css', import.meta.url)), 'utf8');
 

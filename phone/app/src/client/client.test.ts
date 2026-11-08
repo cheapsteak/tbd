@@ -17,6 +17,8 @@ import {
 import type { ClientOptions } from './client.ts';
 
 const REF: PhoneSessionRef = { kind: 'local', terminalID: '08A7FA53-E9FD-5ACA-8D10-6F6F0E189F62' };
+// Outside phone/: the classifier's `Sources/TBDDaemon/PhoneBridge/App/*` route
+// (scripts/ci/phone-parts-needed.sh) runs these tests when either file changes.
 const SERVICE = new URL('../../../../Sources/TBDDaemon/PhoneBridge/App/PhoneAppService.swift', import.meta.url);
 const PROTOCOL = new URL('../../../../Sources/TBDDaemon/PhoneBridge/App/PhoneAppProtocol.swift', import.meta.url);
 

@@ -131,6 +131,37 @@ test_each_part_alone() {
   expect "the committed bundle runs the app alone"      "$APP" Sources/TBDDaemon/Resources/phone-app/app.js
 }
 
+# The app's tests read these files to check the app against them, so a change
+# to one alone must run the app. The Swift suite has its own gate.
+test_files_the_app_tests_read_run_the_app() {
+  local path
+  for path in \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppService.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppProtocol.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneAppMessages.swift \
+    Sources/TBDDaemon/PhoneBridge/App/PhoneNewFile.swift \
+    Sources/TBDDaemon/PhoneBridge/App/Transcript/TranscriptFeed.swift \
+    Sources/TBDShared/PromptAnswer.swift \
+    Sources/TBDShared/PendingPrompt.swift \
+    docs/design/phone-control/phone-control-mocks.html \
+    docs/design/phone-control/screenshots/light/sessions.webp \
+    docs/design/phone-control/README.md
+  do
+    expect "$path runs the app alone" "$APP" "$path"
+  done
+  # Only those: the rest of the bridge and of TBDShared, and other designs, run no part.
+  for path in \
+    Sources/TBDDaemon/PhoneBridge/PhoneBridge.swift \
+    Sources/TBDDaemon/PhoneBridge/AppX/PhoneAppService.swift \
+    Sources/TBDShared/PromptAnswerTests.swift \
+    docs/design/other/mocks.html \
+    docs/design/phone-control.md
+  do
+    expect "$path runs no part" "$NONE" "$path"
+  done
+}
+
 test_shared_inputs_run_every_part() {
   local path
   for path in \
@@ -250,6 +281,17 @@ test_output_contract() {
     "- \`phone/package.json\` – loader, phone_app – the phone workspace's shared tooling"
   assert_line "a file naming every part lists all three" "$summary" \
     "- \`.github/workflows/phone.yml\` – relay, loader, phone_app – the workflow that runs the parts"
+
+  d="$(scratch)"
+  printf 'Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift\nSources/TBDShared/PromptAnswer.swift\ndocs/design/phone-control/phone-control-mocks.html\n' |
+    GITHUB_OUTPUT="$d/output" GITHUB_STEP_SUMMARY="$d/summary" "$BASH" "$SCRIPT" --classify >/dev/null 2>&1
+  summary="$(cat "$d/summary")"
+  assert_line "the daemon's app protocol says why it runs the app" "$summary" \
+    "- \`Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift\` – phone_app – the daemon's app protocol, which the app's tests check against"
+  assert_line "a TBDShared enum says why it runs the app" "$summary" \
+    "- \`Sources/TBDShared/PromptAnswer.swift\` – phone_app – a TBDShared enum the app's tests check against"
+  assert_line "the mocks say why they run the app" "$summary" \
+    "- \`docs/design/phone-control/phone-control-mocks.html\` – phone_app – the mocks, which the app's tests check against"
 
   # A skip with no record of why is refused: every answer turns to `true`.
   d="$(scratch)"

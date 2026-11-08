@@ -11,6 +11,8 @@ import {
   fitsFrame, LOADER_WRAPPER_BYTES, MAX_BODY_BYTES, MAX_IN_FLIGHT, MAX_PLAINTEXT, RESEND_HORIZON_MS, utf8Length,
 } from './limits.ts';
 
+// Outside phone/: the classifier's `Sources/TBDDaemon/PhoneBridge/App/*` route
+// (scripts/ci/phone-parts-needed.sh) runs these tests when it changes.
 const SWIFT_CONSTANTS = new URL('../../../Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift', import.meta.url);
 
 /** The loader's own check in `sendApp`: the wrapped body, encoded, against the frame limit. */

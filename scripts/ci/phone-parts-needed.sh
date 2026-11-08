@@ -158,6 +158,16 @@ judge() {
       PARTS=phone_app; REASON='phone/app/**'; return ;;
     Sources/TBDDaemon/Resources/phone-app/*)
       PARTS=phone_app; REASON='the committed app bundle'; return ;;
+    # The app's tests read these, to check the app against them, so a change
+    # to one alone runs the app as well as the Swift suite. Whole directories
+    # where a test reads a file in one, so a test that reads a sibling next is
+    # covered too; single files in TBDShared, which is too big for that.
+    Sources/TBDDaemon/PhoneBridge/App/*)
+      PARTS=phone_app; REASON='the daemon'"'"'s app protocol, which the app'"'"'s tests check against'; return ;;
+    Sources/TBDShared/PromptAnswer.swift|Sources/TBDShared/PendingPrompt.swift)
+      PARTS=phone_app; REASON='a TBDShared enum the app'"'"'s tests check against'; return ;;
+    docs/design/phone-control/*)
+      PARTS=phone_app; REASON='the mocks, which the app'"'"'s tests check against'; return ;;
     # `phone/package.json`, its lockfile, `.nvmrc`, `tsconfig.json`: the
     # loader and the app build and test with them. The relay has its own.
     phone/*)

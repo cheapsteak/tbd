@@ -15,6 +15,10 @@ import {
 } from './wire.ts';
 import type { Method, ParamsOf, PhoneSessionRef } from './types.ts';
 
+// Outside phone/: the classifier (scripts/ci/phone-parts-needed.sh) runs these tests when a
+// file they read changes, through its `Sources/TBDDaemon/PhoneBridge/App/*` route and its
+// lines for `TBDShared/PromptAnswer.swift` and `TBDShared/PendingPrompt.swift`. A test that
+// reads another TBDShared file needs a line there too.
 const SOURCES = new URL('../../../../Sources/', import.meta.url);
 const PROTOCOL_DIR = new URL('../../../protocol/', import.meta.url);
 

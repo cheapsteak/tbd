@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.join(HERE, 'pairs.mjs');
+// Outside phone/: the classifier's `docs/design/phone-control/*` route
+// (scripts/ci/phone-parts-needed.sh) runs these tests when the screenshots change.
 const MOCKS = path.resolve(HERE, '../../../../docs/design/phone-control/screenshots');
 const NO_MOCK_TEXT = 'No mock: a new state.';
 
