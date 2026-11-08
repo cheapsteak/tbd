@@ -82,9 +82,10 @@ public struct ProjectedScreen: Sendable, Equatable {
 /// ended mid-sequence, and an `ESC` fed into that aborts the child's pending
 /// sequence, prints its remainder into the grid as literal text and swallows
 /// the reply to a query the child was in the middle of asking.
-/// `TerminalSnapshotWriter` does probe, once per attach, and argues that case
-/// in its own doc. This is why `ProjectedScreen` carries no cursor visibility
-/// and why `modes` reads all three flags from public properties.
+/// `TerminalSnapshotWriter` does probe, once per attach, and its doc says why
+/// it must run between sequences. This is why `ProjectedScreen` carries no
+/// cursor visibility and why `modes` reads all three flags from public
+/// properties.
 public enum TerminalScreenProjection {
 
     /// The scrollback tail plus viewport as whitelisted plain lines, with the
