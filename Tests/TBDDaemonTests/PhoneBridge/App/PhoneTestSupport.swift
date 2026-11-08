@@ -491,7 +491,8 @@ struct PhoneServiceHarness: Sendable {
         } else if let failingPairingRead {
             readPairing = { deviceID in try await failingPairingRead.read(db, deviceID) }
         }
-        let now: @Sendable () -> Date = dates?.provider ?? { Date() }
+        let now: @Sendable () -> Date
+        if let dates { now = dates.provider } else { now = { Date() } }
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, locateTranscript: Self.locateTranscript,
