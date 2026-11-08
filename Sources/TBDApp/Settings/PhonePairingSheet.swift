@@ -210,19 +210,24 @@ struct PhonePairingSheet: View {
         }
     }
 
+    /// Allows this sheet's own offer, the one whose name and code it shows,
+    /// never whatever offer the daemon reports by the time the call runs.
     private func allow() {
+        guard case .started(let offerID) = phase else { return }
         isActing = true
         Task {
-            await appState.allowPhonePairing()
+            await appState.allowPhonePairing(offerID: offerID)
             isActing = false
         }
     }
 
+    /// Denies this sheet's own offer, never a newer one.
     private func deny() {
+        guard case .started(let offerID) = phase else { return }
         isActing = true
         didDeny = true
         Task {
-            await appState.denyPhonePairing()
+            await appState.denyPhonePairing(offerID: offerID)
             isActing = false
         }
     }
@@ -232,11 +237,14 @@ struct PhonePairingSheet: View {
         dismiss()
     }
 
-    /// Denies this sheet's offer if it is still live and not yet denied.
+    /// Denies this sheet's offer if it is still live and not yet denied. The
+    /// ID is taken now: by the time the call runs, the daemon may report a
+    /// newer offer, which this sheet never showed.
     private func denyIfLive() {
         guard !didDeny, let pairing, PhonePresentation.isLive(pairing.state) else { return }
         didDeny = true
-        Task { await appState.denyPhonePairing() }
+        let offerID = pairing.offerID
+        Task { await appState.denyPhonePairing(offerID: offerID) }
     }
 
     private func copy(_ link: String) {

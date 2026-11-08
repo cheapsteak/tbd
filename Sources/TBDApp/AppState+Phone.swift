@@ -146,21 +146,23 @@ extension AppState {
         }
     }
 
-    /// Allows the phone waiting on the shown offer. A failure's reason is
-    /// kept in `phonePairingError`, for the pairing sheet to show.
-    func allowPhonePairing() async {
-        guard let offerID = phoneStatus?.pairing?.offerID else { return }
+    /// Allows the phone waiting on offer `offerID`, the offer whose phone
+    /// name and code the pairing sheet showed. The daemon refuses any ID but
+    /// its live offer's, so an Allow never reaches a newer offer, whose phone
+    /// the user has not seen. A failure's reason is kept in
+    /// `phonePairingError`, for the pairing sheet to show.
+    func allowPhonePairing(offerID: UUID) async {
         let failure = await performPhoneAction(RPCMethod.phonePairAllow) {
             _ = try await phoneClient.phonePairAllow(offerID: offerID)
         }
         if failure != phonePairingError { phonePairingError = failure }
     }
 
-    /// Denies the shown offer: the user clicked Deny, or closed the pairing
-    /// sheet while it was live. A failure's reason is kept in
+    /// Denies offer `offerID`, the one the pairing sheet showed: the user
+    /// clicked Deny, or closed the sheet while it was live. Like Allow, it
+    /// never reaches a newer offer. A failure's reason is kept in
     /// `phonePairingError`, for the pairing sheet to show.
-    func denyPhonePairing() async {
-        guard let offerID = phoneStatus?.pairing?.offerID else { return }
+    func denyPhonePairing(offerID: UUID) async {
         let failure = await performPhoneAction(RPCMethod.phonePairDeny) {
             try await phoneClient.phonePairDeny(offerID: offerID)
         }

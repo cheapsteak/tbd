@@ -880,6 +880,36 @@ struct PhoneBridgeTests {
 
     // MARK: The pairing notification
 
+    /// The app names the offer whose phone it showed. A replaced offer's ID,
+    /// arriving after a newer offer's phone reached the prompt, is refused,
+    /// and the newer offer is left as it was.
+    @Test func anAllowOrDenyNamingAReplacedOfferIsRefused() async throws {
+        try await withBridge { h in
+            await h.bridge.reconcile()
+            let (stale, _) = try await h.startPairing()
+            let (live, link) = try await h.startPairing()
+            #expect(stale.offerID != live.offerID)
+            let phone = try await h.joinedPairingPhone(link)
+            try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForPairingState(.awaitingApproval)
+
+            let bridge = h.bridge
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await bridge.pairAllow(offerID: stale.offerID) }
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await bridge.pairDeny(offerID: stale.offerID) }
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            let pending = await bridge.status().pairing
+            #expect(pending?.offerID == live.offerID)
+            #expect(pending?.state == .awaitingApproval)
+
+            // The live offer still pairs.
+            let device = try await bridge.pairAllow(offerID: live.offerID)
+            #expect(device.name == "iPhone")
+            let stored = try await h.db.phoneDevices.list().map(\.id)
+            #expect(stored == [device.id])
+        }
+    }
+
     @Test func pairingPostsExactlyOneNotification() async throws {
         try await withBridge(mainWorktree: true) { h in
             await h.bridge.reconcile()

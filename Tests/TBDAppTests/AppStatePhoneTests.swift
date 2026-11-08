@@ -6,7 +6,7 @@ import TestSupport
 
 /// A `PhoneControlClient` that answers from fixed values and counts calls.
 actor FakePhoneClient: PhoneControlClient {
-    let status: PhoneStatusResult
+    private(set) var status: PhoneStatusResult
     let devices: [PhoneDevice]
     let statusError: (any Error)?
     let relayURLError: (any Error)?
@@ -37,6 +37,12 @@ actor FakePhoneClient: PhoneControlClient {
     }
 
     static let identityRefusal = "phone control is managed only from the TBD app"
+
+    /// From now on, `phone.status` answers `newStatus`, as the daemon does
+    /// once it has a new offer.
+    func setStatus(_ newStatus: PhoneStatusResult) {
+        status = newStatus
+    }
 
     func phoneStatus() async throws -> PhoneStatusResult {
         statusCalls += 1
@@ -219,7 +225,7 @@ struct AppStatePhoneTests {
         }
     }
 
-    @Test func allowAndDenyActOnTheShownOffer() async {
+    @Test func allowAndDenyActOnTheOfferTheyAreGiven() async {
         await withState { state in
             let offerID = UUID()
             let pairing = PhonePairingStatus(
@@ -231,13 +237,45 @@ struct AppStatePhoneTests {
             let failure = await state.startPhonePairing()
             #expect(failure == nil)
             #expect(state.phoneStatus?.pairing?.offerID == offerID)
-            await state.allowPhonePairing()
-            await state.denyPhonePairing()
+            await state.allowPhonePairing(offerID: offerID)
+            await state.denyPhonePairing(offerID: offerID)
             let allowed = await fake.allowedOffers
             let denied = await fake.deniedOffers
             #expect(allowed == [offerID])
             #expect(denied == [offerID])
             #expect(state.phonePairingError == nil)
+        }
+    }
+
+    /// The sheet showed offer A's phone; by the time its Deny or Allow runs,
+    /// the daemon reports a newer offer B. The call still names A, so B, whose
+    /// phone the user never saw, is neither denied nor allowed.
+    @Test func aDenyOrAllowLandingAfterANewerOfferLeavesTheNewerOfferAlone() async {
+        await withState { state in
+            let expiry = Date(timeIntervalSince1970: 1_800_000_300)
+            let shown = PhonePairingStatus(
+                offerID: UUID(), link: nil, expiresAt: expiry, state: .awaitingApproval,
+                confirmationCode: "123456", deviceName: "iPhone")
+            let newer = PhonePairingStatus(
+                offerID: UUID(), link: nil, expiresAt: expiry, state: .awaitingApproval,
+                confirmationCode: "654321", deviceName: "acme-other-phone")
+            let fake = FakePhoneClient(status: status(pairing: shown))
+            state.phoneClient = fake
+            await state.refreshPhone()
+            #expect(state.phoneStatus?.pairing?.offerID == shown.offerID)
+
+            // Offer B is published before the user's click lands.
+            await fake.setStatus(status(pairing: newer))
+            await state.refreshPhone()
+            #expect(state.phoneStatus?.pairing?.offerID == newer.offerID)
+
+            await state.denyPhonePairing(offerID: shown.offerID)
+            await state.allowPhonePairing(offerID: shown.offerID)
+            let denied = await fake.deniedOffers
+            let allowed = await fake.allowedOffers
+            #expect(denied == [shown.offerID])
+            #expect(allowed == [shown.offerID])
+            #expect(state.phoneStatus?.pairing == newer)
         }
     }
 
@@ -252,7 +290,7 @@ struct AppStatePhoneTests {
                 allowError: DaemonClientError.rpcError(reason, code: nil), pairing: pairing)
             state.phoneClient = fake
             await state.refreshPhone()
-            await state.allowPhonePairing()
+            await state.allowPhonePairing(offerID: pairing.offerID)
             #expect(state.phonePairingError == reason)
             // A new offer starts without the old offer's failure.
             let failure = await state.startPhonePairing()
