@@ -22,6 +22,10 @@
 // Each resolves once the laptop replied or the request failed. Like every action, none
 // rejects (`actions/index.ts`); `superseded` is silent.
 //
+// A pending open waits only while the user stays put: `openSession` and `back` clear it
+// (`PendingOpen` in `state/store.ts`), so a new tab or worktree the user has moved away from
+// never pulls them back to it.
+//
 // **Never retry one of these automatically under a new request ID.** Each but the two loads
 // acts, and one that failed with `not_confirmed`, `bad_reply`, `internal` or `too_large` may
 // have happened all the same (`ACTING_METHODS` in `client/client.ts`): a retry under a new ID

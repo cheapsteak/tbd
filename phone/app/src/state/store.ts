@@ -37,7 +37,8 @@ export type MenuState = { name: 'account'; askProfileID: string | null } | { nam
  *   opens its first one. `toast` is a template: when it is not null, opening shows it with
  *   every `{name}` replaced by the row's name, so `'Created {name}'` reads "Created fix-login".
  *
- * Opening it clears `pendingOpen`.
+ * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`
+ * (`actions/shell.ts`), so a fork or create the user has moved away from never takes them to it.
  */
 export type PendingOpen = { ref: PhoneSessionRef } | { worktreeID: string; toast: string | null };
 

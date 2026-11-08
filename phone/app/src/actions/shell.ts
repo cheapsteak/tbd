@@ -102,19 +102,26 @@ export function shellActions(ctx: ActionContext, self: () => Actions) {
     },
 
     /**
-     * Shows `ref`'s session and opens its transcript, clearing the menu and the sheet. A ref no
-     * row lists does nothing: the laptop acts only on sessions its list shows.
+     * Shows `ref`'s session and opens its transcript, clearing the menu, the sheet and any
+     * pending open: the user chose where to go, so a fork or create still on its way no longer
+     * takes them anywhere. A ref no row lists does nothing: the laptop acts only on sessions its
+     * list shows.
      */
     openSession(ref: PhoneSessionRef): void {
       const found = findSession(store.get().sessions, ref);
       if (found === null) return;
-      setUI((ui) => ({ ...ui, route: { screen: 'session', ref }, lastRowID: found.row.id, menu: null, sheet: null }));
+      setUI((ui) => ({
+        ...ui, route: { screen: 'session', ref }, lastRowID: found.row.id, menu: null, sheet: null, pendingOpen: null,
+      }));
       self().openTranscript(ref);
     },
 
-    /** Back to the sessions list, closing the transcript, the menu and the sheet. */
+    /**
+     * Back to the sessions list, closing the transcript, the menu and the sheet, and clearing
+     * any pending open, as `openSession` does.
+     */
     back(): void {
-      setUI((ui) => ({ ...ui, route: SESSIONS_ROUTE, menu: null, sheet: null }));
+      setUI((ui) => ({ ...ui, route: SESSIONS_ROUTE, menu: null, sheet: null, pendingOpen: null }));
       self().closeTranscript();
     },
 

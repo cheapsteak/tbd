@@ -313,6 +313,48 @@ test('a pending open the list already shows opens at once', async () => {
   assert.deepEqual(h.calls, [['openTranscript', R]]);
 });
 
+test('openSession clears a pending open, so a fork the user moved away from never takes them to it', async () => {
+  const h = await subscribed([row('W1', [R]), row('W2', [OTHER])]);
+  h.actions.openSession(R);
+  h.actions.openPending({ ref: R2 });   // a fork of R that the list does not show yet
+  h.actions.openSession(OTHER);
+  assert.equal(h.state().ui.pendingOpen, null);
+  h.calls.length = 0;
+  h.actions.onEvent(changed([row('W1', [R, R2])]));
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: OTHER });
+  assert.deepEqual(h.calls, []);
+});
+
+test('back clears a pending open, so a worktree the user moved away from never opens or toasts', async () => {
+  const h = await subscribed([row('W1', [R])]);
+  h.actions.openSession(R);
+  h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' });
+  h.actions.back();
+  assert.equal(h.state().ui.pendingOpen, null);
+  h.calls.length = 0;
+  h.actions.onEvent(changed([row(WT, [R2], 'fix-login')]));
+  assert.equal(h.state().ui.route, SESSIONS_ROUTE);
+  assert.equal(h.state().ui.toast, null);
+  assert.deepEqual(h.calls, []);
+});
+
+test("a pending open that opens is not the user's navigation: the user's own state stays", async () => {
+  const h = await subscribed([row('W1', [R])]);
+  h.actions.openSession(R);
+  h.actions.setShowDetails(true);
+  h.actions.toggleRepo('repo:R1');
+  h.actions.openSheet({ name: 'new', repoID: 'R1', repoName: 'acme' });
+  h.actions.openPending({ worktreeID: WT, toast: null });
+  const before = h.state().ui;
+  h.actions.onEvent(changed([row(WT, [R2])]));
+  const ui = h.state().ui;
+  assert.deepEqual(ui.route, { screen: 'session', ref: R2 });
+  assert.equal(ui.pendingOpen, null);
+  for (const key of ['sheet', 'showDetails', 'collapsed', 'toast', 'refusal', 'drafts'] as const) {
+    assert.equal(ui[key], before[key], key);
+  }
+});
+
 test('an event that leaves the route as it was opens and closes nothing', async () => {
   const h = await subscribed([row('W1', [R])]);
   h.actions.openSession(R);
