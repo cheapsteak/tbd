@@ -58,10 +58,12 @@
  *   bottom.
  *
  * The list writes `scrollTop` itself, and notes where each write left the view, so the scroll
- * event the write fires reads as the list's own and not as a swipe (`moved`). It notes the
+ * event the write fires reads as the list's own and not as a swipe (`takeScroll`). It notes the
  * virtualizer's writes the same way (`scrollToFn`): the virtualizer moves the view by as much as
  * a row above it grew when it measures that row, and that is not the reader's scroll, so it
- * neither asks for a page nor retries a failed one. A write from a tap
+ * neither asks for a page nor retries a failed one. A scroll event that moved the view a pixel or
+ * less leaves the noted place as it was, so a slow drag adds up until it counts as the reader's,
+ * and then asks for a page and retries a failed one as any scroll does. A write from a tap
  * or from a store change lands before the next frame, whose scroll event the virtualizer reads
  * first, so the rows at the new place are drawn before that frame paints. The list's scroll
  * listener is a capture listener on `.tx-wrap`: it runs before the virtualizer's own listener on
@@ -89,8 +91,7 @@ import { Dots, Icon } from '../ui/Icon.tsx';
 import { useNow } from '../ui/now.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
-  anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, sticksAfterScroll,
-  wantsOlder,
+  anchorAt, atBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, takeScroll, wantsOlder,
 } from './scroll.ts';
 import type { Anchor, Metrics, Paging, SeenRows } from './scroll.ts';
 
@@ -129,9 +130,10 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
 
 /**
  * What the list keeps between renders, none of which it draws:
- * - `stuck`: whether the view keeps to the bottom (`sticksAfterScroll`);
- * - `top`: the `scrollTop` it last saw or wrote, so a scroll event can tell whether the view
- *   moved;
+ * - `stuck`: whether the view keeps to the bottom: whether it was at the bottom after the last
+ *   scroll event, or the list has put it there since;
+ * - `top`: the `scrollTop` of the list's last write, or of the last scroll event it took as the
+ *   reader's, so a scroll event can tell whether the reader moved the view (`takeScroll`);
  * - `seen`: how far the view was above its bottom then (`fromBottom`), so a layout can tell
  *   whether something pushed it away;
  * - `rows`: the rows it last saw (`rowsChange`, `prepended`);
@@ -311,16 +313,17 @@ function List(p: {
     const onScroll = (e: Event): void => {
       if (e.target !== el) return;
       const m = metricsOf(el);
-      const byScroll = moved(view.top, m);
-      view.stuck = sticksAfterScroll(view.stuck, view.top, m);
-      view.top = m.scrollTop;
+      const { byReader, top } = takeScroll(view.top, m);
+      view.top = top;
       // The event of the list's own write may come after a layout that pushed the view.
-      if (byScroll) view.seen = fromBottom(m);
+      if (byReader) view.seen = fromBottom(m);
       else settle();
-      if (atBottom(metricsOf(el))) setPill(false);
+      // Where the view is now says whether it keeps to the bottom, however little moved it.
+      view.stuck = atBottom(metricsOf(el));
+      if (view.stuck) setPill(false);
       // The anchor follows the view while a page is on its way, and the reader while one goes in.
-      if (view.anchor !== null && (byScroll || view.restoring === null)) view.anchor = anchorNow(el);
-      if (!byScroll) return;
+      if (view.anchor !== null && (byReader || view.restoring === null)) view.anchor = anchorNow(el);
+      if (!byReader) return;
       actions.clearOlderFailed();
       const paging = view.paging;
       if (paging !== null && wantsOlder(metricsOf(el), { ...paging, olderFailed: false })) askOlder(el);
@@ -453,7 +456,7 @@ function metricsOf(el: HTMLElement): Metrics {
   return { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight };
 }
 
-/** Notes where the list's own write left the view, so the scroll event it fires does not read as a swipe (`moved`). */
+/** Notes where the list's own write left the view, so the scroll event it fires does not read as a swipe (`takeScroll`). */
 function noteWrite(view: ViewState, el: HTMLElement): void {
   const m = metricsOf(el);
   view.top = m.scrollTop;

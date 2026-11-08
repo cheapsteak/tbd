@@ -1,6 +1,6 @@
 // Tests scroll.ts with exact numbers: at the bottom within 30 px, an older page within two
-// screens of the top, the anchor's place, when a view keeps to the bottom, and how the rows
-// changed, read from rows the real transcript slice made.
+// screens of the top, the anchor's place, which scroll events are the reader's, slow drags
+// included, and how the rows changed, read from rows the real transcript slice made.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -8,8 +8,8 @@ import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../pr
 import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, emptyTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import {
-  anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
-  sticksAfterScroll, wantsOlder,
+  anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX, takeScroll,
+  wantsOlder,
 } from './scroll.ts';
 import type { Metrics } from './scroll.ts';
 
@@ -100,23 +100,49 @@ test('a scroll event moved the view when scrollTop changed by more than a pixel'
   assert.equal(moved(1000, at(998.5)), true);
 });
 
-test('at the bottom a view keeps to it, whatever it did before', () => {
-  assert.equal(sticksAfterScroll(false, 0, at(970)), true);
-  assert.equal(sticksAfterScroll(false, 2000, at(1000)), true);
-  assert.equal(sticksAfterScroll(true, 1000, at(975)), true);
+test('a scroll event that moved the view more than a pixel is the reader’s, and is measured from next', () => {
+  assert.deepEqual(takeScroll(1000, at(990)), { byReader: true, top: 990 });
+  assert.deepEqual(takeScroll(1000, at(1001.5)), { byReader: true, top: 1001.5 });
+  // The event of the list's own write, and a rounded read-back of it, are not.
+  assert.deepEqual(takeScroll(1000, at(1000)), { byReader: false, top: 1000 });
+  assert.deepEqual(takeScroll(1000.5, at(999.5)), { byReader: false, top: 1000.5 });
 });
 
-test('above the bottom a view stops keeping to it only when it moved up', () => {
-  // The reader swiped up 31 px from the bottom.
-  assert.equal(sticksAfterScroll(true, 1000, at(969)), false);
-  // Rows grew below the view before the list put it back: its own write's event moved nothing.
-  const grown: Metrics = { scrollTop: 1000, scrollHeight: 2400, clientHeight: 800 };
-  assert.equal(sticksAfterScroll(true, 1000, grown), true);
-  // A rounded read-back of a write, up to a pixel short.
-  assert.equal(sticksAfterScroll(true, 1000.5, { ...grown, scrollTop: 999.5 }), true);
-  assert.equal(sticksAfterScroll(true, 1000.5, { ...grown, scrollTop: 999.4 }), false);
-  // Moving down without reaching the bottom keeps a view that does not keep to it as it is.
-  assert.equal(sticksAfterScroll(false, 100, at(500)), false);
+/**
+ * A drag up from the bottom of `at`, `step` px an event for `n` events, folded through
+ * `takeScroll` as the list folds it: which events count as the reader's, and whether the view
+ * keeps to the bottom after each, which is whether it is at the bottom then.
+ */
+function drag(step: number, n: number): Array<{ scrollTop: number; byReader: boolean; stuck: boolean }> {
+  let top = 1000;
+  const out = [];
+  for (let i = 1; i <= n; i++) {
+    const m = at(1000 - i * step);
+    const taken = takeScroll(top, m);
+    top = taken.top;
+    out.push({ scrollTop: m.scrollTop, byReader: taken.byReader, stuck: atBottom(m) });
+  }
+  return out;
+}
+
+test('a slow drag of a pixel or a third of one an event adds up until it counts as the reader’s', () => {
+  // Every event alone moves the view a pixel or less.
+  for (const [step, every] of [[1, 2], [1 / 3, 4]] as const) {
+    const events = drag(step, 120);
+    assert.ok(events.every((e) => !moved(e.scrollTop + step, at(e.scrollTop))), String(step));
+    const counted = events.flatMap((e, i) => (e.byReader ? [i + 1] : []));
+    assert.equal(counted[0], every, String(step));
+    // From then on, every `every`-th event counts, measured from the last that did.
+    assert.ok(counted.every((n, i) => n === every * (i + 1)), String(step));
+  }
+});
+
+test('a slow drag stops keeping to the bottom once the view is more than 30 px from it', () => {
+  for (const step of [1, 1 / 3]) {
+    const events = drag(step, Math.ceil(60 / step));
+    for (const e of events) assert.equal(e.stuck, 1000 - e.scrollTop <= STICK_PX, `${step} at ${e.scrollTop}`);
+    assert.equal(events.at(-1)!.stuck, false);
+  }
 });
 
 test('a view that keeps to the bottom goes back to it when pushed more than a pixel further away', () => {
@@ -134,13 +160,14 @@ test('a view that keeps to the bottom goes back to it when pushed more than a pi
   assert.equal(pushedFromBottom(false, 0, { scrollTop: 0, scrollHeight: 5000, clientHeight: 800 }), false);
 });
 
-test('the event of the list’s own write, after the view got shorter, keeps it to the bottom and shows the push', () => {
+test('the event of the list’s own write, after the view got shorter, is not the reader’s and shows the push', () => {
   // Measured in Chromium: the list wrote 1,605 over 2,066 px in a 461 px view, and the phone
-  // turned before that write's event came, leaving the view 299 px tall.
+  // turned before that write's event came, leaving the view 299 px tall. The list puts the view
+  // back at the bottom, so it still keeps to it.
   const m: Metrics = { scrollTop: 1605, scrollHeight: 2066, clientHeight: 299 };
-  assert.equal(moved(1605, m), false);
-  assert.equal(sticksAfterScroll(true, 1605, m), true);
+  assert.deepEqual(takeScroll(1605, m), { byReader: false, top: 1605 });
   assert.equal(pushedFromBottom(true, 0, m), true);
+  assert.equal(atBottom({ ...m, scrollTop: m.scrollHeight - m.clientHeight }), true);
 });
 
 // --- how the rows changed, from rows the slice made ------------------------------------------

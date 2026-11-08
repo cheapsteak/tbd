@@ -460,6 +460,31 @@ function scrollTx(tx, top) {
 }
 
 /**
+ * Drags `.tx` up slowly from where it is, `step` px a frame for `n` frames, as a slow finger
+ * moves it, then waits two frames (this file's header). The finger's place is kept unrounded, so
+ * the browser rounds a fractional step as it would round a finger's, and it moves with the view
+ * when the app moves it, as when a page goes in above.
+ * @param {Locator} tx
+ * @param {number} step
+ * @param {number} n
+ */
+function slowDrag(tx, step, n) {
+  return tx.evaluate(async (el, { step, n }) => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    let finger = el.scrollTop;
+    for (let i = 0; i < n; i++) {
+      finger -= step;
+      el.scrollTop = finger;
+      const wrote = el.scrollTop;
+      await frame();
+      finger += el.scrollTop - wrote;
+    }
+    await frame();
+    await frame();
+  }, { step, n });
+}
+
+/**
  * The top of `row` on the screen.
  * @param {Locator} row
  */
@@ -611,6 +636,22 @@ test('scrolling to the bottom takes the pill away', async ({ page, appHost }) =>
   await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
   await expect(pill).toHaveCount(0);
 });
+
+// A finger that moves a pixel or less a frame, as a slow drag does, and in fractional steps on a
+// 3x screen, moves the view all the same: once it is more than 30 px from the bottom, new rows
+// show the pill and leave it where the reader put it.
+for (const [what, step, n] of /** @type {const} */ ([['a pixel', 1, 60], ['a third of a pixel', 1 / 3, 180]])) {
+  test(`a slow drag up of ${what} a frame stops keeping to the bottom`, async ({ page, appHost }) => {
+    const tx = await openTall(page, appHost);
+    await slowDrag(tx, step, n);
+    expect(await fromBottom(tx)).toBeGreaterThan(30);
+    const { row, top: before } = await firstWholeRow(tx);
+    await appendToCheckout(page, bashRows('slow', 1));
+    await expect(app(page).locator('.pill')).toBeVisible();
+    expect(await topOf(row)).toBe(before);
+    expect(await fromBottom(tx)).toBeGreaterThan(30);
+  });
+}
 
 test('a page in place of the rows starts at the bottom and takes the pill away', async ({ page, appHost }) => {
   const tx = await openTall(page, appHost);
@@ -991,6 +1032,23 @@ test('a failed older page shows nothing, and loads on the next scroll', async ({
   expect(cursors[asked + 1]).toBe(cursors[asked]);
   await pageWentIn(tx, first);
   await expect(app(page).getByText(REMOTE_REFUSED)).toHaveCount(0);
+});
+
+test('a slow drag is the reader’s scroll, so a failed older page loads again on it', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'setReply', 'transcript.page', { error: { code: 'refused', message: REMOTE_REFUSED } });
+  await scrollTx(tx, 150);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  await frames(tx, 3);
+  const first = await firstRowKey(tx);
+  await hostCall(page, 'setReply', 'transcript.page', null);
+  // A pixel a frame: no one scroll event moves the view more than a pixel. It asks again, for
+  // the same page.
+  await slowDrag(tx, 1, 20);
+  await expect.poll(async () => (await pageCursors(page)).length).toBeGreaterThanOrEqual(asked + 2);
+  const cursors = await pageCursors(page);
+  expect(cursors[asked + 1]).toBe(cursors[asked]);
+  await pageWentIn(tx, first);
 });
 
 test('a reset starts over at the newest items', async ({ page, appHost }) => {

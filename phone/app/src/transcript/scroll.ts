@@ -4,10 +4,15 @@
  * metrics and acts on what these say.
  *
  * - **Sticking to the bottom.** A view within `STICK_PX` of its bottom is at the bottom
- *   (`atBottom`). While the view keeps to the bottom (`sticksAfterScroll`), rows that arrive or
- *   grow below it, and a scroll element that gets shorter, as when the keyboard opens, put it
- *   back at the bottom (`pushedFromBottom`). Rows that arrive while it does not keep to the
- *   bottom show the "New messages" pill instead (`rowsChange`).
+ *   (`atBottom`). While the view keeps to the bottom, rows that arrive or grow below it, and a
+ *   scroll element that gets shorter, as when the keyboard opens, put it back at the bottom
+ *   (`pushedFromBottom`). After every scroll event, once the list has put back a view that was
+ *   pushed, the view keeps to the bottom exactly when it is at the bottom, whatever moved it and
+ *   by how little. Rows that arrive while it does not keep to the bottom show the "New messages"
+ *   pill instead (`rowsChange`).
+ * - **The reader's scroll.** A scroll event is the reader's when it moved the view more than a
+ *   pixel from where the list last wrote it or last took the reader's scroll (`takeScroll`), so
+ *   the event of the list's own write never counts, and a slow drag adds up until it does.
  * - **Older pages.** The list asks for the page above its rows once the reader is within two
  *   screen heights of the top, one page at a time (`wantsOlder`), and at once when the rows fit
  *   the view, which the reader cannot scroll (`fitsView`).
@@ -84,35 +89,33 @@ export function restoreTop(anchor: Anchor, rowTop: number): number {
 }
 
 /**
- * Whether a scroll event moved the view from `prevTop`, the `scrollTop` the list last saw or
- * wrote, by more than a pixel, so a rounded read-back does not count. The reader's swipe moves
- * it. The event of a write by the list, or by the virtualizer when rows above the view change
- * height, does not, since the list notes where each of those writes left the view.
+ * Whether a scroll event moved the view from `prevTop` by more than a pixel, so a rounded
+ * read-back does not count. `prevTop` is the `scrollTop` of the list's last write, or of the last
+ * event `takeScroll` counted as the reader's. The list notes where each of its writes left the
+ * view, and the virtualizer's when rows above the view change height, so their events do not
+ * move it.
  */
 export function moved(prevTop: number, m: Metrics): boolean {
   return Math.abs(m.scrollTop - prevTop) > 1;
 }
 
 /**
- * Whether the view keeps to the bottom after a scroll event, from whether it did before and
- * `prevTop` (as for `moved`):
- * - at the bottom, it does;
- * - above it, it stops only when the view moved up, as a reader's swipe moves it. A view that
- *   keeps to the bottom can be pushed above it from below, by rows that grew or a scroll element
- *   that got shorter, before the list put it back, and the event of the list's own last write
- *   can come only then. That event did not move the view, so it keeps to the bottom.
+ * What the list takes from a scroll event, from `top` as for `moved`: whether the reader made
+ * it, and the `top` the next event is measured from. An event that moved the view more than a
+ * pixel is the reader's, and its `scrollTop` becomes `top`. Any other leaves `top` as it was,
+ * so a drag of a pixel or less a frame, or of a fraction of one on a 3x screen, adds up from
+ * where it began until an event counts, and the next counts again from there.
  */
-export function sticksAfterScroll(stuck: boolean, prevTop: number, m: Metrics): boolean {
-  if (atBottom(m)) return true;
-  return stuck && m.scrollTop >= prevTop - 1;
+export function takeScroll(top: number, m: Metrics): { byReader: boolean; top: number } {
+  return moved(top, m) ? { byReader: true, top: m.scrollTop } : { byReader: false, top };
 }
 
 /**
  * Whether something pushed a view that keeps to the bottom away from it, so the list should
  * put it back: the view is now more than a pixel further above its bottom than `seen`, its
  * distance when the list last looked. Rows that arrived or grew below it do that, and so does
- * a shorter scroll element. The list looks after every layout, after every scroll event that
- * moved the view, and after every one that did not (`moved`), and puts it back then too, so a
+ * a shorter scroll element. The list looks after every layout, after every scroll event the
+ * reader made, and after every one they did not (`takeScroll`), and puts it back then too, so a
  * swipe does not count as a push, and a push that came before the event of the list's own write
  * is not taken for a swipe. Rows that grew above the view do not push it, since the virtualizer
  * moves the view by as much as they grew.
