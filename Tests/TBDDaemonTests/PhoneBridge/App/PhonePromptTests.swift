@@ -412,6 +412,38 @@ struct PhonePromptTests {
         #expect(h.actions.remoteAnswers.count == cases.count)
     }
 
+    /// Answering one of a remote prompt's two questions is refused by TBD's
+    /// validator, naming the question the phone left out. The phone was sent
+    /// that question in `prompt.changed`, so the refusal reaches it verbatim,
+    /// not as the generic provider line.
+    @Test func answeringOneOfTwoQuestionsGetsTBDsRefusalVerbatim() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let session = Self.remoteSession
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        let prompt = RemotePendingPrompt(
+            id: "rp-1", kind: .question,
+            questions: [RemotePendingQuestionItem(prompt: "Which branch?"), RemotePendingQuestionItem(prompt: "Which repo?")])
+        try Self.listRemoteSessions(h, open: prompt, elsewhere: nil)
+        let outbox = try await Self.liveConnection(h)
+        await h.service.openPrompts(session, for: deviceID)
+        let first = try await Self.promptEvent(0, in: outbox)
+        let sentIDs = first.data.prompts.map(\.id)
+        #expect(sentIDs == ["rp-1"])
+        let missing = PromptAnswerValidation.missingAnswer(question: "Which repo?").message
+        h.actions.respond(to: .answerRemotePrompt, with: RPCResponse(error: missing))
+
+        let (reply, bytes) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(
+                session: session, promptID: "rp-1", answer: .question(answers: ["Which branch?": "main"])),
+            on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .refused, message: missing))
+        #expect(!PhoneProviderSecret.leaks(bytes))
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
     /// A local answer's refusal is TBD's own, so any text the core sends
     /// reaches the phone as it is: the filter is the remote path's alone.
     @Test func aLocalAnswersRefusalIsNotFiltered() async throws {

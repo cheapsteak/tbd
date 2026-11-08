@@ -888,7 +888,8 @@ extension PhoneAppService {
             try Self.requireCapability(capabilities.answer, orElse: Self.noAnswerReason)
             let core = RemoteAnswerParams(
                 provider: provider, sessionID: sessionID, promptID: params.promptID, answer: params.answer)
-            let remoteRefusals = Self.tbdRemoteAnswerRefusals(for: params.answer)
+            let promptQuestions = await sentQuestionTexts(for: key)
+            let remoteRefusals = Self.tbdRemoteAnswerRefusals(for: params.answer, promptQuestions: promptQuestions)
             return try await answerInLedger(key, deviceID: deviceID, remoteRefusals: remoteRefusals) {
                 try await self.actions.phoneAnswerRemotePrompt(core, deviceID: deviceID)
             }
@@ -940,9 +941,9 @@ extension PhoneAppService {
     /// - **A remote answer** can be refused by the provider, whose error
     ///   message can quote a URL with an access token in it. Its reason
     ///   reaches the phone only when it is in `remoteRefusals`, the words TBD
-    ///   writes on that path (`tbdRemoteAnswerRefusals(for:)`); anything else
-    ///   is `remoteRefusedReason`, and the reason goes to the log as private
-    ///   data (`remoteRefusal(_:method:tbdRefusals:)`).
+    ///   writes on that path (`tbdRemoteAnswerRefusals(for:promptQuestions:)`);
+    ///   anything else is `remoteRefusedReason`, and the reason goes to the
+    ///   log as private data (`remoteRefusal(_:method:tbdRefusals:)`).
     static func answerRefusal(_ reason: String?, remoteRefusals: Set<String>?) -> PhoneAppError {
         guard let remoteRefusals else {
             return Self.refusal(reason.flatMap { $0.isEmpty ? nil : $0 } ?? Self.answerRefusedReason)
@@ -951,22 +952,27 @@ extension PhoneAppService {
     }
 
     /// The refusals TBD itself writes on the remote answer path, for an
-    /// answer of `answer`, which reach a phone as they are
+    /// answer of `answer` to a prompt whose question texts, as a phone was
+    /// sent them, are `promptQuestions`, which reach a phone as they are
     /// (`answerRefusal(_:remoteRefusals:)`):
     /// - the gates' (`tbdRemoteGateRefusals`);
     /// - the setting's, and a session with no mirror row
     ///   (`PromptAnswerRefusal`);
     /// - a session that has exited (`RemoteSendMessageRefusal.exited`);
-    /// - every `PromptAnswerValidation` message whose words are TBD's and the
-    ///   phone's own: the fixed ones, and, for a question answer, the ones
-    ///   that name a question the answer itself names.
+    /// - every `PromptAnswerValidation` message whose words are TBD's and
+    ///   text the phone has: the fixed ones, and, for a question answer, the
+    ///   ones that name a question the answer itself names, and the "no
+    ///   answer" one for every question in `promptQuestions`, which the
+    ///   validator raises for a question the answer left out.
     ///
-    /// Every text here is TBD's words and the phone's own, so none can carry
-    /// a provider's. The refusals TBD builds from anything else, such as a
-    /// validation message naming a question the answer does not name, a
-    /// stale provider's and an undeclared verb's, are left out, and the phone
-    /// gets `remoteRefusedReason` for them.
-    static func tbdRemoteAnswerRefusals(for answer: PromptAnswer) -> Set<String> {
+    /// Every text here is TBD's words with the phone's own text or the
+    /// prompt's question texts a phone was already sent in `prompt.changed`,
+    /// so none tells the phone anything a provider wrote that it does not
+    /// have. The refusals TBD builds from anything else, such as a validation
+    /// message naming a question no phone was sent, a stale provider's and an
+    /// undeclared verb's, are left out, and the phone gets
+    /// `remoteRefusedReason` for them.
+    static func tbdRemoteAnswerRefusals(for answer: PromptAnswer, promptQuestions: [String] = []) -> Set<String> {
         var refusals = tbdRemoteGateRefusals.union([
             PromptAnswerRefusal.disabled,
             PromptAnswerRefusal.notMirrored,
@@ -980,8 +986,24 @@ extension PhoneAppService {
                 refusals.insert(PromptAnswerValidation.missingAnswer(question: question).message)
                 refusals.insert(PromptAnswerValidation.unknownQuestion(question).message)
             }
+            for question in promptQuestions {
+                refusals.insert(PromptAnswerValidation.missingAnswer(question: question).message)
+            }
         }
         return refusals
+    }
+
+    /// The question texts of the prompt under `key`, as a device's prompt
+    /// feed last sent it to its phone, or none when no feed sent it. A
+    /// question's text goes whole (`PhonePromptShaper`), so these are the
+    /// texts the core checks an answer against.
+    func sentQuestionTexts(for key: PhonePromptAnswerLedger.Key) -> [String] {
+        for state in devices.values {
+            guard let set = state.prompts?.set, set.session == key.session,
+                  let prompt = set.sent?.first(where: { $0.id == key.promptID }) else { continue }
+            return (prompt.questions ?? []).map(\.text)
+        }
+        return []
     }
 
     // MARK: - The ledger
