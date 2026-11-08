@@ -117,7 +117,7 @@ public struct HookResolver: Sendable {
             }
 
             do {
-                try process.run()
+                try process.runDisarmingHandlerOnFailure()
             } catch {
                 resumeOnce(.failure(error))
                 return

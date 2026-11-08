@@ -3753,6 +3753,15 @@ public actor PRStatusManager {
                 process.standardOutput = stdout
                 process.standardError = stderr
 
+                guard handle.adopt(process) else {
+                    // Cancelled before the launch: the cheapest possible
+                    // termination is never starting. The handler below is not
+                    // assigned yet, because a process that never launches never
+                    // releases it, and it holds both pipes.
+                    continuation.resume(returning: nil)
+                    return
+                }
+
                 process.terminationHandler = { p in
                     let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
                     let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
@@ -3763,15 +3772,8 @@ public actor PRStatusManager {
                     ))
                 }
 
-                guard handle.adopt(process) else {
-                    // Cancelled before the launch: the cheapest possible
-                    // termination is never starting.
-                    continuation.resume(returning: nil)
-                    return
-                }
-
                 do {
-                    try process.run()
+                    try process.runDisarmingHandlerOnFailure()
                     handle.terminateIfCancelled()
                 } catch {
                     logger.debug("Failed to launch \(executable, privacy: .public): \(error)")
