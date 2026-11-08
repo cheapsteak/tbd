@@ -52,8 +52,7 @@ actor RemoteTranscriptFollower {
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteTranscriptSync(
             RemoteTranscriptSyncParams(provider: provider, sessionID: sessionID))
-        guard response.success else { throw PhoneAppService.refusal(response.error) }
-        let result = try PhoneAppService.decoded(
+        let result = try PhoneAppService.succeeded(
             RemoteTranscriptSyncResult.self, from: response, method: "remote.transcriptSync")
         caughtUp = result.caughtUp
         return result
@@ -65,8 +64,7 @@ actor RemoteTranscriptFollower {
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteTranscriptLoadEarlier(
             RemoteTranscriptLoadEarlierParams(provider: provider, sessionID: sessionID))
-        guard response.success else { throw PhoneAppService.refusal(response.error) }
-        return try PhoneAppService.decoded(
+        return try PhoneAppService.succeeded(
             RemoteTranscriptLoadEarlierResult.self, from: response, method: "remote.transcriptLoadEarlier")
     }
 

@@ -168,18 +168,11 @@ enum PhonePromptShaper {
     // MARK: Cutting
 
     /// `text` cut at a character boundary so its JSON string body, without
-    /// quotes, is at most `limit` bytes, and whether anything was cut.
+    /// quotes, is at most `limit` bytes, and whether anything was cut: the
+    /// transcript's own cut (`TranscriptShaper.preview`).
     static func cut(_ text: String, to limit: Int) -> (text: String, cut: Bool) {
-        guard escapedLength(text) > limit else { return (text, false) }
-        var kept = ""
-        var used = 0
-        for character in text {
-            let width = escapedLength(String(character))
-            guard used + width <= limit else { break }
-            kept.append(character)
-            used += width
-        }
-        return (kept, true)
+        let preview = TranscriptShaper.preview(text, limit: limit)
+        return (preview.text, preview.truncated)
     }
 
     /// The bytes `text` takes as a JSON string body, without quotes
@@ -725,8 +718,6 @@ struct PhonePromptFeed: Sendable {
 /// (`PhonePromptAttribution`). Events go through `emit`, so they are numbered
 /// and kept for a resume.
 extension PhoneAppService {
-    private static let promptsLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
-
     static let answerReasonTooLongReason = "That reason is too long to send from a phone."
     static let answerRefusedReason = "The laptop refused the answer."
     static let noAnswerReason = "This provider does not support answering prompts."
@@ -766,11 +757,8 @@ extension PhoneAppService {
                 try await self.actions.phoneAnswerPrompt(core, deviceID: deviceID)
             }
         case .remote(let provider, let sessionID):
-            let declared = try await declaredCapabilities(ofProvider: provider)
-            let capability = PhoneSessionStatus.remoteCapabilities(declared: declared).answer
-            guard capability.available else {
-                throw PhoneAppError(code: .unsupported, message: capability.reason ?? Self.noAnswerReason)
-            }
+            let capabilities = try await remoteCapabilities(ofProvider: provider)
+            try Self.requireCapability(capabilities.answer, orElse: Self.noAnswerReason)
             let core = RemoteAnswerParams(
                 provider: provider, sessionID: sessionID, promptID: params.promptID, answer: params.answer)
             return try await answerInLedger(key, deviceID: deviceID) {
@@ -793,26 +781,13 @@ extension PhoneAppService {
             guard response.success else {
                 throw Self.refusal(response.error.flatMap { $0.isEmpty ? nil : $0 } ?? Self.answerRefusedReason)
             }
-            result = try Self.answerResult(from: response)
+            result = try Self.decoded(PromptAnswerResult.self, from: response, method: "prompt.answer")
         } catch {
             await finishPhoneAnswer(key, token: token, keep: false)
             throw error
         }
         await finishPhoneAnswer(key, token: token, keep: result.outcome != .alreadyResolved)
         return result
-    }
-
-    /// `response`'s `PromptAnswerResult`. One that does not decode is
-    /// `internal`: caught here, so it never reads as the phone's
-    /// `bad_request`, nor as a success.
-    private static func answerResult(from response: RPCResponse) throws -> PromptAnswerResult {
-        do {
-            return try response.decodeResult(PromptAnswerResult.self)
-        } catch {
-            promptsLogger.error(
-                "Phone prompt.answer: the core answered a result that does not decode: \(Self.errorType(error), privacy: .public)")
-            throw PhoneAppError(code: .internalError, message: "Something went wrong on the laptop.")
-        }
     }
 
     // MARK: - The ledger

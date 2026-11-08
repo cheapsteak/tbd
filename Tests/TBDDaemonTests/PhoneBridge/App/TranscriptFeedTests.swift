@@ -33,7 +33,7 @@ struct TranscriptFeedTests {
         await d.feed.start()
         // The read `start()` asks for is behind us, so nothing but the
         // watcher can read the line appended next.
-        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
         try fixture.append([FeedLine.prompt("m3", "placeholder prompt 3")])
         let events = d.events
         let arrived: @Sendable () async -> Bool = { Self.appendedIDs(events.values) == ["m3"] }
@@ -158,7 +158,7 @@ struct TranscriptFeedTests {
         let d = DirectFeed(path: fixture.path)
         _ = try await d.feed.open()
         await d.feed.start()
-        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
 
         try fixture.append([
             FeedLine.promptWithoutUUID("placeholder prompt with no uuid"),
@@ -186,7 +186,7 @@ struct TranscriptFeedTests {
         let d = DirectFeed(path: fixture.path, liveItemLimit: 3)
         _ = try await d.feed.open()
         await d.feed.start()
-        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
 
         try fixture.append([
             FeedLine.bash("a1", id: "toolu_live", command: "echo live"),
@@ -457,7 +457,7 @@ struct TranscriptFeedTests {
             terminalID: s.terminal.id, worktreeID: s.terminal.worktreeID,
             sessionID: "acme-session-2", transcriptPath: rolled)))
 
-        try await Self.waitUntil("the rollover reset") {
+        try await waitUntil("the rollover reset") {
             ((try? Self.events(.transcriptReset, TranscriptResetData.self, in: s.outbox)) ?? []).count == 1
         }
         let reset = try #require(try Self.events(.transcriptReset, TranscriptResetData.self, in: s.outbox).first)
@@ -470,7 +470,7 @@ struct TranscriptFeedTests {
 
         try FeedFixture.append([FeedLine.prompt("n2", "placeholder prompt 2")], to: rolled)
         h.subscriptions.broadcast(delta: Self.activity(s.terminal))
-        try await Self.waitUntil("the append to the new file") { Self.appendedIDs(in: s.outbox).contains("n2") }
+        try await waitUntil("the append to the new file") { Self.appendedIDs(in: s.outbox).contains("n2") }
         let appended = Self.appendedIDs(in: s.outbox)
         #expect(appended == ["n2"])
         let moved = try await Self.eventually("the watcher to move to the new file") {
@@ -499,7 +499,7 @@ struct TranscriptFeedTests {
         #expect(openedIDs == ["n1"])
         let otherFeed = try #require(await h.service.transcriptFeed(for: deviceID))
         #expect(otherFeed !== s.feed)
-        try await Self.waitUntil("the first feed to stop and the second to start") {
+        try await waitUntil("the first feed to stop and the second to start") {
             let firstWatching = await s.feed.isWatching
             let secondWatching = await otherFeed.isWatching
             return !firstWatching && secondWatching && h.subscriptions.subscriberCount == s.baseline + 2
@@ -515,7 +515,7 @@ struct TranscriptFeedTests {
         h.subscriptions.broadcast(delta: Self.activity(s.terminal))
         try second.append([FeedLine.prompt("n2", "placeholder prompt 2")])
         h.subscriptions.broadcast(delta: Self.activity(other))
-        try await Self.waitUntil("the second session's append") { Self.appendedIDs(in: s.outbox).contains("n2") }
+        try await waitUntil("the second session's append") { Self.appendedIDs(in: s.outbox).contains("n2") }
         let appended = Self.appendedIDs(in: s.outbox)
         #expect(appended == ["n2"])
         await h.service.phoneRevoked(deviceID: deviceID)
@@ -547,7 +547,7 @@ struct TranscriptFeedTests {
         #expect(subscribed.error == nil)
         let subscribeSeq = try JSONDecoder().decode(PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bytes).result.seq
 
-        try await Self.waitUntil("the append after the subscribe reply") { Self.appendedIDs(in: outbox) == ["m3"] }
+        try await waitUntil("the append after the subscribe reply") { Self.appendedIDs(in: outbox) == ["m3"] }
         let replyIndex = try #require(Self.replyIndices("subscribe", in: outbox).first)
         let appends = try Self.events(.transcriptAppend, TranscriptItemsData.self, in: outbox)
         let appendIndex = try #require(Self.eventIndices(.transcriptAppend, in: outbox).first)
@@ -573,7 +573,7 @@ struct TranscriptFeedTests {
         #expect(Self.replyIndices("open-once", in: s.outbox).count == 2)
         let replacement = try #require(await h.service.transcriptFeed(for: deviceID))
         #expect(replacement !== s.feed)
-        try await Self.waitUntil("one feed, one relay, one prompt feed") {
+        try await waitUntil("one feed, one relay, one prompt feed") {
             let firstWatching = await s.feed.isWatching
             let replacementWatching = await replacement.isWatching
             return !firstWatching && replacementWatching && h.subscriptions.subscriberCount == s.baseline + 2
@@ -585,7 +585,7 @@ struct TranscriptFeedTests {
 
         let closed = try await Self.ask(h, .transcriptClose, id: "close", PhoneEmpty(), on: s.outbox)
         #expect(try Self.error(closed) == nil)
-        try await Self.waitUntil("the close to stop the feed, the relay and the prompt feed") {
+        try await waitUntil("the close to stop the feed, the relay and the prompt feed") {
             let watching = await replacement.isWatching
             return !watching && h.subscriptions.subscriberCount == s.baseline
         }
@@ -622,13 +622,13 @@ struct TranscriptFeedTests {
         let opened = try await Self.open(h, secondSession, id: "open-second", on: outbox)
         #expect(opened.page != nil)
         let secondFeed = try #require(await h.service.transcriptFeed(for: deviceID))
-        try await Self.waitUntil("the second feed's live part to start") {
+        try await waitUntil("the second feed's live part to start") {
             let watching = await secondFeed.isWatching
             return watching && h.subscriptions.subscriberCount == baseline + 2
         }
 
         gate.open()
-        try await Self.waitUntil("the first open's reply") { !Self.replyIndices("open-first", in: outbox).isEmpty }
+        try await waitUntil("the first open's reply") { !Self.replyIndices("open-first", in: outbox).isEmpty }
         let firstReply = outbox.bodies[Self.replyIndices("open-first", in: outbox)[0]]
         #expect(try Self.error(firstReply)?.message == PhoneAppService.transcriptChangedReason)
         let current = await h.service.transcriptFeed(for: deviceID)
@@ -642,7 +642,7 @@ struct TranscriptFeedTests {
         h.subscriptions.broadcast(delta: Self.activity(firstTerminal))
         try second.append([FeedLine.prompt("n2", "placeholder prompt 2")])
         h.subscriptions.broadcast(delta: Self.activity(secondTerminal))
-        try await Self.waitUntil("the second session's append") { Self.appendedIDs(in: outbox).contains("n2") }
+        try await waitUntil("the second session's append") { Self.appendedIDs(in: outbox).contains("n2") }
         let appended = Self.appendedIDs(in: outbox)
         #expect(appended == ["n2"])
         await h.service.phoneRevoked(deviceID: deviceID)
@@ -668,7 +668,7 @@ struct TranscriptFeedTests {
         #expect(try Self.error(closed) == nil)
 
         gate.open()
-        try await Self.waitUntil("the open's reply") { !Self.replyIndices("open", in: outbox).isEmpty }
+        try await waitUntil("the open's reply") { !Self.replyIndices("open", in: outbox).isEmpty }
         let openReply = outbox.bodies[Self.replyIndices("open", in: outbox)[0]]
         #expect(try Self.error(openReply)?.message == PhoneAppService.transcriptChangedReason)
         #expect(await h.service.transcriptFeed(for: deviceID) == nil)
@@ -688,7 +688,7 @@ struct TranscriptFeedTests {
         let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
         defer { fixture.remove() }
         let s = try await Self.openLive(h, path: fixture.path)
-        try await Self.waitUntil("the prompt feed's first event") {
+        try await waitUntil("the prompt feed's first event") {
             ((try? Self.events(.promptChanged, PromptChangedData.self, in: s.outbox)) ?? []).count == 1
         }
         let streamID = try #require(await h.service.streamID(for: deviceID))
@@ -698,7 +698,7 @@ struct TranscriptFeedTests {
         try fixture.append([FeedLine.prompt("m3", "placeholder prompt 3")])
         let before = try #require(await h.service.lastSeq(for: deviceID))
         h.subscriptions.broadcast(delta: Self.activity(s.terminal))
-        try await Self.waitUntil("the append while the phone is away") {
+        try await waitUntil("the append while the phone is away") {
             (await h.service.lastSeq(for: deviceID) ?? 0) > before
         }
 
@@ -708,7 +708,7 @@ struct TranscriptFeedTests {
         #expect(subscribed.error == nil)
         let result = try JSONDecoder().decode(PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bytes).result
         #expect(result.replayed)
-        try await Self.waitUntil("the replayed append") { Self.appendedIDs(in: outbox) == ["m3"] }
+        try await waitUntil("the replayed append") { Self.appendedIDs(in: outbox) == ["m3"] }
 
         let resumed = try await Self.open(h, s.session, id: "resume", resume: true, on: outbox)
         #expect(resumed.resumed)
@@ -730,7 +730,7 @@ struct TranscriptFeedTests {
         let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
         defer { fixture.remove() }
         let s = try await Self.openLive(h, path: fixture.path)
-        try await Self.waitUntil("the prompt feed's first event") {
+        try await waitUntil("the prompt feed's first event") {
             ((try? Self.events(.promptChanged, PromptChangedData.self, in: s.outbox)) ?? []).count == 1
         }
         let streamID = try #require(await h.service.streamID(for: deviceID))
@@ -742,7 +742,7 @@ struct TranscriptFeedTests {
             toolInputJSON: #"{"command":"ls -la"}"#, suggestionsJSON: nil)
         let before = try #require(await h.service.lastSeq(for: deviceID))
         await h.subscriptions.broadcastPendingPrompts(terminalID: s.terminal.id, from: h.pendingPrompts)
-        try await Self.waitUntil("the prompt change while the phone is away") {
+        try await waitUntil("the prompt change while the phone is away") {
             (await h.service.lastSeq(for: deviceID) ?? 0) > before
         }
 
@@ -761,7 +761,7 @@ struct TranscriptFeedTests {
 
         await h.pendingPrompts.closed(terminalID: s.terminal.id, toolUseID: "toolu-9")
         await h.subscriptions.broadcastPendingPrompts(terminalID: s.terminal.id, from: h.pendingPrompts)
-        try await Self.waitUntil("the prompt change after the resume") {
+        try await waitUntil("the prompt change after the resume") {
             ((try? Self.events(.promptChanged, PromptChangedData.self, in: outbox)) ?? []).count == 2
         }
         let after = try Self.events(.promptChanged, PromptChangedData.self, in: outbox)[1].data
@@ -787,7 +787,7 @@ struct TranscriptFeedTests {
         try fixture.append([FeedLine.prompt("m3", "placeholder prompt 3")])
         let before = try #require(await h.service.lastSeq(for: deviceID))
         h.subscriptions.broadcast(delta: Self.activity(s.terminal))
-        try await Self.waitUntil("the append while the phone is away") {
+        try await waitUntil("the append while the phone is away") {
             (await h.service.lastSeq(for: deviceID) ?? 0) > before
         }
 
@@ -800,13 +800,13 @@ struct TranscriptFeedTests {
         let resumeBody = try PhoneTestRequests.body(
             .transcriptOpen, id: "resume", params: Self.openParams(s.session, resume: true))
         await h.service.handleAppMessage(resumeBody, from: h.peer)
-        try await Self.waitUntil("the resumed open to wait for the subscribe reply") {
+        try await waitUntil("the resumed open to wait for the subscribe reply") {
             await h.service.hasPendingTranscriptResume(for: deviceID)
         }
         #expect(outbox.bodies.isEmpty)
 
         gate.open()
-        try await Self.waitUntil("the resumed open's reply") { !Self.replyIndices("resume", in: outbox).isEmpty }
+        try await waitUntil("the resumed open's reply") { !Self.replyIndices("resume", in: outbox).isEmpty }
         let bodies = outbox.bodies
         let subscribeIndex = try #require(Self.replyIndices("subscribe", in: outbox).first)
         let appendIndex = try #require(Self.eventIndices(.transcriptAppend, in: outbox).first)
@@ -861,7 +861,7 @@ struct TranscriptFeedTests {
         #expect(fresh !== firstFeed)
 
         gate.open()
-        try await Self.waitUntil("the subscribe reply") { !Self.replyIndices("subscribe", in: outbox).isEmpty }
+        try await waitUntil("the subscribe reply") { !Self.replyIndices("subscribe", in: outbox).isEmpty }
         let subscribeIndex = Self.replyIndices("subscribe", in: outbox)[0]
         let subscribed = try JSONDecoder().decode(
             PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: outbox.bodies[subscribeIndex]).result
@@ -885,7 +885,7 @@ struct TranscriptFeedTests {
         h.subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
             terminalID: s.terminal.id, worktreeID: s.terminal.worktreeID,
             sessionID: "acme-session-2", transcriptPath: rolled)))
-        try await Self.waitUntil("the rollover reset") {
+        try await waitUntil("the rollover reset") {
             ((try? Self.events(.transcriptReset, TranscriptResetData.self, in: s.outbox)) ?? []).count == 1
         }
 
@@ -911,7 +911,7 @@ struct TranscriptFeedTests {
         // The sessions publisher's catch-up window and the grace.
         try await h.clock.requireSleepersArmed(count: 2, timeout: TestDeadlines.saturatedPass)
         await h.clock.advance(by: PhoneAppConstants.parseStateGrace)
-        try await Self.waitUntil("the grace to drop the phone's state and stop the feed") {
+        try await waitUntil("the grace to drop the phone's state and stop the feed") {
             let gone = await h.service.streamID(for: deviceID) == nil
             let watching = await s.feed.isWatching
             return gone && !watching && h.subscriptions.subscriberCount == 0
@@ -1152,19 +1152,6 @@ struct TranscriptFeedTests {
         #else
         return nil
         #endif
-    }
-
-    /// Waits until `condition` holds, or throws naming `what`.
-    private static func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
-        let deadline = TestDeadlines.saturatedPass
-        switch await pollUntilTrue(timeout: deadline, condition) {
-        case .satisfied:
-            return
-        case .cancelled:
-            throw CancellationError()
-        case .timedOut:
-            throw BoundedWaitTimeout(what: what, observed: nil, deadline: deadline)
-        }
     }
 
     /// `waitUntil`, returning true, for a check a test then asserts.

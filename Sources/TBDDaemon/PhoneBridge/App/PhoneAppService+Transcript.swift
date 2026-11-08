@@ -152,8 +152,6 @@ actor TranscriptDeltaRelay {
 /// The grace after a disconnect, and a revoke, stop them too
 /// (`PhoneDeviceState.shutDown()`).
 extension PhoneAppService {
-    private static let transcriptLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
-
     static let notAClaudeTranscriptReason = "Only a Claude session has a transcript."
     static let noTranscriptReadReason = "This provider does not support reading transcripts."
     static let transcriptNotOpenReason = "That transcript is not open. Open it again."
@@ -166,8 +164,8 @@ extension PhoneAppService {
         let requestID = context.requestID
         guard let stamp = context.transcriptStamp else {
             // `handleAppMessage` stamps every `transcript.open`.
-            Self.transcriptLogger.fault("Phone transcript: an open arrived with no stamp")
-            throw PhoneAppError(code: .internalError, message: "Something went wrong on the laptop.")
+            Self.logger.fault("Phone transcript: an open arrived with no stamp")
+            throw PhoneAppError(code: .internalError, message: Self.internalErrorReason)
         }
         let source: TranscriptFeedSource
         switch params.session {
@@ -227,14 +225,10 @@ extension PhoneAppService {
     private nonisolated func remoteTranscriptFollower(
         provider: String, sessionID: String
     ) async throws -> RemoteTranscriptFollower {
-        let declared = try await declaredCapabilities(ofProvider: provider)
-        let capability = PhoneSessionStatus.remoteCapabilities(declared: declared).transcript
-        guard capability.available else {
-            throw PhoneAppError(code: .unsupported, message: capability.reason ?? Self.noTranscriptReadReason)
-        }
+        let capabilities = try await remoteCapabilities(ofProvider: provider)
+        try Self.requireCapability(capabilities.transcript, orElse: Self.noTranscriptReadReason)
         let response = try await actions.phoneRemoteSessions()
-        guard response.success else { throw Self.refusal(response.error) }
-        let sessions = try Self.decoded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
+        let sessions = try Self.succeeded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
         guard sessions.contains(where: { $0.provider == provider && $0.payload.id == sessionID && !$0.dismissed }) else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
         }
@@ -290,7 +284,7 @@ extension PhoneAppService {
         }
         let result = TranscriptOpenResult(resumed: true, seq: state.stream.lastSeq, page: nil)
         guard let reply = try? PhoneAppCoding.reply(requestID: requestID, result: result) else {
-            send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
+            send(Self.failure(requestID, .internalError, Self.internalErrorReason), to: deviceID)
             return
         }
         devices[deviceID]?.transcript?.stamp = stamp
@@ -317,8 +311,8 @@ extension PhoneAppService {
         }
         let result = TranscriptOpenResult(resumed: false, seq: state.stream.lastSeq, page: page)
         guard let reply = try? PhoneAppCoding.reply(requestID: requestID, result: result) else {
-            Self.transcriptLogger.error("Phone transcript: the open reply does not encode")
-            send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
+            Self.logger.error("Phone transcript: the open reply does not encode")
+            send(Self.failure(requestID, .internalError, Self.internalErrorReason), to: deviceID)
             return
         }
         let earlier = state.transcript
@@ -420,7 +414,7 @@ extension PhoneAppService {
                   let worktree = try await db.worktrees.get(id: terminal.worktreeID) else { return nil }
             return locateTranscript(terminal, worktree.localPath)
         } catch {
-            Self.transcriptLogger.error(
+            Self.logger.error(
                 "Phone transcript: could not read a terminal row: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return nil
         }

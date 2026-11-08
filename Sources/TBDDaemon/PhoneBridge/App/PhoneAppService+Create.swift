@@ -29,8 +29,6 @@ import TBDShared
 /// fill, from the tapped repo and the phone's message, so the phone neither
 /// sees nor sets them.
 extension PhoneAppService {
-    private static let createLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
-
     static let noSuchRepoReason = "That repo is no longer on this laptop."
     static let providerTakesNoMessageReason = "This provider does not take a first message."
     static let notAFormFieldReason = "The form has a value this provider does not ask for."
@@ -93,8 +91,7 @@ extension PhoneAppService {
         try Task.checkCancellation()
         let response = try await actions.phoneCreateWorktree(
             WorktreeCreateParams(repoID: params.repoID, prompt: prompt), deviceID: context.peer.deviceID)
-        guard response.success else { throw Self.refusal(response.error) }
-        let worktree = try Self.decoded(Worktree.self, from: response, method: "worktree.create")
+        let worktree = try Self.succeeded(Worktree.self, from: response, method: "worktree.create")
         let terminalID = try await firstAgentSession(inWorktree: worktree.id)
         return PhoneWorktreeCreateResult(
             worktreeID: worktree.id, session: terminalID.map { PhoneSessionRef.local(terminalID: $0) })
@@ -178,12 +175,12 @@ extension PhoneAppService {
         } catch is CancellationError {
             return nil
         } catch {
-            createLogger.error(
+            Self.logger.error(
                 "Phone worktree.create: could not read the new worktree: \(Self.errorType(error), privacy: .public)")
             return nil
         }
         guard worktree != nil else {
-            createLogger.notice(
+            Self.logger.notice(
                 "Phone worktree.create: worktree \(worktreeID, privacy: .public) is gone, so its create failed")
             throw PhoneAppError(code: .refused, message: worktreeCreateFailedReason)
         }
@@ -319,7 +316,7 @@ extension PhoneAppService {
         }
         let dropped = providers.count - kept.count
         if dropped > 0 {
-            createLogger.notice(
+            Self.logger.notice(
                 "Phone remote.providers: \(dropped, privacy: .public) of \(providers.count, privacy: .public) providers left out to fit one frame")
         }
         return PhoneRemoteProvidersResult(providers: kept)
@@ -354,8 +351,7 @@ extension PhoneAppService {
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteCreate(
             RemoteCreateParams(provider: params.provider, paramsJSON: paramsJSON), deviceID: context.peer.deviceID)
-        guard response.success else { throw Self.refusal(response.error) }
-        let session = try Self.decoded(RemoteSessionPayload.self, from: response, method: "remote.create")
+        let session = try Self.succeeded(RemoteSessionPayload.self, from: response, method: "remote.create")
         return SessionRefResult(session: .remote(provider: params.provider, sessionID: session.id))
     }
 
@@ -523,9 +519,8 @@ extension PhoneAppService {
     /// The registered providers, as `remote.providers` gives them. A list the
     /// daemon refuses to give is `refused` with its reason; one that does not
     /// decode is `internal`.
-    private nonisolated func providerStatuses() async throws -> [RemoteProviderStatus] {
+    nonisolated func providerStatuses() async throws -> [RemoteProviderStatus] {
         let response = try await actions.phoneRemoteProviders()
-        guard response.success else { throw Self.refusal(response.error) }
-        return try Self.decoded(RemoteProvidersResult.self, from: response, method: "remote.providers").providers
+        return try Self.succeeded(RemoteProvidersResult.self, from: response, method: "remote.providers").providers
     }
 }

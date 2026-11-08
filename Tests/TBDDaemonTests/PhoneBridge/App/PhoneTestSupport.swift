@@ -269,6 +269,21 @@ final class PhoneTestGate: @unchecked Sendable {
     }
 }
 
+// MARK: - Waiting
+
+/// Waits until `condition` holds, or throws naming `what`.
+func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
+    let deadline = TestDeadlines.saturatedPass
+    switch await pollUntilTrue(timeout: deadline, condition) {
+    case .satisfied:
+        return
+    case .cancelled:
+        throw CancellationError()
+    case .timedOut:
+        throw BoundedWaitTimeout(what: what, observed: nil, deadline: deadline)
+    }
+}
+
 // MARK: - Requests and replies
 
 /// A reply as a test reads it: its request ID, and its error when it has one.

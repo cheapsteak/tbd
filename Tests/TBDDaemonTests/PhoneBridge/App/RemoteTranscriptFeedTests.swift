@@ -124,7 +124,7 @@ struct RemoteTranscriptFeedTests {
         #expect(pageIDs == ["m2", "m3", "m4", "m5"])
         let cursor = try #require(page.cursor)
         await d.feed.start()
-        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
 
         let older = try await d.feed.olderPage(cursor: cursor)
 
@@ -234,9 +234,9 @@ struct RemoteTranscriptFeedTests {
         #expect(d.actions.remoteLoadEarliers.count == 1)
 
         await d.feed.start()
-        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
         try await d.clock.requireAdvanceWhenArmed(by: .seconds(3))
-        try await Self.waitUntil("the feed to apply the tick's sync") { await d.feed.readCount >= 2 }
+        try await waitUntil("the feed to apply the tick's sync") { await d.feed.readCount >= 2 }
         #expect(d.actions.remoteSyncs.count == 2)
         let again = try await d.feed.olderPage(cursor: cursor)
         #expect(again.reachedStart)
@@ -256,7 +256,7 @@ struct RemoteTranscriptFeedTests {
         let page = try await d.feed.open()
         let cursor = try #require(page.cursor)
         await d.feed.start()
-        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
         cache.replaceBeforeLoad(CacheLine.conversation("n", messages: 2))
 
         await #expect(throws: PhoneAppError(code: .staleCursor, message: TranscriptPager.staleCursorMessage)) {
@@ -317,7 +317,7 @@ struct RemoteTranscriptFeedTests {
         await d.feed.close()
 
         #expect(await d.feed.isSyncing == false)
-        try await Self.waitUntil("the follower's interval to be cancelled") { !d.clock.hasSleeper }
+        try await waitUntil("the follower's interval to be cancelled") { !d.clock.hasSleeper }
         cache.queueAppend([CacheLine.prompt("m3", "placeholder prompt 3")])
         await d.clock.advance(by: .seconds(3))
         await settle()
@@ -413,7 +413,7 @@ struct RemoteTranscriptFeedTests {
         #expect(first.data.prompts.first?.target == "make")
         #expect(first.data.session == Self.session)
         let feed = try #require(await h.service.transcriptFeed(for: deviceID))
-        try await Self.waitUntil("the syncs and the prompt source to start") {
+        try await waitUntil("the syncs and the prompt source to start") {
             let syncing = await feed.isSyncing
             return syncing && h.subscriptions.subscriberCount == baseline + 1
         }
@@ -453,10 +453,10 @@ struct RemoteTranscriptFeedTests {
             .promptAnswer, id: "answer-1",
             params: PhonePromptAnswerParams(session: Self.session, promptID: "rp-1", answer: Self.allow))
         await h.service.handleAppMessage(answer, from: h.peer)
-        try await Self.waitUntil("the answer to reach the core") { h.actions.remoteAnswers.count == 1 }
+        try await waitUntil("the answer to reach the core") { h.actions.remoteAnswers.count == 1 }
         try Self.listSession(h)
         h.subscriptions.broadcast(delta: .remoteSessionsChanged)
-        try await Self.waitUntil("the prompt read to wait for the phone's answer") {
+        try await waitUntil("the prompt read to wait for the phone's answer") {
             await h.service.phoneAnswerWaiterCount() > 0
         }
 
@@ -486,10 +486,10 @@ struct RemoteTranscriptFeedTests {
 
         _ = try await Self.open(h, id: "open-1", on: outbox)
         let closedFeed = try #require(await h.service.transcriptFeed(for: deviceID))
-        try await Self.waitUntil("the first feed's syncs to start") { await closedFeed.isSyncing }
+        try await waitUntil("the first feed's syncs to start") { await closedFeed.isSyncing }
         let closeReply = try await Self.ask(h, .transcriptClose, id: "close", PhoneEmpty(), on: outbox)
         #expect(try Self.error(closeReply) == nil)
-        try await Self.waitUntil("the close to end the first feed's syncs") {
+        try await waitUntil("the close to end the first feed's syncs") {
             let syncing = await closedFeed.isSyncing
             return !syncing
         }
@@ -497,18 +497,18 @@ struct RemoteTranscriptFeedTests {
         _ = try await Self.open(h, id: "open-2", on: outbox)
         let replaced = try #require(await h.service.transcriptFeed(for: deviceID))
         #expect(replaced !== closedFeed)
-        try await Self.waitUntil("the second feed's syncs to start") { await replaced.isSyncing }
+        try await waitUntil("the second feed's syncs to start") { await replaced.isSyncing }
         _ = try await Self.open(h, id: "open-3", on: outbox)
         let last = try #require(await h.service.transcriptFeed(for: deviceID))
         #expect(last !== replaced)
-        try await Self.waitUntil("another open to end the second feed's syncs") {
+        try await waitUntil("another open to end the second feed's syncs") {
             let replacedSyncing = await replaced.isSyncing
             let lastSyncing = await last.isSyncing
             return !replacedSyncing && lastSyncing
         }
 
         await h.service.phoneRevoked(deviceID: deviceID)
-        try await Self.waitUntil("the revoke to end the last feed's syncs") {
+        try await waitUntil("the revoke to end the last feed's syncs") {
             let syncing = await last.isSyncing
             return !syncing && h.subscriptions.subscriberCount == 0
         }
@@ -529,7 +529,7 @@ struct RemoteTranscriptFeedTests {
         let outbox = try await Self.liveConnection(h)
         _ = try await Self.open(h, id: "open", on: outbox)
         let feed = try #require(await h.service.transcriptFeed(for: deviceID))
-        try await Self.waitUntil("the syncs to start") { await feed.isSyncing }
+        try await waitUntil("the syncs to start") { await feed.isSyncing }
 
         await h.service.phoneDisconnected(h.peer)
         // The sessions publisher's catch-up window, the grace, and the
@@ -537,7 +537,7 @@ struct RemoteTranscriptFeedTests {
         try await h.clock.requireSleepersArmed(count: 3, timeout: TestDeadlines.saturatedPass)
         await h.clock.advance(by: PhoneAppConstants.parseStateGrace)
 
-        try await Self.waitUntil("the grace to stop the feed, its syncs and its prompt source") {
+        try await waitUntil("the grace to stop the feed, its syncs and its prompt source") {
             let gone = await h.service.streamID(for: deviceID) == nil
             let syncing = await feed.isSyncing
             return gone && !syncing && h.subscriptions.subscriberCount == 0
@@ -683,19 +683,6 @@ struct RemoteTranscriptFeedTests {
 
     private static func resets(_ events: [TranscriptFeedEvent]) -> [TranscriptResetData] {
         events.compactMap { resetData($0) }
-    }
-
-    /// Waits until `condition` holds, or throws naming `what`.
-    private static func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
-        let deadline = TestDeadlines.saturatedPass
-        switch await pollUntilTrue(timeout: deadline, condition) {
-        case .satisfied:
-            return
-        case .cancelled:
-            throw CancellationError()
-        case .timedOut:
-            throw BoundedWaitTimeout(what: what, observed: nil, deadline: deadline)
-        }
     }
 }
 

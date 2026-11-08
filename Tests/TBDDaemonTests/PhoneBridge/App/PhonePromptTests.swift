@@ -92,19 +92,6 @@ struct PhonePromptTests {
         try json(["questions": questions])
     }
 
-    /// Waits until `condition` holds, or throws naming `what`.
-    private static func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
-        let deadline = TestDeadlines.saturatedPass
-        switch await pollUntilTrue(timeout: deadline, condition) {
-        case .satisfied:
-            return
-        case .cancelled:
-            throw CancellationError()
-        case .timedOut:
-            throw BoundedWaitTimeout(what: what, observed: nil, deadline: deadline)
-        }
-    }
-
     /// Connects the phone and makes the connection live with a fresh
     /// `sessions.subscribe`, so events go out on it. Returns once the
     /// sessions publisher holds its subscriber, so the subscriber count is
@@ -953,10 +940,10 @@ struct PhonePromptTests {
         // is handed in directly and its reply found by its ID.
         let body = try PhoneTestRequests.body(.promptAnswer, id: "answer-1", params: Self.local(terminalID, "toolu-1"))
         await h.service.handleAppMessage(body, from: h.peer)
-        try await Self.waitUntil("the answer to reach the core") { h.actions.answers.count == 1 }
+        try await waitUntil("the answer to reach the core") { h.actions.answers.count == 1 }
         await h.pendingPrompts.receipt(terminalID: terminalID, toolUseID: "toolu-1")
         await h.subscriptions.broadcastPendingPrompts(terminalID: terminalID, from: h.pendingPrompts)
-        try await Self.waitUntil("the feed to wait for the phone's answer") {
+        try await waitUntil("the feed to wait for the phone's answer") {
             await h.service.phoneAnswerWaiterCount() > 0
         }
         #expect(try Self.promptEvents(in: outbox).count == 1, "nothing is sent while the answer runs")
@@ -1049,7 +1036,7 @@ struct PhonePromptTests {
 
         await h.service.closePrompts(for: deviceID)
         #expect(await h.service.promptsSession(for: deviceID) == nil)
-        try await Self.waitUntil("the feed's subscriber to go") {
+        try await waitUntil("the feed's subscriber to go") {
             h.subscriptions.subscriberCount == publisherOnly
         }
         await h.service.phoneRevoked(deviceID: deviceID)

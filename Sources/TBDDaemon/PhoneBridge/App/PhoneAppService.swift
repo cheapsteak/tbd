@@ -212,7 +212,8 @@ final class PhoneOutboxQueue: Sendable {
 /// `PhoneHandlerReply.onQueue`. Code in other files reads and changes
 /// `devices` entries in place; only the lifecycle methods add or remove one.
 actor PhoneAppService: PhoneAppHandling {
-    private static let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
+    /// The log of the service and every extension of it.
+    static let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
 
     /// The reply to a known method no task serves yet.
     private static let notServed = PhoneAppError(code: .unavailable, message: "This TBD build cannot do that from a phone yet.")
@@ -301,8 +302,7 @@ actor PhoneAppService: PhoneAppHandling {
         state.live = false
         state.pendingTranscriptResume = nil
         state.grace?.cancel()
-        let token = nextToken
-        nextToken &+= 1
+        let token = mintToken()
         state.graceToken = token
         let clock = self.clock
         state.grace = Task {
@@ -444,8 +444,7 @@ actor PhoneAppService: PhoneAppHandling {
     /// `phoneRevoked` cancels it.
     private func start(_ method: PhoneAppMethod, body: Data, context: DeviceContext) {
         let deviceID = context.peer.deviceID
-        let token = nextToken
-        nextToken &+= 1
+        let token = mintToken()
         // The task runs on this actor between its suspensions, so it cannot
         // finish before it is stored.
         let task = Task {
@@ -507,7 +506,7 @@ actor PhoneAppService: PhoneAppHandling {
                 case .onQueue:
                     // Work on the service cannot be kept for a resend.
                     Self.logger.fault("Phone app: \(method.rawValue, privacy: .public) is remembered and cannot run on the queue")
-                    return Self.failure(requestID, .internalError, "Something went wrong on the laptop.")
+                    return Self.failure(requestID, .internalError, Self.internalErrorReason)
                 }
             })
         return .body(reply)
@@ -550,7 +549,7 @@ actor PhoneAppService: PhoneAppHandling {
             // the handler was working on, such as a path or a message.
             Self.logger.error(
                 "Phone app: \(method.rawValue, privacy: .public) failed: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return .body(Self.failure(requestID, .internalError, "Something went wrong on the laptop."))
+            return .body(Self.failure(requestID, .internalError, Self.internalErrorReason))
         }
     }
 
@@ -560,15 +559,6 @@ actor PhoneAppService: PhoneAppHandling {
     }
 
     // MARK: - Handlers
-
-    /// The handler for `method`: its own, or one that replies `unavailable`
-    /// while no task serves it.
-    func handler(for method: PhoneAppMethod) -> PhoneMethodHandler {
-        if let handler = registeredHandler(for: method) {
-            return handler
-        }
-        return { _, _ in throw Self.notServed }
-    }
 
     /// The one place a method gets its handler; nil while no task serves it.
     /// A later task serves a method by returning its handler here, as in
@@ -773,6 +763,8 @@ actor PhoneAppService: PhoneAppHandling {
     // MARK: - Replies
 
     private static let tooManyRequests = "Too many requests are in progress. Try again in a moment."
+    /// The `internal` error's words for a failure on the laptop.
+    static let internalErrorReason = "Something went wrong on the laptop."
 
     /// A new token, unique for this service's life, to tell one run of
     /// something from a later one.

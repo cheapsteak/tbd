@@ -23,19 +23,6 @@ struct PhoneCreateTests {
         ProviderCreateParamField(name: "draft", type: "bool", label: "Open as draft"),
     ]
 
-    /// Waits until `condition` holds, or throws naming `what`.
-    private func waitUntil(_ what: String, _ condition: () async -> Bool) async throws {
-        let deadline = TestDeadlines.saturatedPass
-        switch await pollUntilTrue(timeout: deadline, condition) {
-        case .satisfied:
-            return
-        case .cancelled:
-            throw CancellationError()
-        case .timedOut:
-            throw BoundedWaitTimeout(what: what, observed: nil, deadline: deadline)
-        }
-    }
-
     // MARK: - Fixtures
 
     /// A repo with `remoteURL`, hidden when asked.

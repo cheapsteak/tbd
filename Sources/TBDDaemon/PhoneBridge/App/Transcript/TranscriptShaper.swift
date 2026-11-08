@@ -189,7 +189,7 @@ enum TranscriptShaper {
                 id: id, kind: .subagent, at: at, text: nil, truncated: false,
                 toolName: toolName, target: summaryTarget(name: name, input: input), toolStatus: status,
                 added: nil, removed: nil,
-                agentType: agentType, itemCount: count.map { min(max($0, 0), PhoneAppConstants.subagentCountLimit) },
+                agentType: agentType, itemCount: count.map(boundedItemCount),
                 sender: nil)
         }
         return PhoneItem(
@@ -227,6 +227,12 @@ enum TranscriptShaper {
             return nil
         }
         return detail.isEmpty ? nil : capped(String(detail), targetLimit)
+    }
+
+    /// A subagent row's item count, held to `0...subagentCountLimit`
+    /// (`PhoneAppConstants.subagentCountLimit`).
+    static func boundedItemCount(_ count: Int) -> Int {
+        min(max(count, 0), PhoneAppConstants.subagentCountLimit)
     }
 
     private static func capped(_ text: String, _ limit: Int) -> String {

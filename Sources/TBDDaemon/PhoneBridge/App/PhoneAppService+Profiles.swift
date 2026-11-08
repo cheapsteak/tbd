@@ -31,8 +31,6 @@ import TBDShared
 /// (`remembersReplies(of:)`), so a resend acts once and gets the first reply.
 /// Their record's target is the session reference, never a profile.
 extension PhoneAppService {
-    private static let profilesLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
-
     static let noSuchProfileReason = "That profile is no longer on this laptop."
     static let notAClaudeSessionReason = "Only a Claude session can switch profiles or fork."
     /// The sessions list marks a parked session's fork unavailable with the
@@ -82,7 +80,7 @@ extension PhoneAppService {
             kept.append(profile)
         }
         if kept.count < profiles.count {
-            profilesLogger.notice(
+            Self.logger.notice(
                 "Phone profiles: \(profiles.count - kept.count, privacy: .public) of \(profiles.count, privacy: .public) profiles left out to fit one frame")
         }
         return ProfilesListResult(profiles: kept)
@@ -131,9 +129,7 @@ extension PhoneAppService {
         guard !terminal.isParked else {
             throw PhoneAppError(code: .refused, message: Self.parkedForkReason)
         }
-        guard capabilities.fork.available else {
-            throw PhoneAppError(code: .unsupported, message: capabilities.fork.reason ?? Self.notAClaudeSessionReason)
-        }
+        try Self.requireCapability(capabilities.fork, orElse: Self.notAClaudeSessionReason)
         if let profileID = params.profileID, try await db.modelProfiles.get(id: profileID) == nil {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProfileReason)
         }
@@ -165,10 +161,7 @@ extension PhoneAppService {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         let capabilities = PhoneSessionStatus.localCapabilities(
             terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
-        guard capabilities.switchProfile.available else {
-            throw PhoneAppError(
-                code: .unsupported, message: capabilities.switchProfile.reason ?? Self.notAClaudeSessionReason)
-        }
+        try Self.requireCapability(capabilities.switchProfile, orElse: Self.notAClaudeSessionReason)
         guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
             throw PhoneAppError(code: .unsupported, message: Self.notAClaudeSessionReason)
         }
@@ -194,10 +187,9 @@ extension PhoneAppService {
         let response = try await actions.phoneSwapProfile(
             TerminalSwapProfileParams(terminalID: terminalID, newProfileID: profileID, mode: mode),
             deviceID: deviceID)
-        guard response.success else { throw Self.refusal(response.error) }
-        let row = try Self.decoded(TBDShared.Terminal.self, from: response, method: "terminal.swapProfile")
+        let row = try Self.succeeded(TBDShared.Terminal.self, from: response, method: "terminal.swapProfile")
         if mode == .fork, row.id == terminalID {
-            Self.profilesLogger.notice(
+            Self.logger.notice(
                 "Phone session.fork: terminal \(terminalID, privacy: .public) parked before the swap, which moved it in place")
             throw PhoneAppError(code: .refused, message: Self.forkMovedReason)
         }

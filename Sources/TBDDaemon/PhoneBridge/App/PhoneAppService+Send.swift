@@ -24,8 +24,6 @@ enum PhoneSendPurpose: Sendable {
 /// Both methods are in the request memory (`remembersReplies(of:)`), so a
 /// resent request types once and gets the first reply.
 extension PhoneAppService {
-    private static let sendLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
-
     static let emptyMessageReason = "Write a message first."
     static let messageTooLongReason = "That message is too long to send from a phone."
     /// The sessions list says the same when it marks `send` unavailable.
@@ -163,8 +161,7 @@ extension PhoneAppService {
             try Task.checkCancellation()
             let response = try await actions.phoneWake(
                 TerminalWakeParams(terminalID: terminalID, prompt: text), deviceID: deviceID)
-            guard response.success else { throw Self.refusal(response.error) }
-            let result = try Self.decoded(TerminalWakeResult.self, from: response, method: "terminal.wake")
+            let result = try Self.succeeded(TerminalWakeResult.self, from: response, method: "terminal.wake")
             guard result.woken else {
                 throw PhoneAppError(code: .refused, message: Self.alreadyRunningReason)
             }
@@ -175,8 +172,7 @@ extension PhoneAppService {
     private nonisolated func sendRemote(
         _ text: String, provider: String, sessionID: String, deviceID: UUID, purpose: PhoneSendPurpose
     ) async throws -> ActionOutcomeResult {
-        let declared = try await declaredCapabilities(ofProvider: provider)
-        let capabilities = PhoneSessionStatus.remoteCapabilities(declared: declared)
+        let capabilities = try await remoteCapabilities(ofProvider: provider)
         let needed: PhoneCapability
         switch purpose {
         case .message:
@@ -184,14 +180,11 @@ extension PhoneAppService {
         case .model:
             needed = capabilities.model
         }
-        guard needed.available else {
-            throw PhoneAppError(code: .unsupported, message: needed.reason ?? Self.cannotTakeMessagesReason)
-        }
+        try Self.requireCapability(needed, orElse: Self.cannotTakeMessagesReason)
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteSendMessage(
             RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text), deviceID: deviceID)
-        guard response.success else { throw Self.refusal(response.error) }
-        switch try Self.decoded(RemoteSendMessageResult.self, from: response, method: "remote.sendMessage").outcome {
+        switch try Self.succeeded(RemoteSendMessageResult.self, from: response, method: "remote.sendMessage").outcome {
         case .sent:
             return ActionOutcomeResult(outcome: "sent")
         case .unknown:
@@ -199,19 +192,26 @@ extension PhoneAppService {
         }
     }
 
-    /// The capabilities `provider` declares, read the way the sessions list
-    /// reads them. A provider list the daemon refuses to give is `refused`
-    /// with its reason; one that does not decode is `internal`; a provider
-    /// missing from it is `not_found`. `prompt.answer` reads them the same
-    /// way.
-    nonisolated func declaredCapabilities(ofProvider provider: String) async throws -> Set<String> {
-        let response = try await actions.phoneRemoteProviders()
-        guard response.success else { throw Self.refusal(response.error) }
-        let providers = try Self.decoded(RemoteProvidersResult.self, from: response, method: "remote.providers").providers
+    /// The capabilities of `provider`'s sessions, from what it declares, read
+    /// the way the sessions list reads them. A provider list the daemon
+    /// refuses to give is `refused` with its reason; one that does not decode
+    /// is `internal`; a provider missing from it is `not_found`.
+    /// `prompt.answer` and `transcript.open` read them the same way.
+    nonisolated func remoteCapabilities(ofProvider provider: String) async throws -> PhoneCapabilities {
+        let providers = try await providerStatuses()
         guard let declared = PhoneSessionStatus.declaredCapabilities(providers)[provider] else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProviderReason)
         }
-        return declared
+        return PhoneSessionStatus.remoteCapabilities(declared: declared)
+    }
+
+    /// Throws `unsupported` unless `capability` is available, with the
+    /// capability's reason, as the sessions list shows it, or `fallback` when
+    /// it gives none.
+    static func requireCapability(_ capability: PhoneCapability, orElse fallback: String) throws {
+        guard capability.available else {
+            throw PhoneAppError(code: .unsupported, message: capability.reason ?? fallback)
+        }
     }
 
     // MARK: - Replies
@@ -223,6 +223,14 @@ extension PhoneAppService {
         return PhoneAppError(code: .refused, message: PhoneText.capped(text, limit: Self.refusalLimit))
     }
 
+    /// `response`'s result as `R`, once it succeeded: a refusal is `refused`
+    /// with the laptop's reason (`refusal(_:)`), and a result that does not
+    /// decode is `internal` (`decoded(_:from:method:)`).
+    static func succeeded<R: Decodable>(_ type: R.Type, from response: RPCResponse, method: String) throws -> R {
+        guard response.success else { throw Self.refusal(response.error) }
+        return try Self.decoded(type, from: response, method: method)
+    }
+
     /// `response`'s result as `R`. One that does not decode is `internal`:
     /// the handler catches the decoding error itself, so it never reads as
     /// the phone's `bad_request`, and never as a success. Every action
@@ -231,9 +239,9 @@ extension PhoneAppService {
         do {
             return try response.decodeResult(R.self)
         } catch {
-            Self.sendLogger.error(
+            Self.logger.error(
                 "Phone send: \(method, privacy: .public) answered a result that does not decode: \(Self.errorType(error), privacy: .public)")
-            throw PhoneAppError(code: .internalError, message: "Something went wrong on the laptop.")
+            throw PhoneAppError(code: .internalError, message: Self.internalErrorReason)
         }
     }
 }

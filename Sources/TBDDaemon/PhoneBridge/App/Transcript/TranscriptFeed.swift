@@ -560,18 +560,7 @@ actor TranscriptFeed {
                 filePath: path, generation: generation,
                 ctx: ShapingContext(showDetails: showDetails, subagentItemCount: subagentCount(path: path)))
         else { return nil }
-        for (id, result) in build.results {
-            results.set(Self.statusOnly(result), for: id)
-        }
-        for (id, offset) in build.lineOffsets {
-            lineOffsets.set(offset, for: id)
-        }
-        for (id, item) in build.unresolvedCalls {
-            waitingCalls.set(item, for: id)
-        }
-        for (id, agentID) in build.subagentAgentIDs {
-            pageAgentIDs.set(agentID, for: id)
-        }
+        keepIndexes(of: build)
         var fresh = TranscriptAppendCursor(path: path, offset: build.endOffset) { path, offset in
             TranscriptAppendCursor.diskTailWindow(path: path, endingAt: offset)
         }
@@ -676,7 +665,7 @@ actor TranscriptFeed {
     private func resolvedRow(_ row: PhoneItem, result: ToolResult, path: String) -> PhoneItem {
         var itemCount = row.itemCount
         if row.kind == .subagent, let agentID = liveAgentIDs[row.id] {
-            itemCount = subagentCount(path: path)(agentID).map { min(max($0, 0), PhoneAppConstants.subagentCountLimit) }
+            itemCount = subagentCount(path: path)(agentID).map(TranscriptShaper.boundedItemCount)
         }
         return PhoneItem(
             id: row.id, kind: row.kind, at: row.at, text: row.text, truncated: row.truncated,
@@ -748,9 +737,7 @@ actor TranscriptFeed {
         guard let path else { throw Self.staleCursor }
         switch source {
         case .local:
-            let build = try TranscriptPager.olderPage(
-                filePath: path, cursor: cursor, generation: generation, ctx: pageContext(path: path))
-            return keep(build)
+            return try keep(olderBuild(cursor: cursor, path: path))
         case .remote(let follower):
             return try await remoteOlderPage(cursor: cursor, path: path, follower: follower)
         }
@@ -781,7 +768,7 @@ actor TranscriptFeed {
         cursor: String, path: String, follower: RemoteTranscriptFollower
     ) async throws -> TranscriptPage {
         let pageGeneration = generation
-        let cached = try remoteBuild(cursor: cursor, path: path)
+        let cached = try olderBuild(cursor: cursor, path: path)
         guard needsEarlier(cached) else { return keep(cached) }
         let loaded: RemoteTranscriptLoadEarlierResult
         do {
@@ -817,19 +804,15 @@ actor TranscriptFeed {
             wakeups?.yield()
             throw Self.staleCursor
         }
-        let rebuilt = try remoteBuild(cursor: cursor, path: path)
+        let rebuilt = try olderBuild(cursor: cursor, path: path)
         return keep(rebuilt)
     }
 
-    /// The page before `cursor` in the remote cache at `path`, or
-    /// `stale_cursor` when the cursor names no line of it.
-    private func remoteBuild(cursor: String, path: String) throws -> PageBuild {
-        guard let offset = TranscriptPager.resolveCursor(cursor, generation: generation, filePath: path),
-              let build = TranscriptPager.olderPage(
-                filePath: path, before: offset, generation: generation, ctx: pageContext(path: path)) else {
-            throw Self.staleCursor
-        }
-        return build
+    /// The page before `cursor` in the file at `path`, shaped with
+    /// `pageContext(path:)`, or `stale_cursor` when the cursor names no line
+    /// of it.
+    private func olderBuild(cursor: String, path: String) throws -> PageBuild {
+        try TranscriptPager.olderPage(filePath: path, cursor: cursor, generation: generation, ctx: pageContext(path: path))
     }
 
     /// Whether a remote page needs earlier history loaded: it reaches the top
@@ -847,10 +830,16 @@ actor TranscriptFeed {
             showDetails: showDetails, joinedResults: results.dictionary, subagentItemCount: subagentCount(path: path))
     }
 
-    /// Keeps an older page's results, its rows' offsets, its calls still
-    /// `running` and its subagent IDs, and returns the page as the phone gets
-    /// it.
+    /// Keeps an older page's indexes (`keepIndexes(of:)`) and returns the
+    /// page as the phone gets it.
     private func keep(_ build: PageBuild) -> TranscriptPage {
+        keepIndexes(of: build)
+        return phonePage(build, generation: generation)
+    }
+
+    /// Keeps a page's results, its rows' offsets, its calls still `running`
+    /// and its subagent IDs.
+    private func keepIndexes(of build: PageBuild) {
         for (id, result) in build.results {
             results.set(Self.statusOnly(result), for: id)
         }
@@ -863,7 +852,6 @@ actor TranscriptFeed {
         for (id, agentID) in build.subagentAgentIDs {
             pageAgentIDs.set(agentID, for: id)
         }
-        return phonePage(build, generation: generation)
     }
 
     /// Where to look up `itemID`'s detail, or nil when the feed has no file:

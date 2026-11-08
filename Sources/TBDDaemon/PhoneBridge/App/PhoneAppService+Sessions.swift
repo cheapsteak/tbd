@@ -36,8 +36,6 @@ struct PhoneSessionsFeed: Sendable {
 /// state stops it, and it keeps emitting while the phone is away: its events
 /// are numbered and kept for the resume.
 extension PhoneAppService {
-    private static let sessionsLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
-
     // MARK: - sessions.subscribe
 
     /// Gathers the sessions list unless the reply will replay, and hands back
@@ -78,7 +76,7 @@ extension PhoneAppService {
                 stream: state.stream.streamID, seq: state.stream.lastSeq, replayed: true,
                 layout: nil, rows: nil, omittedRows: 0, more: false)
             guard let reply = try? PhoneAppCoding.reply(requestID: requestID, result: result) else {
-                send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
+                send(Self.failure(requestID, .internalError, Self.internalErrorReason), to: deviceID)
                 refusePendingTranscriptResume(for: deviceID)
                 return
             }
@@ -101,8 +99,8 @@ extension PhoneAppService {
         let parts = Self.snapshotReply(
             snapshot, requestID: requestID, stream: state.stream.streamID, seq: state.stream.lastSeq)
         guard let reply = parts.reply else {
-            Self.sessionsLogger.error("Phone sessions: the snapshot reply does not fit a frame")
-            send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
+            Self.logger.error("Phone sessions: the snapshot reply does not fit a frame")
+            send(Self.failure(requestID, .internalError, Self.internalErrorReason), to: deviceID)
             refusePendingTranscriptResume(for: deviceID)
             return
         }
@@ -241,7 +239,7 @@ extension PhoneAppService {
         do {
             let response = try await actions.phoneSessionStates()
             guard response.success else {
-                Self.sessionsLogger.debug("Phone sessions: no session states: \(response.error ?? "", privacy: .private)")
+                Self.logger.debug("Phone sessions: no session states: \(response.error ?? "", privacy: .private)")
                 return [:]
             }
             var states: [UUID: SessionState] = [:]
@@ -250,7 +248,7 @@ extension PhoneAppService {
             }
             return states
         } catch {
-            Self.sessionsLogger.debug(
+            Self.logger.debug(
                 "Phone sessions: no session states: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return [:]
         }
@@ -262,7 +260,7 @@ extension PhoneAppService {
             guard response.success else { return [] }
             return try response.decodeResult(RemoteSessionsResult.self).sessions
         } catch {
-            Self.sessionsLogger.debug(
+            Self.logger.debug(
                 "Phone sessions: no remote sessions: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return []
         }
@@ -274,7 +272,7 @@ extension PhoneAppService {
             guard response.success else { return [] }
             return try response.decodeResult(RemoteProvidersResult.self).providers
         } catch {
-            Self.sessionsLogger.debug(
+            Self.logger.debug(
                 "Phone sessions: no remote providers: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return []
         }
