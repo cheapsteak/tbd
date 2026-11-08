@@ -9,10 +9,11 @@ import TBDShared
 struct PhonePresentationTests {
     private func status(
         enabled: Bool = true, relayURL: String? = "https://acme-relay.acme.workers.dev",
+        loaderURL: String? = "https://acme-loader.github.io/",
         running: Bool = true, problem: String? = nil, relayState: PhoneRelayState = .connected
     ) -> PhoneStatusResult {
         PhoneStatusResult(
-            enabled: enabled, relayURL: relayURL, loaderURLOverride: nil, running: running,
+            enabled: enabled, relayURL: relayURL, loaderURLOverride: loaderURL, running: running,
             problem: problem,
             relay: PhoneRelayStatus(state: relayState, version: "1.0.0", bundledVersion: "1.0.0"),
             connectedDeviceIDs: [], pairing: nil)
@@ -53,6 +54,7 @@ struct PhonePresentationTests {
             status(relayURL: nil, relayState: .notSetUp),
             status(running: false, problem: "The laptop key file is missing."),
             status(relayState: .incompatible),
+            status(loaderURL: nil),
         ]
         for candidate in blocked {
             #expect(!PhonePresentation.canPair(candidate))
@@ -62,6 +64,18 @@ struct PhonePresentationTests {
         #expect(PhonePresentation.pairDisabledReason(status()) == nil)
         #expect(PhonePresentation.pairDisabledReason(status(running: false, problem: "The laptop key file is missing."))
             == "The laptop key file is missing.")
+    }
+
+    /// This build records no default loader, so with no override saved the
+    /// button is disabled and says what to set.
+    @Test func pairingNeedsALoaderURL() {
+        #expect(Config.phoneLoaderURLDefault == nil)
+        let unset = status(loaderURL: nil)
+        #expect(!PhonePresentation.canPair(unset))
+        #expect(PhonePresentation.pairDisabledReason(unset)
+            == "Set a loader URL in Settings → Phone → Advanced before pairing a phone.")
+        // The placeholder is an example, never a loader someone could claim.
+        #expect(PhonePresentation.loaderURLPlaceholder == "https://acme-loader.github.io/")
     }
 
     @Test func countdownAndCode() {

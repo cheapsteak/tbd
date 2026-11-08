@@ -8,6 +8,8 @@ import TestSupport
 
 private let relayAddress = "https://acme-relay.acme.workers.dev"
 private let otherRelayAddress = "https://other-relay.acme.workers.dev"
+/// The loader URL the harness saves, because this build has no default.
+private let loaderAddress = "https://acme-loader.github.io/"
 
 /// What a TBD relay of this build answers `GET /v1/info` with.
 private let currentRelay = PhoneRelayInfo(name: "tbd-relay", version: PhoneBridgeConstants.bundledRelayVersion,
@@ -240,7 +242,10 @@ private struct PhoneBridgeHarness: Sendable {
 ///   pairing notification goes.
 /// - `holdSends`: true puts a ``HoldingTransport`` between the bridge and the
 ///   relay, as `holdingTransport`.
-private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress, devices: Int = 0,
+/// - `loaderURL`: the loader URL override to save; nil saves none, which
+///   leaves no loader URL, since this build records no default.
+private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress,
+                        loaderURL: String? = loaderAddress, devices: Int = 0,
                         keyFile: KeyFile = .present, installRecorder: Bool = true, mainWorktree: Bool = false,
                         holdSends: Bool = false,
                         _ body: (PhoneBridgeHarness) async throws -> Void) async throws {
@@ -266,6 +271,9 @@ private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress, 
         try await db.config.setPhoneControlEnabled(true)
     }
     try await db.config.setPhoneRelayURL(relayURL)
+    if let loaderURL {
+        try await db.config.setPhoneLoaderURL(loaderURL)
+    }
     let dates = TestDateSource()
     var phones: [PairedPhone] = []
     for index in 0..<devices {
@@ -344,6 +352,26 @@ struct PhoneBridgeTests {
             #expect(status.relay.state == .checking)
             let armed = await watchForSleeper(on: h.clock, upTo: .milliseconds(200))
             #expect(!armed)
+        }
+    }
+
+    @Test func withNoLoaderURLPairingIsRefusedAndOpensNoRoom() async throws {
+        try await withBridge(loaderURL: nil) { h in
+            await h.bridge.reconcile()
+            await #expect(throws: PhoneBridgeError.loaderNotSetUp) { try await h.bridge.pairStart() }
+            let refused = await h.bridge.status()
+            #expect(refused.pairing == nil)
+            #expect(refused.loaderURLOverride == nil)
+            #expect(h.relay.connectAttempts.isEmpty)
+
+            // Saving an override is all pairing needs.
+            try await h.db.config.setPhoneLoaderURL(loaderAddress)
+            let started = try await h.bridge.pairStart()
+            let text = try #require(started.link)
+            #expect(text.hasPrefix(loaderAddress + "#"))
+            let paired = try await h.pairAPhone(named: "iPhone")
+            let rowIDs = try await h.db.phoneDevices.list().map(\.id)
+            #expect(rowIDs == [paired.device.id])
         }
     }
 

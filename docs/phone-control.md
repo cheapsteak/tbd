@@ -41,6 +41,19 @@ not offer relay API 1. It tells you which.
 Use the "Phone control" switch in Settings → Phone. With the switch off, TBD keeps no connection
 to the relay.
 
+## Set the loader URL
+
+The loader is the web page your phone opens from the pairing QR code. TBD has no default loader
+yet, so you enter its address yourself, once:
+
+1. Open Settings → Phone → Advanced.
+2. Type the loader's address in "Loader URL", for example `https://acme-loader.github.io/`, and
+   press Return.
+
+Use a loader you trust, such as your own copy published from a fork, as
+`docs/phone-control-loader-repo.md` describes: whoever controls the loader controls the page that
+receives the pairing secret. Until a loader URL is set, "Pair a Phone…" is disabled and says so.
+
 ## Pair a phone
 
 1. Click "Pair a Phone…".

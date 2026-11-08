@@ -180,10 +180,10 @@ struct PhoneSettingsView: View {
     private var advancedSection: some View {
         Section {
             DisclosureGroup("Advanced") {
-                TextField("Loader URL", text: $loaderURLDraft, prompt: Text(Config.phoneLoaderURLDefault))
+                TextField("Loader URL", text: $loaderURLDraft, prompt: Text(PhonePresentation.loaderURLPlaceholder))
                     .onSubmit { saveLoaderURL() }
                     .disabled(appState.phoneStatus == nil || isSavingLoaderURL)
-                    .help("The page your phone opens from the QR code. Leave blank for the default. Press Return to save.")
+                    .help(PhonePresentation.loaderURLHelp)
                 if let loaderURLError {
                     Text(loaderURLError)
                         .font(.caption)
@@ -202,7 +202,7 @@ struct PhoneSettingsView: View {
         if rows != deviceRows { deviceRows = rows }
     }
 
-    /// Saves the loader URL as typed; blank goes back to the default.
+    /// Saves the loader URL as typed; blank clears the override.
     private func saveLoaderURL() {
         let draft = loaderURLDraft
         isSavingLoaderURL = true

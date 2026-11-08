@@ -341,6 +341,16 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("phone-relay: https://acme-relay.acme.workers.dev"))
     }
 
+    /// No loader is recorded as a default, so an unset loader URL reads "not
+    /// set" rather than naming a page nobody controls.
+    @Test func configGetPrintsTheLoaderURLOrNotSet() {
+        var config = Config()
+        #expect(Config.phoneLoaderURLDefault == nil)
+        #expect(ConfigGet.render(config).contains("phone-loader: not set"))
+        config.phoneLoaderURL = "https://acme-loader.github.io/"
+        #expect(ConfigGet.render(config).contains("phone-loader: https://acme-loader.github.io/"))
+    }
+
     @Test func phoneKeysAreNotSettableFromTheCLI() {
         #expect(ConfigSet.appOnlyKeys.allSatisfy { !ConfigSet.allKeys.contains($0) })
         #expect(ConfigSet.appOnlyKeyMessage("phone-control").contains("Settings → Phone"))
