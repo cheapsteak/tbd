@@ -271,9 +271,12 @@ between engines. So both engines must look the same to the program.
   - A terminal that does start on libghostty logs "libghostty engine active for <id>"
     at `.notice`. That line, not the absence of an error, is the evidence that the engine
     engaged.
-  - While the flag is on, a terminal built on SwiftTerm, after a switch or a fallback
-    included, logs "SwiftTerm engine active for <id>" at `.notice`. So the latest of
-    these lines for a terminal names its engine. With the flag off, no build logs one.
+  - While the flag is on, a terminal built on SwiftTerm, after a switch included, logs
+    "SwiftTerm engine active for <id>" at `.notice`. So the latest of these lines for a
+    terminal names its engine. With the flag off, a SwiftTerm build logs nothing. A build
+    on a libghostty request logs its lines whatever the flag reads, a fallback's two lines
+    included: only a libghostty request makes one, and a copy of the flag that briefly
+    disagrees with the store must not hide which engine the terminal got.
   - Each change of the flag, including the first read at launch when it is on, logs
     "libghostty engine experiment turned on" or "… turned off" at `.notice`. A terminal
     rebuilt while the flag is off logs no line, so this line says when a terminal's

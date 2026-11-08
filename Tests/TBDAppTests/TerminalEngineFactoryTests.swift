@@ -155,22 +155,35 @@ struct TerminalEngineFactoryTests {
         #expect(TerminalEngineFactory.describe(TerminalEngineConfiguration()) == "a local PTY")
     }
 
-    @Test("With the experiment off, no build sends a notice, whichever engine it asks for")
-    func experimentOffSendsNoNotice() {
+    @Test("With the experiment off, a SwiftTerm build sends no notice, but a libghostty build still names its engine")
+    func experimentOffSendsOnlyLibghosttyNotices() {
         withTestDefaults("TerminalEngineFactory.NoticesOff") { defaults in
             let appearance = AppearanceSettings(defaults: defaults)
-            var messages: [String] = []
-            for kind in TerminalEngineKind.allCases {
+            let terminalID = UUID()
+            var swiftTerm: [String] = []
+            for configuration in [TerminalEngineConfiguration(terminalID: terminalID), TerminalEngineConfiguration()] {
                 _ = TerminalEngineFactory.make(
-                    kind: kind,
+                    kind: .swiftTerm,
                     font: appearance.font,
                     appearance: appearance,
-                    configuration: TerminalEngineConfiguration(terminalID: UUID()),
+                    configuration: configuration,
                     experimentEnabled: false,
-                    makeGhostty: Self.standInGhostty,
-                    onNotice: { messages.append($0.message) })
+                    onNotice: { swiftTerm.append($0.message) })
             }
-            #expect(messages.isEmpty, "a build with the experiment off sent \(messages)")
+            #expect(swiftTerm.isEmpty, "a SwiftTerm build with the experiment off sent \(swiftTerm)")
+
+            // Only a libghostty request builds libghostty, so its line is
+            // never noise, even from a copy of the flag that reads off.
+            var ghostty: [String] = []
+            _ = TerminalEngineFactory.make(
+                kind: .ghostty,
+                font: appearance.font,
+                appearance: appearance,
+                configuration: TerminalEngineConfiguration(terminalID: terminalID),
+                experimentEnabled: false,
+                makeGhostty: Self.standInGhostty,
+                onNotice: { ghostty.append($0.message) })
+            #expect(ghostty == ["libghostty engine active for \(terminalID.uuidString)"])
         }
     }
 
@@ -204,33 +217,38 @@ struct TerminalEngineFactoryTests {
         }
     }
 
-    @Test("A fallback sends the fallback notice and then the SwiftTerm notice, both naming the terminal")
+    /// A fallback is logged whatever the caller's copy of the flag reads: it
+    /// can only follow a libghostty request, and a copy that briefly
+    /// disagrees with the store must not leave it unlogged.
+    @Test("A fallback sends the fallback notice and then the SwiftTerm notice, both naming the terminal, with the experiment on or off")
     func fallbackSendsBothNotices() {
         withTestDefaults("TerminalEngineFactory.FallbackNotices") { defaults in
             let appearance = AppearanceSettings(defaults: defaults)
             let terminalID = UUID()
-            var notices: [TerminalEngineNotice] = []
-            let engine = TerminalEngineFactory.make(
-                kind: .ghostty,
-                font: appearance.font,
-                appearance: appearance,
-                configuration: TerminalEngineConfiguration(terminalID: terminalID),
-                experimentEnabled: true,
-                makeGhostty: Self.failingGhostty,
-                onNotice: { notices.append($0) })
             let id = terminalID.uuidString
             let reason = String(describing: GhosttyError.metalUnavailable)
             let expected: [TerminalEngineNotice] = [
                 .fallback(terminal: id, reason: reason),
                 .active(.swiftTerm, terminal: id),
             ]
-            #expect(engine.kind == .swiftTerm)
-            #expect(notices == expected)
-            let messages = notices.map { $0.message }
-            #expect(messages == [
-                "libghostty engine unavailable for \(id), fell back to SwiftTerm: \(reason)",
-                "SwiftTerm engine active for \(id)",
-            ])
+            for experimentEnabled in [true, false] {
+                var notices: [TerminalEngineNotice] = []
+                let engine = TerminalEngineFactory.make(
+                    kind: .ghostty,
+                    font: appearance.font,
+                    appearance: appearance,
+                    configuration: TerminalEngineConfiguration(terminalID: terminalID),
+                    experimentEnabled: experimentEnabled,
+                    makeGhostty: Self.failingGhostty,
+                    onNotice: { notices.append($0) })
+                #expect(engine.kind == .swiftTerm)
+                #expect(notices == expected, "with the experiment \(experimentEnabled ? "on" : "off"), a fallback sent \(notices)")
+                let messages = notices.map { $0.message }
+                #expect(messages == [
+                    "libghostty engine unavailable for \(id), fell back to SwiftTerm: \(reason)",
+                    "SwiftTerm engine active for \(id)",
+                ])
+            }
         }
     }
 

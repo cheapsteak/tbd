@@ -712,7 +712,7 @@ class EngineRunTests(unittest.TestCase):
     ARGV = ["--worktree", "w", "--swiftterm-terminal", SWIFTTERM_ID,
             "--ghostty-terminal", GHOSTTY_ID, "--samples", "2", "--gap-ms", "0"]
 
-    def run_main(self, log, argv=None, during_run=None, engine_flag=None, capture=CAPTURE):
+    def run_main(self, log, argv=None, during_run=None, engine_flag=None, capture=CAPTURE, sleep=None):
         # Requests 1 and 2 at idle, 3 and 4 under load: each arm gets one
         # sample in each band.
         whole = WholeRun(self.ROWS, capture, [1.0, 1.0, 30.0, 30.0])
@@ -722,7 +722,53 @@ class EngineRunTests(unittest.TestCase):
             (probe, "read_app_log", log),
             (probe, "read_engine_flag", engine_flag or FakeFlag()),
         ]
+        if sleep is not None:
+            patches.append((probe.time, "sleep", sleep))
         return whole.run(argv or self.ARGV, patches, during_run)
+
+    def test_the_recheck_waits_for_the_log_to_settle(self):
+        events: list[str] = []
+        fake = FakeLog(STANDARD_ENGINE_LINES)
+
+        def log(start):
+            events.append("log")
+            return fake(start)
+
+        status, _, err, _ = self.run_main(log, sleep=lambda seconds: events.append(f"sleep {seconds}"))
+        self.assertEqual(status, 0, err)
+        # The check before the run reads the log at once; the one after it
+        # reads it only once the settle is over.
+        self.assertEqual(events[0], "log")
+        self.assertEqual(events[-2:], [f"sleep {probe.ENGINE_RECHECK_SETTLE_SECONDS}", "log"])
+        # Longer than the second the capture waits for the app's own turn.
+        self.assertGreater(probe.ENGINE_RECHECK_SETTLE_SECONDS, 1.0)
+
+    def test_an_interrupted_settle_still_rechecks_and_says_so(self):
+        fake = FakeLog(STANDARD_ENGINE_LINES)
+
+        def sleep(seconds):
+            if seconds == probe.ENGINE_RECHECK_SETTLE_SECONDS:
+                raise KeyboardInterrupt
+
+        status, out, err, _ = self.run_main(fake, sleep=sleep)
+        self.assertEqual(status, 0, err)
+        self.assertIn("interrupted — rechecking the engines without the 3s wait for the log", err)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertIn("terminal engine latency, milliseconds", out)
+
+    def test_a_flip_logged_in_the_settle_refuses_the_report(self):
+        fake = FakeLog(STANDARD_ENGINE_LINES)
+
+        def sleep(seconds):
+            # The flip reaches the store while the check waits for it.
+            if seconds == probe.ENGINE_RECHECK_SETTLE_SECONDS:
+                fake.lines.append(flag(100, False))
+
+        status, out, err, _ = self.run_main(fake, sleep=sleep)
+        self.assertEqual(status, 1, err)
+        self.assertIn("REFUSING TO REPORT — the engine check no longer holds after the run:", err)
+        self.assertIn("turned off", err)
+        self.assertEqual(out, "")
 
     def test_confirmed_run_reports_by_engine(self):
         status, out, err, written = self.run_main(FakeLog(STANDARD_ENGINE_LINES))

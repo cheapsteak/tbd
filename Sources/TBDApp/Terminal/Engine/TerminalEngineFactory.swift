@@ -107,11 +107,13 @@ enum TerminalEngineFactory {
     }
 
     /// - Parameter experimentEnabled: whether `useGhosttyTerminalEngine` is
-    ///   on. While it is, every build sends a notice naming the engine it got,
-    ///   so the latest notice for a terminal names its engine: a fallback
-    ///   sends `.fallback` and then `.active(.swiftTerm, ...)`. Off, no build
-    ///   sends one. Required, so no caller can leave the notices off by
-    ///   omission.
+    ///   on. It decides only whether a SwiftTerm build sends
+    ///   `.active(.swiftTerm, ...)`. A libghostty build always sends its
+    ///   notices, `.active(.ghostty, ...)` or, on a fallback, `.fallback` and
+    ///   then `.active(.swiftTerm, ...)`, since only a libghostty request
+    ///   makes such a build, and a copy of the flag that briefly disagrees
+    ///   with the store must not hide which engine a terminal got. Required,
+    ///   so no caller can leave the notices off by omission.
     /// - Parameter makeGhostty: builds the libghostty engine; the default is
     ///   `GhosttyEngine`'s initializer.
     /// - Parameter onFallback: told the kind that was asked for and why it
@@ -137,15 +139,13 @@ enum TerminalEngineFactory {
         case .ghostty:
             do {
                 let engine = try makeGhostty(font, appearance, configuration)
-                if experimentEnabled { onNotice(.active(.ghostty, terminal: terminal)) }
+                onNotice(.active(.ghostty, terminal: terminal))
                 return engine
             } catch {
                 let reason = Self.reason(for: error)
                 onFallback(.ghostty, reason)
-                if experimentEnabled {
-                    onNotice(.fallback(terminal: terminal, reason: reason))
-                    onNotice(.active(.swiftTerm, terminal: terminal))
-                }
+                onNotice(.fallback(terminal: terminal, reason: reason))
+                onNotice(.active(.swiftTerm, terminal: terminal))
                 return SwiftTermEngine(font: font, appearance: appearance, configuration: configuration)
             }
         }

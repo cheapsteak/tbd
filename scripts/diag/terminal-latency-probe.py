@@ -394,6 +394,10 @@ ENGINE_CATEGORY = "terminalEngine"
 # Taken off the app's age, so a line logged in the launch's first second is
 # still inside the window.
 LAUNCH_SLACK = datetime.timedelta(seconds=5)
+# How long the engine check after the run waits before it reads the app's log
+# again. A flag change or a rebuild logged as the run ended reaches the log
+# store a moment later, and `log show` reads only what has arrived.
+ENGINE_RECHECK_SETTLE_SECONDS = 3.0
 
 # The app's `.notice` build lines, as `TerminalEngineNotice.message`
 # (`Sources/TBDApp/Terminal/Engine/TerminalEngineFactory.swift`) words them,
@@ -1042,6 +1046,16 @@ def main(argv: list[str] | None = None) -> int:
         if flag_problem is not None:
             problems.append(flag_problem)
         if engine_evidence is not None:
+            try:
+                time.sleep(ENGINE_RECHECK_SETTLE_SECONDS)
+            except KeyboardInterrupt:
+                # As in the settle before the capture, a Ctrl-C here means
+                # "stop waiting": the check still runs, on what has arrived.
+                print(
+                    f"\ninterrupted — rechecking the engines without the {ENGINE_RECHECK_SETTLE_SECONDS:g}s"
+                    " wait for the log, so a change logged as the run ended may be missed",
+                    file=sys.stderr,
+                )
             problems += recheck_engines(terminals, engine_pid, engine_since, engine_evidence, read_app_log)
         if problems:
             print(
