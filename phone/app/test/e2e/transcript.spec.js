@@ -220,6 +220,32 @@ test('a running tool opened to its input shows its result too once it stops runn
   expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0]]);
 });
 
+test('a running tool’s Input stays on screen while its result loads', async ({ page, appHost }) => {
+  const scenario = structuredClone(MOCK);
+  const items = scenario.transcripts['local:' + LOGIN_REF.terminalID];
+  const bashItem = items.find((/** @type {{ id: string }} */ it) => it.id === BASH_ID);
+  bashItem.toolStatus = 'running';
+  await openApp(page, appHost, { scenario });
+  const { tx, bash } = await openLogin(page);
+  await bash.click();
+  const detail = tx.locator('.detail');
+  await expect(detail.locator('pre')).toHaveText([MOCK.details[BASH_ID].input]);
+
+  await hostCall(page, 'hold', 'transcript.detail');
+  await hostCall(page, 'emit', 'transcript.update', { session: LOGIN_REF, items: [{ ...bashItem, toolStatus: 'ok' }] });
+  await expect(detail.locator('.loading')).toHaveText('Loading from the laptop…');
+  expect(await detail.locator('.dl, pre, .loading').evaluateAll((els) => els.map((el) => el.className || el.tagName))).toEqual(
+    ['dl', 'PRE', 'loading'],
+  );
+  await expect(detail.locator('.dl')).toHaveText(['Input']);
+  await expect(detail.locator('pre')).toHaveText([MOCK.details[BASH_ID].input]);
+
+  await hostCall(page, 'release', 'transcript.detail');
+  await expect(detail.locator('.dl')).toHaveText(['Input', 'Result']);
+  await expect(detail.locator('pre')).toHaveText([MOCK.details[BASH_ID].input, MOCK.details[BASH_ID].result]);
+  await expect(detail.locator('.loading')).toHaveCount(0);
+});
+
 test('a message shown in full through Show more shows its new cut text and Show more again once its text changes', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Login redirect fix');
