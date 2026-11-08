@@ -139,6 +139,29 @@ import TestSupport
             """)
     }
 
+    // MARK: - The wait is bounded
+
+    /// A child can leave a sequence open for good. The attach waits a bounded
+    /// time for it and then hands the pty over anyway, because an attach that
+    /// never returned would be worse than a remainder printed as text.
+    @Test("an attach still hands the pty over when the child never finishes the sequence")
+    func theWaitIsBounded() async throws {
+        // One poll's worth of budget: the bound is what is under test, and
+        // each `ImmediateClock` sleep costs a `megaYield`.
+        let harness = try Harness(deliveringOnFirstRead: [], waitingAtMost: .milliseconds(5))
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("BEFORE\r\n\(Self.esc)]0;never-ends".utf8))
+
+        let vended = try await harness.reader.suspendDraining()
+        defer { close(vended) }
+        let preamble = await harness.reader.snapshotPreamble()
+
+        let viewer = ViewerTerminal(columns: 40, rows: 8)
+        viewer.feed(preamble)
+        let painted = viewer.screenText()
+        #expect(painted.contains("BEFORE"), "the viewer painted: \(painted.debugDescription)")
+    }
+
     // MARK: - Support
 
     /// Everything a vended descriptor will give right now. The descriptor is
@@ -193,7 +216,10 @@ import TestSupport
         let reader: HolderReader
         private let ours: Int32
 
-        init(deliveringOnFirstRead rest: [UInt8]) throws {
+        init(
+            deliveringOnFirstRead rest: [UInt8],
+            waitingAtMost budget: Duration = HolderReader.defaultSequenceBoundaryBudget
+        ) throws {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             ours = pair[1]
@@ -206,6 +232,7 @@ import TestSupport
                 columns: 40,
                 rows: 8,
                 scrollbackLines: 200,
+                sequenceBoundaryBudget: budget,
                 readFault: HolderReadFault(nextErrno: { delivery.nextErrno() }),
                 observedChildFromStart: true,
                 clock: ImmediateClock())

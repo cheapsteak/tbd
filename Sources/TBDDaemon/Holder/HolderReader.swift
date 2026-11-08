@@ -71,6 +71,10 @@ actor HolderReader {
         /// still be reading is the byte theft this whole design prevents. The
         /// reader keeps draining rather than handing anything over.
         case drainDidNotQuiesce
+        /// The reader went back on its pty while the hand-over was waiting for
+        /// the child to finish a sequence, so nothing was handed over: the
+        /// drain owns the descriptor again.
+        case resumedDuringHandOver
         /// The pty master could not be duplicated for a viewer.
         case cannotDuplicate(errno: Int32)
 
@@ -89,6 +93,9 @@ actor HolderReader {
             case .drainDidNotQuiesce:
                 return "the drain thread did not leave the session's pty within the budget, so "
                     + "nothing else may read it"
+            case .resumedDuringHandOver:
+                return "the session's reader went back on its pty during the hand-over, so "
+                    + "nothing was handed over"
             case .cannotDuplicate(let code):
                 return "could not duplicate the session's pty for a viewer: "
                     + "\(String(cString: strerror(code))) (errno \(code))"
@@ -128,6 +135,7 @@ actor HolderReader {
     private let descriptor: PTYDescriptor
     private let emulator: HolderEmulator
     private let stopTimeout: Duration
+    private let sequenceBoundaryBudget: Duration
     private let clock: any Clock<Duration>
     /// Handed to the drain loop when it starts; see `init`.
     private let onEndOfOutput: (@Sendable () -> Void)?
@@ -144,6 +152,9 @@ actor HolderReader {
     ///   `ptyFD` rather than the POSIX word because SwiftLint's
     ///   `inclusive_language` rule refuses that word in a *declaration*; prose
     ///   throughout still says "pty master", which is what `forkpty` calls it.
+    /// - Parameter sequenceBoundaryBudget: how long `suspendDraining` waits
+    ///   for the child to finish a sequence it is part-way through; see
+    ///   `awaitSequenceBoundary`. Production passes nothing.
     /// - Parameter readFault: a test seam. Production passes nothing; see
     ///   `HolderReadFault` for why the branch it reaches has no other way in.
     /// - Parameter onEndOfOutput: announced once, on the drain thread, when the
@@ -191,6 +202,7 @@ actor HolderReader {
         rows: Int,
         scrollbackLines: Int = HolderReader.scrollbackLines,
         stopTimeout: Duration = HolderReader.defaultStopTimeout,
+        sequenceBoundaryBudget: Duration = HolderReader.defaultSequenceBoundaryBudget,
         readFault: HolderReadFault? = nil,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
         programStatus: HolderProgramStatusTap? = nil,
@@ -201,6 +213,7 @@ actor HolderReader {
         self.sessionID = sessionID
         self.observedChildFromStart = observedChildFromStart
         self.stopTimeout = stopTimeout
+        self.sequenceBoundaryBudget = sequenceBoundaryBudget
         self.clock = clock
         self.onEndOfOutput = onEndOfOutput
         let descriptor = PTYDescriptor(fd: ptyFD, readFault: readFault)
@@ -429,6 +442,9 @@ actor HolderReader {
     /// after this call therefore sees every byte the session had produced up to
     /// the moment it stopped reading, and everything after that moment is still
     /// queued on the tty for whoever reads next. Nothing falls between the two.
+    /// If those bytes end part-way through one of the child's sequences, the
+    /// rest is waited for, briefly, so that the snapshot is taken between
+    /// sequences (`awaitSequenceBoundary`).
     ///
     /// The descriptor is deliberately **not** closed: this reader still owns it
     /// and can be put back on it with `resumeDraining()`. The returned `dup` is
@@ -468,6 +484,14 @@ actor HolderReader {
             state = .suspended
         }
         drainRemainder()
+        await awaitSequenceBoundary()
+        // That wait can park this actor, and a stop or a resume that lands in
+        // it means this call is no longer the descriptor's only reader.
+        switch state {
+        case .stopped: throw Error.stopped
+        case .draining: throw Error.resumedDuringHandOver
+        case .idle, .suspended: break
+        }
         let duplicate = descriptor.duplicate()
         guard duplicate >= 0 else {
             let code = errno
@@ -488,13 +512,55 @@ actor HolderReader {
     /// as long as it kept writing, with the actor parked. Stopping early costs
     /// nothing — the bytes stay queued for whoever reads next, which is exactly
     /// where every byte written after this call already is.
-    private func drainRemainder() {
+    private func drainRemainder(maxReads: Int = Self.quiesceMaxReads) {
         var buffer = [UInt8](repeating: 0, count: Self.quiesceBufferSize)
-        for _ in 0..<Self.quiesceMaxReads {
+        for _ in 0..<maxReads {
             guard case .bytes(let count) = descriptor.read(into: &buffer) else { return }
             emulator.feed(buffer[0..<count])
         }
     }
+
+    /// Keeps reading, for a bounded time, while the child's output so far
+    /// ends part-way through a sequence.
+    ///
+    /// **The snapshot that follows feeds the emulator.** `snapshotPreamble`
+    /// asks the terminal for its modes with `DECRQM` queries and, on an alt
+    /// screen, toggles to the primary and back. Fed into a parser that is
+    /// part-way through one of the child's sequences (an OSC title or link, a
+    /// sixel DCS, a kitty APC, a CSI's parameters, a UTF-8 character), the
+    /// first `ESC` ends that sequence early. The rest of it then prints as
+    /// text in two places: in this emulator if the drain resumes, and in the
+    /// viewer, whose parser starts in the ground state and cannot know a
+    /// sequence was open. The quiesce stops wherever the child's writes have
+    /// got to, and a child writing a frame larger than the pty buffer is
+    /// routinely mid-sequence there, with the rest a moment behind. So this
+    /// waits for the rest, and the snapshot is taken between sequences.
+    ///
+    /// Bounded, because a child can leave a sequence open indefinitely, and
+    /// an attach that never returned would be worse than a remainder printed
+    /// as text. One buffer per poll, so a child flooding its terminal cannot
+    /// hold the actor for more than the budget's worth of reads.
+    private func awaitSequenceBoundary() async {
+        var waited: Duration = .zero
+        while !emulator.isAtSequenceBoundary, waited < sequenceBoundaryBudget {
+            try? await clock.sleep(for: Self.stopPollInterval)
+            waited += Self.stopPollInterval
+            guard state == .suspended || state == .idle else { return }
+            drainRemainder(maxReads: 1)
+        }
+        guard !emulator.isAtSequenceBoundary else { return }
+        Self.logger.notice(
+            """
+            session \(self.sessionID.uuidString, privacy: .public) was still part-way through a \
+            sequence when the attach stopped waiting, so the snapshot may cut it short and the \
+            viewer may print its remainder as text
+            """)
+    }
+
+    /// How long the attach waits for the child to finish a sequence the
+    /// quiesce found it part-way through. A child that finishes one finishes
+    /// it within a write or two, which is milliseconds.
+    static let defaultSequenceBoundaryBudget: Duration = .milliseconds(250)
 
     /// The read buffer the quiesce uses, matching the drain loop's own.
     private static let quiesceBufferSize = 64 * 1024
@@ -1504,6 +1570,13 @@ private final class HolderEmulator: @unchecked Sendable {
         }
     }
 
+    /// Whether the child's output so far ends between sequences, so bytes of
+    /// the daemon's own — `snapshotPreamble`'s mode queries and alt-screen
+    /// toggle — can be fed without cutting one of the child's short.
+    var isAtSequenceBoundary: Bool {
+        terminal.terminalLock.withLock { terminal.isAtSequenceBoundary }
+    }
+
     /// The viewport as text, through the same projection `screen` uses — so
     /// the diagnostic render and the typed screen cannot disagree about what a
     /// cell projects to or where the trailing blanks stop.
@@ -1547,7 +1620,8 @@ private final class HolderEmulator: @unchecked Sendable {
     /// the pty buffer — would therefore truncate the child's sequence, print
     /// its remainder into the screen model as literal text, and swallow the
     /// reply to a query the child was in the middle of asking. `snapshotPreamble`
-    /// still probes, once per attach; its own doc argues that case.
+    /// still probes, once per attach, after the quiesce has waited for the
+    /// child's output to reach a sequence boundary.
     ///
     /// It does not touch `lastByteAt` either — a daemon reading its own
     /// emulator must not make a stale screen look fresh.
@@ -1623,6 +1697,12 @@ private final class HolderEmulator: @unchecked Sendable {
     /// Those queries feed the `Terminal` directly rather than through `feed`,
     /// so they do not stamp `lastByteAt` — an attach must not make a session
     /// that has been silent for an hour report an age of zero.
+    ///
+    /// **Call it between sequences.** The first `ESC` those feeds carry ends
+    /// whatever sequence the child is part-way through, and its remainder
+    /// then prints as text here and in the viewer. The attach path calls this
+    /// after `HolderReader.suspendDraining`, which waits for
+    /// `isAtSequenceBoundary`.
     func snapshotPreamble(maxScrollbackLines: Int) -> Data {
         terminal.terminalLock.withLock {
             let reader = DelegateModeReader(terminal: terminal, delegate: delegate)
@@ -1776,8 +1856,10 @@ private final class ReplyForwardingDelegate: TerminalDelegate {
 /// mode with `beginCollectingReplies`, or the answers go to the child and this
 /// reads nothing. `HolderEmulator.snapshotPreamble` is the only construction
 /// site, and it does both. Deliberately only that one: a probe is safe there
-/// because it runs once per attach, and unsafe on the per-`terminal.output`
-/// path, where it would abort a sequence the child is mid-way through sending.
+/// because the attach's quiesce first waits for the child's output to reach a
+/// sequence boundary, and unsafe on the per-`terminal.output` path, where
+/// nothing waits and it would abort a sequence the child is mid-way through
+/// sending.
 private struct DelegateModeReader: ModeReplyReader {
     let terminal: Terminal
     let delegate: ReplyForwardingDelegate
