@@ -471,6 +471,70 @@ struct PairingServiceTests {
         }
     }
 
+    @Test func aPairedSendThatFailsUndoesThePairing() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withPairing(relay: relay, transport: transport) { h in
+            // However the test ends, nothing stays held for `cancel()` to
+            // wait on.
+            defer { transport.release() }
+            let (status, link) = try await h.startOffer()
+            let (phone, _) = try await h.phoneAwaitingApproval(link)
+
+            // `paired` is held at the socket and then fails there, as a send
+            // on a socket that died does.
+            transport.hold()
+            let service = h.service
+            let offerID = status.offerID
+            let allowing = Task { try await service.allow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+            transport.release(failing: true)
+            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+
+            // The row Allow stored is gone, and `onPaired` never ran.
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            #expect(h.paired.values.isEmpty)
+            let after = await h.service.status
+            #expect(after?.state == .interrupted)
+            #expect(after?.link == nil && after?.deviceName == nil && after?.confirmationCode == nil)
+            // The phone heard message 2 and nothing more; then the room closed.
+            #expect(h.relay.laptopFrames(room: link.room).count == 1)
+            let left = try await phone.nextSignal()
+            #expect(left == "peer-left")
+            await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: offerID) }
+        }
+    }
+
+    @Test func aPhoneThatLeavesBeforePairedReachesTheRelayUndoesThePairing() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withPairing(relay: relay, transport: transport) { h in
+            defer { transport.release() }
+            let (status, link) = try await h.startOffer()
+            let (phone, _) = try await h.phoneAwaitingApproval(link)
+
+            // `paired` is held at the socket while the phone leaves, so the
+            // phone can never hear it.
+            transport.hold()
+            let service = h.service
+            let offerID = status.offerID
+            let allowing = Task { try await service.allow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+            phone.close()
+            // The relay's `peer-left` ends Allow's wait at once, with `paired`
+            // still held.
+            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+            #expect(transport.heldSends == 1)
+
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            #expect(h.paired.values.isEmpty)
+            let after = await h.service.status
+            #expect(after?.state == .interrupted)
+        }
+    }
+
     @Test func denySendsPairDeniedAndDiscardsTheOffer() async throws {
         try await withPairing { h in
             let (status, link) = try await h.startOffer()

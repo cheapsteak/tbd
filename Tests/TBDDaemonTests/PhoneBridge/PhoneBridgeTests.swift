@@ -867,6 +867,39 @@ struct PhoneBridgeTests {
         }
     }
 
+    @Test func aPairingWhosePairedSendFailsPostsNoNotificationAndOpensNoRoom() async throws {
+        try await withBridge(mainWorktree: true, holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            let worktreeID = try #require(h.mainWorktreeID)
+            await h.bridge.reconcile()
+            let (offer, link) = try await h.startPairing()
+            let phone = try await h.joinedPairingPhone(link)
+            try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForPairingState(.awaitingApproval)
+
+            // `paired` is held at the socket and then fails there.
+            transport.hold()
+            let bridge = h.bridge
+            let offerID = offer.offerID
+            let allowing = Task { try await bridge.pairAllow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+            transport.release(failing: true)
+            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+
+            // `onPaired` never ran: no row, no notification, no device room.
+            try await h.waitForPairingState(.interrupted)
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            let unread = try await h.db.notifications.unread(worktreeID: worktreeID)
+            #expect(unread.isEmpty)
+            #expect(h.notificationDeltas.isEmpty)
+            let links = await h.bridge.linkCount
+            #expect(links == 0)
+        }
+    }
+
     @Test func thePairingNotificationSkipsHiddenRepositoriesAndPrefersHealthyOnes() async throws {
         try await withBridge { h in
             // Listed in this order; each has a main worktree.

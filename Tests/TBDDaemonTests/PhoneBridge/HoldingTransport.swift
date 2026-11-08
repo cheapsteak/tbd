@@ -10,7 +10,8 @@ final class HoldingTransport: RelayTransport, @unchecked Sendable {
     private var holding = false
     /// The one room whose sends are held; nil holds every room's.
     private var heldRoom: String?
-    private var held: [CheckedContinuation<Void, Never>] = []
+    /// Each waiting send, resumed with whether it is to fail.
+    private var held: [CheckedContinuation<Bool, Never>] = []
 
     init(relay: FakeRelay) {
         self.relay = relay
@@ -44,28 +45,32 @@ final class HoldingTransport: RelayTransport, @unchecked Sendable {
         lock.withLock { held.count }
     }
 
-    /// Stops holding and lets every waiting send go on. Safe to call twice.
-    func release() {
-        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+    /// Stops holding and lets every waiting send go on: on to the relay, or,
+    /// with `failing`, to throw ``HoldingTransportFailure`` as a send on a
+    /// socket that died does. Safe to call twice.
+    func release(failing: Bool = false) {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
             holding = false
             let waiting = held
             held = []
             return waiting
         }
         for send in waiting {
-            send.resume()
+            send.resume(returning: failing)
         }
     }
 
-    fileprivate func waitWhileHolding(room: String) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+    /// Waits while sends in `room` are held, and returns whether the send is
+    /// to fail.
+    fileprivate func waitWhileHolding(room: String) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let parked = lock.withLock { () -> Bool in
                 guard holding, heldRoom == nil || heldRoom == room else { return false }
                 held.append(continuation)
                 return true
             }
             if !parked {
-                continuation.resume()
+                continuation.resume(returning: false)
             }
         }
     }
@@ -80,7 +85,10 @@ private struct HoldingSocket: RelaySocket {
 
     func send(_ frame: RelayFrame) async throws {
         if case .binary = frame {
-            await transport.waitWhileHolding(room: room)
+            let failing = await transport.waitWhileHolding(room: room)
+            if failing {
+                throw HoldingTransportFailure()
+            }
         }
         try await base.send(frame)
     }
@@ -91,5 +99,13 @@ private struct HoldingSocket: RelaySocket {
 
     func close(code: Int) async {
         await base.close(code: code)
+    }
+}
+
+/// What a send held by a ``HoldingTransport`` throws when it is released
+/// with `failing`.
+struct HoldingTransportFailure: Error, LocalizedError {
+    var errorDescription: String? {
+        "The test transport failed a held send."
     }
 }

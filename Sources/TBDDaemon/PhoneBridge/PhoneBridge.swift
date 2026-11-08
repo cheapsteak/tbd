@@ -31,6 +31,9 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     /// The pairing offer is open, but no phone has finished pairing with it
     /// yet, so there is nothing to allow.
     case notAwaitingApproval
+    /// Allow stored the phone, but the message that tells it its room cannot
+    /// have reached it, so the pairing was undone and the offer interrupted.
+    case pairingNotFinished
     /// The pairing link built for a new offer is one the phone would refuse,
     /// almost always because the saved relay address is not in the form a
     /// pairing link carries. No offer was made.
@@ -65,6 +68,8 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
             return "The pairing code expired. Start pairing again for a new code."
         case .notAwaitingApproval:
             return "No phone has finished pairing yet. Wait until the phone shows its code."
+        case .pairingNotFinished:
+            return "The phone could not be told that pairing finished, so it was not paired. Start pairing again."
         case .invalidPairingLink:
             return "Couldn't make a pairing code a phone can read. Check the relay address in Settings → Phone: "
                 + "it must be just an https:// address, such as https://acme-relay.acme.workers.dev."

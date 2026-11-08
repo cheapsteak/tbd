@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import TBDShared
 
 /// Pairing offers: the QR code's room, the `Noise_IKpsk2` responder, the
@@ -47,7 +48,15 @@ import TBDShared
 /// **Ending.**
 /// - `allow` stores the phone with a fresh device room, which is never the
 ///   pairing room, tells the phone that room in `paired`, closes the pairing
-///   room for good, and then calls `onPaired`.
+///   room for good, and then calls `onPaired`. The row is stored first,
+///   because the phone may connect to its room as soon as it reads `paired`.
+/// - When `paired` cannot have reached the phone, Allow undoes the pairing:
+///   the row is deleted again, the offer is interrupted, `allow` throws
+///   `.pairingNotFinished`, and `onPaired` is not called. That is when the
+///   send fails or is still in flight at the flush limit, and when
+///   `peer-joined`, `peer-left`, a link `.closed` or a refusal arrives before
+///   `paired` has reached the relay; such an event ends Allow's wait at once.
+///   One that arrives after is the phone leaving with its room.
 /// - `deny`, expiry, an interruption, `cancel` and a replacing `start` close
 ///   the pairing room. Deny and expiry first send `pairDenied`, but only to a
 ///   confirmed phone, the only one with a channel to receive it.
@@ -98,6 +107,25 @@ actor PairingService {
         let phoneKey: Data
     }
 
+    /// Allow's progress with the confirmed phone, from the claim until
+    /// `paired` has reached the relay.
+    private struct Allowing {
+        let confirmed: Confirmed
+        /// Set by the writer, off the actor, the moment `paired` reaches the
+        /// relay, so an event the phone's reading of it caused is never taken
+        /// for one that came first. Nil until Allow queues `paired`.
+        var sent: OSAllocatedUnfairLock<Bool>?
+        /// Ends Allow's wait for `paired` early.
+        var stopWaiting: AsyncStream<Void>.Continuation?
+        /// Why the phone cannot hear `paired`: an event that ended its
+        /// channel before `paired` reached the relay.
+        var lost: String?
+
+        var hasSent: Bool {
+            sent?.withLock { $0 } ?? false
+        }
+    }
+
     private enum Phase {
         /// `waitingForPhone`, with the handshake waiting for its first
         /// transport message, if any.
@@ -106,7 +134,7 @@ actor PairingService {
         case awaitingApproval(Confirmed)
         /// Allow has taken the offer and is storing the phone and telling it
         /// its room. Shown as `awaitingApproval`.
-        case allowing(Confirmed)
+        case allowing(Allowing)
         case paired(deviceName: String, deviceID: UUID, code: String)
         /// `denied`, `expired` or `interrupted`.
         case ended(PhonePairingState)
@@ -126,9 +154,10 @@ actor PairingService {
             switch phase {
             case .waiting:
                 return PhonePairingStatus(offerID: id, link: link, expiresAt: expiresAt, state: .waitingForPhone)
-            case .awaitingApproval(let confirmed), .allowing(let confirmed):
-                return PhonePairingStatus(offerID: id, link: link, expiresAt: expiresAt, state: .awaitingApproval,
-                                          confirmationCode: confirmed.code, deviceName: confirmed.deviceName)
+            case .awaitingApproval(let confirmed):
+                return approvalStatus(confirmed)
+            case .allowing(let allowing):
+                return approvalStatus(allowing.confirmed)
             case .paired(let deviceName, let deviceID, let code):
                 return PhonePairingStatus(offerID: id, link: nil, expiresAt: expiresAt, state: .paired,
                                           confirmationCode: code, deviceName: deviceName, deviceID: deviceID)
@@ -136,13 +165,19 @@ actor PairingService {
                 return PhonePairingStatus(offerID: id, link: nil, expiresAt: expiresAt, state: state)
             }
         }
+
+        private func approvalStatus(_ confirmed: Confirmed) -> PhonePairingStatus {
+            PhonePairingStatus(offerID: id, link: link, expiresAt: expiresAt, state: .awaitingApproval,
+                               confirmationCode: confirmed.code, deviceName: confirmed.deviceName)
+        }
     }
 
     /// One frame for the writer.
     private struct Outgoing: Sendable {
         let frame: Data
-        /// Called once the frame has left or failed to.
-        let onLeft: (@Sendable () -> Void)?
+        /// Called once the frame has reached the relay (`true`) or failed
+        /// to (`false`).
+        let onLeft: (@Sendable (Bool) -> Void)?
     }
 
     /// The live offer's room socket and the tasks that serve it.
@@ -269,7 +304,9 @@ actor PairingService {
     /// Throws `.notAwaitingApproval` while the offer still waits for a
     /// phone, `.offerExpired` once it has expired, and `.noSuchOffer` for any
     /// other offer that is not awaiting approval, including one that is not
-    /// the current offer.
+    /// the current offer. Throws `.pairingNotFinished` when `paired` cannot
+    /// have reached the phone; the row is gone again, the offer is
+    /// interrupted, and `onPaired` is not called.
     func allow(offerID: UUID) async throws -> PhoneDevice {
         let claim = try claimApproval(offerID)
         let id = UUID()
@@ -403,7 +440,9 @@ actor PairingService {
             switch current.phase {
             case .waiting, .awaitingApproval:
                 interrupt(because: "the relay was refused")
-            case .allowing, .paired, .ended:
+            case .allowing:
+                loseAllow(because: "the relay was refused before the phone heard it was paired")
+            case .paired, .ended:
                 return
             }
         case .peerJoined, .peerLeft, .closed:
@@ -412,7 +451,9 @@ actor PairingService {
                 await dropAttempt(because: "the phone's socket changed")
             case .awaitingApproval:
                 interrupt(because: "the phone's socket changed")
-            case .waiting(.none), .allowing, .paired, .ended:
+            case .allowing:
+                loseAllow(because: "the phone's socket changed before it heard it was paired")
+            case .waiting(.none), .paired, .ended:
                 return
             }
         case .frame(let bytes):
@@ -582,7 +623,7 @@ actor PairingService {
                 throw PhoneBridgeError.noSuchOffer
             }
             channel = nil
-            offer?.phase = .allowing(confirmed)
+            offer?.phase = .allowing(Allowing(confirmed: confirmed))
             return Claim(confirmed: confirmed, deviceRoom: deviceRoom, pairedFrame: frame)
         case .waiting:
             throw PhoneBridgeError.notAwaitingApproval
@@ -594,8 +635,9 @@ actor PairingService {
     }
 
     /// The rest of Allow, in its own task so that `cancel` and `start` can
-    /// wait for it. While the offer is `allowing`, events, expiry and Deny
-    /// leave it alone.
+    /// wait for it. While the offer is `allowing`, expiry and Deny leave it
+    /// alone, and an event that ends the phone's channel before `paired`
+    /// reaches the relay makes the pairing undone.
     private func commitAllow(offerID: UUID, claim: Claim) async throws -> PhoneDevice {
         let device = PhoneDevice(id: UUID(), name: claim.confirmed.deviceName, publicKey: claim.confirmed.phoneKey,
                                  roomID: claim.deviceRoom, pairedAt: now())
@@ -607,16 +649,81 @@ actor PairingService {
             await end(as: .interrupted)?.value
             throw error
         }
+        // The row is in place before `paired` goes: the phone may connect to
+        // its new room as soon as it reads it.
+        if let lost = await sendPaired(claim.pairedFrame, offerID: offerID) {
+            await undoAllow(device, because: lost)
+            throw PhoneBridgeError.pairingNotFinished
+        }
         PhoneBridgeLog.record(.allowed(name: device.name, deviceID: device.id))
         if let ending = session, offer?.id == offerID {
             session = nil
-            await close(ending, timer: takeHandshakeTimer(), sending: claim.pairedFrame)
+            await close(ending, timer: takeHandshakeTimer(), sending: nil)
         }
         if offer?.id == offerID {
             offer?.phase = .paired(deviceName: device.name, deviceID: device.id, code: claim.confirmed.code)
             onChange()
         }
         return device
+    }
+
+    /// Queues `paired` and waits, up to the flush limit, until it reaches the
+    /// relay. Nil once it has, with the phone's channel still standing;
+    /// otherwise why the phone cannot have heard it. An event that ends the
+    /// channel first ends the wait at once.
+    private func sendPaired(_ frame: Data, offerID: UUID) async -> String? {
+        let unsent = "the phone's new room did not reach the relay"
+        guard let current = offer, current.id == offerID, case .allowing(var allowing) = current.phase,
+              let outbox = session?.outbox else {
+            return unsent
+        }
+        if let lost = allowing.lost {
+            return lost
+        }
+        let sent = OSAllocatedUnfairLock(initialState: false)
+        let (left, signal) = AsyncStream.makeStream(of: Void.self)
+        allowing.sent = sent
+        allowing.stopWaiting = signal
+        offer?.phase = .allowing(allowing)
+        let outgoing = Outgoing(frame: frame, onLeft: { reached in
+            if reached {
+                sent.withLock { $0 = true }
+            }
+            signal.finish()
+        })
+        guard case .enqueued = outbox.yield(outgoing) else { return unsent }
+        await waitUntilLeft(left, clock: clock)
+        if case .allowing(let after) = offer?.phase, let lost = after.lost {
+            return lost
+        }
+        return sent.withLock { $0 } ? nil : unsent
+    }
+
+    /// An event ended the confirmed phone's channel while Allow was storing
+    /// it or sending `paired`. Before `paired` has reached the relay, the
+    /// phone can no longer hear it, so Allow stops waiting and undoes the
+    /// pairing. After, the event is the phone leaving with its new room, and
+    /// changes nothing.
+    private func loseAllow(because reason: String) {
+        guard case .allowing(var allowing) = offer?.phase, !allowing.hasSent, allowing.lost == nil else { return }
+        allowing.lost = reason
+        offer?.phase = .allowing(allowing)
+        allowing.stopWaiting?.finish()
+    }
+
+    /// `paired` cannot have reached the phone: the row Allow stored goes
+    /// again, and the offer ends as interrupted. `allow` then throws, so
+    /// `onPaired` is not called: no pairing notification, and no link for the
+    /// room. `cancel` and `start` wait for the room's close.
+    private func undoAllow(_ device: PhoneDevice, because reason: String) async {
+        do {
+            try await devices.delete(id: device.id)
+        } catch {
+            PhoneBridgeLog.record(.failed(
+                "Could not remove phone \(device.id), whose pairing did not finish: \(error.localizedDescription)"))
+        }
+        PhoneBridgeLog.record(.interrupted(reason: reason))
+        end(as: .interrupted)
     }
 
     private func expire(_ offerID: UUID) async {
@@ -708,7 +815,7 @@ actor PairingService {
         timer?.cancel()
         if let last {
             let (left, signal) = AsyncStream.makeStream(of: Void.self)
-            if case .enqueued = ending.outbox.yield(Outgoing(frame: last, onLeft: { signal.finish() })) {
+            if case .enqueued = ending.outbox.yield(Outgoing(frame: last, onLeft: { _ in signal.finish() })) {
                 await waitUntilLeft(left, clock: clock)
             }
         }
@@ -733,12 +840,15 @@ actor PairingService {
     /// The one writer: sends each queued frame in order.
     private static func drain(_ outbox: AsyncStream<Outgoing>, to link: RelayLink) async {
         for await item in outbox {
+            let reached: Bool
             do {
                 try await link.send(item.frame)
+                reached = true
             } catch {
                 PhoneBridgeLog.record(.frameNotSent(deviceID: nil, detail: error.localizedDescription))
+                reached = false
             }
-            item.onLeft?()
+            item.onLeft?(reached)
         }
     }
 
