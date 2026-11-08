@@ -74,6 +74,74 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(request.target?.terminal == terminal.id.uuidString)
     }
 
+    // MARK: - A phone's message outside the send rail
+
+    /// Messages the send rail refuses, each with the refusal it gets: a NUL,
+    /// the bracketed-paste end marker, and a message of zero-width characters
+    /// only.
+    private static let refusedMessages: [(text: String, refusal: String)] = [
+        ("\u{0}", RPCRouter.phoneControlCharacterRefusal),
+        ("\u{1b}[201~", RPCRouter.phoneControlCharacterRefusal),
+        ("\u{200B}\u{2060}", RPCRouter.phoneEmptySendRefusal),
+    ]
+
+    @Test func aPhoneMessageIsVettedByTheSendRailsRules() {
+        #expect(RPCRouter.phoneMessageVetted("first\r\nsecond\tthird") == .deliver("first\nsecond\tthird"))
+        #expect(RPCRouter.phoneMessageVetted("lone\rreturn") == .refused(RPCRouter.phoneControlCharacterRefusal))
+        #expect(RPCRouter.phoneMessageVetted("bell\u{7}") == .refused(RPCRouter.phoneControlCharacterRefusal))
+        #expect(RPCRouter.phoneMessageVetted("\r\n") == .refused(RPCRouter.phoneEmptySendRefusal))
+        #expect(RPCRouter.phoneMessageVetted("") == .refused(RPCRouter.phoneEmptySendRefusal))
+    }
+
+    /// A wake's message is the respawned session's first prompt, carried in a
+    /// process's argument list, so it meets the send rail's refusals before
+    /// the wake handler runs, and a refused one records no wake.
+    @Test func phoneWakeRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-wt")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneWake(
+                TerminalWakeParams(terminalID: terminal.id, prompt: text), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
+        #expect(wakeRows.isEmpty, "a refused message never reaches the wake handler")
+    }
+
+    /// The handler gets the message with the send rail's line endings.
+    @Test func phoneWakeHandsTheHandlerTheMessageWithBareLineFeeds() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-wt")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        _ = try await f.actions.phoneWake(
+            TerminalWakeParams(terminalID: terminal.id, prompt: "first\r\nsecond"), deviceID: UUID())
+
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.terminalWake })
+        #expect(request.prompt == "first\nsecond")
+    }
+
+    /// A wake with an empty prompt carries no message, so no message rule
+    /// applies and the handler runs.
+    @Test func phoneWakeWithAnEmptyPromptStillReachesTheHandler() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-wt")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        let response = try await f.actions.phoneWake(
+            TerminalWakeParams(terminalID: terminal.id, prompt: ""), deviceID: UUID())
+
+        #expect(response.error != RPCRouter.phoneEmptySendRefusal)
+        let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
+        #expect(wakeRows.count == 1)
+    }
+
     /// Every worktree is asked about, and a plain shell is never reported on.
     @Test func phoneSessionStatesListsAgentTerminalsOnly() async throws {
         let f = try makeFixture()
@@ -418,5 +486,44 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(f.invoker.callsSnapshot().filter { $0.first == "answer" } == [["answer", "s-1", "p-1"]])
         let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteAnswer })
         #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
+    }
+
+    /// The provider pastes a remote message into its session, so a message the
+    /// send rail refuses reaches no provider and records no send.
+    @Test func phoneRemoteSendMessageRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring(["send", RemoteCapability.sendSubmit]),
+        ])
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneRemoteSendMessage(
+                RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: text),
+                deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused message never reaches the provider")
+        let sendRows = f.actuationRows().filter { $0.method == RPCMethod.remoteSendMessage }
+        #expect(sendRows.isEmpty)
+    }
+
+    /// The provider gets the message with the send rail's line endings, and
+    /// the record names the phone.
+    @Test func phoneRemoteSendMessageDeliversTheMessageWithBareLineFeeds() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring(["send", RemoteCapability.sendSubmit]),
+            providerOK("{}"),
+        ])
+        let d = UUID()
+
+        let response = try await f.actions.phoneRemoteSendMessage(
+            RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "first\r\nsecond"),
+            deviceID: d)
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        #expect(f.invoker.callsSnapshot().last == ["send", "s-1", "--submit"])
+        #expect(f.invoker.stdinsSnapshot().last ?? nil == Data("first\nsecond".utf8))
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteSendMessage })
+        #expect(request.actor == ActuationActor.phone(deviceID: d))
     }
 }

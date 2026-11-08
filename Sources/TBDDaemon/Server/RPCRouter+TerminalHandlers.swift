@@ -4020,7 +4020,7 @@ extension RPCRouter {
     /// blank. Whitespace is the set the shape check trims. One visible scalar
     /// makes the text non-blank, so a ZWJ inside an emoji sequence or a
     /// variation selector after a visible character keeps it.
-    private static func phoneTextIsBlank(_ text: String) -> Bool {
+    static func phoneTextIsBlank(_ text: String) -> Bool {
         text.unicodeScalars.allSatisfy { scalar in
             CharacterSet.whitespacesAndNewlines.contains(scalar)
                 || scalar.properties.generalCategory == .format
@@ -4030,14 +4030,14 @@ extension RPCRouter {
 
     /// `text` with every CRLF made a bare LF, for a phone message. A lone CR
     /// is kept, for the control-character refusal to judge.
-    private static func phoneLineEndingsNormalized(_ text: String) -> String {
+    static func phoneLineEndingsNormalized(_ text: String) -> String {
         text.replacingOccurrences(of: "\r\n", with: "\n")
     }
 
     /// Whether `text`, a phone message's `text` or one of its text parts,
     /// holds a control character a phone message may not carry
     /// (`isPhoneRefusedControl`).
-    private static func phoneTextHasControlCharacter(_ text: String) -> Bool {
+    static func phoneTextHasControlCharacter(_ text: String) -> Bool {
         text.unicodeScalars.contains { scalar in Self.isPhoneRefusedControl(scalar) }
     }
 

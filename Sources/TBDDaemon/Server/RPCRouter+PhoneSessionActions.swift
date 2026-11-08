@@ -4,13 +4,15 @@ import TBDShared
 /// The router behind the phone bridge's one door (`PhoneSessionActions`).
 ///
 /// Every method is one call to an existing core function or handler. It adds
-/// only four things: the params a phone may set, rebuilt from those fields
+/// only five things: the params a phone may set, rebuilt from those fields
 /// alone; the encoding of params for a handler that decodes them, with the
 /// router's own `encoder` to match the router's own `decoder`; the phone's
-/// identity, built from the one `deviceID` it is given; and, in
-/// `phoneSessionStates`, the removal of every report on a shell. So each runs
-/// the checks of the RPC it mirrors, in that RPC's order, and returns that
-/// RPC's response.
+/// identity, built from the one `deviceID` it is given; in
+/// `phoneSessionStates`, the removal of every report on a shell; and, in
+/// `phoneWake` and `phoneRemoteSendMessage`, the send rail's rules for a
+/// phone's message (`phoneMessageVetted`), whose refusal answers before the
+/// handler runs. Past that, each runs the checks of the RPC it mirrors, in
+/// that RPC's order, and returns that RPC's response.
 ///
 /// **The rebuild names what a phone keeps, never what it loses.** Every params
 /// value the bridge passes is rebuilt field by field into fresh params holding
@@ -62,9 +64,21 @@ extension RPCRouter: PhoneSessionActions {
         try await sendFromPairedPhone(p, deviceID: deviceID)
     }
 
+    /// A wake from a phone. A message it carries is held to the send rail's
+    /// rules first (`phoneMessageVetted`), and a refused one wakes nothing. A
+    /// wake with no message, a nil or empty prompt, is not a phone message and
+    /// goes to the handler as it came.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleTerminalWake(
-            encoder.encode(Self.phoneWakeParams(p)), actor: .phone(deviceID: deviceID))
+        var params = Self.phoneWakeParams(p)
+        if let prompt = params.prompt, !prompt.isEmpty {
+            switch Self.phoneMessageVetted(prompt) {
+            case .refused(let reason):
+                return RPCResponse(error: reason)
+            case .deliver(let text):
+                params = TerminalWakeParams(terminalID: params.terminalID, prompt: text)
+            }
+        }
+        return try await handleTerminalWake(encoder.encode(params), actor: .phone(deviceID: deviceID))
     }
 
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
@@ -90,9 +104,22 @@ extension RPCRouter: PhoneSessionActions {
             encoder.encode(Self.phoneRemoteCreateParams(p)), actor: .phone(deviceID: deviceID))
     }
 
+    /// A message from a phone to a remote session, held to the send rail's
+    /// rules first (`phoneMessageVetted`). The provider pastes the text into
+    /// its own session, so an ESC sequence such as the bracketed-paste end
+    /// marker would end the paste early and reach the agent as keys; a
+    /// refused message reaches no provider.
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleRemoteSendMessage(
-            encoder.encode(Self.phoneRemoteSendMessageParams(p)), actor: .phone(deviceID: deviceID))
+        let params = Self.phoneRemoteSendMessageParams(p)
+        switch Self.phoneMessageVetted(params.text) {
+        case .refused(let reason):
+            return RPCResponse(error: reason)
+        case .deliver(let text):
+            return try await handleRemoteSendMessage(
+                encoder.encode(RemoteSendMessageParams(
+                    provider: params.provider, sessionID: params.sessionID, text: text)),
+                actor: .phone(deviceID: deviceID))
+        }
     }
 
     func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse {
@@ -102,6 +129,40 @@ extension RPCRouter: PhoneSessionActions {
     func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
         try await handleRemoteTranscriptLoadEarlier(
             encoder.encode(Self.phoneRemoteTranscriptLoadEarlierParams(p)))
+    }
+
+    // MARK: - A phone's message outside the send rail
+
+    /// What becomes of a phone's message under the send rail's rules.
+    enum PhoneMessageVetting: Equatable {
+        /// Deliver this text: the message with every CRLF made a bare LF.
+        case deliver(String)
+        /// Deliver nothing, and answer with this refusal.
+        case refused(String)
+    }
+
+    /// `text`, a phone's message that reaches a session by a path other than
+    /// the send rail (a wake's prompt, a remote session's message), held to
+    /// the send rail's own rules (`sendFromPairedPhone`) with its own
+    /// refusals: every CRLF becomes a bare LF (`phoneLineEndingsNormalized`),
+    /// then a blank message is refused (`phoneTextIsBlank`), then one holding
+    /// a control character (`phoneTextHasControlCharacter`).
+    ///
+    /// The two paths need it for their own reasons. A wake's prompt rides the
+    /// argument list of the process that respawns the session, and an
+    /// argument is a C string, which cannot hold a NUL; it also becomes the
+    /// session's first message, so a blank one would start a turn on nothing.
+    /// A remote provider pastes the text, so a control character reaches the
+    /// agent as a key.
+    static func phoneMessageVetted(_ text: String) -> PhoneMessageVetting {
+        let normalized = Self.phoneLineEndingsNormalized(text)
+        if Self.phoneTextIsBlank(normalized) {
+            return .refused(Self.phoneEmptySendRefusal)
+        }
+        if Self.phoneTextHasControlCharacter(normalized) {
+            return .refused(Self.phoneControlCharacterRefusal)
+        }
+        return .deliver(normalized)
     }
 
     // MARK: - The fields a phone may set
