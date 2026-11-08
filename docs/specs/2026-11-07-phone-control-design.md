@@ -314,9 +314,12 @@ Requests:
 its kind (question or permission), the tool name, a summary of the input, and the questions with
 their options, or the permission's suggested rules.
 
-**No double actions.** The daemon keeps each request ID and its result for 10 minutes. A repeat of
-a known request ID returns the stored result and does nothing again. So a resend after a reconnect
-is safe.
+**No double actions.** The daemon keeps each request ID and its result for 10 minutes, in memory.
+A repeat of a known request ID returns the stored result and does nothing again. The phone resends
+an action after a reconnect only within 9 minutes of first sending it, and only once the new
+connection's `sessions.subscribe` reply shows the same event stream. A new stream can mean the
+daemon restarted and forgot its requests, so the phone then says it cannot confirm the action, and
+does not send it again.
 
 **Fixtures.** Every app-protocol message has a JSON fixture under `phone/protocol/`. Swift tests
 decode and re-encode each one, and TypeScript tests do the same, so the two sides cannot drift.

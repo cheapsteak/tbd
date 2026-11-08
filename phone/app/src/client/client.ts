@@ -17,17 +17,29 @@
  * 2. It calls `onUp`. Whatever `onUp` requests goes out first: `sessions.subscribe`, then a
  *    `transcript.open` with `resume`.
  * 3. It posts every other unanswered request again, in the order each was first sent, with
- *    the very body it first posted, then drains the queue.
+ *    the very body it first posted, then drains the queue. An acting request posted on an
+ *    earlier connection waits, though, until this connection's `sessions.subscribe` reply
+ *    shows the daemon still remembers it (below).
  *
  * A resend is safe because of what the daemon does with a request ID (`PhoneAppService.swift`):
  * - **A resend of a request still running** starts nothing, and the running request's one
  *   reply comes to the new connection.
  * - **A resend of an acting request** (`ACTING_METHODS`) that finished gets the reply the
- *   daemon remembered and acts no more. The daemon remembers a reply for 600 s, and after that
- *   a resend would act again: a message typed twice, a second worktree. So an acting request
- *   is resent only within `RESEND_HORIZON_MS` (540 s) of its first send, and is otherwise
- *   rejected with `not_confirmed`.
- * - **A resend of a read** that finished runs again, which is harmless at any age.
+ *   daemon remembered and acts no more. Otherwise a resend would act again: a message typed
+ *   twice, a second worktree. The daemon remembers a reply for 600 s, and only in memory, so
+ *   two things can make it forget:
+ *   - **Time.** An acting request is resent only within `RESEND_HORIZON_MS` (540 s) of its
+ *     first send, and is otherwise rejected with `not_confirmed`.
+ *   - **A daemon restart.** The loader keeps the same frame across one, so the client cannot
+ *     see it directly. It sees the event stream, though: the daemon makes a new stream ID for
+ *     each phone it starts keeping state for (`PhoneEventStream.swift`). So an acting resend
+ *     waits for the subscribe reply, and goes out only when that reply replays the stream or
+ *     names the stream the client already had. A new stream, or no stream known before,
+ *     rejects it with `not_confirmed`. A new stream can also mean only that the daemon's
+ *     120 s grace for an absent phone ran out while it still remembered the request; refusing
+ *     then is the cautious reading.
+ * - **A resend of a read** that finished runs again, which is harmless at any age, so reads
+ *   go out at once.
  * - **An ID reused for another method** is answered `bad_request`. So a resend posts the very
  *   body first posted, and a new request always gets a new ID.
  *
@@ -53,6 +65,12 @@ import type { AppEvent, ErrorCode, Method, ParamsOf, ResultOf, SessionsSubscribe
  * The methods that act on a session or create something. The daemon keeps their replies in its
  * request memory (`PhoneAppService.remembersReplies(of:)`), so a resend of one gets the first
  * run's reply and acts no more, but only while the daemon still remembers it.
+ *
+ * **Never retry a failed action automatically under a new ID.** Several failures can mean the
+ * action happened all the same: `not_confirmed`, `bad_reply`, `internal`, and a `too_large`
+ * that came from the loader (`sendFailed: tooLarge`) rather than from `request`'s own check. A
+ * new ID is a new action to the daemon, so an automatic retry can act twice. Show the error
+ * and leave the choice to the user.
  */
 export const ACTING_METHODS: ReadonlySet<Method> = new Set<Method>([
   'message.send',
@@ -66,7 +84,9 @@ export const ACTING_METHODS: ReadonlySet<Method> = new Set<Method>([
 
 /**
  * The methods that set up or tear down what the laptop sends the phone. They are never resent:
- * after a drop, the caller's `onUp` sends fresh ones for the state it wants now.
+ * after a drop, the caller's `onUp` sends fresh ones for the state it wants now. That includes
+ * a `transcript.close`: one superseded at a channel up is gone, so when no transcript is open,
+ * the transcript actions' `onUp` work (`resumeTranscriptOnUp`) sends a fresh close.
  */
 export const STATE_METHODS: ReadonlySet<Method> = new Set<Method>(['sessions.subscribe', 'transcript.open', 'transcript.close']);
 
@@ -95,7 +115,11 @@ export const NOT_CONFIRMED_TEXT =
  */
 export const SUPERSEDED_TEXT = 'The connection came back, and a fresh request replaces this one.';
 
-/** A request that failed: with a code from the daemon's closed list, or one of the client's own. */
+/**
+ * A request that failed: with a code from the daemon's closed list, or one of the client's own.
+ * For an acting request, `not_confirmed`, `bad_reply`, `internal` and a loader's `too_large`
+ * can each mean the action happened; see `ACTING_METHODS`.
+ */
 export class AppError extends Error {
   readonly code: ErrorCode | LocalErrorCode;
 
@@ -118,15 +142,26 @@ export interface ClientOptions {
   onUp(): void;
   /** The channel to the laptop went down. */
   onDown(): void;
-  /**
-   * The time in milliseconds. Defaults to `Date.now`, wall time, on purpose: the daemon's
-   * request memory lasts 600 s of wall time, and wall time keeps running while iOS suspends the
-   * page. A clock that stopped during a suspension would let the client resend an action the
-   * daemon has already forgotten, and the action would happen twice.
-   */
+  /** The time in milliseconds. Defaults to `elapsedClock()`, which never undercounts. */
   now?: () => number;
   /** A new request ID, unique for good. Defaults to `newRequestID`. */
   newID?: () => string;
+}
+
+/**
+ * A clock, in milliseconds, whose elapsed time is the larger of what wall time and the
+ * monotonic clock say has passed since it was made. The client compares an action's age with
+ * the daemon's 600 s request memory, so the clock must never undercount: an undercount resends
+ * an action the daemon has forgotten, and the action happens twice.
+ * - **Wall time** (`Date.now`) keeps running while iOS suspends the page, when the monotonic
+ *   clock may stop. The daemon's memory runs on in the meantime.
+ * - **The monotonic clock** (`performance.now`) keeps counting when the wall clock is stepped
+ *   backward.
+ */
+export function elapsedClock(): () => number {
+  const wall0 = Date.now();
+  const mono0 = performance.now();
+  return () => wall0 + Math.max(Date.now() - wall0, performance.now() - mono0);
 }
 
 /**
@@ -150,9 +185,12 @@ export function newRequestID(): string {
  * - `posted`: posted on the current channel, holding one of the 32 slots;
  * - `held`: posted before, and owed a repost on the next channel up, because the channel went
  *   down or the loader reported it unsent (`sendFailed: offline`);
- * - `resend`: owed a repost since the latest channel up, waiting for a slot.
+ * - `unconfirmed`: an acting request owed a repost since the latest channel up, waiting for
+ *   that connection's subscribe reply to show the daemon still remembers it;
+ * - `resend`: owed a repost since the latest channel up, waiting for a slot. The list is kept
+ *   in first-send order.
  */
-type Lane = 'queued' | 'first' | 'posted' | 'held' | 'resend';
+type Lane = 'queued' | 'first' | 'posted' | 'held' | 'unconfirmed' | 'resend';
 
 interface Pending {
   readonly id: string;
@@ -166,6 +204,12 @@ interface Pending {
   firstSentAt: number | null;
   /** Its place in first-send order, which reposts keep. */
   sendOrder: number;
+  /** How many times it was posted. */
+  posts: number;
+}
+
+function byFirstSend(a: Pending, b: Pending): number {
+  return a.sendOrder - b.sendOrder;
 }
 
 type Reply = Extract<Envelope, { kind: 'reply' }>;
@@ -192,6 +236,7 @@ export class AppClient {
   readonly #pending = new Map<string, Pending>();
   readonly #posted = new Set<Pending>();
   #first: Pending[] = [];
+  #unconfirmed: Pending[] = [];
   #resends: Pending[] = [];
   #queue: Pending[] = [];
   #held: Pending[] = [];
@@ -201,7 +246,7 @@ export class AppClient {
     this.#onEvent = options.onEvent;
     this.#onUp = options.onUp;
     this.#onDown = options.onDown;
-    this.#now = options.now ?? Date.now;
+    this.#now = options.now ?? elapsedClock();
     this.#newID = options.newID ?? newRequestID;
   }
 
@@ -248,8 +293,9 @@ export class AppClient {
    * - `too_large` at once for a body over one frame, with nothing posted;
    * - `bad_reply` for a reply that does not decode;
    * - `superseded` for a state request still unanswered when the channel comes back up;
-   * - `not_confirmed` for an acting request still unanswered when the channel comes back up
-   *   more than 540 s after its first send.
+   * - `not_confirmed` for an acting request still unanswered when the channel comes back up,
+   *   when it is more than 540 s past its first send or the new connection's subscribe reply
+   *   names a new stream, and for a repost of one that the daemon answers `refused`.
    *
    * It has no timeout: the daemon answers every request it runs. The request goes out at once
    * when the channel is up and fewer than 32 requests are posted and unanswered. Otherwise it
@@ -271,7 +317,7 @@ export class AppClient {
     return new Promise<ResultOf<M>>((resolve, reject) => {
       const lane: Lane = this.#inOnUp ? 'first' : 'queued';
       const pending: Pending = {
-        id, method, body, resolve: resolve as (result: unknown) => void, reject, lane, firstSentAt: null, sendOrder: 0,
+        id, method, body, resolve: resolve as (result: unknown) => void, reject, lane, firstSentAt: null, sendOrder: 0, posts: 0,
       };
       this.#pending.set(id, pending);
       if (lane === 'first') this.#first.push(pending);
@@ -295,16 +341,18 @@ export class AppClient {
       this.#onUp();
     } finally {
       this.#inOnUp = false;
-      const held = this.#held.sort((a, b) => a.sendOrder - b.sendOrder);
+      const reads: Pending[] = [];
+      for (const pending of this.#held) {
+        if (ACTING_METHODS.has(pending.method)) {
+          pending.lane = 'unconfirmed';
+          this.#unconfirmed.push(pending);
+        } else {
+          reads.push(pending);
+        }
+      }
       this.#held = [];
-      for (const pending of held) {
-        pending.lane = 'resend';
-        this.#resends.push(pending);
-      }
-      // Told at once rather than when a slot frees; `#pump` checks again before each repost.
-      for (const pending of [...this.#resends]) {
-        if (this.#tooOldToResend(pending)) this.#fail(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
-      }
+      this.#addResends(reads);
+      this.#rejectTooOld([...this.#unconfirmed, ...this.#resends]);
       this.#pump();
     }
   }
@@ -315,8 +363,12 @@ export class AppClient {
     this.#up = false;
     for (const pending of this.#posted) this.#hold(pending);
     this.#posted.clear();
+    // A released resend still waiting for a slot is held again, so the next connection's
+    // subscribe reply must confirm it afresh.
     for (const pending of this.#resends) this.#hold(pending);
     this.#resends = [];
+    for (const pending of this.#unconfirmed) this.#hold(pending);
+    this.#unconfirmed = [];
     // `onUp` requests never posted are queued requests now, still ahead of the rest.
     for (const pending of this.#first) pending.lane = 'queued';
     this.#queue = [...this.#first, ...this.#queue];
@@ -347,6 +399,25 @@ export class AppClient {
   #hold(pending: Pending): void {
     pending.lane = 'held';
     this.#held.push(pending);
+  }
+
+  /**
+   * Adds reposts to the resend lane, kept in first-send order: the lanes they come from do not
+   * keep it, since a request first sent on one connection can be held after one sent earlier.
+   */
+  #addResends(list: Pending[]): void {
+    for (const pending of list) pending.lane = 'resend';
+    this.#resends = [...this.#resends, ...list].sort(byFirstSend);
+  }
+
+  /**
+   * Rejects each of `list` that is too old to resend, at once rather than when a slot frees.
+   * `#pump` checks again before each repost.
+   */
+  #rejectTooOld(list: Pending[]): void {
+    for (const pending of list) {
+      if (this.#tooOldToResend(pending)) this.#fail(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
+    }
   }
 
   // MARK: - Sending
@@ -384,6 +455,7 @@ export class AppClient {
       pending.firstSentAt = this.#now();
       pending.sendOrder = ++this.#sends;
     }
+    pending.posts++;
     pending.lane = 'posted';
     this.#posted.add(pending);
     this.#post(pending.body);
@@ -404,6 +476,9 @@ export class AppClient {
         break;
       case 'held':
         this.#held = this.#held.filter((p) => p !== pending);
+        break;
+      case 'unconfirmed':
+        this.#unconfirmed = this.#unconfirmed.filter((p) => p !== pending);
         break;
       case 'resend':
         this.#resends = this.#resends.filter((p) => p !== pending);
@@ -445,10 +520,17 @@ export class AppClient {
     const pending = this.#sentRequest(reply.requestID);
     if (pending === undefined) return;
     if (reply.error !== undefined) {
-      // A code outside the closed list is a reply this build cannot fully read. Its message
-      // is the daemon's own words for the phone, so it is kept.
       const { code, message } = reply.error;
-      this.#fail(pending, isErrorCode(code) ? code : 'bad_reply', message);
+      if (code === 'refused' && ACTING_METHODS.has(pending.method) && pending.posts > 1) {
+        // The daemon checks its cap on running requests before its request memory, so a
+        // repost of an action that already ran can be refused as "too many in progress".
+        // Shown as is, it invites the user to try again under a new ID, which would act twice.
+        this.#fail(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
+      } else {
+        // A code outside the closed list is a reply this build cannot fully read. Its message
+        // is the daemon's own words for the phone, so it is kept.
+        this.#fail(pending, isErrorCode(code) ? code : 'bad_reply', message);
+      }
       this.#pump();
       return;
     }
@@ -470,13 +552,27 @@ export class AppClient {
   /**
    * A subscribe reply that decoded. A snapshot starts the numbering at its `seq`; a replay
    * keeps it, because the events it replays follow with `seq` at or below its own.
+   *
+   * It also settles the acting reposts waiting for it. A replay, or a snapshot of the stream
+   * the client already had, shows the daemon is the one that numbered that stream, so it still
+   * remembers their IDs: they go out, still held to the horizon. Any other stream may come from
+   * a daemon that restarted and forgot them, so each is rejected `not_confirmed`.
    */
   #subscribed(result: SessionsSubscribeResult): void {
+    const before = this.#stream;
     if (!result.replayed) {
       this.#stream = result.stream;
       this.#lastSeq = result.seq;
     }
     this.#awaitingSubscribe = false;
+    const waiting = this.#unconfirmed;
+    if (result.replayed || (before !== null && result.stream === before)) {
+      this.#unconfirmed = [];
+      this.#addResends(waiting);
+      this.#rejectTooOld(waiting);
+    } else {
+      for (const pending of [...waiting]) this.#fail(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
+    }
   }
 
   /**

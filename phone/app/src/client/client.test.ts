@@ -111,6 +111,17 @@ function last(h: Harness, method: Method): Body | undefined {
   return h.posted.filter((b) => b.method === method).at(-1);
 }
 
+/** Brings the channel up and answers `onUp`'s subscribe with a snapshot of stream `s1`. */
+function connect(h: Harness): void {
+  h.up();
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
+}
+
+/** Answers the latest subscribe with a replay of the client's stream, which releases held actions. */
+function confirm(h: Harness): void {
+  h.reply(last(h, 'sessions.subscribe'), replay(h.c.stream ?? 's1', h.c.lastSeq ?? 0));
+}
+
 /** How many times a body with `requestID` was posted. */
 function sends(h: Harness, requestID: string): number {
   return h.posted.filter((b) => b.requestID === requestID).length;
@@ -419,14 +430,17 @@ test("the acting methods are the ones the daemon's request memory keeps", () => 
 
 test('channel up posts what onUp asks for before any resend', () => {
   const h = harness({ whenUp: subscribe });
-  h.up();
-  h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
+  connect(h);
+  track(h.c.request('profiles.list', {}));
   track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const readID = last(h, 'profiles.list')!.requestID;
   const firstSendID = last(h, 'message.send')!.requestID;
   h.down();
   h.up();
   assert.equal(h.posted.at(-2)!.method, 'sessions.subscribe');
   assert.deepEqual(h.posted.at(-2)!.params, { stream: 's1', sinceSeq: 0 });
+  assert.equal(h.posted.at(-1)!.requestID, readID);
+  confirm(h);
   assert.equal(h.posted.at(-1)!.requestID, firstSendID);
 });
 
@@ -448,19 +462,23 @@ test("onUp's requests go out in the order it makes them, then reposts in first-s
   const mark = h.posted.length;
   h.up();
   assert.deepEqual(h.posted.slice(mark).map((b) => b.method),
-    ['sessions.subscribe', 'transcript.open', 'profiles.list', 'message.send', 'remote.providers']);
+    ['sessions.subscribe', 'transcript.open', 'profiles.list', 'remote.providers']);
   assert.equal(h.posted[mark + 2], read);
-  assert.equal(h.posted[mark + 3], act);
+  // The action waits for the subscribe reply.
+  confirm(h);
+  assert.equal(h.posted.at(-1), act);
 });
 
 test('an acting request is resent with its own requestID', async () => {
   const h = harness({ whenUp: subscribe });
-  h.up();
+  connect(h);
   const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
   const first = last(h, 'message.send')!;
   h.down();
   h.clock.now = 300_000;
   h.up();
+  assert.equal(sends(h, first.requestID), 1);
+  confirm(h);
   const resent = last(h, 'message.send')!;
   assert.equal(resent.requestID, first.requestID);
   assert.equal(sends(h, first.requestID), 2);
@@ -484,38 +502,44 @@ test('an acting request first sent over 540 s ago is not resent', async () => {
 });
 
 test('an acting request at exactly 540,000 ms is resent, and at 540,001 it is not', async () => {
-  const h = harness();
-  h.up();
+  const h = harness({ whenUp: subscribe });
+  connect(h);
   h.clock.now = 0;
   const older = track(h.c.request('prompt.answer', { session: REF, promptID: 'p1', answer: { kind: 'permission', decision: 'allow' } }));
+  const olderID = last(h, 'prompt.answer')!.requestID;
   h.clock.now = 1;
   const newer = track(h.c.request('prompt.answer', { session: REF, promptID: 'p2', answer: { kind: 'permission', decision: 'deny' } }));
+  const newerID = last(h, 'prompt.answer')!.requestID;
   h.down();
   h.clock.now = 540_001;
   h.up();
+  confirm(h);
   await flush();
   assert.equal(older.state, 'rejected');
   assert.equal((older.error as AppError).code, 'not_confirmed');
   assert.equal(newer.state, 'pending');
-  assert.equal(sends(h, 'r1'), 1);
-  assert.equal(sends(h, 'r2'), 2);
+  assert.equal(sends(h, olderID), 1);
+  assert.equal(sends(h, newerID), 2);
 });
 
 test('the horizon counts from the first send, not from the latest resend', async () => {
-  const h = harness();
-  h.up();
+  const h = harness({ whenUp: subscribe });
+  connect(h);
   const p = track(h.c.request('session.setModel', { session: REF, model: 'opus' }));
+  const id = last(h, 'session.setModel')!.requestID;
   h.down();
   h.clock.now = 300_000;
   h.up();
-  assert.equal(sends(h, 'r1'), 2);
+  confirm(h);
+  assert.equal(sends(h, id), 2);
   h.down();
   h.clock.now = 540_001;
   h.up();
+  confirm(h);
   await flush();
   assert.equal(p.state, 'rejected');
   assert.equal((p.error as AppError).code, 'not_confirmed');
-  assert.equal(sends(h, 'r1'), 2);
+  assert.equal(sends(h, id), 2);
 });
 
 test('every acting method is held to the horizon, and no read or queued request is', async () => {
@@ -563,14 +587,16 @@ test('a read is resent after any delay', () => {
 });
 
 test('a queued request that was never posted is posted on up whatever its age', async () => {
-  const h = harness();
+  const h = harness({ whenUp: subscribe });
   const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
   h.clock.now = 3_600_000;
-  h.up();
+  h.up();   // a request never sent waits for no subscribe reply
   assert.equal(sends(h, 'r1'), 1);
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
   h.down();
   h.clock.now += 540_000;   // 540 s after its first send, not after it was made
   h.up();
+  confirm(h);
   assert.equal(sends(h, 'r1'), 2);
   h.reply(last(h, 'message.send'), { outcome: 'sent' });
   await flush();
@@ -662,11 +688,13 @@ test('an event between channel up and the subscribe reply is dropped', () => {
   h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 10));
   h.down();
   h.up();
-  event(h, 11);
+  h.app({ kind: 'event', event: 'sessions.changed', seq: 11, data: { rows: [], removedRowIDs: ['stale'] } });
   h.reply(last(h, 'sessions.subscribe'), replay('s1', 12));
-  event(h, 11);
+  h.app({ kind: 'event', event: 'sessions.changed', seq: 11, data: { rows: [], removedRowIDs: ['replayed'] } });
   event(h, 12);
-  assert.deepEqual(h.events.map((e) => e.seq), [11, 12]);   // the 11 before the reply is not delivered
+  assert.deepEqual(h.events.map((e) => e.seq), [11, 12]);
+  // The 11 before the reply is not delivered; the replayed 11 is.
+  assert.deepEqual(h.events[0], { event: 'sessions.changed', seq: 11, data: { rows: [], removedRowIDs: ['replayed'] } });
 });
 
 test('an event whose data does not decode takes its seq and is not handed on', () => {
@@ -789,24 +817,26 @@ test('channel up twice in a row resends nothing twice', () => {
   h.down();
   h.up();
   h.up();
+  confirm(h);
   assert.equal(sends(h, id), 2);
   assert.equal(h.posted.filter((b) => b.method === 'sessions.subscribe').length, 2);
   assert.deepEqual(h.calls, ['up', 'down', 'up']);
 });
 
 test('sendFailed offline resends on the next up', async () => {
-  const h = harness();
-  h.up();
+  const h = harness({ whenUp: subscribe });
+  connect(h);   // r1 is the subscribe
   const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
   h.c.handle({ t: 'sendFailed', reason: 'offline' });
   // Not on this channel, even when something else is posted.
   track(h.c.request('profiles.list', {}));
-  assert.deepEqual(h.posted.map((b) => b.requestID), ['r1', 'r2']);
+  assert.deepEqual(h.posted.map((b) => b.requestID), ['r1', 'r2', 'r3']);
   h.down();
   h.up();
-  assert.deepEqual(h.posted.map((b) => b.requestID), ['r1', 'r2', 'r1', 'r2']);
-  assert.equal(h.posted[2], h.posted[0]);
-  h.reply(h.posted[2], { outcome: 'sent' });
+  confirm(h);
+  assert.deepEqual(h.posted.map((b) => b.requestID), ['r1', 'r2', 'r3', 'r4', 'r3', 'r2']);
+  assert.equal(h.posted[5], h.posted[1]);
+  h.reply(h.posted[5], { outcome: 'sent' });
   await flush();
   assert.equal(p.state, 'resolved');
 });
@@ -835,8 +865,10 @@ test('a resend repeats the request ID, method and params exactly', () => {
   const json = JSON.stringify(first);
   h.down();
   h.up();
+  confirm(h);
   h.down();
   h.up();
+  confirm(h);
   const resent = h.posted.filter((b) => b.requestID === first.requestID);
   assert.deepEqual(resent, [first, first, first]);
   for (const body of resent) assert.equal(body, first);
@@ -845,12 +877,13 @@ test('a resend repeats the request ID, method and params exactly', () => {
 
 test('an unanswered request survives any number of drops and takes its one reply', async () => {
   const h = harness({ whenUp: subscribe });
-  h.up();
+  connect(h);
   const p = track(h.c.request('worktree.create', { repoID: 'R1', message: 'Fix the login loop.' }));
   for (let i = 0; i < 5; i++) {
     h.clock.now += 60_000;
     h.down();
     h.up();
+    confirm(h);
   }
   assert.equal(sends(h, last(h, 'worktree.create')!.requestID), 6);
   h.reply(last(h, 'worktree.create'), { worktreeID: 'W1', session: REF });
@@ -868,4 +901,243 @@ test('reposts still go out when onUp throws', () => {
   fail = true;
   assert.throws(() => h.up(), /onUp failed/);
   assert.equal(sends(h, 'r1'), 2);
+});
+
+// MARK: - Actions wait until the laptop shows it still remembers them
+
+test('a daemon restart (a snapshot of a new stream) rejects a held action, which is posted only once', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const id = last(h, 'message.send')!.requestID;
+  h.down();
+  h.up();
+  assert.equal(sends(h, id), 1);
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s2', 0));
+  await flush();
+  assert.equal(p.state, 'rejected');
+  assert.equal((p.error as AppError).code, 'not_confirmed');
+  assert.equal((p.error as AppError).message, NOT_CONFIRMED_TEXT);
+  assert.equal(h.c.stream, 's2');
+  h.down();
+  h.up();
+  confirm(h);
+  assert.equal(sends(h, id), 1);
+});
+
+test('a replaying subscribe releases a held action', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const p = track(h.c.request('worktree.create', { repoID: 'R1', message: 'Fix the login loop.' }));
+  const id = last(h, 'worktree.create')!.requestID;
+  h.down();
+  h.up();
+  h.reply(last(h, 'sessions.subscribe'), replay('s1', 4));
+  assert.equal(sends(h, id), 2);
+  h.reply(last(h, 'worktree.create'), { worktreeID: 'W1' });
+  await flush();
+  assert.equal(p.state, 'resolved');
+});
+
+test('a snapshot of the same stream releases a held action', () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  track(h.c.request('session.fork', { session: REF }));
+  const id = last(h, 'session.fork')!.requestID;
+  h.down();
+  h.up();
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 9));
+  assert.equal(sends(h, id), 2);
+});
+
+test('with no stream known before, a snapshot rejects a held action', async () => {
+  const h = harness({ whenUp: subscribe });
+  h.up();   // the first subscribe is never answered
+  const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const id = last(h, 'message.send')!.requestID;
+  h.down();
+  h.up();
+  assert.equal(h.c.stream, null);
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
+  await flush();
+  assert.equal(p.state, 'rejected');
+  assert.equal((p.error as AppError).code, 'not_confirmed');
+  assert.equal(sends(h, id), 1);
+});
+
+test('a subscribe that fails keeps a held action held, across drops, until a good reply releases it', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const id = last(h, 'message.send')!.requestID;
+  h.down();
+  h.up();
+  h.fail(last(h, 'sessions.subscribe'), 'internal', 'The sessions list changed while it was read. Try again.');
+  h.down();
+  h.clock.now = 200_000;
+  h.up();
+  h.reply(last(h, 'sessions.subscribe'), { stream: 's1', seq: -0.5, replayed: true, omittedRows: 0, more: false });
+  await flush();
+  assert.equal(p.state, 'pending');
+  assert.equal(sends(h, id), 1);
+  // Try again, on the same connection.
+  track(h.c.request('sessions.subscribe', { stream: 's1', sinceSeq: 0 }));
+  confirm(h);
+  assert.equal(sends(h, id), 2);
+});
+
+test('reads and requests never sent are not held, and a new stream leaves them alone', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const read = track(h.c.request('profiles.list', {}));
+  const act = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const readID = last(h, 'profiles.list')!.requestID;
+  h.down();
+  const fresh = track(h.c.request('message.send', { session: REF, text: 'Written while offline.' }));
+  const mark = h.posted.length;
+  h.up();
+  assert.deepEqual(h.posted.slice(mark).map((b) => [b.method, b.params.text]),
+    [['sessions.subscribe', undefined], ['profiles.list', undefined], ['message.send', 'Written while offline.']]);
+  assert.equal(h.posted[mark + 1]!.requestID, readID);
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s2', 0));
+  await flush();
+  assert.equal(act.state, 'rejected');
+  assert.equal(read.state, 'pending');
+  assert.equal(fresh.state, 'pending');
+});
+
+test('the horizon still applies when a held action is released', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  h.clock.now = 0;
+  const p = track(h.c.request('remote.create', { provider: 'acme-cloud', repoID: 'R1', message: 'hi', strings: {}, bools: {} }));
+  const id = last(h, 'remote.create')!.requestID;
+  h.down();
+  h.clock.now = 500_000;
+  h.up();
+  h.clock.now = 540_001;
+  confirm(h);
+  await flush();
+  assert.equal(p.state, 'rejected');
+  assert.equal((p.error as AppError).code, 'not_confirmed');
+  assert.equal(sends(h, id), 1);
+});
+
+test('a reply that reaches a held action before the subscribe reply settles it', async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+  const first = last(h, 'message.send')!;
+  h.down();
+  h.up();
+  h.reply(first, { outcome: 'sent' });   // the first run's reply, sent to the new connection
+  confirm(h);
+  await flush();
+  assert.equal(p.state, 'resolved');
+  assert.equal(sends(h, first.requestID), 1);
+});
+
+test('a released action still waiting for a slot at a drop waits for the next subscribe reply again', async () => {
+  const h = harness({
+    whenUp: (c) => {
+      subscribe(c);
+      if (c.lastSeq !== null) track(c.request('transcript.open', { session: REF, showDetails: false, resume: true }));
+    },
+  });
+  connect(h);
+  const acts = [
+    track(h.c.request('message.send', { session: REF, text: 'one' })),
+    track(h.c.request('message.send', { session: REF, text: 'two' })),
+  ];
+  const ids = h.posted.filter((b) => b.method === 'message.send').map((b) => b.requestID);
+  for (let i = 0; i < 30; i++) track(h.c.request('profiles.list', {}));
+  h.down();
+  h.up();   // the subscribe, the open and 30 reads fill every slot
+  confirm(h);   // one slot frees: the first action goes, the second waits
+  assert.deepEqual(ids.map((id) => sends(h, id)), [2, 1]);
+  h.down();
+  h.up();
+  assert.deepEqual(ids.map((id) => sends(h, id)), [2, 1]);
+  h.reply(last(h, 'sessions.subscribe'), snapshot('s2', 0));
+  await flush();
+  assert.deepEqual(acts.map((a) => (a.error as AppError | undefined)?.code), ['not_confirmed', 'not_confirmed']);
+  assert.deepEqual(ids.map((id) => sends(h, id)), [2, 1]);
+});
+
+test('reposts go out in first-send order across two drops with more than 32 unanswered', () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  track(h.c.request('message.send', { session: REF, text: 'first action' }));
+  for (let i = 0; i < 31; i++) track(h.c.request('profiles.list', {}));
+  track(h.c.request('message.send', { session: REF, text: 'second action' }));
+  track(h.c.request('remote.providers', {}));
+  const reads = h.posted.filter((b) => b.method === 'profiles.list');
+  assert.equal(h.posted.length, 33);   // the first subscribe, then 32: the second action and a read wait
+  h.down();
+  let mark = h.posted.length;
+  h.up();   // the subscribe and 31 reads; the first action is held
+  assert.deepEqual(h.posted.slice(mark + 1), reads);
+  h.reply(reads[0], PROFILES);   // the second action takes the slot: its first send
+  assert.equal(h.posted.at(-1)!.params.text, 'second action');
+  h.down();
+  mark = h.posted.length;
+  h.up();   // the subscribe, 30 reads, and the queued read; both actions are held
+  assert.deepEqual(h.posted.slice(mark + 1, mark + 31), reads.slice(1));
+  assert.equal(h.posted.at(-1)!.method, 'remote.providers');
+  mark = h.posted.length;
+  confirm(h);
+  h.reply(reads[1], PROFILES);
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.params.text), ['first action', 'second action']);
+});
+
+// MARK: - The refused stopgap and the clock
+
+test("a refused reply to a repost of an action reads as not_confirmed", async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const p = h.c.request('message.send', { session: REF, text: 'hi' });
+  h.down();
+  h.up();
+  confirm(h);
+  h.fail(last(h, 'message.send'), 'refused', 'Too many requests are in progress. Try again in a moment.');
+  await assert.rejects(p, { code: 'not_confirmed', message: NOT_CONFIRMED_TEXT });
+});
+
+test("a refused reply to an action posted once, or to a reposted read, keeps the daemon's words", async () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  const act = h.c.request('message.send', { session: REF, text: 'hi' });
+  h.fail(last(h, 'message.send'), 'refused', 'This session has exited.');
+  await assert.rejects(act, { code: 'refused', message: 'This session has exited.' });
+  const read = h.c.request('profiles.list', {});
+  h.down();
+  h.up();
+  h.fail(last(h, 'profiles.list'), 'refused', 'Too many requests are in progress. Try again in a moment.');
+  await assert.rejects(read, { code: 'refused', message: 'Too many requests are in progress. Try again in a moment.' });
+});
+
+test('the default clock counts wall time through a suspension, and monotonic time through a step back', async (t) => {
+  let wall = 1_762_500_000_000;
+  let mono = 5_000;
+  t.mock.method(Date, 'now', () => wall);
+  t.mock.method(performance, 'now', () => mono);
+  /** Sends an action, drops the channel, moves the clocks, and reconnects. */
+  const run = async (move: () => void) => {
+    const h = harness({ now: undefined, whenUp: subscribe });
+    connect(h);
+    const p = track(h.c.request('message.send', { session: REF, text: 'hi' }));
+    const id = last(h, 'message.send')!.requestID;
+    h.down();
+    move();
+    h.up();
+    confirm(h);
+    await flush();
+    return { state: p.state, sends: sends(h, id) };
+  };
+  // Suspended: the monotonic clock stopped while 540,001 ms of wall time passed.
+  assert.deepEqual(await run(() => { wall += 540_001; }), { state: 'rejected', sends: 1 });
+  // The wall clock stepped back an hour while 540,001 ms passed.
+  assert.deepEqual(await run(() => { wall -= 3_600_000; mono += 540_001; }), { state: 'rejected', sends: 1 });
+  // Both say 540,000 ms passed: still within the horizon.
+  assert.deepEqual(await run(() => { wall += 540_000; mono += 540_000; }), { state: 'pending', sends: 2 });
 });
