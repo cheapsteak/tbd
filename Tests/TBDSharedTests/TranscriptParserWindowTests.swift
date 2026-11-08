@@ -403,6 +403,30 @@ struct TranscriptParserWindowTests {
         #expect(pastTheCall == nil, "a scan that starts after the call cannot find it")
     }
 
+    @Test func aBoundedLookupReadsNoFurtherThanItsLimit() throws {
+        let fixture = try WindowFixture(WindowLine.conversation(messages: 10))
+        defer { fixture.remove() }
+        let p = fixture.path
+        let r9 = try #require(fixture.uuids.firstIndex(of: "r9"))
+        let r9Start = fixture.offsets[r9]
+        let r9End = fixture.offsets[r9 + 1]
+        let halfway = r9Start + (r9End - r9Start) / 2
+
+        let throughTheLine = TranscriptParser.lookupDetail(
+            filePath: p, itemID: "toolu_9", startingAt: 0, scanLimit: r9End).text
+        let fromTheLine = TranscriptParser.lookupDetail(
+            filePath: p, itemID: "toolu_9", startingAt: r9Start, scanLimit: r9End - r9Start).text
+        let cutInsideTheLine = TranscriptParser.lookupDetail(
+            filePath: p, itemID: "toolu_9", startingAt: 0, scanLimit: halfway).text
+        let endingBeforeTheLine = TranscriptParser.lookupDetail(
+            filePath: p, itemID: "toolu_9", startingAt: 0, scanLimit: r9Start).text
+
+        #expect(throughTheLine == "output 9")
+        #expect(fromTheLine == "output 9")
+        #expect(cutInsideTheLine == nil, "a line the limit cuts short cannot match")
+        #expect(endingBeforeTheLine == nil, "a scan that ends before the line cannot find it")
+    }
+
     @Test func aPositionalIDResolvesItsLineInFull() throws {
         // Two long lines with no `uuid`: a reply, whose item ID carries a
         // block suffix, and a prompt, whose item ID is the bare line ID.

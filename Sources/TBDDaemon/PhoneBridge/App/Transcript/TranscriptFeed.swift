@@ -123,7 +123,11 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 /// - **page subagent IDs** – `liveFactLimit` subagent IDs from the pages read,
 ///   so `transcript.detail` can find a page row's subagent;
 /// - **subagent counts** – `SubagentCountCache.limit` counts, each read once
-///   per agent and read again once the agent's result arrives.
+///   per agent and read again once the agent's result arrives;
+/// - **details** – `detailCacheLimit` details read for `transcript.detail` in
+///   the current generation, the one used longest ago dropped first. Each is
+///   at most one `detailLimitBytes` text or one subagent read bounded by
+///   `subagentCountLimit`, so they hold a few megabytes at most.
 ///
 /// The live `IncrementalTranscript` holds the items appended since it
 /// started, which it needs to patch late results. It starts over on every
@@ -140,6 +144,9 @@ actor TranscriptFeed {
     static let liveFactLimit = 1_024
     /// The most items the live transcript holds before it starts over.
     static let liveItemLimit = 2_000
+    /// The most details `cachedDetail` keeps, so a phone moving between a
+    /// few large details reads each file once.
+    static let detailCacheLimit = 4
 
     static let rewriteReason = "rewrite"
     static let rolloverReason = "rollover"
@@ -180,7 +187,9 @@ actor TranscriptFeed {
     private var liveAgentIDs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
     private var pageAgentIDs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
     private let subagentCounts = SubagentCountCache()
-    private var lastDetail: CachedDetail?
+    /// The details kept for `transcript.detail`, the one used most recently
+    /// last.
+    private var recentDetails: [CachedDetail] = []
 
     private var wakeups: AsyncStream<Void>.Continuation?
     private var worker: Task<Void, Never>?
@@ -218,7 +227,7 @@ actor TranscriptFeed {
         var earlierEnded = false
     }
 
-    /// The last detail the phone was sent, for the generation it was read in.
+    /// A detail the phone was sent, for the generation it was read in.
     private struct CachedDetail: Sendable {
         let generation: Int
         let itemID: String
@@ -287,7 +296,7 @@ actor TranscriptFeed {
     /// more.
     func close() {
         closed = true
-        lastDetail = nil
+        recentDetails.removeAll()
         wakeups?.finish()
         wakeups = nil
         worker?.cancel()
@@ -554,7 +563,7 @@ actor TranscriptFeed {
         liveAgentIDs.removeAll()
         pageAgentIDs.removeAll()
         subagentCounts.removeAll()
-        lastDetail = nil
+        recentDetails.removeAll()
         guard let path,
               let build = TranscriptPager.firstPage(
                 filePath: path, generation: generation,
@@ -867,20 +876,31 @@ actor TranscriptFeed {
             agentID: liveAgentIDs[itemID] ?? pageAgentIDs[itemID], generation: generation)
     }
 
-    /// The detail last cached for `itemID`'s `part` in this generation, as
-    /// `Value`, or nil.
+    /// The detail kept for `itemID`'s `part` in this generation, as `Value`,
+    /// or nil. A hit makes it the detail used most recently.
     func cachedDetail<Value: Sendable>(itemID: String, part: TranscriptDetailPart, as type: Value.Type) -> Value? {
-        guard let lastDetail, lastDetail.generation == generation,
-              lastDetail.itemID == itemID, lastDetail.part == part else { return nil }
-        return lastDetail.value as? Value
+        guard let index = recentDetails.lastIndex(where: { detail in
+            detail.generation == generation && detail.itemID == itemID && detail.part == part
+        }) else { return nil }
+        let detail = recentDetails.remove(at: index)
+        recentDetails.append(detail)
+        return detail.value as? Value
     }
 
     /// Keeps `value`, read in `generation`, as the detail of `itemID`'s
-    /// `part`, in place of the one kept before. Keeps nothing once the feed
-    /// is closed or has moved to another generation.
+    /// `part`, in place of any kept for it before, and drops the detail used
+    /// longest ago past `detailCacheLimit`, and any from another generation.
+    /// Keeps nothing once the feed is closed or has moved to another
+    /// generation.
     func cacheDetail<Value: Sendable>(_ value: Value, itemID: String, part: TranscriptDetailPart, generation: Int) {
         guard !closed, generation == self.generation else { return }
-        lastDetail = CachedDetail(generation: generation, itemID: itemID, part: part, value: value)
+        recentDetails.removeAll { detail in
+            detail.generation != generation || (detail.itemID == itemID && detail.part == part)
+        }
+        recentDetails.append(CachedDetail(generation: generation, itemID: itemID, part: part, value: value))
+        if recentDetails.count > Self.detailCacheLimit {
+            recentDetails.removeFirst(recentDetails.count - Self.detailCacheLimit)
+        }
     }
 
     // MARK: - Frames

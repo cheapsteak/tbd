@@ -194,9 +194,10 @@ struct TranscriptDetailTests {
 
     // MARK: - The feed's cache
 
-    /// The feed keeps one detail, for the generation it was read in, and
-    /// drops it when it closes.
-    @Test func theFeedKeepsOneDetailForItsGenerationUntilItCloses() async throws {
+    /// The feed keeps the last few details, for the generation they were read
+    /// in, drops the one used longest ago past its limit, and drops them all
+    /// when it closes.
+    @Test func theFeedKeepsTheLastFewDetailsForItsGenerationUntilItCloses() async throws {
         let fixture = try DetailFixture(DetailLine.conversation(messages: 1))
         defer { fixture.remove() }
         let path = fixture.path
@@ -213,19 +214,33 @@ struct TranscriptDetailTests {
         #expect(place.agentID == nil)
         #expect(place.generation == 0)
 
+        #expect(TranscriptFeed.detailCacheLimit == 4)
         await feed.cacheDetail("first", itemID: "m1", part: .text, generation: 0)
         await feed.cacheDetail("second", itemID: "toolu_1", part: .result, generation: 0)
         let first = await feed.cachedDetail(itemID: "m1", part: .text, as: String.self)
         let second = await feed.cachedDetail(itemID: "toolu_1", part: .result, as: String.self)
         let otherPart = await feed.cachedDetail(itemID: "toolu_1", part: .input, as: String.self)
         let otherType = await feed.cachedDetail(itemID: "toolu_1", part: .result, as: Int.self)
-        #expect(first == nil, "the feed keeps one detail")
+        #expect(first == "first", "the feed keeps more than one detail")
         #expect(second == "second")
         #expect(otherPart == nil)
         #expect(otherType == nil)
 
-        await feed.cacheDetail("stale", itemID: "m1", part: .text, generation: 1)
-        let stale = await feed.cachedDetail(itemID: "m1", part: .text, as: String.self)
+        // `m1` was used just now, so filling the cache past its limit drops
+        // `toolu_1`, the one used longest ago, and keeps `m1`. `otherType`
+        // read `toolu_1` last, so read `m1` again to make it the newest.
+        _ = await feed.cachedDetail(itemID: "m1", part: .text, as: String.self)
+        for index in 2...4 {
+            await feed.cacheDetail("fill \(index)", itemID: "m\(index)", part: .text, generation: 0)
+        }
+        let dropped = await feed.cachedDetail(itemID: "toolu_1", part: .result, as: String.self)
+        let kept = await feed.cachedDetail(itemID: "m1", part: .text, as: String.self)
+        #expect(dropped == nil, "the detail used longest ago goes first")
+        #expect(kept == "first")
+        await feed.cacheDetail("second", itemID: "toolu_1", part: .result, generation: 0)
+
+        await feed.cacheDetail("stale", itemID: "m9", part: .text, generation: 1)
+        let stale = await feed.cachedDetail(itemID: "m9", part: .text, as: String.self)
         let stillKept = await feed.cachedDetail(itemID: "toolu_1", part: .result, as: String.self)
         #expect(stale == nil, "a detail read in another generation is not kept")
         #expect(stillKept == "second")
@@ -329,6 +344,40 @@ struct TranscriptDetailTests {
         #expect(kept >= size, "the kept offset must lie past every line")
         #expect(reply.result?.text == "output 1")
         await h.service.phoneRevoked(deviceID: h.peer.deviceID)
+    }
+
+    /// With the file larger than the scan limit, a lookup reads forward from
+    /// the item's offset, or else the file's last `scanLimit` bytes, and finds
+    /// nothing before that window once the offset is gone.
+    @Test func aLookupReadsOnlyFromTheOffsetAndTheFilesTail() throws {
+        let fixture = try DetailFixture(DetailLine.conversation(messages: 10))
+        defer { fixture.remove() }
+        let path = fixture.path
+        let size = try fixture.size()
+        let m10 = try #require(fixture.offset(ofUUID: "m10"))
+        let a2 = try #require(fixture.offset(ofUUID: "a2"))
+        let m3 = try #require(fixture.offset(ofUUID: "m3"))
+        // The tail window holds `m10`, `a10` and `r10`, and a scan from `a2`
+        // reads `a2` and `r2` whole before it stops.
+        let scanLimit = size - m10
+
+        let recent = TranscriptDetailReader.text(
+            itemID: "toolu_10", part: .result, filePath: path, lineOffset: nil, scanLimit: scanLimit)
+        let early = TranscriptDetailReader.text(
+            itemID: "toolu_2", part: .result, filePath: path, lineOffset: nil, scanLimit: scanLimit)
+        let earlyFromItsOffset = TranscriptDetailReader.text(
+            itemID: "toolu_2", part: .result, filePath: path, lineOffset: a2, scanLimit: scanLimit)
+        let earlyInput = TranscriptDetailReader.text(
+            itemID: "toolu_2", part: .input, filePath: path, lineOffset: a2, scanLimit: scanLimit)
+        let recentPastAWrongOffset = TranscriptDetailReader.text(
+            itemID: "toolu_10", part: .result, filePath: path, lineOffset: a2, scanLimit: scanLimit)
+
+        #expect(m3 - a2 <= scanLimit, "the scan from a2 must reach past r2")
+        #expect(recent == "output 10")
+        #expect(early == nil, "an item before the tail window, with no offset, is not found")
+        #expect(earlyFromItsOffset == "output 2")
+        #expect(earlyInput == #"{"command":"echo 2"}"#)
+        #expect(recentPastAWrongOffset == "output 10", "a miss from the offset looks in the tail")
     }
 
     /// A result larger than one chunk arrives in chunks that rejoin to it and

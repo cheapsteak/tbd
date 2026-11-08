@@ -453,12 +453,14 @@ extension PhoneAppService {
     /// - **Text parts** come from `TranscriptDetailReader.text`, starting at
     ///   the item's line, and are split by `TranscriptDetailChunker.chunk`.
     ///   Over `detailLimitBytes`, only the first chunk is served and
-    ///   `tooLarge` is set.
+    ///   `tooLarge` is set. The lookup reads a bounded part of the file
+    ///   (see there).
     /// - **`subagent`** reads the transcript of the agent the feed recorded
     ///   for the row (`TranscriptDetailReader.subagent`) and serves its items
     ///   in runs of whole items.
-    /// - **Later chunks come from the feed's cache** of the last item and part
-    ///   read in the current generation, so they read no file.
+    /// - **Both reads run off the cooperative pool** (`readOffThePool(_:)`).
+    /// - **Later chunks come from the feed's cache** of the last few items and
+    ///   parts read in the current generation, so they read no file.
     /// - A detail the transcript does not hold is `not_found`.
     ///
     /// A pure read: its replies are not remembered and it records nothing.
@@ -504,9 +506,14 @@ extension PhoneAppService {
         if let cached = await feed.cachedDetail(itemID: itemID, part: part, as: DetailChunks.self) {
             return cached
         }
-        guard let place = await feed.detailContext(itemID: itemID),
-              let text = TranscriptDetailReader.text(
-                itemID: itemID, part: part, filePath: place.filePath, lineOffset: place.lineOffset) else {
+        guard let place = await feed.detailContext(itemID: itemID) else {
+            throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
+        }
+        let text = await Self.readOffThePool {
+            TranscriptDetailReader.text(
+                itemID: itemID, part: part, filePath: place.filePath, lineOffset: place.lineOffset)
+        }
+        guard let text else {
             throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
         }
         try Task.checkCancellation()
@@ -522,14 +529,35 @@ extension PhoneAppService {
         if let cached = await feed.cachedDetail(itemID: itemID, part: .subagent, as: SubagentDetailChunks.self) {
             return cached
         }
-        guard let place = await feed.detailContext(itemID: itemID), let agentID = place.agentID,
-              let detail = TranscriptDetailReader.subagent(
-                agentID: agentID, transcriptPath: place.filePath, showDetails: feed.showDetails) else {
+        guard let place = await feed.detailContext(itemID: itemID), let agentID = place.agentID else {
+            throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
+        }
+        let showDetails = feed.showDetails
+        let detail = await Self.readOffThePool {
+            TranscriptDetailReader.subagent(
+                agentID: agentID, transcriptPath: place.filePath, showDetails: showDetails)
+        }
+        guard let detail else {
             throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
         }
         try Task.checkCancellation()
         await feed.cacheDetail(detail, itemID: itemID, part: .subagent, generation: place.generation)
         return detail
+    }
+
+    /// Runs `read`, a blocking read of transcript files, on a GCD thread
+    /// rather than on the cooperative pool, and suspends until it answers:
+    /// the discipline `AppLivenessArbiter.verdictOffThePool(for:)` follows
+    /// for its blocking `ps` spawns. A detail read can scan megabytes, and
+    /// run inline it would hold one of the pool's few threads for all of it.
+    /// `.userInitiated`, not `.utility`: utility work is throttled onto the
+    /// efficiency cores under load, and a phone is waiting on this read.
+    static func readOffThePool<T: Sendable>(_ read: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: read())
+            }
+        }
     }
 
     // MARK: - transcript.close

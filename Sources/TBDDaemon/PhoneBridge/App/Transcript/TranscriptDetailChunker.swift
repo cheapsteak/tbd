@@ -138,18 +138,40 @@ enum TranscriptDetailChunker {
 /// itself recorded, which `TranscriptPager.subagentFilePath` checks.
 enum TranscriptDetailReader {
     /// The full text of `itemID`'s `part`: the call's input JSON for `input`,
-    /// its result for `result`, the whole message for `text`. The lookup
-    /// starts at `lineOffset`, the item's line, when the feed kept it, and
-    /// starts again from the top of the file when that misses: a remote
-    /// prepend can move a line after the offset was taken. Nil when the file
-    /// holds no such text.
-    static func text(itemID: String, part: TranscriptDetailPart, filePath: String, lineOffset: UInt64?) -> String? {
+    /// its result for `result`, the whole message for `text`. Nil when the
+    /// part of the file the lookup reads holds no such text.
+    ///
+    /// **Every scan reads at most `scanLimit` bytes**
+    /// (`PhoneAppConstants.anchorScanLimit` by default), so no lookup reads a
+    /// large transcript whole:
+    /// 1. When the feed kept `lineOffset`, the item's line, the lookup scans
+    ///    forward from it, and usually matches on its first line.
+    /// 2. When the feed kept no offset, as for an item whose offset left the
+    ///    feed's index, or the scan from it missed, as when a rewrite or a
+    ///    remote prepend moved the line, the lookup scans the file's last
+    ///    `scanLimit` bytes, the whole file when it is smaller. Recent items
+    ///    are the ones that lie there. It skips this scan when the first one
+    ///    already read those bytes.
+    ///
+    /// An item before that window whose offset the feed no longer holds is
+    /// not found.
+    static func text(
+        itemID: String, part: TranscriptDetailPart, filePath: String, lineOffset: UInt64?,
+        scanLimit: UInt64 = UInt64(PhoneAppConstants.anchorScanLimit)
+    ) -> String? {
         let lookupID = part == .input ? itemID + "#input" : itemID
-        if let lineOffset, lineOffset > 0,
-           let text = TranscriptParser.lookupDetail(filePath: filePath, itemID: lookupID, startingAt: lineOffset).text {
+        if let lineOffset, let text = TranscriptParser.lookupDetail(
+            filePath: filePath, itemID: lookupID, startingAt: lineOffset, scanLimit: scanLimit).text {
             return text
         }
-        return TranscriptParser.lookupDetail(filePath: filePath, itemID: lookupID, startingAt: 0).text
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let size = (attributes[.size] as? NSNumber)?.uint64Value else { return nil }
+        let tailStart = size > scanLimit ? size - scanLimit : 0
+        // The window is `scanLimit` bytes long, or the whole file, so the
+        // scan from `lineOffset` read all of it only when it started there.
+        if lineOffset == tailStart { return nil }
+        return TranscriptParser.lookupDetail(
+            filePath: filePath, itemID: lookupID, startingAt: tailStart, scanLimit: scanLimit).text
     }
 
     /// Subagent `agentID`'s items, shaped with `showDetails` and chunked, or

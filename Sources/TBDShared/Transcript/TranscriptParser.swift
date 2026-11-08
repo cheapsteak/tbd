@@ -855,7 +855,14 @@ public enum TranscriptParser {
     /// as the line the ID was made from had none; otherwise the ID is stale
     /// and resolves to nothing. No `tool_use` line is passed on the way, so an
     /// attachment row found this way reports `triggeredBy` as nil.
-    public static func lookupDetail(filePath: String, itemID: String, startingAt offset: UInt64) -> ItemDetail {
+    ///
+    /// The scan reads at most `scanLimit` bytes from `offset`, so a lookup
+    /// that misses in a large file stops there rather than at the end of the
+    /// file. A line that runs past the limit is not read whole, and so cannot
+    /// match.
+    public static func lookupDetail(
+        filePath: String, itemID: String, startingAt offset: UInt64, scanLimit: UInt64 = .max
+    ) -> ItemDetail {
         guard let handle = FileHandle(forReadingAtPath: filePath) else {
             return ItemDetail(text: nil, attachment: nil)
         }
@@ -886,7 +893,8 @@ public enum TranscriptParser {
             return windowLineDetail(handle: handle, lineOffset: lineOffset, blockIndex: blockIndex)
         }
 
-        guard var lines = ForwardLineReader(handle: handle, from: offset, chunkSize: detailChunkBytes) else {
+        guard var lines = ForwardLineReader(
+            handle: handle, from: offset, chunkSize: detailChunkBytes, limit: scanLimit) else {
             return ItemDetail(text: nil, attachment: nil)
         }
 
@@ -1074,7 +1082,8 @@ public enum TranscriptParser {
 ///
 /// A read that throws ends the scan as end of file does, after one `.error`
 /// log line naming the error, so a scan cut short by an I/O failure is not
-/// silent.
+/// silent. So does reaching `limit` bytes read from the offset: what the
+/// reader holds then comes out as a last line, cut short.
 struct ForwardLineReader {
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "transcript")
 
@@ -1088,11 +1097,14 @@ struct ForwardLineReader {
     /// `"\n"`.
     private var scanned = 0
     private var reachedEnd = false
+    /// The bytes the reader may still read from the file.
+    private var remaining: UInt64
 
-    init?(handle: FileHandle, from offset: UInt64, chunkSize: Int) {
+    init?(handle: FileHandle, from offset: UInt64, chunkSize: Int, limit: UInt64 = .max) {
         guard (try? handle.seek(toOffset: offset)) != nil else { return nil }
         self.handle = handle
         self.chunkSize = chunkSize
+        self.remaining = limit
     }
 
     mutating func next() -> Data? {
@@ -1114,9 +1126,13 @@ struct ForwardLineReader {
             }
             // The unread tail of `buffer` is a partial line; the next chunk
             // goes after it so the line comes out whole.
+            guard remaining > 0 else {
+                reachedEnd = true
+                continue
+            }
             let readChunk: Data?
             do {
-                readChunk = try handle.read(upToCount: chunkSize)
+                readChunk = try handle.read(upToCount: Int(min(UInt64(chunkSize), remaining)))
             } catch {
                 // Logged once: `reachedEnd` is set below, so this reader never
                 // reads again.
@@ -1128,6 +1144,7 @@ struct ForwardLineReader {
                 reachedEnd = true
                 continue
             }
+            remaining -= min(remaining, UInt64(chunk.count))
             if cursor > buffer.count / 2 {
                 buffer = Data(buffer[cursor...])
                 scanned -= cursor
