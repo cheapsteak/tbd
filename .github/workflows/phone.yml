@@ -258,10 +258,14 @@ jobs:
           cache-dependency-path: phone/package-lock.json
       - name: Rebuild the app bundle and compare it with the committed one
         run: bash scripts/ci/phone-app-bundle-check.sh
+      # `!cancelled()`, so the end-to-end tests still run after a bundle
+      # mismatch. That also runs them when the check's `npm ci` failed, and
+      # then a bare `npx playwright` would download and run whatever
+      # `playwright` is newest. `--no-install` fails instead.
       - name: Install Playwright's WebKit and Chromium
         if: ${{ !cancelled() }}
         working-directory: phone
-        run: npx playwright install --with-deps chromium webkit
+        run: npx --no-install playwright install --with-deps chromium webkit
       - name: Test the app end to end
         if: ${{ !cancelled() }}
         working-directory: phone
