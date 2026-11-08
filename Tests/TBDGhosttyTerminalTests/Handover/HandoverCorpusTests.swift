@@ -622,7 +622,10 @@ struct HandoverCorpusTests {
 
     private static func lastIndex(of needle: [UInt8], in haystack: [UInt8]) -> Int? {
         guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
-        return (0...(haystack.count - needle.count)).last { haystack[$0..<($0 + needle.count)].elementsEqual(needle) }
+        // A workload state runs to a megabyte, so the first byte is checked before any slice is made.
+        return (0...(haystack.count - needle.count)).last {
+            haystack[$0] == needle[0] && haystack[$0..<($0 + needle.count)].elementsEqual(needle)
+        }
     }
 
     private static func describe(_ bytes: [UInt8]) -> String { String(decoding: bytes, as: UTF8.self).debugDescription }
