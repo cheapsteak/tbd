@@ -522,6 +522,43 @@ struct PhonePromptTests {
             promptID: "toolu-1", answeredBy: .phone, deviceID: nil))
     }
 
+    /// A running answer counts only for a read that stopped waiting for it,
+    /// and then as one that may have landed: one phone answering is named,
+    /// two are not, and a delivered answer still wins.
+    @Test func aRunningAnswerCountsOnlyWhenTheReadStoppedWaiting() {
+        var ledger = PhonePromptAnswerLedger()
+        let key = PhonePromptAnswerLedger.Key(session: .local(terminalID: UUID()), promptID: "toolu-1")
+        let first = UUID()
+        let second = UUID()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        ledger.begin(key, token: 1, deviceID: first, now: now)
+        #expect(ledger.answeredBy(key) == nil)
+        #expect(ledger.answeredBy(key, countingRunning: true) == .device(first))
+        ledger.begin(key, token: 2, deviceID: second, now: now)
+        #expect(ledger.answeredBy(key, countingRunning: true) == .unknownDevice)
+        _ = ledger.finish(key, token: 2, settled: .delivered, now: now)
+        #expect(ledger.answeredBy(key, countingRunning: true) == .device(second))
+    }
+
+    /// A wait that expired parks no more reads, and one that ended ignores a
+    /// late expiry.
+    @Test func aWaitThatEndedIgnoresItsExpiry() {
+        var ledger = PhonePromptAnswerLedger()
+        ledger.beginWait(1)
+        #expect(ledger.isWaiting(1))
+        let expired = ledger.expire(1)
+        #expect(expired.isEmpty)
+        #expect(!ledger.isWaiting(1))
+        ledger.endWait(1)
+
+        ledger.beginWait(2)
+        ledger.endWait(2)
+        #expect(!ledger.isWaiting(2))
+        let late = ledger.expire(2)
+        #expect(late.isEmpty)
+    }
+
     @Test func theLedgerDropsAnswersPastItsLifetimeAndItsLimit() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let terminalID = UUID()
@@ -1115,6 +1152,59 @@ struct PhonePromptTests {
         let replyBytes = try await Self.reply("answer-1", in: outbox)
         #expect(try Self.outcome(replyBytes) == outcome)
         #expect(await h.service.phoneAnswerWaiterCount() == 0)
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// A remote prompt that closes while the provider still holds the
+    /// phone's answer to it waits for that answer only
+    /// `answerAttributionWait`: the `prompt.changed` carrying the next prompt
+    /// goes out once that much time passes on the clock, with the closed
+    /// prompt said to be this phone's, and the answer's own reply still
+    /// comes when the provider returns.
+    @Test func aHeldRemoteAnswerDelaysPromptChangedOnlyToTheBound() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let session = Self.remoteSession
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        let gate = PhoneTestGate()
+        h.actions.hold(.answerRemotePrompt, on: gate)
+        h.actions.respond(to: .answerRemotePrompt, with: try Self.answered(.delivered))
+        let answered = RemotePendingPrompt(
+            id: "rp-1", kind: .permission, toolName: "Bash", toolInputJSON: #"{"command":"make"}"#)
+        let next = RemotePendingPrompt(
+            id: "rp-2", kind: .permission, toolName: "Bash", toolInputJSON: #"{"command":"make test"}"#)
+        try Self.listRemoteSessions(h, open: answered, elsewhere: nil)
+        let outbox = try await Self.liveConnection(h)
+        await h.service.openPrompts(session, for: deviceID)
+        _ = try await Self.promptEvent(0, in: outbox)
+
+        let body = try PhoneTestRequests.body(
+            .promptAnswer, id: "answer-1",
+            params: PhonePromptAnswerParams(session: session, promptID: "rp-1", answer: Self.allow))
+        await h.service.handleAppMessage(body, from: h.peer)
+        try await waitUntil("the answer to reach the provider") { h.actions.remoteAnswers.count == 1 }
+        try Self.listRemoteSessions(h, open: next, elsewhere: nil)
+        h.subscriptions.broadcast(delta: .remoteSessionsChanged)
+        try await waitUntil("the feed to wait for the phone's answer") {
+            await h.service.phoneAnswerWaiterCount() > 0
+        }
+        #expect(try Self.promptEvents(in: outbox).count == 1, "nothing is sent while the wait runs")
+
+        // The sessions publisher's catch-up window, and the wait's bound.
+        try await h.clock.requireSleepersArmed(count: 2, timeout: TestDeadlines.saturatedPass)
+        await h.clock.advance(by: PhoneAppConstants.answerAttributionWait)
+
+        let changed = try await Self.promptEvent(1, in: outbox)
+        #expect(changed.data == PromptChangedData(
+            session: session, prompts: [PhonePromptShaper.remote(next)],
+            resolved: [PhonePromptResolution(promptID: "rp-1", answeredBy: .phone, deviceID: deviceID)]))
+        #expect(await h.service.phoneAnswerWaiterCount() == 0)
+        let answering = h.actions.remoteAnswers.count
+        #expect(answering == 1)
+
+        gate.open()
+        let replyBytes = try await Self.reply("answer-1", in: outbox)
+        #expect(try Self.outcome(replyBytes) == .delivered)
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 

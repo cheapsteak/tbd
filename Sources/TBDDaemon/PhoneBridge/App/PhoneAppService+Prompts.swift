@@ -258,7 +258,14 @@ enum PhonePromptShaper {
 /// settles is kept. A prompt takes one answer, so `answeredBy` names the
 /// phone whose answer was delivered; with none delivered, the phone whose
 /// answer may have landed when only one phone's may have, and no phone in
-/// particular when several may have, since any of them may be the one.
+/// particular when several may have, since any of them may be the one. A
+/// read that stopped waiting for running attempts counts each as one that
+/// may have landed.
+///
+/// **Bounded waits.** A read waits for a closed prompt's running attempts
+/// under a wait ID (`beginWait(_:)`). `expire(_:)` ends the wait early and
+/// hands back its parked read, and `endWait(_:)` retires the ID, so a timer
+/// that fires after the wait ended does nothing.
 ///
 /// **Bounded.** Running attempts are bounded by the requests a device may have
 /// in flight. A kept attempt is dropped `lifetime` after it settled, and at
@@ -318,11 +325,20 @@ struct PhonePromptAnswerLedger: Sendable {
     /// minutes, long past its prompt's closing.
     static let lifetime: TimeInterval = 600
 
+    /// A read parked on a prompt's running attempts, under its wait's ID.
+    private struct Waiter: Sendable {
+        let waitID: UInt64
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private var attempts: [Key: [Attempt]] = [:]
     /// The kept attempts, in the order they settled.
     private var settledOrder: [Settled] = []
     /// Reads waiting for a prompt's running attempts to finish.
-    private var waiters: [Key: [CheckedContinuation<Void, Never>]] = [:]
+    private var waiters: [Key: [Waiter]] = [:]
+    /// The waits that may still park a read: begun, and neither expired nor
+    /// ended.
+    private var openWaits: Set<UInt64> = []
 
     /// A phone's answer to the prompt under `key` is about to reach the core.
     mutating func begin(_ key: Key, token: UInt64, deviceID: UUID, now: Date) {
@@ -348,7 +364,7 @@ struct PhonePromptAnswerLedger: Sendable {
         }
         prune(now: now)
         guard !isAnswering(key) else { return [] }
-        return waiters.removeValue(forKey: key) ?? []
+        return (waiters.removeValue(forKey: key) ?? []).map(\.continuation)
     }
 
     /// Whether a phone's answer to the prompt under `key` is still running.
@@ -357,14 +373,18 @@ struct PhonePromptAnswerLedger: Sendable {
     }
 
     /// Who answered the prompt under `key`, from its kept attempts, counting
-    /// only one that settled at or after `openedAt` when it is given:
+    /// only one that settled at or after `openedAt` when it is given, and,
+    /// with `countingRunning`, its running attempts as ones that may have
+    /// landed:
     /// - **the phone whose answer was `delivered`**, when one was;
-    /// - otherwise **the phone whose answer may have landed** (`unknown`),
-    ///   when only one phone's may have, however many attempts it made;
+    /// - otherwise **the phone whose answer may have landed** (`unknown`, or
+    ///   running when counted), when only one phone's may have, however many
+    ///   attempts it made;
     /// - **`unknownDevice`** when several phones' may have;
     /// - nil when no attempt counts.
-    func answeredBy(_ key: Key, openedAt: Date? = nil) -> Answerer? {
-        let kept = (attempts[key] ?? []).filter { attempt in
+    func answeredBy(_ key: Key, openedAt: Date? = nil, countingRunning: Bool = false) -> Answerer? {
+        let all = attempts[key] ?? []
+        let kept = all.filter { attempt in
             guard let settledAt = attempt.settledAt else { return false }
             guard let openedAt else { return true }
             return settledAt >= openedAt
@@ -372,14 +392,47 @@ struct PhonePromptAnswerLedger: Sendable {
         if let delivered = kept.first(where: { attempt in attempt.settlement == .delivered }) {
             return .device(delivered.deviceID)
         }
-        guard let first = kept.first else { return nil }
-        let devices = Set(kept.map { attempt in attempt.deviceID })
+        let running = countingRunning ? all.filter { attempt in attempt.settledAt == nil } : []
+        let mayHaveLanded = kept + running
+        guard let first = mayHaveLanded.first else { return nil }
+        let devices = Set(mayHaveLanded.map { attempt in attempt.deviceID })
         return devices.count == 1 ? .device(first.deviceID) : .unknownDevice
     }
 
-    /// Waits on `key`'s running attempts. Call only while `isAnswering(key)`.
-    mutating func wait(_ key: Key, _ continuation: CheckedContinuation<Void, Never>) {
-        waiters[key, default: []].append(continuation)
+    /// Opens the wait `waitID`, so it may park a read.
+    mutating func beginWait(_ waitID: UInt64) {
+        openWaits.insert(waitID)
+    }
+
+    /// Whether the wait `waitID` may still park a read: begun, and neither
+    /// expired nor ended.
+    func isWaiting(_ waitID: UInt64) -> Bool {
+        openWaits.contains(waitID)
+    }
+
+    /// Parks a read on `key`'s running attempts under the wait `waitID`.
+    /// Call only while `isAnswering(key)` and `isWaiting(waitID)`.
+    mutating func wait(_ key: Key, waitID: UInt64, _ continuation: CheckedContinuation<Void, Never>) {
+        waiters[key, default: []].append(Waiter(waitID: waitID, continuation: continuation))
+    }
+
+    /// The wait `waitID` ran out of time: it parks no more reads, and the
+    /// read it has parked is returned to resume. Nothing once it ended.
+    mutating func expire(_ waitID: UInt64) -> [CheckedContinuation<Void, Never>] {
+        guard openWaits.remove(waitID) != nil else { return [] }
+        var resumed: [CheckedContinuation<Void, Never>] = []
+        for key in Array(waiters.keys) {
+            guard let list = waiters[key], list.contains(where: { $0.waitID == waitID }) else { continue }
+            resumed += list.filter { $0.waitID == waitID }.map(\.continuation)
+            let rest = list.filter { $0.waitID != waitID }
+            waiters[key] = rest.isEmpty ? nil : rest
+        }
+        return resumed
+    }
+
+    /// The wait `waitID` ended. An `expire(_:)` after this does nothing.
+    mutating func endWait(_ waitID: UInt64) {
+        openWaits.remove(waitID)
     }
 
     /// How many reads are waiting. For tests.
@@ -401,10 +454,11 @@ struct PhonePromptAnswerLedger: Sendable {
 /// What tells who answered each prompt that closed.
 ///
 /// `answeredBy` is:
-/// - **`phone`**, when the ledger kept a phone's answer to it, with the
-///   phone's device when the ledger can name it
-///   (`PhonePromptAnswerLedger.answeredBy`) and none when several phones'
-///   answers may have landed. For a local prompt, only when the store says
+/// - **`phone`**, when the ledger kept a phone's answer to it, or a phone's
+///   answer still ran when the read stopped waiting for it
+///   (`PhoneAppService.phoneAnswers(for:openedAt:)`), with the phone's
+///   device when the ledger can name it (`PhonePromptAnswerLedger.answeredBy`)
+///   and none when several phones' answers may have landed. For a local prompt, only when the store says
 ///   TBD's decision reached Claude (`answered`), or has no record of how it
 ///   ended.
 /// - **`laptop`** for a local prompt the terminal answered
@@ -634,9 +688,9 @@ actor PhoneLocalPromptSource: PhonePromptSource {
 ///
 /// One task reads and delivers, one read at a time, and a wakeup that comes
 /// while it works makes one more read. So a delivery that waits, for a
-/// phone's answer to a prompt that closed (up to the provider's answer
-/// timeout), holds up only the next read, never the transcript's syncs,
-/// which run on a task of their own.
+/// phone's answer to a prompt that closed (up to
+/// `PhoneAppConstants.answerAttributionWait`), holds up only the next read,
+/// never the transcript's syncs, which run on a task of their own.
 ///
 /// `stop()` removes the subscriber and ends the work for good; a later
 /// `start()` does nothing.
@@ -958,27 +1012,64 @@ extension PhoneAppService {
     /// It first waits for every phone's answer to those prompts still
     /// running, so a race is told right: a phone whose answer lost to the
     /// laptop's finishes `already_resolved` and is dropped, rather than being
-    /// read as the winner while its call was in flight. For a local prompt
-    /// the wait is short, as the core returns at once for a prompt that has
-    /// closed. For a remote prompt it can last as long as the provider's
-    /// answer timeout, 30 seconds, plus the time the answer waits in the
-    /// session's queue behind other calls, and the device's next
-    /// `prompt.changed` waits with it.
+    /// read as the winner while its call was in flight. The device's next
+    /// `prompt.changed` waits with it, so the wait is bounded: at most
+    /// `PhoneAppConstants.answerAttributionWait` on the service's clock. A
+    /// local answer to a closed prompt returns well inside that, as the core
+    /// returns at once. A remote one can run for the provider's answer
+    /// timeout, 30 seconds, plus its time in the session's queue, and is the
+    /// one the bound cuts short. A prompt whose phone answer still runs when
+    /// the wait ends counts as answered by that phone, with its device when
+    /// one phone is answering it and none when several are: that answer is
+    /// why the prompt closed in nearly every case.
     func phoneAnswers(
         for keys: [PhonePromptAnswerLedger.Key], openedAt: [String: Date] = [:]
     ) async -> [String: PhonePromptAnswerLedger.Answerer] {
+        if keys.contains(where: { phoneAnswerLedger.isAnswering($0) }) {
+            await waitForPhoneAnswers(to: keys)
+        }
         var answers: [String: PhonePromptAnswerLedger.Answerer] = [:]
         for key in keys {
-            while phoneAnswerLedger.isAnswering(key) {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    phoneAnswerLedger.wait(key, continuation)
-                }
-            }
-            if let answerer = phoneAnswerLedger.answeredBy(key, openedAt: openedAt[key.promptID]) {
+            if let answerer = phoneAnswerLedger.answeredBy(
+                key, openedAt: openedAt[key.promptID], countingRunning: true) {
                 answers[key.promptID] = answerer
             }
         }
         return answers
+    }
+
+    /// Waits until no phone's answer to any prompt in `keys` runs, or until
+    /// `PhoneAppConstants.answerAttributionWait` has passed on the service's
+    /// clock, whichever comes first.
+    private func waitForPhoneAnswers(to keys: [PhonePromptAnswerLedger.Key]) async {
+        let waitID = mintToken()
+        phoneAnswerLedger.beginWait(waitID)
+        let clock = self.clock
+        let timer = Task {
+            do {
+                try await clock.sleep(for: PhoneAppConstants.answerAttributionWait)
+            } catch {
+                return
+            }
+            self.expirePhoneAnswerWait(waitID)
+        }
+        for key in keys {
+            while phoneAnswerLedger.isAnswering(key), phoneAnswerLedger.isWaiting(waitID) {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    phoneAnswerLedger.wait(key, waitID: waitID, continuation)
+                }
+            }
+        }
+        timer.cancel()
+        phoneAnswerLedger.endWait(waitID)
+    }
+
+    /// Ends the wait `waitID` for running phone answers, when its time ran
+    /// out before the answers finished.
+    private func expirePhoneAnswerWait(_ waitID: UInt64) {
+        for waiter in phoneAnswerLedger.expire(waitID) {
+            waiter.resume()
+        }
     }
 
     /// How many prompt reads wait for a phone's answer to finish. For tests.

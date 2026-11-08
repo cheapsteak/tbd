@@ -34,6 +34,10 @@ enum PhoneAppConstants {
     static let remoteSyncInterval: Duration = .seconds(3)
     /// How long `worktree.create` waits for the new worktree's session.
     static let worktreeSessionWait: Duration = .seconds(30)
+    /// The longest a `prompt.changed` waits for a phone's answer, still
+    /// running, to a prompt that closed, so it can say who answered. Past it
+    /// the running answer is taken as the one that closed the prompt.
+    static let answerAttributionWait: Duration = .seconds(2)
     /// The most events kept for a reconnecting phone to replay.
     static let eventRingCount = 512
     /// The most bytes of events kept for replay.
