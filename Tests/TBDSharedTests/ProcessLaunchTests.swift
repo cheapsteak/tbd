@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 import TestSupport
 @testable import TBDShared
 
@@ -35,12 +36,14 @@ struct ProcessLaunchTests {
     func successfulLaunchKeepsHandler() async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in done.resume() }
-            do { try process.runDisarmingHandlerOnFailure() } catch {
-                Issue.record("launch of /usr/bin/true failed: \(error)")
-                done.resume()
-            }
+        let called = OSAllocatedUnfairLock(initialState: false)
+        process.terminationHandler = { _ in called.withLock { $0 = true } }
+        try process.runDisarmingHandlerOnFailure()
+        // Polling with Task.sleep, unlike a continuation, throws when the
+        // suite's time limit cancels the test, so a handler that never fires
+        // ends the test instead of hanging it.
+        while !called.withLock({ $0 }) {
+            try await Task.sleep(for: .milliseconds(10))
         }
         #expect(process.terminationStatus == 0)
     }
