@@ -29,6 +29,13 @@ enum PhoneBridgeConstants {
     static let bundledRelayVersion = "1.0.0"
     /// The most raw (compressed) bundle bytes one `bundle.chunk` carries.
     static let bundleChunkRawBytes = 45_000
+    /// The largest compressed bundle a phone's loader accepts: it refuses a
+    /// `welcome` whose bundle `size` is larger. `MAX_BUNDLE_COMPRESSED` in
+    /// `phone/loader/constants.js`.
+    static let maxBundleCompressedBytes = 4 * 1024 * 1024
+    /// The largest bundle, inflated, a phone's loader accepts: it stops
+    /// inflating past it. `MAX_BUNDLE_TEXT` in `phone/loader/constants.js`.
+    static let maxBundleTextBytes = 16 * 1024 * 1024
     static let loaderProtocolVersion = 1
     static let minLoaderProtocolVersion = 1
     /// A phone's name is 1 to this many characters after trimming.

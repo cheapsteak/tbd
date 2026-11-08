@@ -244,10 +244,12 @@ private struct PhoneBridgeHarness: Sendable {
 ///   relay, as `holdingTransport`.
 /// - `loaderURL`: the loader URL override to save; nil saves none, which
 ///   leaves no loader URL, since this build records no default.
+/// - `bundleLoader`: how the bridge loads the phone app bundle; nil loads the
+///   shipped one.
 private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress,
                         loaderURL: String? = loaderAddress, devices: Int = 0,
                         keyFile: KeyFile = .present, installRecorder: Bool = true, mainWorktree: Bool = false,
-                        holdSends: Bool = false,
+                        holdSends: Bool = false, bundleLoader: (@Sendable () throws -> PhoneAppBundle)? = nil,
                         _ body: (PhoneBridgeHarness) async throws -> Void) async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("tbd-phone-bridge-\(UUID().uuidString)", isDirectory: true)
@@ -306,6 +308,7 @@ private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress,
     let clock = EventDrivenTestClock()
     let bridge = PhoneBridge(
         db: db, keyStore: LaptopKeyStore(path: keyPath, now: dates.provider), transport: transport, infoClient: info,
+        bundleLoader: bundleLoader ?? { try PhoneAppBundle.loadShipped() },
         laptopName: { "acme-laptop" }, broadcast: { deltas.record($0) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
     if installRecorder {
@@ -1109,6 +1112,23 @@ struct PhoneBridgeTests {
                               "other-relay.acme.workers.dev", "other-relay.acme.workers.dev"])
             let checked = await h.info.relays
             #expect(checked.last?.absoluteString == otherRelayAddress)
+        }
+    }
+
+    @Test func aBundleAPhoneWouldRefuseStopsTheBridgeWithAReason() async throws {
+        // Compressed, any bundle is over a 1-byte limit.
+        let oversized: @Sendable () throws -> PhoneAppBundle = {
+            try PhoneAppBundle(source: Data("acme".utf8), maxCompressedBytes: 1)
+        }
+        try await withBridge(devices: 1, bundleLoader: oversized) { h in
+            await h.bridge.reconcile()
+            let status = await h.bridge.status()
+            #expect(status.running == false)
+            let problem = try #require(status.problem)
+            #expect(problem.hasPrefix("The phone app bundle is "))
+            #expect(problem.hasSuffix(" a phone accepts, so TBD cannot serve it."))
+            #expect(h.relay.connectAttempts.isEmpty)
+            await #expect(throws: PhoneBridgeError.notRunning(problem)) { try await h.bridge.pairStart() }
         }
     }
 

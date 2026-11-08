@@ -7,6 +7,11 @@ enum PhoneAppBundleError: Error, Equatable, LocalizedError {
     case notFound(searched: [String])
     /// The Compression framework refused the bundle's bytes.
     case compressionFailed
+    /// `app.js` is `bytes` long, over the `limit` a phone's loader inflates.
+    case textTooLarge(bytes: Int, limit: Int)
+    /// Compressed, the bundle is `bytes` long, over the `limit` a phone's
+    /// loader accepts.
+    case compressedTooLarge(bytes: Int, limit: Int)
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +20,12 @@ enum PhoneAppBundleError: Error, Equatable, LocalizedError {
                 + searched.joined(separator: ", ") + "."
         case .compressionFailed:
             return "TBD could not compress the phone app bundle."
+        case .textTooLarge(let bytes, let limit):
+            return "The phone app bundle is \(bytes) bytes, more than the \(limit) a phone accepts, "
+                + "so TBD cannot serve it."
+        case .compressedTooLarge(let bytes, let limit):
+            return "The phone app bundle is \(bytes) bytes compressed, more than the \(limit) a phone accepts, "
+                + "so TBD cannot serve it."
         }
     }
 }
@@ -30,6 +41,11 @@ enum PhoneAppBundleError: Error, Equatable, LocalizedError {
 /// - `chunks` are `compressed` cut into pieces of at most
 ///   `PhoneBridgeConstants.bundleChunkRawBytes`, so each `bundle.chunk`,
 ///   base64 and envelope included, fits one transport message.
+///
+/// A bundle a phone's loader would refuse is never served: one over
+/// `PhoneBridgeConstants.maxBundleTextBytes`, or over
+/// `PhoneBridgeConstants.maxBundleCompressedBytes` once compressed, fails to
+/// load, and the bridge shows why as its problem.
 struct PhoneAppBundle: Sendable, Equatable {
     /// Where `.copy("Resources")` puts the bundle inside the daemon's
     /// resource bundle.
@@ -47,7 +63,16 @@ struct PhoneAppBundle: Sendable, Equatable {
     /// `compressed`.
     let chunks: [Data]
 
-    init(source: Data) throws {
+    /// Hashes, compresses and chunks `source`. Throws `.textTooLarge`, before
+    /// any of that work, when `source` is over `maxTextBytes`, and
+    /// `.compressedTooLarge` when its compressed form is over
+    /// `maxCompressedBytes`. Tests pass smaller limits to reach the
+    /// compressed one exactly.
+    init(source: Data, maxTextBytes: Int = PhoneBridgeConstants.maxBundleTextBytes,
+         maxCompressedBytes: Int = PhoneBridgeConstants.maxBundleCompressedBytes) throws {
+        guard source.count <= maxTextBytes else {
+            throw PhoneAppBundleError.textTooLarge(bytes: source.count, limit: maxTextBytes)
+        }
         self.source = source
         self.sha256Hex = SHA256.hash(data: source).map { String(format: "%02x", $0) }.joined()
         // `.zlib` is raw DEFLATE, not the zlib format: NSData.h documents
@@ -62,6 +87,9 @@ struct PhoneAppBundle: Sendable, Equatable {
             compressed = try (source as NSData).compressed(using: .zlib) as Data
         } catch {
             throw PhoneAppBundleError.compressionFailed
+        }
+        guard compressed.count <= maxCompressedBytes else {
+            throw PhoneAppBundleError.compressedTooLarge(bytes: compressed.count, limit: maxCompressedBytes)
         }
         self.compressed = compressed
         let size = PhoneBridgeConstants.bundleChunkRawBytes

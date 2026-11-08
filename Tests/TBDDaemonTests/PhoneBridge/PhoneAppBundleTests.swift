@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Testing
+import TestSupport
 
 @testable import TBDDaemonLib
 
@@ -17,6 +18,27 @@ private func startsWithZlibHeader(_ bytes: Data) -> Bool {
     let cmf = bytes[bytes.startIndex]
     let flg = bytes[bytes.startIndex + 1]
     return cmf & 0x0F == 8 && (Int(cmf) << 8 | Int(flg)) % 31 == 0
+}
+
+/// `count` random bytes, which DEFLATE cannot shrink, filled in one call so a
+/// test of megabytes spends no time per byte.
+private func incompressibleBytes(_ count: Int) -> Data {
+    var data = Data(count: count)
+    data.withUnsafeMutableBytes { buffer in
+        if let base = buffer.baseAddress {
+            arc4random_buf(base, buffer.count)
+        }
+    }
+    return data
+}
+
+/// Builds a bundle on a thread the tests own: hashing and compressing
+/// megabytes is synchronous work that must not hold a cooperative pool thread
+/// (`Tests/CLAUDE.md`, "the cooperative pool").
+private func bundleOffThePool(_ source: Data) async throws -> PhoneAppBundle {
+    try await withTaskExecutorPreference(GateExecutor.shared) {
+        try PhoneAppBundle(source: source)
+    }
 }
 
 @Suite("PhoneAppBundle")
@@ -43,6 +65,64 @@ struct PhoneAppBundleTests {
         #expect(bundle.chunks.count >= 5)
         #expect(bundle.chunks.reduce(Data(), +) == bundle.compressed)
         #expect(try (bundle.compressed as NSData).decompressed(using: .zlib) as Data == source)
+    }
+
+    // MARK: The loader's size limits
+
+    @Test func aBundleOverTheLoadersTextLimitIsRefused() {
+        let limit = PhoneBridgeConstants.maxBundleTextBytes
+        // Refused before it is hashed or compressed, so this costs nothing.
+        let source = Data(repeating: 0x61, count: limit + 1)
+        #expect(throws: PhoneAppBundleError.textTooLarge(bytes: limit + 1, limit: limit)) {
+            try PhoneAppBundle(source: source)
+        }
+    }
+
+    @Test func aBundleAtTheLoadersTextLimitIsAccepted() async throws {
+        let limit = PhoneBridgeConstants.maxBundleTextBytes
+        let bundle = try await bundleOffThePool(Data(repeating: 0x61, count: limit))
+        #expect(bundle.source.count == limit)
+        #expect(bundle.compressed.count <= PhoneBridgeConstants.maxBundleCompressedBytes)
+    }
+
+    @Test func aBundleOverTheLoadersCompressedLimitIsRefused() async throws {
+        // Random bytes do not compress: DEFLATE stores them, block headers
+        // and all, so the compressed form is a few hundred bytes over.
+        let limit = PhoneBridgeConstants.maxBundleCompressedBytes
+        let refusal = await #expect(throws: PhoneAppBundleError.self) {
+            try await bundleOffThePool(incompressibleBytes(limit))
+        }
+        guard case .compressedTooLarge(let bytes, let refusedLimit)? = refusal else {
+            Issue.record("expected compressedTooLarge, got \(String(describing: refusal))")
+            return
+        }
+        #expect(refusedLimit == limit)
+        #expect(bytes > limit)
+    }
+
+    @Test func theCompressedLimitAcceptsABundleExactlyAtIt() throws {
+        let source = incompressibleBytes(64 * 1024)
+        let compressedSize = try PhoneAppBundle(source: source).compressed.count
+        let atLimit = try PhoneAppBundle(source: source, maxCompressedBytes: compressedSize)
+        #expect(atLimit.compressed.count == compressedSize)
+        #expect(throws: PhoneAppBundleError.compressedTooLarge(bytes: compressedSize, limit: compressedSize - 1)) {
+            try PhoneAppBundle(source: source, maxCompressedBytes: compressedSize - 1)
+        }
+    }
+
+    @Test func theTextLimitAcceptsABundleExactlyAtIt() throws {
+        let source = Data("acme".utf8)
+        let atLimit = try PhoneAppBundle(source: source, maxTextBytes: source.count)
+        #expect(atLimit.source == source)
+        #expect(throws: PhoneAppBundleError.textTooLarge(bytes: source.count, limit: source.count - 1)) {
+            try PhoneAppBundle(source: source, maxTextBytes: source.count - 1)
+        }
+    }
+
+    @Test func aRefusalSaysTheBundleCannotBeServed() {
+        let text = PhoneAppBundleError.compressedTooLarge(bytes: 5_000_000, limit: 4_194_304).localizedDescription
+        #expect(text == "The phone app bundle is 5000000 bytes compressed, more than the 4194304 a phone accepts, "
+            + "so TBD cannot serve it.")
     }
 
     @Test func compressionIsRawDeflateWithNoZlibHeader() throws {
