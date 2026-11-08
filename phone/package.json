@@ -9,7 +9,8 @@
     "vectors:check": "node test-vectors/generate.mjs --check",
     "vendor:check": "bash scripts/vendor-check.sh",
     "test:scripts": "bash scripts/vendor-check.test.sh && bash scripts/vendor-update.test.sh && bash scripts/osv-check.test.sh && bash scripts/stage-loader.test.sh",
-    "test:e2e": "playwright test -c loader/test/e2e/playwright.config.js"
+    "test:e2e": "playwright test -c loader/test/e2e/playwright.config.js",
+    "screenshots": "playwright test -c loader/test/e2e/playwright.config.js --project=webkit-iphone screens.spec.js"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",

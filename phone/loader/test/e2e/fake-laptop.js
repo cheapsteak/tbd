@@ -105,7 +105,8 @@ const TEST_PAGES = {
  *   only the runner harness (`/__test/runner-harness.html` and its script). Its requests are not
  *   in `requests`.
  * @property {FakeRelay} relay
- * @property {ScriptedLaptop[]} laptops The first is `acme-mbp`; `addLaptop` adds more.
+ * @property {ScriptedLaptop[]} laptops The first is named by `startFakeLaptop`'s `laptopName`
+ *   (`acme-mbp` by default); `addLaptop` adds more.
  * @property {(options: { laptopName: string }) => Promise<ScriptedLaptop>} addLaptop
  * @property {(laptop: ScriptedLaptop, options?: PairingLinkOptions) => string} pairingLink
  *   Opens an offer on `laptop` and returns `${origin}/#p=…`, its relay set to `origin`. The
@@ -131,12 +132,15 @@ const TEST_PAGES = {
 
 /**
  * Starts the server, stages the loader for it and starts the first laptop.
- * @param {{ runnerOrigin?: string, bundle?: 'debug' | 'probe', refuseUpgrade?: boolean }} [options]
+ * @param {{ runnerOrigin?: string, bundle?: 'debug' | 'probe', refuseUpgrade?: boolean, laptopName?: string }} [options]
  *   `runnerOrigin` is stamped into runner.html in place of the server's own origin, so a test
- *   can stamp a foreign one. `bundle` is the app every laptop serves.
+ *   can stamp a foreign one. `bundle` is the app every laptop serves. `laptopName` names the
+ *   first laptop, `acme-mbp` by default.
  * @returns {Promise<FakeLaptopServer>}
  */
-export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUpgrade = false } = {}) {
+export async function startFakeLaptop({
+  runnerOrigin, bundle = 'debug', refuseUpgrade = false, laptopName: firstName = 'acme-mbp',
+} = {}) {
   const bundleFile = BUNDLES[bundle];
   if (bundleFile === undefined) throw new RangeError(`unknown bundle ${bundle}`);
   const bundleText = await readFile(path.join(FIXTURES_DIR, bundleFile), 'utf8');
@@ -272,7 +276,7 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
 
   try {
     await run('bash', [STAGE_SCRIPT, LOADER_DIR, site, runnerOrigin ?? server.origin]);
-    await server.addLaptop({ laptopName: 'acme-mbp' });
+    await server.addLaptop({ laptopName: firstName });
   } catch (error) {
     await server.close();
     throw error;
