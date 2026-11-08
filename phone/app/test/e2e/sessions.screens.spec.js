@@ -75,3 +75,16 @@ test('remote', async ({ page, appHost }) => {
   await expect(app(page).locator('.s-head .rb2')).toHaveText('remote');
   await capture(page, 'remote', app(page).locator('.s-head'));
 });
+
+for (const [state, name, band] of /** @type {const} */ ([
+  ['error', 'Rate limit retry', 'st-err'],
+  ['rate', 'Bulk import', 'st-rate'],
+  ['gone', 'Schema migration', 'st-gone'],
+  ['unknown', 'Legacy pane', 'st-unk'],
+])) {
+  test(state, async ({ page, appHost }) => {
+    await openSession(page, appHost, name);
+    await expect(app(page).locator(`.banner.${band}`)).toBeVisible();
+    await capture(page, state, app(page).locator('.banner'));
+  });
+}

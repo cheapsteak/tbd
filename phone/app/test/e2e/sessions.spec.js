@@ -438,3 +438,47 @@ test('back returns to the list', async ({ page, appHost }) => {
   await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'sessions');
   await expect(app(page).locator('.list-foot')).toBeVisible();
 });
+
+test('an error shows its reason in a band', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Rate limit retry');
+  const band = app(page).locator('.banner');
+  await expect(band).toHaveCount(1);
+  await expect(band).toHaveClass(/(^| )st-err( |$)/);
+  await expect(band).toHaveText('API error 529: the model is overloaded. The turn stopped.');
+  await expect(band.locator('svg')).toHaveCount(1);
+});
+
+test('a rate limit shows its reason in a band', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Bulk import');
+  const band = app(page).locator('.banner');
+  await expect(band).toHaveClass(/(^| )st-rate( |$)/);
+  await expect(band).toHaveText('Usage limit reached. It resets at 3:00 pm.');
+});
+
+test('an unknown status says TBD cannot read it', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Legacy pane');
+  const band = app(page).locator('.banner');
+  await expect(band).toHaveClass(/(^| )st-unk( |$)/);
+  await expect(band).toHaveText("TBD cannot read this tab's status, so it shows as Unknown.");
+});
+
+test('an exited session says to restart it on the laptop', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Schema migration');
+  const band = app(page).locator('.banner');
+  await expect(band).toHaveClass(/(^| )st-gone( |$)/);
+  await expect(band).toHaveText('This session has exited. Restart it on the laptop.');
+});
+
+test('the other statuses have no band', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  for (const name of ['main', 'Login redirect fix', 'Docs refresh', 'Triage flaky test']) {
+    await openSessionByName(page, name);
+    await expect(app(page).locator('.s-head .t1')).toContainText(name);
+    await expect(app(page).locator('.banner'), name).toHaveCount(0);
+    await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+  }
+});
