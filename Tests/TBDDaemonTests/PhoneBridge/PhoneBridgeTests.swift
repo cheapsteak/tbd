@@ -160,6 +160,15 @@ private struct PhoneBridgeHarness: Sendable {
         return (offer, link)
     }
 
+    /// The laptop public key that a new pairing offer's link carries.
+    func pairingLinkKey() async throws -> Data {
+        let offer = try await bridge.pairStart()
+        let text = try #require(offer.link)
+        let url = try #require(URL(string: text))
+        let link = try PairingLink.parse(url, now: dates.now)
+        return try #require(Base64URL.decode(link.key))
+    }
+
     /// A phone in the offer's room, with the relay's `peer-joined` read.
     func joinedPairingPhone(_ link: PairingLink) async throws -> TestPhone {
         try await TestPhone.joined(relay: relay, room: link.room)
@@ -914,6 +923,26 @@ struct PhoneBridgeTests {
             // The file is left as it was.
             let attributes = try FileManager.default.attributesOfItem(atPath: h.keyPath.path)
             #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o644)
+        }
+    }
+
+    @Test func aKeyFileReplacedWhileRunningIsReadAfterTurningPhoneControlOffAndOn() async throws {
+        try await withBridge { h in
+            await h.bridge.reconcile()
+            let first = try await h.pairingLinkKey()
+            #expect(first == h.laptopPublicKey?.rawRepresentation)
+
+            // The key file is replaced while the daemon runs.
+            try FileManager.default.removeItem(at: h.keyPath)
+            let replacement = try LaptopKeyStore(path: h.keyPath).loadOrCreate().publicKey.rawRepresentation
+            #expect(replacement != first)
+
+            try await h.db.config.setPhoneControlEnabled(false)
+            await h.bridge.reconcile()
+            try await h.db.config.setPhoneControlEnabled(true)
+            await h.bridge.reconcile()
+            let second = try await h.pairingLinkKey()
+            #expect(second == replacement)
         }
     }
 

@@ -101,7 +101,8 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 ///    phones paired, a missing key file is never created again, because a new
 ///    key would unpair every phone without a word. The key and the app bundle
 ///    are each loaded once; a failure is kept as `problem`, and the bridge
-///    does not run until a later reconcile loads them.
+///    does not run until a later reconcile loads them. A halt or `stop()`
+///    forgets the key, so the next start reads the file as it is then.
 /// 3. A changed relay URL stops everything and starts again on the new one,
 ///    with a new pairing service and a fresh relay check.
 /// 4. The relay is checked on its own when this address has no answer yet or
@@ -219,6 +220,8 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// Why the bridge is not running although phone control is on and a
     /// relay is set.
     private var problem: String?
+    /// The laptop key, read when the bridge last started; nil while it is
+    /// not running, so a key file replaced or removed meanwhile is read anew.
     private var loadedKey: Curve25519.KeyAgreement.PrivateKey?
     private var loadedBundle: PhoneAppBundle?
     /// The last serialized change; the next one waits for it.
@@ -336,6 +339,7 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// for every task. Final: the bridge never runs again.
     func stop() async {
         isStopped = true
+        loadedKey = nil
         await serialized { await self.stopEverything(reason: "TBD is stopping") }
         linkEventSink.finish()
         await pump?.value
@@ -535,12 +539,14 @@ actor PhoneBridge: PhoneBridgeControlling {
     }
 
     /// Stops everything and keeps `problem` as the reason the bridge is not
-    /// running. The reconcile that halts tells the app.
+    /// running. The reconcile that halts tells the app. The laptop key is
+    /// forgotten, so the next start reads its file again.
     private func halt(reason: String, problem: String?) async {
         self.problem = problem
         if let problem {
             PhoneBridgeLog.record(.failed("Phone control cannot run: \(problem)"))
         }
+        loadedKey = nil
         await stopEverything(reason: reason)
     }
 
