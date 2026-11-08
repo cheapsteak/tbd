@@ -1,6 +1,7 @@
 // Tests mdTree.ts: how each token type maps to nodes, raw HTML kept as text, which links pass
-// `safeLink` (checked against the loader's own `openableURL`), and the caps on nesting and on
-// node count that keep hostile text from hanging or crashing the screen.
+// `safeLink` (checked against the loader's own `openableURL`), and the caps on the length read
+// as markdown, on nesting and on node count that keep hostile text from hanging or crashing the
+// screen.
 //
 // The source policy bans the scheme name that runs script, followed by its colon, in this file
 // too, so the tests build it from pieces, and build HTML tags the same way.
@@ -8,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openableURL } from '../../../loader/frame.js';
-import { MAX_DEPTH, MAX_LINK_LENGTH, MAX_NODES, mdInline, mdTree, safeLink, type MdNode } from './mdTree.ts';
+import { MAX_DEPTH, MAX_LINK_LENGTH, MAX_MARKDOWN_LENGTH, MAX_NODES, mdInline, mdTree, safeLink, type MdNode } from './mdTree.ts';
 
 const JS = 'java' + 'script:';
 /** `<name`, built in pieces so this file holds no tag the source policy bans. */
@@ -247,29 +248,129 @@ test('nesting MAX_DEPTH deep keeps its structure, and one level more shows as so
   assert.ok(flatText(spans).includes('*a *a x a* a*'));
 });
 
-test('hostile nesting returns without throwing, cut at the depth cap, in bounded time', () => {
-  // Each of these overflows marked's stack, or takes seconds, when its lexer is not capped. The
-  // depth must be the cap exactly: a lexer that threw would leave the plain-text fallback, at 0.
-  const MB = 1_000_000;
+test('hostile nesting returns without throwing, cut at the depth cap', () => {
+  // Each of these overflows marked's stack when its lexer is not capped, and each fits
+  // MAX_MARKDOWN_LENGTH, so all of it is read as markdown. The depth must be the cap exactly: a
+  // lexer that threw would leave the plain-text fallback, at depth 0.
   const cases: Array<[src: string, inlineDepth: number]> = [
-    ['>'.repeat(20_000) + ' x', 0],
-    ['*'.repeat(20_000) + 'x' + '*'.repeat(20_000), MAX_DEPTH],
-    ['*a '.repeat(5_000) + 'x' + ' a*'.repeat(5_000), MAX_DEPTH],
-    ['- '.repeat(20_000) + 'x', 0],
-    [Array.from({ length: 1_000 }, (_, i) => `${'  '.repeat(i)}- x`).join('\n'), 0],
-    [('*a '.repeat(1_000) + 'x' + ' a*'.repeat(1_000) + '\n\n').repeat(Math.floor(MB / 6_002)), MAX_DEPTH],
-    [Array.from({ length: 1_400 }, (_, i) => `${'>'.repeat(i + 1)} x`).join('\n'), 0],
+    ['>'.repeat(6_000) + ' x', 0],
+    ['*'.repeat(3_000) + 'x' + '*'.repeat(3_000), MAX_DEPTH],
+    ['*a '.repeat(1_000) + 'x' + ' a*'.repeat(1_000), MAX_DEPTH],
+    ['- '.repeat(3_000) + 'x', 0],
+    [Array.from({ length: 70 }, (_, i) => `${'  '.repeat(i)}- x`).join('\n'), 0],
+    [Array.from({ length: 100 }, (_, i) => `${'>'.repeat(i + 1)} x`).join('\n'), 0],
   ];
   for (const [src, inlineDepth] of cases) {
+    assert.ok(src.length <= MAX_MARKDOWN_LENGTH, `${src.length} characters`);
     for (const [read, expected] of [[mdTree, MAX_DEPTH], [mdInline, inlineDepth]] as const) {
+      const tree = read(src);
+      assert.equal(depth(tree), expected, `${read.name} on ${src.slice(0, 12)}…`);
+      assert.ok(flatText(tree).includes('x'), read.name);
+    }
+  }
+});
+
+/** `value` without white space, to compare what shows when markup and line breaks differ. */
+const compact = (value: string): string => value.replace(/\s+/g, '');
+
+test('hostile paragraphs are read in bounded time, and the rest still shows', () => {
+  // Each of these takes marked seconds to minutes at this size, when all of it is read.
+  const MB = 1 << 20;
+  const fill = (unit: string): string => unit.repeat(Math.floor(MB / unit.length));
+  let ids = '';
+  for (let i = 0; ids.length < MB; i += 1) ids += `var_${i}_`;
+  const cases: Record<string, string> = {
+    'a letter, then underscores': 'a' + '_'.repeat(MB),
+    'underscore pairs': fill('_a'),
+    'a letter, then stars': 'a' + '*'.repeat(MB),
+    'a letter, spaces, a letter': 'a' + ' '.repeat(MB) + 'b',
+    'unclosed link destinations': fill('[a](b') + ')',
+    'a URL, then dots': 'https://acme.example/x' + '.'.repeat(MB),
+    'a table of unclosed stars': '|a|\n|-|\n' + fill('|*a|\n'),
+    'a paragraph of unclosed stars': fill('|*a|\n'),
+    'setext underlines': fill('a\n-\n'),
+    'underscore-joined identifiers': ids,
+    'stars and dots': fill('*.'),
+    'nested emphasis, paragraph after paragraph': fill('*a '.repeat(1_000) + 'x' + ' a*'.repeat(1_000) + '\n\n'),
+    'a run of line breaks, then text': '\n'.repeat(MB) + 'a',
+  };
+  for (const [name, src] of Object.entries(cases)) {
+    for (const read of [mdTree, mdInline]) {
       const started = performance.now();
       const tree = read(src);
       const ms = performance.now() - started;
-      assert.equal(depth(tree), expected, `${read.name} on ${src.slice(0, 12)}…`);
-      assert.ok(flatText(tree).includes('x'), read.name);
-      assert.ok(ms < 5_000, `${read.name} took ${Math.round(ms)} ms on ${src.length} characters`);
+      assert.ok(ms < 1_000, `${read.name} took ${Math.round(ms)} ms on ${name}`);
+      assert.ok(compact(flatText(tree)).length >= compact(src).length - MAX_MARKDOWN_LENGTH, `${read.name} shows the rest of ${name}`);
     }
   }
+});
+
+test('past MAX_MARKDOWN_LENGTH the rest shows as plain lines, cut after a blank line', () => {
+  // Two lines a paragraph, so a cut at the last line break would split one.
+  const tail = 'x'.repeat(80);
+  const paras = Array.from({ length: 200 }, (_, i) => `**b** paragraph ${i}\n${tail}`);
+  const src = paras.join('\n\n');
+
+  const tree = mdTree(src);
+  const k = tree.length - 1;
+  assert.ok(k > 1 && paras.slice(0, k).join('\n\n').length <= MAX_MARKDOWN_LENGTH);
+  // Every paragraph before the cut is read whole, and the cut splits none.
+  tree.slice(0, k).forEach((node, i) => {
+    assert.deepEqual(node, { t: 'p', children: [{ t: 'strong', children: [t('b')] }, t(` paragraph ${i}`), { t: 'br' }, t(tail)] });
+  });
+  assert.equal(tree[k]?.t, 'p');
+  assert.equal(flatText(tree.slice(k)), paras.slice(k).join('\n\n'));
+
+  const read = paras.slice(0, k).map((_, i) => `b paragraph ${i}\n${tail}`).join('\n\n');
+  assert.equal(flatText(mdInline(src)), `${read}\n\n${paras.slice(k).join('\n\n')}`);
+
+  // A message under the cap, ending in a line break, draws as it did.
+  assert.deepEqual(mdInline('a\n'), [t('a\n')]);
+});
+
+test('with no blank line to cut after, the cut falls after a line break, then a space, then anywhere', () => {
+  const lineList = Array.from({ length: 200 }, (_, i) => `line ${i} ${'y'.repeat(60)}`);
+  const byLine = mdTree(lineList.join('\n'));
+  assert.equal(byLine.length, 2);
+  const firstRest = flatText(byLine.slice(1)).split('\n')[0] as string;
+  assert.ok(lineList.includes(firstRest), firstRest);
+  assert.ok(lineList.includes(flatText(byLine.slice(0, 1)).split('\n').at(-1) as string));
+
+  // A blank line in the first half is passed over, so most of the text is still read.
+  const early = mdTree(`intro\n\n${lineList.join('\n')}`);
+  assert.equal(early.length, 3);
+  assert.ok(flatText(early.slice(0, 2)).length > MAX_MARKDOWN_LENGTH / 2);
+
+  const bySpace = mdTree('word '.repeat(3_000));
+  assert.match(flatText(bySpace.slice(1)), /^word /);
+
+  const hard = mdTree('x'.repeat(10_000));
+  assert.equal(flatText(hard.slice(0, 1)).length, MAX_MARKDOWN_LENGTH);
+  assert.equal(compact(flatText(hard)), 'x'.repeat(10_000));
+
+  // The cut never parts a surrogate pair.
+  const emoji = 'a' + '😀'.repeat(5_000);
+  for (const read of [mdTree, mdInline]) {
+    const texts: string[] = [];
+    const walk = (nodes: readonly MdNode[]): void => {
+      for (const n of nodes) {
+        if ('children' in n) walk(n.children);
+        else if (n.t === 'text') texts.push(n.text);
+      }
+    };
+    walk(read(emoji));
+    assert.ok(texts.length > 1, read.name);
+    for (const text of texts) assert.ok(!/[\ud800-\udbff]$|^[\udc00-\udfff]/.test(text), read.name);
+    assert.equal(texts.join(''), emoji, read.name);
+  }
+});
+
+test('a code fence that crosses the cut stays code, and its links stay text', () => {
+  const code = Array.from({ length: 400 }, (_, i) => `[x](https://acme.example/${i})`).join('\n\n');
+  const tree = mdTree(`Intro\n\n\`\`\`\n${code}\n\`\`\`\n\nafter`);
+  assert.deepEqual(tree.map((n) => n.t), ['p', 'pre', 'p']);
+  assert.deepEqual(links(tree), []);
+  assert.ok(flatText(tree).endsWith('```\n\nafter'));
 });
 
 test('a tree holds about MAX_NODES nodes at most, and every character still shows', () => {
@@ -277,7 +378,7 @@ test('a tree holds about MAX_NODES nodes at most, and every character still show
   for (const read of [mdTree, mdInline]) {
     const tree = read(src);
     assert.ok(size(tree) <= MAX_NODES + 4, `${read.name} drew ${size(tree)} nodes`);
-    assert.equal(flatText(tree).trimEnd(), src.trimEnd(), read.name);
+    assert.equal(compact(flatText(tree)), compact(src), read.name);
   }
   const quoted = mdTree('> - [a](https://acme.example/) b\n'.repeat(MAX_NODES / 4));
   assert.ok(size(quoted) <= MAX_NODES + 8, `drew ${size(quoted)} nodes`);

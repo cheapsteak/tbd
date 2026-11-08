@@ -16,6 +16,8 @@
  *   source text, never markup.
  * - **Links pass only through `safeLink`**, which is at least as strict as the loader's own check,
  *   so the app never offers a link the loader would refuse. A link that fails shows its text.
+ * - **Only the first `MAX_MARKDOWN_LENGTH` characters are read as markdown.** The rest shows as
+ *   plain lines. See there.
  * - **Nesting stops at `MAX_DEPTH`.** See there.
  * - **A tree holds about `MAX_NODES` nodes at most.** See there.
  *
@@ -36,6 +38,22 @@ export type MdNode =
 
 /** The longest link the app offers: the loader's own limit, `MAX_OPENABLE_URL_LENGTH` in `phone/loader/frame.js`. */
 export const MAX_LINK_LENGTH = 2_048;
+
+/**
+ * The most characters of a message read as markdown. The rest shows as plain lines of its
+ * source, after a cut `cutPoint` places.
+ *
+ * Several of marked's own rules take time that grows with the square of one paragraph's length,
+ * whatever its nesting: an opening `*` or `_` with no partner, a run of `_` after a letter, an
+ * unclosed link destination, the GitHub rule that looks for a bare URL or email at each `_`, `*`
+ * or `.`. Measured in Node on marked 18.1.3, 64 KB of such text took 1 to 8 s, and 1 MB of `*.`
+ * took 110 s. `Markdown` reads a message while it renders, so that time is a frozen screen. The
+ * worst case known reads 6,144 characters in under 100 ms in Node, 8,192 in about 150 ms and 4,096
+ * in about 40 ms. A preview is at most 4,096 UTF-8 bytes (`messagePreviewBytes`, 4b
+ * `PhoneAppConstants.swift`), so it is always read whole, and "Show more" adds formatted text
+ * before the plain lines start.
+ */
+export const MAX_MARKDOWN_LENGTH = 6_144;
 
 /**
  * How deep quotes, list items, strong, em, del and links may nest, counted together along one
@@ -98,32 +116,110 @@ const WEB_PREFIX = /^https?:\/\//i;
 /**
  * `src` as block markdown: paragraphs, lists, quotes, code blocks, headings and rules, with
  * GitHub's extensions and a line break wherever the text has one, as the mock's `md` draws them.
- * If the lexer fails anyway, the text shows as one paragraph of its lines.
+ * Past `MAX_MARKDOWN_LENGTH`, the rest is one more paragraph of plain lines. If the lexer fails
+ * anyway, the whole text shows as one paragraph of its lines.
  */
 export function mdTree(src: string): MdNode[] {
+  const all = src.replace(CRLF, '\n');
+  const [head, rest] = splitForLexing(all);
   const walk: Walk = { nodes: 0 };
+  let tree: MdNode[];
   try {
-    return blocks(new CappedLexer(lexOptions()).lex(src), 0, walk);
+    tree = blocks(new CappedLexer(lexOptions()).lex(head), 0, walk);
   } catch {
     const plain: Walk = { nodes: 0 };
-    return [count(plain, { t: 'p', children: lines(src.replace(CRLF, '\n'), plain) })];
+    return [count(plain, { t: 'p', children: lines(all, plain) })];
   }
+  const tail = trimBreaks(rest.replace(/^\n+/, ''));
+  if (tail !== '') tree.push(count(walk, { t: 'p', children: lines(tail, walk) }));
+  return tree;
 }
 
 /**
  * `src` as one run of inline markdown, as the mock's `inline` draws a message: code, emphasis,
  * links and line breaks, but no paragraphs, lists or other blocks, whose markers show as typed.
- * If the lexer fails anyway, the text shows as its lines.
+ * Past `MAX_MARKDOWN_LENGTH`, the rest shows as plain lines. If the lexer fails anyway, the whole
+ * text shows as its lines.
  */
 export function mdInline(src: string): MdNode[] {
-  const text = src.replace(CRLF, '\n');
+  const all = src.replace(CRLF, '\n');
+  const [prefix, rest] = splitForLexing(all);
+  // A cut after line breaks: the lexer draws none at the end of its text, so they are drawn here.
+  const cut = rest === '' ? { start: prefix.length, breaks: 0 } : trailingBreaks(prefix);
   const walk: Walk = { nodes: 0 };
+  let tree: MdNode[];
   try {
-    return inlines(new CappedLexer(lexOptions()).inlineTokens(text), 0, false, walk);
+    tree = inlines(new CappedLexer(lexOptions()).inlineTokens(prefix.slice(0, cut.start)), 0, false, walk);
   } catch {
-    return lines(text, { nodes: 0 });
+    return lines(all, { nodes: 0 });
   }
+  for (let i = 0; i < cut.breaks; i += 1) tree.push(count(walk, { t: 'br' }));
+  for (const node of lines(trimBreaks(rest), walk)) tree.push(node);
+  return tree;
 }
+
+/**
+ * Where the line breaks at the end of `value` start, with the spaces and tabs among and before
+ * them, and how many there are. With none, the end of `value` and 0. A loop, not a regular
+ * expression anchored at the end, which would take time growing with the square of a long run.
+ */
+function trailingBreaks(value: string): { start: number; breaks: number } {
+  let start = value.length;
+  let breaks = 0;
+  while (start > 0) {
+    const ch = value.charCodeAt(start - 1);
+    if (ch === 0x0a) breaks += 1;
+    else if (ch !== 0x20 && ch !== 0x09) break;
+    start -= 1;
+  }
+  return breaks === 0 ? { start: value.length, breaks: 0 } : { start, breaks };
+}
+
+/**
+ * `text` split into the part read as markdown and the rest, which shows as plain lines: the
+ * whole text and nothing when it fits `MAX_MARKDOWN_LENGTH`.
+ */
+function splitForLexing(text: string): [head: string, rest: string] {
+  if (text.length <= MAX_MARKDOWN_LENGTH) return [text, ''];
+  const cut = cutPoint(text.slice(0, MAX_MARKDOWN_LENGTH));
+  return [text.slice(0, cut), text.slice(cut)];
+}
+
+/**
+ * Where markdown stops in a text longer than `MAX_MARKDOWN_LENGTH`, given its first that many
+ * characters: just after the last blank line when one falls in the second half, else after the
+ * last line break, else after the last space or tab, else at the end, never between the two
+ * halves of a surrogate pair.
+ *
+ * A blank line ends every paragraph, so no code span, link or emphasis crosses that cut, and the
+ * part before it reads as it does in the whole text, with two differences that only take away. A
+ * reference link whose definition comes after the cut shows as its text. A block that can hold
+ * blank lines (a code fence, an indented code block, an HTML block, a loose list) ends at the
+ * cut: a fence or HTML block left open runs to the end of the part read and shows what it holds
+ * as code or source text, which is what it is, and the rest shows as plain lines either way.
+ *
+ * A cut at a line break or a space can fall inside a paragraph, and so inside a code span or a
+ * link's text that continues past it. Then the part read has an opening backtick or bracket with
+ * no partner, which shows as itself, and the text after it reads as markdown: code from that span
+ * can show as emphasis, or as a link. Such a link has passed `safeLink`, and the loader's sheet
+ * shows the whole URL and asks before opening it (`renderLinkSheet` in `phone/loader/ui.js`), so
+ * the cost is a misdrawn span, never a hidden destination.
+ * Only a message with no blank line in the second half of its first 6,144 characters is cut there.
+ */
+function cutPoint(window: string): number {
+  let afterBlank = -1;
+  for (const match of window.matchAll(BLANK_LINE)) afterBlank = match.index + match[0].length + 1;
+  if (afterBlank >= window.length / 2) return afterBlank;
+  const lineEnd = window.lastIndexOf('\n');
+  if (lineEnd >= 0) return lineEnd + 1;
+  const space = Math.max(window.lastIndexOf(' '), window.lastIndexOf('\t'));
+  if (space >= 0) return space + 1;
+  const last = window.charCodeAt(window.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? window.length - 1 : window.length;
+}
+
+/** A line break followed by a blank line: spaces and tabs, then the next line break. */
+const BLANK_LINE = /\n[ \t]*(?=\n)/g;
 
 const CRLF = /\r\n?/g;
 
@@ -243,9 +339,14 @@ function lines(value: string, walk: Walk): MdNode[] {
   return out;
 }
 
-/** `value` without the line breaks at its end. */
+/**
+ * `value` without the line breaks at its end. A loop, not `/\n+$/`, which takes time growing with
+ * the square of a long run of line breaks that is not at the end.
+ */
 function trimBreaks(value: string): string {
-  return value.replace(/\n+$/, '');
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x0a) end -= 1;
+  return value.slice(0, end);
 }
 
 /** Block tokens at `level`, the number of quotes, list items and spans around them. */
