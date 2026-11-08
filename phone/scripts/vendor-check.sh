@@ -4,11 +4,11 @@
 # and exactly one tarball, integrity and provenance row per library.
 #
 # It also refuses what stage-loader.sh would refuse to serve from the lock, so a lock that
-# passes here never fails a deploy: a library name or file path outside the path rule below;
-# a listed file that is a symlink, sits behind one, or is not a regular file; a vendored file
-# that would be served as a page (.html .htm .xhtml .svg .xml, in any case); and one that
-# carries runner.html's origin placeholder. No symlink may be anywhere under the vendor root,
-# listed or not, and neither the root nor the lock may be one.
+# passes here never fails a deploy: a library name or file path outside the path rule below,
+# which admits only scripts, stylesheets and license notices; a listed file that is a symlink,
+# sits behind one, or is not a regular file; and one that carries runner.html's origin
+# placeholder. No symlink may be anywhere under the vendor root, listed or not, and neither
+# the root nor the lock may be one.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -28,9 +28,15 @@ shown() { printf '%s' "$1" | tr -c 'A-Za-z0-9._/-' '?'; }
 # vendor-update.sh and vendor-check.sh each carry these lines word for word, so that each stays
 # one self-contained file; path-rule.testlib.sh runs all three on one table of paths and fails
 # when their verdicts, or these lines, differ.
+#
+# A vendored file is a script (.js), a stylesheet (.css) or a license notice (LICENSE,
+# LICENCE, COPYING or NOTICE, in any case, alone or with .txt), and nothing else. The kinds are
+# an allowlist because a static host serves many kinds of file as a page (.html, .xht, .svg,
+# .xsl, .mhtml, .rss and more), and a page on the loader's origin could read its IndexedDB.
 segment='[A-Za-z0-9_][A-Za-z0-9._-]*' # no leading dot, so no '..' and no dotfiles
 lib_name="^$segment\$"
-lib_path="^$segment(/$segment)*\$"
+notice='([Ll][Ii][Cc][Ee][Nn][CcSs][Ee]|[Cc][Oo][Pp][Yy][Ii][Nn][Gg]|[Nn][Oo][Tt][Ii][Cc][Ee])(\.[Tt][Xx][Tt])?'
+lib_path="^($segment/)*($segment\.(js|css)|$notice)\$"
 
 # runner.html's placeholder, which stage-loader.sh refuses in any other served file.
 placeholder='https://loader-origin.invalid'
@@ -72,15 +78,9 @@ while IFS="$tab" read -r name _ kind value sha || [ -n "$name" ]; do
   rel="$name/$value"
   printf '%s\n' "$rel" >>"$work/listed"
   if ! [[ "$value" =~ $lib_path ]]; then
-    fail "$(shown "$rel"): a vendored path must be segments of A-Z a-z 0-9 . _ - none starting with '.'"
+    fail "$(shown "$rel"): a vendored file must be a .js or .css file or a license notice (LICENSE, LICENCE, COPYING or NOTICE, alone or with .txt), at a path of segments of A-Z a-z 0-9 . _ - none starting with '.'"
     continue
   fi
-  case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-    *.html | *.htm | *.xhtml | *.svg | *.xml)
-      fail "$rel: would be served as a page; only index.html and runner.html may be"
-      continue
-      ;;
-  esac
   path="$root/$rel"
   if ! plain_file "$root" "$rel"; then
     if [ -e "$path" ] || [ -L "$path" ]; then

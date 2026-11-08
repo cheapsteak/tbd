@@ -6,10 +6,11 @@
 # The loader repo's deploy and the Playwright test server both run it.
 #
 # Served: top-level *.html, *.js, *.css and *.webmanifest; channel/*.js; and each `file`
-# row of vendor/vendor.lock, as vendor/<name>/<path>. Never served: *.test.js, test/,
-# vendor.lock, *.md, dotfiles, symlinks. A served file whose path holds anything but
-# A-Z a-z 0-9 . _ / - refuses. The only pages are index.html and runner.html: any other
-# page would run with the loader's origin and could read its IndexedDB.
+# row of vendor/vendor.lock, as vendor/<name>/<path>, which must be a script, a stylesheet or
+# a license notice (the path rule below). Never served: *.test.js, test/, vendor.lock, *.md,
+# dotfiles, symlinks. A served file whose path holds anything but A-Z a-z 0-9 . _ / - refuses.
+# The only pages are index.html and runner.html: any other page would run with the loader's
+# origin and could read its IndexedDB.
 #
 # <site-dir> must be absent or empty. The site is built in a scratch directory and copied
 # into <site-dir> only once every check passes, so a refusal leaves <site-dir> untouched.
@@ -116,9 +117,15 @@ if ! served_file "$lock"; then refuse "$loader/$lock is missing"; fi
 # vendor-update.sh and vendor-check.sh each carry these lines word for word, so that each stays
 # one self-contained file; path-rule.testlib.sh runs all three on one table of paths and fails
 # when their verdicts, or these lines, differ.
+#
+# A vendored file is a script (.js), a stylesheet (.css) or a license notice (LICENSE,
+# LICENCE, COPYING or NOTICE, in any case, alone or with .txt), and nothing else. The kinds are
+# an allowlist because a static host serves many kinds of file as a page (.html, .xht, .svg,
+# .xsl, .mhtml, .rss and more), and a page on the loader's origin could read its IndexedDB.
 segment='[A-Za-z0-9_][A-Za-z0-9._-]*' # no leading dot, so no '..' and no dotfiles
 lib_name="^$segment\$"
-lib_path="^$segment(/$segment)*\$"
+notice='([Ll][Ii][Cc][Ee][Nn][CcSs][Ee]|[Cc][Oo][Pp][Yy][Ii][Nn][Gg]|[Nn][Oo][Tt][Ii][Cc][Ee])(\.[Tt][Xx][Tt])?'
+lib_path="^($segment/)*($segment\.(js|css)|$notice)\$"
 tab="$(printf '\t')"
 while IFS="$tab" read -r name _ kind value _ || [ -n "$name" ]; do
   case "$name" in '' | '#'*) continue ;; esac
@@ -135,13 +142,13 @@ done <"$loader/$lock"
 
 (cd "$stage" && find . -type f) | sed 's|^\./||' | sort >"$work/list"
 
-# 4. No page but index.html and runner.html.
+# 4. No page but index.html and runner.html. Step 3 staged top-level and channel/ files by
+#    kind and vendored files by the path rule, so the only other page that gets this far is a
+#    top-level *.html, which this refuses with anything else outside those kinds.
 while IFS= read -r rel; do
-  case "$rel" in index.html | runner.html) continue ;; esac
-  case "$(printf '%s' "$rel" | tr '[:upper:]' '[:lower:]')" in
-    *.html | *.htm | *.xhtml | *.svg | *.xml)
-      refuse "$rel would be served as a page; only index.html and runner.html may be"
-      ;;
+  case "$rel" in
+    index.html | runner.html | *.js | *.css | *.webmanifest | vendor/*) ;;
+    *) refuse "$rel would be served as a page, or as a kind the loader does not serve; only index.html and runner.html may be pages" ;;
   esac
 done <"$work/list"
 

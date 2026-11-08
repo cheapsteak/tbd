@@ -138,8 +138,8 @@ refuses "a vendor.lock that is a symlink refuses" lock_link refused "vendor.lock
 svg() { add_row "$1" lib dist/icon.svg '<svg/>'; }
 page() { add_row "$1" lib demo.HTML '<p>x</p>'; }
 stamped() { add_row "$1" lib dist/extra.js '// https://loader-origin.invalid'; }
-refuses "a vendored .svg refuses" svg refused "lib/dist/icon.svg: would be served as a page"
-refuses "a vendored page in capitals refuses" page refused "lib/demo.HTML: would be served as a page"
+refuses "a vendored .svg refuses" svg refused "lib/dist/icon.svg: a vendored file must be a .js or .css file or a license notice"
+refuses "a vendored page in capitals refuses" page refused "lib/demo.HTML: a vendored file must be a .js or .css file or a license notice"
 refuses "a vendored file carrying the origin placeholder refuses" stamped refused "lib/dist/extra.js: carries"
 
 t="$tmp/root-link"; make_root "$tmp/real-root"; ln -s real-root "$t"; run "$t"

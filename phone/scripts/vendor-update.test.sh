@@ -120,6 +120,22 @@ mkdir -p "$root9/x"; printf 'old\n' >"$root9/x/old.js"
 rc=0; VENDOR_REGISTRY="file://$reg9" VENDOR_ROOT="$root9" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 || rc=$?
 if [ "$rc" -eq 1 ] && [ -f "$root9/x/old.js" ] && [ ! -e "$root9/x/dist" ]; then ok "a license named outside the rule refuses, old files kept"; else bad "odd license rc=$rc"; fi
 
+# A license notice is vendored only as LICENSE, LICENCE, COPYING or NOTICE, in any case, alone
+# or with .txt. Any other license-like file the tarball brings, such as a LICENSE.md, refuses
+# rather than being dropped.
+md_license() { printf '# MIT License\n' >"$1/LICENSE.md"; }
+reg9m="$tmp/reg9m"; root9m="$tmp/root9m"; make_registry "$reg9m" yes "" md_license
+mkdir -p "$root9m/x"; printf 'old\n' >"$root9m/x/old.js"
+rc=0; VENDOR_REGISTRY="file://$reg9m" VENDOR_ROOT="$root9m" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && [ -f "$root9m/x/old.js" ] && [ ! -e "$root9m/x/dist" ]; then ok "a LICENSE.md refuses, old files kept"; else bad "LICENSE.md rc=$rc"; fi
+more_notices() { printf 'GPL\n' >"$1/copying"; printf 'Notice\n' >"$1/Notice.txt"; }
+reg9n="$tmp/reg9n"; root9n="$tmp/root9n"; make_registry "$reg9n" yes "" more_notices
+if VENDOR_REGISTRY="file://$reg9n" VENDOR_ROOT="$root9n" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 \
+  && [ -f "$root9n/x/copying" ] && [ -f "$root9n/x/Notice.txt" ] && [ -f "$root9n/x/LICENSE" ] \
+  && bash "$check" "$root9n" >/dev/null 2>&1; then
+  ok "COPYING and NOTICE files, in any case, are vendored with the license"
+else bad "more notices"; fi
+
 # Only the version document's own `dist` object counts. Registry JSON is minified onto one line,
 # so a key of the same name elsewhere in it must neither stand in for a missing dist field nor
 # override a present one.

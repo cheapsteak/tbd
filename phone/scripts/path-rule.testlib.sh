@@ -25,7 +25,10 @@
 path_rule_long="$(printf '%0200d' 0 | tr 0 a)"
 
 # The table: each entry is a verdict, `good` or `bad`, a tab, and a path. No path holds a tab
-# or a newline, which a lock row cannot carry.
+# or a newline, which a lock row cannot carry. `path_rule_registry` puts every path in one
+# package, where vendor-update.sh vendors each top-level license-like name it finds, so a bad
+# license-like name sits under dist/ (vendor-update.test.sh tries a bad one at the top level);
+# and no two paths differ only in case, which a case-insensitive file system would merge.
 path_rule_cases=(
   $'good\tx.js'
   $'good\tLICENSE'
@@ -37,6 +40,13 @@ path_rule_cases=(
   $'good\tdist/a..b.js'
   $'good\ta/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/x.js'
   "good	$path_rule_long/x.js"
+  $'good\tx.css'
+  $'good\tdist/a.min.css'
+  $'good\tLICENCE'
+  $'good\tCOPYING.txt'
+  $'good\tNOTICE'
+  $'good\tdist/license.TXT'
+  $'good\tdist/Copying'
   $'bad\t..'
   $'bad\t../x.js'
   $'bad\tdist/../x.js'
@@ -66,6 +76,34 @@ path_rule_cases=(
   $'bad\ta~b.js'
   "bad	$path_rule_long/../x.js"
   "bad	$path_rule_long/a b.js"
+  $'bad\tdist/x.html'
+  $'bad\tx.htm'
+  $'bad\tx.xhtml'
+  $'bad\tx.xht'
+  $'bad\tindex.xht'
+  $'bad\tx.svg'
+  $'bad\tx.svgz'
+  $'bad\tx.xml'
+  $'bad\tx.xsl'
+  $'bad\tx.xslt'
+  $'bad\tx.mht'
+  $'bad\tx.mhtml'
+  $'bad\tx.rss'
+  $'bad\tx.atom'
+  $'bad\tx.shtml'
+  $'bad\tx.pdf'
+  $'bad\tx.json'
+  $'bad\tx.wasm'
+  $'bad\tdist/x.mjs'
+  $'bad\tdist/x.js.map'
+  $'bad\tdist/upper.JS'
+  $'bad\tdist/x.js.html'
+  $'bad\tdist/x.js/'
+  $'bad\tREADME'
+  $'bad\tdist/LICENSE.md'
+  $'bad\tdist/LICENSE.html'
+  $'bad\tdist/LICENSE-MIT'
+  $'bad\tdist/NOTICE.txt.svg'
 )
 
 # The rule's lines in the script $1: from its opening comment through `lib_path=`.
