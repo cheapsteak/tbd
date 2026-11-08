@@ -48,7 +48,11 @@
  *
  * The daemon also caps a phone at 32 running requests, counted across connections. The client
  * never has more than 32 posted and unanswered on one channel, reposts included: `onUp`'s
- * requests take slots first, then the reposts, then the queue.
+ * requests take slots first, then the reposts, then the queue. An acting repost waiting for the
+ * subscribe reply holds a slot too, since the daemon may still be running it, though `onUp`'s
+ * requests go ahead of it: the subscribe among them is the reply it waits for. The daemon may
+ * still be running a state request that a channel up superseded, as well. The client does not
+ * count those; the app never has close to 32 in flight.
  *
  * **Events.** Every event carries a `seq` on the phone's one stream. The daemon sends none on
  * a connection before that connection's `sessions.subscribe` reply, so the client drops any
@@ -302,9 +306,9 @@ export class AppClient {
    *   the daemon answers `refused`.
    *
    * It has no timeout: the daemon answers every request it runs. The request goes out at once
-   * when the channel is up and fewer than 32 requests are posted and unanswered, and, for an
-   * action, when no earlier action waits to be sent again. Otherwise it waits, in the order it
-   * was made.
+   * when the channel is up and fewer than 32 requests are posted and unanswered or wait for the
+   * subscribe reply, and, for an action, when no earlier action waits to be sent again.
+   * Otherwise it waits, in the order it was made.
    */
   request<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
     const id = this.#newID();
@@ -428,11 +432,16 @@ export class AppClient {
 
   /**
    * Posts what waits while the channel is up and a slot is free: `onUp`'s requests, then the
-   * reposts in first-send order, then the queue. While `onUp` runs, only its own go.
+   * reposts in first-send order, then the queue. While `onUp` runs, only its own go. Each
+   * acting repost waiting for the subscribe reply holds a slot from all but `onUp`'s requests
+   * (this file's header).
    */
   #pump(): void {
     while (this.#up && this.#posted.size < MAX_IN_FLIGHT) {
-      const next = this.#first.shift() ?? (this.#inOnUp ? undefined : this.#resends.shift() ?? this.#nextQueued());
+      let next = this.#first.shift();
+      if (next === undefined && !this.#inOnUp && this.#posted.size + this.#unconfirmed.length < MAX_IN_FLIGHT) {
+        next = this.#resends.shift() ?? this.#nextQueued();
+      }
       if (next === undefined) return;
       if (this.#tooOldToResend(next)) {
         // Shifted out of its lane already, so only its entry is left to remove.

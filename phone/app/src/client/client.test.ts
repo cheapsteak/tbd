@@ -606,7 +606,12 @@ test('a queued request that was never posted is posted on up whatever its age', 
 });
 
 test('a subscribe reply that comes after the horizon rejects the held action, even with no slot free', async () => {
-  const h = harness({ whenUp: subscribe });
+  const h = harness({
+    whenUp: (c) => {
+      subscribe(c);
+      if (c.lastSeq !== null) track(c.request('transcript.open', { session: REF, showDetails: false, resume: true }));
+    },
+  });
   h.up();
   h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
   for (let i = 0; i < 31; i++) track(h.c.request('profiles.list', {}));
@@ -614,9 +619,10 @@ test('a subscribe reply that comes after the horizon rejects the held action, ev
   const id = last(h, 'message.send')!.requestID;
   h.down();
   h.clock.now = 500_000;
-  h.up();   // the subscribe and 31 reads take every slot
+  h.up();   // the subscribe, the open and 29 reads; the held action holds the last slot
   assert.equal(sends(h, id), 1);
   h.clock.now = 540_001;
+  // Its release frees two slots, which the two reads first sent before it take.
   h.reply(last(h, 'sessions.subscribe'), replay('s1', 0));
   await flush();
   assert.equal(act.state, 'rejected');
@@ -1110,9 +1116,9 @@ test('an action released before the horizon that waits for a slot past it is not
   const reads = h.posted.filter((b) => b.method === 'profiles.list');
   h.down();
   h.clock.now = 400_000;
-  h.up();   // the subscribe, the open and 30 reads fill every slot
+  h.up();   // the subscribe, the open and 29 reads; the held action holds the last slot
   h.clock.now = 500_000;
-  confirm(h);   // releases the action; the read sent before it takes the free slot
+  confirm(h);   // releases the action; the two reads sent before it take the two free slots
   assert.equal(h.posted.at(-1), reads[30]);
   assert.equal(sends(h, id), 1);
   h.clock.now = 540_001;
@@ -1162,15 +1168,16 @@ test('a released action still waiting for a slot at a drop waits for the next su
     },
   });
   connect(h);
+  for (let i = 0; i < 30; i++) track(h.c.request('profiles.list', {}));
   const acts = [
     track(h.c.request('message.send', { session: REF, text: 'one' })),
     track(h.c.request('message.send', { session: REF, text: 'two' })),
   ];
   const ids = h.posted.filter((b) => b.method === 'message.send').map((b) => b.requestID);
-  for (let i = 0; i < 30; i++) track(h.c.request('profiles.list', {}));
   h.down();
-  h.up();   // the subscribe, the open and 30 reads fill every slot
-  confirm(h);   // one slot frees: the first action goes, the second waits
+  h.up();   // the subscribe, the open and 28 reads; the two held actions hold the last two slots
+  // Three slots free: the two reads first sent before the actions, then the first action.
+  confirm(h);
   assert.deepEqual(ids.map((id) => sends(h, id)), [2, 1]);
   h.down();
   h.up();
@@ -1198,17 +1205,36 @@ test('reposts go out in first-send order across two drops with more than 32 unan
   for (let drop = 0; drop < 2; drop++) {
     h.down();
     const mark = h.posted.length;
-    h.up();   // the subscribe, the open and 30 reads fill every slot; the action is held
-    assert.deepEqual(h.posted.slice(mark + 2), reads.slice(0, 30));
+    h.up();   // the subscribe, the open and 29 reads; the held action holds the last slot
+    assert.deepEqual(h.posted.slice(mark + 2), reads.slice(0, 29));
   }
   const mark = h.posted.length;
-  confirm(h);   // the action was first sent before the waiting read, so it takes the free slot
+  // Two slots free. The action was first sent before the waiting reads, so it goes first.
+  confirm(h);
   h.reply(reads[0], PROFILES);
   h.reply(reads[1], PROFILES);
   h.reply(reads[2], PROFILES);
   assert.deepEqual(h.posted.slice(mark).map((b) => b.params.text ?? b.method),
-    ['first action', 'profiles.list', 'remote.providers', 'later action']);
-  assert.equal(h.posted[mark + 1], reads[30]);
+    ['first action', 'profiles.list', 'profiles.list', 'remote.providers', 'later action']);
+  assert.deepEqual(h.posted.slice(mark + 1, mark + 3), reads.slice(29, 31));
+});
+
+test('acting reposts waiting for the subscribe reply hold slots, from all but onUp', () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  track(h.c.request('message.send', { session: REF, text: 'one' }));
+  const one = last(h, 'message.send')!;
+  track(h.c.request('message.send', { session: REF, text: 'two' }));
+  h.down();
+  const mark = h.posted.length;
+  h.up();   // the subscribe goes; the two actions wait for its reply
+  for (let i = 0; i < 31; i++) track(h.c.request('profiles.list', {}));
+  // The subscribe and 29 reads: the two waiting actions hold the other two slots.
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.method), ['sessions.subscribe', ...Array<string>(29).fill('profiles.list')]);
+  confirm(h);   // the actions go out in the slots they held, and the subscribe's slot takes a read
+  assert.deepEqual(h.posted.slice(mark + 30).map((b) => b.params.text ?? b.method), ['one', 'two', 'profiles.list']);
+  assert.equal(h.posted[mark + 30], one);
+  assert.equal(h.posted.length, mark + 33);
 });
 
 // MARK: - The refused stopgap and the clock
