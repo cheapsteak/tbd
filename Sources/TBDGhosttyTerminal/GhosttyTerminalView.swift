@@ -440,6 +440,11 @@ public final class GhosttyTerminalView: NSView {
         layer.device = renderContext.device
         // Must match the renderer's pipeline attachment format exactly.
         layer.pixelFormat = .bgra8Unorm
+        // Theme colours are sRGB values. Tagged, Core Animation colour-matches the drawable to the
+        // display as it does a layer-backed view's backing store; untagged (nil), the bytes are
+        // taken as the display's own gamut and look oversaturated on a wide-gamut (P3) display.
+        // SwiftTerm's Metal layer is tagged the same way.
+        layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         layer.framebufferOnly = true
         // 3, not 2: with `presentsWithTransaction` during a live resize the present is synchronous
         // on the main thread, and a pool of 2 leaves `nextDrawable()` blocking (up to a second)

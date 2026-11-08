@@ -202,6 +202,22 @@ struct GhosttyTerminalViewTests {
         #expect(grid.cols == 40 && grid.rows == 10, "the view's grid is \(grid)")
     }
 
+    /// The Metal layer is tagged sRGB, so Core Animation colour-matches the drawable the way it
+    /// does a layer-backed view's backing store. Untagged, theme colours would be shown as the
+    /// display's own gamut, oversaturated on a P3 display next to SwiftTerm.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func metalLayerIsTaggedSRGB() throws {
+        let fixture = try ViewFixture()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        place(fixture.view, in: try #require(window.contentView))
+
+        let layer = try #require(fixture.view.metalLayer, "the view is not backed by a CAMetalLayer")
+        let name: String? = layer.colorspace?.name.map { $0 as String }
+        let sRGB: String = CGColorSpace.sRGB as String
+        #expect(name == sRGB, "the Metal layer's colour space is \(name ?? "nil"), not sRGB")
+    }
+
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func hiddenViewBuildsNoFrames() throws {
         let fixture = try ViewFixture()
