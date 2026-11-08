@@ -574,7 +574,8 @@ struct HandoverCorpusTests {
     /// rebuilds the screen in view and ends with an opener that takes in the rest of the sequence,
     /// so the rest prints nothing and what follows it prints as it does on the viewer. On the
     /// alternate screen that screen comes alone, because a terminal inside such a sequence cannot
-    /// be cloned for its primary.
+    /// be cloned for its primary. Until the rest arrives the receiver is read without its modes:
+    /// a DECRQM query would end the opener with its ESC.
     @Test(arguments: ["sgr-colors", "alt-tui-full"], HandoverCorpusTests.overlongSequences)
     func handbackDropsTheRestOfASequenceThatOutgrewItsBound(_ name: String, _ sequence: OverlongSequence) async throws {
         try await onHandoverThread {
@@ -586,16 +587,17 @@ struct HandoverCorpusTests {
                 "\(name) must be left inside \(sequence.name), past what libghostty keeps of it")
             let receiver = try Self.handedBack(source, state: state)
 
-            func expectScreensMatch(_ moment: String) {
-                let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
+            func expectScreensMatch(_ moment: String, probingModes: Bool) {
+                let received = receiver.handoverSnap(history: false, probingModes: probingModes)
+                let tally = handoverCompare(source.handoverSnap(history: false), received, history: false)
                     .filtered(to: handoverScreenCategories)
                 #expect(tally.isEmpty, "\(name), inside \(sequence.name), \(moment): the screens differ: \(tally.summary)")
             }
-            expectScreensMatch("at the handback")
+            expectScreensMatch("at the handback", probingModes: false)
             let rest = sequence.rest + Array("X".utf8)
             source.feed(rest[...])
             receiver.feed(rest)
-            expectScreensMatch("once the rest arrived")
+            expectScreensMatch("once the rest arrived", probingModes: true)
             let (text, _) = Self.writtenBeforeCursor(receiver, count: 1)
             #expect(text == "X", "\(name), \(sequence.name): what follows the sequence wrote \(text.debugDescription)")
         }

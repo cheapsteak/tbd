@@ -490,7 +490,12 @@ extension HandoverSwiftTerm {
     /// answer, is left out of `modes`, and the comparison counts it. For the mouse modes it
     /// answers with the one tracking mode and the one encoding in effect, so those fill
     /// `mouseTracking` and `mouseEncoding`, nil when one of their modes went unanswered.
-    func handoverSnap(history: Bool = true) -> HandoverSnap {
+    ///
+    /// Each query is fed to the emulator, and its ESC ends any string sequence the parser is
+    /// inside, such as the handback's opener for an overlong one. A reading taken while the
+    /// receiver must stay inside a sequence passes `probingModes: false`: no mode is asked for, so
+    /// it has no answer for any, and only the screen categories compare.
+    func handoverSnap(history: Bool = true, probingModes: Bool = true) -> HandoverSnap {
         locked { terminal in
             var snap = HandoverSnap()
             snap.cols = terminal.cols
@@ -526,7 +531,7 @@ extension HandoverSwiftTerm {
                 return isSet ? value : current
             }
             var tracking: Int? = 0, encoding: Int? = 0
-            for mode in handoverComparedModes {
+            for mode in handoverComparedModes where probingModes {
                 let answer = collector.requestMode(mode.value, decPrivate: mode.decPrivate)
                 let isSet: Bool? = answer == 1 ? true : answer == 2 ? false : nil
                 if mode.decPrivate, handoverMouseTrackingModes.contains(mode.value) {
@@ -537,8 +542,8 @@ extension HandoverSwiftTerm {
                     snap.modes[mode.name] = isSet
                 }
             }
-            snap.mouseTracking = tracking
-            snap.mouseEncoding = encoding
+            snap.mouseTracking = probingModes ? tracking : nil
+            snap.mouseEncoding = probingModes ? encoding : nil
             snap.cursorVisible = snap.modes["DECTCEM"] ?? true
             snap.top = terminal.buffer.scrollTop
             snap.bottom = terminal.buffer.scrollBottom
