@@ -331,6 +331,7 @@ final class FrameBuilder {
         if column < surface.columns {
             for x in column..<surface.columns {
                 surface.setBackground(column: x, row: row, color: 0)
+                surface.setWideLead(column: x, row: row, false)
             }
         }
 
@@ -356,6 +357,8 @@ final class FrameBuilder {
 
         var wide = GHOSTTY_CELL_WIDE_NARROW
         _ = ghostty_cell_get(rawCell, GHOSTTY_CELL_DATA_WIDE, &wide)
+        // Before any early return: a wide cell with no glyph still sizes the cursor.
+        surface.setWideLead(column: column, row: row, wide == GHOSTTY_CELL_WIDE_WIDE)
         var hasHyperlink = false
         _ = ghostty_cell_get(rawCell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &hasHyperlink)
 

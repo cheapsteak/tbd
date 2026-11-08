@@ -110,6 +110,9 @@ final class TerminalSurface {
     /// Row-major `columns * rowCount` background grid, bound directly as the bg pass's instance
     /// buffer. Alpha 0 means "no explicit background" (see `TBDGhosttyShaderTypes.h`).
     private(set) var backgroundCells: [TkzBgCell] = []
+    /// Row-major `columns * rowCount`: true where libghostty's cell data says the cell is the lead
+    /// of a wide grapheme. Written with each rebuilt row, like `backgroundCells`.
+    private(set) var wideLeads: [Bool] = []
     /// Per-row glyph instances. Rebuilt only for rows libghostty reported dirty.
     private(set) var rowGlyphs: [[TkzGlyphInstance]] = []
     /// Per-row decoration rects drawn *after* the glyphs (underline, strikethrough).
@@ -218,6 +221,7 @@ final class TerminalSurface {
         columns = 0
         rowCount = 0
         backgroundCells.removeAll(keepingCapacity: false)
+        wideLeads.removeAll(keepingCapacity: false)
         rowGlyphs.removeAll(keepingCapacity: false)
         rowRects.removeAll(keepingCapacity: false)
         glyphFlatten.removeAll(keepingCapacity: false)
@@ -268,6 +272,7 @@ final class TerminalSurface {
         columns = max(0, newColumns)
         rowCount = max(0, newRows)
         backgroundCells = Array(repeating: TkzBgCell(color: 0), count: columns * rowCount)
+        wideLeads = Array(repeating: false, count: columns * rowCount)
         rowGlyphs = Array(repeating: [], count: rowCount)
         rowRects = Array(repeating: [], count: rowCount)
         glyphTotal = 0
@@ -302,6 +307,11 @@ final class TerminalSurface {
     func setBackground(column: Int, row: Int, color: UInt32) {
         guard column >= 0, column < columns, row >= 0, row < rowCount else { return }
         backgroundCells[row * columns + column] = TkzBgCell(color: color)
+    }
+
+    func setWideLead(column: Int, row: Int, _ isLead: Bool) {
+        guard column >= 0, column < columns, row >= 0, row < rowCount else { return }
+        wideLeads[row * columns + column] = isLead
     }
 
     func finishUpdate(dirty: SurfaceDirty, rowsRebuilt: Int) {
@@ -406,16 +416,18 @@ final class TerminalSurface {
     /// Covering one half would leave the grapheme's whole glyph drawn in `cursorTextColor`, the
     /// background, with only that half behind the block, so the other half would vanish.
     ///
-    /// libghostty reports a cursor on the tail. A lead is known by the glyph anchored on it, which
-    /// carries `TKZ_GLYPH_FLAG_WIDE`; a lead with no glyph has nothing to hide, so one cell does.
+    /// libghostty reports a cursor on the tail, and its cell data marks the lead, which the frame
+    /// builder records in `wideLeads`. Not the glyph: a wide cell with none, a full-width space or
+    /// text hidden with SGR 8, is still two cells, and the cursor keeps one width across it.
     private var cursorCells: (column: Int, width: Int) {
         if cursor.isWideTail { return (max(0, cursor.column - 1), 2) }
-        guard cursor.row >= 0, cursor.row < rowGlyphs.count else { return (cursor.column, 1) }
-        let column = cursor.column
-        let isWideLead = rowGlyphs[cursor.row].contains { glyph in
-            Int(glyph.gridPos.x) == column && glyph.flags & UInt32(TKZ_GLYPH_FLAG_WIDE) != 0
-        }
-        return (column, isWideLead ? 2 : 1)
+        return (cursor.column, isWideLead(column: cursor.column, row: cursor.row) ? 2 : 1)
+    }
+
+    /// Whether libghostty reported the cell as the lead of a wide grapheme when its row was built.
+    func isWideLead(column: Int, row: Int) -> Bool {
+        guard column >= 0, column < columns, row >= 0, row < rowCount else { return false }
+        return wideLeads[row * columns + column]
     }
 
     /// Suppresses the cursor entirely, whatever the terminal's own modes say.

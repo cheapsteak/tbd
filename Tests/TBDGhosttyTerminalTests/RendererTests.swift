@@ -206,21 +206,24 @@ struct RendererTests {
                 "surface A draws its A from atlas position \(drawnAt), but the A is now at (\(freshA.x), \(freshA.y))")
     }
 
-    /// A block cursor on either half of a wide character covers both of its cells, and the
-    /// character's glyph, anchored on the lead, is the one drawn in the cursor's text colour. The
-    /// rect and the marked glyph must agree: a block over one cell under a glyph drawn in the
-    /// background colour leaves the glyph's other half invisible. Built without a GPU: the frame
-    /// builder and the atlas's staging need none.
+    /// A block cursor on either half of a wide cell covers both of its cells, and the character's
+    /// glyph, anchored on the lead, is the one drawn in the cursor's text colour. The rect and the
+    /// marked glyph must agree: a block over one cell under a glyph drawn in the background colour
+    /// leaves the glyph's other half invisible. A wide cell that draws no glyph, a full-width space
+    /// or text hidden with SGR 8, gets the same two-cell block, so the cursor keeps one width as it
+    /// steps across such text. Built without a GPU: the frame builder and the atlas's staging need
+    /// none.
     ///
-    /// - Parameter cursorColumn: the 1-based column CHA moves the cursor to: 1 is the lead, 2 the tail.
-    @Test(arguments: [1, 2])
-    func aBlockCursorOnEitherHalfOfAWideCharacterCoversBothCells(cursorColumn: Int) throws {
+    /// - Parameters:
+    ///   - wideText: what is fed to put one wide cell in columns 0 and 1.
+    ///   - cursorColumn: the 1-based column CHA moves the cursor to: 1 is the lead, 2 the tail.
+    @Test(arguments: ["中", "\u{3000}", "\u{1b}[8m中"], [1, 2])
+    func aBlockCursorOnEitherHalfOfAWideCellCoversBothCells(wideText: String, cursorColumn: Int) throws {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let builder = FrameBuilder(glyphCache: GlyphCache(fontSet: FontSet(font: font, scale: 2), device: nil))
         let terminal = try GhosttyTerminal(cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
         defer { terminal.close() }
-        // A wide character in columns 0 and 1, then the cursor back onto one of them.
-        terminal.feed(text: "中\u{1b}[\(cursorColumn)G")
+        terminal.feed(text: "\(wideText)\u{1b}[\(cursorColumn)G")
         let surface = TerminalSurface()
         try surface.attach(terminal)
         try builder.update(surface)
@@ -229,10 +232,14 @@ struct RendererTests {
         try #require(cursor.column == cursorColumn - 1 && cursor.isWideTail == (cursorColumn == 2),
                      "the cursor is at column \(cursor.column), wide tail \(cursor.isWideTail)")
         try #require(cursor.style == .block, "the cursor is a \(cursor.style), not a block")
-        let anchored = surface.glyphInstances().first { $0.gridPos.x == 0 && $0.gridPos.y == 0 }
-        let glyph = try #require(anchored, "no glyph was built for the wide character")
-        #expect(glyph.flags & UInt32(TKZ_GLYPH_FLAG_UNDER_CURSOR) != 0,
-                "the wide glyph under the block cursor is not marked: flags \(glyph.flags)")
+        // Only the plain ideograph draws a glyph: the full-width space is blank, and SGR 8 hides
+        // the other.
+        if wideText == "中" {
+            let anchored = surface.glyphInstances().first { $0.gridPos.x == 0 && $0.gridPos.y == 0 }
+            let glyph = try #require(anchored, "no glyph was built for the wide character")
+            #expect(glyph.flags & UInt32(TKZ_GLYPH_FLAG_UNDER_CURSOR) != 0,
+                    "the wide glyph under the block cursor is not marked: flags \(glyph.flags)")
+        }
 
         let metrics = try #require(surface.metrics, "the frame builder gave the surface no cell metrics")
         let geometry = GridGeometry(metrics: metrics, viewportWidth: 10 * metrics.width, viewportHeight: 3 * metrics.height)
