@@ -139,6 +139,20 @@ struct WheelPowerlineKittyTests {
         #expect(recorder.sent == [cursorUp], "a wheel-up notch of 12 lines sent \(recorder.sent), from \(describe(up))")
     }
 
+    /// Under DECCKM the arrow key a notch types through the view is the application form, as the
+    /// real key is: a notch up on the alternate screen, with nothing reported, sends `ESC O A`.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aNotchUnderDECCKMTypesTheApplicationArrow() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1049h\u{1b}[?1h")
+        let reporting = terminal.isMouseReporting
+        try #require(!reporting, "a new terminal reports the mouse, so this proves nothing")
+
+        let up = Self.wheel(view, deltaY: 3, precise: false, phase: .unphased, at: 1)
+        #expect(recorder.sent == [Array("\u{1b}OA".utf8)],
+                "a wheel-up notch under DECCKM sent \(recorder.sent), from \(describe(up))")
+    }
+
     /// A trackpad moves by fractions of a line. They add up to whole lines within a gesture, and
     /// the fraction one gesture leaves is dropped when the next begins, so a short flick sends
     /// nothing and lends nothing to the next gesture.
