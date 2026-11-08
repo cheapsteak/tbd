@@ -172,11 +172,13 @@ final class PhoneOutboxQueue: Sendable {
 /// disconnected, the reply is dropped.
 ///
 /// **A resend of a request still running starts nothing.** A phone resends
-/// the requests it has no reply for when it reconnects. A request whose ID is
-/// still running for that device, whatever its method, starts no task, does
-/// not count against `PhoneAppConstants.requestsInFlightPerDevice`, and gets
-/// no reply of its own: the running request's reply goes to whichever
-/// connection the phone has when it finishes.
+/// the requests it has no reply for when it reconnects. A request whose ID
+/// and method match a request still running for that device starts no task,
+/// does not count against `PhoneAppConstants.requestsInFlightPerDevice`, and
+/// gets no reply of its own: the running request's reply goes to whichever
+/// connection the phone has when it finishes. A request that reuses a running
+/// request's ID for another method is no resend: it starts nothing and is
+/// answered `bad_request` at once, so the phone does not wait out its timeout.
 ///
 /// **The work, in order:**
 /// 1. **The flag.** `phone_control_enabled` is read for every request. Off:
@@ -243,10 +245,11 @@ actor PhoneAppService: PhoneAppHandling {
     var devices: [UUID: PhoneDeviceState] = [:]
     /// Handlers a test put in place of a method's own.
     private var replacedHandlers: [PhoneAppMethod: PhoneMethodHandler] = [:]
-    /// One request still running: its ID, which a resend repeats, and its
-    /// task.
+    /// One request still running: its ID and method, which a resend repeats,
+    /// and its task.
     private struct RunningRequest {
         let requestID: String
+        let method: PhoneAppMethod
         let task: Task<Void, Never>
     }
     /// Each device's requests still running, by a token per request. No two
@@ -361,8 +364,9 @@ actor PhoneAppService: PhoneAppHandling {
     /// Nothing runs for a message that is not a request, for a phone with no
     /// connection, for a request whose ID is longer than
     /// `PhoneAppConstants.requestIDMaxBytes`, or for a resend of a request
-    /// still running, which gets no reply of its own; a device with
-    /// `PhoneAppConstants.requestsInFlightPerDevice` requests running is
+    /// still running, which gets no reply of its own; a request that reuses a
+    /// running request's ID for another method, and a device with
+    /// `PhoneAppConstants.requestsInFlightPerDevice` requests running, are
     /// refused. None of these reach the request memory or the flag. Nor does
     /// anything run for a `sessions.subscribe` whose connection ended while
     /// `decideResume` read the flag (see there).
@@ -395,10 +399,16 @@ actor PhoneAppService: PhoneAppHandling {
             }
             return
         }
-        // A resend after a reconnect, while the first run is still going. The
-        // first run's reply goes to whichever connection is current when it
-        // finishes, so this one starts nothing and sends nothing.
-        if requests[deviceID]?.values.contains(where: { $0.requestID == requestID }) == true {
+        if let running = requests[deviceID]?.values.first(where: { $0.requestID == requestID }) {
+            // A resend after a reconnect, while the first run is still going.
+            // The first run's reply goes to whichever connection is current
+            // when it finishes, so this one starts nothing and sends nothing.
+            guard running.method.rawValue == head.method else {
+                Self.logger.error(
+                    "Phone app: refused a request from phone \(deviceID, privacy: .public) whose ID is in use by another method")
+                send(Self.failure(requestID, .badRequest, Self.requestIDInUse), to: deviceID)
+                return
+            }
             Self.logger.debug("Phone app: a resent request from phone \(deviceID, privacy: .public) is still running")
             return
         }
@@ -482,7 +492,8 @@ actor PhoneAppService: PhoneAppHandling {
             let reply = await self.serve(method, body: body, context: context)
             self.requestFinished(token, deviceID: deviceID, reply: reply)
         }
-        requests[deviceID, default: [:]][token] = RunningRequest(requestID: context.requestID, task: task)
+        requests[deviceID, default: [:]][token] = RunningRequest(
+            requestID: context.requestID, method: method, task: task)
     }
 
     /// Sends a finished request's reply through the connection the phone has
@@ -794,6 +805,9 @@ actor PhoneAppService: PhoneAppHandling {
     // MARK: - Replies
 
     private static let tooManyRequests = "Too many requests are in progress. Try again in a moment."
+    /// The reply to a request that reuses a running request's ID for another
+    /// method.
+    static let requestIDInUse = "That request ID is already in use."
     /// The `internal` error's words for a failure on the laptop.
     static let internalErrorReason = "Something went wrong on the laptop."
 

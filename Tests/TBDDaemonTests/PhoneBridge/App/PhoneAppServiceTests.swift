@@ -292,6 +292,34 @@ struct PhoneAppServiceTests {
         #expect(sendRecords.count == 1)
     }
 
+    /// A request that reuses a running request's ID for another method is no
+    /// resend: it starts nothing and is answered `bad_request` at once, and
+    /// the running request still replies once.
+    @Test func aRunningRequestsIDReusedForAnotherMethodIsABadRequest() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let gate = PhoneTestGate()
+        defer { gate.open() }
+        await h.service.setHandler(Self.sendStub(h.actions, gate: gate), for: .messageSend)
+        let outbox = await h.connect()
+        let held = try PhoneTestRequests.body(.messageSend, id: "r1", params: sendParams)
+        await h.service.handleAppMessage(held, from: h.peer)
+        #expect(await h.service.requestsRunning(for: h.peer.deviceID) == 1)
+
+        let page = TranscriptPageParams(session: .local(terminalID: terminalID), cursor: "0")
+        let (reused, _) = try await h.request(.transcriptPage, id: "r1", params: page, on: outbox)
+
+        #expect(reused.requestID == "r1")
+        #expect(reused.error == PhoneAppError(code: .badRequest, message: "That request ID is already in use."))
+        #expect(await h.service.requestsRunning(for: h.peer.deviceID) == 1)
+
+        gate.open()
+        let heldBytes = try await outbox.body(at: 1)
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: heldBytes)
+        #expect(reply.requestID == "r1")
+        #expect(reply.error == nil)
+        #expect(h.actions.sends.count == 1)
+    }
+
     /// A device with the most requests running is refused at once; the
     /// requests already running carry on.
     @Test func aDeviceWithTooManyRequestsRunningIsRefused() async throws {
