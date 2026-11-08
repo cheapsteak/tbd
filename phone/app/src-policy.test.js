@@ -114,7 +114,20 @@ const BANNED = [
     samples: ['location = url;', 'window.location = url;', "location['href'] = url;", 'document.location.assign(url);',
       'location.replace(url);'],
   },
-  { pattern: /\bnavigation\.navigate\b/, samples: ['navigation.navigate(url);', 'window.navigation.navigate(url);'] },
+  // The history and Navigation APIs reload the frame (`history.go(0)`, `navigation.reload()`) or
+  // move it to another entry of the session history it shares with the loader's page. Each is
+  // banned with any accessor: `.`, `?.`, or a bracket around a string.
+  {
+    pattern: /\bnavigation\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:navigate|reload|back|forward|traverseTo)\b/,
+    samples: ['navigation.navigate(url);', 'window.navigation.navigate(url);', 'navigation.reload();', 'navigation.back();',
+      'navigation.forward();', 'navigation.traverseTo(key);', 'navigation?.reload();', "navigation['back']();",
+      'self.navigation?.["traverseTo"](key);', 'navigation\n  .forward();'],
+  },
+  {
+    pattern: /\bhistory\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:go|back|forward)\b/,
+    samples: ['history.go(-1);', 'history.go(0);', 'history.go();', 'window.history.back();', 'history.forward();',
+      'history?.go(0);', "history['back']();", 'globalThis.history?.[`forward`]();', 'history\n  .go(0);'],
+  },
   { pattern: /['"`]_self['"`]/, samples: ["form.target = '_self';", 'const target = "_self";'] },
   { pattern: /\b(?:window|self|globalThis)\.open\b/, samples: ['window.open(url);', "self.open(url, '_blank');"] },
   { pattern: /\b(?:window|self|globalThis)\.parent\b/, samples: ["window.parent.postMessage(m, '*');"] },
@@ -161,6 +174,10 @@ const ALLOWED = [
   'const run = (f: Function) => f;',
   'const seen = new Map<object, string>();',
   'function first(xs: Array<object>): object | undefined { return xs[0]; }',
+  'actions.back();',
+  ' * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`',
+  'const older = history.slice(0, n);',
+  'const goBack = history.length > 0;',
 ];
 
 /** Every `.ts` and `.tsx` file under `app/src/`, as a path relative to it with `/` separators. */
