@@ -4,9 +4,10 @@
 // Grayscale glyphs go into an 8-bit alpha bitmap, colour glyphs (Apple Color Emoji) into BGRA with
 // *premultiplied* alpha, matching the two atlas formats. Subpixel positioning is on with
 // quantization off, so a glyph drawn at a fractional pen position looks the same everywhere.
-// A face without a real bold gets synthetic bold (fill + stroke). Anything that does not fit the
-// grapheme's 1- or 2-cell box is uniformly scaled down until it does — Apple Color Emoji at terminal
-// sizes routinely overflows vertically.
+// A face without a real bold gets synthetic bold (fill + stroke). A colour or wide glyph that does
+// not fit the grapheme's 1- or 2-cell box is uniformly scaled down until it does — Apple Color Emoji
+// at terminal sizes routinely overflows vertically. Narrow text may overhang its cell instead
+// (`narrowTextOverhang`), and a wide glyph is centred in its two cells.
 //
 // `thicken` turns on CoreText "font smoothing" for grayscale glyphs. On an alpha-only context that
 // is not LCD filtering but a stem-darkening pass (Ghostty's `font-thicken`): about 17 % more
@@ -31,7 +32,8 @@ import Foundation
 ///
 /// `bearingX` / `bearingTop` are device pixels from the pen origin (baseline, left edge of the
 /// cluster) to the bitmap's left and top edges, y positive up. To draw at cell origin `(cx, cy)`
-/// with baseline `b`: `x = cx + bearingX`, `y = cy + b - bearingTop`.
+/// with baseline `b`: `x = cx + bearingX`, `y = cy + b - bearingTop`. A wide glyph's `bearingX`
+/// includes the offset that centres it in its two cells.
 struct RasterizedGlyph: Sendable, Equatable {
     let width: Int
     let height: Int
@@ -95,9 +97,14 @@ final class GlyphRasterizer {
         guard !union.isNull, union.width > 0, union.height > 0 else { return nil }
         if strokeWidth > 0 { union = union.insetBy(dx: -strokeWidth, dy: -strokeWidth) }
 
-        // Fit into the grapheme's cell box.
-        let boxWidth = CGFloat(metrics.width * max(1, shaped.cellSpan))
-        let boxHeight = CGFloat(metrics.height)
+        // Fit into the grapheme's cell box. Narrow text gets a box `narrowTextOverhang` times the
+        // cell instead, so in practice it is drawn at its natural size.
+        let span = max(1, shaped.cellSpan)
+        let slotWidth = CGFloat(metrics.width * span)
+        let isNarrowText = span == 1 && !shaped.isColor
+        let overhang: CGFloat = isNarrowText ? GlyphRasterizer.narrowTextOverhang : 1
+        let boxWidth = slotWidth * overhang
+        let boxHeight = CGFloat(metrics.height) * overhang
         var appliedScale: CGFloat = 1
         if union.width > boxWidth || union.height > boxHeight {
             appliedScale = min(boxWidth / union.width, boxHeight / union.height)
@@ -113,10 +120,12 @@ final class GlyphRasterizer {
 
         var extent = integerExtent(appliedScale)
         // Rounding the scaled bounds outward can push the bitmap 1 px past the box; tighten once so
-        // the guarantee "a glyph never exceeds its cell box + padding" holds exactly.
+        // the guarantee "a glyph never exceeds its box + padding" holds exactly. Not for narrow text
+        // at its natural size, which may overhang its cell, and which this would shrink.
         let overWidth = CGFloat(extent.width - padding * 2) - boxWidth
         let overHeight = CGFloat(extent.height - padding * 2) - boxHeight
-        if overWidth > 0 || overHeight > 0 {
+        let mayTighten = !isNarrowText || appliedScale < 1
+        if mayTighten, overWidth > 0 || overHeight > 0 {
             let shrinkX = overWidth > 0 ? boxWidth / CGFloat(extent.width - padding * 2) : 1
             let shrinkY = overHeight > 0 ? boxHeight / CGFloat(extent.height - padding * 2) : 1
             appliedScale *= min(shrinkX, shrinkY)
@@ -184,10 +193,59 @@ final class GlyphRasterizer {
         }
         guard drew else { return nil }
 
+        let centring = span > 1
+            ? GlyphRasterizer.centringOffset(of: shaped, slotWidth: slotWidth, scale: appliedScale)
+            : 0
         return RasterizedGlyph(
             width: width, height: height, bytesPerRow: bytesPerRow, bytesPerPixel: bytesPerPixel,
-            bearingX: originX, bearingTop: originY + height, isColor: isColor,
+            bearingX: originX + centring, bearingTop: originY + height, isColor: isColor,
             appliedScale: appliedScale, pixels: pixels)
+    }
+
+    // MARK: - Placement
+
+    /// How many times its cell a narrow, monochrome glyph may grow before it is scaled down.
+    ///
+    /// A wide glyph or a colour glyph is scaled to fit its cells whenever its ink overflows them.
+    /// A narrow monochrome glyph, from the terminal's font or from a fallback font, is drawn at its
+    /// natural size, as SwiftTerm draws it: SwiftTerm fits only multi-cell glyphs, and Ghostty too
+    /// lets ordinary text overflow its rounded cell. With the cell width rounded to the nearest
+    /// pixel, `%&@` in Monaco 12 pt and `#WX_w~` in Menlo 12 pt have ink up to 0.6 px wider than
+    /// their 14 px cell at 2x, a slanted italic or a synthetic bold reaches further, and fallback
+    /// symbols such as `●` and `⧉` are wider still. Scaling them down would make them smaller and
+    /// softer than SwiftTerm draws them. The overhang is not clipped: the background pass paints
+    /// every cell before any glyph is drawn. Only ink more than twice its cell, which takes a stack
+    /// of combining marks or an outsized icon, is scaled, to keep its bitmap bounded.
+    ///
+    /// The allowance holds vertically too, because SwiftTerm leaves every one-cell glyph as drawn: a
+    /// narrow glyph taller than its row, such as stacked combining marks or a tall fallback symbol,
+    /// draws over the rows above and below it rather than being shrunk into its own.
+    ///
+    /// Colour glyphs are the one place this departs from SwiftTerm, which also draws a one-cell
+    /// emoji at its natural size: an emoji spilling over its neighbour reads as a rendering fault.
+    static let narrowTextOverhang: CGFloat = 2
+
+    /// How far right a wide cluster moves so that its advance, scaled by `scale`, is centred in its
+    /// `slotWidth`-pixel slot.
+    ///
+    /// Pinned to the slot's left edge, a CJK ideograph whose advance is narrower than its two cells
+    /// leaves all the slack on its right, a gap SwiftTerm calls the phantom gap. This splits it
+    /// evenly, as the horizontal half of SwiftTerm's `GlyphSlotFit` does (adapted from SwiftTerm,
+    /// MIT, Copyright (c) 2019-2026 Miguel de Icaza, Sources/SwiftTerm/Apple/AppleTerminalView.swift
+    /// at cheapsteak/SwiftTerm b4db5b0). Rounded to a whole pixel, because the pen sits on one and
+    /// the atlas is sampled without filtering. Narrow glyphs stay at their cell's left edge, as in
+    /// SwiftTerm. `GlyphSlotFit` also centres a scaled-down wide glyph vertically, which this does
+    /// not: a scaled wide glyph keeps its baseline.
+    private static func centringOffset(of shaped: ShapedGrapheme, slotWidth: CGFloat, scale: CGFloat) -> Int {
+        let glyphIDs = shaped.glyphs.map(\.glyph)
+        var advances = [CGSize](repeating: .zero, count: glyphIDs.count)
+        _ = CTFontGetAdvancesForGlyphs(shaped.font, .horizontal, glyphIDs, &advances, glyphIDs.count)
+        var advance: CGFloat = 0
+        for (glyph, size) in zip(shaped.glyphs, advances) {
+            advance = max(advance, glyph.xOffset + size.width)
+        }
+        guard advance > 0 else { return 0 }
+        return Int(((slotWidth - advance * scale) / 2).rounded())
     }
 
     // MARK: - Debug image
