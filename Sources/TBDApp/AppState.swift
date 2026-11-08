@@ -2641,8 +2641,11 @@ final class AppState {
     /// The phone control RPCs, behind a protocol so tests drive them without
     /// a daemon.
     @ObservationIgnored lazy var phoneClient: any PhoneControlClient = daemonClient
-    /// Opens the Settings window. Under `swift test` `NSApp` is nil, and tests
-    /// replace this to see that it was asked.
+    /// Opens the Settings window. The main window's root view replaces this
+    /// with the `\.openSettings` action on appear. The selector below is only
+    /// the fallback until then: since macOS 14 SwiftUI ignores
+    /// `showSettingsWindow:` for a `Settings` scene and opens nothing. In unit
+    /// runs `NSApp` is nil, and tests replace this to see that it was asked.
     @ObservationIgnored var settingsWindowOpener: @MainActor () -> Void = {
         _ = NSApp?.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
