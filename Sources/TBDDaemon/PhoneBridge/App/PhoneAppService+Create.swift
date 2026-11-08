@@ -555,11 +555,14 @@ extension PhoneAppService {
         return repo
     }
 
-    /// The registered providers, as `remote.providers` gives them. A list the
-    /// daemon refuses to give is `refused` with its reason; one that does not
-    /// decode is `internal`.
+    /// The registered providers, as `remote.providers` gives them, without
+    /// re-reading the registry file (`phoneCachedRemoteProviders`): the
+    /// sessions gather re-reads it, so the providers an action checks are
+    /// the ones the phone's list was built from. A list the daemon refuses to
+    /// give is `refused` with its reason; one that does not decode is
+    /// `internal`.
     nonisolated func providerStatuses() async throws -> [RemoteProviderStatus] {
-        let response = try await actions.phoneRemoteProviders()
+        let response = try await actions.phoneCachedRemoteProviders()
         return try Self.succeeded(RemoteProvidersResult.self, from: response, method: "remote.providers").providers
     }
 }

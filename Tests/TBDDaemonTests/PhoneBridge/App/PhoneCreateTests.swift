@@ -884,7 +884,7 @@ struct PhoneCreateTests {
         #expect(tooMany.error == PhoneAppError(code: .badRequest, message: PhoneAppService.tooManyFormValuesReason))
         #expect(tooLong.error == PhoneAppError(code: .badRequest, message: PhoneAppService.formValueTooLongReason))
         #expect(h.actions.remoteCreates.isEmpty)
-        #expect(!h.actions.calls.contains(FakeSessionActions.Call(method: .remoteProviders, deviceID: nil)))
+        #expect(!h.actions.calls.contains(FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil)))
     }
 
     /// A remote create's refusal reaches the phone only in words TBD wrote:

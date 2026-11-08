@@ -179,14 +179,19 @@ extension RPCRouter {
         }
     }
 
-    func handleRemoteProviders() async throws -> RPCResponse {
+    /// `remote.providers`. With `refreshingRegistry` false, the providers as
+    /// the registry was last read, which the phone bridge's per-action
+    /// capability checks use (`phoneCachedRemoteProviders`).
+    func handleRemoteProviders(refreshingRegistry: Bool = true) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
             return Self.remoteBackendsDisabledResponse
         }
         // Re-read the registry first, so a provider added to
         // `agent-providers.json` while the daemon runs is registered and
         // enrolled rather than staying invisible until a restart.
-        await manager.refreshRegistry()
+        if refreshingRegistry {
+            await manager.refreshRegistry()
+        }
         return try RPCResponse(result: RemoteProvidersResult(providers: await manager.providerStatuses()))
     }
 

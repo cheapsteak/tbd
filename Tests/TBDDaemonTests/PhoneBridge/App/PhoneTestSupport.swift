@@ -27,6 +27,7 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         case swapProfile
         case createWorktree
         case remoteProviders
+        case cachedRemoteProviders
         case remoteSessions
         case remoteCreate
         case remoteSendMessage
@@ -119,11 +120,16 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         respond(to: .remoteProviders, with: try RPCResponse(result: RemoteProvidersResult(providers: [provider])))
     }
 
-    private func record(_ method: Method, deviceID: UUID?, keep: (inout Log) -> Void = { _ in }) -> RPCResponse {
+    /// Records a call of `method` and answers what `answering`, `method`
+    /// unless given, is set to answer.
+    private func record(
+        _ method: Method, deviceID: UUID?, answering: Method? = nil, keep: (inout Log) -> Void = { _ in }
+    ) -> RPCResponse {
+        let source = answering ?? method
         let (handler, response) = lock.withLock { () -> (Handler?, RPCResponse) in
             log.calls.append(Call(method: method, deviceID: deviceID))
             keep(&log)
-            return (handlers[method], responses[method] ?? .ok())
+            return (handlers[source], responses[source] ?? .ok())
         }
         return handler?() ?? response
     }
@@ -166,6 +172,12 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
 
     func phoneRemoteProviders() async throws -> RPCResponse {
         record(.remoteProviders, deviceID: nil)
+    }
+
+    /// Answers what `phoneRemoteProviders` is set to answer, since both read
+    /// one roster, and is recorded as a call of its own.
+    func phoneCachedRemoteProviders() async throws -> RPCResponse {
+        record(.cachedRemoteProviders, deviceID: nil, answering: .remoteProviders)
     }
 
     func phoneRemoteSessions() async throws -> RPCResponse {

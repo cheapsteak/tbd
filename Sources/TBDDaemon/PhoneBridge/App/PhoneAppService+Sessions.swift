@@ -268,6 +268,12 @@ extension PhoneAppService {
         }
     }
 
+    /// The registered providers, read the way `remote.providers` reads them,
+    /// re-reading the registry file first. This debounced gather is the only
+    /// phone path that re-reads it; every action reads the providers as
+    /// last read (`providerStatuses()`). Nothing else keeps the registry
+    /// fresh while the app is closed: the app re-reads it on its own
+    /// `remote.providers` calls.
     private nonisolated func gatheredRemoteProviders() async -> [RemoteProviderStatus] {
         do {
             let response = try await actions.phoneRemoteProviders()

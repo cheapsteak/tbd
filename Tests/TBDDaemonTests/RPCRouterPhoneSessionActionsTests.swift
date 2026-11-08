@@ -470,6 +470,7 @@ struct RPCRouterPhoneSessionActionsTests {
         let manager: RemoteProviderManager
         let invoker: FakeProviderInvoker
         let logPath: String
+        let registryURL: URL
 
         var actions: any PhoneSessionActions { router }
 
@@ -508,12 +509,35 @@ struct RPCRouterPhoneSessionActionsTests {
             subscriptions: subs,
             remoteManager: manager,
             actuationLog: ActuationLog(path: logPath))
-        return RemoteFixture(router: router, manager: manager, invoker: invoker, logPath: logPath)
+        return RemoteFixture(
+            router: router, manager: manager, invoker: invoker, logPath: logPath, registryURL: registryURL)
     }
 
     private static func describeDeclaring(_ capabilities: [String]) -> ProviderResult {
         let caps = capabilities.map { "\"\($0)\"" }.joined(separator: ", ")
         return providerOK(#"{"contract_versions": [1], "name": "agentbox", "capabilities": [\#(caps)]}"#)
+    }
+
+    /// A provider added to the registry file while the daemon runs is
+    /// invisible to `phoneCachedRemoteProviders`, which reads the registry as
+    /// last read, and registered by `phoneRemoteProviders`, which re-reads
+    /// it as `remote.providers` does. The new provider's enrollment describe
+    /// fails, so it starts no poll loop.
+    @Test func onlyPhoneRemoteProvidersReReadsTheRegistry() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            ProviderResult(exitCode: 1, stdout: Data(), stderr: "acme describe failed"),
+        ])
+        try #"[{"name": "agentbox", "exec": "/nonexistent"}, {"name": "acmebox", "exec": "/nonexistent"}]"#
+            .write(to: f.registryURL, atomically: true, encoding: .utf8)
+
+        let cached = try await f.actions.phoneCachedRemoteProviders()
+        let cachedNames = try cached.decodeResult(RemoteProvidersResult.self).providers.map(\.config.name)
+        #expect(cachedNames == ["agentbox"])
+
+        let refreshed = try await f.actions.phoneRemoteProviders()
+        let refreshedNames = try refreshed.decodeResult(RemoteProvidersResult.self).providers.map(\.config.name)
+        #expect(refreshedNames == ["acmebox", "agentbox"])
     }
 
     /// The socket's create refuses a seed for a provider that never declared

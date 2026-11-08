@@ -109,6 +109,10 @@ extension RPCRouter: PhoneSessionActions {
         try await handleRemoteProviders()
     }
 
+    func phoneCachedRemoteProviders() async throws -> RPCResponse {
+        try await handleRemoteProviders(refreshingRegistry: false)
+    }
+
     func phoneRemoteSessions() async throws -> RPCResponse {
         try await handleRemoteSessions()
     }

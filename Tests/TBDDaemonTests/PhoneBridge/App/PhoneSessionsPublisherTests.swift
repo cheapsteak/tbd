@@ -387,6 +387,24 @@ struct PhoneSessionsPublisherTests {
         #expect(otherRow.sessions.first?.tabName == "acme other")
     }
 
+    /// The gather is the one phone read that re-reads the provider registry
+    /// (`phoneRemoteProviders`); an action's capability check reads the
+    /// providers as last read (`phoneCachedRemoteProviders`).
+    @Test func onlyTheGatherReReadsTheProviderRegistry() async throws {
+        let h = try await PhoneServiceHarness.make()
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+
+        _ = try await h.service.gatherSnapshot()
+        let gathered = h.actions.calls.map(\.method)
+        #expect(gathered.contains(.remoteProviders))
+        #expect(!gathered.contains(.cachedRemoteProviders))
+
+        let capabilities = try await h.service.remoteCapabilities(ofProvider: "acme-cloud")
+        #expect(capabilities.send.available)
+        let checked = h.actions.calls.map(\.method).dropFirst(gathered.count)
+        #expect(Array(checked) == [.cachedRemoteProviders])
+    }
+
     // MARK: - sessions.subscribe
 
     private static let fresh = SessionsSubscribeParams(stream: nil, sinceSeq: nil)

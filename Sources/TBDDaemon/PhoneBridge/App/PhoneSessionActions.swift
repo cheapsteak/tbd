@@ -113,8 +113,18 @@ protocol PhoneSessionActions: Sendable {
     /// `PhoneAppConstants.firstPromptMaxBytes` on tmux alone.
     func phoneSpawnsOnHolder() async -> Bool
 
-    /// `remote.providers`. A `RemoteProvidersResult`.
+    /// `remote.providers`. A `RemoteProvidersResult`. Like the RPC, it first
+    /// re-reads the provider registry file, registering and enrolling a
+    /// provider added since, so the phone app service calls it only from its
+    /// debounced sessions gather.
     func phoneRemoteProviders() async throws -> RPCResponse
+
+    /// `remote.providers` without re-reading the registry file: the
+    /// providers as the registry was last read, by the sessions gather, the
+    /// app or the daemon's start. A `RemoteProvidersResult`. The phone app
+    /// service reads it for every check one action makes, so an action costs
+    /// no file read.
+    func phoneCachedRemoteProviders() async throws -> RPCResponse
 
     /// `remote.sessions`. A `RemoteSessionsResult`.
     func phoneRemoteSessions() async throws -> RPCResponse

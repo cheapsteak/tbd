@@ -330,7 +330,7 @@ struct PhonePromptTests {
         #expect(reply.error == PhoneAppError(
             code: .unsupported, message: "This provider does not support answering prompts."))
         #expect(h.actions.remoteAnswers.isEmpty)
-        #expect(h.actions.calls == [FakeSessionActions.Call(method: .remoteProviders, deviceID: nil)])
+        #expect(h.actions.calls == [FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil)])
     }
 
     @Test func aRemoteAnswerGoesToItsProvider() async throws {
@@ -352,7 +352,7 @@ struct PhonePromptTests {
             RemoteAnswerShape(provider: "acme-cloud", sessionID: "rs-1", promptID: "rp-1", answer: answer),
         ])
         #expect(h.actions.calls == [
-            FakeSessionActions.Call(method: .remoteProviders, deviceID: nil),
+            FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil),
             FakeSessionActions.Call(method: .answerRemotePrompt, deviceID: h.peer.deviceID),
         ])
         #expect(h.recorder.records == [PhoneActionRecord(
