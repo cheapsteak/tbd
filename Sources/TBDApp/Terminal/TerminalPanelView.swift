@@ -2055,7 +2055,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         ///
         /// The handback is this panel's ordinary one, `detachHolderSession()`,
         /// the path a tab close takes, and nothing of its own: the reader
-        /// stops, the screen is serialized after the close, and the detach
+        /// stops, reading on within its bound until the session's output ends
+        /// between sequences (`TerminalEngine.isAtSequenceBoundary`, on either
+        /// engine), the screen is serialized after the close, and the detach
         /// carries it. The switch waits for that detach to return
         /// (`HolderHandbackLedger.awaitSettled`) before it records the other
         /// engine in `AppState.terminalEngineOverrides`, so the old view keeps

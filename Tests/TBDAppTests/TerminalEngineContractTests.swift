@@ -366,6 +366,40 @@ struct TerminalEngineContractTests {
         }
     }
 
+    /// What the holder reader asks before the handback's probe goes in: whether
+    /// the session's output so far ends between sequences. The cases are the
+    /// daemon's (`HolderAttachSequenceBoundaryTests.openSequences`), so both
+    /// ends of a holder attach read an open sequence alike.
+    @Test("isAtSequenceBoundary is false part-way through an escape sequence or a UTF-8 character, and true once it ends",
+          arguments: TerminalEngineFactory.availableKinds)
+    func sequenceBoundaryFollowsTheParser(kind: TerminalEngineKind) async {
+        let fixture = await makeFixture(kind: kind)
+        defer { fixture.tearDown() }
+        #expect(fixture.engine.isAtSequenceBoundary, "a fresh \(kind) engine reads as mid-sequence")
+
+        let esc = "\u{1b}"
+        let cases: [(name: String, opened: [UInt8], rest: [UInt8])] = [
+            ("an OSC title", Array("\(esc)]0;HALF-OF-A-".utf8), Array("TITLE\u{07}".utf8)),
+            ("an OSC 8 link", Array("\(esc)]8;;https://example.com/".utf8), Array("page\(esc)\\".utf8)),
+            ("a sixel DCS", Array("\(esc)Pq#0;2;0;0;0".utf8), Array("#0!4~\(esc)\\".utf8)),
+            ("a kitty APC", Array("\(esc)_Ga=q,i=31;AAAA".utf8), Array("\(esc)\\".utf8)),
+            ("a CSI's parameters", Array("\(esc)[38;5;".utf8), Array("196m".utf8)),
+            ("a lone ESC", Array(esc.utf8), Array("[1m".utf8)),
+            // U+20AC split after its second byte.
+            ("a UTF-8 character", [0xE2, 0x82], [0xAC]),
+        ]
+        for sequence in cases {
+            fixture.engine.feed(sequence.opened[...])
+            #expect(!fixture.engine.isAtSequenceBoundary,
+                    "\(kind) reads as between sequences part-way through \(sequence.name)")
+            fixture.engine.feed(sequence.rest[...])
+            #expect(fixture.engine.isAtSequenceBoundary,
+                    "\(kind) still reads as mid-sequence after \(sequence.name) ended")
+        }
+        feed("plain text, then a complete \(esc)[0m reset", into: fixture.engine)
+        #expect(fixture.engine.isAtSequenceBoundary, "\(kind) reads plain output as mid-sequence")
+    }
+
     /// DECCOLM needs `CSI ? 40 h` first: that is what enables it in this
     /// emulator (xterm's `allowC132`), as `QuietIngestTests` records.
     @Test("A snapshot's BEL, OSC 52 copy and DECCOLM ring nothing, copy nothing and report no size",

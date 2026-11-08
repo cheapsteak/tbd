@@ -204,6 +204,19 @@ public struct GhosttyTerminalState {
         return Array(UnsafeBufferPointer(start: start, count: length))
     }
 
+    /// Whether the output so far ends between sequences: no escape sequence and no UTF-8 character
+    /// is left unfinished, so bytes fed now cannot cut one short. Read from the continuation
+    /// libghostty keeps for replay (`pendingContinuationBytes()`), the one record of what the
+    /// parser is in the middle of.
+    ///
+    /// A closed terminal is at a boundary: nothing more is parsed. A sequence longer than
+    /// `GhosttyTerminal.continuationMaxBytes` is still open, and a continuation libghostty cannot
+    /// produce is read the same way, so a caller waiting for the end waits rather than cuts.
+    public var isAtSequenceBoundary: Bool {
+        guard raw != nil else { return true }
+        return pendingContinuationBytes()?.isEmpty ?? false
+    }
+
     /// The active screen through libghostty's formatter. nil when closed or when formatting fails.
     public func formatted(_ format: TextFormat = .plain, trim: Bool = true, unwrap: Bool = false) -> String? {
         guard let raw else { return nil }

@@ -314,6 +314,15 @@ final class GhosttyEngine: TerminalEngine {
         }
     }
 
+    /// Whether libghostty's parser is between sequences: no escape sequence
+    /// and no partial UTF-8 character open (`GhosttyTerminalState`'s
+    /// continuation). The holder reader asks before the handback, whose
+    /// writer carries an open sequence of up to 64 KiB itself; past that
+    /// cap the sequence reads open, and the reader's wait still matters.
+    nonisolated var isAtSequenceBoundary: Bool {
+        terminal.withLocked { $0.isAtSequenceBoundary }
+    }
+
     /// A full reset (RIS), muted, so neither a reply nor the program status
     /// clear libghostty reports for RIS reaches anyone. Unlike SwiftTerm's,
     /// libghostty's reset gives a used terminal a fresh screen, alternate
