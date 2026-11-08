@@ -45,17 +45,14 @@ export function repoIDOf(group: PhoneGroupLayout): string | null {
  * never shows such a row.
  */
 export function bestSession(row: PhoneRow): PhoneSession {
-  let best: PhoneSession | undefined;
-  for (const s of row.sessions) {
-    if (best === undefined) {
-      best = s;
-      continue;
-    }
+  const [first, ...rest] = row.sessions;
+  if (first === undefined) throw new RangeError(`bestSession: row ${row.id} has no sessions`);
+  let best = first;
+  for (const s of rest) {
     const rank = STATUS[s.status.chip].rank;
     const bestRank = STATUS[best.status.chip].rank;
     if (rank < bestRank || (rank === bestRank && s.status.changedAt > best.status.changedAt)) best = s;
   }
-  if (best === undefined) throw new RangeError(`bestSession: row ${row.id} has no sessions`);
   return best;
 }
 

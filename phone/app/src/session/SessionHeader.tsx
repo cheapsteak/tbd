@@ -29,29 +29,18 @@ export function SessionHeader({ row, session }: { row: PhoneRow; session: PhoneS
   const codex = session.agent === 'codex';
 
   const model = session.model ?? 'Model';
-  const modelPart = caps.model.available ? (
-    <button
-      className="prof" type="button" aria-haspopup="menu" aria-expanded={menu?.name === 'model'}
-      aria-label={`Model: ${model}. Change model`} onClick={() => actions.openMenu({ name: 'model' })}
-    >
-      {model}
-      <Icon name="chev-d" />
-    </button>
-  ) : (
-    <>{model}</>
+  const modelPart = (
+    <MenuText
+      text={model} available={caps.model.available} open={menu?.name === 'model'}
+      label={`Model: ${model}. Change model`} onOpen={() => actions.openMenu({ name: 'model' })}
+    />
   );
   const account = session.profileName ?? 'Default account';
-  const accountPart = caps.switchProfile.available ? (
-    <button
-      className="prof" type="button" aria-haspopup="menu" aria-expanded={menu?.name === 'account'}
-      aria-label={`Account: ${account}. Switch account`}
-      onClick={() => actions.openMenu({ name: 'account', askProfileID: null })}
-    >
-      {account}
-      <Icon name="chev-d" />
-    </button>
-  ) : (
-    <>{account}</>
+  const accountPart = (
+    <MenuText
+      text={account} available={caps.switchProfile.available} open={menu?.name === 'account'}
+      label={`Account: ${account}. Switch account`} onOpen={() => actions.openMenu({ name: 'account', askProfileID: null })}
+    />
   );
 
   let meta: JSX.Element;
@@ -101,5 +90,22 @@ export function SessionHeader({ row, session }: { row: PhoneRow; session: PhoneS
         </>
       )}
     </div>
+  );
+}
+
+/** `text` as the button that opens one of the header's menus where `available`, else as plain text. */
+function MenuText({ text, available, open, label, onOpen }: {
+  text: string;
+  available: boolean;
+  open: boolean;
+  label: string;
+  onOpen: () => void;
+}): JSX.Element {
+  if (!available) return <>{text}</>;
+  return (
+    <button className="prof" type="button" aria-haspopup="menu" aria-expanded={open} aria-label={label} onClick={onOpen}>
+      {text}
+      <Icon name="chev-d" />
+    </button>
   );
 }

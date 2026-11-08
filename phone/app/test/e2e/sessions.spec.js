@@ -26,6 +26,12 @@ function mockRow(name) {
   return row;
 }
 
+/** Checkout v2's three sessions: Claude (working, changed last), Review and Codex. */
+const CHECKOUT = mockRow('Checkout v2');
+const [CLAUDE, REVIEW, CODEX] = CHECKOUT.sessions;
+/** Review, waiting for you: it outranks Claude, which is newer and working. */
+const REVIEW_WAITING = { ...REVIEW, status: { chip: 'waitingForYou', agoMinutes: 20 } };
+
 /**
  * How many minutes ago a scenario row's status changed, as the fake laptop resolves it: its own
  * `agoMinutes`, else its newest session's.
@@ -126,7 +132,7 @@ test('a row shows its count, remote badge, age and the most urgent status for sc
   await expect(co.locator('.n small')).toHaveText('(3)');
   await expect(co.locator('.sr')).toHaveText('Working');
   await expect(co.locator('.g .dots')).toHaveCount(1);
-  await expect(co).toHaveClass(/(^| )st-work( |$)/);
+  await expect(co).toContainClass('st-work');
   await expect(co.locator('.t')).toHaveText('now');
   await expect(row('Triage flaky test').locator('.rb')).toHaveText('remote');
   // Only the remote row has the badge, and only the row with several sessions a count.
@@ -144,32 +150,24 @@ test('a row shows its count, remote badge, age and the most urgent status for sc
   ]) {
     await expect(row(name).locator('.t'), name).toHaveText(age);
     await expect(row(name).locator('.sr'), name).toHaveText(word);
-    await expect(row(name), name).toHaveClass(new RegExp(`(^| )${cls}( |$)`));
+    await expect(row(name), name).toContainClass(cls);
   }
   // Idle has no symbol; the others draw one.
   await expect(row('main').locator('.g svg')).toHaveCount(0);
   await expect(row('Login redirect fix').locator('.g svg')).toHaveCount(1);
 
   // A session that waits for you outranks a newer one that works.
-  const checkout = mockRow('Checkout v2');
-  const [claude, review, codex] = checkout.sessions;
-  await hostCall(page, 'emit', 'sessions.changed', {
-    rows: [{ ...checkout, sessions: [claude, { ...review, status: { chip: 'waitingForYou', agoMinutes: 20 } }, codex] }],
-    removedRowIDs: [],
-  });
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...CHECKOUT, sessions: [CLAUDE, REVIEW_WAITING, CODEX] }], removedRowIDs: [] });
   await expect(co.locator('.sr')).toHaveText('Waiting for you');
-  await expect(co).toHaveClass(/(^| )st-wait( |$)/);
+  await expect(co).toContainClass('st-wait');
   // The age is still the row's newest change, Claude's.
   await expect(co.locator('.t')).toHaveText('now');
 });
 
 test('tapping a row opens the session that shows its status', async ({ page, appHost }) => {
   await openApp(page, appHost);
-  const checkout = mockRow('Checkout v2');
-  const [claude, review, codex] = checkout.sessions;
   // Review waits for you, so the row shows its status, though Claude is first and changed last.
-  const waiting = { ...review, status: { chip: 'waitingForYou', agoMinutes: 20 } };
-  await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...checkout, sessions: [claude, waiting, codex] }], removedRowIDs: [] });
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...CHECKOUT, sessions: [CLAUDE, REVIEW_WAITING, CODEX] }], removedRowIDs: [] });
   const co = app(page).locator('.row', { hasText: 'Checkout v2' });
   await expect(co.locator('.sr')).toHaveText('Waiting for you');
 
@@ -183,12 +181,12 @@ test('tapping a row opens the session that shows its status', async ({ page, app
   // session screen goes back to the list when its own session leaves, and stays while another
   // does. Claude leaves first; the rename shows the change arrived.
   await hostCall(page, 'emit', 'sessions.changed', {
-    rows: [{ ...checkout, name: 'Checkout v2, renamed', sessions: [waiting, codex] }], removedRowIDs: [],
+    rows: [{ ...CHECKOUT, name: 'Checkout v2, renamed', sessions: [REVIEW_WAITING, CODEX] }], removedRowIDs: [],
   });
   await expect(header).toContainText('Checkout v2, renamed');
   await expect(root).toHaveAttribute('data-screen', 'session');
   // Then Review leaves, and the screen goes back to the list.
-  await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...checkout, sessions: [codex] }], removedRowIDs: [] });
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...CHECKOUT, sessions: [CODEX] }], removedRowIDs: [] });
   await expect(root).toHaveAttribute('data-screen', 'sessions');
   await expect(app(page).locator('.list-foot')).toBeVisible();
 });
@@ -370,7 +368,7 @@ test('the header names the status, age, account and model', async ({ page, appHo
   // SSE reconnect's session uses the acme-work profile in mock.json; most use Personal.
   await openSessionByName(page, 'SSE reconnect');
   const head = app(page).locator('.s-head');
-  await expect(head).toHaveClass(/(^| )st-wait( |$)/);
+  await expect(head).toContainClass('st-wait');
   await expect(head.locator('.t1')).toHaveText('SSE reconnect');
   await expect(head.locator('.t2a')).toHaveText('Waiting for you· 6m');
   await expect(head.locator('.rb2')).toHaveCount(0);
@@ -427,7 +425,7 @@ test('a remote session shows its provider in place of the account', async ({ pag
   await expect(head.locator('.t2b')).toHaveText('acme-cloud · opus');
   await expect(head.getByRole('button', { name: /^Account:/ })).toHaveCount(0);
   await expect(head.getByRole('button', { name: 'Model: opus. Change model' })).toBeEnabled();
-  await expect(head).toHaveClass(/(^| )st-work( |$)/);
+  await expect(head).toContainClass('st-work');
 });
 
 test('back returns to the list', async ({ page, appHost }) => {
@@ -439,39 +437,22 @@ test('back returns to the list', async ({ page, appHost }) => {
   await expect(app(page).locator('.list-foot')).toBeVisible();
 });
 
-test('an error shows its reason in a band', async ({ page, appHost }) => {
-  await openApp(page, appHost);
-  await openSessionByName(page, 'Rate limit retry');
-  const band = app(page).locator('.banner');
-  await expect(band).toHaveCount(1);
-  await expect(band).toHaveClass(/(^| )st-err( |$)/);
-  await expect(band).toHaveText('API error 529: the model is overloaded. The turn stopped.');
-  await expect(band.locator('svg')).toHaveCount(1);
-});
-
-test('a rate limit shows its reason in a band', async ({ page, appHost }) => {
-  await openApp(page, appHost);
-  await openSessionByName(page, 'Bulk import');
-  const band = app(page).locator('.banner');
-  await expect(band).toHaveClass(/(^| )st-rate( |$)/);
-  await expect(band).toHaveText('Usage limit reached. It resets at 3:00 pm.');
-});
-
-test('an unknown status says TBD cannot read it', async ({ page, appHost }) => {
-  await openApp(page, appHost);
-  await openSessionByName(page, 'Legacy pane');
-  const band = app(page).locator('.banner');
-  await expect(band).toHaveClass(/(^| )st-unk( |$)/);
-  await expect(band).toHaveText("TBD cannot read this tab's status, so it shows as Unknown.");
-});
-
-test('an exited session says to restart it on the laptop', async ({ page, appHost }) => {
-  await openApp(page, appHost);
-  await openSessionByName(page, 'Schema migration');
-  const band = app(page).locator('.banner');
-  await expect(band).toHaveClass(/(^| )st-gone( |$)/);
-  await expect(band).toHaveText('This session has exited. Restart it on the laptop.');
-});
+for (const [title, name, cls, text] of [
+  ['an error shows its reason in a band', 'Rate limit retry', 'st-err', 'API error 529: the model is overloaded. The turn stopped.'],
+  ['a rate limit shows its reason in a band', 'Bulk import', 'st-rate', 'Usage limit reached. It resets at 3:00 pm.'],
+  ['an unknown status says TBD cannot read it', 'Legacy pane', 'st-unk', "TBD cannot read this tab's status, so it shows as Unknown."],
+  ['an exited session says to restart it on the laptop', 'Schema migration', 'st-gone', 'This session has exited. Restart it on the laptop.'],
+]) {
+  test(title, async ({ page, appHost }) => {
+    await openApp(page, appHost);
+    await openSessionByName(page, name);
+    const band = app(page).locator('.banner');
+    await expect(band).toHaveCount(1);
+    await expect(band).toContainClass(cls);
+    await expect(band).toHaveText(text);
+    await expect(band.locator('svg')).toHaveCount(1);
+  });
+}
 
 test('the other statuses have no band', async ({ page, appHost }) => {
   await openApp(page, appHost);
@@ -494,8 +475,8 @@ test('a worktree with several sessions shows one tab each, marking the open one'
   await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
   await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'false');
   await expect(tabs.nth(2)).toHaveAttribute('aria-selected', 'false');
-  await expect(tabs.nth(0).locator('.tdot')).toHaveClass(/(^| )st-work( |$)/);
-  await expect(tabs.nth(1).locator('.tdot')).toHaveClass(/(^| )st-idle( |$)/);
+  await expect(tabs.nth(0).locator('.tdot')).toContainClass('st-work');
+  await expect(tabs.nth(1).locator('.tdot')).toContainClass('st-idle');
   await expect(tabs.nth(0).locator('.sr')).toHaveText('Working');
   await expect(tabs.nth(1).locator('.sr')).toHaveText('Idle');
   // A one-session row has no strip.
@@ -514,7 +495,7 @@ test("switching tabs changes the header's status", async ({ page, appHost }) => 
   await app(page).getByRole('tab', { name: 'Review' }).click();
   await expect(app(page).getByRole('tab', { name: 'Review' })).toHaveAttribute('aria-selected', 'true');
   await expect(app(page).getByRole('tab', { name: 'Claude' })).toHaveAttribute('aria-selected', 'false');
-  await expect(head).toHaveClass(/(^| )st-idle( |$)/);
+  await expect(head).toContainClass('st-idle');
   await expect(head.locator('.t2a')).toHaveText('Idle· 20m');
   await expect(head.getByRole('button', { name: 'Account: acme-work. Switch account' })).toBeVisible();
   await expect(head.getByRole('button', { name: 'Model: opus. Change model' })).toBeVisible();
