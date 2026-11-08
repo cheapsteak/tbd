@@ -222,6 +222,33 @@ test("a receipt's prompt ID never matches an item's ID", () => {
   assert.deepEqual(shown(s1), ['p1:changed', 'receipt:p1:Answered on the laptop']);
 });
 
+test("an item that replaces a row takes the row's open detail along, as followItem says", () => {
+  const running: PhoneItem = { id: 't1', kind: 'tool', truncated: false, toolName: 'Bash', target: 'npm test', toolStatus: 'running' };
+  const cut: PhoneItem = { id: 'm1', kind: 'assistant', text: 'The start', truncated: true };
+  let s0 = withRows([running, cut, item('m2')]);
+  const input: DetailState = { ...DETAIL, parts: ['input'], phase: 'open', text: { input: 'npm test' } };
+  const whole: DetailState = { ...DETAIL, parts: ['text'], phase: 'open', text: { text: 'The start, and the rest' } };
+  s0 = { ...s0, details: { [keyOf(s0, 0)]: input, [keyOf(s0, 1)]: whole, [keyOf(s0, 2)]: DETAIL } };
+
+  // The tool stopped running: its detail goes on to its result, keeping its input.
+  const s1 = applyTranscriptEvent(s0, update([{ ...running, toolStatus: 'ok' }]));
+  const tool = s1.details[keyOf(s0, 0)]!;
+  assert.deepEqual([tool.parts, tool.partIndex, tool.chunk, tool.phase], [['input', 'result'], 1, 0, 'loading']);
+  assert.deepEqual(tool.text, { input: 'npm test' });
+  assert.equal(s1.details[keyOf(s0, 1)], whole);
+
+  // The message's text changed, by an update or a same-ID append: its whole text goes.
+  for (const e of [update([{ ...cut, text: 'The start, and more' }]), append([{ ...cut, text: 'The start, and more' }])]) {
+    const s2 = applyTranscriptEvent(s1, e);
+    assert.equal(s2.details[keyOf(s0, 1)], undefined);
+    assert.equal(s2.details[keyOf(s0, 0)], tool);
+    assert.equal(s2.details[keyOf(s0, 2)], DETAIL);
+  }
+  // The same text again changes nothing, and another item's change keeps the details.
+  assert.equal(applyTranscriptEvent(s1, update([cut])), s1);
+  assert.equal(applyTranscriptEvent(s1, update([item('m2', 'other')])).details, s1.details);
+});
+
 test('beginOpen keeps the rows of the session it opens again, and starts another with none', () => {
   let s0 = { ...withRows([item('u1')]), loadingOlder: true, olderFailed: true };
   s0 = { ...s0, details: { [keyOf(s0, 0)]: DETAIL } };

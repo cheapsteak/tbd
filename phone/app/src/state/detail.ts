@@ -33,6 +33,12 @@
  * collapse removes the detail from the slice, and what arrived with it; the action then drops
  * every later reply for it, since the slice no longer holds it (`toggleDetail`).
  *
+ * **A detail follows its row's item** (`followItem`), since a tap reads the item as it was then:
+ * - a tool that was running when tapped loads its input alone, and once it stops running the
+ *   detail goes on to load its result, keeping its input;
+ * - a message's whole text is of the text the row had, so when the text changes the detail
+ *   goes, and the row shows the new cut text and "Show more" again.
+ *
  * **Drawing.** A part of 1 MB can still be a million short lines, a page far taller than a phone
  * lays out well, so the pane draws at most `MAX_DETAIL_LINES` lines of a part (`firstLines`).
  *
@@ -183,6 +189,24 @@ export function firstLines(text: string, max = MAX_DETAIL_LINES): { text: string
     if (end === -1) return { text, cut: false };
   }
   return end + 1 >= text.length ? { text, cut: false } : { text: text.slice(0, end), cut: true };
+}
+
+/**
+ * Row detail `d` once the row's item `was` is replaced by `now`, or null when the detail goes
+ * (this file's header):
+ * - a detail of a message's whole text goes when the text changed, whatever its phase;
+ * - a tool's detail that loads or holds its input alone, as a tap on a running tool starts it,
+ *   goes on to the result once the tool stops running: a loading one adds the result to its
+ *   parts, and an open or too-large one starts loading the result. A failed one stays failed.
+ * Any other change keeps `d` itself.
+ */
+export function followItem(d: DetailState, was: PhoneItem, now: PhoneItem): DetailState | null {
+  if (d.parts[0] === 'text') return now.text === was.text ? d : null;
+  const stopped = was.toolStatus === 'running' && now.toolStatus !== 'running';
+  if (!stopped || d.parts.length !== 1 || d.parts[0] !== 'input' || d.phase === 'failed') return d;
+  const parts: readonly TranscriptDetailPart[] = ['input', 'result'];
+  if (d.phase === 'loading') return { ...d, parts };
+  return { ...d, parts, partIndex: 1, chunk: 0, chunkCount: 0, bytes: 0, phase: 'loading' };
 }
 
 /** `d` failed with `message`, keeping what arrived. */

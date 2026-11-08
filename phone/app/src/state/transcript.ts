@@ -28,6 +28,7 @@
 
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
+import { followItem } from './detail.ts';
 import type { DetailState } from './detail.ts';
 
 /** One row of the transcript: an item the laptop sent, or a receipt for an answered prompt, keyed by the prompt's ID. */
@@ -229,8 +230,9 @@ function itemRows(items: readonly PhoneItem[], nextKey: number): { rows: Transcr
 
 /**
  * `s` with `items` put in: each replaces the last row carrying its ID, keeping that row's key,
- * and with `appendNew`, an item no row carries goes at the bottom as a new row. An item the
- * same as the one it replaces changes nothing. It returns `s` itself when nothing changed.
+ * and the row's open detail follows the new item (`followItem`). With `appendNew`, an item no
+ * row carries goes at the bottom as a new row. An item the same as the one it replaces changes
+ * nothing. It returns `s` itself when nothing changed.
  */
 function putItems(s: TranscriptState, items: readonly PhoneItem[], appendNew: boolean): TranscriptState {
   if (items.length === 0) return s;
@@ -239,6 +241,7 @@ function putItems(s: TranscriptState, items: readonly PhoneItem[], appendNew: bo
     if (row.kind === 'item') lastRowWithID.set(row.item.id, i);
   });
   let rows: TranscriptRow[] | null = null;
+  let details: Record<number, DetailState> | null = null;
   let nextKey = s.nextKey;
   let added = 0;
   for (const item of items) {
@@ -248,6 +251,13 @@ function putItems(s: TranscriptState, items: readonly PhoneItem[], appendNew: bo
       if (row.kind === 'item' && sameItem(row.item, item)) continue;
       rows ??= [...s.rows];
       rows[at] = { key: row.key, kind: 'item', item };
+      const d = (details ?? s.details)[row.key];
+      const next = d !== undefined && row.kind === 'item' ? followItem(d, row.item, item) : d;
+      if (next !== d) {
+        details ??= { ...s.details };
+        if (next === null) delete details[row.key];
+        else if (next !== undefined) details[row.key] = next;
+      }
     } else if (appendNew) {
       rows ??= [...s.rows];
       lastRowWithID.set(item.id, rows.length);
@@ -256,7 +266,7 @@ function putItems(s: TranscriptState, items: readonly PhoneItem[], appendNew: bo
     }
   }
   if (rows === null) return s;
-  return { ...s, rows, nextKey, appendedSinceSeen: s.appendedSinceSeen + added };
+  return { ...s, rows, nextKey, appendedSinceSeen: s.appendedSinceSeen + added, details: details ?? s.details };
 }
 
 /** Whether two items hold the same fields with the same values. Every field of an item is a string, a number or a boolean. */

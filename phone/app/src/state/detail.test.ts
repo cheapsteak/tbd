@@ -14,7 +14,7 @@ import { MAX_DETAIL_READS } from '../actions/transcript.ts';
 import type { Method, ParamsOf, PhoneItem, PhoneSessionRef, ResultOf, TranscriptDetailPart, TranscriptDetailResult } from '../protocol/types.ts';
 import { utf8Length } from '../limits.ts';
 import {
-  addChunk, askOf, DETAIL_CHUNK_BYTES, DETAIL_LIMIT_BYTES, detailParts, failDetail, firstLines, MAX_DETAIL_CHUNKS,
+  addChunk, askOf, DETAIL_CHUNK_BYTES, DETAIL_LIMIT_BYTES, detailParts, failDetail, firstLines, followItem, MAX_DETAIL_CHUNKS,
   MAX_DETAIL_LINES, MAX_SUBAGENT_ITEMS, startDetail,
 } from './detail.ts';
 import type { DetailAsk, DetailState } from './detail.ts';
@@ -240,6 +240,35 @@ test('a subagent within the caps opens with every item, in order', () => {
   const { d } = run(startDetail(['subagent']), (ask) => reply(ask, 2, { items: [nested(ask.chunk * 2), nested(ask.chunk * 2 + 1)] }));
   assert.equal(d.phase, 'open');
   assert.deepEqual(d.items.map((it) => it.id), ['n0', 'n1', 'n2', 'n3']);
+});
+
+test('followItem sends a tool that stopped running on to its result, and drops a whole text whose message changed', () => {
+  const running = tool('t1', 'running');
+  const ok = tool('t1', 'ok');
+  const loadingInput = startDetail(['input']);
+  assert.deepEqual(followItem(loadingInput, running, ok), { ...loadingInput, parts: ['input', 'result'] });
+  const openInput = run(startDetail(['input']), (ask) => reply(ask, 1)).d;
+  assert.equal(openInput.phase, 'open');
+  assert.deepEqual(followItem(openInput, running, tool('t1', 'error')), {
+    ...openInput, parts: ['input', 'result'], partIndex: 1, chunk: 0, chunkCount: 0, bytes: 0, phase: 'loading',
+  });
+  const largeInput = { ...openInput, largeParts: ['input'] as const, phase: 'tooLarge' as const };
+  assert.equal(followItem(largeInput, running, ok)?.phase, 'loading');
+  assert.deepEqual(followItem(largeInput, running, ok)?.largeParts, ['input']);
+  // A failed detail stays failed, a tool still running or one whose detail has its result keeps it.
+  const failed = failDetail(loadingInput, NOT_FOUND_TEXT);
+  assert.equal(followItem(failed, running, ok), failed);
+  assert.equal(followItem(loadingInput, running, running), loadingInput);
+  const both = startDetail(['input', 'result']);
+  assert.equal(followItem(both, running, ok), both);
+
+  const cut: PhoneItem = { id: 'm1', kind: 'assistant', text: 'The start', truncated: true };
+  for (const d of [startDetail(['text']), run(startDetail(['text']), (ask) => reply(ask, 1)).d, failDetail(startDetail(['text']), NOT_FOUND_TEXT)]) {
+    assert.equal(followItem(d, cut, { ...cut, text: 'The start, and more' }), null);
+    assert.equal(followItem(d, cut, { ...cut, truncated: false }), d);
+  }
+  const agent = startDetail(['subagent']);
+  assert.equal(followItem(agent, nested(1), nested(1, 'changed')), agent);
 });
 
 test("the limits mirror the daemon's", () => {
@@ -540,6 +569,62 @@ test('a close drops every queued read unsent, and their taps resolve', async () 
   for (const s of h.sent.filter((x) => x.method === 'transcript.detail')) answer(s, 1);
   await Promise.all(taps);
   assert.deepEqual(h.sent.filter((s) => s.method === 'transcript.detail').map((s) => s.params.itemID), ['t1', 't2', 't3', 't4']);
+});
+
+test('a running tool whose input loaded goes on to load its result once it stops running', async () => {
+  const h = harness([tool('t1', 'running')]);
+  const done = h.actions.toggleDetail(h.key(0), 'input');
+  answer(h.last(), 1);
+  await done;
+  assert.equal(h.t().details[h.key(0)]?.phase, 'open');
+  assert.deepEqual(h.asked(), [['input', 0]]);
+  h.setTranscript((t) => applyTranscriptEvent(t, { event: 'transcript.update', seq: 2, data: { session: R, items: [tool('t1', 'ok')] } }));
+  assert.deepEqual(h.asked(), [['input', 0], ['result', 0]]);
+  assert.equal(h.t().details[h.key(0)]?.phase, 'loading');
+  assert.deepEqual(h.t().details[h.key(0)]?.text, { input: 'input0' }, 'the input stays while the result loads');
+  answer(h.last(), 1);
+  await flush();
+  const d = h.t().details[h.key(0)]!;
+  assert.equal(d.phase, 'open');
+  assert.deepEqual(d.text, { input: 'input0', result: 'result0' });
+  assert.equal(h.sent.length, 2);
+});
+
+test('a running tool that stops while its input loads asks for its result after the input, one request at a time', async () => {
+  const h = harness([tool('t1', 'running')]);
+  const done = h.actions.toggleDetail(h.key(0), 'input');
+  h.setTranscript((t) => applyTranscriptEvent(t, { event: 'transcript.update', seq: 2, data: { session: R, items: [tool('t1', 'ok')] } }));
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0]]);
+  answer(h.last(), 2);
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['input', 1]]);
+  answer(h.last(), 2);
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['input', 1], ['result', 0]]);
+  answer(h.last(), 1);
+  await done;
+  assert.deepEqual(h.t().details[h.key(0)]?.text, { input: 'input0input1', result: 'result0' });
+  assert.equal(h.t().details[h.key(0)]?.phase, 'open');
+});
+
+test("a message whose text changes drops its whole text, and a reply of the old text is not taken", async () => {
+  const cut: PhoneItem = { id: 'm1', kind: 'assistant', text: 'The start', truncated: true };
+  const h = harness([cut]);
+  const first = h.actions.toggleDetail(h.key(0), 'text');
+  const old = h.last();
+  h.setTranscript((t) => applyTranscriptEvent(t, { event: 'transcript.update', seq: 2, data: { session: R, items: [{ ...cut, text: 'The start, and more' }] } }));
+  assert.equal(h.t().details[h.key(0)], undefined, 'the row shows the new cut text and Show more again');
+  // A tap on Show more again waits for the row's request still on the wire.
+  const again = h.actions.toggleDetail(h.key(0), 'text');
+  assert.deepEqual(h.asked(), [['text', 0]]);
+  answer(old, 1, { text: 'The start, and the old rest' });
+  await flush();
+  assert.equal(h.t().details[h.key(0)]?.phase, 'loading', 'the old whole text is not taken');
+  assert.deepEqual(h.asked(), [['text', 0], ['text', 0]]);
+  answer(h.last(), 1, { text: 'The start, and more, and the rest' });
+  await Promise.all([first, again]);
+  assert.deepEqual(h.t().details[h.key(0)]?.text, { text: 'The start, and more, and the rest' });
 });
 
 test('a tap that asks for another chunk than the request still on the wire waits for it, then asks', async () => {

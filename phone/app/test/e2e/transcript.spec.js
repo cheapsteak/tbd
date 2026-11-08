@@ -199,6 +199,47 @@ test('Show more shows the whole message', async ({ page, appHost }) => {
   expect(await detailRequests(page)).toEqual([['login-10', 'text', 0]]);
 });
 
+test('a running tool opened to its input shows its result too once it stops running', async ({ page, appHost }) => {
+  const scenario = structuredClone(MOCK);
+  const items = scenario.transcripts['local:' + LOGIN_REF.terminalID];
+  const bashItem = items.find((/** @type {{ id: string }} */ it) => it.id === BASH_ID);
+  bashItem.toolStatus = 'running';
+  await openApp(page, appHost, { scenario });
+  const { tx, bash } = await openLogin(page);
+  await expect(bash.locator('.dots')).toHaveCount(1);
+  await bash.click();
+  const detail = tx.locator('.detail');
+  await expect(detail.locator('.dl')).toHaveText(['Input']);
+  await expect(detail.locator('pre')).toHaveText([MOCK.details[BASH_ID].input]);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0]]);
+
+  await hostCall(page, 'emit', 'transcript.update', { session: LOGIN_REF, items: [{ ...bashItem, toolStatus: 'ok' }] });
+  await expect(detail.locator('.dl')).toHaveText(['Input', 'Result']);
+  await expect(detail.locator('pre')).toHaveText([MOCK.details[BASH_ID].input, MOCK.details[BASH_ID].result]);
+  await expect(bash).toHaveAttribute('aria-expanded', 'true');
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0]]);
+});
+
+test('a message shown in full through Show more shows its new cut text and Show more again once its text changes', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const say = tx.locator('.say').last();
+  await say.locator('.morebtn').click();
+  await expect(say).toContainText('Both cases have a line in isLocalPath with a comment that says why.');
+  await expect(tx.locator('.morebtn')).toHaveCount(0);
+
+  const cut = 'Fixed, and checked once more. Here is what changed:';
+  await hostCall(page, 'emit', 'transcript.update', {
+    session: LOGIN_REF, items: [{ id: 'login-10', kind: 'assistant', text: cut, truncated: true }],
+  });
+  await expect(say).toContainText(cut);
+  await expect(say).not.toContainText('Both cases have a line');
+  await expect(say.locator('.morebtn')).toHaveText('Show more');
+  await expect(tx.locator('.detail')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0]]);
+});
+
 test("a detail over 1 MB says 'Too large for the phone. Open on the laptop.'", async ({ page, appHost }) => {
   const line = 'PASS src/auth/redirect.test.ts\n';
   const result = line.repeat(Math.ceil(1_100_000 / line.length));

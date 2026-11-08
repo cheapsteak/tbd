@@ -33,7 +33,8 @@
 
 import { AppError, newRequestID } from '../client/client.ts';
 import type {
-  PhoneSessionRef, TranscriptDetailParams, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult, TranscriptPage,
+  PhoneItem, PhoneSessionRef, TranscriptDetailParams, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult,
+  TranscriptPage,
 } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
 import { addChunk, askOf, badReply, detailParts, failDetail, startDetail } from '../state/detail.ts';
@@ -52,12 +53,6 @@ function messageOf(error: unknown): string {
 
 /** How one `transcript.detail` request settled. */
 type ReadOutcome = { ok: true; result: TranscriptDetailResult } | { ok: false; error: unknown };
-
-/** A `transcript.detail` request on the wire for one row: what it asked, and how it settles. */
-interface DetailRead {
-  params: TranscriptDetailParams;
-  settled: Promise<ReadOutcome>;
-}
 
 /**
  * The most `transcript.detail` requests on the wire at once, across every row. The client sends
@@ -145,13 +140,6 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     });
   }
 
-  /**
-   * The `transcript.detail` request each row has on the wire, by row key, until it settles. A
-   * request cannot be taken back, so a collapse leaves its row's request running, and the next
-   * tap on that row waits for it (`readDetail`).
-   */
-  const reads = new Map<number, DetailRead>();
-
   /** How many detail requests are on the wire, at most `MAX_DETAIL_READS`. */
   let readsOut = 0;
 
@@ -161,7 +149,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
   /**
    * Drops each queued read no longer wanted, unsent, and sends the oldest wanted ones while a
    * slot is free. It runs when a read settles and at every change of the state, so a collapse,
-   * a reset or a close drops the reads it made unwanted at once, and their taps resolve.
+   * a reset or a close drops the reads it made unwanted at once.
    */
   function pump(): void {
     for (let i = 0; i < queued.length; ) {
@@ -178,9 +166,6 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
       }
     }
   }
-  store.subscribe(() => {
-    if (queued.length > 0) pump();
-  });
 
   /**
    * Takes a slot: at once when one is free and no read waits, so the request goes out in the
@@ -196,59 +181,109 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     });
   }
 
-  function freeSlot(): void {
-    readsOut -= 1;
-    pump();
+  /**
+   * The outcome of asking `params`, with at most `MAX_DETAIL_READS` requests on the wire across
+   * all rows: past them it waits its turn. Null when `wanted` turns false while it waits, as
+   * when its detail is collapsed, replaced or closed: nothing is asked then.
+   */
+  async function readDetail(params: TranscriptDetailParams, wanted: () => boolean): Promise<ReadOutcome | null> {
+    const slot = takeSlot(wanted);
+    if (slot !== true) {
+      if (!(await slot)) return null;
+      if (!wanted()) {
+        readsOut -= 1;
+        pump();
+        return null;
+      }
+    }
+    try {
+      return { ok: true, result: await ctx.client.request('transcript.detail', params) };
+    } catch (error) {
+      return { ok: false, error };
+    } finally {
+      readsOut -= 1;
+      pump();
+    }
   }
 
   /**
-   * The outcome of asking `params` for row `rowKey`, with at most one request on the wire per
-   * row, and at most `MAX_DETAIL_READS` across all rows. While an earlier request for the row is
-   * unanswered, as after a tap, a collapse and a tap, it waits for that one to settle: its
-   * outcome is the answer when it asked the same, and otherwise this asks once it is gone. So a
-   * laptop that never answers holds one request per row, however often the row is tapped, and
-   * four in all, however many rows are tapped, and the client's other slots stay free. Null
-   * when `wanted` turns false while it waits, for the row's earlier request or for a slot: the
-   * detail was collapsed or replaced, and nothing is asked for it.
+   * The request row `rowKey`'s detail waits on, with the row's item: while the transcript is
+   * open, the slice holds a loading detail for the row, and the row holds an item. Null
+   * otherwise.
    */
-  async function readDetail(rowKey: number, params: TranscriptDetailParams, wanted: () => boolean): Promise<ReadOutcome | null> {
-    for (;;) {
-      for (let prior = reads.get(rowKey); prior !== undefined; prior = reads.get(rowKey)) {
-        const outcome = await prior.settled;
-        if (!wanted()) return null;
-        if (sameRead(prior.params, params)) return outcome;
-      }
-      const slot = takeSlot(wanted);
-      if (slot !== true) {
-        if (!(await slot)) return null;
-        if (!wanted()) {
-          freeSlot();
-          return null;
-        }
-      }
-      // Another read for the row may have gone out while this one waited for its slot.
-      if (!reads.has(rowKey)) break;
-      freeSlot();
-    }
-    const settled = ctx.client.request('transcript.detail', params).then(
-      (result): ReadOutcome => ({ ok: true, result }),
-      (error: unknown): ReadOutcome => ({ ok: false, error }),
-    );
-    const read: DetailRead = { params, settled };
-    reads.set(rowKey, read);
-    // Registered first, so it runs before anyone awaiting `settled` looks at `reads` again.
-    void settled.then(() => {
-      if (reads.get(rowKey) === read) reads.delete(rowKey);
-      freeSlot();
-    });
-    return settled;
+  function askFor(rowKey: number): { params: TranscriptDetailParams; item: PhoneItem } | null {
+    const t = store.get().transcript;
+    const d = t.details[rowKey];
+    if (t.phase !== 'open' || t.ref === null || d === undefined || d.phase !== 'loading') return null;
+    const row = t.rows.find((r) => r.key === rowKey);
+    if (row === undefined || row.kind !== 'item') return null;
+    const ask = askOf(d);
+    return { params: { session: t.ref, itemID: row.item.id, part: ask.part, chunk: ask.chunk }, item: row.item };
   }
 
-  /** Whether the slice still holds `d` as row `rowKey`'s detail, in an open transcript. */
-  function stillAsked(rowKey: number, d: DetailState): boolean {
-    const t = store.get().transcript;
-    return t.phase === 'open' && t.details[rowKey] === d;
+  /** The loop loading each row's detail, by row key, while it runs (`drive`). */
+  const driving = new Map<number, Promise<void>>();
+
+  /**
+   * Loads row `rowKey`'s detail, and resolves once it is no longer loading. One loop runs per
+   * row, and it sends one request at a time, so a row has at most one request on the wire;
+   * a call while the row's loop runs returns that loop.
+   */
+  function drive(rowKey: number): Promise<void> {
+    const running = driving.get(rowKey);
+    if (running !== undefined) return running;
+    if (askFor(rowKey) === null) return Promise.resolve();
+    const loop = load(rowKey);
+    driving.set(rowKey, loop);
+    return loop;
   }
+
+  /**
+   * `drive`'s loop. At each step it asks for what the row's detail waits on now, so a detail
+   * replaced while a request is out, by a collapse and a tap or by its item changing
+   * (`followItem`), carries on from where it stands. A reply counts only for the detail the
+   * slice holds when it lands, and only while that detail still waits on just that request, of
+   * the same item text for a message's text. Otherwise the loop asks again for what the detail
+   * waits on then, or stops when it waits on nothing.
+   */
+  async function load(rowKey: number): Promise<void> {
+    try {
+      for (let want = askFor(rowKey); want !== null; want = askFor(rowKey)) {
+        const { params, item } = want;
+        const counts = (): boolean => {
+          const now = askFor(rowKey);
+          return now !== null && sameRead(now.params, params) && (params.part !== 'text' || now.item.text === item.text);
+        };
+        const outcome = await readDetail(params, counts);
+        if (outcome === null || !counts()) continue;
+        const d = store.get().transcript.details[rowKey]!;
+        if (!outcome.ok) {
+          if (isSuperseded(outcome.error)) dropDetail(rowKey, d);
+          else putDetail(rowKey, d, failDetail(d, messageOf(outcome.error)));
+          return;
+        }
+        const { result } = outcome;
+        putDetail(rowKey, d, (result.itemID === params.itemID ? addChunk(d, result) : badReply(d)).next);
+      }
+    } finally {
+      driving.delete(rowKey);
+    }
+  }
+
+  /** Every loading detail with no loop gets one: a tool's detail that `followItem` set loading. */
+  function driveAll(): void {
+    const t = store.get().transcript;
+    if (t.phase !== 'open') return;
+    for (const key of Object.keys(t.details)) {
+      const rowKey = Number(key);
+      if (t.details[rowKey]!.phase === 'loading' && !driving.has(rowKey)) void drive(rowKey);
+    }
+  }
+
+  store.subscribe(() => {
+    if (queued.length > 0) pump();
+    driveAll();
+  });
 
   /** Puts `next` as row `rowKey`'s detail, when `was` is still the one there. */
   function putDetail(rowKey: number, was: DetailState, next: DetailState): void {
@@ -347,18 +382,21 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
      *   starts the detail over from its first chunk, while the transcript is open and the row
      *   holds an item.
      *
-     * Each reply counts only while the slice still holds this very detail under `rowKey` and the
-     * transcript is open (`stillAsked`). So a reply that lands after a collapse, a second tap,
-     * a reset, a reopen, a close or a switch to another session changes nothing and asks for
-     * nothing: each of those replaces or drops the detail, and a reopen leaves the slice
-     * `opening` until its page drops every detail. A resume is the one new open that keeps the
-     * details, because it keeps the rows: `transcript.detail` is a read, which the client sends
-     * again after a dropped channel, so its reply still comes and the load carries on.
+     * The row's loop loads it (`drive`), and each reply counts only for the detail the slice
+     * holds when it lands, while that detail still waits on just that request and the
+     * transcript is open (`load`). So a reply that lands after a collapse, a reset, a reopen, a
+     * close or a switch to another session changes nothing and asks for nothing: each of those
+     * drops the detail, and a reopen leaves the slice `opening` until its page drops every
+     * detail. A resume is the one new open that keeps the details, because it keeps the rows:
+     * `transcript.detail` is a read, which the client sends again after a dropped channel, so
+     * its reply still comes and the load carries on.
      *
-     * A row has at most one request on the wire (`readDetail`): a tap while the request of a
-     * collapsed detail of the row is unanswered waits for it, and takes its reply when it asked
-     * for the same first chunk. All rows together have at most `MAX_DETAIL_READS`: a read past
-     * them waits its turn, and one whose detail is collapsed or replaced meanwhile is never sent.
+     * A row has at most one request on the wire, since one loop runs per row: a tap while the
+     * request of a collapsed detail of the row is unanswered waits for it, and takes its reply
+     * when it asked for the same first chunk. All rows together have at most
+     * `MAX_DETAIL_READS` (`readDetail`): a read past them waits its turn, and one whose detail
+     * is collapsed or replaced meanwhile is never sent. A detail the slice changes as its item
+     * changes (`followItem`) carries on under the same loop, or one starts for it.
      *
      * A reply for another item ID than the one asked for fails the detail with `BAD_REPLY_TEXT`.
      * An error fails it with the error's message: `not_found`, "That detail is not in the
@@ -375,26 +413,9 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
       }
       const row = t.rows.find((r) => r.key === rowKey);
       if (t.phase !== 'open' || t.ref === null || row === undefined || row.kind !== 'item') return;
-      const session = t.ref;
-      const itemID = row.item.id;
-      let d = startDetail(detailParts(part, row.item));
+      const d = startDetail(detailParts(part, row.item));
       setTranscript((s) => ({ ...s, details: { ...s.details, [rowKey]: d } }));
-      for (;;) {
-        const ask = askOf(d);
-        const asked = d;
-        const outcome = await readDetail(rowKey, { session, itemID, part: ask.part, chunk: ask.chunk }, () => stillAsked(rowKey, asked));
-        if (outcome === null || !stillAsked(rowKey, d)) return;
-        if (!outcome.ok) {
-          if (isSuperseded(outcome.error)) dropDetail(rowKey, d);
-          else putDetail(rowKey, d, failDetail(d, messageOf(outcome.error)));
-          return;
-        }
-        const { result } = outcome;
-        const step = result.itemID === itemID ? addChunk(d, result) : badReply(d);
-        putDetail(rowKey, d, step.next);
-        if (step.ask === null) return;
-        d = step.next;
-      }
+      await drive(rowKey);
     },
   };
 }
