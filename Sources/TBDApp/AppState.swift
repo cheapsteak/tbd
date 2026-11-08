@@ -1291,6 +1291,12 @@ final class AppState {
     /// Why the last phone read failed, in the daemon's words; nil once one
     /// succeeds.
     var phoneStatusError: String?
+    /// Why the last Allow or Deny failed, in the daemon's words, for the
+    /// pairing sheet; nil once one succeeds or a new offer starts.
+    var phonePairingError: String?
+    /// Why the last Revoke failed, in the daemon's words, for the Phone pane;
+    /// nil once one succeeds or the pane appears again.
+    var phoneRevokeError: String?
     /// The Settings window's selected tab, so the Phone menu item and the
     /// status-bar chip can open it on Phone.
     var settingsTab: SettingsTab = .general

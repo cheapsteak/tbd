@@ -30,7 +30,11 @@ struct PhoneSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .task { await appState.refreshPhone() }
+        .task {
+            // A revoke failure from an earlier visit says nothing now.
+            if appState.phoneRevokeError != nil { appState.phoneRevokeError = nil }
+            await appState.refreshPhone()
+        }
         .onChange(of: appState.phoneDevices, initial: true) { rebuildDeviceRows() }
         .onChange(of: appState.phoneStatus?.connectedDeviceIDs) { rebuildDeviceRows() }
         // "Last seen" is relative to now, so the rows are rebuilt once a
@@ -155,6 +159,12 @@ struct PhoneSettingsView: View {
                     Spacer()
                     Button("Revoke…") { deviceToRevoke = row }
                 }
+            }
+            if let error = appState.phoneRevokeError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer()

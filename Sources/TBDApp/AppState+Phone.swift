@@ -79,35 +79,43 @@ extension AppState {
     /// Starts a pairing offer. The new offer is published into `phoneStatus`
     /// before the refresh, so the pairing sheet sees it even if that refresh
     /// fails. Returns nil on success, or the reason pairing could not start.
+    /// An earlier offer's Allow or Deny failure is cleared.
     func startPhonePairing() async -> String? {
-        await performPhoneAction(RPCMethod.phonePairStart) {
+        if phonePairingError != nil { phonePairingError = nil }
+        return await performPhoneAction(RPCMethod.phonePairStart) {
             let pairing = try await phoneClient.phonePairStart()
             phoneStatus?.pairing = pairing
         }
     }
 
-    /// Allows the phone waiting on the shown offer.
+    /// Allows the phone waiting on the shown offer. A failure's reason is
+    /// kept in `phonePairingError`, for the pairing sheet to show.
     func allowPhonePairing() async {
         guard let offerID = phoneStatus?.pairing?.offerID else { return }
-        await performPhoneAction(RPCMethod.phonePairAllow) {
+        let failure = await performPhoneAction(RPCMethod.phonePairAllow) {
             _ = try await phoneClient.phonePairAllow(offerID: offerID)
         }
+        if failure != phonePairingError { phonePairingError = failure }
     }
 
     /// Denies the shown offer: the user clicked Deny, or closed the pairing
-    /// sheet while it was live.
+    /// sheet while it was live. A failure's reason is kept in
+    /// `phonePairingError`, for the pairing sheet to show.
     func denyPhonePairing() async {
         guard let offerID = phoneStatus?.pairing?.offerID else { return }
-        await performPhoneAction(RPCMethod.phonePairDeny) {
+        let failure = await performPhoneAction(RPCMethod.phonePairDeny) {
             try await phoneClient.phonePairDeny(offerID: offerID)
         }
+        if failure != phonePairingError { phonePairingError = failure }
     }
 
-    /// Unpairs a phone.
+    /// Unpairs a phone. A failure's reason is kept in `phoneRevokeError`, for
+    /// the Phone pane to show.
     func revokePhone(deviceID: UUID) async {
-        await performPhoneAction(RPCMethod.phoneRevoke) {
+        let failure = await performPhoneAction(RPCMethod.phoneRevoke) {
             try await phoneClient.phoneRevoke(deviceID: deviceID)
         }
+        if failure != phoneRevokeError { phoneRevokeError = failure }
     }
 
     /// Opens Settings on the Phone tab, with the relay setup sheet when

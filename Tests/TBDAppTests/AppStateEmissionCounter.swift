@@ -216,6 +216,8 @@ final class AppStateEmissionTracker {
         _ = state.phoneStatus
         _ = state.phoneDevices
         _ = state.phoneStatusError
+        _ = state.phonePairingError
+        _ = state.phoneRevokeError
         _ = state.settingsTab
         _ = state.phoneRelaySetupRequested
     }
@@ -354,6 +356,8 @@ final class AppStateEmissionTracker {
         "phoneStatus",
         "phoneDevices",
         "phoneStatusError",
+        "phonePairingError",
+        "phoneRevokeError",
         "settingsTab",
         "phoneRelaySetupRequested",
     ]

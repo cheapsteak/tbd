@@ -13,6 +13,8 @@ import TBDShared
 ///   code.
 /// - **Paired, or ended:** what happened, with Start Again where it helps.
 ///
+/// When Allow or Deny fails, the daemon's reason shows above the buttons.
+///
 /// Closing the sheet while the offer is live denies it, so a code nobody is
 /// looking at never stays open.
 struct PhonePairingSheet: View {
@@ -84,6 +86,7 @@ struct PhonePairingSheet: View {
                 offerView(pairing)
             } else {
                 Text(PhonePresentation.endedSentence(.unknown))
+                actionErrorLine
                 endedButtons
             }
         }
@@ -132,6 +135,7 @@ struct PhonePairingSheet: View {
             Text("Allow it only if your phone shows the same code.")
                 .foregroundStyle(.secondary)
             countdown(until: pairing.expiresAt)
+            actionErrorLine
             HStack {
                 Spacer()
                 Button("Deny") { deny() }
@@ -151,7 +155,21 @@ struct PhonePairingSheet: View {
         case .denied, .expired, .interrupted, .unknown:
             Text(PhonePresentation.endedSentence(pairing.state))
                 .fixedSize(horizontal: false, vertical: true)
+            actionErrorLine
             endedButtons
+        }
+    }
+
+    /// Why the last Allow or Deny failed, in the daemon's words, which are
+    /// written to be shown as they stand. An Allow that fails can also end
+    /// the offer, so the ended states show it too.
+    @ViewBuilder
+    private var actionErrorLine: some View {
+        if let error = appState.phonePairingError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
