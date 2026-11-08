@@ -19,7 +19,8 @@
  * 3. It posts every other unanswered request again, in the order each was first sent, with
  *    the very body it first posted, then drains the queue. An acting request posted on an
  *    earlier connection waits, though, until this connection's `sessions.subscribe` reply
- *    shows the daemon still remembers it (below).
+ *    shows the daemon still remembers it (below), and a queued action waits behind it, so a
+ *    session gets its actions in the order they were made.
  *
  * A resend is safe because of what the daemon does with a request ID (`PhoneAppService.swift`):
  * - **A resend of a request still running** starts nothing, and the running request's one
@@ -298,8 +299,9 @@ export class AppClient {
    *   names a new stream, and for a repost of one that the daemon answers `refused`.
    *
    * It has no timeout: the daemon answers every request it runs. The request goes out at once
-   * when the channel is up and fewer than 32 requests are posted and unanswered. Otherwise it
-   * waits, in the order it was made.
+   * when the channel is up and fewer than 32 requests are posted and unanswered, and, for an
+   * action, when no earlier action waits to be sent again. Otherwise it waits, in the order it
+   * was made.
    */
   request<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
     const id = this.#newID();
@@ -428,7 +430,7 @@ export class AppClient {
    */
   #pump(): void {
     while (this.#up && this.#posted.size < MAX_IN_FLIGHT) {
-      const next = this.#first.shift() ?? (this.#inOnUp ? undefined : this.#resends.shift() ?? this.#queue.shift());
+      const next = this.#first.shift() ?? (this.#inOnUp ? undefined : this.#resends.shift() ?? this.#nextQueued());
       if (next === undefined) return;
       if (this.#tooOldToResend(next)) {
         // Shifted out of its lane already, so only its entry is left to remove.
@@ -438,6 +440,19 @@ export class AppClient {
       }
       this.#send(next);
     }
+  }
+
+  /**
+   * The queued request to post next, taken out of the queue. While an earlier action still
+   * waits to be sent again, held or unconfirmed, a queued action waits behind it, so a session
+   * never gets a message typed later before one typed earlier. Reads go meanwhile, in order.
+   * Once the held actions are resent or rejected, the queue drains in order.
+   */
+  #nextQueued(): Pending | undefined {
+    const actionsWait = this.#unconfirmed.length > 0 || this.#held.some((p) => ACTING_METHODS.has(p.method));
+    if (!actionsWait) return this.#queue.shift();
+    const index = this.#queue.findIndex((p) => !ACTING_METHODS.has(p.method));
+    return index < 0 ? undefined : this.#queue.splice(index, 1)[0];
   }
 
   /**

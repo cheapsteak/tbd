@@ -603,7 +603,7 @@ test('a queued request that was never posted is posted on up whatever its age', 
   assert.equal(p.state, 'resolved');
 });
 
-test('an acting request that waits for a slot past the horizon is not resent', async () => {
+test('a subscribe reply that comes after the horizon rejects the held action, even with no slot free', async () => {
   const h = harness({ whenUp: subscribe });
   h.up();
   h.reply(last(h, 'sessions.subscribe'), snapshot('s1', 0));
@@ -986,7 +986,7 @@ test('a subscribe that fails keeps a held action held, across drops, until a goo
   assert.equal(sends(h, id), 2);
 });
 
-test('reads and requests never sent are not held, and a new stream leaves them alone', async () => {
+test('reads go out at once, a new action waits behind a held one, and a new stream leaves reads alone', async () => {
   const h = harness({ whenUp: subscribe });
   connect(h);
   const read = track(h.c.request('profiles.list', {}));
@@ -994,16 +994,91 @@ test('reads and requests never sent are not held, and a new stream leaves them a
   const readID = last(h, 'profiles.list')!.requestID;
   h.down();
   const fresh = track(h.c.request('message.send', { session: REF, text: 'Written while offline.' }));
+  const freshRead = track(h.c.request('remote.providers', {}));
   const mark = h.posted.length;
   h.up();
-  assert.deepEqual(h.posted.slice(mark).map((b) => [b.method, b.params.text]),
-    [['sessions.subscribe', undefined], ['profiles.list', undefined], ['message.send', 'Written while offline.']]);
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.method), ['sessions.subscribe', 'profiles.list', 'remote.providers']);
   assert.equal(h.posted[mark + 1]!.requestID, readID);
   h.reply(last(h, 'sessions.subscribe'), snapshot('s2', 0));
   await flush();
+  // The held action is rejected, and only then does the new one go.
   assert.equal(act.state, 'rejected');
-  assert.equal(read.state, 'pending');
-  assert.equal(fresh.state, 'pending');
+  assert.equal((act.error as AppError).code, 'not_confirmed');
+  assert.equal(h.posted.at(-1)!.params.text, 'Written while offline.');
+  assert.deepEqual([read.state, fresh.state, freshRead.state], ['pending', 'pending', 'pending']);
+});
+
+test('an action written while offline goes out after the held action, not before', () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  track(h.c.request('message.send', { session: REF, text: 'A' }));
+  const a = last(h, 'message.send')!;
+  h.down();
+  track(h.c.request('message.send', { session: REF, text: 'B' }));
+  const mark = h.posted.length;
+  h.up();
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.method), ['sessions.subscribe']);
+  confirm(h);
+  assert.deepEqual(h.posted.slice(mark + 1).map((b) => b.params.text), ['A', 'B']);
+  assert.equal(h.posted[mark + 1], a);
+  assert.deepEqual(h.posted.filter((b) => b.method === 'message.send').map((b) => b.params.text), ['A', 'A', 'B']);
+});
+
+test('an action made between channel up and the subscribe reply waits behind the held one', () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  track(h.c.request('message.send', { session: REF, text: 'A' }));
+  h.down();
+  h.up();
+  track(h.c.request('message.send', { session: REF, text: 'C' }));
+  track(h.c.request('profiles.list', {}));
+  assert.equal(h.posted.at(-1)!.method, 'profiles.list');
+  const mark = h.posted.length;
+  confirm(h);
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.params.text), ['A', 'C']);
+});
+
+test('an action made while an earlier one is held after sendFailed offline waits for it', () => {
+  const h = harness({ whenUp: subscribe });
+  connect(h);
+  track(h.c.request('message.send', { session: REF, text: 'A' }));
+  h.c.handle({ t: 'sendFailed', reason: 'offline' });
+  track(h.c.request('message.send', { session: REF, text: 'B' }));
+  track(h.c.request('profiles.list', {}));
+  assert.deepEqual(h.posted.slice(1).map((b) => b.params.text ?? b.method), ['A', 'profiles.list']);
+  h.down();
+  h.up();
+  const mark = h.posted.length;
+  confirm(h);
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.params.text), ['A', 'B']);
+});
+
+test('an action released before the horizon that waits for a slot past it is not resent', async () => {
+  const h = harness({
+    whenUp: (c) => {
+      subscribe(c);
+      if (c.lastSeq !== null) track(c.request('transcript.open', { session: REF, showDetails: false, resume: true }));
+    },
+  });
+  connect(h);
+  h.clock.now = 0;
+  for (let i = 0; i < 31; i++) track(h.c.request('profiles.list', {}));
+  const act = track(h.c.request('worktree.create', { repoID: 'R1', message: 'Fix the login loop.' }));
+  const id = last(h, 'worktree.create')!.requestID;
+  const reads = h.posted.filter((b) => b.method === 'profiles.list');
+  h.down();
+  h.clock.now = 400_000;
+  h.up();   // the subscribe, the open and 30 reads fill every slot
+  h.clock.now = 500_000;
+  confirm(h);   // releases the action; the read sent before it takes the free slot
+  assert.equal(h.posted.at(-1), reads[30]);
+  assert.equal(sends(h, id), 1);
+  h.clock.now = 540_001;
+  h.reply(reads[0], PROFILES);   // a slot frees, past the horizon
+  await flush();
+  assert.equal(act.state, 'rejected');
+  assert.equal((act.error as AppError).code, 'not_confirmed');
+  assert.equal(sends(h, id), 1);
 });
 
 test('the horizon still applies when a held action is released', async () => {
@@ -1065,29 +1140,33 @@ test('a released action still waiting for a slot at a drop waits for the next su
 });
 
 test('reposts go out in first-send order across two drops with more than 32 unanswered', () => {
-  const h = harness({ whenUp: subscribe });
+  const h = harness({
+    whenUp: (c) => {
+      subscribe(c);
+      if (c.lastSeq !== null) track(c.request('transcript.open', { session: REF, showDetails: false, resume: true }));
+    },
+  });
   connect(h);
   track(h.c.request('message.send', { session: REF, text: 'first action' }));
   for (let i = 0; i < 31; i++) track(h.c.request('profiles.list', {}));
-  track(h.c.request('message.send', { session: REF, text: 'second action' }));
   track(h.c.request('remote.providers', {}));
+  track(h.c.request('message.send', { session: REF, text: 'later action' }));
   const reads = h.posted.filter((b) => b.method === 'profiles.list');
-  assert.equal(h.posted.length, 33);   // the first subscribe, then 32: the second action and a read wait
-  h.down();
-  let mark = h.posted.length;
-  h.up();   // the subscribe and 31 reads; the first action is held
-  assert.deepEqual(h.posted.slice(mark + 1), reads);
-  h.reply(reads[0], PROFILES);   // the second action takes the slot: its first send
-  assert.equal(h.posted.at(-1)!.params.text, 'second action');
-  h.down();
-  mark = h.posted.length;
-  h.up();   // the subscribe, 30 reads, and the queued read; both actions are held
-  assert.deepEqual(h.posted.slice(mark + 1, mark + 31), reads.slice(1));
-  assert.equal(h.posted.at(-1)!.method, 'remote.providers');
-  mark = h.posted.length;
-  confirm(h);
+  assert.equal(h.posted.length, 33);   // the first subscribe, then 32; a read and an action wait
+  for (let drop = 0; drop < 2; drop++) {
+    h.down();
+    const mark = h.posted.length;
+    h.up();   // the subscribe, the open and 30 reads fill every slot; the action is held
+    assert.deepEqual(h.posted.slice(mark + 2), reads.slice(0, 30));
+  }
+  const mark = h.posted.length;
+  confirm(h);   // the action was first sent before the waiting read, so it takes the free slot
+  h.reply(reads[0], PROFILES);
   h.reply(reads[1], PROFILES);
-  assert.deepEqual(h.posted.slice(mark).map((b) => b.params.text), ['first action', 'second action']);
+  h.reply(reads[2], PROFILES);
+  assert.deepEqual(h.posted.slice(mark).map((b) => b.params.text ?? b.method),
+    ['first action', 'profiles.list', 'remote.providers', 'later action']);
+  assert.equal(h.posted[mark + 1], reads[30]);
 });
 
 // MARK: - The refused stopgap and the clock
