@@ -289,6 +289,11 @@ actor HolderReader {
         drain?.hasReachedEndOfOutput ?? false
     }
 
+    /// How many hand-overs stopped waiting for the child to finish a sequence
+    /// and logged that the viewer may print its remainder as text. Test-facing:
+    /// the notice itself goes to the unified log, where a test cannot read it.
+    private(set) var abandonedSequenceBoundaryWaits = 0
+
     /// The emulator's grid, in columns and rows.
     ///
     /// Test-facing, and the honest instrument for adoption geometry: a
@@ -483,8 +488,8 @@ actor HolderReader {
             }
             state = .suspended
         }
-        drainRemainder()
-        await awaitSequenceBoundary()
+        let outputEnded = drainRemainder()
+        if !outputEnded { await awaitSequenceBoundary() }
         // That wait can park this actor, and a stop or a resume that lands in
         // it means this call is no longer the descriptor's only reader.
         switch state {
@@ -512,12 +517,20 @@ actor HolderReader {
     /// as long as it kept writing, with the actor parked. Stopping early costs
     /// nothing — the bytes stay queued for whoever reads next, which is exactly
     /// where every byte written after this call already is.
-    private func drainRemainder(maxReads: Int = Self.quiesceMaxReads) {
+    ///
+    /// - Returns: whether the descriptor reported the end of the child's
+    ///   output, so that nothing more will ever arrive on it.
+    private func drainRemainder() -> Bool {
         var buffer = [UInt8](repeating: 0, count: Self.quiesceBufferSize)
-        for _ in 0..<maxReads {
-            guard case .bytes(let count) = descriptor.read(into: &buffer) else { return }
-            emulator.feed(buffer[0..<count])
+        for _ in 0..<Self.quiesceMaxReads {
+            switch descriptor.read(into: &buffer) {
+            case .bytes(let count): emulator.feed(buffer[0..<count])
+            case .interrupted: continue
+            case .childGone: return true
+            default: return false
+            }
         }
+        return false
     }
 
     /// Keeps reading, for a bounded time, while the child's output so far
@@ -536,19 +549,23 @@ actor HolderReader {
     /// routinely mid-sequence there, with the rest a moment behind. So this
     /// waits for the rest, and the snapshot is taken between sequences.
     ///
-    /// Bounded, because a child can leave a sequence open indefinitely, and
-    /// an attach that never returned would be worse than a remainder printed
-    /// as text. One buffer per poll, so a child flooding its terminal cannot
-    /// hold the actor for more than the budget's worth of reads.
+    /// Each poll drains what the descriptor holds, as the quiesce does, so a
+    /// frame much larger than the pty buffer is not held to one buffer per
+    /// poll, and it sleeps only while the output is still mid-sequence.
+    /// Bounded, because a child can leave a sequence open indefinitely, and an
+    /// attach that never returned would be worse than a remainder printed as
+    /// text. A child that exits mid-sequence ends the wait at once: nothing
+    /// more will arrive.
     private func awaitSequenceBoundary() async {
         var waited: Duration = .zero
         while !emulator.isAtSequenceBoundary, waited < sequenceBoundaryBudget {
             try? await clock.sleep(for: Self.stopPollInterval)
             waited += Self.stopPollInterval
             guard state == .suspended || state == .idle else { return }
-            drainRemainder(maxReads: 1)
+            if drainRemainder() { return }
         }
         guard !emulator.isAtSequenceBoundary else { return }
+        abandonedSequenceBoundaryWaits += 1
         Self.logger.notice(
             """
             session \(self.sessionID.uuidString, privacy: .public) was still part-way through a \
