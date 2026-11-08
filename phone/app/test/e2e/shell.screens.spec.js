@@ -6,24 +6,26 @@
 //
 // - `loading`: the laptop holds its subscribe reply. No mock.
 // - `app-error`: the laptop refuses the subscribe, in the daemon's words. No mock.
-// - `sessions`: the mock scenario after its subscribe. Until part 6b, this is 6a's stub list.
-// - `reconnect`: the same, then the channel drops, so the loader's strip says "Reconnecting…".
+// - `shell-sessions`: the mock scenario after its subscribe, beside the mocks' `sessions`.
+// - `shell-reconnect`: the same, then the channel drops, so the loader's strip says
+//   "Reconnecting…", beside the mocks' `reconnect`.
+// The last two take the shell's own names, because part 6b's sessions list captures `sessions`
+// and `reconnect`, and one shot must never overwrite another. pairs.mjs pairs them with
+// `shell-sessions=sessions shell-reconnect=reconnect`.
+
+import { readFileSync } from 'node:fs';
 
 import { TEXT } from './fake-laptop-app.js';
-import { app, capture, expect, hostCall, hostRequests, openApp, test } from './fixtures.js';
+import { app, capture, expect, hostCall, hostRequests, openApp, rowButtons, rowNames, test } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
 
 test.skip(({ browserName }) => browserName !== 'webkit', 'the screenshots are taken in WebKit only');
 test.use({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
 
-/**
- * The rows of the sessions list: the mocks' (part 6b) or 6a's stub.
- * @param {Page} page
- */
-function rows(page) {
-  return app(page).locator('button.row, button[data-row]');
-}
+/** Every row of the mock scenario, by name, sorted as `rowNames` returns them. */
+const MOCK_NAMES = JSON.parse(readFileSync(new URL('scenarios/mock.json', import.meta.url), 'utf8'))
+  .rows.map((/** @type {any} */ r) => r.name).sort();
 
 test('loading', async ({ page, appHost }) => {
   await openApp(page, appHost, { channel: 'down' });
@@ -44,15 +46,16 @@ test('app-error', async ({ page, appHost }) => {
   await capture(page, 'app-error', refused);
 });
 
-test('sessions', async ({ page, appHost }) => {
+test('shell-sessions', async ({ page, appHost }) => {
   await openApp(page, appHost);
-  await capture(page, 'sessions', rows(page).first());
+  await expect.poll(() => rowNames(page)).toEqual(MOCK_NAMES);
+  await capture(page, 'shell-sessions', rowButtons(page).first());
 });
 
-test('reconnect', async ({ page, appHost }) => {
+test('shell-reconnect', async ({ page, appHost }) => {
   await openApp(page, appHost);
-  await expect(rows(page).first()).toBeVisible();
+  await expect.poll(() => rowNames(page)).toEqual(MOCK_NAMES);
   await hostCall(page, 'setChannel', false);
   await expect(page.locator('#strip [data-state="reconnect"]')).toHaveText('Reconnecting…');
-  await capture(page, 'reconnect', rows(page).first());
+  await capture(page, 'shell-reconnect', rowButtons(page).first());
 });

@@ -114,6 +114,34 @@ test('--no-mock still needs the built shots, and refuses a state the mocks have'
   assert.equal(existsSync(out), false);
 });
 
+test('<built>=<mock> shows a shot under its own name beside a mock of another name', async (t) => {
+  const { built, out } = workspace(t, ['light/shell-sessions', 'dark/shell-sessions', 'light/reconnect', 'dark/reconnect']);
+  const result = await run(['--built', built, '--out', out, 'shell-sessions=sessions', 'reconnect']);
+  assert.equal(result.code, 0, result.stderr);
+
+  const html = readFileSync(path.join(out, 'index.html'), 'utf8');
+  assert.deepEqual(rowsOf(html), ['shell-sessions/light', 'shell-sessions/dark', 'reconnect/light', 'reconnect/dark']);
+  assert.match(html, /<h2>shell-sessions <small>beside the mock's sessions<\/small><\/h2>/);
+  assert.match(html, /<h2>reconnect<\/h2>/);
+  const section = html.slice(html.indexOf('<section id="shell-sessions">'), html.indexOf('<section id="reconnect">'));
+  assert.deepEqual([...section.matchAll(/<img src="([^"]+)"/g)].map((m) => m[1]), [
+    'mock/light/sessions.webp', 'built/light/shell-sessions.png', 'mock/dark/sessions.webp', 'built/dark/shell-sessions.png',
+  ]);
+  assert.deepEqual(readFileSync(path.join(out, 'mock', 'dark', 'sessions.webp')), readFileSync(path.join(MOCKS, 'dark', 'sessions.webp')));
+  assert.deepEqual(readFileSync(path.join(out, 'built', 'light', 'shell-sessions.png')), readFileSync(path.join(built, 'light', 'shell-sessions.png')));
+  assert.equal(existsSync(path.join(out, 'mock', 'light', 'shell-sessions.webp')), false);
+});
+
+test('<built>=<mock> needs the mock it names, and its own built shots', async (t) => {
+  const { built, out } = workspace(t, ['light/shell-sessions', 'dark/shell-sessions', 'light/shell-reconnect']);
+  const result = await run(['--built', built, '--out', out, 'shell-sessions=nonesuch', 'shell-reconnect=reconnect']);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /shell-sessions: no mock light screenshot at .*light[/\\]nonesuch\.webp\n/);
+  assert.match(result.stderr, /shell-reconnect: no built dark screenshot at .*dark[/\\]shell-reconnect\.png/);
+  assert.doesNotMatch(result.stderr, /--no-mock/, 'no hint to call a paired state new');
+  assert.equal(existsSync(out), false);
+});
+
 test('a usage mistake exits 2', async (t) => {
   const { built, out } = workspace(t, []);
   for (const args of [
@@ -122,6 +150,10 @@ test('a usage mistake exits 2', async (t) => {
     ['--built', built, '--out', out, '--fast', 'sessions'],
     ['--built', built, '--out', out, '../sessions'],
     ['--built', built, '--out', out, '--no-mock', 'loading', 'sessions'],
+    ['--built', built, '--out', out, '--no-mock', 'shell-sessions', 'shell-sessions=sessions'],
+    ['--built', built, '--out', out, 'shell-sessions=../sessions'],
+    ['--built', built, '--out', out, 'a=b=c'],
+    ['--built', built, '--out', out, 'sessions', 'sessions=reconnect'],
   ]) {
     const result = await run(args);
     assert.equal(result.code, 2, args.join(' '));

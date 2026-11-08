@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { app, expect, hostCall, hostRequests, openApp, takeProblems, test } from './fixtures.js';
+import { app, expect, hostCall, hostRequests, openApp, rowNames, takeProblems, test } from './fixtures.js';
 import { BUNDLE_PATH } from './server.js';
 
 const RUNNER_SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../loader/runner.html');
@@ -30,9 +30,9 @@ async function waitForSubscribed(page) {
 test("the bundle starts under the runner's policy with no console error, and subscribes", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await waitForSubscribed(page);
-  await expect(app(page).locator('button[data-row]')).toHaveText([
-    'main', 'Login redirect fix', 'Checkout v2', 'Docs refresh', 'Rate limit retry', 'Bulk import', 'SSE reconnect',
-    'Schema migration', 'Triage flaky test', 'Onboarding copy', 'Settings screen', 'Legacy pane',
+  await expect.poll(() => rowNames(page)).toEqual([
+    'Bulk import', 'Checkout v2', 'Docs refresh', 'Legacy pane', 'Login redirect fix', 'Onboarding copy', 'Rate limit retry',
+    'SSE reconnect', 'Schema migration', 'Settings screen', 'Triage flaky test', 'main',
   ]);
   const [first] = await hostRequests(page);
   expect(first).toEqual({ requestID: expect.any(String), method: 'sessions.subscribe', params: {} });
@@ -132,7 +132,7 @@ test('an object scenario is loaded before the channel comes up', async ({ page, 
   };
   await openApp(page, appHost, { scenario });
   await waitForSubscribed(page);
-  await expect(app(page).locator('button[data-row]')).toHaveText(['Solo row']);
+  await expect.poll(() => rowNames(page)).toEqual(['Solo row']);
   expect((await hostRequests(page)).map((r) => r.method)).toEqual(['sessions.subscribe']);
 });
 

@@ -188,8 +188,28 @@ export function hostLinks(page) {
  */
 export async function openSessionByName(page, rowName, tabName) {
   const frame = app(page);
-  await tapNamed(frame.locator('button.row, button[data-row]'), rowName, 'row');
+  await tapNamed(rowButtons(page), rowName, 'row');
   if (tabName !== undefined) await tapNamed(frame.locator('[role="tab"]'), tabName, 'tab');
+}
+
+/**
+ * The sessions list's rows, in either list: `button.row` (the mock's sessions list) or
+ * `button[data-row]` (6a's stub list).
+ * @param {Page} page
+ */
+export function rowButtons(page) {
+  return app(page).locator('button.row, button[data-row]');
+}
+
+/**
+ * The names of the rows the sessions list shows, named as `openSessionByName` names them, in
+ * either list, and sorted: the order is the list's own (the stub keeps the laptop's, the real
+ * list sorts newest first), so compare names as a set. It does not wait; poll it.
+ * @param {Page} page
+ * @returns {Promise<string[]>}
+ */
+export async function rowNames(page) {
+  return (await rowButtons(page).evaluateAll(namesOf)).sort();
 }
 
 /**
@@ -200,7 +220,22 @@ export async function openSessionByName(page, rowName, tabName) {
  */
 async function tapNamed(candidates, name, what) {
   await expect(candidates.first()).toBeVisible();
-  const names = await candidates.evaluateAll((els) => els.map((el) => {
+  const names = await candidates.evaluateAll(namesOf);
+  const matches = names.flatMap((n, i) => (n === name ? [i] : []));
+  if (matches.length !== 1) {
+    throw new Error(`${matches.length} ${what}s are named "${name}"; the ${what}s are ${JSON.stringify(names)}`);
+  }
+  await candidates.nth(matches[0]).click();
+}
+
+/**
+ * Each element's name (see `openSessionByName`). Playwright runs it in the frame, so it uses
+ * nothing from this module.
+ * @param {Element[]} els
+ * @returns {string[]}
+ */
+function namesOf(els) {
+  return els.map((el) => {
     const root = el.querySelector('.n') ?? el;
     let text = '';
     const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -210,12 +245,7 @@ async function tapNamed(candidates, name, what) {
       text += node.textContent ?? '';
     }
     return text.replace(/\s+/g, ' ').trim();
-  }));
-  const matches = names.flatMap((n, i) => (n === name ? [i] : []));
-  if (matches.length !== 1) {
-    throw new Error(`${matches.length} ${what}s are named "${name}"; the ${what}s are ${JSON.stringify(names)}`);
-  }
-  await candidates.nth(matches[0]).click();
+  });
 }
 
 /**

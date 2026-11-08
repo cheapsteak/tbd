@@ -8,11 +8,16 @@
 //   fixtures.js writes them to app/test/e2e/screenshots/).
 // - `--mocks`: the mocks' screenshots, `<mocks>/<scheme>/<state>.webp`. By default
 //   docs/design/phone-control/screenshots/.
+// - `<state>` is a built shot's name, which is also its mock's name. `<built>=<mock>` pairs a
+//   built shot with a mock of another name, such as `shell-sessions=sessions` for a shot a part
+//   takes under its own name so that it never overwrites another part's. The page shows it
+//   under the built name.
 // - `--no-mock <state>`: a state the mocks do not have, such as a new error screen. The page
 //   shows its built shot alone, beside the words "No mock: a new state.". A state named this way
-//   must be listed too, and must have no mock: one that has a mock is compared with it.
+//   must be listed too, in the plain form, and must have no mock: one that has a mock is
+//   compared with it.
 //
-// It writes `<out>/index.html`, `<out>/mock/<scheme>/<state>.webp` and
+// It writes `<out>/index.html`, `<out>/mock/<scheme>/<mock>.webp` and
 // `<out>/built/<scheme>/<state>.png`. The page uses relative paths only, so the folder stands
 // alone. When any state lacks an image it needs, it names each one, writes nothing, and exits 1.
 // A usage mistake exits 2. Node only.
@@ -27,19 +32,26 @@ const SCHEMES = /** @type {const} */ (['light', 'dark']);
 const STATE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 export const NO_MOCK_TEXT = 'No mock: a new state.';
 
-const USAGE = 'usage: node pairs.mjs --built <dir> --out <dir> [--mocks <dir>] [--no-mock <state>]... <state>...';
+const USAGE = 'usage: node pairs.mjs --built <dir> --out <dir> [--mocks <dir>] [--no-mock <state>]... <state>|<built>=<mock>...';
 
 /** A usage mistake. */
 class UsageError extends Error {}
 
 /**
+ * One state of the page: its built shot's name, and its mock's name, or null for a new state.
+ * @typedef {{ name: string, mock: string | null }} State
+ */
+
+/**
  * @param {string[]} argv the arguments after the script
- * @returns {{ built: string, out: string, mocks: string, noMock: Set<string>, states: string[] }}
+ * @returns {{ built: string, out: string, mocks: string, states: State[] }}
  */
 function parseArgs(argv) {
   /** @type {Record<string, string>} */
   const dirs = {};
+  /** @type {Set<string>} */
   const noMock = new Set();
+  /** @type {State[]} */
   const states = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -51,16 +63,23 @@ function parseArgs(argv) {
     } else if (arg.startsWith('--')) {
       throw new UsageError(`no option ${arg}`);
     } else {
-      states.push(checkState(arg));
+      const parts = arg.split('=');
+      if (parts.length > 2) throw new UsageError(`"${arg}" pairs more than two names`);
+      const name = checkState(parts[0]);
+      states.push({ name, mock: parts.length === 2 ? checkState(parts[1]) : name });
     }
   }
   if (dirs.built === undefined || dirs.out === undefined) throw new UsageError('--built and --out are required');
   if (states.length === 0) throw new UsageError('name at least one state');
-  if (new Set(states).size !== states.length) throw new UsageError('a state is named twice');
-  for (const state of noMock) {
-    if (!states.includes(state)) throw new UsageError(`--no-mock ${state} names a state that is not listed`);
+  const names = states.map((s) => s.name);
+  if (new Set(names).size !== names.length) throw new UsageError('a state is named twice');
+  for (const name of noMock) {
+    const state = states.find((s) => s.name === name);
+    if (state === undefined) throw new UsageError(`--no-mock ${name} names a state that is not listed`);
+    if (state.mock !== name) throw new UsageError(`--no-mock ${name} names a state paired with the mock ${state.mock}`);
+    state.mock = null;
   }
-  return { built: dirs.built, out: dirs.out, mocks: dirs.mocks ?? DEFAULT_MOCKS, noMock, states };
+  return { built: dirs.built, out: dirs.out, mocks: dirs.mocks ?? DEFAULT_MOCKS, states };
 }
 
 /** @param {string} name */
@@ -91,25 +110,26 @@ async function main(argv) {
     process.stderr.write(`pairs: ${error.message}\n${USAGE}\n`);
     return 2;
   }
-  const { built, out, mocks, noMock, states } = args;
+  const { built, out, mocks, states } = args;
 
   /** @type {Array<{ from: string, to: string }>} */
   const copies = [];
   /** @type {string[]} */
   const problems = [];
-  for (const state of states) {
+  for (const { name, mock } of states) {
     for (const scheme of SCHEMES) {
-      const builtShot = path.join(built, scheme, `${state}.png`);
-      if (await isFile(builtShot)) copies.push({ from: builtShot, to: path.join(out, 'built', scheme, `${state}.png`) });
-      else problems.push(`${state}: no built ${scheme} screenshot at ${builtShot}`);
-      const mockShot = path.join(mocks, scheme, `${state}.webp`);
+      const builtShot = path.join(built, scheme, `${name}.png`);
+      if (await isFile(builtShot)) copies.push({ from: builtShot, to: path.join(out, 'built', scheme, `${name}.png`) });
+      else problems.push(`${name}: no built ${scheme} screenshot at ${builtShot}`);
+      const mockShot = path.join(mocks, scheme, `${mock ?? name}.webp`);
       const hasMock = await isFile(mockShot);
-      if (noMock.has(state)) {
-        if (hasMock) problems.push(`${state}: the mocks have it (${mockShot}), so it cannot be --no-mock`);
+      if (mock === null) {
+        if (hasMock) problems.push(`${name}: the mocks have it (${mockShot}), so it cannot be --no-mock`);
       } else if (hasMock) {
-        copies.push({ from: mockShot, to: path.join(out, 'mock', scheme, `${state}.webp`) });
+        copies.push({ from: mockShot, to: path.join(out, 'mock', scheme, `${mock}.webp`) });
       } else {
-        problems.push(`${state}: no mock ${scheme} screenshot at ${mockShot} (pass --no-mock ${state} for a new state)`);
+        const hint = mock === name ? ` (pass --no-mock ${name} for a new state)` : '';
+        problems.push(`${name}: no mock ${scheme} screenshot at ${mockShot}${hint}`);
       }
     }
   }
@@ -122,26 +142,26 @@ async function main(argv) {
     await mkdir(path.dirname(to), { recursive: true });
     await copyFile(from, to);
   }
-  await writeFile(path.join(out, 'index.html'), pageHTML(states, noMock));
+  await writeFile(path.join(out, 'index.html'), pageHTML(states));
   process.stdout.write(`pairs: wrote ${path.join(out, 'index.html')} with ${states.length} states\n`);
   return 0;
 }
 
 /**
  * The page: one section per state, and in it one row per scheme, the mock beside the built shot.
- * @param {string[]} states
- * @param {Set<string>} noMock
+ * @param {State[]} states
  */
-export function pageHTML(states, noMock) {
-  const sections = states.map((state) => {
+export function pageHTML(states) {
+  const sections = states.map(({ name, mock }) => {
     const rows = SCHEMES.map((scheme) => {
-      const mock = noMock.has(state)
+      const left = mock === null
         ? `<figure class="none"><figcaption>Mock, ${scheme}</figcaption><p>${NO_MOCK_TEXT}</p></figure>`
-        : shot(`mock/${scheme}/${state}.webp`, `Mock, ${scheme}`, `${state}, ${scheme}, mock`);
-      const app = shot(`built/${scheme}/${state}.png`, `Built, ${scheme}`, `${state}, ${scheme}, built`);
-      return `<div class="pair" data-state="${state}" data-scheme="${scheme}">${mock}${app}</div>`;
+        : shot(`mock/${scheme}/${mock}.webp`, `Mock, ${scheme}`, `${mock}, ${scheme}, mock`);
+      const right = shot(`built/${scheme}/${name}.png`, `Built, ${scheme}`, `${name}, ${scheme}, built`);
+      return `<div class="pair" data-state="${name}" data-scheme="${scheme}">${left}${right}</div>`;
     });
-    return `<section id="${state}"><h2>${state}</h2>\n${rows.join('\n')}\n</section>`;
+    const beside = mock !== null && mock !== name ? ` <small>beside the mock's ${mock}</small>` : '';
+    return `<section id="${name}"><h2>${name}${beside}</h2>\n${rows.join('\n')}\n</section>`;
   });
   return `<!doctype html>
 <html lang="en">
@@ -160,6 +180,7 @@ export function pageHTML(states, noMock) {
 body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
 h1{font-size:22px;margin:0 0 4px}
 h2{font-size:17px;margin:28px 0 8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+h2 small{font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--muted)}
 p.lead{margin:0;color:var(--muted);max-width:60ch}
 .pair{display:flex;gap:12px;margin:0 0 16px}
 figure{margin:0;flex:0 1 195px;min-width:0}

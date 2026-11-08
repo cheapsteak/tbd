@@ -3,35 +3,27 @@
 // and a refused subscribe. host.spec.js covers the host itself (the runner's policy, the
 // opaque origin, the committed bundle and the console check), so nothing here repeats it.
 //
-// These tests outlive 6a's stub list: they find rows as `button.row` (the mocks' list, part
-// 6b) or `button[data-row]` (the stub), and a row by its name alone.
+// These tests outlive 6a's stub list: they read the rows through `rowNames` (fixtures.js),
+// which names them in either list, and compare the names as a set, never in order.
 
 import { readFileSync } from 'node:fs';
 
 import { TEXT } from './fake-laptop-app.js';
-import { app, expect, hostCall, hostRequests, openApp, test } from './fixtures.js';
+import { app, expect, hostCall, hostRequests, openApp, rowNames, test } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
 
 const MOCK = JSON.parse(readFileSync(new URL('scenarios/mock.json', import.meta.url), 'utf8'));
+/** @type {string[]} */
+const MOCK_NAMES = MOCK.rows.map((/** @type {any} */ r) => r.name);
 
 /**
- * The rows of the sessions list, in either list.
+ * Waits until the sessions list shows exactly the rows named `names`, in any order.
  * @param {Page} page
+ * @param {string[]} [names]
  */
-function rows(page) {
-  return app(page).locator('button.row, button[data-row]');
-}
-
-/**
- * The sessions list's row named `name`, in either list: the stub's button is the name, and
- * the mocks' list holds the name in the row's `.n`, beside its age and status.
- * @param {Page} page
- * @param {string} name
- */
-function rowName(page, name) {
-  const exact = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-  return app(page).locator('button[data-row], button.row .n').filter({ hasText: exact });
+async function expectRows(page, names = MOCK_NAMES) {
+  await expect.poll(() => rowNames(page)).toEqual([...names].sort());
 }
 
 /** @param {Page} page */
@@ -48,7 +40,7 @@ test('the app mounts #app on the sessions screen, with the layout variables from
   await openApp(page, appHost);
   const root = app(page).locator('#app');
   await expect(root).toBeVisible();
-  await expect(rows(page).first()).toBeVisible();
+  await expectRows(page);
   await expect(root).toHaveAttribute('data-screen', 'sessions');
 
   // The loader's safe area and keyboard reach the root as CSS variables. The bottom inset
@@ -79,17 +71,18 @@ test('nothing reaches the laptop before the first channel up', async ({ page, ap
   await expect.poll(() => hostRequests(page)).toEqual([
     { requestID: expect.any(String), method: 'sessions.subscribe', params: {} },
   ]);
-  await expect(rows(page).first()).toBeVisible();
+  await expectRows(page);
 });
 
 test('a dropped channel resubscribes from the last seq it saw, and takes the events it missed', async ({ page, appHost }) => {
   await openApp(page, appHost);
-  await expect(rows(page).first()).toBeVisible();
+  await expectRows(page);
   const row = MOCK.rows.find((/** @type {any} */ r) => r.name === 'main');
+  const renamed = (/** @type {string} */ name) => MOCK_NAMES.map((n) => (n === 'main' ? name : n));
   for (const name of ['main, renamed once', 'main, renamed twice']) {
     await hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...row, name }], removedRowIDs: [] });
   }
-  await expect(rowName(page, 'main, renamed twice')).toBeVisible();
+  await expectRows(page, renamed('main, renamed twice'));
   const seen = await laptopSeq(page);
   expect(seen).toBe(2);
 
@@ -98,8 +91,7 @@ test('a dropped channel resubscribes from the last seq it saw, and takes the eve
   await hostCall(page, 'setChannel', true);
   await expect.poll(async () => (await subscribes(page)).map((r) => r.params)).toEqual([{}, { stream: 's1', sinceSeq: seen }]);
   // The laptop replays the event the phone missed, and the list takes it.
-  await expect(rowName(page, 'main, renamed while away')).toBeVisible();
-  await expect(rowName(page, 'main, renamed twice')).toHaveCount(0);
+  await expectRows(page, renamed('main, renamed while away'));
 });
 
 test('the dark scheme reaches the app', async ({ page, appHost }) => {
@@ -132,7 +124,7 @@ test('a refused subscribe shows its message, and Try again subscribes again', as
 
   await hostCall(page, 'setReply', 'sessions.subscribe', null);
   await refused.getByRole('button', { name: 'Try again' }).click();
-  await expect(rows(page).first()).toBeVisible();
+  await expectRows(page);
   await expect(refused).toHaveCount(0);
   const sent = await hostRequests(page);
   expect(sent).toEqual([
