@@ -5,11 +5,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
-import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, emptyTranscript, prependPage } from '../state/transcript.ts';
+import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, clearTranscript, emptyTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import {
-  anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX, takeScroll,
-  wantsOlder,
+  anchorAt, arrivedCount, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
+  takeScroll, wantsOlder,
 } from './scroll.ts';
 import type { Metrics } from './scroll.ts';
 
@@ -196,19 +196,43 @@ function opened(ids: string[]): TranscriptState {
   return { ...applyPage(beginOpen(emptyTranscript(), R, false, 'open-1'), page(ids)), phase: 'open' };
 }
 
-/** How the rows changed from `a` to `b`, as the list reads it. */
-function change(a: TranscriptState, b: TranscriptState): string {
-  return rowsChange(seenRows(a.rows, a.appendedSinceSeen), b.rows, b.appendedSinceSeen);
+/** What the list sees of the slice `s`'s rows. */
+function seen(s: TranscriptState) {
+  return seenRows(s.rows, s.replacements, s.appendedSinceSeen);
 }
 
-test('an append and a receipt read as appended', () => {
+/** How the rows changed from `a` to `b`, as the list reads it. */
+function change(a: TranscriptState, b: TranscriptState): string {
+  return rowsChange(seen(a), seen(b));
+}
+
+/** The item IDs of the rows that came in at the bottom from `a` to `b`, as the list reads them. */
+function arrived(a: TranscriptState, b: TranscriptState): string[] {
+  return b.rows.slice(b.rows.length - arrivedCount(seen(a), seen(b))).map((r) => (r.kind === 'item' ? r.item.id : `receipt:${r.id}`));
+}
+
+test('an append and a receipt read as appended, and arrive', () => {
   const s = opened(['a', 'b']);
   const appended = applyTranscriptEvent(s, event('transcript.append', ['c']));
   assert.equal(change(s, appended), 'appended');
+  assert.deepEqual(arrived(s, appended), ['c']);
   const receipt = addReceipt(appended, R, 'p1', 'Answered on the laptop');
   assert.equal(change(appended, receipt), 'appended');
+  assert.deepEqual(arrived(appended, receipt), ['receipt:p1']);
   // Seen at once: two appends.
   assert.equal(change(s, receipt), 'appended');
+  assert.deepEqual(arrived(s, receipt), ['c', 'receipt:p1']);
+});
+
+test('the first items appended to an empty transcript read as appended, and arrive', () => {
+  const empty = opened([]);
+  const first = applyTranscriptEvent(empty, event('transcript.append', ['a', 'b']));
+  assert.equal(change(empty, first), 'appended');
+  assert.deepEqual(arrived(empty, first), ['a', 'b']);
+  // A receipt as a transcript's first row too.
+  const receipt = addReceipt(empty, R, 'p1', 'Answered on the laptop');
+  assert.equal(change(empty, receipt), 'appended');
+  assert.deepEqual(arrived(empty, receipt), ['receipt:p1']);
 });
 
 test('a row changed in place, an append that replaces a row, and an older page read as same', () => {
@@ -219,10 +243,11 @@ test('a row changed in place, an append that replaces a row, and an older page r
   assert.equal(change(s, prependPage(older, page(['y', 'z']))), 'same');
 });
 
-test('an older page and an append seen at once read as appended', () => {
+test('an older page and an append seen at once read as appended, and only the append arrives', () => {
   const s = { ...opened(['a', 'b']), olderRequestID: 'page-1' };
   const both = applyTranscriptEvent(prependPage(s, page(['z'])), event('transcript.append', ['c']));
   assert.equal(change(s, both), 'appended');
+  assert.deepEqual(arrived(s, both), ['c']);
 });
 
 test('a reset, and a reopen’s page, read as replaced, even with the same items', () => {
@@ -231,28 +256,32 @@ test('a reset, and a reopen’s page, read as replaced, even with the same items
   assert.equal(change(s, applyTranscriptEvent(s, reset)), 'replaced');
   const reopened = { ...applyPage(beginOpen(s, R, true, 'open-2'), page(['a', 'b', 'c'])), phase: 'open' as const };
   assert.equal(change(s, reopened), 'replaced');
-  // A page and an append after it, seen at once.
-  assert.equal(change(s, applyTranscriptEvent(applyTranscriptEvent(s, reset), event('transcript.append', ['d']))), 'replaced');
+  // A page and an append after it, seen at once, and nothing arrives.
+  const after = applyTranscriptEvent(applyTranscriptEvent(s, reset), event('transcript.append', ['d']));
+  assert.equal(change(s, after), 'replaced');
+  assert.deepEqual(arrived(s, after), []);
 });
 
-test('the first page over no rows reads as replaced, and no rows to none as same', () => {
+test('a page over no rows, or of no rows, reads as replaced, and nothing at all as same', () => {
   const none = beginOpen(emptyTranscript(), R, false, 'open-1');
-  assert.equal(change(none, opened(['a'])), 'replaced');
+  assert.equal(change(none, { ...applyPage(none, page(['a'])), phase: 'open' }), 'replaced');
+  assert.equal(change(none, { ...applyPage(none, page([])), phase: 'open' }), 'replaced');
   assert.equal(change(none, none), 'same');
-  assert.equal(change(none, opened([])), 'same');
-  // Rows to none, as a reset to an empty page does.
-  assert.equal(rowsChange(seenRows(opened(['a']).rows, 0), [], 0), 'replaced');
+  // Rows to none, as a reset to an empty page does, and a close.
+  const s = opened(['a']);
+  assert.equal(change(s, applyTranscriptEvent(s, { event: 'transcript.reset', seq: 2, data: { session: R, reason: 'rollover', page: page([]) } })), 'replaced');
+  assert.equal(change(s, clearTranscript(s)), 'replaced');
 });
 
-test('seenRows names the first and the last row’s keys and the appends', () => {
+test('seenRows holds the slice’s replacements and appends, and the rows’ count', () => {
   const s = applyTranscriptEvent(opened(['a', 'b']), event('transcript.append', ['c']));
-  assert.deepEqual(seenRows(s.rows, s.appendedSinceSeen), { firstKey: s.rows[0]!.key, lastKey: s.rows[2]!.key, appended: 1 });
-  assert.deepEqual(seenRows([], 0), { firstKey: null, lastKey: null, appended: 0 });
+  assert.deepEqual(seen(s), { replacements: s.replacements, appended: 1, count: 3 });
+  assert.deepEqual(seenRows([], -1, 0), { replacements: -1, appended: 0, count: 0 });
 });
 
 /** Whether the list reads rows that came in above, from `a` to `b`. */
 function above(a: TranscriptState, b: TranscriptState): boolean {
-  return prepended(seenRows(a.rows, a.appendedSinceSeen), b.rows);
+  return prepended(seen(a), seen(b));
 }
 
 test('an older page reads as prepended, with an append or without', () => {
@@ -275,6 +304,6 @@ test('an append, an update, a reset, a reopen and a first page do not read as pr
   assert.equal(above(s, applyTranscriptEvent(s, reset)), false);
   assert.equal(above(s, { ...applyPage(beginOpen(s, R, false, 'open-2'), page(['z', 'a', 'b'])), phase: 'open' }), false);
   const none = beginOpen(emptyTranscript(), R, false, 'open-1');
-  assert.equal(above(none, opened(['a'])), false);
-  assert.equal(prepended(seenRows(s.rows, 0), []), false);
+  assert.equal(above(none, { ...applyPage(none, page(['a'])), phase: 'open' }), false);
+  assert.equal(above(s, clearTranscript(s)), false);
 });

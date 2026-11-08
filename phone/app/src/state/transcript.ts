@@ -83,9 +83,17 @@ export interface TranscriptState {
   details: Readonly<Record<number, DetailState>>;
   /**
    * How many rows came in at the bottom since a page last replaced the rows: new items from
-   * `transcript.append`, and new receipts. A rise in it tells the list that rows arrived below.
+   * `transcript.append`, and new receipts. A rise in it tells the list that rows arrived below,
+   * and by how many.
    */
   appendedSinceSeen: number;
+  /**
+   * How many times the rows were replaced: by a page (an open's, a reopen's, a reset's) or by
+   * a clear. It only grows, as `nextKey` does, so a change in it tells the list that a page took
+   * the place of the rows, and a rise in `appendedSinceSeen` alone that rows came in below, an
+   * empty transcript's first items included.
+   */
+  replacements: number;
 }
 
 /** The slice with no transcript open. */
@@ -106,16 +114,17 @@ export function emptyTranscript(): TranscriptState {
     pendingClose: false,
     details: {},
     appendedSinceSeen: 0,
+    replacements: 0,
   };
 }
 
 /**
  * `s` with no transcript open: every field as `emptyTranscript` has it, except `nextKey`, which
- * only grows, so a key never names a second row, and `stalePage`, since an older page on its
- * way is still on the wire (`dropOlder`).
+ * only grows, so a key never names a second row, `stalePage`, since an older page on its way is
+ * still on the wire (`dropOlder`), and `replacements`, which only grows too and counts this.
  */
 export function clearTranscript(s: TranscriptState): TranscriptState {
-  return { ...emptyTranscript(), nextKey: s.nextKey, stalePage: dropOlder(s).stalePage };
+  return { ...emptyTranscript(), nextKey: s.nextKey, stalePage: dropOlder(s).stalePage, replacements: s.replacements + 1 };
 }
 
 /**
@@ -153,15 +162,15 @@ export function beginResume(s: TranscriptState, requestID: string): TranscriptSt
 
 /**
  * `s` with `page` as its rows, in place of every row it had, receipts and open details
- * included: an open's first page, or a `transcript.reset`. Each row gets a new key. It takes
- * the page's cursor, and drops an older page still on its way (`dropOlder`), which belongs above
- * rows that are gone. It leaves `phase` to the caller.
+ * included: an open's first page, or a `transcript.reset`, which `replacements` counts. Each row
+ * gets a new key. It takes the page's cursor, and drops an older page still on its way
+ * (`dropOlder`), which belongs above rows that are gone. It leaves `phase` to the caller.
  */
 export function applyPage(s: TranscriptState, page: TranscriptPage): TranscriptState {
   const { rows, nextKey } = itemRows(page.items, s.nextKey);
   return {
     ...s, rows, nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, ...dropOlder(s), olderFailed: false,
-    details: {}, appendedSinceSeen: 0,
+    details: {}, appendedSinceSeen: 0, replacements: s.replacements + 1,
   };
 }
 

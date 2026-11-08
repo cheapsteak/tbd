@@ -126,50 +126,50 @@ export function pushedFromBottom(stuck: boolean, seen: number, m: Metrics): bool
 }
 
 /**
- * What the list last saw of its rows: the first and the last row's keys, each null with no
- * rows, and the slice's `appendedSinceSeen`.
+ * What the list sees of its rows at a commit, from what the slice records rather than from the
+ * rows' keys: how many times a page has replaced them (`replacements`), how many came in at the
+ * bottom since (`appendedSinceSeen`), and how many there are.
  */
 export interface SeenRows {
-  firstKey: number | null;
-  lastKey: number | null;
+  replacements: number;
   appended: number;
+  count: number;
+}
+
+/** What the list sees of `rows`, given the slice's `replacements` and `appendedSinceSeen` for them. */
+export function seenRows(rows: readonly TranscriptRow[], replacements: number, appended: number): SeenRows {
+  return { replacements, appended, count: rows.length };
 }
 
 /**
- * How the rows changed since the list last saw them (`SeenRows`):
- * - `replaced`: a page took the place of the rows, as an open, a reopen and a reset do. The
- *   row that was last is gone, since a page gives every row a new key, or there were no rows
- *   and now there are.
- * - `appended`: rows came in at the bottom, new items or a receipt (`appendedSinceSeen` rose).
+ * How the rows changed from `seen`, what the list saw of them last, to `now`:
+ * - `replaced`: a page took the place of the rows, as an open, a reopen and a reset do, or they
+ *   were cleared (`replacements` changed), whether there were rows before or not.
+ * - `appended`: rows came in at the bottom, new items or a receipt (`appendedSinceSeen` rose),
+ *   the first items of an empty transcript included.
  * - `same`: anything else, such as a row changed in place or an older page above.
  *
  * The list may see several store changes at once, so a page and appends after it read as
  * `replaced`, and an older page with appends as `appended`.
  */
-export function rowsChange(seen: SeenRows, rows: readonly TranscriptRow[], appended: number): 'replaced' | 'appended' | 'same' {
-  if (seen.lastKey === null ? rows.length > 0 : !hasKey(rows, seen.lastKey)) return 'replaced';
-  return appended > seen.appended ? 'appended' : 'same';
-}
-
-/** What the list sees of `rows` now, for the next `rowsChange` and `prepended`. */
-export function seenRows(rows: readonly TranscriptRow[], appended: number): SeenRows {
-  return { firstKey: rows[0]?.key ?? null, lastKey: rows[rows.length - 1]?.key ?? null, appended };
+export function rowsChange(seen: SeenRows, now: SeenRows): 'replaced' | 'appended' | 'same' {
+  if (now.replacements !== seen.replacements) return 'replaced';
+  return now.appended > seen.appended ? 'appended' : 'same';
 }
 
 /**
- * Whether rows came in above the rows the list last saw, as an older page puts them: the row
- * that was first is still there, and no longer first. A page in place of the rows gives every
- * row a new key, so it never reads as prepended.
+ * How many rows came in at the bottom from `seen` to `now`, so the last that many rows are the
+ * ones that arrived; none when a page replaced the rows. Rows come in only at the bottom, by an
+ * append or a receipt, or above, by an older page, and only a page takes any away.
  */
-export function prepended(seen: SeenRows, rows: readonly TranscriptRow[]): boolean {
-  if (seen.firstKey === null || rows.length === 0 || rows[0]!.key === seen.firstKey) return false;
-  return rows.some((row) => row.key === seen.firstKey);
+export function arrivedCount(seen: SeenRows, now: SeenRows): number {
+  return now.replacements === seen.replacements ? Math.max(0, now.appended - seen.appended) : 0;
 }
 
-/** Whether a row has `key`, looked for from the bottom, where the row that was last stays after an append. */
-function hasKey(rows: readonly TranscriptRow[], key: number): boolean {
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (rows[i]!.key === key) return true;
-  }
-  return false;
+/**
+ * Whether rows came in above the rows the list last saw, as an older page puts them: with no
+ * page in place of the rows, there are more rows than came in at the bottom.
+ */
+export function prepended(seen: SeenRows, now: SeenRows): boolean {
+  return now.replacements === seen.replacements && now.count - seen.count > now.appended - seen.appended;
 }

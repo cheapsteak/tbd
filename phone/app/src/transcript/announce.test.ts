@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneItem } from '../protocol/types.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
-import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, announcement, rowsAfter, spoken } from './announce.ts';
+import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, announcement, spoken } from './announce.ts';
 
 let nextKey = 1;
 
@@ -63,12 +63,4 @@ test('an announcement says the last ANNOUNCE_ROWS rows that say something, oldes
   assert.deepEqual(announcement(mixed), ['Go', 'Read auth.ts', 'Answered on the laptop']);
   assert.deepEqual(announcement([row({ kind: 'thinking', text: 'Hmm.' })]), []);
   assert.deepEqual(announcement([]), []);
-});
-
-test('rowsAfter takes the rows after the one that was last, and none when it is gone', () => {
-  const rows = [row({ kind: 'user', text: 'a' }), row({ kind: 'user', text: 'b' }), row({ kind: 'user', text: 'c' })];
-  assert.deepEqual(rowsAfter(rows, rows[0]!.key), rows.slice(1));
-  assert.deepEqual(rowsAfter(rows, rows[2]!.key), []);
-  assert.deepEqual(rowsAfter(rows, -1), []);
-  assert.deepEqual(rowsAfter(rows, null), []);
 });

@@ -99,10 +99,11 @@ import { sameRef } from '../protocol/wire.ts';
 import { dur } from '../state/status.ts';
 import { Dots, Icon } from '../ui/Icon.tsx';
 import { useNow } from '../ui/now.ts';
-import { announcement, rowsAfter } from './announce.ts';
+import { announcement } from './announce.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
-  anchorAt, atBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, takeScroll, wantsOlder,
+  anchorAt, arrivedCount, atBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, takeScroll,
+  wantsOlder,
 } from './scroll.ts';
 import type { Anchor, Metrics, Paging, SeenRows } from './scroll.ts';
 
@@ -119,6 +120,9 @@ const GESTURES = ['touchstart', 'pointerdown', 'wheel'] as const;
 const WORKING_REFRESH_MS = 1_000;
 
 const NO_ROWS: readonly TranscriptRow[] = [];
+
+/** The `replacements` the list is given while the slice holds no rows of its session, which no slice has. */
+const NOT_SHOWN = -1;
 
 /** The live region's style: out of sight and still read, the usual clip pattern (this file's header). */
 const OUT_OF_SIGHT: CSSProperties = {
@@ -149,6 +153,7 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
     <List
       rows={shown ? t.rows : NO_ROWS}
       appended={shown ? t.appendedSinceSeen : 0}
+      replacements={shown ? t.replacements : NOT_SHOWN}
       paging={shown && t.phase === 'open' ? t : null}
       details={t.details}
       toggle={toggle}
@@ -165,7 +170,7 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
  *   reader's, so a scroll event can tell whether the reader moved the view (`takeScroll`);
  * - `seen`: how far the view was above its bottom then (`fromBottom`), so a layout can tell
  *   whether something pushed it away;
- * - `rows`: the rows it last saw (`rowsChange`, `prepended`);
+ * - `rows`: what it last saw of the rows (`SeenRows`, for `rowsChange` and `prepended`);
  * - `shown` and `paging`: the rows and paging of the last commit, for the listeners, which run
  *   between renders;
  * - `anchor`: the reader's place while an older page is on its way or going in, or null;
@@ -187,6 +192,8 @@ interface ViewState {
  * The virtual list, the bottom it keeps to, the pill and the older pages (this file's header).
  * - `rows`: the rows to show, the slice's when it holds this session's transcript.
  * - `appended`: the slice's `appendedSinceSeen` for those rows; a rise means rows came in below.
+ * - `replacements`: the slice's `replacements` for those rows; a change means a page replaced
+ *   them (`rowsChange`).
  * - `paging`: the slice, while it holds those rows open, or null, when no older page may be
  *   asked for them.
  * - `workingSince`: when the session's chip turned `working`, in Unix milliseconds, while it is
@@ -195,18 +202,19 @@ interface ViewState {
 function List(p: {
   rows: readonly TranscriptRow[];
   appended: number;
+  replacements: number;
   paging: Paging | null;
   details: Readonly<Record<number, DetailState>>;
   toggle: (rowKey: number, part: RowPart) => void;
   workingSince: number | null;
 }): JSX.Element {
-  const { rows, appended, paging } = p;
+  const { rows, appended, replacements, paging } = p;
   const actions = useActions();
   const wrapRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const view = useRef<ViewState>({
-    stuck: true, top: 0, seen: 0, rows: { firstKey: null, lastKey: null, appended: 0 }, shown: NO_ROWS, paging: null, anchor: null,
+    stuck: true, top: 0, seen: 0, rows: { replacements: NOT_SHOWN, appended: 0, count: 0 }, shown: NO_ROWS, paging: null, anchor: null,
     restoring: null,
   }).current;
   const [pill, setPill] = useState(false);
@@ -383,10 +391,11 @@ function List(p: {
   // region; rows below say themselves in it, and show the pill below a view that does not keep to
   // the bottom; a page above the rows holds the reader's place.
   useLayoutEffect(() => {
-    const change = rowsChange(view.rows, rows, appended);
-    const above = prepended(view.rows, rows);
-    const arrived = change === 'appended' ? rowsAfter(rows, view.rows.lastKey) : NO_ROWS;
-    view.rows = seenRows(rows, appended);
+    const now = seenRows(rows, replacements, appended);
+    const change = rowsChange(view.rows, now);
+    const above = prepended(view.rows, now);
+    const arrived = change === 'appended' ? rows.slice(rows.length - arrivedCount(view.rows, now)) : NO_ROWS;
+    view.rows = now;
     const el = scrollRef.current;
     if (change === 'replaced') {
       dropAnchor();
@@ -401,7 +410,7 @@ function List(p: {
     if (!view.stuck) setPill(true);
     const lines = announcement(arrived);
     if (lines.length > 0) setSaid((s) => ({ n: s.n + 1, lines }));
-  }, [view, rows, appended, toBottom, dropAnchor, startRestore]);
+  }, [view, rows, appended, replacements, toBottom, dropAnchor, startRestore]);
 
   // After every render, since rows can change height in any of them.
   useLayoutEffect(afterLayout);

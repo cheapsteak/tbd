@@ -62,15 +62,6 @@ export function announcement(arrived: readonly TranscriptRow[]): string[] {
   return lines;
 }
 
-/** The rows of `rows` after the one keyed `lastKey`, looked for from the bottom; none when it is gone. */
-export function rowsAfter(rows: readonly TranscriptRow[], lastKey: number | null): readonly TranscriptRow[] {
-  if (lastKey === null) return [];
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (rows[i]!.key === lastKey) return rows.slice(i + 1);
-  }
-  return [];
-}
-
 /** The text of a markdown tree, with a space between its blocks and in place of each line break. */
 function plainText(nodes: readonly MdNode[]): string {
   const out: string[] = [];

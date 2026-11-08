@@ -868,6 +868,23 @@ test('the rows of an older page are not said', async ({ page, appHost }) => {
   await expect(region).toHaveText('');
 });
 
+test('the first rows to arrive in an empty transcript are said', async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: checkoutWith([]) });
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  const { region, lines } = liveRegion(page);
+  // Once the open reached the laptop, an event the laptop sends comes after its reply.
+  await expect.poll(async () => (await hostRequests(page)).filter((r) => r.method === 'transcript.open').length).toBe(1);
+  await expect(tx.locator('[data-tx-row]')).toHaveCount(0);
+  await expect(region).toHaveText('');
+  await appendToCheckout(page, [
+    { id: 'first-1', kind: 'user', text: 'Start the checkout split', truncated: false },
+    { id: 'first-2', kind: 'assistant', text: 'Starting with the **form**.', truncated: false },
+  ]);
+  await expect(tx.locator('.say', { hasText: 'Starting with the form.' })).toBeVisible();
+  await expect(lines).toHaveText(['Start the checkout split', 'Starting with the form.']);
+});
+
 test('a page in place of the rows starts at the bottom and takes the pill away', async ({ page, appHost }) => {
   const tx = await openTall(page, appHost);
   const { pill } = await pillAfterScrollingUp(page, tx);

@@ -126,6 +126,23 @@ test('reset replaces everything, receipts and open details included', () => {
   assert.equal(s1.phase, 'open');
 });
 
+test('replacements counts each page in place of the rows and each clear, and only grows', () => {
+  const s0 = withRows([item('u1')]);
+  const n = s0.replacements;
+  assert.ok(n > 0);
+  assert.equal(applyTranscriptEvent(s0, reset(page([item('u9')]))).replacements, n + 1);
+  assert.equal(applyTranscriptEvent(s0, reset(page([]))).replacements, n + 1);
+  assert.equal(clearTranscript(s0).replacements, n + 1);
+  assert.equal(beginOpen(s0, OTHER, false, 'open-2').replacements, n + 1);
+  assert.equal(applyPage(beginOpen(s0, R, true, 'open-2'), page([item('u1')])).replacements, n + 1);
+  // Rows that come in below or above, or change in place, and a reopen still on its way, leave it.
+  assert.equal(beginOpen(s0, R, true, 'open-2').replacements, n);
+  assert.equal(applyTranscriptEvent(s0, append([item('u2')])).replacements, n);
+  assert.equal(applyTranscriptEvent(s0, update([item('u1', 'x')])).replacements, n);
+  assert.equal(addReceipt(s0, R, 'p1', 'Answered on the laptop').replacements, n);
+  assert.equal(prependPage(s0, page([item('u0')])).replacements, n);
+});
+
 test('a page that reached the start has no cursor', () => {
   const s = applyPage(withRows([item('u1')]), page([item('u0')], null));
   assert.equal(s.cursor, null);
