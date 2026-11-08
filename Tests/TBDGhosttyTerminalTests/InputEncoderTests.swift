@@ -1,0 +1,289 @@
+import Foundation
+@testable import TBDGhosttyTerminal
+import TestSupport
+import Testing
+
+@Suite(.fastPassBounded)
+struct KeyEncoderTests {
+    /// `ghostty_key_event_set_utf8` does not copy. The event outlives `encode`, so leaving the
+    /// text set would leave the event pointing into a buffer Swift frees as `withUTF8` returns.
+    @Test func encodeClearsTheEventTextBeforeReturning() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try KeyEncoder()
+        let press = KeyPress(
+            key: MacKeyCodes.key(forVirtualKeyCode: 0x00), text: "a", unshiftedCodepoint: 0x61)
+
+        let bytes = try terminal.withLocked { state in
+            try encoder.encode(press, terminal: try #require(state.raw, "the terminal is closed"))
+        }
+
+        #expect(bytes == Array("a".utf8), "the press encoded as \(bytes), not as its text")
+        #expect(encoder.eventTextLength == 0, "the event still points at \(encoder.eventTextLength) bytes of freed text")
+    }
+}
+
+@Suite(.fastPassBounded)
+struct MouseEncoderTests {
+    /// Ten-pixel cells, so the point (5, 5) is cell 1;1.
+    private static let geometry = TerminalPixelGeometry(screenWidth: 100, screenHeight: 100, cellWidth: 10, cellHeight: 10)
+    private static let point = SurfacePoint(x: 5, y: 5)
+
+    private func encode(_ press: MousePress, with encoder: MouseEncoder, on terminal: GhosttyTerminal) throws -> [UInt8]? {
+        try terminal.withLocked { state in
+            try encoder.encode(press, terminal: try #require(state.raw, "the terminal is closed"))
+        }
+    }
+
+    /// The press went out, so its release must too, even though the program turned reporting
+    /// off in between. It goes out as SGR, as the press did, although the terminal is back on
+    /// the default format by then.
+    @Test func releaseOfAReportedPressGoesOutAfterTrackingTurnsOff() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+
+        let press = try encode(MousePress(action: .press, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(press == Array("\u{1b}[<0;1;1M".utf8), "the press encoded as \(String(describing: press))")
+
+        terminal.feed(text: "\u{1b}[?1000l\u{1b}[?1006l")
+        let release = try encode(
+            MousePress(action: .release, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(release == Array("\u{1b}[<0;1;1m".utf8), "the release encoded as \(String(describing: release))")
+        #expect(encoder.pressEncodings.isEmpty, "the release left \(encoder.pressEncodings) recorded")
+    }
+
+    /// libghostty encodes under the mouse mode set last, and resetting any of them turns tracking
+    /// off, whatever bits are still set. After `?1000h ?1003h ?1003l` the bits still say 1000 but
+    /// clicks go unreported. The held button's release must still go out, and clicks must go out
+    /// again once the program sets 1000 again, although that changes no bit.
+    @Test func trackingFollowsTheModeSetLastNotTheModeBits() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        let down = MousePress(action: .press, button: .left, position: Self.point)
+        let up = MousePress(action: .release, button: .left, position: Self.point)
+        terminal.feed(text: "\u{1b}[?1006h\u{1b}[?1000h\u{1b}[?1003h")
+
+        let press = try encode(down, with: encoder, on: terminal)
+        #expect(press == Array("\u{1b}[<0;1;1M".utf8), "the press encoded as \(String(describing: press))")
+        terminal.feed(text: "\u{1b}[?1003l")
+        let release = try encode(up, with: encoder, on: terminal)
+        #expect(release == Array("\u{1b}[<0;1;1m".utf8), "the held button's release encoded as \(String(describing: release))")
+
+        // Tracking is off in libghostty now, though the 1000 bit is still set.
+        let unreportedPress = try encode(down, with: encoder, on: terminal)
+        let unreportedRelease = try encode(up, with: encoder, on: terminal)
+        #expect(unreportedPress == nil, "with tracking off a press encoded as \(String(describing: unreportedPress))")
+        #expect(unreportedRelease == nil, "with tracking off a release encoded as \(String(describing: unreportedRelease))")
+
+        terminal.feed(text: "\u{1b}[?1000h")
+        let click = try encode(down, with: encoder, on: terminal)
+        #expect(click == Array("\u{1b}[<0;1;1M".utf8), "after 1000 was set again a press encoded as \(String(describing: click))")
+    }
+
+    /// Of two report formats the one set last wins, not the widest: after `?1006h ?1015h` reports
+    /// are urxvt. A press's release keeps its format once reporting is off, so it is urxvt too.
+    @Test func formatFollowsTheModeSetLast() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h\u{1b}[?1015h")
+
+        let press = try encode(MousePress(action: .press, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(press == Array("\u{1b}[32;1;1M".utf8), "the press encoded as \(String(describing: press))")
+        terminal.feed(text: "\u{1b}[?1000l")
+        let release = try encode(
+            MousePress(action: .release, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(release == Array("\u{1b}[35;1;1M".utf8), "the release encoded as \(String(describing: release))")
+    }
+
+    /// Only a reported press earns a release. With tracking off throughout there is nothing to close.
+    @Test func releaseWithNoReportedPressStaysSilent() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+
+        let press = try encode(MousePress(action: .press, button: .left, position: Self.point), with: encoder, on: terminal)
+        let release = try encode(
+            MousePress(action: .release, button: .left, position: Self.point), with: encoder, on: terminal)
+        #expect(press == nil, "with tracking off the press encoded as \(String(describing: press))")
+        #expect(release == nil, "with tracking off the release encoded as \(String(describing: release))")
+    }
+
+    /// A press that went out unreported earns no release, even when the program turns reporting
+    /// on before the button comes up: a release alone would tell it a button came up that it
+    /// never saw go down.
+    @Test func releaseOfAnUnreportedPressStaysSilentAfterTrackingTurnsOn() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        let down = MousePress(action: .press, button: .left, position: Self.point)
+        let up = MousePress(action: .release, button: .left, position: Self.point)
+
+        let press = try encode(down, with: encoder, on: terminal)
+        try #require(press == nil, "with tracking off the press encoded as \(String(describing: press))")
+        terminal.feed(text: "\u{1b}[?1000h")
+        let release = try encode(up, with: encoder, on: terminal)
+        #expect(release == nil, "once 1000 was set the unreported press's release encoded as \(String(describing: release))")
+
+        // Reporting really is on now, or the nil above proves nothing.
+        let click = try encode(down, with: encoder, on: terminal)
+        #expect(click != nil, "with 1000 set a press still encoded as nothing")
+    }
+
+    /// A press that went out unreported leaves no button held. X10 tracking (`?9h`) reports only
+    /// left, middle and right presses, so a back-button press goes out as nothing, and its release
+    /// never reaches the encoder: the controller passes on only the releases of reported presses.
+    /// Held, it would tell libghostty a button is down until focus was lost. libghostty reads that
+    /// only for a move outside the viewport, which any-event tracking then reports as if dragged.
+    @Test func anUnreportedPressLeavesNoButtonHeld() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        terminal.feed(text: "\u{1b}[?9h")
+
+        let press = try encode(MousePress(action: .press, button: .eight, position: Self.point), with: encoder, on: terminal)
+        try #require(press == nil, "X10 tracking reported a back-button press as \(String(describing: press))")
+        #expect(encoder.heldButtons.isEmpty, "the unreported press left \(encoder.heldButtons) held")
+
+        terminal.feed(text: "\u{1b}[?1003h")
+        // Past the right edge of the 100-pixel screen.
+        let outside = try encode(Self.motion(toX: 150), with: encoder, on: terminal)
+        #expect(outside == nil, "a move outside the viewport with no button held encoded as \(String(describing: outside))")
+        // Any-event tracking is on, or the nil above proves nothing.
+        let inside = try encode(Self.motion(toX: 5), with: encoder, on: terminal)
+        #expect(inside != nil, "under any-event tracking a move inside the viewport encoded as nothing")
+    }
+
+    /// Under any-event tracking a move is reported once per cell, not once per pixel: the encoder
+    /// drops a motion report that repeats the last one, and forgets it when the modes change.
+    /// Driven through the terminal's own input seam, so the encoder is the one bound to the
+    /// terminal, which hears about every write.
+    @Test func motionIsReportedOncePerCellUnderAnyEventTracking() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        let firstCell = Array("\u{1b}[<35;1;1M".utf8)
+        let secondCell = Array("\u{1b}[<35;2;1M".utf8)
+
+        // Twenty moves inside cell 1;1, x from 0.5 to 9.05 px, then one into cell 2;1.
+        let inside = (0..<20).compactMap { step in
+            terminal.encodeMouse(Self.motion(toX: 0.5 + Double(step) * 0.45))
+        }
+        #expect(inside == [firstCell], "twenty moves inside one cell gave \(inside.count) reports: \(inside)")
+        let crossing = terminal.encodeMouse(Self.motion(toX: 15))
+        #expect(crossing == secondCell, "the move into the next cell gave \(String(describing: crossing))")
+        let again = terminal.encodeMouse(Self.motion(toX: 16))
+        #expect(again == nil, "a second move inside cell 2;1 gave \(String(describing: again))")
+
+        // Off and on again, in two writes with no event between. The encoder starts afresh, so the
+        // same move that was just dropped as a repeat is reported.
+        terminal.feed(text: "\u{1b}[?1003l")
+        terminal.feed(text: "\u{1b}[?1003h")
+        let afterToggle = terminal.encodeMouse(Self.motion(toX: 16))
+        #expect(afterToggle == secondCell,
+                "after tracking went off and on, the move gave \(String(describing: afterToggle)): the encoder was not reset")
+    }
+
+    /// A resize changes what a cell is, and a press or a release changes what a move means. After
+    /// each, the same move is reported again, not dropped as a repeat of the one before.
+    @Test func aRepeatedMoveIsReportedAgainAfterAResizeAPressOrARelease() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        let move = Self.motion(toX: 5)
+        let report = Array("\u{1b}[<35;1;1M".utf8)
+
+        let first = terminal.encodeMouse(move)
+        let repeated = terminal.encodeMouse(move)
+        #expect(first == report, "the first move encoded as \(String(describing: first))")
+        #expect(repeated == nil, "a repeated move encoded as \(String(describing: repeated))")
+
+        // Twice the cell size: the point is still in cell 1;1, so the report is the same bytes.
+        terminal.setMousePixelGeometry(
+            TerminalPixelGeometry(screenWidth: 200, screenHeight: 200, cellWidth: 20, cellHeight: 20))
+        let afterResize = terminal.encodeMouse(move)
+        #expect(afterResize == report, "after a resize the move encoded as \(String(describing: afterResize))")
+
+        _ = terminal.encodeMouse(MousePress(action: .press, button: .left, position: Self.point))
+        let afterPress = terminal.encodeMouse(move)
+        #expect(afterPress == report, "after a press the move encoded as \(String(describing: afterPress))")
+
+        _ = terminal.encodeMouse(MousePress(action: .release, button: .left, position: Self.point))
+        let afterRelease = terminal.encodeMouse(move)
+        #expect(afterRelease == report, "after a release the move encoded as \(String(describing: afterRelease))")
+    }
+
+    /// Tracking can go off and on again with no mode bit changing: `?1000l` with 1000 never set
+    /// turns it off, and `?1003h` with 1003 still set turns it back on. Across two writes with no
+    /// event between, the encoder still forgets the last motion, so the same move is reported
+    /// again rather than dropped as a repeat.
+    @Test func aRepeatedMoveIsReportedAgainAfterTrackingWentOffAndOnWithNoBitChanging() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: "\u{1b}[?1003h\u{1b}[?1006h")
+        let move = Self.motion(toX: 5)
+        let report = Array("\u{1b}[<35;1;1M".utf8)
+
+        let first = terminal.encodeMouse(move)
+        let repeated = terminal.encodeMouse(move)
+        #expect(first == report, "the first move encoded as \(String(describing: first))")
+        #expect(repeated == nil, "a repeated move encoded as \(String(describing: repeated))")
+
+        terminal.feed(text: "\u{1b}[?1000l")
+        #expect(!terminal.isMouseReporting, "resetting 1000, never set, left tracking on")
+        terminal.feed(text: "\u{1b}[?1003h")
+        #expect(terminal.isMouseReporting, "setting 1003 again left tracking off")
+        let afterToggle = terminal.encodeMouse(move)
+        #expect(afterToggle == report,
+                "after tracking went off and on, the move encoded as \(String(describing: afterToggle))")
+    }
+
+    /// After `?1000h ?1003h ?1003l` the 1000 bit is still set but nothing is reported. The wheel
+    /// then scrolls the primary screen's viewport, as with no mode set, rather than go to a report
+    /// that is never sent.
+    @Test func theWheelScrollsTheViewportAfterTrackingWasReset() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 5, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        terminal.setMousePixelGeometry(Self.geometry)
+        terminal.feed(text: (0..<30).map { "line \($0)\r\n" }.joined())
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1003h\u{1b}[?1003l")
+        let bitStillSet = terminal.withLocked { $0.isMouseTrackingEnabled }
+        try #require(bitStillSet, "the 1000 bit is not set, so this proves nothing")
+
+        let before = terminal.withLocked { state in state.raw.map { TerminalScrollMetrics.read($0) } }
+        let outcome = terminal.mouseWheel(rows: -2, at: Self.point, mods: [])
+        let after = terminal.withLocked { state in state.raw.map { TerminalScrollMetrics.read($0) } }
+        #expect(outcome == .scrolledViewport(rows: -2), "two rows of wheel up gave \(outcome)")
+        #expect(after?.offset != before?.offset,
+                "the viewport stayed at \(String(describing: after?.offset)) of \(String(describing: after?.total))")
+    }
+
+    /// A button-less move to `x` on the first row.
+    private static func motion(toX x: Double) -> MousePress {
+        MousePress(action: .motion, button: nil, position: SurfacePoint(x: x, y: 5))
+    }
+
+    /// A wheel click is a press with no release, so it must leave no button held or recorded.
+    @Test func wheelLeavesNoButtonHeld() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+
+        let outcome = try terminal.withLocked { state in
+            try encoder.wheel(rows: 2, at: Self.point, terminal: try #require(state.raw, "the terminal is closed"))
+        }
+        guard case .report(let bytes) = outcome, !bytes.isEmpty else {
+            Issue.record("two rows of wheel under mode 1000 gave \(outcome), not a report")
+            return
+        }
+        #expect(encoder.heldButtons.isEmpty, "the wheel left \(encoder.heldButtons) held")
+        #expect(encoder.pressEncodings.isEmpty, "the wheel left \(encoder.pressEncodings) recorded")
+    }
+}

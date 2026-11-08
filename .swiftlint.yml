@@ -21,6 +21,7 @@ included:
   - Tests/TBDCLITests
   - Tests/TBDHolderTests
   - Tests/TBDPeerHelperTests
+  - Tests/TBDGhosttyTerminalTests
   - Tests/TestSupport
   - Tests/DaemonTestSupport
 
@@ -67,7 +68,7 @@ custom_rules:
     name: "No print() in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     regex: '\b(?:Swift\.|Foundation\.)?print\s*\('
     match_kinds:
       - identifier
@@ -78,7 +79,7 @@ custom_rules:
     name: "No raw Task.sleep in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     regex: 'Task\.sleep\s*\('
     match_kinds:
       - identifier
@@ -116,7 +117,7 @@ custom_rules:
     name: "No account-database home lookup in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     # Every one of these resolves a home directory through the account database
     # and defeats `CFFIXED_USER_HOME` identically. The Swift-shaped ones —
     # `NSHomeDirectoryForUser(_:)` and `FileManager.homeDirectory(forUser:)` —
@@ -136,7 +137,7 @@ custom_rules:
     # so it cannot reach them without being named there as well — and widening
     # it is a separate change.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
       - "Tests/(TBDSharedTests|TBDKernelTests|TBDAppTests)/.*\\.swift"
     # OPTIMIZED FOR THE PRIVACY RATIONALE, deliberately, and that decides both
     # knobs:
@@ -168,7 +169,7 @@ custom_rules:
     name: "No hand-built path into a TBD or agent store"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     excluded:
       # THE resolvers. `KernelPaths.configDir` and `claudeHostHome` are the
       # single resolution points every other call site is supposed to reach
@@ -220,7 +221,7 @@ custom_rules:
     # `Sources/TBDCLI` from the global list: that would drag every default rule
     # onto the CLI target, which is a separate change.
     included:
-      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|IconBaker|TBDPeerHelper|TBDHolder)/.*\\.swift"
+      - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|IconBaker|TBDPeerHelper|TBDHolder|TBDGhosttyTerminal)/.*\\.swift"
     excluded:
       # `GitManager.swift` — its two error types take their conformance from
       # `Git/GitErrorLocalizedDescriptions.swift`, and the rule cannot see an
