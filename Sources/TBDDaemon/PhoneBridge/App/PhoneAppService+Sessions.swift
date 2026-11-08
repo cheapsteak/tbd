@@ -25,7 +25,8 @@ struct PhoneSessionsFeed: Sendable {
 /// Both replies are queued through `PhoneHandlerReply.onQueue`, so the reply
 /// names the stream's `seq` at the moment it leaves and the events after it
 /// start there; the connection goes live with it. A transcript opened before
-/// the connection went live starts then (`startTranscript(for:)`).
+/// the connection went live starts then, and a resumed open that waited for
+/// it is answered (`transcriptConnectionWentLive(for:)`).
 ///
 /// **The publisher.** A snapshot reply starts a new publisher with that
 /// snapshot as its baseline and stops any earlier one. A token tells the new
@@ -78,6 +79,7 @@ extension PhoneAppService {
                 layout: nil, rows: nil, omittedRows: 0, more: false)
             guard let reply = try? PhoneAppCoding.reply(requestID: requestID, result: result) else {
                 send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
+                refusePendingTranscriptResume(for: deviceID)
                 return
             }
             send(reply, to: deviceID)
@@ -85,7 +87,7 @@ extension PhoneAppService {
                 send(event, to: deviceID)
             }
             devices[deviceID]?.live = true
-            startTranscript(for: deviceID)
+            transcriptConnectionWentLive(for: deviceID)
             return
         }
         guard let snapshot else {
@@ -93,6 +95,7 @@ extension PhoneAppService {
             // publisher or the stream dropped events the phone has not seen.
             // A resend decides again and gets a snapshot.
             send(Self.failure(requestID, .internalError, "The sessions list changed while it was read. Try again."), to: deviceID)
+            refusePendingTranscriptResume(for: deviceID)
             return
         }
         let parts = Self.snapshotReply(
@@ -100,6 +103,7 @@ extension PhoneAppService {
         guard let reply = parts.reply else {
             Self.sessionsLogger.error("Phone sessions: the snapshot reply does not fit a frame")
             send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
+            refusePendingTranscriptResume(for: deviceID)
             return
         }
 
@@ -116,8 +120,10 @@ extension PhoneAppService {
                 emit(.sessionsChanged, data: frame, to: deviceID)
             }
         }
-        // A transcript opened before this reply starts now, after it.
-        startTranscript(for: deviceID)
+        // A transcript opened before this reply starts now, after it, and a
+        // resumed open that waited for it is answered, and refused, since
+        // this reply did not replay.
+        transcriptConnectionWentLive(for: deviceID)
         // The earlier publisher's subscriber goes before the new one's comes.
         // A stop that reaches the new publisher first leaves it stopped.
         Task {

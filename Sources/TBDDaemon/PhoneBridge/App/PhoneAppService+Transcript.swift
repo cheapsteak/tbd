@@ -6,6 +6,14 @@ import TBDShared
 // one open transcript per phone, held in `PhoneDeviceState.transcript`, with
 // the session's `prompt.changed` feed beside it.
 
+/// A `transcript.open` with `resume` waiting for its connection to go live
+/// (`PhoneDeviceState.pendingTranscriptResume`).
+struct PendingTranscriptResume: Sendable {
+    let params: TranscriptOpenParams
+    let requestID: String
+    let stamp: UInt64
+}
+
 /// A device's open transcript: its feed, the relay that hands the feed its
 /// terminal's state deltas, and whether the live part has started.
 struct PhoneTranscriptSlot: Sendable {
@@ -116,12 +124,14 @@ actor TranscriptDeltaRelay {
 /// feed.
 ///
 /// **Resume.** A `transcript.open` with `resume`, on a connection whose
-/// `sessions.subscribe` replayed the stream (`PhoneResumeDecision.replay`),
-/// for the session and `showDetails` of the open feed, keeps that feed: the
-/// reply is `{resumed: true, seq}` with no page. The feed and the prompt feed
-/// ran on while the phone was away, so the replay carries what the phone
-/// missed, the current prompt set included. Any other open starts over from
-/// the tail.
+/// `sessions.subscribe` replays the stream (`canResumeTranscript`), for the
+/// session and `showDetails` of the open feed, keeps that feed: the reply is
+/// `{resumed: true, seq}` with no page. The reply waits until the connection
+/// is live, so it follows the subscribe reply and every event that replays,
+/// all with a `seq` at most its own. The feed and the prompt feed ran on
+/// while the phone was away, so the replay carries what the phone missed,
+/// the current prompt set included. Any other open starts over from the
+/// tail.
 ///
 /// **Order.** Opens and closes take effect in the order the phone sent them,
 /// though their handlers can finish in any order. `handleAppMessage` stamps
@@ -197,20 +207,47 @@ extension PhoneAppService {
     }
 
     /// Whether `params` may keep the device's open feed: the connection's
-    /// `sessions.subscribe` replayed the stream, and the feed is for the same
-    /// session and `showDetails`.
+    /// `sessions.subscribe` decided to replay, a sessions publisher runs to
+    /// carry the stream on, so that subscribe's reply replays it (see
+    /// `sessionsSubscribe`), and the feed is for the same session and
+    /// `showDetails`. Once the connection is live, a decision still `replay`
+    /// means the reply did replay, since a snapshot reply sets it to
+    /// `snapshot`.
     func canResumeTranscript(_ params: TranscriptOpenParams, deviceID: UUID) -> Bool {
-        guard let state = devices[deviceID], case .replay = state.resume,
+        guard let state = devices[deviceID], case .replay = state.resume, state.sessions != nil,
               let slot = state.transcript else { return false }
         return slot.session == params.session && slot.showDetails == params.showDetails
     }
 
+    /// Answers a resumed open once the connection is live, so the reply
+    /// follows the `sessions.subscribe` reply and its replay. Before that it
+    /// waits in `pendingTranscriptResume`, in place of any earlier one, which
+    /// is refused, and `transcriptConnectionWentLive(for:)` answers it. When
+    /// a later open or close came after this open, the reply is
+    /// `transcriptChangedReason` at once.
+    func queueResumedTranscript(_ params: TranscriptOpenParams, stamp: UInt64, requestID: String, deviceID: UUID) {
+        guard let state = devices[deviceID], state.transcriptStamp == stamp else {
+            refuseChangedTranscript(requestID, deviceID: deviceID)
+            return
+        }
+        guard state.live else {
+            if let earlier = state.pendingTranscriptResume {
+                refuseChangedTranscript(earlier.requestID, deviceID: deviceID)
+            }
+            devices[deviceID]?.pendingTranscriptResume = PendingTranscriptResume(
+                params: params, requestID: requestID, stamp: stamp)
+            return
+        }
+        resumeTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
+    }
+
     /// Replies `{resumed: true, seq}` and keeps the feed, starting its live
     /// part if it never started. When a later open or close came after this
-    /// open, or the feed changed since the handler looked, the reply is
-    /// `transcriptChangedReason` and the phone opens again.
-    func queueResumedTranscript(_ params: TranscriptOpenParams, stamp: UInt64, requestID: String, deviceID: UUID) {
-        guard let state = devices[deviceID], state.transcriptStamp == stamp,
+    /// open, the connection is not live, or the feed changed since the
+    /// handler looked, the reply is `transcriptChangedReason` and the phone
+    /// opens again.
+    private func resumeTranscript(_ params: TranscriptOpenParams, stamp: UInt64, requestID: String, deviceID: UUID) {
+        guard let state = devices[deviceID], state.transcriptStamp == stamp, state.live,
               canResumeTranscript(params, deviceID: deviceID) else {
             refuseChangedTranscript(requestID, deviceID: deviceID)
             return
@@ -265,10 +302,37 @@ extension PhoneAppService {
         }
     }
 
+    /// The connection just went live, its `sessions.subscribe` reply and any
+    /// replay queued: answers a resumed open that waited for this, then
+    /// starts the open feed's live part.
+    func transcriptConnectionWentLive(for deviceID: UUID) {
+        if let pending = devices[deviceID]?.pendingTranscriptResume {
+            devices[deviceID]?.pendingTranscriptResume = nil
+            resumeTranscript(pending.params, stamp: pending.stamp, requestID: pending.requestID, deviceID: deviceID)
+        }
+        startTranscript(for: deviceID)
+    }
+
+    /// Refuses a resumed open still waiting for the connection to go live,
+    /// when the `sessions.subscribe` it waits on failed, so the phone does
+    /// not wait for its reply.
+    func refusePendingTranscriptResume(for deviceID: UUID) {
+        guard let pending = devices[deviceID]?.pendingTranscriptResume else { return }
+        devices[deviceID]?.pendingTranscriptResume = nil
+        refuseChangedTranscript(pending.requestID, deviceID: deviceID)
+    }
+
+    /// Whether a resumed open waits for the connection to go live. For
+    /// tests.
+    func hasPendingTranscriptResume(for deviceID: UUID) -> Bool {
+        devices[deviceID]?.pendingTranscriptResume != nil
+    }
+
     /// Starts the device's open feed's live part, with its relay and the
     /// session's prompt feed, once the connection is live. Does nothing with
     /// no feed, a feed already started, or a connection that is not live yet:
-    /// `queueSubscribeReply` calls this again when the connection goes live.
+    /// `transcriptConnectionWentLive(for:)` calls this again when the
+    /// connection goes live.
     func startTranscript(for deviceID: UUID) {
         guard devices[deviceID]?.live == true, var slot = devices[deviceID]?.transcript, !slot.started else {
             return

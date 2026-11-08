@@ -124,6 +124,96 @@ struct TranscriptFeedTests {
         await d.feed.close()
     }
 
+    /// A file rewritten after the first page was read, before the live part
+    /// starts, is a new transcript: the first live read resets rather than
+    /// reading the new file on from the old page's end.
+    @Test func aRewriteBeforeTheFirstLiveReadResets() async throws {
+        let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+        _ = try await d.feed.open()
+        let size = try fixture.size()
+
+        // Larger than before, so only the bytes before the page's end show
+        // the file is not the one the page came from.
+        let padding = String(repeating: "r", count: 256)
+        try fixture.rewrite((1...6).map { FeedLine.prompt("x\($0)", "placeholder rewritten prompt \($0) \(padding)") })
+        let rewrittenSize = try fixture.size()
+        #expect(rewrittenSize > size)
+        await d.feed.start()
+
+        let reset = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.resetData)
+        let resetIDs = reset.page.items.map(\.id)
+        #expect(reset.reason == TranscriptFeed.rewriteReason)
+        #expect(resetIDs == ["x3", "x4", "x5", "x6"])
+        #expect(await d.feed.generation == 1)
+        await d.feed.close()
+    }
+
+    /// A line with no `uuid`, or a `null` one, gets the same ID live as a
+    /// page gives it: `at-<offset>`.
+    @Test func aLineWithoutAStringUUIDHasThePagersIDLive() async throws {
+        let fixture = try FeedFixture([FeedLine.prompt("m1", "placeholder prompt 1")])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+        _ = try await d.feed.open()
+        await d.feed.start()
+        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+
+        try fixture.append([
+            FeedLine.promptWithoutUUID("placeholder prompt with no uuid"),
+            FeedLine.promptWithoutUUID("placeholder prompt with a null uuid", uuid: NSNull()),
+        ])
+        await d.nudge()
+        let appended = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.appended)
+        let liveIDs = appended.items.map(\.id)
+        let positional = liveIDs.filter { $0.hasPrefix("at-") }
+
+        let build = try #require(TranscriptPager.firstPage(filePath: fixture.path, generation: 0, ctx: ShapingContext()))
+        let pageIDs = build.page.items.map(\.id)
+        #expect(liveIDs.count == 2)
+        #expect(positional == liveIDs)
+        #expect(pageIDs == ["m1"] + liveIDs)
+        await d.feed.close()
+    }
+
+    /// Once the live transcript holds `liveItemLimit` items it starts over,
+    /// and a call still running in it updates as before when its result
+    /// arrives.
+    @Test func aFullLiveTranscriptStartsOverAndItsRunningCallStillResolves() async throws {
+        let fixture = try FeedFixture([FeedLine.prompt("m1", "placeholder prompt 1")])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path, liveItemLimit: 3)
+        _ = try await d.feed.open()
+        await d.feed.start()
+        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+
+        try fixture.append([
+            FeedLine.bash("a1", id: "toolu_live", command: "echo live"),
+            FeedLine.prompt("m2", "placeholder prompt 2"),
+            FeedLine.prompt("m3", "placeholder prompt 3"),
+        ])
+        await d.nudge()
+        let appended = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.appended)
+        let appendedIDs = appended.items.map(\.id)
+        #expect(appendedIDs == ["toolu_live", "m2", "m3"])
+        let call = try #require(appended.items.first)
+        #expect(call.toolStatus == TranscriptShaper.runningStatus)
+        #expect(await d.feed.liveItemCount == 0)
+
+        try fixture.append([FeedLine.toolResult("r1", toolUseID: "toolu_live", text: "output live")])
+        await d.nudge()
+        let update = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.updated)
+        let expected = PhoneItem(
+            id: call.id, kind: call.kind, at: call.at, text: call.text, truncated: call.truncated,
+            toolName: call.toolName, target: call.target, toolStatus: TranscriptShaper.okStatus,
+            added: call.added, removed: call.removed, agentType: call.agentType, itemCount: call.itemCount,
+            sender: call.sender)
+        #expect(update.items == [expected])
+        #expect(d.events.values.count == 2)
+        await d.feed.close()
+    }
+
     /// A file rewritten to the same size with a later date is a new
     /// transcript: the feed starts over in a new generation and sends its
     /// tail in a reset.
@@ -680,6 +770,131 @@ struct TranscriptFeedTests {
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
+    /// A resumed open that arrives before its connection's
+    /// `sessions.subscribe` reply waits for it: the phone gets the subscribe
+    /// reply and the replayed events first, then `{resumed: true}` with the
+    /// subscribe reply's `seq`.
+    @Test func aResumeBeforeTheSubscribeReplyFollowsItsReplay() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
+        defer { fixture.remove() }
+        let s = try await Self.openLive(h, path: fixture.path)
+        let streamID = try #require(await h.service.streamID(for: deviceID))
+        let seen = Self.lastSeqSeen(in: s.outbox)
+
+        await h.service.phoneDisconnected(h.peer)
+        try fixture.append([FeedLine.prompt("m3", "placeholder prompt 3")])
+        let before = try #require(await h.service.lastSeq(for: deviceID))
+        h.subscriptions.broadcast(delta: Self.activity(s.terminal))
+        try await Self.waitUntil("the append while the phone is away") {
+            (await h.service.lastSeq(for: deviceID) ?? 0) > before
+        }
+
+        let gate = PhoneTestGate()
+        await Self.holdSubscribes(on: gate, in: h)
+        let outbox = await h.connect()
+        let subscribeBody = try PhoneTestRequests.body(
+            .sessionsSubscribe, id: "subscribe", params: SessionsSubscribeParams(stream: streamID, sinceSeq: seen))
+        await h.service.handleAppMessage(subscribeBody, from: h.peer)
+        let resumeBody = try PhoneTestRequests.body(
+            .transcriptOpen, id: "resume", params: Self.openParams(s.session, resume: true))
+        await h.service.handleAppMessage(resumeBody, from: h.peer)
+        try await Self.waitUntil("the resumed open to wait for the subscribe reply") {
+            await h.service.hasPendingTranscriptResume(for: deviceID)
+        }
+        #expect(outbox.bodies.isEmpty)
+
+        gate.open()
+        try await Self.waitUntil("the resumed open's reply") { !Self.replyIndices("resume", in: outbox).isEmpty }
+        let bodies = outbox.bodies
+        let subscribeIndex = try #require(Self.replyIndices("subscribe", in: outbox).first)
+        let appendIndex = try #require(Self.eventIndices(.transcriptAppend, in: outbox).first)
+        let resumeIndex = try #require(Self.replyIndices("resume", in: outbox).first)
+        #expect(subscribeIndex < appendIndex)
+        #expect(appendIndex < resumeIndex)
+        let subscribed = try JSONDecoder().decode(
+            PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bodies[subscribeIndex]).result
+        let resumed = try JSONDecoder().decode(
+            PhoneReplyEnvelope<TranscriptOpenResult>.self, from: bodies[resumeIndex]).result
+        #expect(subscribed.replayed)
+        #expect(resumed.resumed)
+        #expect(resumed.seq == subscribed.seq)
+        let kept = await h.service.transcriptFeed(for: deviceID)
+        #expect(kept === s.feed)
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// A resume needs a sessions publisher to carry the stream on. A phone
+    /// that opened a transcript but never subscribed gets a fresh open, even
+    /// when its reconnect's `sessions.subscribe` decided to replay.
+    @Test func aResumeWithNoSessionsPublisherOpensAfresh() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
+        defer { fixture.remove() }
+        let terminal = try await Self.seedTerminal(h, path: fixture.path)
+        let session = PhoneSessionRef.local(terminalID: terminal.id)
+        let first = await h.connect()
+        let opened = try await Self.open(h, session, id: "open", on: first)
+        #expect(!opened.resumed)
+        let firstFeed = try #require(await h.service.transcriptFeed(for: deviceID))
+        let streamID = try #require(await h.service.streamID(for: deviceID))
+        let seq = try #require(await h.service.lastSeq(for: deviceID))
+        #expect(await h.service.sessionsPublisher(for: deviceID) == nil)
+
+        await h.service.phoneDisconnected(h.peer)
+        let gate = PhoneTestGate()
+        await Self.holdSubscribes(on: gate, in: h)
+        let outbox = await h.connect()
+        let subscribeBody = try PhoneTestRequests.body(
+            .sessionsSubscribe, id: "subscribe", params: SessionsSubscribeParams(stream: streamID, sinceSeq: seq))
+        await h.service.handleAppMessage(subscribeBody, from: h.peer)
+        let decision = await h.service.resumeDecision(for: deviceID)
+        #expect(decision == PhoneResumeDecision.replay([]))
+
+        let reopened = try await Self.open(h, session, id: "resume", resume: true, on: outbox)
+        #expect(!reopened.resumed)
+        #expect(reopened.page != nil)
+        let fresh = await h.service.transcriptFeed(for: deviceID)
+        #expect(fresh != nil)
+        #expect(fresh !== firstFeed)
+
+        gate.open()
+        try await Self.waitUntil("the subscribe reply") { !Self.replyIndices("subscribe", in: outbox).isEmpty }
+        let subscribeIndex = Self.replyIndices("subscribe", in: outbox)[0]
+        let subscribed = try JSONDecoder().decode(
+            PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: outbox.bodies[subscribeIndex]).result
+        #expect(!subscribed.replayed)
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// A cursor from before a reset names the old generation, so
+    /// `transcript.page` refuses it as `stale_cursor`, even where the new
+    /// file holds the same line at the same offset.
+    @Test func aCursorFromBeforeAResetIsStale() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let fixture = try FeedFixture(FeedLine.conversation(messages: 10))
+        defer { fixture.remove() }
+        let s = try await Self.openLive(h, path: fixture.path)
+        let cursor = try #require(s.opened.page?.cursor)
+
+        let rolled = fixture.sibling("rolled.jsonl")
+        try FeedFixture.write(FeedLine.conversation(messages: 10), to: rolled)
+        try await h.db.terminals.updateSession(id: s.terminal.id, sessionID: "acme-session-2", transcriptPath: rolled)
+        h.subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+            terminalID: s.terminal.id, worktreeID: s.terminal.worktreeID,
+            sessionID: "acme-session-2", transcriptPath: rolled)))
+        try await Self.waitUntil("the rollover reset") {
+            ((try? Self.events(.transcriptReset, TranscriptResetData.self, in: s.outbox)) ?? []).count == 1
+        }
+
+        let reply = try await Self.ask(
+            h, .transcriptPage, id: "stale", TranscriptPageParams(session: s.session, cursor: cursor), on: s.outbox)
+        #expect(try Self.error(reply)?.code == .staleCursor)
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
+    }
+
     /// When the grace runs out the feed stops with the rest of the phone's
     /// state, and a later `transcript.open` with `resume` opens afresh from
     /// the tail.
@@ -806,6 +1021,18 @@ struct TranscriptFeedTests {
             }
             return try await service.transcriptOpen(params, context)
         }, for: .transcriptOpen)
+    }
+
+    /// Holds every `sessions.subscribe` on `gate` before its handler runs.
+    /// The resume decision is made as the request arrives, so it is made at
+    /// once.
+    private static func holdSubscribes(on gate: PhoneTestGate, in h: PhoneServiceHarness) async {
+        let service = h.service
+        await service.setHandler({ body, context in
+            await gate.wait()
+            let params = try PhoneAppCoding.params(SessionsSubscribeParams.self, from: body)
+            return try await service.sessionsSubscribe(params, context)
+        }, for: .sessionsSubscribe)
     }
 
     private static func openParams(_ session: PhoneSessionRef, resume: Bool = false) -> TranscriptOpenParams {
@@ -990,7 +1217,7 @@ private struct DirectFeed {
 
     var session: PhoneSessionRef { .local(terminalID: terminalID) }
 
-    init(path: String?) {
+    init(path: String?, liveItemLimit: Int = TranscriptFeed.liveItemLimit) {
         let terminalID = UUID()
         let events = FireRecorder<TranscriptFeedEvent>()
         let clock = EventDrivenTestClock()
@@ -1001,6 +1228,7 @@ private struct DirectFeed {
             session: .local(terminalID: terminalID), showDetails: false,
             source: .local(terminalID: terminalID, resolvePath: { path }),
             emit: { event in events.record(event) },
+            liveItemLimit: liveItemLimit,
             clock: clock)
     }
 
@@ -1037,6 +1265,17 @@ private enum FeedLine {
     static func prompt(_ uuid: String, _ text: String) -> [String: Any] {
         let message: [String: Any] = ["role": "user", "content": text]
         return ["type": "user", "uuid": uuid, "timestamp": timestamp, "message": message]
+    }
+
+    /// A prompt line whose `uuid` is `uuid` when one is given (`NSNull()`
+    /// writes `null`), and absent otherwise.
+    static func promptWithoutUUID(_ text: String, uuid: Any? = nil) -> [String: Any] {
+        var line = prompt("", text)
+        line.removeValue(forKey: "uuid")
+        if let uuid {
+            line["uuid"] = uuid
+        }
+        return line
     }
 
     /// An assistant line holding one Bash call.

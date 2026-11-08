@@ -95,6 +95,11 @@ struct PhoneDeviceState: Sendable {
     /// finish in any order, so an open takes effect only while its stamp is
     /// still this one, and a close leaves alone a feed opened after it.
     var transcriptStamp: UInt64?
+    /// A `transcript.open` with `resume` whose reply waits for this
+    /// connection to go live, so it follows the `sessions.subscribe` reply
+    /// and the events that reply replays. Every connect and disconnect drops
+    /// it, unanswered, as a reply to a connection that is gone.
+    var pendingTranscriptResume: PendingTranscriptResume?
     /// Drops this state `parseStateGrace` after a disconnect; nil while the
     /// phone is connected.
     var grace: Task<Void, Never>?
@@ -279,6 +284,7 @@ actor PhoneAppService: PhoneAppHandling {
         state.outbox = PhoneOutboxQueue(outbox)
         state.resume = .undecided
         state.live = false
+        state.pendingTranscriptResume = nil
         devices[peer.deviceID] = state
     }
 
@@ -293,6 +299,7 @@ actor PhoneAppService: PhoneAppHandling {
         state.outbox = nil
         state.resume = .undecided
         state.live = false
+        state.pendingTranscriptResume = nil
         state.grace?.cancel()
         let token = nextToken
         nextToken &+= 1
