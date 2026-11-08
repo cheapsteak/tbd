@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { base64urlDecode, base64urlEncode } from '../../channel/pairingLink.js';
 import { DB_NAME, DB_VERSION, MAX_BUNDLE_COMPRESSED, MAX_BUNDLE_TEXT } from '../../constants.js';
 import { createPhoneKeyPair, createWrapKey } from '../../keys.js';
+import { isRoomID, relayPresenceURL, relaySocketURL } from '../../links.js';
 import {
   DamagedRecordError, StoreBlockedError, bundleCacheDeletions, bundleFromRows, bundlesToPrune, laptopFromRow,
   laptopIDFromKey, openStore, readLaptopRows, touchedLaptop, validateBundleRecord, validateLaptopRecord,
@@ -111,6 +112,47 @@ test('validateLaptopRecord checks the type and size of every field, with a TypeE
   }
   assert.equal(validateLaptopRecord({ ...good, lastConnectedAt: 0 }).lastConnectedAt, 0);
   assert.equal(validateLaptopRecord({ ...good, laptopName: '', phoneName: '' }).laptopName, '');
+});
+
+test('validateLaptopRecord refuses a relay or room exactly when links.js builds no socket or presence URL from it', async () => {
+  const relays = [
+    'https://acme-relay.acme.workers.dev', 'https://acme-relay.acme.workers.dev/', 'https://acme.example:8443',
+    'http://127.0.0.1:8787', 'http://localhost', 'https://[::1]', 'http://[::1]:8787', 'http://acme.example',
+    'https://acme.example/relay', 'https://user@acme.example', 'https://user:pw@acme.example', 'https://acme.example?x=1',
+    'https://acme.example/#x', 'wss://acme.example', 'ws://127.0.0.1', 'ftp://acme.example', 'acme.example', '',
+  ];
+  const rooms = [good.room, good.room.slice(0, 42), `${good.room.slice(0, 42)}=`, `${'A'.repeat(42)}B`, `${'A'.repeat(42)}+`, ''];
+  /** @param {() => unknown} fn */
+  const works = (fn) => {
+    try {
+      fn();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let accepted = 0;
+  for (const relay of relays) {
+    for (const room of rooms) {
+      const socket = works(() => relaySocketURL(relay, room));
+      const presence = works(() => relayPresenceURL(relay, room));
+      const stored = works(() => validateLaptopRecord({ ...good, relay, room }));
+      assert.equal(stored, socket && presence, `${relay} ${room}`);
+      if (!isRoomID(room)) assert.equal(stored, false, room);
+      if (stored) accepted += 1;
+    }
+  }
+  assert.ok(accepted > 0 && accepted < relays.length * rooms.length, 'both kinds are in the table');
+
+  // Read back from the store, such a record is a damaged row, named, beside the good one.
+  const other = await anotherLaptop();
+  const { laptops, damaged } = readLaptopRows([
+    { key: good.id, value: good },
+    { key: other.id, value: { ...other, relay: 'http://acme.example' } },
+  ]);
+  assert.deepEqual(laptops, [good]);
+  assert.deepEqual(damaged, [{ key: other.id, laptopName: 'acme-desktop' }]);
+  throwsDamaged(() => laptopFromRow(good.id, { ...good, room: `${'A'.repeat(42)}B` }), { key: good.id, laptopName: 'acme-laptop' });
 });
 
 test('validateLaptopRecord returns a fresh record with only its fields, its bytes copied', () => {

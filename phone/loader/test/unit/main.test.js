@@ -264,14 +264,14 @@ function relaySockets() {
 /**
  * Boots the loader on a fake page at `href`.
  * @param {{ href?: string, framed?: boolean, laptops?: any[], openSocket?: (url: string) => any,
- *   fetch?: (url: string, init: RequestInit) => Promise<any> }} [options]
+ *   fetch?: (url: string, init: RequestInit) => Promise<any>, subtle?: SubtleCrypto }} [options]
  */
 function bootPage({
   href = PAGE, framed = false, laptops = [], openSocket = () => {
     throw new TypeError('no sockets in these tests');
   }, fetch = async () => {
     throw new TypeError('no network in these tests');
-  },
+  }, subtle = crypto.subtle,
 } = {}) {
   /** @type {string[]} */
   const log = [];
@@ -293,7 +293,7 @@ function bootPage({
     document: doc,
     clock,
     indexedDB: idb,
-    subtle: crypto.subtle,
+    subtle,
     fetch,
     openSocket,
     requestAnimationFrame: (/** @type {() => void} */ callback) => setImmediate(callback),
@@ -538,6 +538,69 @@ test('a key that does not unwrap shows the missing-key screen and opens no socke
   await until(() => page.screen() === 'key-missing', 'the missing-key screen');
   assert.ok(page.text().includes(MESSAGES.keyMissing('acme-mbp')));
   assert.equal(relay.sockets.length, 0);
+});
+
+test('a laptop whose stored relay links.js refuses is a damaged row: kept, never connected to, and Forget asks first', async () => {
+  const record = await storedLaptop('acme-mbp');
+  const relay = relaySockets();
+  const net = presenceFetch();
+  const page = bootPage({
+    laptops: [{ ...record, relay: 'http://acme.example' }], openSocket: (url) => relay.openSocket(url), fetch: net.fetch,
+  });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => page.screen() === 'laptops', 'the Laptops screen');
+  assert.ok(page.text().includes(MESSAGES.keyMissing('acme-mbp')));
+  assert.equal(relay.sockets.length, 0, 'no socket');
+  assert.equal(net.calls.length, 0, 'no presence asked for it');
+  const forget = [...page.doc.body.descendants()].find((node) => node.getAttribute('aria-label') === 'Forget acme-mbp');
+  forget?.dispatchEvent(new Event('click'));
+  assert.equal(page.screen(), 'forget-ask');
+  assert.deepEqual(page.idb.calls.map(({ mode }) => mode), ['readonly'], 'nothing is deleted without the confirmation');
+});
+
+test('a connection that cannot be built shows Reload this page, not the missing-key screen', async () => {
+  // The key unwraps, but only once the test lets it, so the failure below lands on the build.
+  /** @type {() => void} */
+  let release = () => {};
+  const unwrapped = new Promise((resolve) => {
+    release = () => resolve(undefined);
+  });
+  const subtle = new Proxy(crypto.subtle, {
+    get(target, name) {
+      if (name === 'importKey') {
+        return async (/** @type {any[]} */ ...args) => {
+          await unwrapped;
+          return /** @type {any} */ (target).importKey(...args);
+        };
+      }
+      const value = Reflect.get(target, name);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const relay = relaySockets();
+  const page = bootPage({ laptops: [await storedLaptop('acme-mbp')], openSocket: (url) => relay.openSocket(url), subtle });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => page.screen() === 'connecting', 'the connecting screen');
+  // Building the connection fails, whatever the cause: here the relay URL cannot be built.
+  const RealURL = globalThis.URL;
+  globalThis.URL = /** @type {any} */ (class extends RealURL {
+    constructor() {
+      throw new TypeError('no URL for this test');
+    }
+  });
+  try {
+    release();
+    await until(() => page.screen() !== 'connecting', 'the screen after the build');
+  } finally {
+    globalThis.URL = RealURL;
+  }
+  assert.equal(page.screen(), 'reload');
+  assert.ok(page.text().includes(MESSAGES.reload));
+  assert.ok(!page.text().includes(MESSAGES.keyMissing('acme-mbp')));
+  assert.equal(relay.sockets.length, 0);
+  assert.deepEqual(page.idb.calls.map(({ mode }) => mode), ['readonly'], 'nothing is deleted');
 });
 
 test('the connection\'s signal timeout counts only time while the page is visible', async () => {

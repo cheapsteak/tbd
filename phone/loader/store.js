@@ -30,7 +30,7 @@ import {
   CACHED_BUNDLES_PER_LAPTOP, DB_NAME, DB_VERSION, MAX_BUNDLE_COMPRESSED, MAX_BUNDLE_TEXT,
 } from './constants.js';
 import { IV_BYTES, KEY_BYTES, isWrapKey } from './keys.js';
-import { isRoomID, relaySocketURL } from './links.js';
+import { isRoomID, relayPresenceURL, relaySocketURL } from './links.js';
 import { isObject, isPlainObject } from './objects.js';
 import { isSHA256 } from './protocol.js';
 
@@ -512,7 +512,7 @@ export function validateLaptopRecord(obj) {
   if (!isRoomID(room)) {
     throw new TypeError('laptop record: room is not a room ID');
   }
-  if (typeof relay !== 'string' || !makesSocketURL(relay, room)) {
+  if (typeof relay !== 'string' || !makesRelayURLs(relay, room)) {
     throw new TypeError('laptop record: relay is not a relay origin');
   }
   if (typeof laptopName !== 'string' || typeof phoneName !== 'string') {
@@ -824,13 +824,16 @@ function isFiniteNumber(value) {
 }
 
 /**
+ * Whether links.js builds both of a room's URLs, its socket's and its presence's, from this
+ * relay and room: a record they refuse could neither connect nor show its status.
  * @param {string} relay
  * @param {string} room
  * @returns {boolean}
  */
-function makesSocketURL(relay, room) {
+function makesRelayURLs(relay, room) {
   try {
     relaySocketURL(relay, room);
+    relayPresenceURL(relay, room);
     return true;
   } catch {
     return false;

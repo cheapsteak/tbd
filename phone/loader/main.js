@@ -756,8 +756,10 @@ class LoaderPage {
         clock: this.#clock,
       });
     } catch {
-      // A relay or room the socket URL refuses: the record cannot be used.
-      this.#showConnScreen('key-missing');
+      // Not a missing key: that is only a key that does not unwrap, above. A stored record's
+      // relay and room are checked as it is read (`validateLaptopRecord`), so this is
+      // unexpected, and a reload is the way out, never Forget.
+      this.#showConnScreen('reload');
       return;
     }
     this.#connection = connection;
