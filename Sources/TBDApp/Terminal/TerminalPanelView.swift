@@ -750,7 +750,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// kernel's cut and `OutgoingInputQueue` finishes it. That gives the
         /// descriptor a second owner: `drainNotifier` watches **this same
         /// number** for write-readiness, which is why it must be cancelled
-        /// before the close in `stopHolderReader` and why nothing may lower
+        /// before the close in `closeHolderWriteSide` and why nothing may lower
         /// this field without cancelling it first.
         private var holderWriteFD: Int32 = -1
 
@@ -829,6 +829,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// silence the sink during exactly the window whose bytes the handback
         /// preamble has to carry.
         private var holderHandbackInFlight = false
+        /// Whether `attach.ready` is in flight for an attach whose reader is
+        /// already running.
+        ///
+        /// A teardown in that window cannot know yet whether a handback will
+        /// follow; the ack's answer decides. So it leaves the view holder and
+        /// the write side alone, and the answer either hands the attach back
+        /// through `detachHolderSession`, which closes both once the screen has
+        /// been read, or abandons it and closes them itself. A cleared holder
+        /// therefore always means no handback is coming, which is how the
+        /// reader's wait for an open sequence reads it.
+        private var holderAckInFlight = false
         /// Seam for the holder attach RPCs. Nil means "build the real client
         /// from the daemon client", which is what production always does; a
         /// test injects a stub so the panel path can be driven without a
@@ -1487,7 +1498,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // The outbox's other half: something has to say when the pty
                 // can take more, or a refused remainder waits for a keystroke
                 // that may never come. Built here, over the same descriptor
-                // the writes go to, and cancelled in `stopHolderReader` before
+                // the writes go to, and cancelled in `closeHolderWriteSide` before
                 // that descriptor closes.
                 //
                 // It is created *disarmed*, and stays that way until the queue
@@ -1505,19 +1516,27 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let holder = viewHolder
             let reader = HolderStreamReader(
                 label: panelID.uuidString, fd: attachment.ptyFD,
-                beforeClose: holderReaderBeforeClose
-            ) { chunk in
-                let bytes = [UInt8](chunk)
-                holder.feed(bytes[...])
-            }
+                beforeClose: holderReaderBeforeClose,
+                // The holder is cleared only once no handback will follow
+                // (`holderAckInFlight`), and then no snapshot probe can cut a
+                // sequence short, so there is nothing to wait for.
+                isAtSequenceBoundary: { holder.withEngine { $0.isAtSequenceBoundary } ?? true },
+                onChunk: { chunk in
+                    let bytes = [UInt8](chunk)
+                    holder.feed(bytes[...])
+                },
+                clock: clock)
             holderReader = reader
             onHolderReaderWillStart?()
             reader.start()
+            holderAckInFlight = true
             do {
                 try await client.ready(
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
                     generation: attachment.generation)
+                holderAckInFlight = false
             } catch {
+                holderAckInFlight = false
                 // A failed ack ends this panel's hold on the descriptor — stop
                 // reading it and report the failure. The release still goes
                 // with it, because a failure proves nothing about the daemon's
@@ -1537,8 +1556,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // attach refuses it again, a pending one is confirmed by it,
                 // and a timed-out one refuses it with the claim standing. The
                 // detach that follows hands back whichever claim resulted.
-                stopHolderReader()
+                //
+                // The holder is cleared before the stop: no handback follows,
+                // so the reader must not see its stop with a sink still set and
+                // read on for a sequence nobody will serialize.
                 viewHolder.clear()
+                stopHolderReader()
+                closeHolderWriteSide()
                 removeLatencyTap()
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
@@ -1553,11 +1577,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the view since before the ack — so it is handed back the way any
             // live attach is, through `detachHolderSession`, carrying what the
             // view had drawn rather than an empty preamble that would drop it.
-            // Not quite everything the reader drained: `cleanup()` cleared the
-            // view holder, so a chunk the reader took after that never reached
-            // the view and is lost with this panel. `cleanup()` has already run
-            // (that is what raised `isTornDown`) and found `holderAttach` nil,
-            // so this is the only detach.
+            // Everything the reader drained is in it: `cleanup()` found the ack
+            // in flight and left the view holder and the write side alone
+            // (`holderAckInFlight`), so the reader's last chunks, and its wait
+            // for an open sequence, reached the view and could be answered.
+            // `cleanup()` has already run (that is what raised `isTornDown`)
+            // and found `holderAttach` nil, so this is the only detach.
             //
             // **The reader is passed in, because the coordinator no longer has
             // it.** `cleanup()`'s own `detachHolderSession` already stopped it
@@ -1791,7 +1816,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// The view holder is deliberately **not** cleared here: on the detach
         /// path the reader's last chunk is exactly the output the handback
         /// preamble is serialized from, so the sink has to outlive the stop.
-        /// Callers that are not handing back clear it themselves.
+        /// Callers that are not handing back clear it themselves. Nor is the
+        /// write side closed: a reader finishing an open sequence can read a
+        /// query, such as `CSI 6n`, whose reply must still reach the child.
+        /// `closeHolderWriteSide()` closes it once the reader has closed, or at
+        /// once when no handback follows.
         @MainActor
         @discardableResult
         private func stopHolderReader() -> HolderStreamReader? {
@@ -1808,6 +1837,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 holderAttachedAt = nil
                 appState?.terminalScreens.unregister(registration)
             }
+            outgoingQueue.shutdown()
+            guard let reader = holderReader else { return nil }
+            holderReader = nil
+            reader.stop()
+            return reader
+        }
+
+        /// Close this panel's write copy of the session's descriptor, and the
+        /// outbox and readiness source over it. Idempotent.
+        @MainActor
+        private func closeHolderWriteSide() {
             // Cancelled before the queue drops its outbox and before the
             // descriptor closes: a readiness callback that ran after the close
             // would write to whatever the kernel reissued that number to. Both
@@ -1821,6 +1861,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the count before the release.
             drainNotifier?.cancel()
             drainNotifier = nil
+            // Again, for a remainder a reply left after the stop's shutdown.
             outgoingQueue.shutdown()
             // Closed here, unlike the reader's descriptor: this one is only
             // ever touched from the main actor, so there is no thread to hand
@@ -1830,10 +1871,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(holderWriteFD)
                 holderWriteFD = -1
             }
-            guard let reader = holderReader else { return nil }
-            holderReader = nil
-            reader.stop()
-            return reader
         }
 
         /// Give the session back to the daemon: stop reading, close this
@@ -1843,9 +1880,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// **The order is the whole function**, and it is the attach's run
         /// backwards:
         ///
-        /// 1. The reader stops and its thread closes the `dup`; the write `dup`
-        ///    is closed on this actor. `awaitClosed()` is what makes step 3
-        ///    strictly later, because `stop()` only raises a flag.
+        /// 1. The reader stops and its thread closes the `dup`, first reading
+        ///    on, briefly, if the output ends part-way through a sequence; the
+        ///    write `dup` is closed on this actor once it has, so a reply to a
+        ///    query read on the way out still reaches the child.
+        ///    `awaitClosed()` is what makes step 3 strictly later, because
+        ///    `stop()` only raises a flag.
         /// 2. The screen is serialized *after* the close, which is the same
         ///    reason the daemon quiesces before it snapshots on the way in:
         ///    everything this panel consumed is in its terminal, everything
@@ -1880,7 +1920,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             holderAttach = nil
             let reader = stopHolderReader() ?? stoppedReader
             guard let attach, let appState else {
-                viewHolder.clear()
+                // While the ack is in flight its answer decides whether a
+                // handback follows, and closes these itself if none does.
+                if !holderAckInFlight {
+                    viewHolder.clear()
+                    closeHolderWriteSide()
+                }
                 return
             }
             // The coordinator holds its engine strongly from `makeNSView`, which
@@ -1901,6 +1946,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // here would drop the preamble — and, worse, the detach — whenever
             // SwiftUI released the coordinator inside the poll interval, which
             // is exactly the tab-close case. It is bounded: one poll interval,
+            // the reader's wait for an open sequence to end (250 ms at most),
             // one main-queue turn, one RPC; resends run in a task of their own.
             //
             // Registered with the ledger so a successor panel for this same
@@ -1910,6 +1956,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // to release.
             let handback = Task { @MainActor in
                 await reader?.awaitClosed()
+                // Only now: the reader may have read a query on its way out,
+                // and the reply, queued on main ahead of this, has been
+                // written by the time this runs.
+                self.closeHolderWriteSide()
                 var preamble = Data()
                 if let engine { preamble = await self.captureHandbackPreamble(from: engine) }
                 self.viewHolder.clear()
@@ -2535,8 +2585,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // off the pty, so nobody else will ever see them, and the preamble
             // this panel is about to serialize is where they belong. The detach
             // task clears the holder itself, once the descriptor is closed and
-            // the screen has been read.
-            if !holderHandbackInFlight { viewHolder.clear() }
+            // the screen has been read. So does an ack still in flight, whose
+            // answer may yet bring that handback (`holderAckInFlight`).
+            if !holderHandbackInFlight && !holderAckInFlight { viewHolder.clear() }
             localProcess = nil
             ChildReaper.reap(pid: ptyChildPid, unless: childExitObservation)
         }
@@ -3002,7 +3053,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
         /// Tells `outgoingQueue` when this session's pty can take more. Built
         /// with `holderWriteFD` in `startHolderClient`, and cancelled in
-        /// `stopHolderReader` **before** that descriptor closes — a readiness
+        /// `closeHolderWriteSide` **before** that descriptor closes — a readiness
         /// callback that ran after the close would write to whatever the
         /// kernel reissued that number to.
         ///
@@ -3149,7 +3200,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// **`.failed` is edge-triggered, and it has to be.** Once the child
         /// exits, every write to the master returns `EIO` — and nothing lowers
         /// `holderWriteFD`, because `HolderStreamReader.readLoop` closes its
-        /// own descriptor on EOF and never calls `stopHolderReader`. An
+        /// own descriptor on EOF and never calls `closeHolderWriteSide`. An
         /// unconditional line there is one `.error` per keystroke for as long
         /// as somebody keeps typing at a dead session. The queue logs the
         /// dropped byte count once for the same episode; this logs the errno

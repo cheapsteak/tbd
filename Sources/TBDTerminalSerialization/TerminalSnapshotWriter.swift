@@ -19,6 +19,13 @@ import SwiftTerm
 /// the supplied `ModeReplyReader` does to obtain a `DECRQM` answer. The lock is
 /// not re-entrant, so it is taken by the caller and never here; see
 /// `TerminalCellWalk` for why the rule exists at all.
+///
+/// **Call it between sequences** (`Terminal.isAtSequenceBoundary`). The first
+/// `ESC` those feeds carry ends whatever sequence the source terminal is
+/// part-way through — an OSC, a DCS, an APC, a CSI's parameters — and the rest
+/// of that sequence, when it arrives, prints as text. The bytes this returns
+/// cannot carry the open sequence either, so a receiver fed them, and then fed
+/// the rest, prints it as text too.
 public enum TerminalSnapshotWriter {
     private static let esc = "\u{1b}"
 
