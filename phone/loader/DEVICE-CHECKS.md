@@ -51,8 +51,10 @@ This needs plans 1 to 3 merged.
       `innerHeight`. Record what iOS Safari reports for them while zoomed.
 - [ ] A link tap is intercepted. A forced self-navigation fires a second `load`, which the loader
       catches.
-- [ ] Leaving the page and returning rebuilds the connection and the frame without a visible
-      flash.
+- [ ] Leave the page while the app runs, long enough for the phone to drop the socket (a
+      minute or more), then return. The connection is rebuilt under the running app: the app
+      frame stays, with no flash and no reload, while the strip reads "Reconnecting…" and then
+      the laptop's name again.
 - [ ] Wrapped X25519 keys survive an IndexedDB round trip. Pair, then force-quit Safari or the
       Home Screen app, restart the phone, and reopen the next day. Connect without pairing. Do
       this in both a Safari tab and the Home Screen app. Playwright's Linux WebKit does not
