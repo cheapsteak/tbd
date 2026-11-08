@@ -24,7 +24,8 @@ struct PhoneSessionsFeed: Sendable {
 ///
 /// Both replies are queued through `PhoneHandlerReply.onQueue`, so the reply
 /// names the stream's `seq` at the moment it leaves and the events after it
-/// start there; the connection goes live with it.
+/// start there; the connection goes live with it. A transcript opened before
+/// the connection went live starts then (`startTranscript(for:)`).
 ///
 /// **The publisher.** A snapshot reply starts a new publisher with that
 /// snapshot as its baseline and stops any earlier one. A token tells the new
@@ -84,6 +85,7 @@ extension PhoneAppService {
                 send(event, to: deviceID)
             }
             devices[deviceID]?.live = true
+            startTranscript(for: deviceID)
             return
         }
         guard let snapshot else {
@@ -114,6 +116,8 @@ extension PhoneAppService {
                 emit(.sessionsChanged, data: frame, to: deviceID)
             }
         }
+        // A transcript opened before this reply starts now, after it.
+        startTranscript(for: deviceID)
         // The earlier publisher's subscriber goes before the new one's comes.
         // A stop that reaches the new publisher first leaves it stopped.
         Task {
@@ -285,9 +289,8 @@ extension PhoneAppService {
     /// or the worktree archived, and it acts on nothing the laptop no longer
     /// shows it. So every action on a local session resolves its terminal
     /// here, and nowhere else: `message.send` and `session.setModel`
-    /// (`sendText`), `prompt.answer`, `session.switchProfile` and
-    /// `session.fork`. `transcript.open`, not served yet, must resolve a local
-    /// session here too.
+    /// (`sendText`), `prompt.answer`, `session.switchProfile`,
+    /// `session.fork` and `transcript.open`.
     nonisolated func phoneVisibleTerminal(
         _ terminalID: UUID
     ) async throws -> (terminal: TBDShared.Terminal, worktree: Worktree) {

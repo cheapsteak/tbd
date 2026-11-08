@@ -304,10 +304,20 @@ struct PhoneServiceHarness: Sendable {
         let pendingPrompts = PendingPromptStore()
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
-            pendingPrompts: pendingPrompts, recorder: recorder, clock: clock)
+            pendingPrompts: pendingPrompts, locateTranscript: Self.locateTranscript,
+            recorder: recorder, clock: clock)
         return PhoneServiceHarness(
             db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, service: service, peer: peer)
+    }
+
+    /// The production locator over a `projects/` root that does not exist,
+    /// so a terminal's transcript is the `transcriptPath` a test stores on
+    /// its row (`db.terminals.updateSession`), or none.
+    static let locateTranscript: @Sendable (TBDShared.Terminal, String) -> String? = { terminal, worktreePath in
+        ClaudeTranscriptLocator.filePath(
+            terminal: terminal, worktreePath: worktreePath,
+            projectsBase: URL(fileURLWithPath: "/acme-no-projects", isDirectory: true))
     }
 
     /// Connects the phone through a fresh outbox and returns it.

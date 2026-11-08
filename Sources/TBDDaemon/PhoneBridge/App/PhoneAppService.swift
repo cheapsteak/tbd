@@ -78,9 +78,13 @@ struct PhoneDeviceState: Sendable {
     var sessions: PhoneSessionsFeed?
     /// The open session's `prompt.changed` feed: what the phone was last sent
     /// and the source that watches the session's prompts. Set by
-    /// `openPrompts(_:for:)` and cleared by `closePrompts(for:)`; the
-    /// transcript feed takes it over.
+    /// `openPrompts(_:for:)` when the open transcript's live part starts, and
+    /// cleared by `closePrompts(for:)` on `transcript.close`.
     var prompts: PhonePromptFeed?
+    /// The open transcript: its feed, which runs on while the phone is away
+    /// so a resume replays what changed. Set by `transcript.open` and cleared
+    /// by `transcript.close`.
+    var transcript: PhoneTranscriptSlot?
     /// Drops this state `parseStateGrace` after a disconnect; nil while the
     /// phone is connected.
     var grace: Task<Void, Never>?
@@ -95,6 +99,7 @@ struct PhoneDeviceState: Sendable {
         outbox?.close()
         await sessions?.publisher.stop()
         await prompts?.source?.stop()
+        await transcript?.stop()
     }
 }
 
@@ -202,6 +207,10 @@ actor PhoneAppService: PhoneAppHandling {
     let subscriptions: StateSubscriptionManager
     let pendingPrompts: PendingPromptStore
     let recorder: any PhoneActionRecording
+    /// The transcript file of a terminal in the worktree at the path given,
+    /// as the terminal row names it (`ClaudeTranscriptLocator.filePath` under
+    /// the daemon's `projects/` roots), or nil.
+    let locateTranscript: @Sendable (TBDShared.Terminal, _ worktreePath: String) -> String?
     let now: @Sendable () -> Date
     let clock: any Clock<Duration>
     /// Request IDs and their replies, per device.
@@ -226,13 +235,16 @@ actor PhoneAppService: PhoneAppHandling {
     private var nextToken: UInt64 = 0
 
     init(db: TBDDatabase, actions: any PhoneSessionActions, subscriptions: StateSubscriptionManager,
-         pendingPrompts: PendingPromptStore, recorder: any PhoneActionRecording = LoggerPhoneActionRecorder(),
+         pendingPrompts: PendingPromptStore,
+         locateTranscript: @escaping @Sendable (TBDShared.Terminal, _ worktreePath: String) -> String?,
+         recorder: any PhoneActionRecording = LoggerPhoneActionRecorder(),
          now: @escaping @Sendable () -> Date = { Date() },
          clock: any Clock<Duration> = ContinuousClock()) {
         self.db = db
         self.actions = actions
         self.subscriptions = subscriptions
         self.pendingPrompts = pendingPrompts
+        self.locateTranscript = locateTranscript
         self.recorder = recorder
         self.now = now
         self.clock = clock
@@ -575,10 +587,21 @@ actor PhoneAppService: PhoneAppHandling {
             return Self.typed(PhoneRemoteCreateParams.self) { [self] params, context in
                 try await self.remoteCreate(params, context)
             }
-        case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose:
-            // Not served yet. `transcript.open` must resolve a local session
-            // through `phoneVisibleTerminal`, as every local-session action
-            // does, so the phone opens nothing the laptop no longer shows it.
+        case .transcriptOpen:
+            return { [self] body, context in
+                let params = try PhoneAppCoding.params(TranscriptOpenParams.self, from: body)
+                return try await self.transcriptOpen(params, context)
+            }
+        case .transcriptPage:
+            return Self.typed(TranscriptPageParams.self) { [self] params, context in
+                try await self.transcriptPage(params, context)
+            }
+        case .transcriptClose:
+            return Self.typed(PhoneEmpty.self) { [self] params, context in
+                try await self.transcriptClose(params, context)
+            }
+        case .transcriptDetail:
+            // Not served yet.
             return nil
         }
     }
@@ -699,6 +722,12 @@ actor PhoneAppService: PhoneAppHandling {
     /// for it.
     func streamID(for deviceID: UUID) -> String? {
         devices[deviceID]?.stream.streamID
+    }
+
+    /// The `seq` of the device's last event, or nil when the service keeps
+    /// no state for it. For tests.
+    func lastSeq(for deviceID: UUID) -> Int? {
+        devices[deviceID]?.stream.lastSeq
     }
 
     /// The device's connection's resume decision, or nil when the service

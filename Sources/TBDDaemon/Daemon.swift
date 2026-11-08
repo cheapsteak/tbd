@@ -1608,7 +1608,8 @@ public final class Daemon: Sendable {
         // relay check and no key read happen until step 11a-phone-bridge
         // reconciles. The phone app service goes in here too, so every
         // channel, from the first, uses it; it reaches the router only
-        // through `PhoneSessionActions`.
+        // through `PhoneSessionActions` and the transcript locator it is
+        // handed here.
         var phoneBridge: PhoneBridge?
         if mockMode == nil {
             let bridge = PhoneBridge(
@@ -1617,7 +1618,10 @@ public final class Daemon: Sendable {
                 broadcast: { [subs] delta in subs.broadcast(delta: delta) })
             await bridge.setAppHandler(PhoneAppService(
                 db: database, actions: rpcRouter, subscriptions: subs,
-                pendingPrompts: rpcRouter.pendingQuestions))
+                pendingPrompts: rpcRouter.pendingQuestions,
+                locateTranscript: { [rpcRouter] terminal, worktreePath in
+                    rpcRouter.claudeTranscriptFilePath(terminal: terminal, worktreePath: worktreePath)
+                }))
             phoneBridge = bridge
             self.phoneBridge = bridge
             rpcRouter.phoneBridge = bridge

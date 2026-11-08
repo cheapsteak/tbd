@@ -8,6 +8,10 @@ struct PageBuild: Sendable {
     /// The first byte of the page's first source line. The next older page
     /// ends here, and the page's cursor names it.
     let startOffset: UInt64
+    /// The window's exclusive end: just past the last whole line it read. A
+    /// live append cursor starts here, so it reads every line after the page,
+    /// a line Claude Code was still writing included, once it is whole.
+    let endOffset: UInt64
     /// Item ID → the offset of the line it came from, for every item on the
     /// page, so a detail lookup can start there.
     let lineOffsets: [String: UInt64]
@@ -271,6 +275,7 @@ enum TranscriptPager {
         return PageBuild(
             page: TranscriptPage(items: items, cursor: cursor, reachedStart: startOffset == 0, omittedItems: omitted),
             startOffset: startOffset,
+            endOffset: window.endOffset,
             lineOffsets: lineOffsets,
             unresolvedCalls: unresolvedCalls,
             results: window.toolResultsByID)

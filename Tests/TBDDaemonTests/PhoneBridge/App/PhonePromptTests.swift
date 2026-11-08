@@ -1091,6 +1091,7 @@ struct PhonePromptAnswerRouterTests {
             actuationLog: ActuationLog(path: directory.appendingPathComponent("actuations.jsonl").path))
         let service = PhoneAppService(
             db: db, actions: router, subscriptions: subs, pendingPrompts: router.pendingQuestions,
+            locateTranscript: PhoneServiceHarness.locateTranscript,
             recorder: CapturingRecorder(), clock: EventDrivenTestClock())
         return Fixture(db: db, service: service, peer: peer)
     }
