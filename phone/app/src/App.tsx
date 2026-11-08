@@ -69,22 +69,18 @@ export function App({ root }: { root: HTMLElement }): JSX.Element {
 /**
  * Sets `root`'s layout variables from the loader's env. It renders nothing. Each env message is
  * a new object, so it keeps the values it wrote last and writes only a variable whose value
- * differs.
+ * differs. `root` is the one element `main.tsx` makes, so the values it wrote are always its.
  */
 function LayoutVars({ root }: { root: HTMLElement }): null {
   const env = useAppState((s) => s.env);
-  const written = useRef<{ root: HTMLElement; values: Map<string, string> } | null>(null);
+  const written = useRef<Map<string, string> | null>(null);
 
   useLayoutEffect(() => {
-    let last = written.current;
-    if (last === null || last.root !== root) {
-      last = { root, values: new Map() };
-      written.current = last;
-    }
+    const last = (written.current ??= new Map());
     for (const [name, value] of Object.entries(layoutVars(env))) {
-      if (last.values.get(name) === value) continue;
+      if (last.get(name) === value) continue;
       root.style.setProperty(name, value);
-      last.values.set(name, value);
+      last.set(name, value);
     }
   }, [root, env]);
 
