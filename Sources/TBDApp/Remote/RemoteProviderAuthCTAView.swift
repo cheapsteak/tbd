@@ -130,6 +130,7 @@ struct RemoteRemediationTerminalSheet: View {
     private var presentation: RemoteProviderAuthPresentation { run.presentation }
     private var command: String { run.command }
     @EnvironmentObject var appearance: AppearanceSettings
+    @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
     @State private var exitCode: Int32?
     @State private var hasExited = false
@@ -155,6 +156,9 @@ struct RemoteRemediationTerminalSheet: View {
                 environment: TerminalPanelView.makeViewerEnvironment(
                     base: ProcessInfo.processInfo.environment),
                 appearance: appearance,
+                // The observed mirror of the flag in this AppState's own
+                // store, which a body can read without a defaults lookup.
+                ghosttyTerminalEngineEnabled: appState.ghosttyTerminalEngineFlag,
                 onExit: { code in
                     exitCode = code
                     hasExited = true
