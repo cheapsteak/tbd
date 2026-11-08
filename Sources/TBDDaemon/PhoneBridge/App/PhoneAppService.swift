@@ -272,6 +272,9 @@ actor PhoneAppService: PhoneAppHandling {
     /// Which phone is answering, or answered, which prompt, across every
     /// device, for `prompt.changed`'s `answeredBy`.
     var phoneAnswerLedger = PhonePromptAnswerLedger()
+    /// When a sessions gather last re-read the provider registry, on the
+    /// date seam; nil before the first. See `claimProviderRefresh(force:)`.
+    var providersRefreshedAt: Date?
 
     /// Each phone the service keeps state for, by device ID.
     var devices: [UUID: PhoneDeviceState] = [:]

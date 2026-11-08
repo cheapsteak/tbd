@@ -34,6 +34,12 @@ enum PhoneAppConstants {
     static let remoteSyncInterval: Duration = .seconds(3)
     /// How long `worktree.create` waits for the new worktree's session.
     static let worktreeSessionWait: Duration = .seconds(30)
+    /// The least time, in seconds, between two sessions gathers that re-read
+    /// the provider registry (`phoneRemoteProviders`); a gather inside it
+    /// reads the providers as last read. A `sessions.subscribe` always
+    /// re-reads. Compared on the service's date seam (`now`), as it stamps a
+    /// moment rather than waiting.
+    static let providerRefreshInterval: TimeInterval = 30
     /// The longest a `prompt.changed` waits for a phone's answer, still
     /// running, to a prompt that closed, so it can say who answered. Past it
     /// the running answer is taken as the one that closed the prompt.

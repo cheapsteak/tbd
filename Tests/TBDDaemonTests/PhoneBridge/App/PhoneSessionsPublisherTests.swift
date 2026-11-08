@@ -405,6 +405,36 @@ struct PhoneSessionsPublisherTests {
         #expect(Array(checked) == [.cachedRemoteProviders])
     }
 
+    /// A gather re-reads the provider registry at most once per
+    /// `providerRefreshInterval` on the service's date seam, and reads the
+    /// providers as last read in between; a `sessions.subscribe` re-reads it
+    /// whenever it comes.
+    @Test func theGatherReReadsTheRegistryAtMostOncePerInterval() async throws {
+        let dates = TestDateSource()
+        let h = try await PhoneServiceHarness.make(dates: dates)
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        func reads(_ method: FakeSessionActions.Method) -> Int {
+            h.actions.calls.filter { $0.method == method }.count
+        }
+
+        _ = try await h.service.gatherSnapshot()
+        _ = try await h.service.gatherSnapshot()
+        dates.advance(by: PhoneAppConstants.providerRefreshInterval - 1)
+        _ = try await h.service.gatherSnapshot()
+        #expect(reads(.remoteProviders) == 1)
+        #expect(reads(.cachedRemoteProviders) == 2)
+
+        dates.advance(by: 1)
+        _ = try await h.service.gatherSnapshot()
+        #expect(reads(.remoteProviders) == 2)
+
+        let outbox = await h.connect()
+        let (reply, _) = try await h.request(.sessionsSubscribe, params: Self.fresh, on: outbox)
+        #expect(reply.error == nil)
+        #expect(reads(.remoteProviders) == 3)
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
+    }
+
     // MARK: - sessions.subscribe
 
     private static let fresh = SessionsSubscribeParams(stream: nil, sinceSeq: nil)

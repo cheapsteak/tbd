@@ -45,7 +45,7 @@ extension PhoneAppService {
         if await canReplaySessions(for: context.peer.deviceID) {
             snapshot = nil
         } else {
-            snapshot = try await gatherSnapshot()
+            snapshot = try await gatherSnapshot(forceProviderRefresh: true)
         }
         return .onQueue { (service: isolated PhoneAppService) in
             service.queueSubscribeReply(params, snapshot: snapshot, context: context)
@@ -204,7 +204,11 @@ extension PhoneAppService {
     /// `PhoneSessionActions`; a call that fails, as the remote ones do while
     /// remote backends are off, counts as an empty list, and with no session
     /// states every session reads `unknown`. A failed database read throws.
-    nonisolated func gatherSnapshot() async throws -> PhoneSnapshot {
+    /// The providers re-read the registry at most once per
+    /// `PhoneAppConstants.providerRefreshInterval`, or always with
+    /// `forceProviderRefresh`, as a `sessions.subscribe` asks
+    /// (`gatheredRemoteProviders(forceRefresh:)`).
+    nonisolated func gatherSnapshot(forceProviderRefresh: Bool = false) async throws -> PhoneSnapshot {
         let repos = try await db.repos.list()
         let worktrees = try await db.worktrees.list(excludeArchived: true)
         let scratch = try await db.worktrees.listScratch().filter { $0.status != .archived }
@@ -230,7 +234,7 @@ extension PhoneAppService {
         let openPrompts = await pendingPrompts.oldestOpenPrompts()
         let states = await gatheredSessionStates()
         let remoteSessions = await gatheredRemoteSessions()
-        let providers = await gatheredRemoteProviders()
+        let providers = await gatheredRemoteProviders(forceRefresh: forceProviderRefresh)
         return PhoneSnapshotBuilder.build(PhoneSnapshotInput(
             repos: repos, worktrees: worktrees, scratch: scratch, terminals: terminals,
             tabOrder: tabOrder, tabLabels: tabLabels, profiles: profiles, states: states,
@@ -269,14 +273,29 @@ extension PhoneAppService {
     }
 
     /// The registered providers, read the way `remote.providers` reads them,
-    /// re-reading the registry file first. This debounced gather is the only
-    /// phone path that re-reads it; every action reads the providers as
-    /// last read (`providerStatuses()`). Nothing else keeps the registry
-    /// fresh while the app is closed: the app re-reads it on its own
+    /// re-reading the registry file first when this gather claims the
+    /// refresh (`claimProviderRefresh(force:)`), and as last read otherwise
+    /// (`phoneCachedRemoteProviders`). The gathers are the only phone path
+    /// that re-reads the registry; every action reads the providers as last
+    /// read (`providerStatuses()`). Nothing else keeps the registry fresh
+    /// while the app is closed: the app re-reads it on its own
     /// `remote.providers` calls.
-    private nonisolated func gatheredRemoteProviders() async -> [RemoteProviderStatus] {
+    ///
+    /// Every phone's publisher gathers after every debounced change, and
+    /// goes on for the grace after the phone leaves, so re-reading the file
+    /// each time would read it many times a second on a busy laptop. Once
+    /// per `PhoneAppConstants.providerRefreshInterval` keeps a registry edit
+    /// reaching the phone within that interval, and a `sessions.subscribe`
+    /// re-reads it at once.
+    private nonisolated func gatheredRemoteProviders(forceRefresh: Bool) async -> [RemoteProviderStatus] {
+        let refresh = await claimProviderRefresh(force: forceRefresh)
         do {
-            let response = try await actions.phoneRemoteProviders()
+            let response: RPCResponse
+            if refresh {
+                response = try await actions.phoneRemoteProviders()
+            } else {
+                response = try await actions.phoneCachedRemoteProviders()
+            }
             guard response.success else { return [] }
             return try response.decodeResult(RemoteProvidersResult.self).providers
         } catch {
@@ -284,6 +303,23 @@ extension PhoneAppService {
                 "Phone sessions: no remote providers: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
             return []
         }
+    }
+
+    /// Whether a gather re-reads the provider registry now: always with
+    /// `force`, and otherwise when no gather has re-read it within
+    /// `PhoneAppConstants.providerRefreshInterval` on the date seam, or the
+    /// date went back past the last one. A claim stamps the moment in the
+    /// same turn, so gathers that start together re-read it once.
+    func claimProviderRefresh(force: Bool) -> Bool {
+        let date = self.now()
+        if !force, let last = providersRefreshedAt {
+            let elapsed = date.timeIntervalSince(last)
+            if elapsed >= 0, elapsed < PhoneAppConstants.providerRefreshInterval {
+                return false
+            }
+        }
+        providersRefreshedAt = date
+        return true
     }
 
     // MARK: - The sessions the phone can see

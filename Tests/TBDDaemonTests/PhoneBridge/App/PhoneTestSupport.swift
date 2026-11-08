@@ -464,10 +464,11 @@ struct PhoneServiceHarness: Sendable {
     /// through it, so a test can hold the first read still; with
     /// `pairingRead`, it reads each request's pairing through it, likewise;
     /// with `failingPairingRead`, each request's pairing read goes through
-    /// it, so a test can make the first reads fail.
+    /// it, so a test can make the first reads fail; with `dates`, the
+    /// service's date seam (`now`) reads it, so a test can move the date.
     static func make(
         phoneControlRead: HeldPhoneControlRead? = nil, pairingRead: HeldPairingRead? = nil,
-        failingPairingRead: FailingPairingRead? = nil
+        failingPairingRead: FailingPairingRead? = nil, dates: TestDateSource? = nil
     ) async throws -> PhoneServiceHarness {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPhoneControlEnabled(true)
@@ -490,10 +491,11 @@ struct PhoneServiceHarness: Sendable {
         } else if let failingPairingRead {
             readPairing = { deviceID in try await failingPairingRead.read(db, deviceID) }
         }
+        let now: @Sendable () -> Date = dates?.provider ?? { Date() }
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, locateTranscript: Self.locateTranscript,
-            recorder: recorder, readPhoneControl: readPhoneControl, readPairing: readPairing, clock: clock)
+            recorder: recorder, readPhoneControl: readPhoneControl, readPairing: readPairing, now: now, clock: clock)
         return PhoneServiceHarness(
             db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
             pendingPrompts: pendingPrompts, service: service, peer: peer)
