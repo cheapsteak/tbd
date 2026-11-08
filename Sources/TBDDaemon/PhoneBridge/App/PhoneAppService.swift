@@ -563,8 +563,19 @@ actor PhoneAppService: PhoneAppHandling {
             return Self.typed(SessionForkParams.self) { [self] params, context in
                 try await self.sessionFork(params, context)
             }
-        case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
-             .worktreeCreate, .remoteProviders, .remoteCreate:
+        case .worktreeCreate:
+            return Self.typed(PhoneWorktreeCreateParams.self) { [self] params, context in
+                try await self.worktreeCreate(params, context)
+            }
+        case .remoteProviders:
+            return Self.typed(PhoneRemoteProvidersParams.self) { [self] params, context in
+                try await self.remoteProviders(params, context)
+            }
+        case .remoteCreate:
+            return Self.typed(PhoneRemoteCreateParams.self) { [self] params, context in
+                try await self.remoteCreate(params, context)
+            }
+        case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose:
             return nil
         }
     }
