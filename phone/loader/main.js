@@ -3,7 +3,7 @@
 // connection with its header strip and app frame. Which screen follows what is decided in
 // views.js; the work is done by the modules it wires together.
 
-import { systemClock, withTimeout } from './clock.js';
+import { systemClock, withVisibleTimeout } from './clock.js';
 import { LaptopConnection } from './connection.js';
 import { SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from './constants.js';
 import { AppFrame, readEnv } from './frame.js';
@@ -26,6 +26,7 @@ import {
 } from './views.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
+/** @typedef {import('./clock.js').Visibility} Visibility */
 /** @typedef {import('./types.js').LaptopRecord} LaptopRecord */
 /** @typedef {import('./types.js').DamagedLaptop} DamagedLaptop */
 /** @typedef {import('./types.js').WebSocketLike} WebSocketLike */
@@ -88,7 +89,8 @@ export async function boot(options) {
   if (link !== null) page.openLink(link);
   let store;
   try {
-    store = await withTimeout(openStore(options.indexedDB), STORE_TIMEOUT_MS, options.clock);
+    store = await withVisibleTimeout(
+      openStore(options.indexedDB), STORE_TIMEOUT_MS, documentVisibility(options.document), options.clock);
   } catch {
     page.showStoreFailure();
     return;
@@ -106,6 +108,22 @@ function takeLinkFromAddress(win) {
   const { link, cleanURL } = takePairingFragment(win.location.href);
   if (link !== null) win.history.replaceState(null, '', cleanURL);
   return link;
+}
+
+/**
+ * The document's visibility, for the store timeouts: only time while the page is visible
+ * counts, because iOS freezes a hidden page with its store requests in flight.
+ * @param {Document} doc
+ * @returns {Visibility}
+ */
+function documentVisibility(doc) {
+  return {
+    isVisible: () => doc.visibilityState !== 'hidden',
+    onChange: (listener) => {
+      doc.addEventListener('visibilitychange', listener);
+      return () => doc.removeEventListener('visibilitychange', listener);
+    },
+  };
 }
 
 /**
@@ -143,6 +161,7 @@ class LoaderPage {
   #screen;
   #frameHost;
   #probe;
+  #visibility;
 
   /** @type {Store | null} */
   #store = null;
@@ -194,6 +213,7 @@ class LoaderPage {
     this.#screen = element(this.#doc, 'screen');
     this.#frameHost = element(this.#doc, 'frame-host');
     this.#probe = element(this.#doc, 'safe-probe');
+    this.#visibility = documentVisibility(this.#doc);
 
     this.#doc.addEventListener('visibilitychange', () => {
       if (this.#doc.visibilityState === 'visible') this.#resume();
@@ -310,14 +330,33 @@ class LoaderPage {
   }
 
   /**
-   * Every laptop, in the order the screens list them, or null after showing the store failure.
-   * A read that takes longer than STORE_TIMEOUT_MS is a failure too.
+   * A store request, bounded by STORE_TIMEOUT_MS of time while the page is visible.
+   * @template T
+   * @param {(store: Store) => Promise<T>} request
+   * @returns {Promise<T>}
+   */
+  #ask(request) {
+    return withVisibleTimeout(request(/** @type {Store} */ (this.#store)), STORE_TIMEOUT_MS, this.#visibility, this.#clock);
+  }
+
+  /**
+   * Every laptop, in the order the screens list them.
+   * @returns {Promise<{ laptops: LaptopRecord[], damaged: DamagedLaptop[] }>}
+   * @throws for a read that fails or takes longer than `#ask` allows
+   */
+  async #readLaptops() {
+    const list = await this.#ask((store) => store.listLaptops());
+    return { laptops: sortLaptops(list.laptops), damaged: list.damaged };
+  }
+
+  /**
+   * Every laptop, for a screen that has nothing else to show, or null after showing the store
+   * failure: a read that fails or does not answer in time ends in "Reload this page".
    * @returns {Promise<{ laptops: LaptopRecord[], damaged: DamagedLaptop[] } | null>}
    */
   async #list() {
     try {
-      const list = await withTimeout(/** @type {Store} */ (this.#store).listLaptops(), STORE_TIMEOUT_MS, this.#clock);
-      return { laptops: sortLaptops(list.laptops), damaged: list.damaged };
+      return await this.#readLaptops();
     } catch {
       this.showStoreFailure();
       return null;
@@ -413,7 +452,7 @@ class LoaderPage {
     const epoch = this.#leave();
     this.#mount(renderLoading());
     try {
-      await withTimeout(/** @type {Store} */ (this.#store).forgetLaptop(key), STORE_TIMEOUT_MS, this.#clock);
+      await this.#ask((store) => store.forgetLaptop(key));
     } catch {
       this.showStoreFailure();
       return;
@@ -582,7 +621,7 @@ class LoaderPage {
       lastConnectedAt: null,
     };
     try {
-      await withTimeout(/** @type {Store} */ (this.#store).putLaptop(record), STORE_TIMEOUT_MS, this.#clock);
+      await this.#ask((store) => store.putLaptop(record));
     } catch {
       this.showStoreFailure();
       return;
@@ -962,8 +1001,16 @@ class LoaderPage {
     /** @type {Menu} */
     const menu = { abort: () => {}, nodes: [] };
     this.#menu = menu;
-    const list = await this.#list();
-    if (list === null || this.#menu !== menu) return;
+    let list;
+    try {
+      list = await this.#readLaptops();
+    } catch {
+      // The menu is a convenience over a working app, so a read that fails or stalls only
+      // closes it. A store that is really lost has already said so through `onClosed`.
+      if (this.#menu === menu) this.#closeMenu(false);
+      return;
+    }
+    if (this.#menu !== menu) return;
     // The current laptop, as this page knows it now, in place of its stored row.
     const laptops = list.laptops.map((record) => (record.id === current.id && this.#current !== null ? this.#current : record));
     const now = this.#clock.now();

@@ -16,7 +16,7 @@ import { NoiseError, createInitiator, phonePrologue, MAX_PLAINTEXT_LENGTH } from
 import { base64urlDecode } from './channel/pairingLink.js';
 import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
 import { systemClock } from './clock.js';
-import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
+import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relaySocketURL } from './links.js';
 import {
   ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
@@ -135,6 +135,8 @@ export class LaptopConnection {
   #socketOpen = false;
   /** @type {RelaySocket | null} The socket the last `resume()` opened. */
   #resumeSocket = null;
+  /** When, on the clock, the last `resume()` opened `#resumeSocket`. */
+  #resumedAt = 0;
   /** Whether any socket of this connection has opened. Until one has, a failure is `relayUnreachable`. */
   #everOpened = false;
   #gotSignal = false;
@@ -197,10 +199,11 @@ export class LaptopConnection {
    * waiting, or a socket is still connecting, perhaps one frozen while the page was hidden)
    * a fresh socket replaces it at once and the backoff starts over.
    *
-   * Back-to-back calls coalesce: while the socket an earlier `resume()` opened is still
-   * connecting, another call does nothing, so the two events a return to the page can fire
-   * open one socket, not two. (The probe already runs one at a time.) Should that socket hang,
-   * the signal timeout still ends it.
+   * Calls that come close together coalesce: within RESUME_COALESCE_MS of the call that
+   * opened a socket, while that socket is still connecting, another call does nothing, so the
+   * two events one return to the page can fire open one socket, not two. (The probe already
+   * runs one at a time.) Should that socket hang, the signal timeout still ends it. A later
+   * call is a later return to the page, and replaces the socket at once like any other.
    */
   resume() {
     if (!this.#started) return;
@@ -209,12 +212,14 @@ export class LaptopConnection {
         this.#socket?.probe();
         return;
       }
-      if (this.#socket !== null && this.#socket === this.#resumeSocket) return;
+      const now = this.#clock.now();
+      if (this.#socket !== null && this.#socket === this.#resumeSocket && isSoonAfter(this.#resumedAt, now)) return;
       this.#closeSocket();
       this.#reconnectTimer = this.#disarm(this.#reconnectTimer);
       this.#attempt = 0;
       this.#connect();
       this.#resumeSocket = this.#socket;
+      this.#resumedAt = now;
     });
   }
 
@@ -683,4 +688,15 @@ function settle(write) {
   } catch {
     // A cache that throws instead of rejecting is ignored the same way.
   }
+}
+
+/**
+ * Whether `now` is within RESUME_COALESCE_MS after `then`, on the same clock. A clock that
+ * went back reads as not soon, so the resume replaces the socket, as it would without coalescing.
+ * @param {number} then
+ * @param {number} now
+ */
+function isSoonAfter(then, now) {
+  const elapsed = now - then;
+  return elapsed >= 0 && elapsed < RESUME_COALESCE_MS;
 }

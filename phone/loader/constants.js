@@ -7,6 +7,10 @@ export const LOADER_PROTOCOLS = Object.freeze([1]);
 
 export const KEEPALIVE_MS = 30_000;
 export const RESUME_PONG_TIMEOUT_MS = 3_000;
+// A return to the page can fire both `pageshow` and `visibilitychange`. A resume this soon
+// after the one that opened a socket keeps that socket while it connects; a later resume
+// replaces it at once, since it may have frozen while the page was hidden in between.
+export const RESUME_COALESCE_MS = 1_000;
 export const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 60_000;
 
@@ -14,7 +18,8 @@ export const SIGNAL_TIMEOUT_MS = 10_000;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
 export const CACHE_READ_TIMEOUT_MS = 3_000;
 // A store request the page waits on with nothing else to show (opening the store, listing
-// the laptops, saving or forgetting one) that takes longer shows "Reload this page".
+// the laptops, saving or forgetting one) that takes longer shows "Reload this page". Only time
+// while the page is visible counts. The strip menu's read only closes the menu.
 export const STORE_TIMEOUT_MS = 10_000;
 export const RUNNER_START_TIMEOUT_MS = 10_000;
 export const PAIRING_EXPIRY_GRACE_MS = 120_000;

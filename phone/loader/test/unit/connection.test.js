@@ -7,8 +7,8 @@ import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../chan
 import { base64urlDecode } from '../../channel/pairingLink.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, RESUME_PONG_TIMEOUT_MS,
-  SIGNAL_TIMEOUT_MS,
+  CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, RESUME_COALESCE_MS,
+  RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
 import { relaySocketURL } from '../../links.js';
@@ -1286,6 +1286,44 @@ test('back-to-back resumes open one socket, and a later resume still replaces a 
   await quiet();
   assert.equal(env.joins(), 1);
   assert.equal(env.net.sockets.length, 1);
+  c.conn.stop();
+});
+
+test('only resumes close together coalesce: a later one replaces a socket still connecting at once', async () => {
+  const env = await setup();
+  const hanging = hangingSockets();
+  let hang = true;
+  const c = connection(env, { openSocket: (/** @type {string} */ url) => (hang ? hanging.factory(url) : env.net.factory(url)) });
+  c.conn.start();
+  await quiet();
+  assert.equal(hanging.sockets.length, 1);
+
+  // Two resumes inside the window are one return to the page: one socket.
+  c.conn.resume();
+  await quiet();
+  assert.equal(hanging.sockets.length, 2);
+  await env.clock.advance(RESUME_COALESCE_MS - 1);
+  c.conn.resume();
+  await quiet();
+  assert.equal(hanging.sockets.length, 2, 'a resume inside the window keeps the socket the first opened');
+  assert.deepEqual(hanging.sockets[1].closes, []);
+
+  // The page went away again before that socket connected, and is back: a later return to the
+  // page replaces the socket, which may have frozen meanwhile, at once, with no backoff wait.
+  await env.clock.advance(1);
+  hang = false;
+  c.conn.resume();
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(hanging.sockets[1].closes, [1000], 'the earlier resume\'s socket is closed');
+  assert.equal(hanging.sockets.length, 2);
+  assert.equal(env.joins(), 1);
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready']);
+
+  // Neither the replaced socket's signal timer nor any backoff fires later.
+  await env.clock.advance(SIGNAL_TIMEOUT_MS);
+  await quiet();
+  assert.equal(c.states().at(-1), 'ready');
+  assert.equal(env.joins(), 1);
   c.conn.stop();
 });
 
