@@ -258,8 +258,18 @@ function cutPoint(window: string): number {
   if (lineEnd >= 0) return lineEnd + 1;
   const space = Math.max(window.lastIndexOf(' '), window.lastIndexOf('\t'));
   if (space >= 0) return space + 1;
-  const last = window.charCodeAt(window.length - 1);
-  return last >= 0xd800 && last <= 0xdbff ? window.length - 1 : window.length;
+  return pairSafeEnd(window, window.length);
+}
+
+/**
+ * Where a cut of `s` at `end` ends so that it never falls between the two halves of a surrogate
+ * pair: `end`, or one before it when the unit before `end` is a pair's first half. Every cut of
+ * transcript text by UTF-16 units goes through this, here and in what the live region says
+ * (`transcript/announce.ts`).
+ */
+export function pairSafeEnd(s: string, end: number): number {
+  const unit = s.charCodeAt(end - 1);
+  return unit >= 0xd800 && unit <= 0xdbff ? end - 1 : end;
 }
 
 /** A line break followed by a blank line: spaces and tabs, then the next line break. */

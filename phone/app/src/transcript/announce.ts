@@ -16,7 +16,7 @@
  * Everything here is pure.
  */
 
-import { mdInline, mdTree, type MdNode } from '../markdown/mdTree.ts';
+import { mdInline, mdTree, pairSafeEnd, type MdNode } from '../markdown/mdTree.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 
 /** The most rows one announcement says. */
@@ -96,9 +96,7 @@ function plainText(nodes: readonly MdNode[]): string {
   return out.join('');
 }
 
-/** `s` cut to its first `max` UTF-16 units, never inside a surrogate pair. */
+/** `s` cut to its first `max` UTF-16 units, never inside a surrogate pair (`pairSafeEnd`). */
 function cut(s: string, max: number): string {
-  if (s.length <= max) return s;
-  const code = s.charCodeAt(max - 1);
-  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+  return s.length <= max ? s : s.slice(0, pairSafeEnd(s, max));
 }

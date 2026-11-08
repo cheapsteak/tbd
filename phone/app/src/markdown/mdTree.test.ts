@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openableURL } from '../../../loader/frame.js';
-import { MAX_DEPTH, MAX_LINK_LENGTH, MAX_MARKDOWN_LENGTH, MAX_NODES, mdInline, mdTree, safeLink, type MdNode } from './mdTree.ts';
+import { MAX_DEPTH, MAX_LINK_LENGTH, MAX_MARKDOWN_LENGTH, MAX_NODES, mdInline, mdTree, pairSafeEnd, safeLink, type MdNode } from './mdTree.ts';
 
 const JS = 'java' + 'script:';
 /** `<name`, built in pieces so this file holds no tag the source policy bans. */
@@ -326,6 +326,16 @@ test('past MAX_MARKDOWN_LENGTH the rest shows as plain lines, cut after a blank 
 
   // A message under the cap, ending in a line break, draws as it did.
   assert.deepEqual(mdInline('a\n'), [t('a\n')]);
+});
+
+test('pairSafeEnd ends a cut before a surrogate pair it would part, and anywhere else where asked', () => {
+  const s = 'ab😀c';
+  assert.equal(pairSafeEnd(s, 2), 2);
+  // Between the two halves of the pair: one before.
+  assert.equal(pairSafeEnd(s, 3), 2);
+  assert.equal(pairSafeEnd(s, 4), 4);
+  assert.equal(pairSafeEnd(s, 5), 5);
+  assert.equal(pairSafeEnd(s, 0), 0);
 });
 
 test('with no blank line to cut after, the cut falls after a line break, then a space, then anywhere', () => {
