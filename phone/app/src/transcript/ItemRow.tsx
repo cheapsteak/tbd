@@ -1,8 +1,12 @@
 /**
  * One row of the transcript, drawn element for element and class for class as the mock's
  * `itemHTML` draws it (mock 870-897), with its open detail. It only renders: a tap on a tool, a
- * subagent or "Show more" calls `toggle`, which the list wires to `toggleDetail` with the row's
- * key, and `detail` is that row's record in the slice's `details`.
+ * subagent or "Show more" calls `toggle` with the row's key, which the list wires to
+ * `toggleDetail`, and `detail` is that row's record in the slice's `details`.
+ *
+ * **It renders again only when its own props change** (`memo`). The list passes each row the
+ * same row object, detail record and `toggle` until that row changes, so an append, an update of
+ * another row or a tick of another part of the state draws no row again, an open nest included.
  *
  * Where the wire holds less than the mock shows, the row shows less, and says what it can:
  * - a failed tool's mark reads "failed", since the wire has no exit code;
@@ -16,7 +20,9 @@
  *   once it arrived, and the button goes, as in the mock. Its box shows the loading line, the
  *   too-large line or the laptop's message. After a failure the button comes back, and a tap
  *   starts over.
- * - A subagent row draws its items in `.nest`, each through this component as a nested row.
+ * - A subagent row draws its items in `.nest`, each through this component as a nested row,
+ *   under one budget for the whole nest (`nest.ts`): items past it are not drawn, and the row
+ *   shows "Too large for the phone. Open on the laptop." under the nest.
  *
  * **Nested rows draw, and never open.** A nested row has no row key, so it has no record in
  * `details`, and the laptop could not serve one anyway: it finds a detail by looking the item ID
@@ -27,7 +33,8 @@
  * row alone.
  */
 
-import type { JSX } from 'react';
+import { memo, useMemo, type JSX } from 'react';
+import type { MdNode } from '../markdown/mdTree.ts';
 import type { PhoneItem } from '../protocol/types.ts';
 import { isOpen } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
@@ -36,12 +43,26 @@ import { toolGlyph } from '../state/status.ts';
 import { Markdown } from '../markdown/Markdown.tsx';
 import { Dots, Icon } from '../ui/Icon.tsx';
 import { DetailPane } from './DetailPane.tsx';
+import { planNest } from './nest.ts';
 
 /** The part each kind of row opens with a tap: a tool's input (then its result), the rest of a message, or a subagent's items. */
 export type RowPart = 'input' | 'text' | 'subagent';
 
-export function ItemRow(p: { row: TranscriptRow; detail: DetailState | undefined; toggle: ((part: RowPart) => void) | null }): JSX.Element | null {
-  const { row, toggle } = p;
+/**
+ * - `toggle`: what a tap calls, with the row's key, or null for a nested row, which never opens.
+ *   Pass the same function on every render, or `memo` gains nothing.
+ * - `tree`: a nested message's markdown, read ahead under its nest's budget.
+ */
+export interface ItemRowProps {
+  row: TranscriptRow;
+  detail: DetailState | undefined;
+  toggle: ((rowKey: number, part: RowPart) => void) | null;
+  tree?: readonly MdNode[] | null;
+}
+
+export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | null {
+  const { row } = p;
+  const toggle = p.toggle === null ? null : (part: RowPart): void => p.toggle?.(row.key, part);
   const detail = toggle !== null && isOpen(p.detail) ? p.detail : null;
   const expanded = detail !== null;
   if (row.kind === 'receipt') {
@@ -60,7 +81,7 @@ export function ItemRow(p: { row: TranscriptRow; detail: DetailState | undefined
       return (
         <div className="me">
           <span className="who">You</span>
-          <Markdown inline text={text} />
+          <Markdown inline text={text} nodes={p.tree} />
         </div>
       );
     case 'assistant': {
@@ -68,7 +89,7 @@ export function ItemRow(p: { row: TranscriptRow; detail: DetailState | undefined
       return (
         <>
           <div className="say">
-            <Markdown text={full ?? text} />
+            <Markdown text={full ?? text} nodes={full === undefined ? p.tree : null} />
             {it.truncated && toggle !== null && (detail === null || detail.phase === 'failed') && (
               <button className="morebtn" type="button" onClick={() => toggle('text')}>
                 Show more
@@ -147,14 +168,7 @@ export function ItemRow(p: { row: TranscriptRow; detail: DetailState | undefined
             <Icon name={expanded ? 'tri-d' : 'tri-r'} cls="tri" />
             {label}
           </button>
-          {detail !== null && detail.phase !== 'loading' && detail.items.length > 0 && (
-            <div className="nest">
-              {detail.items.map((item, i) => (
-                <ItemRow key={i} row={{ key: i, kind: 'item', item }} detail={undefined} toggle={null} />
-              ))}
-            </div>
-          )}
-          {detail !== null && <DetailPane detail={detail} parts={false} />}
+          {detail !== null && (detail.phase === 'loading' ? <DetailPane detail={detail} parts={false} /> : <Nest detail={detail} />)}
         </>
       );
     }
@@ -171,7 +185,7 @@ export function ItemRow(p: { row: TranscriptRow; detail: DetailState | undefined
             <Icon name="msg" />
             From {it.sender ?? ''}
           </span>
-          <Markdown inline text={text} />
+          <Markdown inline text={text} nodes={p.tree} />
         </div>
       );
     case 'thinking':
@@ -189,4 +203,27 @@ export function ItemRow(p: { row: TranscriptRow; detail: DetailState | undefined
         </div>
       );
   }
-}
+});
+
+/**
+ * A subagent's items in `.nest`, as `planNest` plans them, then the detail's box: the
+ * too-large line when the laptop's detail or the nest's budget left items out, or the laptop's
+ * message. Each nested row is an `ItemRow` with no `toggle`, so it never opens and never nests.
+ * The plan is read again only when the items change.
+ */
+const Nest = memo(function Nest(p: { detail: DetailState }): JSX.Element {
+  const { items } = p.detail;
+  const plan = useMemo(() => planNest(items), [items]);
+  return (
+    <>
+      {plan.rows.length > 0 && (
+        <div className="nest">
+          {plan.rows.map((r, i) => (
+            <ItemRow key={i} row={{ key: i, kind: 'item', item: r.item }} detail={undefined} toggle={null} tree={r.tree} />
+          ))}
+        </div>
+      )}
+      <DetailPane detail={p.detail} parts={false} cut={plan.cut} />
+    </>
+  );
+});

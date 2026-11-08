@@ -13,8 +13,8 @@ import { createActions } from '../actions/index.ts';
 import type { Method, ParamsOf, PhoneItem, PhoneSessionRef, ResultOf, TranscriptDetailPart, TranscriptDetailResult } from '../protocol/types.ts';
 import { utf8Length } from '../limits.ts';
 import {
-  addChunk, askOf, cancelDetail, DETAIL_CHUNK_BYTES, DETAIL_LIMIT_BYTES, detailParts, failDetail, MAX_DETAIL_CHUNKS,
-  MAX_SUBAGENT_ITEMS, startDetail,
+  addChunk, askOf, cancelDetail, DETAIL_CHUNK_BYTES, DETAIL_LIMIT_BYTES, detailParts, failDetail, firstLines, MAX_DETAIL_CHUNKS,
+  MAX_DETAIL_LINES, MAX_SUBAGENT_ITEMS, startDetail,
 } from './detail.ts';
 import type { DetailAsk, DetailState } from './detail.ts';
 import { createStore, initialState } from './store.ts';
@@ -87,15 +87,26 @@ test('each other part loads itself, and a running tool loads its input alone', (
   assert.deepEqual(detailParts('input', tool('t1', 'error')), ['input', 'result']);
 });
 
-test('tooLarge keeps the first chunk and asks for nothing more', () => {
-  const step = addChunk(startDetail(['input', 'result']), reply({ part: 'input', chunk: 0 }, 1, { text: 'first', tooLarge: true }));
-  assert.equal(step.ask, null);
-  assert.equal(step.next.phase, 'tooLarge');
+test('tooLarge keeps the first chunk of its part and asks for none of the rest, and the next part still loads', () => {
+  const step = addChunk(startDetail(['input', 'result']), reply({ part: 'input', chunk: 0 }, 3, { text: 'first', tooLarge: true }));
+  assert.deepEqual(step.ask, { part: 'result', chunk: 0 });
   assert.deepEqual(step.next.text, { input: 'first' });
-  // Not of that part, and not of a later one: the result is never asked for.
-  const later = addChunk(startDetail(['input']), reply({ part: 'input', chunk: 0 }, 3, { tooLarge: true }));
-  assert.equal(later.ask, null);
-  assert.equal(later.next.phase, 'tooLarge');
+  assert.deepEqual(step.next.largeParts, ['input']);
+  const end = addChunk(step.next, reply({ part: 'result', chunk: 0 }, 1));
+  assert.equal(end.ask, null);
+  assert.equal(end.next.phase, 'tooLarge', 'a detail with a part too large ends too large');
+  assert.deepEqual(end.next.text, { input: 'first', result: 'result0' });
+  assert.deepEqual(end.next.largeParts, ['input']);
+  // A last part too large ends the detail.
+  const last = addChunk(startDetail(['input', 'result']), reply({ part: 'input', chunk: 0 }, 1));
+  const lastEnd = addChunk(last.next, reply({ part: 'result', chunk: 0 }, 3, { tooLarge: true }));
+  assert.equal(lastEnd.ask, null);
+  assert.equal(lastEnd.next.phase, 'tooLarge');
+  assert.deepEqual(lastEnd.next.largeParts, ['result']);
+  // A detail whose parts fit has no part too large.
+  const fits = run(startDetail(['input', 'result']), (ask) => reply(ask, 2)).d;
+  assert.equal(fits.phase, 'open');
+  assert.deepEqual(fits.largeParts, []);
 });
 
 test('a collapsed detail drops later replies and asks for nothing', () => {
@@ -145,12 +156,16 @@ test('a chunkCount that is not a positive integer fails the detail and never thr
   }
 });
 
-test('an absurd chunkCount keeps the first chunk as too large and asks for nothing more', () => {
+test('an absurd chunkCount keeps the first chunk of its part as too large and asks for none of the rest', () => {
   for (const chunkCount of [MAX_DETAIL_CHUNKS + 1, 1e9, Number.MAX_SAFE_INTEGER]) {
     const step = addChunk(startDetail(['input', 'result']), reply({ part: 'input', chunk: 0 }, chunkCount));
-    assert.equal(step.ask, null, String(chunkCount));
-    assert.equal(step.next.phase, 'tooLarge');
+    assert.deepEqual(step.ask, { part: 'result', chunk: 0 }, String(chunkCount));
     assert.deepEqual(step.next.text, { input: 'input0' });
+    assert.deepEqual(step.next.largeParts, ['input']);
+    const alone = addChunk(startDetail(['text']), reply({ part: 'text', chunk: 0 }, chunkCount));
+    assert.equal(alone.ask, null, String(chunkCount));
+    assert.equal(alone.next.phase, 'tooLarge');
+    assert.deepEqual(alone.next.text, { text: 'text0' });
   }
 });
 
@@ -169,13 +184,16 @@ test('a text part over 1 MB in UTF-8 is too large, whatever tooLarge and chunkCo
   // 30,000 é take 60,000 bytes, so the 18th chunk passes 1,048,576 bytes while the text holds
   // only 540,000 UTF-16 units.
   const chunk = 'é'.repeat(30_000);
-  const { d, asks } = run(startDetail(['input', 'result']), (ask) => reply(ask, 100, { text: chunk }));
-  assert.equal(asks.length, 18);
-  assert.ok(asks.every((a) => a.part === 'input'));
+  const { d, asks } = run(startDetail(['input', 'result']), (ask) => (ask.part === 'input' ? reply(ask, 100, { text: chunk }) : reply(ask, 1)));
+  assert.equal(asks.length, 19);
+  assert.ok(asks.slice(0, 18).every((a) => a.part === 'input'));
+  assert.deepEqual(asks[18], { part: 'result', chunk: 0 }, 'the result still loads');
   assert.equal(d.phase, 'tooLarge');
+  assert.deepEqual(d.largeParts, ['input']);
   assert.equal(d.text.input?.length, 18 * 30_000);
-  assert.equal(d.bytes, 18 * 60_000);
-  assert.ok(d.bytes <= DETAIL_LIMIT_BYTES + 65_519, 'a part holds at most the limit and one frame');
+  assert.equal(utf8Length(d.text.input ?? ''), 18 * 60_000);
+  assert.ok(utf8Length(d.text.input ?? '') <= DETAIL_LIMIT_BYTES + 65_519, 'a part holds at most the limit and one frame');
+  assert.equal(d.text.result, 'result0');
 });
 
 test('the 1 MB limit counts each part on its own', () => {
@@ -191,6 +209,20 @@ test('a text exactly at the limit is not too large', () => {
   const { d } = run(startDetail(['text']), (ask) => reply(ask, 2, { text: 'x'.repeat(DETAIL_LIMIT_BYTES / 2) }));
   assert.equal(d.phase, 'open');
   assert.equal(d.bytes, DETAIL_LIMIT_BYTES);
+});
+
+test('firstLines keeps a text of at most max lines whole, and cuts a longer one after its max-th line', () => {
+  assert.deepEqual(firstLines('', 2), { text: '', cut: false });
+  assert.deepEqual(firstLines('a\nb', 2), { text: 'a\nb', cut: false });
+  assert.deepEqual(firstLines('a\nb\n', 2), { text: 'a\nb\n', cut: false });
+  assert.deepEqual(firstLines('a\nb\nc', 2), { text: 'a\nb', cut: true });
+  assert.deepEqual(firstLines('\n\n\n', 2), { text: '\n', cut: true });
+  // A megabyte of empty lines draws MAX_DETAIL_LINES of them.
+  const lines = firstLines('\n'.repeat(DETAIL_LIMIT_BYTES));
+  assert.equal(lines.cut, true);
+  assert.equal(lines.text.split('\n').length, MAX_DETAIL_LINES);
+  const long = 'x'.repeat(DETAIL_LIMIT_BYTES);
+  assert.deepEqual(firstLines(long), { text: long, cut: false }, 'one long line is not cut: it wraps in one text node');
 });
 
 test('subagent items join across chunks and are capped in number', () => {
@@ -375,12 +407,79 @@ test('a tap on an open detail collapses it, and the next tap loads it afresh', a
 test('a too-large detail collapses with a tap', async () => {
   const h = harness();
   const done = h.actions.toggleDetail(h.key(0), 'input');
-  answer(h.last(), 1, { tooLarge: true });
+  answer(h.last(), 3, { tooLarge: true });
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['result', 0]], 'a too-large input stops itself, not its result');
+  answer(h.last(), 1);
   await done;
   assert.equal(h.t().details[h.key(0)]?.phase, 'tooLarge');
   await h.actions.toggleDetail(h.key(0), 'input');
   assert.equal(h.t().details[h.key(0)]?.cancelled, true);
-  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent.length, 2);
+});
+
+test('a tap while the collapsed request is unanswered waits for it, and takes its reply', async () => {
+  const h = harness();
+  const first = h.actions.toggleDetail(h.key(0), 'input');
+  await h.actions.toggleDetail(h.key(0), 'input');
+  const again = h.actions.toggleDetail(h.key(0), 'input');
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0]], 'one request for the row on the wire');
+  assert.equal(h.t().details[h.key(0)]?.phase, 'loading');
+  answer(h.sent[0]!, 1);
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['result', 0]], 'the reply counted for the new detail');
+  answer(h.last(), 1);
+  await Promise.all([first, again]);
+  const d = h.t().details[h.key(0)]!;
+  assert.equal(d.phase, 'open');
+  assert.deepEqual(d.text, { input: 'input0', result: 'result0' });
+});
+
+test('taps against a laptop that never answers put one request per row on the wire', async () => {
+  const h = harness([tool('t1'), tool('t2')]);
+  const taps: Array<Promise<void>> = [];
+  // 201 taps: 100 open and collapse, and the last one opens.
+  for (let i = 0; i < 201; i += 1) taps.push(h.actions.toggleDetail(h.key(0), 'input'));
+  const other = h.actions.toggleDetail(h.key(1), 'input');
+  await flush();
+  assert.deepEqual(h.sent.map((s) => s.params.itemID), ['t1', 't2'], 'a waiting row holds back no other row');
+  answer(h.sent[0]!, 1);
+  await flush();
+  assert.deepEqual(h.sent.map((s) => [s.params.itemID, s.params.part]), [['t1', 'input'], ['t2', 'input'], ['t1', 'result']]);
+  answer(h.sent[2]!, 1);
+  answer(h.sent[1]!, 1);
+  await flush();
+  answer(h.sent[3]!, 1);
+  await Promise.all([...taps, other]);
+  assert.equal(h.t().details[h.key(0)]?.phase, 'open');
+  assert.equal(h.t().details[h.key(1)]?.phase, 'open');
+  assert.equal(h.sent.length, 4);
+});
+
+test('a tap that asks for another chunk than the request still on the wire waits for it, then asks', async () => {
+  const h = harness();
+  const first = h.actions.toggleDetail(h.key(0), 'input');
+  answer(h.last(), 2);
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['input', 1]]);
+  await h.actions.toggleDetail(h.key(0), 'input');
+  const again = h.actions.toggleDetail(h.key(0), 'input');
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['input', 1]], 'chunk 0 waits for chunk 1 of the collapsed detail');
+  answer(h.last(), 2);
+  await flush();
+  assert.deepEqual(h.asked(), [['input', 0], ['input', 1], ['input', 0]]);
+  assert.deepEqual(h.t().details[h.key(0)]?.text, {}, 'the old reply was not taken');
+  answer(h.last(), 2);
+  await flush();
+  answer(h.last(), 2);
+  await flush();
+  answer(h.last(), 1);
+  await Promise.all([first, again]);
+  const d = h.t().details[h.key(0)]!;
+  assert.equal(d.phase, 'open');
+  assert.deepEqual(d.text, { input: 'input0input1', result: 'result0' });
 });
 
 test('a reply for another item fails the detail as a reply the app cannot read', async () => {

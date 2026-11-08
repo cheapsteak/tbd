@@ -20,6 +20,8 @@
  *   plain lines. See there.
  * - **Nesting stops at `MAX_DEPTH`.** See there.
  * - **A tree holds about `MAX_NODES` nodes at most.** See there.
+ * - **Texts drawn together can share those two caps** through an `MdBudget`, such as a
+ *   subagent's items in one nest, so many texts cost about what one message does. See there.
  *
  * Pure, with no React, so `node --test` loads it.
  */
@@ -79,6 +81,24 @@ export const MAX_DEPTH = 16;
 export const MAX_NODES = 50_000;
 
 /**
+ * What several texts drawn together may still spend between them: characters read as markdown,
+ * and nodes. `mdTree` and `mdInline` take an optional budget, read at most its `markdown`
+ * characters as markdown and stop at about its `nodes` nodes, each also within its own caps
+ * (`MAX_MARKDOWN_LENGTH`, `MAX_NODES`), and take what they spent off it, so the next text gets
+ * what is left. Past the markdown, a text shows as plain lines, and past the nodes, as one text
+ * child holding the rest of its source. A text drawn alone, with no budget, has one message's
+ * caps to itself.
+ *
+ * The markdown matters because the lexer's time can grow with the square of a paragraph's
+ * length: many texts each read in full would each pay up to a message's worth. The nodes matter
+ * because each is an element or text the page lays out.
+ */
+export interface MdBudget {
+  markdown: number;
+  nodes: number;
+}
+
+/**
  * `target` as the normalized URL the loader opens, when it is a link the app offers; otherwise
  * null. It must start with `http://` or `https://` in any case of letters, hold no ASCII control
  * character, space, DEL, C1 control or backslash, parse as an absolute http or https URL with no
@@ -116,46 +136,70 @@ const WEB_PREFIX = /^https?:\/\//i;
 /**
  * `src` as block markdown: paragraphs, lists, quotes, code blocks, headings and rules, with
  * GitHub's extensions and a line break wherever the text has one, as the mock's `md` draws them.
- * Past `MAX_MARKDOWN_LENGTH`, the rest is one more paragraph of plain lines. If the lexer fails
- * anyway, the whole text shows as one paragraph of its lines.
+ * Past `MAX_MARKDOWN_LENGTH`, or what `budget` has left, the rest is one more paragraph of plain
+ * lines. If the lexer fails anyway, the whole text shows as one paragraph of its lines.
  */
-export function mdTree(src: string): MdNode[] {
+export function mdTree(src: string, budget?: MdBudget): MdNode[] {
   const all = src.replace(CRLF, '\n');
-  const [head, rest] = splitForLexing(all);
-  const walk: Walk = { nodes: 0 };
+  const [head, rest] = splitForLexing(all, markdownLimit(budget));
+  const walk = startWalk(budget);
   let tree: MdNode[];
   try {
     tree = blocks(new CappedLexer(lexOptions()).lex(head), 0, walk);
   } catch {
-    const plain: Walk = { nodes: 0 };
-    return [count(plain, { t: 'p', children: lines(all, plain) })];
+    const plain = startWalk(budget);
+    const out = [count(plain, { t: 'p' as const, children: lines(all, plain) })];
+    spend(budget, head.length, plain);
+    return out;
   }
   const tail = trimBreaks(rest.replace(/^\n+/, ''));
   if (tail !== '') tree.push(count(walk, { t: 'p', children: lines(tail, walk) }));
+  spend(budget, head.length, walk);
   return tree;
 }
 
 /**
  * `src` as one run of inline markdown, as the mock's `inline` draws a message: code, emphasis,
  * links and line breaks, but no paragraphs, lists or other blocks, whose markers show as typed.
- * Past `MAX_MARKDOWN_LENGTH`, the rest shows as plain lines. If the lexer fails anyway, the whole
- * text shows as its lines.
+ * Past `MAX_MARKDOWN_LENGTH`, or what `budget` has left, the rest shows as plain lines. If the
+ * lexer fails anyway, the whole text shows as its lines.
  */
-export function mdInline(src: string): MdNode[] {
+export function mdInline(src: string, budget?: MdBudget): MdNode[] {
   const all = src.replace(CRLF, '\n');
-  const [prefix, rest] = splitForLexing(all);
+  const [prefix, rest] = splitForLexing(all, markdownLimit(budget));
   // A cut after line breaks: the lexer draws none at the end of its text, so they are drawn here.
   const cut = rest === '' ? { start: prefix.length, breaks: 0 } : trailingBreaks(prefix);
-  const walk: Walk = { nodes: 0 };
+  const walk = startWalk(budget);
   let tree: MdNode[];
   try {
     tree = inlines(new CappedLexer(lexOptions()).inlineTokens(prefix.slice(0, cut.start)), 0, false, walk);
   } catch {
-    return lines(all, { nodes: 0 });
+    const plain = startWalk(budget);
+    const out = lines(all, plain);
+    spend(budget, prefix.length, plain);
+    return out;
   }
   for (let i = 0; i < cut.breaks; i += 1) tree.push(count(walk, { t: 'br' }));
   for (const node of lines(trimBreaks(rest), walk)) tree.push(node);
+  spend(budget, prefix.length, walk);
   return tree;
+}
+
+/** The most characters a text reads as markdown: `MAX_MARKDOWN_LENGTH`, or less when `budget` has less left. */
+function markdownLimit(budget: MdBudget | undefined): number {
+  return budget === undefined ? MAX_MARKDOWN_LENGTH : Math.max(0, Math.min(MAX_MARKDOWN_LENGTH, budget.markdown));
+}
+
+/** A walk that stops at `MAX_NODES` nodes, or at what `budget` has left. */
+function startWalk(budget: MdBudget | undefined): Walk {
+  return { nodes: 0, max: budget === undefined ? MAX_NODES : Math.max(0, Math.min(MAX_NODES, budget.nodes)) };
+}
+
+/** Takes `read` characters of markdown and the walk's nodes off `budget`. */
+function spend(budget: MdBudget | undefined, read: number, walk: Walk): void {
+  if (budget === undefined) return;
+  budget.markdown -= read;
+  budget.nodes -= walk.nodes;
 }
 
 /**
@@ -177,11 +221,11 @@ function trailingBreaks(value: string): { start: number; breaks: number } {
 
 /**
  * `text` split into the part read as markdown and the rest, which shows as plain lines: the
- * whole text and nothing when it fits `MAX_MARKDOWN_LENGTH`.
+ * whole text and nothing when it fits `limit` characters, at most `MAX_MARKDOWN_LENGTH`.
  */
-function splitForLexing(text: string): [head: string, rest: string] {
-  if (text.length <= MAX_MARKDOWN_LENGTH) return [text, ''];
-  const cut = cutPoint(text.slice(0, MAX_MARKDOWN_LENGTH));
+function splitForLexing(text: string, limit: number): [head: string, rest: string] {
+  if (text.length <= limit) return [text, ''];
+  const cut = cutPoint(text.slice(0, limit));
   return [text.slice(0, cut), text.slice(cut)];
 }
 
@@ -268,9 +312,10 @@ class CappedLexer extends Lexer {
   }
 }
 
-/** How many nodes the tree being built holds so far. */
+/** How many nodes the tree being built holds so far, and about the most it may hold. */
 interface Walk {
   nodes: number;
+  max: number;
 }
 
 /** `node`, counted. Every node is made through this or `text`. */
@@ -295,13 +340,13 @@ function kids(token: Token): Token[] | null {
 }
 
 /**
- * `rule` applied to each token in turn, until the tree holds `MAX_NODES` nodes. Then the rest of
+ * `rule` applied to each token in turn, until the tree holds `walk.max` nodes. Then the rest of
  * the tokens show as one text child holding their source.
  */
 function each(tokens: readonly Token[], walk: Walk, rule: (token: Token) => MdNode[]): MdNode[] {
   const out: MdNode[] = [];
   for (let i = 0; i < tokens.length; i += 1) {
-    if (walk.nodes >= MAX_NODES) {
+    if (walk.nodes >= walk.max) {
       out.push(text(walk, tokens.slice(i).map((t) => (typeof t.raw === 'string' ? t.raw : '')).join('')));
       break;
     }
@@ -323,7 +368,7 @@ function lines(value: string, walk: Walk): MdNode[] {
   const out: MdNode[] = [];
   let start = 0;
   while (start <= value.length) {
-    if (walk.nodes >= MAX_NODES) {
+    if (walk.nodes >= walk.max) {
       if (start < value.length) out.push(text(walk, value.slice(start)));
       break;
     }

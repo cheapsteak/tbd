@@ -7,15 +7,19 @@
  * `inline` draws the text as one run with no blocks, the way the mock draws your messages and
  * messages from other sessions (its `inline`). Otherwise it draws blocks, the way the mock draws
  * assistant text (its `md`): app.css spaces paragraphs and lists only inside `.say`.
+ *
+ * `nodes`, when given, is the text's markdown read ahead, and is drawn in place of reading
+ * `text` again: a subagent's nest reads all its items under one budget (`transcript/nest.ts`).
  */
 
 import { useMemo, type CSSProperties, type JSX, type KeyboardEvent, type ReactNode } from 'react';
 import { useActions } from '../state/context.tsx';
 import { mdInline, mdTree, type MdNode } from './mdTree.ts';
 
-export function Markdown(p: { text: string; inline?: boolean }): JSX.Element {
+export function Markdown(p: { text: string; inline?: boolean; nodes?: readonly MdNode[] | null }): JSX.Element {
   const inline = p.inline === true;
-  const nodes = useMemo(() => (inline ? mdInline(p.text) : mdTree(p.text)), [p.text, inline]);
+  const given = p.nodes ?? null;
+  const nodes = useMemo(() => given ?? (inline ? mdInline(p.text) : mdTree(p.text)), [given, p.text, inline]);
   return <>{draw(nodes)}</>;
 }
 

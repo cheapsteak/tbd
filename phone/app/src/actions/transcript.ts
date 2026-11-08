@@ -32,8 +32,9 @@
 
 import { AppError, BAD_REPLY_TEXT, newRequestID } from '../client/client.ts';
 import type {
-  PhoneSessionRef, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult, TranscriptPage,
+  PhoneSessionRef, TranscriptDetailParams, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult, TranscriptPage,
 } from '../protocol/types.ts';
+import { sameRef } from '../protocol/wire.ts';
 import { addChunk, askOf, cancelDetail, detailParts, failDetail, isOpen, startDetail } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
 import { applyPage, beginOpen, beginResume, emptyTranscript, prependPage } from '../state/transcript.ts';
@@ -46,6 +47,15 @@ function isSuperseded(error: unknown): boolean {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** How one `transcript.detail` request settled. */
+type ReadOutcome = { ok: true; result: TranscriptDetailResult } | { ok: false; error: unknown };
+
+/** A `transcript.detail` request on the wire for one row: what it asked, and how it settles. */
+interface DetailRead {
+  params: TranscriptDetailParams;
+  settled: Promise<ReadOutcome>;
 }
 
 /** The slice an open's reply leaves: its page in place of the rows, or the rows kept when it resumed. */
@@ -123,6 +133,41 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     ctx.client.request('transcript.close', {}).then(answered, (error: unknown) => {
       if (!isSuperseded(error)) answered();
     });
+  }
+
+  /**
+   * The `transcript.detail` request each row has on the wire, by row key, until it settles. A
+   * request cannot be taken back, so a collapse leaves its row's request running, and the next
+   * tap on that row waits for it (`readDetail`).
+   */
+  const reads = new Map<number, DetailRead>();
+
+  /**
+   * The outcome of asking `params` for row `rowKey`, with at most one request on the wire per
+   * row. While an earlier request for the row is unanswered, as after a tap, a collapse and a
+   * tap, it waits for that one to settle: its outcome is the answer when it asked the same, and
+   * otherwise this asks once it is gone. So a laptop that never answers holds one request per
+   * row, however often the row is tapped, and the client's 32 slots stay free for the rest.
+   * Null when `wanted` turns false while it waits: the detail was collapsed or replaced, and
+   * nothing is asked for it.
+   */
+  async function readDetail(rowKey: number, params: TranscriptDetailParams, wanted: () => boolean): Promise<ReadOutcome | null> {
+    for (let prior = reads.get(rowKey); prior !== undefined; prior = reads.get(rowKey)) {
+      const outcome = await prior.settled;
+      if (!wanted()) return null;
+      if (sameRead(prior.params, params)) return outcome;
+    }
+    const settled = ctx.client.request('transcript.detail', params).then(
+      (result): ReadOutcome => ({ ok: true, result }),
+      (error: unknown): ReadOutcome => ({ ok: false, error }),
+    );
+    const read: DetailRead = { params, settled };
+    reads.set(rowKey, read);
+    // Registered first, so it runs before anyone awaiting `settled` looks at `reads` again.
+    void settled.then(() => {
+      if (reads.get(rowKey) === read) reads.delete(rowKey);
+    });
+    return settled;
   }
 
   /** Whether the slice still holds `d` as row `rowKey`'s detail, in an open transcript. */
@@ -227,6 +272,10 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
      * details, because it keeps the rows: `transcript.detail` is a read, which the client sends
      * again after a dropped channel, so its reply still comes and the load carries on.
      *
+     * A row has at most one request on the wire (`readDetail`): a tap while the request of a
+     * collapsed detail of the row is unanswered waits for it, and takes its reply when it asked
+     * for the same first chunk.
+     *
      * A reply for another item ID than the one asked for fails the detail with `BAD_REPLY_TEXT`.
      * An error fails it with the error's message: `not_found`, "That detail is not in the
      * transcript.", is the usual one, since the laptop keeps the place of its last 8,192 items
@@ -248,16 +297,15 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
       setTranscript((s) => ({ ...s, details: { ...s.details, [rowKey]: d } }));
       for (;;) {
         const ask = askOf(d);
-        let result: TranscriptDetailResult;
-        try {
-          result = await ctx.client.request('transcript.detail', { session, itemID, part: ask.part, chunk: ask.chunk });
-        } catch (error) {
-          if (!stillAsked(rowKey, d)) return;
-          if (isSuperseded(error)) dropDetail(rowKey, d);
-          else putDetail(rowKey, d, failDetail(d, messageOf(error)));
+        const asked = d;
+        const outcome = await readDetail(rowKey, { session, itemID, part: ask.part, chunk: ask.chunk }, () => stillAsked(rowKey, asked));
+        if (outcome === null || !stillAsked(rowKey, d)) return;
+        if (!outcome.ok) {
+          if (isSuperseded(outcome.error)) dropDetail(rowKey, d);
+          else putDetail(rowKey, d, failDetail(d, messageOf(outcome.error)));
           return;
         }
-        if (!stillAsked(rowKey, d)) return;
+        const { result } = outcome;
         const step = result.itemID === itemID ? addChunk(d, result) : { next: failDetail(d, BAD_REPLY_TEXT), ask: null };
         putDetail(rowKey, d, step.next);
         if (step.ask === null) return;
@@ -265,4 +313,9 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
       }
     },
   };
+}
+
+/** Whether two detail requests ask the same: one session, item, part and chunk. */
+function sameRead(a: TranscriptDetailParams, b: TranscriptDetailParams): boolean {
+  return sameRef(a.session, b.session) && a.itemID === b.itemID && a.part === b.part && a.chunk === b.chunk;
 }

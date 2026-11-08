@@ -19,17 +19,21 @@
  *   `BAD_REPLY_TEXT`, so it needs no copy of its own. The action checks `itemID` the same way.
  * - **`chunkCount` is read from a part's first reply** and capped at `MAX_DETAIL_CHUNKS`, the
  *   most an honest laptop sends for a part within the 1 MB limit. Past it, the part is too
- *   large: the phone keeps the first chunk and asks for nothing more.
+ *   large: the phone keeps the first chunk and asks for no more of that part.
  * - **What the phone holds is capped, whatever the laptop says.** Once a text part passes
  *   `DETAIL_LIMIT_BYTES` in UTF-8, or a subagent's items pass it as JSON in UTF-8, or pass
  *   `MAX_SUBAGENT_ITEMS` in number, the detail is too large. The part holds at most the limit
  *   and one chunk, and one chunk fits one frame.
  * - **`totalBytes` is never read.** The phone counts what arrived.
  *
- * **Endings.** `tooLarge`, from the laptop or from the caps above, keeps what arrived and asks
- * for nothing more, of that part or any later one. An error fails the detail with its message,
- * keeping what arrived. A collapse (`cancelDetail`) drops what arrived, and `addChunk` drops
- * every later reply.
+ * **Endings.** A part too large, by the laptop's `tooLarge` or by the caps above, keeps what
+ * arrived of it and asks for no more of it, and the detail goes on to its next part, as a tool's
+ * result after an input too large. It is named in `largeParts`, and the detail ends `tooLarge`
+ * rather than `open`. An error fails the detail with its message, keeping what arrived. A
+ * collapse (`cancelDetail`) drops what arrived, and `addChunk` drops every later reply.
+ *
+ * **Drawing.** A part of 1 MB can still be a million short lines, a page far taller than a phone
+ * lays out well, so the pane draws at most `MAX_DETAIL_LINES` lines of a part (`firstLines`).
  *
  * Every function is pure and returns a new object when it changes anything.
  */
@@ -58,6 +62,15 @@ export const DETAIL_CHUNK_BYTES = 60_000;
 export const MAX_DETAIL_CHUNKS = Math.floor(DETAIL_LIMIT_BYTES / Math.ceil((DETAIL_CHUNK_BYTES - 5) / 6)) + 1;
 
 /**
+ * The most lines the pane draws of one text part: 20,000. Past them it shows "Too large for the
+ * phone. Open on the laptop." A 1 MB text with no line break wraps to about 22,000 lines at a
+ * phone's width (about 48 characters of the pane's mono text a line), so the cap holds a part of
+ * short lines to about the height any 1 MB part takes, where a megabyte of line breaks alone
+ * would draw a million.
+ */
+export const MAX_DETAIL_LINES = 20_000;
+
+/**
  * The most subagent items the phone holds for one detail. They draw in one row of the list, so
  * the cap bounds that row too. A subagent with more shows its first ones and "Too large for the
  * phone. Open on the laptop."
@@ -79,6 +92,8 @@ export interface DetailState {
   items: readonly PhoneItem[];
   /** The UTF-8 bytes the part loading now holds: its text, or its items as JSON. */
   bytes: number;
+  /** The parts that were too large for the phone, each keeping what arrived of it. */
+  largeParts: readonly TranscriptDetailPart[];
   phase: 'loading' | 'open' | 'tooLarge' | 'failed';
   /** True once the reader collapsed the row: later results are dropped. */
   cancelled: boolean;
@@ -105,7 +120,9 @@ export function detailParts(part: TranscriptDetailPart, item: PhoneItem): readon
 
 /** A detail about to ask for chunk 0 of `parts[0]`. `parts` must not be empty. */
 export function startDetail(parts: readonly TranscriptDetailPart[]): DetailState {
-  return { parts, partIndex: 0, chunk: 0, chunkCount: 0, text: {}, items: [], bytes: 0, phase: 'loading', cancelled: false, error: null };
+  return {
+    parts, partIndex: 0, chunk: 0, chunkCount: 0, text: {}, items: [], bytes: 0, largeParts: [], phase: 'loading', cancelled: false, error: null,
+  };
 }
 
 /** The request `d` waits on: the part loading now, and the chunk asked for last. */
@@ -143,16 +160,30 @@ export function addChunk(d: DetailState, r: TranscriptDetailResult): { next: Det
     over = bytes > DETAIL_LIMIT_BYTES;
   }
 
-  if (r.tooLarge || over || chunkCount > MAX_DETAIL_CHUNKS) return { next: { ...next, phase: 'tooLarge' }, ask: null };
-  if (d.chunk + 1 < chunkCount) {
+  const large = r.tooLarge || over || chunkCount > MAX_DETAIL_CHUNKS;
+  if (!large && d.chunk + 1 < chunkCount) {
     const ask = { part, chunk: d.chunk + 1 };
     return { next: { ...next, chunk: ask.chunk }, ask };
   }
+  const largeParts = large ? [...d.largeParts, part] : d.largeParts;
   if (d.partIndex + 1 < d.parts.length) {
     const ask = { part: d.parts[d.partIndex + 1]!, chunk: 0 };
-    return { next: { ...next, partIndex: d.partIndex + 1, chunk: 0, chunkCount: 0, bytes: 0 }, ask };
+    return { next: { ...next, largeParts, partIndex: d.partIndex + 1, chunk: 0, chunkCount: 0, bytes: 0 }, ask };
   }
-  return { next: { ...next, phase: 'open' }, ask: null };
+  return { next: { ...next, largeParts, phase: largeParts.length > 0 ? 'tooLarge' : 'open' }, ask: null };
+}
+
+/**
+ * `text`'s first `max` lines, without the line break that ends the last of them, and whether
+ * any line was left out. A text of `max` lines or fewer comes back whole.
+ */
+export function firstLines(text: string, max = MAX_DETAIL_LINES): { text: string; cut: boolean } {
+  let end = -1;
+  for (let line = 0; line < max; line += 1) {
+    end = text.indexOf('\n', end + 1);
+    if (end === -1) return { text, cut: false };
+  }
+  return end + 1 >= text.length ? { text, cut: false } : { text: text.slice(0, end), cut: true };
 }
 
 /** `d` failed with `message`, keeping what arrived. A cancelled detail stays as it is. */

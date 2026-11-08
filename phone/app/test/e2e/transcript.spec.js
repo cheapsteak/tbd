@@ -252,3 +252,133 @@ test('collapsing while the chunks load asks for no more of them', async ({ page,
     [BASH_ID, 'input', 0], [BASH_ID, 'input', 0], [BASH_ID, 'input', 1], [BASH_ID, 'input', 2], [BASH_ID, 'result', 0],
   ]);
 });
+
+test('a tap while the collapsed request is unanswered sends no second request, and takes its reply', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  const { tx, bash } = await openLogin(page);
+  await hostCall(page, 'hold', 'transcript.detail');
+  await bash.click();
+  await expect.poll(() => detailRequests(page)).toEqual([[BASH_ID, 'input', 0]]);
+  await bash.click();
+  await expect(bash).toHaveAttribute('aria-expanded', 'false');
+  await bash.click();
+  await expect(bash).toHaveAttribute('aria-expanded', 'true');
+  await expect(tx.locator('.detail .loading')).toHaveText('Loading from the laptop…');
+  // An event behind the taps on the same channel: once its row shows, every request the taps
+  // made has reached the laptop.
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF, items: [{ id: 'x-taps', kind: 'assistant', text: 'Here after the taps.', truncated: false }],
+  });
+  await expect(tx.locator('.say', { hasText: 'Here after the taps.' })).toBeVisible();
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0]]);
+
+  await hostCall(page, 'release', 'transcript.detail');
+  await expect(tx.locator('.detail pre')).toHaveText([MOCK.details[BASH_ID].input, MOCK.details[BASH_ID].result]);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0]]);
+});
+
+test('a tool input over 1 MB says so under the input, and its result still loads', async ({ page, appHost }) => {
+  const line = 'file_path: src/auth/redirect.ts\n';
+  const input = line.repeat(Math.ceil(1_100_000 / line.length));
+  await openApp(page, appHost, { scenario: withBashPart('input', input) });
+  const { tx, bash } = await openLogin(page);
+  await bash.click();
+  const detail = tx.locator('.detail');
+  await expect(detail.locator('pre')).toHaveCount(2);
+  expect(await detail.locator('.dl, pre, .toobig').evaluateAll((els) => els.map((el) => el.className || el.tagName))).toEqual(
+    ['dl', 'PRE', 'toobig', 'dl', 'PRE'],
+  );
+  await expect(detail.locator('.toobig')).toHaveText(TOO_LARGE);
+  await expect(detail.locator('pre').nth(1)).toHaveText(MOCK.details[BASH_ID].result);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0]]);
+});
+
+test('a tool part of many lines draws its first 20,000 and says the rest is too large', async ({ page, appHost }) => {
+  // 40,000 empty lines are 80,000 escaped bytes: two chunks, well under 1 MB.
+  await openApp(page, appHost, { scenario: withBashPart('result', '\n'.repeat(40_000)) });
+  const { tx, bash } = await openLogin(page);
+  await bash.click();
+  const detail = tx.locator('.detail');
+  await expect(detail.locator('.toobig')).toHaveText(TOO_LARGE);
+  const shown = await detail.locator('pre').nth(1).evaluate((el) => el.textContent ?? '');
+  expect(shown.split('\n')).toHaveLength(20_000);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0], [BASH_ID, 'result', 1]]);
+});
+
+/**
+ * Every DOM node under the transcript's `.nest`, elements and text alike.
+ * @param {import('@playwright/test').Locator} tx
+ */
+function nestNodes(tx) {
+  return tx.evaluate((el) => {
+    const nest = el.querySelector('.nest');
+    if (nest === null) return 0;
+    const walker = document.createTreeWalker(nest, NodeFilter.SHOW_ALL);
+    let n = 0;
+    while (walker.nextNode()) n += 1;
+    return n;
+  });
+}
+
+// One message's nodes (`NEST_NODES`, 50,000) and a few for the rows' own elements.
+const NEST_DOM_BOUND = 51_000;
+
+for (const [name, c] of Object.entries({
+  'messages of short lines': { kind: 'assistant', text: 'a\n'.repeat(2_048), perChunk: 9, chunks: 19 },
+  'a table of stars': { kind: 'user', text: `|a|\n|-|\n${'|*a|\n'.repeat(1_225)}`, perChunk: 8, chunks: 18 },
+})) {
+  test(`a hostile subagent nest of ${name} draws at most ${NEST_DOM_BOUND} nodes, and says it is too large`, async ({ page, appHost }) => {
+    await openApp(page, appHost);
+    await openSessionByName(page, 'Login redirect fix');
+    await page.evaluate((c) => {
+      /** @type {any} */ (window).__host.setReply('transcript.detail', (/** @type {any} */ params) => {
+        const items = Array.from({ length: c.perChunk }, (_, i) => ({ id: `n${params.chunk}-${i}`, kind: c.kind, text: c.text, truncated: false }));
+        return { result: { itemID: params.itemID, part: params.part, chunk: params.chunk, chunkCount: c.chunks, totalBytes: 0, tooLarge: false, items } };
+      });
+    }, c);
+    const tx = app(page).locator('.tx');
+    const agent = tx.locator('button.tool', { hasText: 'Explore agent' });
+    await agent.click();
+    await expect(tx.locator('.detail .toobig')).toHaveText(TOO_LARGE);
+    const nodes = await nestNodes(tx);
+    expect(nodes).toBeGreaterThan(1_000);
+    expect(nodes).toBeLessThanOrEqual(NEST_DOM_BOUND);
+    expect(await detailRequests(page)).toHaveLength(c.chunks);
+    // And the row still answers a tap.
+    await agent.click();
+    await expect(tx.locator('.nest')).toHaveCount(0);
+  });
+}
+
+test('nested subagents and truncated messages draw, and never open or ask the laptop', async ({ page, appHost }) => {
+  const scenario = structuredClone(MOCK);
+  scenario.details['login-3'].subagent.push(
+    { id: 'login-3-4', kind: 'subagent', truncated: false, agentType: 'Plan', target: 'redirect fix', itemCount: 1 },
+    { id: 'login-3-5', kind: 'assistant', text: 'The redirect check needs a test for', truncated: true },
+  );
+  // The laptop would answer both, so a nested row that asked would draw what it got.
+  scenario.details['login-3-4'] = { subagent: [{ id: 'login-3-4-1', kind: 'assistant', text: 'Nested two deep.', truncated: false }] };
+  scenario.details['login-3-5'] = { text: 'The redirect check needs a test for each rule it applies.' };
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await tx.locator('button.tool', { hasText: 'Explore agent' }).click();
+  const nest = tx.locator('.nest');
+  await expect(nest.locator('.tool b')).toHaveText(['Grep', 'Read', 'Plan agent']);
+  await expect(nest.locator('.tool .cnt')).toHaveText('1 items');
+  await expect(nest.locator('.say')).toHaveText([
+    'finishLogin in src/auth/redirect.ts receives next but never uses it.', 'The redirect check needs a test for',
+  ]);
+  await expect(nest.locator('button, [aria-expanded], .morebtn, .tri, .nest, .detail')).toHaveCount(0);
+
+  await nest.locator('.tool', { hasText: 'Plan agent' }).click();
+  await nest.locator('.say').last().click();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF, items: [{ id: 'x-nested', kind: 'assistant', text: 'Here after the nested taps.', truncated: false }],
+  });
+  await expect(tx.locator('.say', { hasText: 'Here after the nested taps.' })).toBeVisible();
+  await expect(tx.locator('.nest .nest, .nest .detail')).toHaveCount(0);
+  await expect(tx).not.toContainText('Nested two deep.');
+  await expect(tx).not.toContainText('each rule it applies');
+  expect(await detailRequests(page)).toEqual([['login-3', 'subagent', 0]]);
+});

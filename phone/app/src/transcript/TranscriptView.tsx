@@ -14,16 +14,18 @@
  *   (`data-row` is not used: the e2e fixtures' `rowButtons` matches `button[data-row]`.)
  */
 
-import type { JSX } from 'react';
+import { useCallback, type JSX } from 'react';
 import { useActions, useAppState } from '../state/context.tsx';
 import type { PhoneSession } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
 import { Icon } from '../ui/Icon.tsx';
-import { ItemRow } from './ItemRow.tsx';
+import { ItemRow, type RowPart } from './ItemRow.tsx';
 
 export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
   const actions = useActions();
   const t = useAppState((s) => s.transcript);
+  // One function for every row on every render, so a row draws again only when it changes.
+  const toggle = useCallback((rowKey: number, part: RowPart) => void actions.toggleDetail(rowKey, part), [actions]);
   const { available, reason } = p.session.capabilities.transcript;
   if (!available) return <Note text={reason ?? ''} />;
   if (t.phase === 'failed') return <Note text={t.error ?? ''} />;
@@ -33,7 +35,7 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
       <div className="tx" id="tx" aria-live="polite">
         {rows.map((row) => (
           <div key={row.key} data-key={row.key} data-tx-row="" style={ROW_STYLE}>
-            <ItemRow row={row} detail={t.details[row.key]} toggle={(part) => void actions.toggleDetail(row.key, part)} />
+            <ItemRow row={row} detail={t.details[row.key]} toggle={toggle} />
           </div>
         ))}
       </div>
