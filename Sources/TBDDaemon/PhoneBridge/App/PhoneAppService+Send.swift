@@ -26,6 +26,10 @@ enum PhoneSendPurpose: Sendable {
 extension PhoneAppService {
     static let emptyMessageReason = "Write a message first."
     static let messageTooLongReason = "That message is too long to send from a phone."
+    /// A message over `PhoneAppConstants.firstPromptMaxBytes` that would
+    /// start a session on the tmux transport.
+    static let firstMessageTooLongReason =
+        "That message is too long to start the session with. Shorten it, or open the session on the laptop first."
     /// The sessions list says the same when it marks `send` unavailable.
     static let cannotTakeMessagesReason = PhoneSessionStatus.cannotTakeMessagesReason
     static let alreadyRunningReason =
@@ -128,7 +132,9 @@ extension PhoneAppService {
     /// - **not running** (parked or exited): `phoneWake` with the text as the
     ///   wake's prompt. `woken` when the wake respawned the session; a wake
     ///   that found it running delivered nothing, so it is `refused` and the
-    ///   phone is asked to send again.
+    ///   phone is asked to send again. On the tmux transport, text over
+    ///   `PhoneAppConstants.firstPromptMaxBytes` is `bad_request`
+    ///   (`firstMessageTooLongReason`) before anything is woken.
     ///
     /// **`woken` means the wake respawned the session with the message as its
     /// first prompt, and no more.** It does not confirm that Claude received
@@ -137,9 +143,10 @@ extension PhoneAppService {
     /// that cannot resume exits with the prompt lost while the respawn still
     /// succeeds, and the phone does not wait. On the tmux transport the
     /// prompt rides the respawn command, which tmux refuses past about 16 KB
-    /// with "command too long", so a longer wake message fails the respawn
-    /// and comes back `refused` with that reason, although
-    /// `PhoneAppConstants.messageMaxBytes` lets it through.
+    /// with "command too long", so the wake path holds it to
+    /// `PhoneAppConstants.firstPromptMaxBytes`. A session keeps the
+    /// transport it was born on, so the terminal row says which one the wake
+    /// respawns onto; a pty-holder session takes up to `messageMaxBytes`.
     ///
     /// **A remote session** needs the capability `purpose` names, as the
     /// sessions list shows it (`PhoneSessionStatus.remoteCapabilities`), or
@@ -186,6 +193,9 @@ extension PhoneAppService {
             guard response.success else { throw Self.refusal(response.error) }
             return ActionOutcomeResult(outcome: "sent")
         case .notRunning:
+            guard terminal.transport == .holder || text.utf8.count <= PhoneAppConstants.firstPromptMaxBytes else {
+                throw PhoneAppError(code: .badRequest, message: Self.firstMessageTooLongReason)
+            }
             try Task.checkCancellation()
             let response = try await actions.phoneWake(
                 TerminalWakeParams(terminalID: terminalID, prompt: text), deviceID: deviceID)

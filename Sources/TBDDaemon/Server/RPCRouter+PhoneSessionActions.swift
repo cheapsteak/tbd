@@ -100,6 +100,11 @@ extension RPCRouter: PhoneSessionActions {
         }
     }
 
+    func phoneSpawnsOnHolder() async -> Bool {
+        let config = try? await db.config.get()
+        return TerminalSpawnTransport.decide(config: config, registry: holderRegistry).isHolder
+    }
+
     func phoneRemoteProviders() async throws -> RPCResponse {
         try await handleRemoteProviders()
     }

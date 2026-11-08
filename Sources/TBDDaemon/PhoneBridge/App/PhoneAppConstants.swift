@@ -54,6 +54,19 @@ enum PhoneAppConstants {
     /// may type into a session. A frame already bounds a request near 64 KB;
     /// this makes the limit explicit, so it holds whatever carries the text.
     static let messageMaxBytes = 262_144
+    /// The most UTF-8 bytes of a phone message that starts a session on the
+    /// tmux transport: a phone `worktree.create`'s first message, or a
+    /// message that wakes a parked tmux session. Such a message rides the
+    /// spawn command, and tmux packs the whole command into one client
+    /// message of about 16 KB and refuses a longer one with "command too
+    /// long" (on tmux 3.6a a 16,013-byte command was accepted and a
+    /// 17,013-byte one refused). 12,000 leaves about 4 KB for the rest of the
+    /// command: the agent's flags and environment, and the shell quoting of
+    /// the message. A pty-holder spawn hands its command to the holder
+    /// through a socket and execs it with argv, bounded by `ARG_MAX` (1 MiB
+    /// on macOS) rather than by tmux, so it takes up to `messageMaxBytes`,
+    /// as a running session does.
+    static let firstPromptMaxBytes = 12_000
     /// The most rows one `sessions.subscribe` snapshot carries.
     static let snapshotMaxRows = 1_000
     /// The most items one first page carries.

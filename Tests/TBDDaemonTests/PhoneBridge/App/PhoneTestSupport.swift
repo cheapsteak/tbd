@@ -62,8 +62,17 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     private var responses: [Method: RPCResponse] = [:]
     private var handlers: [Method: Handler] = [:]
     private var gates: [Method: PhoneTestGate] = [:]
+    private var holderSpawns = true
 
     init() {}
+
+    /// What `phoneSpawnsOnHolder` answers: true, the shipped default, unless
+    /// a test puts new sessions on tmux. Not recorded in `calls`, since it
+    /// acts on nothing.
+    var spawnsOnHolder: Bool {
+        get { lock.withLock { holderSpawns } }
+        set { lock.withLock { holderSpawns = newValue } }
+    }
 
     var calls: [Call] { lock.withLock { log.calls } }
     var answers: [PromptAnswerParams] { lock.withLock { log.answers } }
@@ -149,6 +158,10 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
 
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
         record(.createWorktree, deviceID: deviceID) { $0.worktreeCreates.append(p) }
+    }
+
+    func phoneSpawnsOnHolder() async -> Bool {
+        spawnsOnHolder
     }
 
     func phoneRemoteProviders() async throws -> RPCResponse {
@@ -459,9 +472,12 @@ struct PhoneServiceHarness: Sendable {
     /// A terminal of `kind` in a new worktree of a new repo: a local
     /// worktree, or with `inRemoteLane` a remote lane's row, whose location
     /// is a provider's session. A Claude terminal has a Claude session ID, so
-    /// it can be parked. `profileID` is the terminal's model profile.
+    /// it can be parked. `profileID` is the terminal's model profile, and
+    /// `transport` the one it was born on; a holder row has empty tmux IDs,
+    /// as it does when TBD makes one.
     func seedTerminal(
-        kind: TerminalKind = .claude, inRemoteLane: Bool = false, profileID: UUID? = nil
+        kind: TerminalKind = .claude, inRemoteLane: Bool = false, profileID: UUID? = nil,
+        transport: TerminalTransport = .tmux
     ) async throws -> TBDShared.Terminal {
         let repo = try await db.repos.create(
             path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
@@ -475,9 +491,11 @@ struct PhoneServiceHarness: Sendable {
                 repoID: repo.id, name: "acme-one", displayName: "Acme one", branch: "acme-one",
                 path: "/acme/widgets-one-\(UUID().uuidString)", tmuxServer: "tbd-acme").id
         }
+        let onHolder = transport == .holder
         return try await db.terminals.create(
-            worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            claudeSessionID: kind == .claude ? "acme-session" : nil, profileID: profileID, kind: kind)
+            worktreeID: worktreeID, tmuxWindowID: onHolder ? "" : "@1", tmuxPaneID: onHolder ? "" : "%1",
+            claudeSessionID: kind == .claude ? "acme-session" : nil, profileID: profileID, kind: kind,
+            transport: transport)
     }
 
     /// Parks `terminalID` as the idle sweep does.

@@ -91,6 +91,65 @@ struct PhoneSendTests {
         #expect(h.actions.calls == [FakeSessionActions.Call(method: .wake, deviceID: h.peer.deviceID)])
     }
 
+    /// A message over `firstPromptMaxBytes` would ride a tmux respawn
+    /// command, so it wakes no parked tmux session and is `bad_request`;
+    /// exactly that many wakes it.
+    @Test func aWakeMessageTooLongForTmuxIsABadRequest() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal()
+        try await h.park(terminal.id)
+        h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
+        let outbox = await h.connect()
+        let longest = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes)
+
+        let (over, _) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), longest + "a"), on: outbox)
+        #expect(over.error == PhoneAppError(code: .badRequest, message: PhoneAppService.firstMessageTooLongReason))
+        #expect(h.actions.calls.isEmpty)
+
+        let (atCap, bytes) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), longest), on: outbox)
+        #expect(atCap.error == nil)
+        #expect(try Self.outcome(bytes) == "woken")
+        let prompts = h.actions.wakes.map(\.prompt)
+        #expect(prompts == [longest])
+    }
+
+    /// A parked pty-holder session respawns through no tmux command, so a
+    /// message over `firstPromptMaxBytes` wakes it.
+    @Test func aLongWakeMessageWakesAHolderSession() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal(transport: .holder)
+        try await h.park(terminal.id)
+        h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
+        let outbox = await h.connect()
+        let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes + 1)
+
+        let (reply, bytes) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), message), on: outbox)
+
+        #expect(reply.error == nil)
+        #expect(try Self.outcome(bytes) == "woken")
+        let prompts = h.actions.wakes.map(\.prompt)
+        #expect(prompts == [message])
+    }
+
+    /// A running session takes a message up to `messageMaxBytes`, past the
+    /// first-message cap, on tmux.
+    @Test func aRunningTmuxSessionTakesAMessageOverTheFirstMessageCap() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal()
+        let outbox = await h.connect()
+        let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes + 1)
+
+        let (reply, _) = try await h.request(
+            .messageSend, params: Self.message(.local(terminalID: terminal.id), message), on: outbox)
+
+        #expect(reply.error == nil)
+        let sends = h.actions.sends.map(SendShape.init)
+        #expect(sends == [Self.composerSend(terminal.id, message)])
+    }
+
     @Test func aWakeThatFindsItRunningIsRefused() async throws {
         let h = try await PhoneServiceHarness.make()
         let terminal = try await h.seedTerminal()

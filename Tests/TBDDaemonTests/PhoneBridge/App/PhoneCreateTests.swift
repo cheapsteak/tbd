@@ -291,6 +291,49 @@ struct PhoneCreateTests {
         #expect(h.actions.worktreeCreates.isEmpty)
     }
 
+    /// A first message over `firstPromptMaxBytes` is `bad_request` when the
+    /// new session would spawn on tmux, and creates nothing; on the
+    /// pty-holder transport the same message creates the worktree with it.
+    @Test func aFirstMessageTooLongForTmuxIsABadRequestOnlyOnTmux() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
+        _ = try await Self.seedTab(h, in: worktree, kind: .claude)
+        let outbox = await h.connect()
+        let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes + 1)
+        let params = PhoneWorktreeCreateParams(repoID: repo.id, message: message)
+
+        h.actions.spawnsOnHolder = false
+        let (onTmux, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
+        #expect(onTmux.error == PhoneAppError(code: .badRequest, message: PhoneAppService.firstMessageTooLongReason))
+        #expect(h.actions.worktreeCreates.isEmpty)
+
+        h.actions.spawnsOnHolder = true
+        let (onHolder, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
+        #expect(onHolder.error == nil)
+        let prompts = h.actions.worktreeCreates.map(\.prompt)
+        #expect(prompts == [message])
+    }
+
+    /// A first message of exactly `firstPromptMaxBytes` creates the worktree
+    /// on tmux.
+    @Test func aFirstMessageAtTheTmuxCapCreates() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
+        _ = try await Self.seedTab(h, in: worktree, kind: .claude)
+        h.actions.spawnsOnHolder = false
+        let outbox = await h.connect()
+        let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes)
+
+        let (reply, _) = try await h.request(
+            .worktreeCreate, params: PhoneWorktreeCreateParams(repoID: repo.id, message: message), on: outbox)
+
+        #expect(reply.error == nil)
+        let prompts = h.actions.worktreeCreates.map(\.prompt)
+        #expect(prompts == [message])
+    }
+
     /// A refused create is `refused` with the daemon's words, such as the
     /// phone message rule's, and waits for nothing.
     @Test func aRefusedCreateReturnsTheDaemonsReason() async throws {
