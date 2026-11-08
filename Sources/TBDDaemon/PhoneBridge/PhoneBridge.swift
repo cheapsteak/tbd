@@ -170,9 +170,14 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// **An undone Allow** stored the phone's row and deleted it again, because
 /// `paired` cannot have reached the phone. A reconcile in between listed the
 /// row and opened a link for it, so the undo reconciles, and that link stops.
+/// Before it lists the phones, that reconcile deletes the row once more, in
+/// case Allow's own delete failed; were the row left, the phone, which never
+/// heard `paired`, would stay paired and get a link. If that delete fails too,
+/// the failure is logged and the row stays until the user revokes it.
 ///
 /// `stop()` is final: no task or socket outlives it, and a later
-/// `reconcile()`, such as the one a late Allow makes, changes nothing.
+/// `reconcile()`, such as the one a late Allow makes, changes nothing but
+/// that delete.
 actor PhoneBridge: PhoneBridgeControlling {
     /// The latest answer of the relay check (`GET /v1/info`).
     enum RelayCheck: Sendable, Equatable {
@@ -254,6 +259,8 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// How many times the relay check has refused the relay. A reconcile
     /// reads it as it begins and starts no link once it has moved.
     private var relayRefusals: UInt64 = 0
+    /// The rows of undone Allows, which the next reconcile deletes again.
+    private var undoneRows: Set<UUID> = []
     private var checkTask: Task<Void, Never>?
     /// Why the bridge is not running although phone control is on and a
     /// relay is set.
@@ -464,6 +471,7 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// nothing: its caller sends the one delta once it is done. A `seed` for
     /// the saved relay stands as its check.
     private func reconcileNow(seed: RelaySeed? = nil) async {
+        await removeUndoneRows()
         guard !isStopped else { return }
         startPump()
         let refusalsAtStart = relayRefusals
@@ -678,7 +686,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             devices: db.phoneDevices, preflight: preflight(for: relayURL),
             onChange: { broadcast(.phoneStatusChanged) },
             onPaired: { [weak self] device in await self?.paired(device) },
-            onPairingUndone: { [weak self] in await self?.pairingUndone() },
+            onPairingUndone: { [weak self] deviceID in await self?.pairingUndone(deviceID: deviceID) },
             now: now, backoff: backoff, clock: clock)
     }
 
@@ -690,13 +698,33 @@ actor PhoneBridge: PhoneBridgeControlling {
         await reconcile()
     }
 
-    /// Allow deleted the row it stored. A reconcile that ran while the row
-    /// existed opened a link for it; this one, in the line of changes, finds
-    /// the row gone and stops that link. Like `paired`, it can run after
-    /// `stop()`, on the Allow caller's task, and then does nothing.
-    private func pairingUndone() async {
-        guard !isStopped else { return }
+    /// Allow tried to delete the row `deviceID` it stored. A reconcile that
+    /// ran while the row existed opened a link for it; this one, in the line
+    /// of changes, deletes the row again first, in case Allow's delete
+    /// failed, then finds it gone and stops that link. Like `paired`, it can
+    /// run after `stop()`, on the Allow caller's task, and then only deletes
+    /// the row.
+    private func pairingUndone(deviceID: UUID) async {
+        undoneRows.insert(deviceID)
         await reconcile()
+    }
+
+    /// Deletes the rows of undone Allows again. Allow's own delete has
+    /// usually removed the row already, and then this deletes nothing. A row
+    /// this cannot delete either stays paired, so the failure is logged, and
+    /// the user can revoke the phone in Settings.
+    private func removeUndoneRows() async {
+        let rows = undoneRows
+        undoneRows = []
+        for deviceID in rows {
+            do {
+                try await db.phoneDevices.delete(id: deviceID)
+            } catch {
+                PhoneBridgeLog.record(.failed(
+                    "Could not remove phone \(deviceID), whose pairing did not finish; it stays paired until "
+                        + "it is revoked in Settings: \(error.localizedDescription)"))
+            }
+        }
     }
 
     /// Posts `pairingNotice` as an `.attentionNeeded` TBD notification. A

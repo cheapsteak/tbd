@@ -71,8 +71,8 @@ private struct PairingHarness {
     let states: PairingStateLog
     /// Every device `onPaired` was called with.
     let paired: FireRecorder<PhoneDevice>
-    /// One value per `onPairingUndone` call.
-    let undone: FireRecorder<Bool>
+    /// The row ID of each `onPairingUndone` call.
+    let undone: FireRecorder<UUID>
     let service: PairingService
 
     /// Starts an offer, parses its link, and waits until the laptop's socket
@@ -136,12 +136,12 @@ private func withPairing(laptopName: String = "acme-laptop", relayAddress: URL =
     let clock = EventDrivenTestClock()
     let states = PairingStateLog()
     let paired = FireRecorder<PhoneDevice>()
-    let undone = FireRecorder<Bool>()
+    let undone = FireRecorder<UUID>()
     let service = PairingService(
         relayURL: relayAddress, transport: sockets, laptopKey: laptopKey, laptopName: laptopName,
         devices: db.phoneDevices, preflight: preflight,
         onChange: { states.capture() },
-        onPaired: { paired.record($0) }, onPairingUndone: { undone.record(true) }, now: dates.provider,
+        onPaired: { paired.record($0) }, onPairingUndone: { undone.record($0) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
     states.attach(service)
     let harness = PairingHarness(db: db, laptopKey: laptopKey, relay: relay, clock: clock, dates: dates,
@@ -509,6 +509,41 @@ struct PairingServiceTests {
             let left = try await phone.nextSignal()
             #expect(left == "peer-left")
             await #expect(throws: PhoneBridgeError.noSuchOffer) { try await h.service.allow(offerID: offerID) }
+        }
+    }
+
+    /// When the undo's delete fails, the row stays, and the owner hears its
+    /// ID, so it can try the delete again.
+    @Test func anUndoneAllowWhoseDeleteFailsNamesTheRowItLeft() async throws {
+        let relay = FakeRelay()
+        let transport = HoldingTransport(relay: relay)
+        try await withPairing(relay: relay, transport: transport) { h in
+            defer { transport.release() }
+            let (status, link) = try await h.startOffer()
+            _ = try await h.phoneAwaitingApproval(link)
+            try await h.db.writerForTests.write { conn in
+                try conn.execute(sql: """
+                    CREATE TRIGGER induced_phone_device_delete_failure
+                    BEFORE DELETE ON phone_device
+                    BEGIN SELECT RAISE(ABORT, 'induced phone_device delete failure'); END
+                    """)
+            }
+
+            transport.hold()
+            let service = h.service
+            let offerID = status.offerID
+            let allowing = Task { try await service.allow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+            transport.release(failing: true)
+            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.count == 1)
+            let rowIDs = rows.map(\.id)
+            #expect(h.undone.values == rowIDs)
+            #expect(h.paired.values.isEmpty)
+            let after = await h.service.status
+            #expect(after?.state == .interrupted)
         }
     }
 

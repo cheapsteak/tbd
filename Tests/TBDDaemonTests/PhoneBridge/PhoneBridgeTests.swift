@@ -1,5 +1,7 @@
 import CryptoKit
 import Foundation
+import GRDB
+import os
 import TBDShared
 import Testing
 import TestSupport
@@ -1116,6 +1118,63 @@ struct PhoneBridgeTests {
             #expect(links == 0)
             let status = try await bridge.status()
             #expect(status.running && status.connectedDeviceIDs.isEmpty)
+        }
+    }
+
+    /// Allow's own delete of an undone pairing's row fails. The undo's
+    /// reconcile deletes the row again before it lists the phones, so the
+    /// phone, which never heard `paired`, stays unpaired and gets no link.
+    @Test func theUndoDeletesARowAllowCouldNotDeleteBeforeItOpensLinks() async throws {
+        try await withBridge(holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            await h.bridge.reconcile()
+            let (offer, link) = try await h.startPairing()
+            let phone = try await h.joinedPairingPhone(link)
+            try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForPairingState(.awaitingApproval)
+
+            // The first delete of a phone's row fails; later ones succeed. A
+            // function decides, because a trigger's own writes would roll
+            // back with the delete it aborts.
+            let deletes = OSAllocatedUnfairLock(initialState: 0)
+            let failFirstDelete = DatabaseFunction("tbd_test_fail_first_phone_delete", argumentCount: 0) { _ in
+                let first = deletes.withLock { calls in
+                    calls += 1
+                    return calls == 1
+                }
+                let fail: Int = first ? 1 : 0
+                return fail
+            }
+            try await h.db.writerForTests.write { database in
+                database.add(function: failFirstDelete)
+                try database.execute(sql: """
+                    CREATE TEMP TRIGGER induced_first_phone_device_delete_failure
+                    BEFORE DELETE ON phone_device
+                    WHEN tbd_test_fail_first_phone_delete()
+                    BEGIN SELECT RAISE(ABORT, 'induced phone_device delete failure'); END
+                    """)
+            }
+
+            // `paired` is held at the socket and then fails there, so Allow
+            // undoes the pairing, and its delete is the one that fails.
+            transport.hold()
+            let bridge = h.bridge
+            let offerID = offer.offerID
+            let allowing = Task { try await bridge.pairAllow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+            transport.release(failing: true)
+            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+
+            // Allow returns only after the undo's reconcile, which deleted
+            // the row on the second try and so opened no link for it.
+            let attempts = deletes.withLock { $0 }
+            #expect(attempts == 2)
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            let links = await bridge.linkCount
+            #expect(links == 0)
         }
     }
 
