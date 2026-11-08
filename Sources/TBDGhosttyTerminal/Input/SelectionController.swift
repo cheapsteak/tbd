@@ -381,6 +381,25 @@ final class SelectionController {
         ghostty_selection_gesture_reset(gesture, terminal)
     }
 
+    /// Select everything on the active screen, scrollback included: from its first cell to the
+    /// last cell of its last row. Ends the click sequence first. Returns false for an empty screen.
+    @discardableResult
+    func selectAll() throws -> Bool {
+        let cols = columns
+        var totalRows = 0
+        _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, &totalRows)
+        guard cols > 0, totalRows > 0 else { return false }
+        reset()
+        var selection = GhosttySelection()
+        selection.start = try gridRef(at: TerminalGridPoint(x: 0, y: 0, space: .screen))
+        selection.end = try gridRef(at: TerminalGridPoint(x: cols - 1, y: UInt32(totalRows - 1), space: .screen))
+        try ghosttyCheck(
+            ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection),
+            "ghostty_terminal_set(OPT_SELECTION)"
+        )
+        return true
+    }
+
     /// Drop the terminal's active selection.
     func clearSelection() {
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, nil)

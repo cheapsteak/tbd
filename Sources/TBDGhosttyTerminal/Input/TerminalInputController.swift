@@ -136,7 +136,9 @@ final class TerminalInputController {
     /// path-independent — there is no way to tell which one we are on:
     ///
     /// * ⌘ held → decline, so menu items and app shortcuts (⌘P) work. The view then calls `super`,
-    ///   which lets AppKit continue up the responder chain.
+    ///   which lets AppKit continue up the responder chain. The ⌘ text-editing shortcuts are taken
+    ///   before this rule is asked (`naturalTextEditingBytes`), and a ⌘ key no menu item took comes
+    ///   back through `handleCommandKeyDown`.
     /// * we are not the window's first responder → decline. `performKeyEquivalent` is offered to
     ///   the *whole* view hierarchy, not just the focused view, so without this a background
     ///   terminal would swallow keys meant for a text field.
@@ -145,12 +147,26 @@ final class TerminalInputController {
     func acceptsKeyDown(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
         guard event.type == .keyDown else { return false }
         if event.modifierFlags.contains(.command) { return false }
-        if let window = view.window, window.firstResponder !== view { return false }
-        return true
+        return isKeyTarget(view)
+    }
+
+    /// Whether keys typed now are `view`'s: it is its window's first responder, or it has no
+    /// window at all, as in the tests.
+    private func isKeyTarget(_ view: GhosttyTerminalView) -> Bool {
+        guard let window = view.window else { return true }
+        return window.firstResponder === view
     }
 
     private func handleKeyDown(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
+        // The text-editing shortcuts come first, ⌘ ones included, so they win over any menu item
+        // with the same key, as they do in SwiftTerm, where `performKeyEquivalent` takes them.
+        if isKeyTarget(view), let bytes = Self.naturalTextEditingBytes(for: event) {
+            sendTyped(bytes, in: view)
+            return true
+        }
         guard acceptsKeyDown(event, in: view) else { return false }
+
+        if handlePageKey(event, in: view) { return true }
 
         // Solid cursor while typing.
         view.resetCursorBlink()
@@ -194,6 +210,142 @@ final class TerminalInputController {
             composing: composing, layout: layout)
         send(press, scrollsToBottom: true)
         return true
+    }
+
+    // MARK: - macOS shortcuts SwiftTerm translates
+    //
+    // The app's SwiftTerm terminals answer some macOS shortcuts with bytes no key encoder would
+    // produce: `TBDTerminalView`'s natural text editing, and SwiftTerm's own `keyDown` and
+    // `doCommand(by:)`. This engine sends the same bytes for the same keys, so a terminal behaves
+    // the same whichever engine draws it.
+
+    /// The bytes for one of the macOS text-editing shortcuts that `TBDTerminalView` turns into
+    /// shell line editing, or nil for any other key:
+    ///
+    /// * ⌘← is `ESC [ H` (Home) and ⌘→ is `ESC [ F` (End). Home and End rather than Ctrl-A and
+    ///   Ctrl-E, because Ctrl-A is a common tmux prefix.
+    /// * ⌘⌫ is Ctrl-U, delete to the start of the line.
+    /// * ⌥⌫ is `ESC DEL`, delete the word before the cursor.
+    /// * ⌥⌦ (Option-Fn-Delete) is `ESC d`, delete the word after it.
+    ///
+    /// Only with that one modifier: Shift or Control held declines, and so does ⌘ with ⌥. The bytes
+    /// are fixed, whatever the program's modes and whether Option is Meta, as SwiftTerm sends them.
+    static func naturalTextEditingBytes(for event: NSEvent) -> [UInt8]? {
+        guard event.type == .keyDown else { return nil }
+        let flags = event.modifierFlags
+        guard !flags.contains(.control), !flags.contains(.shift),
+              let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first else { return nil }
+        let key = Int(scalar.value)
+        switch (flags.contains(.command), flags.contains(.option)) {
+        case (true, false):
+            switch key {
+            case NSLeftArrowFunctionKey: return [0x1B, 0x5B, 0x48]
+            case NSRightArrowFunctionKey: return [0x1B, 0x5B, 0x46]
+            case 0x7F: return [0x15]
+            default: return nil
+            }
+        case (false, true):
+            switch key {
+            case 0x7F: return [0x1B, 0x7F]
+            case NSDeleteFunctionKey: return [0x1B, 0x64]
+            default: return nil
+            }
+        default:
+            return nil
+        }
+    }
+
+    /// PageUp and PageDown on their own, as SwiftTerm's view handles them. Returns true when this
+    /// took the key; false sends it on to the key encoder.
+    ///
+    /// * While the program has made neither key its own (no Kitty flags, normal cursor keys with
+    ///   DECCKM off, the primary screen), the viewport scrolls a page and nothing is sent.
+    /// * Otherwise the program gets `CSI 5 ~` or `CSI 6 ~`.
+    /// * Option held while it is not Meta counts as no modifier, as SwiftTerm counts it, and the
+    ///   key pages the viewport under DECCKM too, as SwiftTerm's `pageUp()` does. Where the key
+    ///   goes to the program (alternate screen, Kitty flags), the key encoder would add Alt, so
+    ///   this sends it without.
+    /// * With Shift, Control, ⌘ or Option-as-Meta held, the key encoder sends the modified key.
+    private func handlePageKey(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
+        let key = MacKeyCodes.key(forVirtualKeyCode: event.keyCode)
+        guard key == GHOSTTY_KEY_PAGE_UP || key == GHOSTTY_KEY_PAGE_DOWN else { return false }
+        let mods = Self.modifiers(from: event.modifierFlags)
+        guard mods.isDisjoint(with: [.shift, .control, .super_]), !optionAsAlt.applies(to: mods) else { return false }
+        let optionHeld = mods.contains(.alt)
+        let up = key == GHOSTTY_KEY_PAGE_UP
+        if view.terminal.scrollViewportByPage(up: up, ignoringApplicationCursorKeys: optionHeld) {
+            view.requestFrame()
+            return true
+        }
+        guard optionHeld else { return false }
+        let action: KeyPress.Action = event.isARepeat ? .repeated : .press
+        let press = KeyPress(action: action, key: key, mods: mods.subtracting([.alt, .altRight]))
+        sendTyped(view.terminal.encodeKey(press, optionAsAlt: optionAsAlt), in: view)
+        return true
+    }
+
+    /// A ⌘ key that reached `keyDown`: no menu item and no text-editing shortcut took it.
+    ///
+    /// SwiftTerm hands such a key to the macOS key bindings, and this does what they do there:
+    ///
+    /// * ⌘. is `cancelOperation:`, which sends Escape: `ESC`, or Escape with Super under Kitty
+    ///   flags.
+    /// * ⌘⌥O switches Option between Meta and the layout's characters.
+    /// * Under Kitty flags, a function key goes to the program with Super among its modifiers:
+    ///   ⌘↑ is `CSI 1;9A`. Without them it sends nothing, as in SwiftTerm.
+    /// * Any other ⌘ key sends nothing, and is consumed, so it does not beep.
+    ///
+    /// Only `keyDown` calls this, never `performKeyEquivalent`, so a menu item sees the key first.
+    /// Returns false, for the responder chain, when the view is not where keys go.
+    func handleCommandKeyDown(_ event: NSEvent) -> Bool {
+        guard let view, event.type == .keyDown, event.modifierFlags.contains(.command),
+              isKeyTarget(view) else { return false }
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let characters = event.charactersIgnoringModifiers
+
+        if flags.contains([.command, .option]), characters == "o" {
+            optionAsAlt = optionAsAlt == .never ? .both : .never
+            return true
+        }
+
+        let key = MacKeyCodes.key(forVirtualKeyCode: event.keyCode)
+        let isCancel = flags == .command && characters == "."
+        guard isCancel || Self.isFunctionKey(key) else { return true }
+
+        let kittyFlags = view.terminal.withLocked { $0.kittyKeyboardFlags }
+        if kittyFlags == 0 {
+            if isCancel { sendTyped([0x1B], in: view) }
+            return true
+        }
+        var mods = Self.modifiers(from: event.modifierFlags)
+        // SwiftTerm counts Option as a modifier only while it is Meta.
+        if !optionAsAlt.applies(to: mods) { mods.subtract([.alt, .altRight]) }
+        let action: KeyPress.Action = event.isARepeat ? .repeated : .press
+        let press = KeyPress(action: action, key: isCancel ? GHOSTTY_KEY_ESCAPE : key, mods: mods)
+        sendTyped(view.terminal.encodeKey(press, optionAsAlt: optionAsAlt), in: view)
+        return true
+    }
+
+    /// The keys SwiftTerm encodes as function keys: the arrows, Home, End, Page Up and Down,
+    /// forward Delete, the F keys and the keypad. Not Help, the Mac key libghostty calls Insert:
+    /// it types `NSHelpFunctionKey`, which SwiftTerm does not encode.
+    static func isFunctionKey(_ key: GhosttyKey) -> Bool {
+        switch key {
+        case GHOSTTY_KEY_ARROW_UP, GHOSTTY_KEY_ARROW_DOWN, GHOSTTY_KEY_ARROW_LEFT, GHOSTTY_KEY_ARROW_RIGHT,
+             GHOSTTY_KEY_HOME, GHOSTTY_KEY_END, GHOSTTY_KEY_PAGE_UP, GHOSTTY_KEY_PAGE_DOWN, GHOSTTY_KEY_DELETE,
+             GHOSTTY_KEY_F1, GHOSTTY_KEY_F2, GHOSTTY_KEY_F3, GHOSTTY_KEY_F4, GHOSTTY_KEY_F5,
+             GHOSTTY_KEY_F6, GHOSTTY_KEY_F7, GHOSTTY_KEY_F8, GHOSTTY_KEY_F9, GHOSTTY_KEY_F10,
+             GHOSTTY_KEY_F11, GHOSTTY_KEY_F12, GHOSTTY_KEY_F13, GHOSTTY_KEY_F14, GHOSTTY_KEY_F15,
+             GHOSTTY_KEY_F16, GHOSTTY_KEY_F17, GHOSTTY_KEY_F18, GHOSTTY_KEY_F19, GHOSTTY_KEY_F20,
+             GHOSTTY_KEY_NUMPAD_0, GHOSTTY_KEY_NUMPAD_1, GHOSTTY_KEY_NUMPAD_2, GHOSTTY_KEY_NUMPAD_3,
+             GHOSTTY_KEY_NUMPAD_4, GHOSTTY_KEY_NUMPAD_5, GHOSTTY_KEY_NUMPAD_6, GHOSTTY_KEY_NUMPAD_7,
+             GHOSTTY_KEY_NUMPAD_8, GHOSTTY_KEY_NUMPAD_9, GHOSTTY_KEY_NUMPAD_DECIMAL, GHOSTTY_KEY_NUMPAD_DIVIDE,
+             GHOSTTY_KEY_NUMPAD_MULTIPLY, GHOSTTY_KEY_NUMPAD_SUBTRACT, GHOSTTY_KEY_NUMPAD_ADD,
+             GHOSTTY_KEY_NUMPAD_ENTER, GHOSTTY_KEY_NUMPAD_EQUAL:
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Key up / modifiers
@@ -495,6 +647,15 @@ final class TerminalInputController {
         if scrollsToBottom { scrollToBottom(view) }
         view.send(bytes)
         return true
+    }
+
+    /// Sends bytes the user typed that no key encoder produced: the cursor goes solid and the
+    /// viewport comes back down to it, as for any typed key.
+    private func sendTyped(_ bytes: [UInt8], in view: GhosttyTerminalView) {
+        guard !bytes.isEmpty else { return }
+        view.resetCursorBlink()
+        scrollToBottom(view)
+        view.send(bytes)
     }
 
     /// Brings the viewport down to the cursor, and asks for a frame when it moved.

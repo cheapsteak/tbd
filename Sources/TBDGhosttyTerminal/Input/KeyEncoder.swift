@@ -230,7 +230,9 @@ final class KeyEncoder {
     ///
     /// The result then goes through ``legacyControlBytes(replacing:kittyFlags:)``, which turns
     /// Ctrl-I, Ctrl-M, Ctrl-[ and Ctrl-Shift-letter back into control bytes for a program that never
-    /// asked for CSI u.
+    /// asked for CSI u, and ``legacyShiftedEnterOrEscape(replacing:kittyFlags:)``, which sends
+    /// Shift-Enter and Shift-Escape as the plain key for a program that asked for neither Kitty flags
+    /// nor modifyOtherKeys level 2.
     ///
     /// - Returns: the bytes to write to the pty. **An empty array is a normal result**, not an
     ///   error: bare modifier presses, releases in legacy mode, and composing keys produce nothing.
@@ -270,8 +272,64 @@ final class KeyEncoder {
 
             let encoded = try encodeCurrentEvent()
             let kittyFlags = GhosttyTerminalState(raw: terminal).kittyKeyboardFlags
-            return Self.legacyControlBytes(replacing: encoded, kittyFlags: kittyFlags) ?? encoded
+            if let control = Self.legacyControlBytes(replacing: encoded, kittyFlags: kittyFlags) {
+                return control
+            }
+            // A probe that fails sends libghostty's own form rather than dropping the key.
+            if let plain = Self.legacyShiftedEnterOrEscape(replacing: encoded, kittyFlags: kittyFlags),
+               (try? modifyOtherKeysState2IsSet()) == false {
+                return plain
+            }
+            return encoded
         }
+    }
+
+    /// The bytes SwiftTerm sends for Shift-Enter and Shift-Escape, in place of the xterm form
+    /// libghostty sends for them, for a program that asked for neither Kitty flags nor xterm's
+    /// modifyOtherKeys.
+    ///
+    /// libghostty's legacy table sends Shift-Enter as `CSI 27;2;13~` and Shift-Escape as
+    /// `CSI 27;2;27~` whatever the program asked for. SwiftTerm sends the plain key, because macOS
+    /// binds Shift-Return to the same `insertNewline:` as Return and Shift-Escape to the same
+    /// `cancelOperation:` as Escape; a shell sent the CSI form prints `27;2;13~`. With Alt held too
+    /// (`CSI 27;4;…~`) an ESC goes before the key, as SwiftTerm sends it while Option is Meta, and
+    /// as libghostty sends Alt-Enter whatever Option is.
+    ///
+    /// Only the parsing: the caller still checks modifyOtherKeys level 2, under which the CSI form
+    /// is what the program asked for.
+    ///
+    /// - Returns: the bytes to send instead, or nil to send `encoded` unchanged.
+    static func legacyShiftedEnterOrEscape(replacing encoded: [UInt8], kittyFlags: UInt8) -> [UInt8]? {
+        guard kittyFlags == 0 else { return nil }
+        // ESC [ 27 ; <modifiers> ; <key> ~
+        guard encoded.count >= 9, encoded[0] == 0x1B, encoded[1] == UInt8(ascii: "["),
+              encoded.last == UInt8(ascii: "~") else { return nil }
+        let fields = encoded[2..<(encoded.count - 1)]
+            .split(separator: UInt8(ascii: ";"), omittingEmptySubsequences: false)
+        guard fields.count == 3, decimal(fields[0]) == 27, let modifiers = decimal(fields[1]),
+              let key = decimal(fields[2]), key == 0x0D || key == 0x1B else { return nil }
+        switch modifiers {
+        case 2: return [UInt8(key)]        // Shift
+        case 4: return [0x1B, UInt8(key)]  // Shift and Alt
+        default: return nil
+        }
+    }
+
+    /// Whether the program set xterm's modifyOtherKeys to level 2, which libghostty's C API has no
+    /// getter for. Encodes Shift-Backspace on the encoder as `set_from_terminal` left it: `DEL`
+    /// normally, `CSI 27;2;127~` at level 2.
+    ///
+    /// Overwrites the reusable event; `encode` sets every field again on its next call.
+    private func modifyOtherKeysState2IsSet() throws -> Bool {
+        _ = ghostty_key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS)
+        _ = ghostty_key_event_set_key(event, GHOSTTY_KEY_BACKSPACE)
+        _ = ghostty_key_event_set_mods(event, KeyModifiers.shift.rawValue)
+        _ = ghostty_key_event_set_consumed_mods(event, 0)
+        _ = ghostty_key_event_set_composing(event, false)
+        _ = ghostty_key_event_set_unshifted_codepoint(event, 0)
+        try ghosttyCheck(
+            ghostty_key_event_set_utf8(event, GhosttyString(ptr: nil, len: 0)), "ghostty_key_event_set_utf8")
+        return try encodeCurrentEvent() != [0x7F]
     }
 
     /// Control bytes in place of the CSI u that libghostty encoded some Ctrl keys as, for a program

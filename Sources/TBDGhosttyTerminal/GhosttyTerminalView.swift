@@ -1080,6 +1080,12 @@ public final class GhosttyTerminalView: NSView {
         mouseController.copySelection()
     }
 
+    /// Edit > Select All (⌘A): everything on the screen, scrollback included, as SwiftTerm selects
+    /// it. Nothing reaches the program.
+    public override func selectAll(_ sender: Any?) {
+        if terminal.selectAll() { requestFrame() }
+    }
+
     /// Edit > Paste: the pasteboard's text, bracketed and checked by libghostty. `onPaste` sees
     /// the text first.
     @objc func paste(_ sender: Any?) {
@@ -1155,8 +1161,11 @@ public final class GhosttyTerminalView: NSView {
         return hit === self || hit.isDescendant(of: self)
     }
 
+    /// A ⌘ key arrives here only once no menu item took it, and SwiftTerm's view consumes it then,
+    /// sending what the macOS key bindings make of it (`handleCommandKeyDown`).
     public override func keyDown(with event: NSEvent) {
-        if !forward(event) { super.keyDown(with: event) }
+        if forward(event) || inputController.handleCommandKeyDown(event) { return }
+        super.keyDown(with: event)
     }
 
     public override func keyUp(with event: NSEvent) {
