@@ -52,8 +52,12 @@ struct PhoneRelaySetupSheet: View {
                         .disabled(isChecking)
                 }
                 Spacer()
+                // The check cannot be called off, so a Cancel during it would
+                // close the sheet and the save would still land. The daemon
+                // bounds the check, so the wait is short.
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(isChecking)
                 Button("Check and Save") { save() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(isChecking || AppState.nonBlankPhoneURL(urlDraft) == nil)
