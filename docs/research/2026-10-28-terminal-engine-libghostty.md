@@ -3,7 +3,8 @@
 *Evidence record gathered 2026-11-06, the day `libghostty-vt` 1.0.0 was tagged,
 against TBD at `43a009132`, with a proof of concept run on 2026-11-07 against
 TBD at `5891dd294`. A/B runs of TBD's opt-in libghostty engine were taken on
-2026-11-08 against TBD at `ac44edb9d`, a release build. Sources are the
+2026-11-08 against release builds of TBD at `ac44edb9d` and, for footprint,
+at `ee15bf8b2`. Sources are the
 library's announcement, its documentation and headers at the `vt-1.0.0` tag,
 Ghostty's release notes, its maintainer's public statements, the repositories
 and write-ups of projects that embed libghostty, TBD's own tree, the proof of
@@ -30,8 +31,11 @@ The first A/B of the two engines found no clear win, and libghostty had a
 longer draw wait ("A/B of the opt-in engine"). Under heavy output, libghostty
 used about half the app CPU in Claude Code's full-screen mode, with latency
 within 1 ms ("A/B under heavy output"). App CPU during a workload is not one of
-the spec's measures. So the spec's graduation rule is not met, and the engine
-stays opt-in.
+the spec's measures. The spec's own CPU and footprint measure showed no win:
+libghostty cost the same per kept-alive panel as SwiftTerm, about 11 to 16 MB
+more in fixed cost, and while visible the same ~100 MB of GPU memory as
+SwiftTerm's Metal renderer ("Footprint and idle CPU"). So the spec's graduation
+rule is not met, and the engine stays opt-in.
 
 The proof of concept measured what libghostty costs and what it gains ("Proof
 of concept"):
@@ -489,7 +493,7 @@ of 4.595 ms and a p90 of 8.633 ms (301 samples).
 - **A large stream** – the time to paint about 50 MB sent to a visible
   terminal. "A/B under heavy output" measures it.
 - **Footprint** – app CPU and memory footprint with 8 and with 24 terminals
-  open.
+  open. "Footprint and idle CPU" measures it.
 - **A repeat** – the graduation rule needs a result repeated in two
   A/B/B/A runs. The two runs here compared libghostty with two different
   SwiftTerm renderers. Panes of equal size, or a pane swap with the same
@@ -535,9 +539,9 @@ terminals open.
 - **Grid** – the engines' cells differed in size: 14 by 34 pixels on SwiftTerm,
   15 by 32 on libghostty. So the pane held 102 by 50 cells on SwiftTerm and 95
   by 53 on libghostty. The cell counts are within 1.3% of each other, but
-  libghostty received about 4% more bytes in each scroll run. A fix that gives
-  libghostty SwiftTerm's cell size is open (#1420), and the grids differed
-  throughout these runs.
+  libghostty received about 4% more bytes in each scroll run. The fix that
+  gives libghostty SwiftTerm's cell size (#1420) is not in this build, so the
+  grids differed throughout these runs.
 
 **The 50 MB stream.** Each run sent a 52,428,897-byte file of coloured log
 lines with `cat` into a shell in the pane. Paint time runs from the run's first
@@ -660,7 +664,7 @@ Metal, libghostty's input to draw start was 9.2 ms at p50 and 14.3 ms at p90.
   for these frames and not for an echo was not established.
 - **The graduation rule is not met** – app CPU during a workload is not one of
   the spec's four measures. Its CPU measure is app CPU and memory footprint
-  with 8 and with 24 terminals open, which has not been run. On the spec's
+  with 8 and with 24 terminals open ("Footprint and idle CPU"). On the spec's
   measures, this round adds the 50 MB paint time and two draw-wait
   comparisons, and none came near the 20% bar. The largest difference, 8%, was
   libghostty's longer draw wait at p50 in Claude Code. So these results do not
@@ -668,10 +672,163 @@ Metal, libghostty's input to draw start was 9.2 ms at p50 and 14.3 ms at p90.
   also stands: 3.2 to 3.4 times longer at p90 on libghostty, which the code
   traces to frames encoded only on display-link ticks. So do the open daily-use
   gaps.
-- **Parity fixes** – the measured build predates two libghostty fixes that have
-  since merged: the sRGB colour space (#1419) and stroke weight (#1416). Fixes
-  for macOS line-editing shortcuts (#1421) and for cell size, baseline and wide
-  glyphs (#1420) are open.
+- **Parity fixes** – the measured build predates four libghostty fixes: the
+  sRGB colour space (#1419), stroke weight (#1416), macOS line-editing
+  shortcuts (#1421), and cell size, baseline and wide glyphs (#1420). The
+  footprint round's build includes all four ("Footprint and idle CPU").
+
+## Footprint and idle CPU
+
+Run on 2026-11-08 against a release build of TBD at `ee15bf8b2`, on the same
+laptop as the earlier rounds. That build includes the four parity fixes that
+"A/B under heavy output" lists. This round takes the fourth of the spec's
+measures, app CPU and memory footprint with 8 and with 24 terminals open. No
+workload was driven during its CPU samples.
+
+**How TBD mounts terminals.** A terminal costs the app memory only while it has
+a panel.
+
+- **Tabs** – within a worktree, only the active tab is built. Selecting a tab
+  builds its panel, or one per terminal when its layout is split, and the
+  engine settings are read then.
+- **Worktrees** – the app keeps the views of up to 8 recently visited worktrees
+  mounted (`keepAliveLimit` in `Sources/TBDApp/AppState.swift`), plus the
+  selected worktree and any worktree whose agent is working.
+- **Pinned terminals** – a terminal pinned to the dock keeps its panel while it
+  is pinned.
+- **The rest** – a terminal with no panel lives in the daemon alone.
+- **Parked sessions** – selecting a worktree wakes its parked Claude session
+  (`wakeHibernatedTerminalsOnFocus` in `AppState+Hibernation.swift`), which
+  restarts the agent process.
+
+So "N terminals open" costs the app only what its mounted panels cost. With 24
+worktrees open, the keep-alive limit mounts about 9 of them. Panels beyond
+those come only from worktrees whose agents are working, pinned terminals and
+split panes. The 8-worktree run measured what each kept-alive worktree adds,
+about 3 MB on every engine, so 24 worktrees should cost what 9 do, plus about
+3 MB for each extra panel. That extrapolation is why 24 was not run
+separately. Running it would also have meant waking parked sessions: the
+machine had 12 running sessions and 18 parked ones, and visiting a parked one
+restarts its agent. The 8-worktree run used only worktrees whose sessions were
+already running.
+
+**Method.**
+
+- **Footprint** – macOS `footprint -p` on the app process: the physical
+  footprint, with its breakdown by category.
+- **App CPU** – the change in the app's CPU time over 30 s, as a percentage of
+  one core.
+- **Arms** – `useGhosttyTerminalEngine` and `useMetalTerminalRenderer` chose
+  each arm: libghostty, SwiftTerm on Metal, or SwiftTerm on CoreGraphics. Both
+  settings are read when a panel is built.
+- **Order** – each part ran its arms in a mirrored order, so drift over the
+  session fell evenly on each arm.
+
+**One visible panel with a full scrollback.** TBD was frontmost, with two holder
+test terminals as tabs in the main pane. Both were first filled by `cat` of a
+52 MB file of coloured log lines, so each later mount replayed a full
+scrollback from the daemon. Each run selected the other test tab, then its own,
+so one test panel was mounted at a time. The run then waited for the app to go
+quiet, and 5 s more, before sampling. The 1-minute load was 5.2 to 7.8. The table
+lists the runs in the order they ran, with memory in MB.
+
+| run | engine | footprint | unmapped graphics | IOSurface | IOAccelerator | Malloc Large | idle CPU, % |
+|---|---|---|---|---|---|---|---|
+| 1 | SwiftTerm CoreGraphics | 167 | 3 | 33 | 2 | 10 | 1.1 |
+| 2 | libghostty | 285 | 102 | 34 | 13 | 10 | 1.4 |
+| 3 | SwiftTerm Metal | 300 | 102 | 50 | 5 | 14 | 1.6 |
+| 4 | libghostty | 294 | 102 | 34 | 13 | 14 | 1.4 |
+| 5 | libghostty | 294 | 102 | 34 | 13 | 14 | 1.5 |
+| 6 | SwiftTerm Metal | 325 | 102 | 50 | 5 | 36 | 1.5 |
+| 7 | libghostty | 316 | 102 | 34 | 13 | 36 | 1.5 |
+| 8 | SwiftTerm CoreGraphics | 201 | 3 | 33 | 2 | 36 | 1.0 |
+
+"Unmapped graphics" is `footprint`'s category "Owned physical footprint
+(unmapped) (graphics)", and "IOAccelerator" is "IOAccelerator (graphics)".
+
+- **The gap is GPU memory** – unmapped graphics held 102 MB whenever a Metal
+  panel, on either engine, was mounted and visible, and 3 MB with only
+  CoreGraphics. Neighbouring runs at the same Malloc Large level (1 and 2, 7
+  and 8) put libghostty 115 to 118 MB above SwiftTerm on CoreGraphics. Unmapped
+  graphics accounts for 99 MB of that, and IOAccelerator for 11 MB more.
+- **libghostty against SwiftTerm on Metal** – libghostty was 6 to 9 MB smaller
+  in neighbouring runs (3 and 4, 6 and 7). It held 16 MB less IOSurface and
+  8 MB more IOAccelerator.
+- **Drift** – Malloc Small rose slowly over the session, from 61 to 68 MB,
+  whatever the arm. Malloc Large rose in two steps that stayed for every later
+  run: to 14 MB at run 3 and to 36 MB at run 6. Both steps came on SwiftTerm
+  Metal runs. With two such runs, whether that panel caused them was not
+  established. The comparisons above therefore pair neighbouring runs at the
+  same Malloc Large level.
+- **Idle CPU** – SwiftTerm on CoreGraphics used 1.0 to 1.1% of a core,
+  libghostty 1.4 to 1.5%, and SwiftTerm on Metal 1.5 to 1.6%.
+
+**Eight kept-alive worktrees.**
+
+- **Background app** – before each run the app was stopped with SIGTERM, which
+  ended it cleanly every time, then relaunched in the background with
+  `open -g`. Its window stayed behind other windows, so no Metal view drew.
+- **Visits** – the driver selected the worktree it ran from and took a base
+  sample. It then selected one running Claude session in each of 8 other
+  worktrees, 2.5 s apart, without activating the app. Last, it selected the
+  first worktree again and, 15 s later, took the second sample and then the CPU
+  sample. All 8 worktrees were visited in every run, which left 9 kept alive:
+  the selected one and the 8 visited.
+- **Live output** – several of the visited sessions were working agents, so
+  their output was live during the CPU sample, and the app was not idle.
+- **Load** – the 1-minute load was 3.9 to 7.3.
+
+The table lists the six runs in the order they ran, with memory in MB.
+IOAccelerator did not change between the two samples.
+
+| run | engine | base | after 8 visits | IOAccelerator | Malloc Large, base | Malloc Large, after | CPU, % |
+|---|---|---|---|---|---|---|---|
+| 1 | libghostty | 167 | 191 | 9.0 | 9.5 | 32 | 1.6 |
+| 2 | SwiftTerm Metal | 155 | 178 | 1.7 | 4.0 | 26 | 1.7 |
+| 3 | SwiftTerm CoreGraphics | 152 | 176 | 1.4 | 0 | 22 | 1.4 |
+| 4 | SwiftTerm CoreGraphics | 153 | 175 | 1.4 | 0 | 22 | 1.5 |
+| 5 | SwiftTerm Metal | 156 | 178 | 1.7 | 4.0 | 26 | 1.7 |
+| 6 | libghostty | 167 | 190 | 9.0 | 8.0 | 30 | 1.3 |
+
+- **Each visit cost about 3 MB on every engine** – 22 to 24 MB for the 8.
+  Malloc Large carried 22 MB of it in every run. Malloc Small rose 0 to 2 MB,
+  and no other category moved by more than 0.2 MB. The cost was the same on
+  all three engines, which points at TBD's own per-panel state rather than at
+  either engine. That is a reading: the run does not show what the allocations
+  hold.
+- **libghostty's fixed cost** – libghostty used 11 to 16 MB more than
+  SwiftTerm, run for run, before and after the visits: 11 to 13 MB against
+  Metal and 14 to 16 MB against CoreGraphics. Two categories carried it:
+  IOAccelerator, 9.0 MB against 1.4 to 1.7, and Malloc Large at base, 8.0 to
+  9.5 MB against 0 to 4.0.
+- **No GPU memory without a drawing Metal view** – unmapped graphics stayed at
+  3 MB in every run, on every engine. Together with the 102 MB of the visible
+  panel above, this places the ~100 MB with the one visible, drawing Metal
+  terminal, not with each mounted panel. That is an inference from the two
+  measurements. Two Metal views visible at once, such as a terminal in the main
+  pane and another in the side panel, were not measured.
+- **App CPU with live background output** – libghostty used 1.6 and 1.3% of a
+  core, SwiftTerm on Metal 1.7 and 1.7%, and SwiftTerm on CoreGraphics 1.4 and
+  1.5%. The working agents' output fell in the sample, so these are not idle
+  figures, and they compare the engines only roughly. libghostty's range
+  overlapped both of SwiftTerm's.
+
+**What the numbers show.**
+
+- **No footprint or CPU win for libghostty** – it cost the same per visit as
+  SwiftTerm and about 11 to 16 MB more in fixed cost. While visible it held the
+  same ~100 MB of GPU memory as SwiftTerm's Metal path. Its idle CPU fell
+  between SwiftTerm's two paths with one visible panel, and its CPU overlapped
+  both with 8 panels mounted.
+- **Both Metal renderers cost GPU memory** – against SwiftTerm's default
+  CoreGraphics path, either Metal renderer held about 100 MB more GPU memory
+  for the visible terminal, and used 0.3 to 0.6 points more idle CPU with one
+  visible panel.
+- **The graduation rule** – this measure gives no win toward graduation.
+  Against SwiftTerm on Metal, libghostty shows no regression beyond its fixed
+  11 to 16 MB. Against the default CoreGraphics path, it also carries the GPU
+  memory that either Metal renderer holds while visible. The CPU win under
+  heavy output stands on its own ("A/B under heavy output").
 
 ## Ghostty on 2026-11-06
 
@@ -798,13 +955,12 @@ the first steps, as its
 
 These stay open:
 
-- **The A/B** – app CPU and memory footprint with 8 and with 24 terminals
-  open, a second A/B/B/A run of any measure that shows a win, and the pixel
-  and SwiftTerm-on-Metal comparisons that "A/B of the opt-in engine" lists as
-  not measured in its round.
+- **The A/B** – a second A/B/B/A run of any measure that shows a win, the
+  pixel and SwiftTerm-on-Metal comparisons that "A/B of the opt-in engine"
+  lists as not measured in its round, and the footprint of two Metal views
+  visible at once.
 - **Daily-use gaps** – among them ligatures and right-to-left text, which the
-  Settings toggle names as unsupported, and the two open fixes that "A/B under
-  heavy output" lists.
+  Settings toggle names as unsupported.
 - **A renderer package** – if Ghostty publishes one, check its licence, its
   version pin against `libghostty-vt`, and what it covers of IME, selection,
   scrolling and accessibility.
