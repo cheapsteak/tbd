@@ -46,12 +46,30 @@ enum PhoneBridgeConstants {
 /// The laptop's name as phones see it: in the pairing link and in handshake
 /// message 2.
 enum LaptopName {
-    /// The Mac's computer name, the one the user sets in System Settings, or
-    /// its host name when none can be read, cut to fit.
+    /// The Mac's computer name, the one the user sets in System Settings;
+    /// else its local host name, the Bonjour name without `.local`; else the
+    /// kernel's host name; cut to fit, and "Mac" when none can be read.
+    ///
+    /// None of these waits on DNS or mDNS. The bridge reads the name while
+    /// it reconciles, which daemon startup awaits, so `ProcessInfo.hostName`,
+    /// which can resolve the name over the network, is not used.
     static func current() -> String {
-        let computerName = SCDynamicStoreCopyComputerName(nil, nil).map { $0 as String } ?? ""
-        let hasComputerName = !computerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return limited(hasComputerName ? computerName : ProcessInfo.processInfo.hostName)
+        let candidates = [
+            SCDynamicStoreCopyComputerName(nil, nil).map { $0 as String },
+            SCDynamicStoreCopyLocalHostName(nil).map { $0 as String },
+            kernelHostName(),
+        ]
+        let name = candidates.compactMap { $0 }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return limited(name ?? "")
+    }
+
+    /// `gethostname(3)`, or nil when it fails.
+    private static func kernelHostName() -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXHOSTNAMELEN) + 1)
+        // One byte short of the buffer, so the name is always terminated.
+        guard gethostname(&buffer, buffer.count - 1) == 0 else { return nil }
+        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
     }
 
     /// `raw` trimmed of whitespace and cut, at a `Character` boundary, to at
