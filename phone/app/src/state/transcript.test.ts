@@ -111,6 +111,64 @@ test('an item matches the last row that carries its ID', () => {
   assert.deepEqual(shown(s2), ['at-100:old', 'at-100:newest']);
 });
 
+/** `s` with each item row's `item` read through a getter that counts each read in `reads`. */
+function counted(s: TranscriptState, reads: { n: number }): TranscriptState {
+  const rows = s.rows.map((row): TranscriptRow => {
+    if (row.kind !== 'item') return row;
+    const { item } = row;
+    return Object.defineProperty({ key: row.key, kind: 'item' }, 'item', {
+      enumerable: true,
+      get: () => {
+        reads.n += 1;
+        return item;
+      },
+    }) as TranscriptRow;
+  });
+  return { ...s, rows };
+}
+
+test('an update or a repeat near the bottom reads the rows near the bottom only, however long the transcript', () => {
+  const n = 10_000;
+  const items = Array.from({ length: n }, (_, i) => item(`u${i}`));
+  const reads = { n: 0 };
+  const s0 = counted(withRows(items), reads);
+  /** How many rows `fn` read. */
+  const readsOf = <T,>(fn: () => T): [T, number] => {
+    reads.n = 0;
+    const out = fn();
+    return [out, reads.n];
+  };
+  const [s1, r1] = readsOf(() => applyTranscriptEvent(s0, update([item(`u${n - 1}`, 'done')])));
+  assert.ok(r1 <= 3, `an update of the last row read ${r1} rows`);
+  assert.equal(shown(s1).at(-1), `u${n - 1}:done`);
+  const [s2, r2] = readsOf(() => applyTranscriptEvent(s0, append([item(`u${n - 5}`, 'again'), item(`u${n - 2}`, 'again')])));
+  assert.ok(r2 <= 12, `a repeat near the bottom read ${r2} rows`);
+  assert.deepEqual(shown(s2).slice(-5), [`u${n - 5}:again`, `u${n - 4}:u${n - 4}`, `u${n - 3}:u${n - 3}`, `u${n - 2}:again`, `u${n - 1}:u${n - 1}`]);
+  assert.equal(s2.rows.length, n);
+  // New items read every row, about twice at most, however many there are.
+  const [s3, r3] = readsOf(() => applyTranscriptEvent(s0, append(Array.from({ length: 500 }, (_, i) => item(`n${i}`)))));
+  assert.ok(r3 <= 2 * n + 10, `500 new items read ${r3} rows`);
+  assert.equal(s3.rows.length, n + 500);
+});
+
+test('past its first pass over the rows, the search finds the same rows: the last with each ID, new rows included', () => {
+  // Ten rows, two of them carrying `dup`; the first new item reads all ten, so the rest are looked up by ID.
+  const s0 = withRows(['r0', 'r1', 'dup', 'r3', 'r4', 'r5', 'r6', 'r7', 'dup', 'r9'].map((id) => item(id)));
+  const news = Array.from({ length: 20 }, (_, i) => item(`n${i}`));
+  const s1 = applyTranscriptEvent(s0, append([...news, item('dup', 'changed'), item('n3', 'changed'), item('r0', 'changed'), item('n21')]));
+  assert.deepEqual(shown(s1), [
+    'r0:changed', 'r1:r1', 'dup:dup', 'r3:r3', 'r4:r4', 'r5:r5', 'r6:r6', 'r7:r7', 'dup:changed', 'r9:r9',
+    ...news.map((x) => (x.id === 'n3' ? 'n3:changed' : `${x.id}:${x.id}`)), 'n21:n21',
+  ]);
+  // Each replaced row keeps its key, and each new row takes the next.
+  assert.deepEqual(s1.rows.slice(0, 10).map((r) => r.key), s0.rows.map((r) => r.key));
+  assert.deepEqual(s1.rows.slice(10).map((r) => r.key), Array.from({ length: 21 }, (_, i) => s0.nextKey + i));
+  assert.equal(s1.appendedSinceSeen, 21);
+  // An update past the first pass replaces only rows it has, and the last of two.
+  const s2 = applyTranscriptEvent(s0, update([item('nope1'), item('nope2'), item('dup', 'x'), item('r1', 'y')]));
+  assert.deepEqual(shown(s2), ['r0:r0', 'r1:y', 'dup:dup', 'r3:r3', 'r4:r4', 'r5:r5', 'r6:r6', 'r7:r7', 'dup:x', 'r9:r9']);
+});
+
 test('reset replaces everything, receipts and open details included', () => {
   let s0 = withRows([item('u1'), item('u2')]);
   s0 = addReceipt(s0, R, 'p1', 'Answered on the laptop');

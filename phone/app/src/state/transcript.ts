@@ -246,21 +246,18 @@ function itemRows(items: readonly PhoneItem[], nextKey: number): { rows: Transcr
  * `s` with `items` put in: each replaces the last row carrying its ID, keeping that row's key,
  * and the row's open detail follows the new item (`followItem`). With `appendNew`, an item no
  * row carries goes at the bottom as a new row. An item the same as the one it replaces changes
- * nothing. It returns `s` itself when nothing changed.
+ * nothing. It returns `s` itself when nothing changed. `rowFinder` finds each item's row.
  */
 function putItems(s: TranscriptState, items: readonly PhoneItem[], appendNew: boolean): TranscriptState {
   if (items.length === 0) return s;
-  const lastRowWithID = new Map<string, number>();
-  s.rows.forEach((row, i) => {
-    if (row.kind === 'item') lastRowWithID.set(row.item.id, i);
-  });
+  const find = rowFinder(s.rows.length);
   let rows: TranscriptRow[] | null = null;
   let details: Record<number, DetailState> | null = null;
   let nextKey = s.nextKey;
   let added = 0;
   for (const item of items) {
-    const at = lastRowWithID.get(item.id);
-    if (at !== undefined) {
+    const at = find.last(rows ?? s.rows, item.id);
+    if (at >= 0) {
       const row = (rows ?? s.rows)[at]!;
       if (row.kind === 'item' && sameItem(row.item, item)) continue;
       rows ??= [...s.rows];
@@ -274,13 +271,53 @@ function putItems(s: TranscriptState, items: readonly PhoneItem[], appendNew: bo
       }
     } else if (appendNew) {
       rows ??= [...s.rows];
-      lastRowWithID.set(item.id, rows.length);
+      find.appended(item.id, rows.length);
       rows.push({ key: nextKey++, kind: 'item', item });
       added++;
     }
   }
   if (rows === null) return s;
   return { ...s, rows, nextKey, appendedSinceSeen: s.appendedSinceSeen + added, details: details ?? s.details };
+}
+
+/**
+ * How `putItems` finds the last row carrying an item's ID, for one call. It looks up from the
+ * bottom, where the laptop changes items, so an update or a repeat of an item near the bottom
+ * reads a few rows, however long the transcript. An ID no row carries, as a new item's, reads
+ * every row, so once the call's looking has read `budget` rows, as many as the slice held, it
+ * indexes the rows by ID once and reads the index from then on. A burst of new items then costs
+ * about two passes over the rows, where an index for every call would cost one each time.
+ * - `last(rows, id)`: the index of the last of `rows` carrying `id`, or -1.
+ * - `appended(id, at)`: a row carrying `id` went in at `at`, below every other row.
+ */
+function rowFinder(budget: number): { last(rows: readonly TranscriptRow[], id: string): number; appended(id: string, at: number): void } {
+  let index: Map<string, number> | null = null;
+  let left = budget;
+  return {
+    last(rows, id) {
+      if (index === null) {
+        const stop = Math.max(0, rows.length - left);
+        for (let i = rows.length - 1; i >= stop; i--) {
+          const row = rows[i]!;
+          if (row.kind === 'item' && row.item.id === id) {
+            left -= rows.length - i;
+            return i;
+          }
+        }
+        left -= rows.length - stop;
+        if (stop === 0) return -1;
+        const built = new Map<string, number>();
+        rows.forEach((row, i) => {
+          if (row.kind === 'item') built.set(row.item.id, i);
+        });
+        index = built;
+      }
+      return index.get(id) ?? -1;
+    },
+    appended(id, at) {
+      index?.set(id, at);
+    },
+  };
 }
 
 /** Whether two items hold the same fields with the same values. Every field of an item is a string, a number or a boolean. */
