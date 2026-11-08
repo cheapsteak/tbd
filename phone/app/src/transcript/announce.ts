@@ -1,11 +1,14 @@
 /**
  * What the transcript's live region says (`TranscriptView`'s header): the rows that just came in
- * at the bottom, as the words a screen reader reads. The list itself is no live region, since
- * the rows the virtualizer draws as the reader scrolls would read as if they had just arrived.
+ * at the bottom, or changed there, as the words a screen reader reads. The list itself is no live
+ * region, since the rows the virtualizer draws as the reader scrolls would read as if they had
+ * just arrived.
  *
- * - **Which rows.** Only rows that came in at the bottom, new items or a receipt
- *   (`rowsChange` reads `appended`): never the rows of an open, a reopen or a reset, an older
- *   page, or rows drawn as the reader scrolls.
+ * - **Which rows.** Rows that came in at the bottom, new items or a receipt (`rowsChange` reads
+ *   `appended`), and a message among the last `ANNOUNCE_ROWS` rows whose text changed in place,
+ *   as when its text comes after its row: it says its new words, once (`changedWords`). A tool
+ *   whose status changes, a receipt that changes, and a row further up say nothing. Never the
+ *   rows of an open, a reopen or a reset, an older page, or rows drawn as the reader scrolls.
  * - **What each says** (`spoken`), in the row's own words and no others: a message from the
  *   reader, Claude or a peer says its text, as plain text without its markdown marks; a receipt
  *   says its text; a tool call says its tool's name and its target, as the row shows them. Any
@@ -63,14 +66,43 @@ export function spoken(row: TranscriptRow): string | null {
   return said === '' ? null : cut(said, ANNOUNCE_CHARS);
 }
 
-/** What the live region says for `arrived`, the rows that came in at the bottom, oldest first: a line for each of the last few that say something. */
-export function announcement(arrived: readonly TranscriptRow[]): string[] {
+/**
+ * What the live region says for `rows`, oldest first: a line for each of the last few rows that
+ * say something, of the rows that came in at the bottom, the last `arrived` of `rows`, and the
+ * messages above them among the last `ANNOUNCE_ROWS` rows that changed in place since `before`,
+ * the last rows as the list last saw them (`lastRows`).
+ */
+export function announcement(rows: readonly TranscriptRow[], arrived: number, before: readonly TranscriptRow[]): string[] {
   const lines: string[] = [];
-  for (let i = arrived.length - 1; i >= 0 && lines.length < ANNOUNCE_ROWS; i--) {
-    const said = spoken(arrived[i]!);
+  const firstArrived = rows.length - arrived;
+  const lowest = rows.length - ANNOUNCE_ROWS;
+  for (let i = rows.length - 1; i >= 0 && (i >= firstArrived || i >= lowest) && lines.length < ANNOUNCE_ROWS; i--) {
+    const row = rows[i]!;
+    const said = i >= firstArrived ? spoken(row) : changedWords(row, before);
     if (said !== null) lines.unshift(said);
   }
   return lines;
+}
+
+/** The last `ANNOUNCE_ROWS` of `rows`, which the list keeps to tell next time which changed in place (`announcement`). */
+export function lastRows(rows: readonly TranscriptRow[]): readonly TranscriptRow[] {
+  return rows.slice(Math.max(0, rows.length - ANNOUNCE_ROWS));
+}
+
+/** The kinds of row whose text changing in place is said again: messages from the reader, Claude and a peer. */
+const MESSAGE_KINDS: ReadonlySet<string> = new Set(['user', 'assistant', 'peer']);
+
+/**
+ * The new words of `row` when it is a message that changed in place since `before`: `before`
+ * holds it, by its key, with other text, and its words now are not empty and not the ones it
+ * said then. Null for any other row, so a tool whose status changes says nothing.
+ */
+function changedWords(row: TranscriptRow, before: readonly TranscriptRow[]): string | null {
+  if (row.kind !== 'item' || !MESSAGE_KINDS.has(row.item.kind)) return null;
+  const was = before.find((r) => r.key === row.key);
+  if (was === undefined || was === row || was.kind !== 'item' || was.item.text === row.item.text) return null;
+  const said = spoken(row);
+  return said !== null && said !== spoken(was) ? said : null;
 }
 
 /** The text of a markdown tree, with a space between its blocks and in place of each line break. */

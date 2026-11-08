@@ -28,10 +28,11 @@
  * **What a screen reader is told** (`announce.ts`). `.tx` is no live region, since the rows the
  * virtualizer draws as the reader scrolls would read as if they had just arrived. A visually
  * hidden polite live region beside it, styled inline, since app.css is not this file's, says
- * the rows that came in at the bottom (`rowsChange` reads `appended`) since it last spoke, in
- * their own words: at most the last `ANNOUNCE_ROWS` of them that say anything, each cut to
- * `ANNOUNCE_CHARS` characters. The rows of an open, a reopen or a reset, an older page, and
- * rows drawn as the reader scrolls are never said, and a page in place of the rows empties it.
+ * the rows that came in at the bottom (`rowsChange` reads `appended`) since it last spoke, and
+ * the messages among the last rows whose text changed in place, in their own words: at most the
+ * last `ANNOUNCE_ROWS` of them that say anything, each cut to `ANNOUNCE_CHARS` characters. The
+ * rows of an open, a reopen or a reset, an older page, and rows drawn as the reader scrolls are
+ * never said, and a page in place of the rows empties it.
  *
  * **Keeping to the bottom**, by the rules in `scroll.ts`. The view keeps to the bottom at mount
  * and after a page replaces the rows (an open, a reopen, a reset), and from then on while the
@@ -99,7 +100,7 @@ import { sameRef } from '../protocol/wire.ts';
 import { dur } from '../state/status.ts';
 import { Dots, Icon } from '../ui/Icon.tsx';
 import { useNow } from '../ui/now.ts';
-import { announcement } from './announce.ts';
+import { announcement, lastRows } from './announce.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
   anchorAt, arrivedCount, atBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, takeScroll,
@@ -170,7 +171,8 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
  *   reader's, so a scroll event can tell whether the reader moved the view (`takeScroll`);
  * - `seen`: how far the view was above its bottom then (`fromBottom`), so a layout can tell
  *   whether something pushed it away;
- * - `rows`: what it last saw of the rows (`SeenRows`, for `rowsChange` and `prepended`);
+ * - `rows`: what it last saw of the rows (`SeenRows`, for `rowsChange` and `prepended`), and
+ *   `tail`, the last of them, so it can tell which changed in place (`announcement`);
  * - `shown` and `paging`: the rows and paging of the last commit, for the listeners, which run
  *   between renders;
  * - `anchor`: the reader's place while an older page is on its way or going in, or null;
@@ -182,6 +184,7 @@ interface ViewState {
   top: number;
   seen: number;
   rows: SeenRows;
+  tail: readonly TranscriptRow[];
   shown: readonly TranscriptRow[];
   paging: Paging | null;
   anchor: Anchor | null;
@@ -214,7 +217,7 @@ function List(p: {
   const scrollRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const view = useRef<ViewState>({
-    stuck: true, top: 0, seen: 0, rows: { replacements: NOT_SHOWN, appended: 0, count: 0 }, shown: NO_ROWS, paging: null, anchor: null,
+    stuck: true, top: 0, seen: 0, rows: { replacements: NOT_SHOWN, appended: 0, count: 0 }, tail: NO_ROWS, shown: NO_ROWS, paging: null, anchor: null,
     restoring: null,
   }).current;
   const [pill, setPill] = useState(false);
@@ -387,15 +390,18 @@ function List(p: {
     view.paging = paging;
   });
 
-  // Rows that came in. A page in place of the rows starts at the bottom and empties the live
-  // region; rows below say themselves in it, and show the pill below a view that does not keep to
-  // the bottom; a page above the rows holds the reader's place.
+  // Rows that came in or changed. A page in place of the rows starts at the bottom and empties
+  // the live region; rows below say themselves in it, and show the pill below a view that does not
+  // keep to the bottom; a message near the bottom that changed in place says its new words; a page
+  // above the rows holds the reader's place.
   useLayoutEffect(() => {
     const now = seenRows(rows, replacements, appended);
     const change = rowsChange(view.rows, now);
     const above = prepended(view.rows, now);
-    const arrived = change === 'appended' ? rows.slice(rows.length - arrivedCount(view.rows, now)) : NO_ROWS;
+    const arrived = arrivedCount(view.rows, now);
+    const before = view.tail;
     view.rows = now;
+    view.tail = lastRows(rows);
     const el = scrollRef.current;
     if (change === 'replaced') {
       dropAnchor();
@@ -406,9 +412,8 @@ function List(p: {
       return;
     }
     if (above && view.anchor !== null && el !== null) startRestore(el);
-    if (change !== 'appended') return;
-    if (!view.stuck) setPill(true);
-    const lines = announcement(arrived);
+    if (change === 'appended' && !view.stuck) setPill(true);
+    const lines = announcement(rows, arrived, before);
     if (lines.length > 0) setSaid((s) => ({ n: s.n + 1, lines }));
   }, [view, rows, appended, replacements, toBottom, dropAnchor, startRestore]);
 

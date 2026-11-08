@@ -845,10 +845,23 @@ test('the live region says the rows that arrive at the bottom in their own words
   expect(said.map((l) => l.slice(0, 2))).toEqual(['7 ', '8 ', '9 ']);
   expect(said.every((l) => l.length === 500)).toBe(true);
 
-  // An update in place is not an arrival; a page in place of the rows empties the region.
-  await hostCall(page, 'emit', 'transcript.update', { session: CHECKOUT_REF, items: [item({ id: 'burst-9', kind: 'assistant', text: 'Changed.' })] });
+  // A message among the last rows whose text changes in place says its new words, once; a row
+  // further up and a tool whose status changes say nothing; a page in place of the rows empties the region.
+  const update = (/** @type {object[]} */ items) => hostCall(page, 'emit', 'transcript.update', { session: CHECKOUT_REF, items });
+  await update([item({ id: 'burst-9', kind: 'assistant', text: 'Changed.' })]);
   await expect(tx.locator('.say', { hasText: 'Changed.' })).toHaveCount(1);
-  expect(await lines.allTextContents()).toEqual(said);
+  await expect(lines).toHaveText(['Changed.']);
+  await update([item({ id: 'burst-5', kind: 'assistant', text: 'Changed far up.' }), item({ id: 'burst-9', kind: 'assistant', text: 'Changed again.' })]);
+  await expect(lines).toHaveText(['Changed again.']);
+  const lint = (/** @type {string} */ toolStatus) => item({ id: 'say-5', kind: 'tool', toolName: 'Bash', target: 'npm run lint', toolStatus });
+  await appendToCheckout(page, [lint('running')]);
+  await expect(lines).toHaveText(['Bash npm run lint']);
+  const spoke = await region.locator(':scope > div').elementHandle();
+  await update([lint('ok')]);
+  await expect(tx.locator('button.tool', { hasText: 'npm run lint' }).locator('.okm')).toBeVisible();
+  await frames(tx, 3);
+  expect(await spoke?.evaluate((el) => el.isConnected)).toBe(true);
+  await expect(lines).toHaveText(['Bash npm run lint']);
   await hostCall(page, 'emit', 'transcript.reset', {
     session: CHECKOUT_REF, reason: 'rollover', page: { items: bashRows('reset', 5), reachedStart: true, omittedItems: 0 },
   });

@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneItem } from '../protocol/types.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
-import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, ANNOUNCE_SOURCE_CHARS, announcement, spoken } from './announce.ts';
+import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, ANNOUNCE_SOURCE_CHARS, announcement, lastRows, spoken } from './announce.ts';
 
 let nextKey = 1;
 
@@ -67,7 +67,7 @@ test('a message’s words come from its first ANNOUNCE_SOURCE_CHARS characters o
 test('an announcement says the last ANNOUNCE_ROWS rows that say something, oldest first', () => {
   assert.equal(ANNOUNCE_ROWS, 3);
   const burst = Array.from({ length: 50 }, (_, i) => row({ kind: 'assistant', text: `Message ${i}.` }));
-  assert.deepEqual(announcement(burst), ['Message 47.', 'Message 48.', 'Message 49.']);
+  assert.deepEqual(announcement(burst, burst.length, []), ['Message 47.', 'Message 48.', 'Message 49.']);
   const mixed = [
     row({ kind: 'user', text: 'Go' }),
     row({ kind: 'tool', toolName: 'Read', target: 'auth.ts' }),
@@ -75,7 +75,57 @@ test('an announcement says the last ANNOUNCE_ROWS rows that say something, oldes
     receipt('Answered on the laptop'),
     row({ kind: 'fileEdit', toolName: 'Edit', target: 'auth.ts' }),
   ];
-  assert.deepEqual(announcement(mixed), ['Go', 'Read auth.ts', 'Answered on the laptop']);
-  assert.deepEqual(announcement([row({ kind: 'thinking', text: 'Hmm.' })]), []);
-  assert.deepEqual(announcement([]), []);
+  assert.deepEqual(announcement(mixed, mixed.length, []), ['Go', 'Read auth.ts', 'Answered on the laptop']);
+  assert.deepEqual(announcement([row({ kind: 'thinking', text: 'Hmm.' })], 1, []), []);
+  assert.deepEqual(announcement([], 0, []), []);
+  // Only the rows that came in, the last `arrived` of them.
+  assert.deepEqual(announcement(mixed, 2, lastRows(mixed.slice(0, 3))), ['Answered on the laptop']);
+});
+
+/** `r` with its item's fields replaced by `over`, in place: the same key. */
+function changed(r: TranscriptRow, over: Partial<PhoneItem>): TranscriptRow {
+  if (r.kind !== 'item') throw new Error('not an item');
+  return { ...r, item: { ...r.item, ...over } };
+}
+
+test('a message among the last ANNOUNCE_ROWS rows whose text changed in place says its new words, once', () => {
+  const rows = [row({ kind: 'user', text: 'Go' }), row({ kind: 'assistant', text: '' }), row({ kind: 'peer', text: 'Hold on.' })];
+  const before = lastRows(rows);
+  // An empty message whose text arrives, and a message whose text changes.
+  const now = [rows[0]!, changed(rows[1]!, { text: 'Both **pass**.' }), changed(rows[2]!, { text: 'Keep the `saved-card` list.' })];
+  assert.deepEqual(announcement(now, 0, before), ['Both pass.', 'Keep the saved-card list.']);
+  // Seen again, nothing changed since.
+  assert.deepEqual(announcement(now, 0, lastRows(now)), []);
+  // The user's own message, changed in place.
+  const mine = [changed(now[0]!, { text: 'Go on' }), ...now.slice(1)];
+  assert.deepEqual(announcement(mine, 0, lastRows(now)), ['Go on']);
+});
+
+test('a change in place that says nothing new, a tool, a receipt and a row further up say nothing', () => {
+  const tool = row({ kind: 'tool', toolName: 'Bash', target: 'npm test', toolStatus: 'running' });
+  const far = row({ kind: 'assistant', text: 'Far up.' });
+  const said = row({ kind: 'assistant', text: 'Both **pass**.' });
+  const answered = receipt('Answered on this phone: Yes');
+  const rows = [far, row({ kind: 'user', text: 'Go' }), tool, said, answered];
+  const before = lastRows(rows);
+  const now = [
+    changed(far, { text: 'Changed far up.' }), rows[1]!, changed(tool, { toolStatus: 'ok' }),
+    // The same words: only the marks changed, or text emptied.
+    changed(said, { text: 'Both *pass*.' }), { ...answered, text: 'Answered on the laptop' },
+  ];
+  assert.deepEqual(announcement(now, 0, before), []);
+  assert.deepEqual(announcement([...now.slice(0, 3), changed(said, { text: '' }), now[4]!], 0, before), []);
+  // A row the list never saw at the bottom is not taken for a change.
+  assert.deepEqual(announcement(now, 0, []), []);
+});
+
+test('rows that arrive and a message changed in place above them share the ANNOUNCE_ROWS lines', () => {
+  const said = row({ kind: 'assistant', text: 'Working on it.' });
+  const rows = [row({ kind: 'user', text: 'Go' }), said];
+  const before = lastRows(rows);
+  const one = [rows[0]!, changed(said, { text: 'Done.' }), row({ kind: 'assistant', text: 'Next.' })];
+  assert.deepEqual(announcement(one, 1, before), ['Done.', 'Next.']);
+  // Three rows that arrive fill the lines, and the changed row is no longer among the last three.
+  const three = [rows[0]!, changed(said, { text: 'Done.' }), ...['A.', 'B.', 'C.'].map((text) => row({ kind: 'assistant', text }))];
+  assert.deepEqual(announcement(three, 3, before), ['A.', 'B.', 'C.']);
 });
