@@ -189,7 +189,10 @@ class LoaderPage {
   #state = null;
   /** @type {string | null} The full screen showing for the current laptop, if any. */
   #shown = null;
-  /** @type {((laptopName: string) => void) | null} Renames the laptop on the connecting screen. */
+  /**
+   * @type {((laptopName: string) => void) | null} Renames the laptop on the connecting screen;
+   *   set only while that screen shows, and cleared by whatever replaces it.
+   */
   #renameConnecting = null;
   /** @type {AppFrame | null} */
   #frame = null;
@@ -316,6 +319,7 @@ class LoaderPage {
    */
   #mount(node, onLeave = null) {
     if (this.#dead) return;
+    this.#renameConnecting = null;
     this.#leaveScreen?.();
     this.#leaveScreen = onLeave;
     this.#closeMenu(false);
@@ -837,7 +841,7 @@ class LoaderPage {
     if (current === null) return;
     this.#current = { ...current, laptopName };
     this.#renderStrip();
-    if (this.#shown === 'connecting') this.#renameConnecting?.(laptopName);
+    this.#renameConnecting?.(laptopName);
   }
 
   /**
@@ -860,11 +864,13 @@ class LoaderPage {
    * @param {string} text
    */
   #onBundle(connection, sha256, text) {
+    // Defence in depth: `runningBundle` normally stops the bundle the frame runs from coming again.
     if (this.#frame !== null && this.#frameSha === sha256) return;
     this.#destroyFrame();
     this.#leaveScreen?.();
     this.#leaveScreen = null;
     this.#shown = null;
+    this.#renameConnecting = null;
     this.#screen.replaceChildren();
     this.#screen.hidden = true;
     this.#frameHost.hidden = false;

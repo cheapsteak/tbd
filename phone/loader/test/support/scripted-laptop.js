@@ -223,6 +223,11 @@ export async function createScriptedLaptop({
       };
     },
 
+    /** @param {string} name The name later message 2s, and offers, carry: the laptop was renamed. */
+    setLaptopName(name) {
+      laptopName = name;
+    },
+
     /** @param {string} text The bundle later `welcome` messages name. */
     setBundle(text) {
       bundle = makeBundle(text);

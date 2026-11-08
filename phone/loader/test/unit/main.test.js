@@ -842,6 +842,24 @@ test('only a session that reaches ready records the visit, with the handshake\'s
   assert.equal(page.stripButton()?.textContent.includes('acme-mbp'), true);
 });
 
+test('a rename after the app frame replaced the connecting screen does nothing to that screen', async (t) => {
+  const { page, laptop, room } = await readyWithFrame(t);
+  /** The connecting screens drawn so far. */
+  const connecting = () => page.doc.created.filter((element) => element.getAttribute('data-state') === 'connecting');
+  const [drawn] = connecting();
+  assert.equal(connecting().length, 1);
+  assert.equal(drawn.textContent, 'Connecting to acme-mbp…');
+
+  // The laptop is renamed and comes back: the strip takes the new name from the handshake.
+  laptop.setLaptopName('acme-studio');
+  laptop.leave(room);
+  await waitFor(() => page.strip.textContent.includes('Reconnecting'), 'the strip reading Reconnecting…');
+  laptop.join(room);
+  await waitFor(() => page.stripButton()?.textContent.includes('acme-studio') ?? false, 'the strip naming acme-studio');
+  assert.equal(drawn.textContent, 'Connecting to acme-mbp…', 'the connecting screen that went keeps its text');
+  assert.equal(connecting().length, 1, 'no connecting screen was drawn again');
+});
+
 test('the app frame hears its channel go down once and come up once across a reconnect', async (t) => {
   const { page, laptop, room, channel } = await readyWithFrame(t);
   await waitFor(() => channel.length === 1, 'the first channel message');
