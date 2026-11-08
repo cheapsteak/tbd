@@ -11,6 +11,7 @@ import {
 } from '../../links.js';
 import { createFakeRelay } from '../support/fake-relay.js';
 import { fakeSocketFactory } from '../support/fake-websocket.js';
+import { b64, decode, encode, until } from '../support/helpers.js';
 import { createScriptedLaptop } from '../support/scripted-laptop.js';
 
 // Playwright 1.65.0's devices['iPhone 15'], devices['Pixel 7'], devices['Desktop Safari'] (an
@@ -24,27 +25,6 @@ const GALAXY_TAB_S4_UA = 'Mozilla/5.0 (Linux; Android 8.1.0; SM-T837A) AppleWebK
 
 const file = JSON.parse(readFileSync(new URL('../../../test-vectors/pairing-link.json', import.meta.url), 'utf8'));
 const NOW = file.now * 1000, V1 = file.valid[0], ROOM = V1.link.room;
-const WAIT_MS = 5_000;
-
-/** @param {unknown} value */
-const encode = (value) => new TextEncoder().encode(JSON.stringify(value));
-/** @param {Uint8Array} bytes */
-const decode = (bytes) => JSON.parse(new TextDecoder().decode(bytes));
-/** @param {string} text */
-const b64 = (text) => /** @type {Uint8Array} */ (base64urlDecode(text));
-const sleep = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * @param {() => boolean} predicate
- * @param {string} what
- */
-async function until(predicate, what) {
-  const deadline = Date.now() + WAIT_MS;
-  while (!predicate()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await sleep(1);
-  }
-}
 
 /**
  * The relay field of a vector link, read without the parser.

@@ -5,38 +5,19 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 
 import { createInitiator, phonePrologue } from '../../channel/noise.js';
 import { confirmationCode } from '../../channel/confirm.js';
-import { base64urlDecode, base64urlEncode } from '../../channel/pairingLink.js';
+import { base64urlEncode } from '../../channel/pairingLink.js';
 import { MAX_CHUNK_BYTES } from '../../constants.js';
 import { createFakeRelay } from './fake-relay.js';
 import { fakeSocketFactory } from './fake-websocket.js';
+import { b64, decode, encode, sleep, until } from './helpers.js';
 import { createScriptedLaptop } from './scripted-laptop.js';
 import { importPair } from './x25519.js';
 
 const ROOM_ID = /^[A-Za-z0-9_-]{43}$/;
 const HELLO = { type: 'hello', loaderVersion: '1.0.0', protocols: [1] };
-const WAIT_MS = 5_000;
 
-/** @param {unknown} value */
-const encode = (value) => new TextEncoder().encode(JSON.stringify(value));
-/** @param {Uint8Array} bytes */
-const decode = (bytes) => JSON.parse(new TextDecoder().decode(bytes));
-/** @param {string} text */
-const b64 = (text) => /** @type {Uint8Array} */ (base64urlDecode(text));
 /** @param {Uint8Array | string} data */
 const sha256Hex = (data) => createHash('sha256').update(data).digest('hex');
-const sleep = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * @param {() => boolean} predicate
- * @param {string} what
- */
-async function until(predicate, what) {
-  const deadline = Date.now() + WAIT_MS;
-  while (!predicate()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await sleep(1);
-  }
-}
 
 /** An X25519 key pair made as the loader makes it: private half not extractable. */
 async function phoneKeys() {

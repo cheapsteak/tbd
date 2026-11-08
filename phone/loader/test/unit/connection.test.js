@@ -4,7 +4,6 @@ import { createHash, randomBytes } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
 
 import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../channel/noise.js';
-import { base64urlDecode } from '../../channel/pairingLink.js';
 import { LaptopConnection } from '../../connection.js';
 import {
   CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, RESUME_COALESCE_MS,
@@ -16,38 +15,16 @@ import { validateLaptopRecord } from '../../store.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { createFakeRelay } from '../support/fake-relay.js';
 import { fakeSocketFactory } from '../support/fake-websocket.js';
+import { b64, decode, encode, hangingSockets, quiet, until } from '../support/helpers.js';
 import { createResponder } from '../support/noise-responder.js';
 import { createScriptedLaptop } from '../support/scripted-laptop.js';
 import { importPair } from '../support/x25519.js';
 
-const WAIT_MS = 10_000;
 const START = 1_700_000_000_000;
 const HELLO = { type: 'hello', loaderVersion: LOADER_VERSION, protocols: [1] };
 
-/** @param {unknown} value */
-const encode = (value) => new TextEncoder().encode(JSON.stringify(value));
-/** @param {Uint8Array} bytes */
-const decode = (bytes) => JSON.parse(new TextDecoder().decode(bytes));
-/** @param {string} text */
-const b64 = (text) => /** @type {Uint8Array} */ (base64urlDecode(text));
 /** @param {string} text */
 const sha256Hex = (text) => createHash('sha256').update(text).digest('hex');
-const sleep = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
-/** Lets in-flight socket deliveries and Web Crypto work land. */
-const quiet = () => sleep(30);
-
-/**
- * @param {() => boolean} predicate
- * @param {string} what
- * @param {number} [ms]
- */
-async function until(predicate, what, ms = WAIT_MS) {
-  const deadline = Date.now() + ms;
-  while (!predicate()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await sleep(1);
-  }
-}
 
 /**
  * Wraps a socket factory to record, per test, every socket it made and a timeline of what
@@ -133,41 +110,6 @@ function intercept(ws, name, before, after) {
       handler = fn;
     },
   });
-}
-
-/**
- * A socket factory whose sockets stay connecting forever, as on a network that swallows the
- * WebSocket handshake. Each socket records the codes `close()` was called with.
- */
-function hangingSockets() {
-  /** @type {any[]} */
-  const sockets = [];
-  return {
-    sockets,
-    /** @param {string} url */
-    factory(url) {
-      const ws = {
-        url,
-        binaryType: 'blob',
-        readyState: 0,
-        onopen: null,
-        onmessage: null,
-        onclose: null,
-        onerror: null,
-        /** @type {Array<number | undefined>} */ closes: [],
-        send() {
-          throw new DOMException('the WebSocket is still connecting', 'InvalidStateError');
-        },
-        /** @param {number} [code] */
-        close(code) {
-          ws.closes.push(code);
-          ws.readyState = 3;
-        },
-      };
-      sockets.push(ws);
-      return ws;
-    },
-  };
 }
 
 /**

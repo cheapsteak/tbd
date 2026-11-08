@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 
 import { confirmationCode } from '../../channel/confirm.js';
 import { NoiseError, phonePrologue } from '../../channel/noise.js';
-import { base64urlDecode, base64urlEncode } from '../../channel/pairingLink.js';
+import { base64urlEncode } from '../../channel/pairingLink.js';
 import { LaptopConnection } from '../../connection.js';
 import {
   HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, PAIRING_EXPIRY_GRACE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
@@ -17,11 +17,13 @@ import { validateLaptopRecord } from '../../store.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { createFakeRelay } from '../support/fake-relay.js';
 import { fakeSocketFactory } from '../support/fake-websocket.js';
+import {
+  WAIT_MS, b64, decode, encode, hangingSockets, quiet, until,
+} from '../support/helpers.js';
 import { createResponder } from '../support/noise-responder.js';
 import { createScriptedLaptop } from '../support/scripted-laptop.js';
 import { generatePair } from '../support/x25519.js';
 
-const WAIT_MS = 10_000;
 const START = 1_700_000_000_000;
 const LOADER_URL = 'https://loader.acme.test/';
 const LOCAL_RELAY = 'http://127.0.0.1';
@@ -30,29 +32,7 @@ const HELLO = { type: 'hello', loaderVersion: LOADER_VERSION, protocols: [1] };
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const utf8 = new TextEncoder();
-/** @param {unknown} value */
-const encode = (value) => utf8.encode(JSON.stringify(value));
-/** @param {Uint8Array} bytes */
-const decode = (bytes) => JSON.parse(new TextDecoder().decode(bytes));
-/** @param {string} text */
-const b64 = (text) => /** @type {Uint8Array} */ (base64urlDecode(text));
 const newRoom = () => base64urlEncode(new Uint8Array(randomBytes(32)));
-const sleep = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
-/** Lets in-flight socket deliveries and Web Crypto work land. */
-const quiet = () => sleep(30);
-
-/**
- * @param {() => boolean} predicate
- * @param {string} what
- * @param {number} [ms]
- */
-async function until(predicate, what, ms = WAIT_MS) {
-  const deadline = Date.now() + ms;
-  while (!predicate()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await sleep(1);
-  }
-}
 
 /**
  * The link a phone reads from an offer, through the loader's own intake.
@@ -156,41 +136,6 @@ function intercept(ws, name, wrapper) {
       handler = fn;
     },
   });
-}
-
-/**
- * A socket factory whose sockets stay connecting forever. Each records the codes `close()`
- * was called with.
- */
-function hangingSockets() {
-  /** @type {any[]} */
-  const sockets = [];
-  return {
-    sockets,
-    /** @param {string} url */
-    factory(url) {
-      const ws = {
-        url,
-        binaryType: 'blob',
-        readyState: 0,
-        onopen: null,
-        onmessage: null,
-        onclose: null,
-        onerror: null,
-        /** @type {Array<number | undefined>} */ closes: [],
-        send() {
-          throw new DOMException('the WebSocket is still connecting', 'InvalidStateError');
-        },
-        /** @param {number} [code] */
-        close(code) {
-          ws.closes.push(code);
-          ws.readyState = 3;
-        },
-      };
-      sockets.push(ws);
-      return ws;
-    },
-  };
 }
 
 /**
