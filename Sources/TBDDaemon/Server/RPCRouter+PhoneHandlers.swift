@@ -167,11 +167,16 @@ extension RPCRouter {
     // MARK: - Settings
 
     /// Saves the "Phone control" setting, then lets the bridge start or stop.
+    /// The bridge's reconcile broadcasts the new status; without a bridge,
+    /// the handler does.
     private func handleConfigSetPhoneControlEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetPhoneControlEnabledParams.self, from: paramsData)
         try await db.config.setPhoneControlEnabled(params.enabled)
-        await phoneBridge?.reconcile()
-        subscriptions.broadcast(delta: .phoneStatusChanged)
+        if let bridge = phoneBridge {
+            await bridge.reconcile()
+        } else {
+            subscriptions.broadcast(delta: .phoneStatusChanged)
+        }
         return .ok()
     }
 
@@ -200,8 +205,13 @@ extension RPCRouter {
             stored = nil
         }
         try await db.config.setPhoneRelayURL(stored)
-        await bridge?.reconcile()
-        subscriptions.broadcast(delta: .phoneStatusChanged)
+        // The bridge's reconcile broadcasts the new status; without a
+        // bridge, the handler does.
+        if let bridge {
+            await bridge.reconcile()
+        } else {
+            subscriptions.broadcast(delta: .phoneStatusChanged)
+        }
         return .ok()
     }
 

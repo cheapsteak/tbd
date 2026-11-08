@@ -49,7 +49,11 @@ struct PhoneRPCTests {
             processSignaller: processSignaller,
             actuationLog: ActuationLog(path: logPath))
         router.phoneAppBinaryCheck = binaryCheck
-        let fake = FakePhoneBridgeController()
+        // Like the real bridge, the fake's reconcile broadcasts the status
+        // once, through the router's subscriptions.
+        let fake = FakePhoneBridgeController(broadcast: { [subscriptions = router.subscriptions] delta in
+            subscriptions.broadcast(delta: delta)
+        })
         if withBridge {
             router.phoneBridge = fake
         }
@@ -351,6 +355,7 @@ struct PhoneRPCTests {
         #expect(config.phoneControlEnabled == true)
         let calls = await f.fake.calls
         #expect(calls == ["reconcile"])
+        // The reconcile's own delta, and none from the handler.
         #expect(f.deltas.count == 1)
     }
 
@@ -378,6 +383,7 @@ struct PhoneRPCTests {
         #expect(config.phoneRelayURL == Self.relayURL)
         calls = await f.fake.calls
         #expect(calls == [check, check, "reconcile"])
+        // The reconcile's own delta, and none from the handler.
         #expect(f.deltas.count == 1)
 
         // Saving the same URL again checks it again ("Check Again").
@@ -385,6 +391,7 @@ struct PhoneRPCTests {
         #expect(again.success, "\(again.error ?? "no error")")
         calls = await f.fake.calls
         #expect(calls == [check, check, "reconcile", check, "reconcile"])
+        #expect(f.deltas.count == 2)
 
         // A failed check of another URL leaves the saved one in place.
         await f.fake.failCheckRelay(with: .notATBDRelay)
@@ -406,6 +413,7 @@ struct PhoneRPCTests {
         }
         calls = await f.fake.calls
         #expect(calls == ["reconcile", "reconcile"])
+        #expect(f.deltas.count == 4)
     }
 
     @Test func aPublicHTTPRelayURLIsRefusedBeforeAnyCheck() async throws {
@@ -600,13 +608,22 @@ private actor FakePhoneBridgeController: PhoneBridgeControlling {
     private(set) var calls: [String] = []
     private var checkRelayFailure: PhoneBridgeError?
     private var bridgeCallFailure: PhoneBridgeError?
+    private let broadcast: @Sendable (StateDelta) -> Void
+
+    init(broadcast: @escaping @Sendable (StateDelta) -> Void) {
+        self.broadcast = broadcast
+    }
 
     func failCheckRelay(with error: PhoneBridgeError?) { checkRelayFailure = error }
     /// Makes `pairStart`, `pairAllow`, `pairDeny` and `revoke` throw `error`.
     func failBridgeCalls(with error: PhoneBridgeError?) { bridgeCallFailure = error }
     func clearCalls() { calls = [] }
 
-    func reconcile() async { calls.append("reconcile") }
+    /// Broadcasts the status once, as `PhoneBridgeControlling` requires.
+    func reconcile() async {
+        calls.append("reconcile")
+        broadcast(.phoneStatusChanged)
+    }
 
     func checkRelay(_ url: URL) async throws -> PhoneRelayInfo {
         calls.append("checkRelay \(url.absoluteString)")

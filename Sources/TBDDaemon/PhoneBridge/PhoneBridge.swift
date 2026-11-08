@@ -111,6 +111,13 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// 5. Each paired phone without a link gets one; each link whose phone is
 ///    gone is stopped.
 ///
+/// **The status delta.** Each `reconcile()` broadcasts `.phoneStatusChanged`
+/// once, when it is done, whatever it did; nothing it does on the way
+/// broadcasts one of its own. So the RPC handler that saves a setting and
+/// reconciles sends none, and one toggle reaches the app as one delta. A
+/// change that comes later, such as the relay check's answer, broadcasts
+/// when it lands.
+///
 /// **A refused relay** stops each link it refuses, for good; a later
 /// reconcile starts them again. Saving the relay URL is how the user asks.
 ///
@@ -240,7 +247,7 @@ actor PhoneBridge: PhoneBridgeControlling {
     // MARK: - PhoneBridgeControlling
 
     func reconcile() async {
-        await serialized { await self.reconcileNow() }
+        await serialized { await self.reconcileAndAnnounce() }
     }
 
     func checkRelay(_ url: URL) async throws -> PhoneRelayInfo {
@@ -364,6 +371,14 @@ actor PhoneBridge: PhoneBridgeControlling {
         return await task.value
     }
 
+    /// A reconcile, then its one status delta.
+    private func reconcileAndAnnounce() async {
+        await reconcileNow()
+        broadcast(.phoneStatusChanged)
+    }
+
+    /// Brings the bridge in line with the saved settings. Broadcasts
+    /// nothing: its caller sends the one delta once it is done.
     private func reconcileNow() async {
         guard !isStopped else { return }
         startPump()
@@ -444,7 +459,6 @@ actor PhoneBridge: PhoneBridgeControlling {
         for device in devices where links[device.id] == nil {
             await startLink(for: device, in: current)
         }
-        broadcast(.phoneStatusChanged)
     }
 
     private func pairStartNow() async -> Result<PhonePairingStatus, any Error> {
@@ -454,7 +468,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             guard let relayText = config.phoneRelayURL else { throw PhoneBridgeError.relayNotSetUp }
             if running?.relayURL.absoluteString != relayText {
                 // Not started yet, or started on another relay.
-                await reconcileNow()
+                await reconcileAndAnnounce()
             }
             guard let current = running else {
                 throw PhoneBridgeError.notRunning(problem ?? (isStopped ? "TBD is stopping." : "it has not started."))
@@ -490,15 +504,14 @@ actor PhoneBridge: PhoneBridgeControlling {
         }
     }
 
-    /// Stops everything, keeps `problem` as the reason the bridge is not
-    /// running, and tells the app.
+    /// Stops everything and keeps `problem` as the reason the bridge is not
+    /// running. The reconcile that halts tells the app.
     private func halt(reason: String, problem: String?) async {
         self.problem = problem
         if let problem {
             PhoneBridgeLog.record(.failed("Phone control cannot run: \(problem)"))
         }
         await stopEverything(reason: reason)
-        broadcast(.phoneStatusChanged)
     }
 
     /// Stops the relay check, every link and the pairing service, sending
@@ -624,8 +637,10 @@ actor PhoneBridge: PhoneBridgeControlling {
 
     /// Checks the relay in a task of its own. The task first waits for the
     /// one it replaces, so awaiting `checkTask` awaits every check started.
+    /// Only a reconcile starts one, and its own delta shows the check in
+    /// flight; the answer broadcasts when it lands.
     private func startRelayCheck(_ relayURL: URL) {
-        setCheck(.inFlight, for: relayURL)
+        setCheck(.inFlight, for: relayURL, announce: false)
         let previous = checkTask
         previous?.cancel()
         checkTask = Task {
@@ -663,7 +678,11 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// answer keeps `newRefusal` as the refusal; only an `.ok` answer clears
     /// it. A check in flight, or one that failed, leaves the refusal as it
     /// was: it says nothing about whether the relay is usable now.
-    private func setCheck(_ answer: RelayCheck, for relayURL: URL, refusal newRefusal: PhoneBridgeError? = nil) {
+    ///
+    /// A changed answer broadcasts the status, unless `announce` is false
+    /// because a reconcile in progress will.
+    private func setCheck(_ answer: RelayCheck, for relayURL: URL, refusal newRefusal: PhoneBridgeError? = nil,
+                          announce: Bool = true) {
         guard running?.relayURL == relayURL else { return }
         switch answer {
         case .ok:
@@ -675,7 +694,9 @@ actor PhoneBridge: PhoneBridgeControlling {
         }
         guard check != answer else { return }
         check = answer
-        broadcast(.phoneStatusChanged)
+        if announce {
+            broadcast(.phoneStatusChanged)
+        }
     }
 
     // MARK: - Link events

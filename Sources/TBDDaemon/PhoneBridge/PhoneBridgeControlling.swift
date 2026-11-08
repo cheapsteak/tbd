@@ -13,6 +13,8 @@ import TBDShared
 protocol PhoneBridgeControlling: Sendable {
     /// Brings the running links in line with the saved settings: starts or
     /// stops the bridge, and opens or closes one link per paired phone.
+    /// Broadcasts `.phoneStatusChanged` once when it is done, whatever it
+    /// did, so a caller that reconciles sends no delta of its own.
     func reconcile() async
 
     /// Reads `GET /v1/info` from `url`, a relay the user has not saved yet,

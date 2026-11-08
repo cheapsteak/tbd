@@ -179,6 +179,14 @@ private struct PhoneBridgeHarness: Sendable {
         return PairedByLink(phone: phone, device: device, link: link)
     }
 
+    /// How many `.phoneStatusChanged` deltas the bridge broadcast.
+    var statusDeltaCount: Int {
+        deltas.values.filter { delta in
+            if case .phoneStatusChanged = delta { return true }
+            return false
+        }.count
+    }
+
     /// The `notificationReceived` deltas the bridge broadcast.
     var notificationDeltas: [NotificationDelta] {
         deltas.values.compactMap { delta -> NotificationDelta? in
@@ -927,6 +935,41 @@ struct PhoneBridgeTests {
             try await h.waitUntil("the room to open once") { h.relay.openLaptopRooms() == [room] }
             let restarted = await h.bridge.linkCount
             #expect(restarted == 1)
+        }
+    }
+
+    // MARK: The status delta
+
+    @Test func eachReconcileBroadcastsTheStatusOnce() async throws {
+        try await withBridge { h in
+            await h.bridge.reconcile()
+            try await h.waitUntil("the relay to show as connected") {
+                await h.bridge.status().relay.state == .connected
+            }
+
+            // Turning phone control off: one delta.
+            let beforeOff = h.statusDeltaCount
+            try await h.db.config.setPhoneControlEnabled(false)
+            await h.bridge.reconcile()
+            #expect(h.statusDeltaCount == beforeOff + 1)
+
+            // Turning it on again: one delta, which shows the new relay check
+            // in flight. The check's answer is held, so nothing else lands.
+            await h.info.hold()
+            let beforeOn = h.statusDeltaCount
+            try await h.db.config.setPhoneControlEnabled(true)
+            await h.bridge.reconcile()
+            try await h.waitUntil("the relay check to wait on the relay") { await h.info.heldCalls == 1 }
+            #expect(h.statusDeltaCount == beforeOn + 1)
+            let status = await h.bridge.status()
+            #expect(status.running && status.relay.state == .checking)
+
+            // The answer is a change of its own, and broadcasts when it lands.
+            await h.info.release()
+            try await h.waitUntil("the relay to show as connected again") {
+                await h.bridge.status().relay.state == .connected
+            }
+            #expect(h.statusDeltaCount == beforeOn + 2)
         }
     }
 
