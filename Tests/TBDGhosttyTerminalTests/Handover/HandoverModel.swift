@@ -126,6 +126,13 @@ let handoverComparedModes: [(name: String, value: Int, decPrivate: Bool)] = [
     ("reverseVideo", 5, true), ("IRM", 4, false), ("LNM", 20, false),
 ]
 
+/// The names `HandoverSnap.modes` holds an answer for on both engines: the compared modes other
+/// than the mouse modes.
+let handoverAnsweredModeNames: [String] = handoverComparedModes.filter { !isMouseMode($0) }.map { $0.name }
+
+/// The names `HandoverSnap.mouseModeBits` holds, on a snap that has them.
+let handoverMouseModeNames: [String] = handoverComparedModes.filter { isMouseMode($0) }.map { $0.name }
+
 /// What a reader sees on the screen: text, width, colours, attributes, links, the cursor's cell
 /// and which screen is active.
 let handoverScreenCategories: Set<String> = [
@@ -211,9 +218,11 @@ private func compareCells(
 /// What is compared: every cell of the screen and the scrollback, soft wraps, the cursor's cell,
 /// pending wrap and visibility, the active screen, the modes in `handoverComparedModes`, the
 /// mouse tracking mode and encoding in effect, the scrolling region and margins, the pen and the
-/// kitty keyboard flags. A mode one side gave no answer for differs. libghostty's bits for each
-/// mouse mode are compared when both sides have them. What SwiftTerm cannot expose, and so is not
-/// compared:
+/// kitty keyboard flags. A mode in `handoverAnsweredModeNames` differs when either side gave no
+/// answer for it, both sides included, and so does a mouse mode in effect either side could not
+/// read: two engines that both stopped answering must not pass as two that agree. libghostty's
+/// bits for each mouse mode are compared, a missing one included, when both sides have them.
+/// What SwiftTerm cannot expose, and so is not compared:
 ///
 /// - **Character sets and tab stops** – SwiftTerm keeps its G0 to G3 designations, the shift
 ///   state and the tab stops private.
@@ -258,23 +267,26 @@ func handoverCompare(_ expected: HandoverSnap, _ actual: HandoverSnap, history: 
         tally.add("inertMargins", regionText)
     }
     let unanswered = "no answer"
-    for name in Set(expected.modes.keys).union(actual.modes.keys).sorted() {
+    func answer(_ value: Bool?) -> String { value.map { "\($0)" } ?? unanswered }
+    for name in Set(handoverAnsweredModeNames).union(expected.modes.keys).union(actual.modes.keys).sorted() {
         let lhs = expected.modes[name], rhs = actual.modes[name]
-        if lhs != rhs {
-            tally.add("mode." + name, "\(lhs.map { "\($0)" } ?? unanswered) vs \(rhs.map { "\($0)" } ?? unanswered)")
+        if lhs == nil || rhs == nil || lhs != rhs {
+            tally.add("mode." + name, "\(answer(lhs)) vs \(answer(rhs))")
         }
     }
     if let lhsBits = expected.mouseModeBits, let rhsBits = actual.mouseModeBits {
-        for (name, value) in lhsBits.sorted(by: { $0.key < $1.key }) where rhsBits[name] != value {
-            tally.add("mode." + name, "\(value) vs \(rhsBits[name].map { "\($0)" } ?? unanswered)")
+        let names = Set(handoverMouseModeNames).union(lhsBits.keys).union(rhsBits.keys)
+        for name in names.sorted() where lhsBits[name] == nil || lhsBits[name] != rhsBits[name] {
+            tally.add("mode." + name, "\(answer(lhsBits[name])) vs \(answer(rhsBits[name]))")
         }
     }
     let unread = "unread"
-    if expected.mouseTracking != actual.mouseTracking {
-        tally.add("mouseTracking", "\(expected.mouseTracking.map(String.init) ?? unread) vs \(actual.mouseTracking.map(String.init) ?? unread)")
+    func reading(_ value: Int?) -> String { value.map { "\($0)" } ?? unread }
+    if expected.mouseTracking == nil || expected.mouseTracking != actual.mouseTracking {
+        tally.add("mouseTracking", "\(reading(expected.mouseTracking)) vs \(reading(actual.mouseTracking))")
     }
-    if expected.mouseEncoding != actual.mouseEncoding {
-        tally.add("mouseEncoding", "\(expected.mouseEncoding.map(String.init) ?? unread) vs \(actual.mouseEncoding.map(String.init) ?? unread)")
+    if expected.mouseEncoding == nil || expected.mouseEncoding != actual.mouseEncoding {
+        tally.add("mouseEncoding", "\(reading(expected.mouseEncoding)) vs \(reading(actual.mouseEncoding))")
     }
     let lhsPen = expected.pen, rhsPen = actual.pen
     if lhsPen.foreground != rhsPen.foreground || lhsPen.background != rhsPen.background || lhsPen.flags != rhsPen.flags
