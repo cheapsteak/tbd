@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Reads the created session's id and its title out of the three prose lines
-/// `claude --cloud "<description>"` prints. There is no structured form —
+/// `claude --cloud=<description>` prints. There is no structured form —
 /// `--print` is refused alongside `--cloud` — so those lines are the only
 /// channel either value travels on.
 ///

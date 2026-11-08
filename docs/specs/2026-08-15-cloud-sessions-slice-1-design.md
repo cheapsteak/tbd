@@ -271,15 +271,23 @@ with the signed-in account — including for `attach`, which is declared because
 provider implements it. Whether a given account is permitted to use it is a
 separate, runtime question, and §5 is where that is answered.
 
-**Verbs, shipped.** `create` runs `claude --cloud "<prompt>"` from the
+**Verbs, shipped.** `create` runs `claude --cloud=<prompt>` from the
 repository checkout, on a pseudo-terminal, and reads the session id and its
 title out of what it prints (below). `list` returns the `claude_cloud_session`
 ledger — what this machine started — and nothing else; it is always
 `complete: false`, which the next subsection specifies. `send` posts one
-message through `claude -p "<msg>" --cloud <id> --output-format json`; the
+message through `claude -p --cloud=<id> --output-format json -- <msg>`; the
 response is `{"ok": true, "session_id": "…", "url": "…"}`, and `ok` plus a
 `session_id` matching the id sent is the success condition. `attach` runs
 `claude --cloud <id>` on the pane's PTY.
+
+User text never reaches the command line where the CLI could read it as an
+option. A prompt or message may start with `-`, and `--cloud` takes an optional
+value, which the CLI's parser does not take from a following argument that
+starts with `-`: it reads that argument as another option, so `--settings=…`
+would load settings. So `create` attaches the prompt with `--cloud=`, which
+assigns the value whatever it starts with, and `send` puts the message, the
+command's positional prompt, after `--`.
 
 **Verbs, designed for the later slice that declares them.** `land` will report
 the session's repository and branch with a `resume_command` of
@@ -880,7 +888,7 @@ What the field posts travels the ordinary path. The app sends the same bytes it
 sends any provider through `remote.send`
 (`Sources/TBDDaemon/Server/RPCRouter+RemoteHandlers.swift`:189); the provider
 implements the contract's byte interface on top of
-`claude -p "<msg>" --cloud <id> --output-format json` (§3 specifies the byte
+`claude -p --cloud=<id> --output-format json -- <msg>` (§3 specifies the byte
 handling, §11 records the measured call and its response).
 
 **What happens after a send is the honest limit of this slice.** There is no

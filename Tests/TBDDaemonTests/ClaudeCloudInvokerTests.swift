@@ -364,7 +364,7 @@ struct ClaudeCloudInvokerTests {
 
         #expect(result.exitCode == 0)
         let request = try #require(spawner.requestsSnapshot().first)
-        #expect(request.arguments == ["--cloud", "add a probe"])
+        #expect(request.arguments == ["--cloud=add a probe"])
         #expect(request.workingDirectory == "/tmp/api")
         // Non-negotiable: the CLI refuses `--cloud` creation on a pipe, so a
         // piped spawn does not degrade — it never works.
@@ -382,6 +382,24 @@ struct ClaudeCloudInvokerTests {
         #expect(session.agentState == .unknown)
         #expect(session.meta?["repo"] == "acme/api")
         #expect(session.meta?["branch"] == "fix-ci")
+    }
+
+    /// A prompt is user text, from the app or a phone, and may start with
+    /// `-`. `--cloud` takes an optional value, and the CLI's parser reads a
+    /// following argument that starts with `-` as another option, so as a
+    /// separate argument `--settings=/tmp/x` would load settings and `-h`
+    /// would print help. Attached with `=`, it is `--cloud`'s value.
+    @Test(arguments: ["--settings=/tmp/x", "-h", "- fix the tests"])
+    func aPromptThatStartsWithADashIsTheCloudValueNeverAnOption(prompt: String) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await seedRepo(db)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: successOutput, stderr: "")])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["create"], stdin: createBody(prompt: prompt), timeout: 60, contractVersion: 2)
+
+        #expect(result.exitCode == 0)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(request.arguments == ["--cloud=\(prompt)"])
     }
 
     @Test func createWritesTheLedgerRowBeforeResolvingIt() async throws {
@@ -848,7 +866,7 @@ struct ClaudeCloudInvokerTests {
         #expect(result.exitCode == 0)
         let request = try #require(spawner.requestsSnapshot().first)
         #expect(request.arguments
-            == ["-p", "try again", "--cloud", "session_01AAA", "--output-format", "json"])
+            == ["-p", "--cloud=session_01AAA", "--output-format", "json", "--", "try again"])
         // `--print` is explicitly a NON-interactive invocation and returns
         // JSON on an ordinary pipe. A pty here would merge stderr into that
         // JSON.
@@ -856,6 +874,24 @@ struct ClaudeCloudInvokerTests {
         // The contract's `send` answers `{}`; exit 0 means the bytes were
         // handed to the transport, not that the agent acted on them.
         #expect(try JSONSerialization.jsonObject(with: result.stdout) is [String: Any])
+    }
+
+    /// A message is user text, from the app or a phone, and may start with
+    /// `-`. Before `--` the CLI would parse it as an option, so
+    /// `--settings=/tmp/x` would load settings and `-h` would print help.
+    /// After `--` it is the command's positional prompt: one argument, last.
+    @Test(arguments: ["--settings=/tmp/x", "-h", "- fix the tests"])
+    func aMessageThatStartsWithADashFollowsTheEndOfOptions(message: String) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let spawner = FakeClaudeSpawner(outcomes: [.completed(status: 0, output: sendOK, stderr: "")])
+        let result = try await invoker(db: db, spawner: spawner).run(
+            config(), verb: ["send", "session_01AAA"], stdin: Data("\(message)\r".utf8),
+            timeout: 30, contractVersion: 2)
+
+        #expect(result.exitCode == 0)
+        let request = try #require(spawner.requestsSnapshot().first)
+        #expect(request.arguments
+            == ["-p", "--cloud=session_01AAA", "--output-format", "json", "--", message])
     }
 
     /// The fix this round of findings exists for: incidental stderr chatter
