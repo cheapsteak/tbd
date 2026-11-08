@@ -433,6 +433,45 @@ struct RemoteTranscriptFeedTests {
         #expect(h.subscriptions.subscriberCount == 0)
     }
 
+    /// A resumed open keeps the feed, whose follower ran on while the phone
+    /// was away, and makes no remote call: no provider list, no session list,
+    /// and no follower of its own.
+    @Test func aResumedOpenMakesNoRemoteCall() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let cache = try FakeCache(CacheLine.conversation("m", messages: 2))
+        defer { cache.remove() }
+        try Self.serve(h, cache: cache, prompt: Self.makePrompt)
+        let first = try await Self.liveConnection(h)
+        let opened = try await Self.open(h, id: "open", on: first)
+        #expect(!opened.resumed)
+        // The prompt feed's first read of the session list is behind us.
+        _ = try await Self.promptEvent(0, in: first)
+        let feed = try #require(await h.service.transcriptFeed(for: deviceID))
+        let streamID = try #require(await h.service.streamID(for: deviceID))
+        let seq = try #require(await h.service.lastSeq(for: deviceID))
+
+        await h.service.phoneDisconnected(h.peer)
+        let outbox = await h.connect()
+        let (subscribed, bytes) = try await h.request(
+            .sessionsSubscribe, params: SessionsSubscribeParams(stream: streamID, sinceSeq: seq), on: outbox)
+        #expect(subscribed.error == nil)
+        let result = try JSONDecoder().decode(PhoneReplyEnvelope<SessionsSubscribeResult>.self, from: bytes).result
+        #expect(result.replayed)
+        let callsBefore = h.actions.calls.count
+
+        let resumed = try await Self.open(h, id: "resume", resume: true, on: outbox)
+
+        #expect(resumed.resumed)
+        #expect(resumed.page == nil)
+        let kept = await h.service.transcriptFeed(for: deviceID)
+        #expect(kept === feed)
+        let methods = h.actions.calls.dropFirst(callsBefore).map(\.method)
+        let remoteReads = methods.filter { method in method == .remoteProviders || method == .remoteSessions }
+        #expect(remoteReads.isEmpty)
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
     /// A prompt read that waits for the phone's answer to a prompt that
     /// closed never holds up the transcript: the follower's ticks go on, and
     /// the prompt's closing follows once the answer finishes.
@@ -597,14 +636,16 @@ struct RemoteTranscriptFeedTests {
         return outbox
     }
 
-    private static func openParams(_ session: PhoneSessionRef) -> TranscriptOpenParams {
-        TranscriptOpenParams(session: session, showDetails: false, resume: false)
+    private static func openParams(_ session: PhoneSessionRef, resume: Bool = false) -> TranscriptOpenParams {
+        TranscriptOpenParams(session: session, showDetails: false, resume: resume)
     }
 
     /// Sends `transcript.open` for the remote session and returns its
     /// result, or throws the error it replied.
-    private static func open(_ h: PhoneServiceHarness, id: String, on outbox: CapturingOutbox) async throws -> TranscriptOpenResult {
-        let bytes = try await ask(h, .transcriptOpen, id: id, openParams(session), on: outbox)
+    private static func open(
+        _ h: PhoneServiceHarness, id: String, resume: Bool = false, on outbox: CapturingOutbox
+    ) async throws -> TranscriptOpenResult {
+        let bytes = try await ask(h, .transcriptOpen, id: id, openParams(session, resume: resume), on: outbox)
         if let error = try self.error(bytes) {
             throw OpenRefused(error: error)
         }

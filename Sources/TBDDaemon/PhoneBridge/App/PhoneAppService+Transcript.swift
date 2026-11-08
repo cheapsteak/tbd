@@ -137,7 +137,9 @@ actor TranscriptDeltaRelay {
 /// all with a `seq` at most its own. The feed and the prompt feed ran on
 /// while the phone was away, so the replay carries what the phone missed,
 /// the current prompt set included. Any other open starts over from the
-/// tail.
+/// tail. The resume check runs right after a local tab's checks, before
+/// anything is built: a resumed remote open makes no remote call and builds
+/// no follower, since the kept feed's own follower runs on.
 ///
 /// **Order.** Opens and closes take effect in the order the phone sent them,
 /// though their handlers can finish in any order. `handleAppMessage` stamps
@@ -167,21 +169,22 @@ extension PhoneAppService {
             Self.logger.fault("Phone transcript: an open arrived with no stamp")
             throw PhoneAppError(code: .internalError, message: Self.internalErrorReason)
         }
+        if case .local(let terminalID) = params.session {
+            try await checkLocalTranscript(terminalID)
+        }
+        if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
+            return .onQueue { service in
+                service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
+            }
+        }
         let source: TranscriptFeedSource
         switch params.session {
         case .remote(let provider, let sessionID):
             source = .remote(try await remoteTranscriptFollower(provider: provider, sessionID: sessionID))
         case .local(let terminalID):
-            try await checkLocalTranscript(terminalID)
             source = .local(terminalID: terminalID, resolvePath: { [weak self] in
                 await self?.transcriptPath(of: terminalID)
             })
-        }
-
-        if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
-            return .onQueue { service in
-                service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
-            }
         }
         let token = await mintToken()
         let feed = TranscriptFeed(
