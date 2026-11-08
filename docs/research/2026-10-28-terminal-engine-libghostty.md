@@ -27,8 +27,11 @@ toggle is in Settings ▸ Terminal ▸ Experimental. Terminals that run through
 tmux stay on SwiftTerm, and so does the daemon.
 
 The first A/B of the two engines found no clear win, and libghostty had a
-longer draw wait ("A/B of the opt-in engine"). So the spec's graduation rule is
-not met, and the engine stays opt-in.
+longer draw wait ("A/B of the opt-in engine"). Under heavy output, libghostty
+used about half the app CPU in Claude Code's full-screen mode, with latency
+within 1 ms ("A/B under heavy output"). App CPU during a workload is not one of
+the spec's measures. So the spec's graduation rule is not met, and the engine
+stays opt-in.
 
 The proof of concept measured what libghostty costs and what it gains ("Proof
 of concept"):
@@ -481,13 +484,13 @@ of 4.595 ms and a p90 of 8.633 ms (301 samples).
   regression as measured. Under the spec's "flat A/B" outcome, the engine stays
   opt-in.
 
-**Not measured yet.**
+**Not measured in this round.**
 
 - **A large stream** – the time to paint about 50 MB sent to a visible
-  terminal.
+  terminal. "A/B under heavy output" measures it.
 - **Footprint** – app CPU and memory footprint with 8 and with 24 terminals
   open.
-- **A second round** – the graduation rule needs a result repeated in two
+- **A repeat** – the graduation rule needs a result repeated in two
   A/B/B/A runs. The two runs here compared libghostty with two different
   SwiftTerm renderers. Panes of equal size, or a pane swap with the same
   SwiftTerm renderer, would rule out pane size.
@@ -499,6 +502,176 @@ of 4.595 ms and a p90 of 8.633 ms (301 samples).
 One question follows from the mechanism and stays open: should libghostty
 build a frame when output arrives, instead of on the next tick? This record
 does not answer it.
+
+## A/B under heavy output
+
+Run on 2026-11-08 against the same release build at `ac44edb9d`, on the same
+laptop as the first round. It measured two heavy workloads: a 50 MB stream,
+which is the third of the spec's four measures, and Claude Code in full-screen
+mode. It also measured the app's CPU time during each workload. That is not
+one of the spec's measures: the spec's CPU measure is taken with 8 and with 24
+terminals open.
+
+**Setup.**
+
+- **Terminals** – two holder terminals, one on each engine, as two tabs in the
+  same pane. Each run selected its arm's tab, which rebuilt the panel, so both
+  arms drew into a pane of the same pixel size.
+- **Two phases** – SwiftTerm drew with CoreGraphics in phase 1 and with Metal
+  in phase 2. SwiftTerm's Metal renderer writes no draw lines, so phase 2
+  compares CPU only.
+- **Order** – one engine at a time, in A/B/B/A order: 12 runs in each phase for
+  the stream, and 8 for Claude Code.
+- **App CPU** – the change in the app process's CPU time, read with `ps`,
+  across a window.
+- **Draw lines** – captured live with `log stream`. As in the first round, each
+  line marks the start of a draw and gives the wait of the oldest undrawn chunk.
+- **Load** – the Claude Code driver read the 1-minute load average at the start
+  of each run: 3.5 to 11.3. The stream driver did not record load.
+- **Replies** – Claude Code queries the terminal at startup. Both engines
+  answered XTVERSION, the Kitty keyboard query, and DECRQM for modes 2026 and
+  1016 alike. They differed on the Kitty graphics query `a=q`: SwiftTerm
+  replied OK, and libghostty stayed silent.
+- **Grid** – the engines' cells differed in size: 14 by 34 pixels on SwiftTerm,
+  15 by 32 on libghostty. So the pane held 102 by 50 cells on SwiftTerm and 95
+  by 53 on libghostty. The cell counts are within 1.3% of each other, but
+  libghostty received about 4% more bytes in each scroll run. A fix that gives
+  libghostty SwiftTerm's cell size is open (#1420), and the grids differed
+  throughout these runs.
+
+**The 50 MB stream.** Each run sent a 52,428,897-byte file of coloured log
+lines with `cat` into a shell in the pane. Paint time runs from the run's first
+draw line to its last. The table gives medians of phase 1's six runs on each
+engine, with SwiftTerm on CoreGraphics. For the draw wait, each cell is the
+median of the runs' own percentiles.
+
+| | SwiftTerm | libghostty |
+|---|---|---|
+| paint time, s | 0.455 | 0.447 |
+| `cat` wall time, s | 0.44 | 0.43 |
+| frames per second | 123 | 121 |
+| draw wait p50, ms | 8.29 | 8.33 |
+| draw wait p90, ms | 8.64 | 8.37 |
+| app CPU, s | 0.78 | 0.62 |
+
+- **Delivery set the pace** – both engines painted the stream in about the
+  time `cat` took to write it: 0.43 to 0.44 s at the median, or about 120 MB/s.
+  libghostty parses faster than TBD's SwiftTerm fork ("Proof of concept"), yet
+  the paint times matched. So the limit lay upstream of both engines. That is a
+  reading, not a measurement.
+- **Draw wait** – about 8.3 ms at p50 on both, one frame at 120 Hz.
+  libghostty's p90 was steadier: 8.36 to 8.38 ms in every run, against 8.54 to
+  8.69 ms on SwiftTerm.
+- **App CPU** – libghostty used 21% less than SwiftTerm on CoreGraphics.
+- **SwiftTerm on Metal** – in phase 2, SwiftTerm on Metal had a median of
+  1.21 s of CPU over five runs, and libghostty 0.59 s over six, 51% less. The
+  three Metal runs outside the slow cluster below used 0.96 to 1.21 s, more
+  than any SwiftTerm run on CoreGraphics (0.76 to 0.83 s). So on this workload
+  SwiftTerm's Metal path used more CPU than its CoreGraphics path. libghostty's
+  median paint time in phase 2 was 0.44 s.
+
+  Phase 2's first SwiftTerm run is not counted as Metal. Its panel had not been
+  rebuilt since the renderer setting changed, so it still drew with
+  CoreGraphics: it wrote draw lines, which only that path does, and it used
+  0.76 s.
+- **Outliers** – one libghostty run in phase 1 used 1.08 s of CPU and took
+  1.54 s to paint, while `cat` took 1.51 s. In phase 2, runs 7 to 9 were slow on
+  both engines, with `cat` taking 2.0 to 5.5 s: libghostty used 1.16 s, and
+  SwiftTerm on Metal 3.60 and 4.78 s. The driver did not record load, so the
+  cause is unknown. Apart from phase 2's first SwiftTerm run, the medians
+  exclude nothing.
+
+**Claude Code in full-screen mode.** Claude Code 2.1.319 ran with
+`CLAUDE_CODE_NO_FLICKER=1`, which TBD sets by default. It was the real CLI,
+talking to the repository's zero-token fake model API (`scripts/claude-stub.py`),
+which streamed the answer as 40-character deltas every 25 ms. Each run had
+three parts:
+
+1. **Stream** – a 10 KB answer, about 11.5 s long, in about 75 frames and about
+   180 KB of terminal output.
+2. **Scroll** – 112 steps, 150 ms apart: the wheel 25 steps up and 25 down,
+   PageUp 6 times and PageDown 6 times, then the wheel 25 up and 25 down. Each
+   step makes Claude Code repaint the whole viewport in one synchronized frame
+   (DEC mode 2026).
+3. **Exit** – Ctrl-C twice.
+
+- **Input path** – the driver sent the scroll bytes through a pass-through
+  relay in front of Claude Code. `tbd terminal send --text` wraps its text in
+  bracketed paste while mode 2004 is on, which full-screen Claude Code turns
+  on, so a wheel report sent that way would reach the composer as pasted text.
+  The relay passes keystrokes and output through unchanged, with one extra copy
+  each way on both arms. It logged no other input to Claude Code in any
+  measured window.
+- **Steps counted** – the first step of each of the six segments starts or
+  reverses the scroll, where Claude Code draws an extra frame, a "Jump to
+  bottom" hint. Those steps are left out, which leaves 106 steps per run and 424
+  per arm in each phase.
+- **Measures:**
+  - **App CPU while streaming** – from submitting the prompt until the app went
+    quiet after the answer ended.
+  - **App CPU per scroll step** – the app's CPU time across the scroll part,
+    divided by the 109 steps that produced output.
+  - **Input to draw start** – from the driver's write to the step's first draw
+    line.
+  - **Claude Code's own time** – from the driver's write to the first output
+    byte at the relay.
+
+**App CPU.** Medians of four runs per arm. The ratio is libghostty ÷ SwiftTerm.
+
+| SwiftTerm renderer | measure | SwiftTerm | libghostty | ratio |
+|---|---|---|---|---|
+| CoreGraphics | streaming, s | 0.87 | 0.37 | 0.43 |
+| CoreGraphics | per scroll step, ms | 12.6 | 5.2 | 0.41 |
+| Metal | streaming, s | 0.72 | 0.39 | 0.54 |
+| Metal | per scroll step, ms | 11.2 | 5.0 | 0.44 |
+
+Every libghostty run used less CPU than every SwiftTerm run, on both measures
+in both phases. While streaming, runs ranged from 0.85 to 0.90 s on
+CoreGraphics, 0.70 to 0.76 s on Metal, and 0.30 to 0.40 s on libghostty. Per
+scroll step they ranged from 12.2 to 12.7 ms on CoreGraphics, 10.6 to 11.6 ms on
+Metal, and 4.5 to 5.7 ms on libghostty.
+
+**Latency, with SwiftTerm on CoreGraphics.** Pooled over 424 steps per arm, in
+milliseconds.
+
+| | SwiftTerm p50 | libghostty p50 | SwiftTerm p90 | libghostty p90 |
+|---|---|---|---|---|
+| input to draw start | 9.0 | 9.6 | 14.8 | 15.7 |
+| draw wait | 5.3 | 5.7 | 8.4 | 8.9 |
+
+Claude Code's own time had per-run medians between 2.0 and 4.4 ms on both arms.
+Every counted step drew exactly one frame on both engines. With SwiftTerm on
+Metal, libghostty's input to draw start was 9.2 ms at p50 and 14.3 ms at p90.
+
+**What the numbers show.**
+
+- **libghostty used much less app CPU** – in Claude Code's full-screen mode it
+  used 0.41 to 0.54 of SwiftTerm's app CPU on either renderer, while it received
+  about 4% more bytes per scroll run. On the 50 MB stream it used 0.79 of
+  SwiftTerm's on CoreGraphics and 0.49 on Metal.
+- **Latency was within 1 ms** – in Claude Code, libghostty's draws started
+  0.6 ms later at p50 and 0.9 ms later at p90. On the stream, the paint times
+  matched.
+- **SwiftTerm waits for Claude Code's frames** – on CoreGraphics its draw-wait
+  p90 was 8.4 ms here, against 2.7 ms after a typed echo in the first round. So
+  the first round's gap of 3.2 to 3.4 times does not appear with Claude Code's
+  synchronized frames. The wait is not output trickling in: each step's output
+  reached the relay within 0.5 ms of its first byte at p90. Why SwiftTerm waits
+  for these frames and not for an echo was not established.
+- **The graduation rule is not met** – app CPU during a workload is not one of
+  the spec's four measures. Its CPU measure is app CPU and memory footprint
+  with 8 and with 24 terminals open, which has not been run. On the spec's
+  measures, this round adds the 50 MB paint time and two draw-wait
+  comparisons, and none came near the 20% bar. The largest difference, 8%, was
+  libghostty's longer draw wait at p50 in Claude Code. So these results do not
+  by themselves meet the rule. The first round's draw wait after typed echo
+  also stands: 3.2 to 3.4 times longer at p90 on libghostty, which the code
+  traces to frames encoded only on display-link ticks. So do the open daily-use
+  gaps.
+- **Parity fixes** – the measured build predates two libghostty fixes that have
+  since merged: the sRGB colour space (#1419) and stroke weight (#1416). Fixes
+  for macOS line-editing shortcuts (#1421) and for cell size, baseline and wide
+  glyphs (#1420) are open.
 
 ## Ghostty on 2026-11-06
 
@@ -605,7 +778,9 @@ C API underneath is stable, so an ABI break is not a reason to hold it back.
 
 If it never ships, the alternative is the renderer that TBD adapted on
 `render.h` for its opt-in engine, path B in the companion record. Making that
-engine the default needs a motive, and the first A/B found none in performance.
+engine the default needs a motive. The A/B rounds found none that meets the
+spec's graduation rule. Their clearest difference, about half the app CPU under
+Claude Code's full-screen output, is not one of the spec's measures.
 
 ## Before a move
 
@@ -623,8 +798,13 @@ the first steps, as its
 
 These stay open:
 
-- **The A/B** – the measures and the second round that "A/B of the opt-in
-  engine" lists as not measured yet.
+- **The A/B** – app CPU and memory footprint with 8 and with 24 terminals
+  open, a second A/B/B/A run of any measure that shows a win, and the pixel
+  and SwiftTerm-on-Metal comparisons that "A/B of the opt-in engine" lists as
+  not measured in its round.
+- **Daily-use gaps** – among them ligatures and right-to-left text, which the
+  Settings toggle names as unsupported, and the two open fixes that "A/B under
+  heavy output" lists.
 - **A renderer package** – if Ghostty publishes one, check its licence, its
   version pin against `libghostty-vt`, and what it covers of IME, selection,
   scrolling and accessibility.
