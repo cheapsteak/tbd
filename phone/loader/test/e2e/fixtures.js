@@ -436,3 +436,20 @@ export async function appRoundTrip(page, laptop) {
   await sheet.getByRole('button', { name: 'Cancel' }).click();
   await expect(sheet).toHaveCount(0);
 }
+
+/**
+ * Runs in a runner document (pass it to `frame.evaluate`): claims the Trusted Types policy
+ * name `runner`, which the runner's policy allows exactly once. 'free' means runner.js never
+ * made its policy, so it stopped before step 2 or never ran.
+ * @returns {string}
+ */
+export function claimRunnerPolicy() {
+  const trustedTypes = /** @type {any} */ (globalThis).trustedTypes;
+  if (!trustedTypes) return 'no trustedTypes';
+  try {
+    trustedTypes.createPolicy('runner', {});
+    return 'free';
+  } catch (error) {
+    return `taken: ${String(error)}`;
+  }
+}

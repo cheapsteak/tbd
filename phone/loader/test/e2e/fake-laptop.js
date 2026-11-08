@@ -6,7 +6,11 @@
 //   file the loader needs that the allowlist misses fails the suite. It is served at `/` with
 //   `Access-Control-Allow-Origin: *`, `Cache-Control: no-store` and no policy header, as GitHub
 //   Pages sends none.
-// - Test-only routes live under `/__test/` and never come from the staged site.
+// - Test-only routes live under `/__test/` and never come from the staged site. One of them is
+//   the runner harness (`/__test/runner-harness.html`), which frames runner.html the way
+//   sandbox-runner.spec.js asks.
+// - A second server on another port, a second origin, serves only the runner harness, so a test
+//   can frame runner.html from a page that is not the loader's.
 // - `GET /v1/rooms/<room>/presence` answers from the fake relay, and WebSocket upgrades on
 //   `/v1/rooms/…` join it.
 //
@@ -64,8 +68,15 @@ const CONTENT_TYPES = {
  */
 const htmlPage = (title) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title></head><body><p>${title}</p></body></html>\n`;
 
+/**
+ * The runner harness page; its script is `/__test/runner-harness.js`.
+ */
+const HARNESS_PAGE = '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Runner harness</title>'
+  + '<script src="/__test/runner-harness.js"></script></head><body></body></html>\n';
+
 /** @type {Record<string, { type: string, body: string | Uint8Array }>} */
 const TEST_PAGES = {
+  'runner-harness.html': { type: CONTENT_TYPES['.html'], body: HARNESS_PAGE },
   landing: { type: CONTENT_TYPES['.html'], body: htmlPage('Landing') },
   anchor: { type: CONTENT_TYPES['.html'], body: htmlPage('Anchor') },
   nav: { type: CONTENT_TYPES['.html'], body: htmlPage('Navigated') },
@@ -90,6 +101,9 @@ const TEST_PAGES = {
 /**
  * @typedef {object} FakeLaptopServer
  * @property {string} origin `http://127.0.0.1:<port>`, the loader's origin and the relay's.
+ * @property {string} otherOrigin `http://127.0.0.1:<other port>`, a second origin that serves
+ *   only the runner harness (`/__test/runner-harness.html` and its script). Its requests are not
+ *   in `requests`.
  * @property {FakeRelay} relay
  * @property {ScriptedLaptop[]} laptops The first is `acme-mbp`; `addLaptop` adds more.
  * @property {(options: { laptopName: string }) => Promise<ScriptedLaptop>} addLaptop
@@ -111,7 +125,7 @@ const TEST_PAGES = {
  * @property {boolean} refuseUpgrade While true, every WebSocket upgrade gets 503.
  * @property {boolean} refusePresence While true, every presence request fails at the network
  *   level: the socket is destroyed with no response.
- * @property {() => Promise<void>} close Closes every socket and the server, and removes the
+ * @property {() => Promise<void>} close Closes every socket and both servers, and removes the
  *   staged site.
  */
 
@@ -145,10 +159,12 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
   let parked = null;
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
   const http = createServer();
+  const other = createServer();
 
   /** @type {FakeLaptopServer} */
   const server = {
     origin: '',
+    otherOrigin: '',
     relay,
     laptops: [],
     requests: [],
@@ -199,8 +215,10 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
       for (const ws of sockets) ws.terminate();
       sockets.clear();
       wss.close();
-      http.closeAllConnections();
-      await new Promise((resolve) => http.close(() => resolve(undefined)));
+      for (const listener of [http, other]) {
+        listener.closeAllConnections();
+        await new Promise((resolve) => listener.close(() => resolve(undefined)));
+      }
       await rm(temp, { recursive: true, force: true });
     },
   };
@@ -232,17 +250,25 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
     bridge(req, socket, head, url);
   });
   http.on('clientError', (_error, socket) => socket.destroy());
-
-  await new Promise((resolve, reject) => {
-    http.once('error', reject);
-    http.listen(0, '127.0.0.1', () => {
-      http.off('error', reject);
-      resolve(undefined);
-    });
+  // The second origin: the runner harness, and nothing else.
+  other.on('request', (req, res) => {
+    const pathname = (req.url ?? '/').split('?')[0];
+    const route = pathname.startsWith('/__test/') ? pathname.slice('/__test/'.length) : '';
+    if ((req.method === 'GET' || req.method === 'HEAD') && HARNESS_ROUTES.has(route)) {
+      testRoute(req, res, route).catch(() => res.destroy());
+    } else {
+      notFound(req, res);
+    }
   });
-  const address = http.address();
-  if (address === null || typeof address === 'string') throw new Error('the server has no port');
-  server.origin = `http://127.0.0.1:${address.port}`;
+  other.on('clientError', (_error, socket) => socket.destroy());
+
+  server.origin = await listen(http);
+  try {
+    server.otherOrigin = await listen(other);
+  } catch (error) {
+    await server.close();
+    throw error;
+  }
 
   try {
     await run('bash', [STAGE_SCRIPT, LOADER_DIR, site, runnerOrigin ?? server.origin]);
@@ -321,6 +347,10 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
       await sendFile(req, res, FIXTURES_DIR, 'qr-sample.png');
       return;
     }
+    if (route === 'runner-harness.js') {
+      await sendFile(req, res, FIXTURES_DIR, 'runner-harness.js');
+      return;
+    }
     if (route === 'support/vectors-in-page.js') {
       await sendFile(req, res, SUPPORT_DIR, 'vectors-in-page.js');
       return;
@@ -397,6 +427,27 @@ export async function startFakeLaptop({ runnerOrigin, bundle = 'debug', refuseUp
       for (const deliver of pending.splice(0)) deliver(opened);
     });
   }
+}
+
+/** The routes under `/__test/` that the second origin serves too. */
+const HARNESS_ROUTES = new Set(['runner-harness.html', 'runner-harness.js']);
+
+/**
+ * Listens on a free port of 127.0.0.1.
+ * @param {import('node:http').Server} server
+ * @returns {Promise<string>} the server's origin, `http://127.0.0.1:<port>`
+ */
+async function listen(server) {
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve(undefined);
+    });
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('the server has no port');
+  return `http://127.0.0.1:${address.port}`;
 }
 
 /**

@@ -1,14 +1,14 @@
 // The probe bundle: checks, from inside the app frame, what the runner's sandbox and policy
 // allow (plan 5 Task 18). A classic script, plain text.
 //
-// After the first `{t:'channel', state:'up'}` it runs every case, waits up to 2 s for the image
-// and `fetch` outcomes, writes the results as text into `<pre id="results">`, and sends them
-// to the laptop as event `probe.results`. Each result is `{ ok, detail }`, where `ok` means the
-// expected outcome happened.
+// After the first `{t:'channel', state:'up'}` it runs every case, waits up to 2 s for the image,
+// `fetch`, IndexedDB and worker outcomes, writes the results as text into `<pre id="results">`,
+// and sends them to the laptop as event `probe.results`. Each result is `{ ok, detail }`, where
+// `ok` means the expected outcome happened.
 //
 // Several cases deliberately use a sink the loader bans (`innerHTML`, `new Function`, a script
-// element's text and `src`, a `style` attribute). Each sits inside `try`, with a comment, and
-// is expected to be refused.
+// element's text and `src`, a `style` attribute, a worker URL). Each sits inside `try`, with a
+// comment, and is expected to be refused.
 //
 // For checks on a device it also shows a 16 px text field, the last env values, and three
 // controls: open https://example.com through the loader, navigate this frame, and a plain link.
@@ -230,6 +230,21 @@
       record('scriptSrcString', set.threw && set.error instanceof TypeError, set.threw ? describe(set.error) : 'assigned');
     }
 
+    const worker = within((settle) => {
+      const url = URL.createObjectURL(new Blob(['postMessage("ran");'], { type: 'text/javascript' }));
+      // Deliberate: a plain string for a worker URL is a sink Trusted Types must refuse, and the
+      // runner's `worker-src 'none'` refuses any worker where Trusted Types is missing.
+      const made = attempt(() => new Worker(url));
+      if (made.threw) {
+        URL.revokeObjectURL(url);
+        settle({ ok: true, detail: `threw ${describe(made.error)}` });
+        return;
+      }
+      const started = /** @type {Worker} */ (made.value);
+      started.addEventListener('message', () => settle({ ok: false, detail: 'the worker ran' }));
+      started.addEventListener('error', () => settle({ ok: true, detail: 'error event' }));
+    }, () => ({ ok: false, detail: 'no outcome within 2 s' }));
+
     {
       const trustedTypes = /** @type {any} */ (globalThis).trustedTypes;
       if (!trustedTypes) {
@@ -289,10 +304,11 @@
       record('topNavigation', set.threw, set.threw ? describe(set.error) : 'navigated');
     }
 
-    const [imageResult, fetchResult, databaseResult] = await Promise.all([image, fetched, database]);
+    const [imageResult, fetchResult, databaseResult, workerResult] = await Promise.all([image, fetched, database, worker]);
     results.remoteImage = imageResult;
     results.fetch = fetchResult;
     results.indexedDB = databaseResult;
+    results.worker = workerResult;
 
     resultsPre.textContent = JSON.stringify(results, null, 2);
     port.postMessage({ t: 'app', body: { kind: 'event', event: 'probe.results', data: results } });
