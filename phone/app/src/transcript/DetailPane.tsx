@@ -11,7 +11,8 @@
  * - **too large**: `.toobig`, the laptop glyph and "Too large for the phone. Open on the
  *   laptop.", under each part the laptop or the phone's caps cut, or the lines cap cut, so a
  *   too-large Input reads as such above a whole Result; and once at the end for a part the box
- *   does not draw, or when `cut` says the caller left something out, as a nest past its budget;
+ *   does not draw, or when `cut` says the caller left something out, as a nest past its budget
+ *   or a message's whole text past its first `MAX_DETAIL_LINES` lines;
  * - **failed**: the laptop's message, such as "That detail is not in the transcript.", after
  *   what arrived.
  *

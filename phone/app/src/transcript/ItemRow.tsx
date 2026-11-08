@@ -18,8 +18,9 @@
  * - A tool row draws its box under the button: Input and Result, or the loading line. A tap
  *   collapses it, a failed one too, and the next tap starts over.
  * - "Show more" puts the message's whole text in place of the cut text, through `Markdown`,
- *   once it arrived, and the button goes, as in the mock. Its box shows the loading line, the
- *   too-large line or the laptop's message. While the text loads, the button stays, marked
+ *   once it arrived, and the button goes, as in the mock. It draws at most `MAX_DETAIL_LINES`
+ *   lines of it (`firstLines`), as a tool's parts do. Its box shows the loading line, the
+ *   too-large line, after a text too large or cut at those lines, or the laptop's message. While the text loads, the button stays, marked
  *   busy (`aria-busy`), and a tap on it cancels the load (spec section 7, "Large details"): the
  *   detail goes, and the row shows its cut text and "Show more" again. After a failure the
  *   button comes back, and a tap starts over.
@@ -40,6 +41,7 @@
 import { memo, useMemo, type JSX } from 'react';
 import type { MdNode } from '../markdown/mdTree.ts';
 import type { PhoneItem } from '../protocol/types.ts';
+import { firstLines } from '../state/detail.ts';
 import type { DetailState } from '../state/detail.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 import { toolGlyph } from '../state/status.ts';
@@ -68,6 +70,9 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
   const toggle = onToggle === null ? null : (part: RowPart): void => onToggle(row.key, part);
   const detail = toggle !== null ? (p.detail ?? null) : null;
   const expanded = detail !== null;
+  // A message's whole text once "Show more" brought it, cut to its first lines, read again only when it changes.
+  const wholeText = detail !== null && detail.phase !== 'loading' ? detail.text.text : undefined;
+  const whole = useMemo(() => (wholeText === undefined ? null : firstLines(wholeText)), [wholeText]);
   if (row.kind === 'receipt') {
     return (
       <div className="receipt">
@@ -89,7 +94,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
       );
     case 'assistant': {
       const loading = detail?.phase === 'loading';
-      const full = detail !== null && !loading ? detail.text.text : undefined;
+      const full = whole?.text;
       return (
         <>
           <div className="say">
@@ -100,7 +105,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
               </button>
             )}
           </div>
-          {detail !== null && <DetailPane detail={detail} parts={false} />}
+          {detail !== null && <DetailPane detail={detail} parts={false} cut={whole?.cut === true} />}
         </>
       );
     }

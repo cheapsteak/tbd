@@ -446,6 +446,26 @@ test('a tool part of many lines draws its first 20,000 and says the rest is too 
   expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0], [BASH_ID, 'result', 1]]);
 });
 
+test('Show more of many lines draws the first 20,000 and says the rest is too large', async ({ page, appHost }) => {
+  // 40,000 short lines are about 300 KB: several chunks, well under 1 MB.
+  const scenario = structuredClone(MOCK);
+  scenario.details['login-10'].text = Array.from({ length: 40_000 }, (_, i) => `L${i + 1};`).join('\n');
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const key = await tx.locator('.say', { hasText: 'Fixed. Here is what changed:' }).evaluate((el) => el.closest('[data-tx-row]')?.getAttribute('data-key'));
+  const row = tx.locator(`[data-tx-row][data-key="${key}"]`);
+  await row.locator('.morebtn').click();
+  await expect(row.locator('.detail .toobig')).toHaveText(TOO_LARGE);
+  const shown = await row.locator('.say').evaluate((el) => el.textContent ?? '');
+  expect(shown.startsWith('L1;L2;')).toBe(true);
+  expect(shown.endsWith('L20000;')).toBe(true);
+  expect(shown).not.toContain('L20001;');
+  // The line comes after the text, and the button has gone.
+  expect(await row.locator('.say, .toobig').evaluateAll((els) => els.map((el) => el.className))).toEqual(['say', 'toobig']);
+  await expect(row.locator('.morebtn')).toHaveCount(0);
+});
+
 /**
  * Every DOM node under the transcript's `.nest`, elements and text alike.
  * @param {import('@playwright/test').Locator} tx
