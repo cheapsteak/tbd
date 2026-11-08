@@ -2,6 +2,7 @@ import AppKit
 import Clocks
 import Darwin
 import Foundation
+import Observation
 import SwiftUI
 import Testing
 @testable import TBDApp
@@ -11,28 +12,44 @@ import TestSupport
 
 /// Switch Terminal Engine and the tab's engine label.
 ///
-/// A switch hands a holder session back through the panel's own detach, waits
-/// for the detach to return, and records the other engine in
-/// `AppState.terminalEngineOverrides`; the changed identity rebuilds the panel
-/// on that engine, which attaches as any new panel does. The panel tests drive
-/// the coordinator the way `makeNSView` and `dismantleNSView` do, through the
-/// same `registerEngineRecords` / `unregisterEngineRecords`, against a stub
-/// daemon that vends one socketpair per attach and hands the second attach the
-/// screen the first detach carried. Every store is an isolated suite.
+/// A switch only records the other engine in
+/// `AppState.terminalEngineOverrides`. The changed identity rebuilds the
+/// panel: the old one's teardown hands the holder session back, with its
+/// screen, as any teardown does, and the new one, built on the other engine,
+/// waits for that handback and attaches as any new panel does. The panel
+/// tests drive the coordinator the way `makeNSView` and `dismantleNSView` do,
+/// through the same `registerEngineRecords` / `unregisterEngineRecords`,
+/// against a stub daemon that vends one socketpair per attach and hands the
+/// second attach the screen the first detach carried. Every store is an
+/// isolated suite.
 @MainActor
 @Suite("Switch Terminal Engine", .fastPassBounded)
 struct TerminalEngineSwitchTests {
 
     // MARK: - The switch
 
-    @Test("A switch hands the session back with its screen, then the rebuilt panel attaches on the other engine and shows that screen",
+    /// The switch itself leaves the session alone, so the panel keeps reading
+    /// it until SwiftUI tears the panel down. That teardown is the one
+    /// handback, and it is the whole of one: the reader reads on to the end of
+    /// a sequence the session is part-way through, the write side stays open
+    /// until the reader has closed, so a query read on the way out is
+    /// answered, and the screen the detach carries reaches the panel built on
+    /// the other engine. The reader's wait is on a clock that never moves, so
+    /// it ends by the sequence ending, however long a loaded machine keeps the
+    /// reader thread from its first look.
+    @Test("A switch leaves the session alone, and the teardown it causes is the one handback: it finishes an open sequence, answers a query read on the way out, and carries the screen to the other engine",
           .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice),
           arguments: TerminalEngineKind.allCases)
-    func switchDetachesWithHandbackThenAttachesTheOtherEngine(from start: TerminalEngineKind) async throws {
+    func switchLeavesTheSessionToTheTeardownsOneHandback(from start: TerminalEngineKind) async throws {
         let fixture = SwitchFixture(label: "Handback.\(start.rawValue)", flag: true)
         defer { fixture.tearDown() }
         fixture.state.terminalEngineOverrides[fixture.terminalID] = start
-        let first = fixture.makePanel()
+        // What the session writes the moment the first panel's reader stops:
+        // the end of the title it is part-way through, a line, and a query.
+        let first = fixture.makePanel(
+            clock: ImmediateClock<Duration>(),
+            readerBeforeClose: fixture.sessionWritesOnceTheReaderStops(
+                "TITLE-PAYLOAD\u{07}AFTER-THE-SWITCH\r\n\u{1b}[6n", on: 0))
         try #require(first.engine.kind == start, "the first panel was built on \(first.engine.kind), not \(start)")
         await first.coordinator.startHolderClient(engine: first.engine)
         try #require(fixture.daemon.events == ["attach", "ready"], "the first panel did not attach: \(fixture.daemon.events)")
@@ -45,40 +62,107 @@ struct TerminalEngineSwitchTests {
         ) { Self.screenText(firstEngine).contains("BEFORE-THE-SWITCH") }
         try #require(painted)
         let identityBefore = fixture.identity
+        let identityChanged = HolderTestLatch()
+        withObservationTracking {
+            _ = fixture.identity
+        } onChange: {
+            identityChanged.set()
+        }
 
-        await fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
 
-        #expect(fixture.daemon.events == ["attach", "ready", "detach"],
-                "the switch did not send exactly one detach: \(fixture.daemon.events)")
-        let handedBack = try #require(fixture.daemon.detachPreambles.first)
-        #expect(!handedBack.isEmpty, "the switch's detach carried no screen")
-        #expect(fixture.ptys[0].isClosedAfterDraining,
-                "the switch told the daemon it detached while this app was still on the descriptor")
+        #expect(identityChanged.isSet,
+                "the switch changed nothing the panel's identity reads, so SwiftUI would not rebuild the panel")
+        #expect(fixture.identity != identityBefore)
         #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == start.other)
-        #expect(fixture.identity != identityBefore,
-                "the switch left the panel's identity alone, so SwiftUI would not rebuild it")
+        #expect(fixture.daemon.events == ["attach", "ready"],
+                "the switch touched the session itself, ahead of the teardown: \(fixture.daemon.events)")
+        #expect(!fixture.ptys[0].isClosedAfterDraining, "the switch closed the panel's descriptors")
 
-        // What SwiftUI does once the identity changes: the old panel goes and
-        // a new one is made, asking AppState which engine to build.
+        // Until the teardown, the session is still this panel's: output after
+        // the switch paints here, and this output stops part-way through a
+        // title.
+        fixture.sessionWrites("BETWEEN\r\n\u{1b}]0;HALF-OF-A-", on: 0)
+        let stillReading = await EngineTestSupport.waitUntil(
+            "output written after the switch to reach the first panel, part-way through a title",
+            observed: { "\(Self.screenText(firstEngine)) between sequences=\(firstEngine.isAtSequenceBoundary)" }
+        ) { Self.screenText(firstEngine).contains("BETWEEN") && !firstEngine.isAtSequenceBoundary }
+        try #require(stillReading)
+
+        // What SwiftUI does once the identity has changed: the old panel goes
+        // and a new one is made, asking AppState which engine to build. The
+        // new one's attach waits for the old one's handback.
         fixture.dismantle(first)
         let second = fixture.makePanel()
         #expect(second.engine.kind == start.other, "the rebuilt panel was built on \(second.engine.kind)")
         await second.coordinator.startHolderClient(engine: second.engine)
         #expect(fixture.daemon.events == ["attach", "ready", "detach", "attach", "ready"],
-                "the rebuilt panel did not attach once, after the detach: \(fixture.daemon.events)")
+                "the switch did not come to exactly one detach, then the rebuilt panel's attach: \(fixture.daemon.events)")
+
+        let answered = fixture.sessionReads(on: 0)
+        #expect(answered.range(of: "\u{1b}\\[[0-9]+;1R", options: .regularExpression) != nil, """
+            the session asked where the cursor was as the first panel closed, and no answer reached it: \
+            \(answered.debugDescription)
+            """)
+        let handedBack = try #require(fixture.daemon.detachPreambles.first)
+        #expect(!handedBack.isEmpty, "the teardown's detach carried no screen")
+
         let secondEngine = second.engine
-        await EngineTestSupport.waitUntil(
+        let shown = await EngineTestSupport.waitUntil(
             "the handed-back screen to paint on \(start.other)",
             observed: { Self.screenText(secondEngine) }
-        ) { Self.screenText(secondEngine).contains("BEFORE-THE-SWITCH") }
+        ) { Self.screenText(secondEngine).contains("AFTER-THE-SWITCH") }
+        try #require(shown, "output the first panel read after its stop did not reach the handback")
+        let screen = Self.screenText(secondEngine)
+        #expect(screen.contains("BEFORE-THE-SWITCH") && screen.contains("BETWEEN"), "the rebuilt panel shows \(screen)")
+        #expect(!screen.contains("PAYLOAD"), "the title's rest painted as text: \(screen)")
 
         await EngineTestSupport.mainQueueTurn()
         #expect(fixture.state.terminalEngineKindInUse(for: fixture.terminalID) == start.other,
                 "the tab's label would still name the engine the panel left")
     }
 
+    /// The switch awaits nothing, so nothing it does can land after the tab
+    /// closes. A terminal closed while the teardown the switch caused is
+    /// still handing the session back keeps no override, and a row that comes
+    /// back under the same id starts on the engine the flag gives it.
+    @Test("A terminal closed while the switch's teardown hands it back keeps no override, and a row that returns under its id starts on the flag's engine")
+    func aTerminalClosedDuringTheHandbackKeepsNoOverride() async throws {
+        let fixture = SwitchFixture(label: "ClosedDuringHandback", flag: true)
+        defer { fixture.tearDown() }
+        let base = TerminalPanePresentation.attachIdentity(
+            for: fixture.row, attachEpoch: 0, attachRetry: 0, engineOverride: nil)
+        fixture.state.terminalEngineOverrides[fixture.terminalID] = .swiftTerm
+        let first = fixture.makePanel()
+        await first.coordinator.startHolderClient(engine: first.engine)
+        try #require(fixture.daemon.events == ["attach", "ready"], "\(fixture.daemon.events)")
+
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
+
+        // The rebuild's teardown starts the handback, and the tab closes
+        // before the handback can run: nothing suspends in between.
+        fixture.dismantle(first)
+        fixture.state.terminals[fixture.worktreeID] = []
+        fixture.state.recordTerminalRemoval(terminalID: fixture.terminalID)
+        await fixture.state.holderHandbackLedger.awaitSettled(terminalID: fixture.terminalID)
+        await EngineTestSupport.mainQueueTurn()
+
+        #expect(fixture.daemon.events == ["attach", "ready", "detach"],
+                "the closed terminal was not handed back once: \(fixture.daemon.events)")
+        #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == nil,
+                "the closed terminal's override came back after its handback")
+        #expect(fixture.state.terminalEngineKindInUse(for: fixture.terminalID) == nil)
+        #expect(fixture.state.terminalEngineSwitchers[fixture.terminalID] == nil)
+
+        fixture.state.terminals[fixture.worktreeID] = [fixture.row]
+        #expect(fixture.state.terminalEngineKind(for: fixture.terminalID)
+                == TerminalEngineFactory.requestedKind(flagEnabled: true, host: .panel(.holder)))
+        #expect(fixture.identity == base, "a returning row's panel carries the closed terminal's override")
+    }
+
     @Test("The override is kept across panel rebuilds, a fresh AppState has none, and it goes with the terminal")
-    func overrideSurvivesRebuildAndIsGoneAfterRelaunch() async {
+    func overrideSurvivesRebuildAndIsGoneAfterRelaunch() {
         let fixture = SwitchFixture(label: "Relaunch", flag: true)
         defer { fixture.tearDown() }
         let base = TerminalPanePresentation.attachIdentity(
@@ -86,12 +170,11 @@ struct TerminalEngineSwitchTests {
         #expect(base == "\(fixture.terminalID)-\(fixture.row.tmuxWindowID)-0-0",
                 "an override of nil changed the identity of a terminal nobody switched")
 
-        // On SwiftTerm as if switched there before; never attached, so the
-        // switch has nothing to hand back and only records the engine.
+        // On SwiftTerm as if switched there before, and never attached.
         fixture.state.terminalEngineOverrides[fixture.terminalID] = .swiftTerm
         let first = fixture.makePanel()
         #expect(first.engine.kind == .swiftTerm)
-        await fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
         #expect(fixture.daemon.events.isEmpty, "a panel with no attach sent \(fixture.daemon.events)")
         #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
         let switched = fixture.identity
@@ -148,22 +231,25 @@ struct TerminalEngineSwitchTests {
             #expect(panel.engine.kind == .swiftTerm)
             await panel.coordinator.startHolderClient(engine: panel.engine)
             let identity = fixture.identity
-            await fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+            fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
             #expect(fixture.daemon.events == ["attach", "ready"],
                     "a switch with the flag \(name) touched the session: \(fixture.daemon.events)")
             #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == nil)
             #expect(fixture.identity == identity, "a switch with the flag \(name) would rebuild the panel")
         }
 
-        // The control: flag on, a holder panel on SwiftTerm switches.
+        // The control: flag on, a holder panel on SwiftTerm switches. The
+        // switch records the engine and leaves the session to the teardown.
         let fixture = SwitchFixture(label: "Hidden.control", flag: true)
         defer { fixture.tearDown() }
         fixture.state.terminalEngineOverrides[fixture.terminalID] = .swiftTerm
         let panel = fixture.makePanel()
         await panel.coordinator.startHolderClient(engine: panel.engine)
-        await fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
-        #expect(fixture.daemon.events == ["attach", "ready", "detach"], "\(fixture.daemon.events)")
+        let identity = fixture.identity
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        #expect(fixture.daemon.events == ["attach", "ready"], "\(fixture.daemon.events)")
         #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
+        #expect(fixture.identity != identity, "a switch with the flag on would not rebuild the panel")
     }
 
     @Test("The command is enabled for a focused holder panel only: not a tmux panel, a remote attach terminal, or a remote sign-in terminal")
@@ -223,8 +309,8 @@ struct TerminalEngineSwitchTests {
         await first.coordinator.startHolderClient(engine: first.engine)
         try #require(fixture.daemon.events == ["attach", "ready"], "\(fixture.daemon.events)")
 
-        await fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
-        #expect(fixture.daemon.events == ["attach", "ready", "detach"], "\(fixture.daemon.events)")
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        #expect(fixture.daemon.events == ["attach", "ready"], "\(fixture.daemon.events)")
         #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
 
         fixture.dismantle(first)
@@ -250,11 +336,11 @@ struct TerminalEngineSwitchTests {
                 "the label named the engine that was asked for, not the one the panel runs on")
 
         // Another press would ask for libghostty again, which did not start:
-        // nothing would rebuild the panel, so nothing is handed back.
+        // nothing would rebuild the panel, so nothing is recorded.
         let identity = fixture.identity
-        await fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
         #expect(fixture.daemon.events.count == 5,
-                "a switch to the engine that failed detached the session: \(fixture.daemon.events)")
+                "a switch to the engine that failed touched the session: \(fixture.daemon.events)")
         #expect(fixture.identity == identity)
         #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == .ghostty)
     }
@@ -370,9 +456,17 @@ private final class SwitchFixture {
 
     /// A panel as `makeNSView` makes one: the engine AppState asks for, the
     /// coordinator wired to it, and the panel's engine records entered.
+    ///
+    /// - Parameters:
+    ///   - clock: the coordinator's, which its holder reader bounds the wait
+    ///     for an open sequence on.
+    ///   - readerBeforeClose: the holder reader's hook, run once its loop has
+    ///     stopped and before it reads on to the end of an open sequence.
     func makePanel(
         makeGhostty: TerminalEngineFactory.GhosttyMaker = TerminalEngineFactory.makeGhosttyEngine,
-        fallbacks: MakerAttemptLog? = nil
+        fallbacks: MakerAttemptLog? = nil,
+        clock: any Clock<Duration> = ContinuousClock(),
+        readerBeforeClose: (@Sendable (HolderStreamReader) -> Void)? = nil
     ) -> SwitchPanel {
         let engine = TerminalEngineFactory.make(
             kind: state.terminalEngineKind(for: terminalID),
@@ -381,10 +475,11 @@ private final class SwitchFixture {
             configuration: TerminalEngineConfiguration(terminalID: terminalID),
             makeGhostty: makeGhostty,
             onFallback: { requested, _ in fallbacks?.fallbacks.append(requested) })
-        let coordinator = TerminalPanelRepresentable.Coordinator()
+        let coordinator = TerminalPanelRepresentable.Coordinator(clock: clock)
         coordinator.appState = state
         coordinator.panelID = terminalID
         coordinator.holderAttachClient = daemon
+        coordinator.holderReaderBeforeClose = readerBeforeClose
         // One attempt per attach: each attach here is vended exactly once.
         coordinator.holderAttachRetryDelays = []
         coordinator.engine = engine
@@ -414,6 +509,33 @@ private final class SwitchFixture {
     func sessionWrites(_ text: String, on index: Int) {
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBytes { Darwin.write(ptys[index].far, $0.baseAddress, $0.count) }
+    }
+
+    /// A reader hook for `makePanel` that plays the session writing `text` on
+    /// attach `index`'s pty the moment the reader has stopped: bytes only a
+    /// reader that reads on after its stop can see.
+    func sessionWritesOnceTheReaderStops(
+        _ text: String, on index: Int
+    ) -> @Sendable (HolderStreamReader) -> Void {
+        let far = ptys[index].far
+        let bytes = Array(text.utf8)
+        return { _ in
+            _ = bytes.withUnsafeBytes { Darwin.write(far, $0.baseAddress, $0.count) }
+        }
+    }
+
+    /// Everything the panel has written to attach `index`'s session and
+    /// nobody has read yet. The far end is non-blocking, so this stops at the
+    /// first read that finds nothing, or at the end once the panel has closed.
+    func sessionReads(on index: Int) -> String {
+        var collected: [UInt8] = []
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(ptys[index].far, $0.baseAddress, $0.count) }
+            guard count > 0 else { break }
+            collected.append(contentsOf: buffer[0..<count])
+        }
+        return String(bytes: collected, encoding: .utf8) ?? "<not UTF-8: \(collected)>"
     }
 
     func tearDown() {

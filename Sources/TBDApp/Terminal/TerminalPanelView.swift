@@ -646,7 +646,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     ) {
         let owner = coordinator.engineSwitchToken
         appState.registerTerminalEngineSwitcher(for: terminalID, owner: owner) { [weak coordinator] in
-            await coordinator?.switchEngine()
+            coordinator?.switchEngine()
         }
         DispatchQueue.main.async { [weak appState] in
             appState?.noteTerminalEngineInUse(kind, terminalID: terminalID, owner: owner)
@@ -981,9 +981,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// (`terminalEngineSwitchers`, `terminalEnginesInUse`), so a
         /// predecessor's teardown leaves its successor's entries alone.
         let engineSwitchToken = UUID()
-        /// Whether `switchEngine()` is running, so a second press while it
-        /// runs does nothing.
-        private var engineSwitchInFlight = false
 
         init(clock: any Clock<Duration> = ContinuousClock()) {
             self.clock = clock
@@ -2050,56 +2047,45 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             ledger.register(terminalID: panelID, task: handback)
         }
 
-        /// Switch Terminal Engine: hand the session back to the daemon, then
-        /// rebuild this panel on the other engine.
+        /// Switch Terminal Engine: record the other engine for this terminal,
+        /// which rebuilds the panel on it.
         ///
-        /// The handback is this panel's ordinary one, `detachHolderSession()`,
-        /// the path a tab close takes, and nothing of its own: the reader
-        /// stops, reading on within its bound until the session's output ends
-        /// between sequences (`TerminalEngine.isAtSequenceBoundary`, on either
-        /// engine), the screen is serialized after the close, and the detach
-        /// carries it. The switch waits for that detach to return
-        /// (`HolderHandbackLedger.awaitSettled`) before it records the other
-        /// engine in `AppState.terminalEngineOverrides`, so the old view keeps
-        /// its last frame until the session is free. The override changes the
-        /// panel's identity, SwiftUI rebuilds it, and the new panel attaches
-        /// as any new panel does, receiving the screen this one handed back.
-        ///
-        /// A panel with no live attach (one still attaching, or showing the
-        /// attach-failed placard) hands nothing back here; it just records
-        /// the override, and the rebuild's teardown settles whatever is in
-        /// flight, as it does for a closed tab.
+        /// The switch touches the session not at all. The override is part of
+        /// the panel's identity (`TerminalPanePresentation.attachIdentity`), so
+        /// writing it makes SwiftUI tear this panel down and build its
+        /// successor, exactly as a layout change does. The teardown's
+        /// `cleanup()` makes the one handback, through `detachHolderSession()`:
+        /// the reader reads on within its bound until the output ends between
+        /// sequences (`TerminalEngine.isAtSequenceBoundary`, on either engine),
+        /// the screen is serialized after the close, and the detach carries
+        /// it. The successor's attach waits for that detach
+        /// (`HolderHandbackLedger.awaitSettled`) and receives the screen. A
+        /// panel with no live attach needs nothing else: its teardown settles
+        /// whatever is in flight, as for a closed tab. Nothing is awaited here,
+        /// so nothing can land after a teardown or a close that follows.
         ///
         /// The other engine is the other of the one this panel was actually
-        /// built on. A panel whose libghostty start fell back to SwiftTerm was
-        /// asked for libghostty already, so a switch there would ask for the
-        /// same engine again, leave the identity as it is, and strand the
-        /// session detached with nothing to rebuild the panel; it does
-        /// nothing and logs why. One switch at a time: a second press while
-        /// one runs does nothing. With `useGhosttyTerminalEngine` off, where
-        /// an override would count for nothing, nothing happens at all.
+        /// built on. When that is already what the terminal asks for (a second
+        /// press before the rebuild, or a panel whose libghostty start fell
+        /// back to SwiftTerm), the write would change no identity, so nothing
+        /// happens and the log says why. With `useGhosttyTerminalEngine` off,
+        /// where an override would count for nothing, nothing happens at all.
         @MainActor
-        func switchEngine() async {
-            guard !isTornDown, !engineSwitchInFlight, let appState, let engine,
+        func switchEngine() {
+            guard !isTornDown, let appState, let engine,
                   appState.ghosttyTerminalEngineEnabled,
                   panelTransport() == .holder else { return }
             let target = engine.kind.other
             guard appState.terminalEngineKind(for: panelID) != target else {
                 terminalEngineSwitchLog.info(
-                    "terminal engine switch skipped terminal=\(self.panelID, privacy: .public): \(target.rawValue, privacy: .public) was asked for and did not start, so the panel stays on \(engine.kind.rawValue, privacy: .public)"
+                    "terminal engine switch skipped terminal=\(self.panelID, privacy: .public): it already asks for \(target.rawValue, privacy: .public), so nothing would rebuild the panel, which stays on \(engine.kind.rawValue, privacy: .public)"
                 )
                 return
-            }
-            engineSwitchInFlight = true
-            if holderAttach != nil {
-                detachHolderSession()
-                await handbackLedger(appState).awaitSettled(terminalID: panelID)
             }
             terminalEngineSwitchLog.info(
                 "switching terminal engine terminal=\(self.panelID, privacy: .public) from=\(engine.kind.rawValue, privacy: .public) to=\(target.rawValue, privacy: .public)"
             )
             appState.terminalEngineOverrides[panelID] = target
-            engineSwitchInFlight = false
         }
 
         /// Serialize this panel's terminal as the byte stream that reconstructs

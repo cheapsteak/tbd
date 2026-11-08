@@ -290,7 +290,7 @@ private struct TerminalCommandsContent: View {
         if TerminalEngineSwitchCommand.isVisible(experimentEnabled: ghosttyExperimentEnabled) {
             Button(TerminalEngineSwitchCommand.title) {
                 Task { @MainActor in
-                    await appState.switchFocusedTerminalEngine()
+                    appState.switchFocusedTerminalEngine()
                 }
             }
             .keyboardShortcut(

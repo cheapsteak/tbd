@@ -12,11 +12,12 @@ let terminalEngineSwitchLog = Logger(subsystem: "com.tbd.app", category: "termin
 /// Switch Terminal Engine: move a live holder terminal to the other engine, to
 /// compare the two on the same session while `useGhosttyTerminalEngine` soaks.
 ///
-/// The switch hands the session back to the daemon through the panel's own
-/// detach (`TerminalPanelRepresentable.Coordinator.switchEngine()`), records
-/// the other engine in `AppState.terminalEngineOverrides`, and the panel's
-/// identity then rebuilds it on that engine, which attaches as any new panel
-/// does. Design: `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+/// The switch records the other engine in `AppState.terminalEngineOverrides`
+/// (`TerminalPanelRepresentable.Coordinator.switchEngine()`), and nothing
+/// else. The override is part of the panel's identity, so SwiftUI rebuilds
+/// the panel: the old one's teardown hands the session back as a layout
+/// change's does, and the new one attaches on the other engine as any new
+/// panel does. Design: `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
 enum TerminalEngineSwitchCommand {
     static let title = "Switch Terminal Engine"
     /// ⌃⌘E. Unbound elsewhere in this app and not a macOS default, and a
@@ -75,7 +76,7 @@ struct TerminalEngineSwitcher {
     /// The registering panel's token, so a predecessor's teardown cannot
     /// unregister its successor.
     let owner: UUID
-    let run: @MainActor () async -> Void
+    let run: @MainActor () -> Void
 }
 
 extension AppState {
@@ -114,7 +115,7 @@ extension AppState {
     }
 
     func registerTerminalEngineSwitcher(
-        for terminalID: UUID, owner: UUID, run: @escaping @MainActor () async -> Void
+        for terminalID: UUID, owner: UUID, run: @escaping @MainActor () -> Void
     ) {
         terminalEngineSwitchers[terminalID] = TerminalEngineSwitcher(owner: owner, run: run)
     }
@@ -161,17 +162,17 @@ extension AppState {
     /// Switches the focused holder terminal to the other engine. Re-resolved
     /// from the first responder, so a stale menu state cannot switch the
     /// wrong terminal.
-    func switchFocusedTerminalEngine() async {
+    func switchFocusedTerminalEngine() {
         guard canSwitchFocusedTerminalEngine,
               let responder = NSApp.keyWindow?.firstResponder as? NSView,
               let terminalID = terminalFocusTargets.first(where: { $0.value.view === responder })?.key
         else { return }
-        await switchTerminalEngine(terminalID: terminalID)
+        switchTerminalEngine(terminalID: terminalID)
     }
 
     /// Runs the mounted panel's switch for `terminalID`, if it has one.
-    func switchTerminalEngine(terminalID: UUID) async {
+    func switchTerminalEngine(terminalID: UUID) {
         guard let switcher = terminalEngineSwitchers[terminalID] else { return }
-        await switcher.run()
+        switcher.run()
     }
 }
