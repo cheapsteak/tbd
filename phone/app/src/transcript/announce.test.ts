@@ -102,9 +102,37 @@ test('a message among the last ANNOUNCE_ROWS rows whose text changed in place sa
   assert.deepEqual(announcement(now, 0, before), ['Both pass.', 'Keep the saved-card list.']);
   // Seen again, nothing changed since.
   assert.deepEqual(announcement(now, 0, lastRows(now)), []);
-  // The user's own message, changed in place.
+  // The user's own message, changed in place: it says the words added.
   const mine = [changed(now[0]!, { text: 'Go on' }), ...now.slice(1)];
-  assert.deepEqual(announcement(mine, 0, lastRows(now)), ['Go on']);
+  assert.deepEqual(announcement(mine, 0, lastRows(now)), ['on']);
+});
+
+test('a message whose text grows says only the words added, however long it is', () => {
+  const long = 'Checking each file in turn. '.repeat(60);
+  assert.ok(long.length > ANNOUNCE_SOURCE_CHARS);
+  const said = row({ kind: 'assistant', text: long });
+  const rows = [row({ kind: 'user', text: 'Go' }), said];
+  // Past the characters read for a message's words, an addition is still said, and only it.
+  const grown = [rows[0]!, changed(said, { text: `${long}All **pass** now.` })];
+  assert.deepEqual(announcement(grown, 0, lastRows(rows)), ['All pass now.']);
+  // A short message as it streams.
+  const short = row({ kind: 'peer', text: 'Working on' });
+  assert.deepEqual(announcement([changed(short, { text: 'Working on it.' })], 0, [short]), ['it.']);
+  // An addition is cut as any row is, and white space alone says nothing.
+  const many = announcement([changed(short, { text: `Working on${' it'.repeat(1_000)}` })], 0, [short]);
+  assert.deepEqual(many.map((line) => line.length), [ANNOUNCE_CHARS]);
+  assert.deepEqual(announcement([changed(short, { text: 'Working on \n ' })], 0, [short]), []);
+  // An addition never starts inside a surrogate pair.
+  const emoji = row({ kind: 'user', text: 'a\ud83d' });
+  assert.deepEqual(announcement([changed(emoji, { text: 'a😀 b' })], 0, [emoji]), ['😀 b']);
+});
+
+test('a message whose text changes other than by growing says its new text from the start', () => {
+  const said = row({ kind: 'assistant', text: 'Both **pass**.' });
+  assert.deepEqual(announcement([changed(said, { text: 'All pass.' })], 0, [said]), ['All pass.']);
+  const long = row({ kind: 'assistant', text: 'x '.repeat(1_000) });
+  const rewritten = announcement([changed(long, { text: `y ${'x '.repeat(1_000)}` })], 0, [long]);
+  assert.deepEqual(rewritten.map((line) => [line.length, line.slice(0, 4)]), [[ANNOUNCE_CHARS, 'y x ']]);
 });
 
 test('a change in place that says nothing new, a tool, a receipt and a row further up say nothing', () => {

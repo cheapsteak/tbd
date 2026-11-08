@@ -6,9 +6,10 @@
  *
  * - **Which rows.** Rows that came in at the bottom, new items or a receipt (`rowsChange` reads
  *   `appended`), and a message among the last `ANNOUNCE_ROWS` rows whose text changed in place,
- *   as when its text comes after its row: it says its new words, once (`changedWords`). A tool
- *   whose status changes, a receipt that changes, and a row further up say nothing. Never the
- *   rows of an open, a reopen or a reset, an older page, or rows drawn as the reader scrolls.
+ *   as when its text comes after its row: it says its new words, once (`changedWords`), which are
+ *   the words added when the new text extends the old, as a message written as it streams does.
+ *   A tool whose status changes, a receipt that changes, and a row further up say nothing. Never
+ *   the rows of an open, a reopen or a reset, an older page, or rows drawn as the reader scrolls.
  * - **What each says** (`spoken`), in the row's own words and no others: a message from the
  *   reader, Claude or a peer says its text, as plain text without its markdown marks; a receipt
  *   says its text; a tool call says its tool's name and its target, as the row shows them. Any
@@ -41,29 +42,34 @@ export const ANNOUNCE_SOURCE_CHARS = 2 * ANNOUNCE_CHARS;
 
 /** The words a screen reader hears for `row`, cut to `ANNOUNCE_CHARS`, or null for a row that says nothing. */
 export function spoken(row: TranscriptRow): string | null {
-  let words: string;
-  if (row.kind === 'receipt') {
-    words = row.text;
-  } else {
-    const it = row.item;
-    const text = cut(it.text ?? '', ANNOUNCE_SOURCE_CHARS);
-    switch (it.kind) {
-      case 'assistant':
-        words = plainText(mdTree(text));
-        break;
-      case 'user':
-      case 'peer':
-        words = plainText(mdInline(text));
-        break;
-      case 'tool':
-        words = `${it.toolName ?? ''} ${it.target ?? ''}`;
-        break;
-      default:
-        return null;
-    }
+  if (row.kind === 'receipt') return said(row.text);
+  const it = row.item;
+  switch (it.kind) {
+    case 'assistant':
+    case 'user':
+    case 'peer':
+      return messageWords(it.kind, it.text ?? '');
+    case 'tool':
+      return said(`${it.toolName ?? ''} ${it.target ?? ''}`);
+    default:
+      return null;
   }
-  const said = words.replace(/\s+/g, ' ').trim();
-  return said === '' ? null : cut(said, ANNOUNCE_CHARS);
+}
+
+/**
+ * The words of a message of `kind` whose text is `text`, as `spoken` says them: its first
+ * `ANNOUNCE_SOURCE_CHARS` characters read as markdown, as the row draws it (`mdTree` for Claude,
+ * `mdInline` for the reader and a peer), its plain text cut to `ANNOUNCE_CHARS`.
+ */
+function messageWords(kind: 'assistant' | 'user' | 'peer', text: string): string | null {
+  const read = cut(text, ANNOUNCE_SOURCE_CHARS);
+  return said(plainText(kind === 'assistant' ? mdTree(read) : mdInline(read)));
+}
+
+/** `words` with each run of white space as one space, cut to `ANNOUNCE_CHARS`, or null when nothing is left. */
+function said(words: string): string | null {
+  const one = words.replace(/\s+/g, ' ').trim();
+  return one === '' ? null : cut(one, ANNOUNCE_CHARS);
 }
 
 /**
@@ -89,20 +95,27 @@ export function lastRows(rows: readonly TranscriptRow[]): readonly TranscriptRow
   return rows.slice(Math.max(0, rows.length - ANNOUNCE_ROWS));
 }
 
-/** The kinds of row whose text changing in place is said again: messages from the reader, Claude and a peer. */
-const MESSAGE_KINDS: ReadonlySet<string> = new Set(['user', 'assistant', 'peer']);
-
 /**
- * The new words of `row` when it is a message that changed in place since `before`: `before`
- * holds it, by its key, with other text, and its words now are not empty and not the ones it
- * said then. Null for any other row, so a tool whose status changes says nothing.
+ * The new words of `row` when it is a message that changed in place since `before`, which holds
+ * it, by its key, with other text. Null for any other row, so a tool whose status changes says
+ * nothing.
+ * - **Text that extends the old text**, as a message's does while it streams, says only what was
+ *   added, read as `spoken` reads a message: its first `ANNOUNCE_SOURCE_CHARS` characters, cut
+ *   to `ANNOUNCE_CHARS`. So a message past those characters still says each addition.
+ * - **Any other change** says the new text's start, as `spoken` does, when its words are not
+ *   empty and not the ones it said then.
  */
 function changedWords(row: TranscriptRow, before: readonly TranscriptRow[]): string | null {
-  if (row.kind !== 'item' || !MESSAGE_KINDS.has(row.item.kind)) return null;
+  if (row.kind !== 'item') return null;
+  const { kind } = row.item;
+  if (kind !== 'assistant' && kind !== 'user' && kind !== 'peer') return null;
   const was = before.find((r) => r.key === row.key);
   if (was === undefined || was === row || was.kind !== 'item' || was.item.text === row.item.text) return null;
-  const said = spoken(row);
-  return said !== null && said !== spoken(was) ? said : null;
+  const old = was.item.text ?? '';
+  const now = row.item.text ?? '';
+  if (now.startsWith(old)) return messageWords(kind, now.slice(pairSafeEnd(now, old.length)));
+  const words = spoken(row);
+  return words !== null && words !== spoken(was) ? words : null;
 }
 
 /** The text of a markdown tree, with a space between its blocks and in place of each line break. */
