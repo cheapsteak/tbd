@@ -299,6 +299,39 @@ struct TranscriptFeedTests {
         #expect(await d.feed.isWatching == false)
     }
 
+    /// A page waiting for the read turn when the feed closes reads nothing:
+    /// it is stale, though its cursor still names a line of the file. A
+    /// device's pages wait in its one open feed's turn, so this keeps a page
+    /// queued on a feed that a later open replaced from scanning beside the
+    /// new feed's reads.
+    @Test func aPageWaitingForTheReadTurnWhenTheFeedClosesReadsNothing() async throws {
+        let fixture = try FeedFixture(FeedLine.conversation(messages: 10))
+        defer { fixture.remove() }
+        let resolver = HeldLaterResolve(path: fixture.path)
+        defer { resolver.gate.open() }
+        let terminalID = UUID()
+        let feed = TranscriptFeed(
+            session: .local(terminalID: terminalID), showDetails: false,
+            source: .local(terminalID: terminalID, resolvePath: { await resolver.resolve() }),
+            emit: { _ in },
+            clock: EventDrivenTestClock())
+        let page = try await feed.open()
+        let cursor = try #require(page.cursor)
+        // The worker's first read resolves the path again and holds the read
+        // turn until the gate opens or the worker is cancelled.
+        await feed.start()
+        try await waitUntil("the worker's read to hold the read turn") { resolver.calls >= 2 }
+        let pageTask = Task { try await feed.olderPage(cursor: cursor) }
+        try await waitUntil("the page to wait for the read turn") { await feed.readTurnWaiterCount == 1 }
+
+        await feed.close()
+        resolver.gate.open()
+
+        await #expect(throws: PhoneAppError(code: .staleCursor, message: TranscriptPager.staleCursorMessage)) {
+            _ = try await pageTask.value
+        }
+    }
+
     // MARK: - Frames and the bounded index
 
     /// Items go out in order, as few to a frame as fit the budget, and an
@@ -1224,6 +1257,37 @@ struct TranscriptFeedTests {
         if await done() || clock.hasSleeper { return }
         throw BoundedWaitTimeout(
             what: "the feed's watcher to arm its debounce", observed: "no sleeper", deadline: TestDeadlines.saturatedPass)
+    }
+}
+
+// MARK: - A held resolve
+
+/// A local feed's `resolvePath` whose first call returns `path` at once and
+/// whose later calls each wait until `gate` opens or their task is
+/// cancelled, so a test can hold the worker's read, and the read turn with
+/// it.
+private final class HeldLaterResolve: @unchecked Sendable {
+    let gate = PhoneTestGate()
+    private let path: String
+    private let lock = NSLock()
+    private var count = 0
+
+    init(path: String) {
+        self.path = path
+    }
+
+    /// How many calls have started, the held ones included.
+    var calls: Int { lock.withLock { count } }
+
+    func resolve() async -> String? {
+        let isFirst = lock.withLock { () -> Bool in
+            count += 1
+            return count == 1
+        }
+        if !isFirst {
+            await gate.wait()
+        }
+        return path
     }
 }
 

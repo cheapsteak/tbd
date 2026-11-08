@@ -135,7 +135,10 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 /// the subagent counts shaping asks for. **One read section runs at a time,
 /// in the order they asked** (`acquireReadTurn()`): a worker read with what
 /// it applies, an older page with what it keeps. So reads and the state they
-/// change apply in the order they would have run inline. Calls that read no
+/// change apply in the order they would have run inline. A device has one
+/// open feed, so its `transcript.page` requests, each with an anchor scan of
+/// up to `anchorScanLimit` bytes, run one at a time; a page still waiting for
+/// the turn when the feed closes reads nothing. Calls that read no
 /// file (`noteDelta(_:)`, `close()`, the detail cache) still run during a
 /// read; a section reads the feed's state it needs before its read and
 /// applies the result after it, so the state they see is whole.
@@ -389,6 +392,11 @@ actor TranscriptFeed {
     /// The items the live transcript holds. For tests.
     var liveItemCount: Int {
         transcript.items.count
+    }
+
+    /// How many read sections wait for the read turn. For tests.
+    var readTurnWaiterCount: Int {
+        readTurnWaiters.count
     }
 
     // MARK: - Wakeups
@@ -913,14 +921,16 @@ actor TranscriptFeed {
     /// Its results, its rows' offsets and its calls still `running` are kept
     /// too, so the page before it can join a result that sits on this one.
     /// Throws `stale_cursor` for a cursor of another generation, or one that
-    /// no longer names a line of the file. A remote session's page can load
+    /// no longer names a line of the file, and once the feed is closed: a
+    /// page that waited for the read turn while a later open or close
+    /// replaced the feed reads nothing. A remote session's page can load
     /// earlier history first (`remoteOlderPage`).
     func olderPage(cursor: String) async throws -> TranscriptPage {
         switch source {
         case .local:
             await acquireReadTurn()
             defer { releaseReadTurn() }
-            guard let path else { throw Self.staleCursor }
+            guard !closed, let path else { throw Self.staleCursor }
             let read = try await olderBuild(cursor: cursor, path: path)
             return keep(read)
         case .remote(let follower):
@@ -1009,11 +1019,11 @@ actor TranscriptFeed {
 
     /// The first part of `remoteOlderPage`, in a read turn of its own: the
     /// page before `cursor` from the cache as it is, kept in this same turn
-    /// when it needs no earlier history.
+    /// when it needs no earlier history. Stale once the feed is closed.
     private func cachedOlderPage(cursor: String) async throws -> CachedOlderPage {
         await acquireReadTurn()
         defer { releaseReadTurn() }
-        guard let path else { throw Self.staleCursor }
+        guard !closed, let path else { throw Self.staleCursor }
         let pageGeneration = generation
         let cached = try await olderBuild(cursor: cursor, path: path)
         guard needsEarlier(cached.build) else { return .kept(keep(cached)) }

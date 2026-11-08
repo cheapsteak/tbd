@@ -251,6 +251,23 @@ struct RemoteTranscriptFeedTests {
         await d.feed.close()
     }
 
+    /// A page asked of a closed feed reads nothing, even one the cache could
+    /// serve with no earlier history to load: the cursor is stale.
+    @Test func aPageOfAClosedFeedIsStale() async throws {
+        let cache = try FakeCache(CacheLine.conversation("m", messages: 6))
+        defer { cache.remove() }
+        let d = RemoteDirectFeed(cache: cache)
+        let page = try await d.feed.open()
+        let cursor = try #require(page.cursor)
+
+        await d.feed.close()
+
+        await #expect(throws: PhoneAppError(code: .staleCursor, message: TranscriptPager.staleCursorMessage)) {
+            _ = try await d.feed.olderPage(cursor: cursor)
+        }
+        #expect(d.actions.remoteLoadEarliers.isEmpty)
+    }
+
     /// A load whose result names a newer generation fetched nothing, since a
     /// sync replaced the cache first: the cursor is stale, the feed starts
     /// over with reason `generation`, and the next tick appends to the new
