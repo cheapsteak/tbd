@@ -4,8 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import { appPortMessage } from '../../loader/frame.js';
-import { decodeLoaderMessage, HostLink, readHost } from './host.ts';
+import { isPlainRecord as loaderIsPlainRecord } from '../../loader/objects.js';
+import { decodeLoaderMessage, HostLink, isPlainRecord, readHost } from './host.ts';
 import type { HostHandlers } from './host.ts';
 import type { HostEnv } from './env.ts';
 
@@ -265,5 +267,33 @@ test('readHost takes a real MessagePort', () => {
     assert.equal(readHost({ tbdHost: { port: port2, protocol: 1 } }).port, port2);
   } finally {
     port1.close();
+  }
+});
+
+test("isPlainRecord gives the loader's answer", () => {
+  class Point { x = 1; }
+  const other = vm.runInNewContext('({ literal: {}, bare: Object.create(null), list: [] })') as Record<string, unknown>;
+  const values: Array<[string, unknown, boolean]> = [
+    ['an object literal', { a: 1 }, true],
+    ['an empty object literal', {}, true],
+    ['a null-prototype object', Object.create(null), true],
+    ['an array', [1, 2], false],
+    ['a Date', new Date(0), false],
+    ['a Map', new Map(), false],
+    ['a class instance', new Point(), false],
+    ['an object whose prototype is an object literal', Object.create({}), false],
+    ['null', null, false],
+    ['undefined', undefined, false],
+    ['a number', 1, false],
+    ['a string', 's', false],
+    ['a boolean', true, false],
+    ['a function', () => {}, false],
+    ["another realm's object literal", other.literal, false],
+    ["another realm's null-prototype object", other.bare, true],
+    ["another realm's array", other.list, false],
+  ];
+  for (const [name, value, want] of values) {
+    assert.equal(isPlainRecord(value), want, name);
+    assert.equal(isPlainRecord(value), loaderIsPlainRecord(value), name);
   }
 });

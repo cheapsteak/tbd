@@ -147,10 +147,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * An object literal or a null-prototype object: not an array, a Date, a Map or any other
- * built-in or class instance, which structured clone can also carry. The loader's
- * `isPlainRecord` (`phone/loader/objects.js`) is the same rule.
+ * built-in or class instance, which structured clone can also carry. It is the same rule as the
+ * loader's `isPlainRecord` (`phone/loader/objects.js`), kept as a copy because the bundle
+ * imports nothing from outside its own tree, as `runner.js` keeps its own. `host.test.ts`
+ * ("isPlainRecord gives the loader's answer") checks that the two agree.
  */
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value)) return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
