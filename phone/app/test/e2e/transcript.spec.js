@@ -1,18 +1,29 @@
 // The transcript's rows end to end (spec section 7), in WebKit as an iPhone and in Chromium as
-// an Android phone: each item kind draws as the mock draws it, and a session whose laptop
-// offers no transcript shows the laptop's reason.
+// an Android phone: each item kind draws as the mock draws it, a session whose laptop offers no
+// transcript shows the laptop's reason, and a row's detail opens through `transcript.detail`:
+// a tool's input and result, "Show more", a subagent's items, a detail too large for the phone,
+// one the laptop no longer holds, and a collapse while the chunks load.
 //
 // mock.json has no slash item and no running tool, and its fake laptop leaves out thinking and
 // system notes unless "Show details" is on, so those arrive through `emit`, which the fake
 // forwards as the laptop would. The "Show details" filter itself is for Task 6c-8's tests.
+// mock.json's details are all small, so a test that needs a large one loads a scenario object.
 
 import { readFileSync } from 'node:fs';
 
-import { app, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
+import { chunkText, DETAIL_CHUNK_BYTES, TEXT } from './fake-laptop-app.js';
+import { app, expect, hostCall, hostRequests, openApp, openSessionByName, test } from './fixtures.js';
+
+/** @typedef {import('@playwright/test').Page} Page */
 
 const MOCK = JSON.parse(readFileSync(new URL('scenarios/mock.json', import.meta.url), 'utf8'));
 /** Checkout v2's Claude session. */
 const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
+/** Login redirect fix's Claude session. */
+const LOGIN_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000102' };
+/** Login redirect fix's Bash call, `npm test -- auth`. */
+const BASH_ID = 'login-8';
+const TOO_LARGE = 'Too large for the phone. Open on the laptop.';
 
 test('each item kind draws as the mock draws it', async ({ page, appHost }) => {
   await openApp(page, appHost);
@@ -95,4 +106,149 @@ test('a session with no transcript shows the laptop’s reason', async ({ page, 
   const note = app(page).locator('.codex-note');
   await expect(note.locator('b')).toHaveText(reason);
   await expect(app(page).locator('.tx .me, .tx .say, .tx .tool')).toHaveCount(0);
+});
+
+// --- details --------------------------------------------------------------------------------
+
+/**
+ * Every `transcript.detail` that reached the laptop, as `[itemID, part, chunk]`.
+ * @param {Page} page
+ */
+async function detailRequests(page) {
+  return (await hostRequests(page)).filter((r) => r.method === 'transcript.detail').map((r) => [r.params.itemID, r.params.part, r.params.chunk]);
+}
+
+/**
+ * The mock scenario with Bash's input or result replaced by `text`.
+ * @param {'input' | 'result'} part
+ * @param {string} text
+ */
+function withBashPart(part, text) {
+  const scenario = structuredClone(MOCK);
+  scenario.details[BASH_ID][part] = text;
+  return scenario;
+}
+
+/**
+ * Opens Login redirect fix and returns its transcript and its Bash row.
+ * @param {Page} page
+ */
+async function openLogin(page) {
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const bash = tx.locator('button.tool', { hasText: 'npm test -- auth' });
+  await expect(bash).toHaveAttribute('aria-expanded', 'false');
+  return { tx, bash };
+}
+
+test('a tool row opens to its input and result', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  const { tx, bash } = await openLogin(page);
+  await bash.click();
+  await expect(bash).toHaveAttribute('aria-expanded', 'true');
+  const detail = tx.locator('.detail');
+  await expect(detail.locator('.dl')).toHaveText(['Input', 'Result']);
+  await expect(detail.locator('pre')).toHaveText([MOCK.details[BASH_ID].input, MOCK.details[BASH_ID].result]);
+  await expect(detail.locator('.toobig, .loading')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0]]);
+
+  // A second tap collapses it.
+  await bash.click();
+  await expect(bash).toHaveAttribute('aria-expanded', 'false');
+  await expect(tx.locator('.detail')).toHaveCount(0);
+});
+
+test('a subagent row opens to its items, which draw but do not open', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const agent = tx.locator('button.tool', { hasText: 'Explore agent' });
+  await agent.click();
+  await expect(agent).toHaveAttribute('aria-expanded', 'true');
+  const nest = tx.locator('.nest');
+  await expect(nest.locator('.tool b')).toHaveText(['Grep', 'Read']);
+  await expect(nest.locator('.tool code')).toHaveText(['finishLogin', 'src/auth/callback.ts']);
+  await expect(nest.locator('.say')).toHaveText('finishLogin in src/auth/redirect.ts receives next but never uses it.');
+  await expect(nest.locator('button')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-3', 'subagent', 0]]);
+});
+
+test('Show more shows the whole message', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const say = tx.locator('.say').last();
+  await expect(say).not.toContainText('Both cases have a line');
+  await say.locator('.morebtn').click();
+  await expect(say).toContainText('Both cases have a line in isLocalPath with a comment that says why.');
+  await expect(say.locator('.lnk')).toHaveText('OWASP cheat sheet on open redirects');
+  await expect(tx.locator('.morebtn')).toHaveCount(0);
+  await expect(tx.locator('.detail')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0]]);
+});
+
+test("a detail over 1 MB says 'Too large for the phone. Open on the laptop.'", async ({ page, appHost }) => {
+  const line = 'PASS src/auth/redirect.test.ts\n';
+  const result = line.repeat(Math.ceil(1_100_000 / line.length));
+  await openApp(page, appHost, { scenario: withBashPart('result', result) });
+  const { tx, bash } = await openLogin(page);
+  await bash.click();
+  const detail = tx.locator('.detail');
+  await expect(detail.locator('.toobig')).toHaveText(TOO_LARGE);
+  await expect(detail.locator('.toobig svg')).toHaveCount(1);
+  await expect(detail.locator('.dl')).toHaveText(['Input', 'Result']);
+  // The first chunk only: the laptop sends no more, and the phone asks for no more.
+  const [first] = chunkText(result, DETAIL_CHUNK_BYTES, 1);
+  expect(await detail.locator('pre').nth(1).evaluate((el) => el.textContent)).toBe(first);
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0], [BASH_ID, 'result', 0]]);
+});
+
+test("a detail the laptop no longer holds shows 'That detail is not in the transcript.'", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  const { tx, bash } = await openLogin(page);
+  await hostCall(page, 'setReply', 'transcript.detail', { error: { code: 'not_found', message: TEXT.detailNotFound } });
+  await bash.click();
+  const detail = tx.locator('.detail');
+  await expect(detail).toHaveText(TEXT.detailNotFound);
+  await expect(bash).toHaveAttribute('aria-expanded', 'true');
+
+  // A tap after the failure starts over.
+  await hostCall(page, 'setReply', 'transcript.detail', null);
+  await bash.click();
+  await expect(detail.locator('.dl')).toHaveText(['Input', 'Result']);
+  await expect(detail).not.toContainText(TEXT.detailNotFound);
+  await expect(bash).toHaveAttribute('aria-expanded', 'true');
+});
+
+test('collapsing while the chunks load asks for no more of them', async ({ page, appHost }) => {
+  // About 150 KB of input: three chunks.
+  const input = 'command: npm test -- auth --verbose '.repeat(4_200);
+  await openApp(page, appHost, { scenario: withBashPart('input', input) });
+  const { tx, bash } = await openLogin(page);
+  await hostCall(page, 'hold', 'transcript.detail');
+  await bash.click();
+  await expect(tx.locator('.detail .loading')).toHaveText('Loading from the laptop…');
+  await expect.poll(() => detailRequests(page)).toEqual([[BASH_ID, 'input', 0]]);
+  await bash.click();
+  await expect(bash).toHaveAttribute('aria-expanded', 'false');
+  await expect(tx.locator('.detail')).toHaveCount(0);
+
+  // The held reply, then an event behind it on the same channel: once the event's row shows,
+  // the app has taken the reply, and anything it asked for in return has reached the laptop.
+  await hostCall(page, 'release', 'transcript.detail');
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF, items: [{ id: 'x-after', kind: 'assistant', text: 'Here after the dropped chunk.', truncated: false }],
+  });
+  await expect(tx.locator('.say', { hasText: 'Here after the dropped chunk.' })).toBeVisible();
+  expect(await detailRequests(page)).toEqual([[BASH_ID, 'input', 0]]);
+  await expect(tx.locator('.detail')).toHaveCount(0);
+
+  // A tap opens it again, from its first chunk, and every chunk joins in order.
+  await bash.click();
+  const pre = tx.locator('.detail pre').first();
+  await expect(pre).toBeVisible();
+  expect(await pre.evaluate((el) => el.textContent)).toBe(input);
+  expect(await detailRequests(page)).toEqual([
+    [BASH_ID, 'input', 0], [BASH_ID, 'input', 0], [BASH_ID, 'input', 1], [BASH_ID, 'input', 2], [BASH_ID, 'result', 0],
+  ]);
 });

@@ -1,7 +1,7 @@
 /**
  * The transcript actions: opening and closing the one transcript the laptop sends this phone,
- * resuming it after a dropped channel, and its older pages (spec section 7). The slice they fill
- * is `state/transcript.ts`. Details (`toggleDetail`) come with Task 6c-5.
+ * resuming it after a dropped channel, its older pages, and its rows' details (spec section 7).
+ * The slice they fill is `state/transcript.ts`; a detail's chunk rules are `state/detail.ts`.
  *
  * **Which reply counts.** The laptop keeps one transcript open per phone, and opening another
  * replaces the first. Each open, a resume included, takes a fresh token from `newRequestID`
@@ -30,8 +30,12 @@
  * Every action resolves and never rejects (`actions/index.ts`); `superseded` is silent.
  */
 
-import { AppError, newRequestID } from '../client/client.ts';
-import type { PhoneSessionRef, TranscriptDetailPart, TranscriptOpenResult, TranscriptPage } from '../protocol/types.ts';
+import { AppError, BAD_REPLY_TEXT, newRequestID } from '../client/client.ts';
+import type {
+  PhoneSessionRef, TranscriptDetailPart, TranscriptDetailResult, TranscriptOpenResult, TranscriptPage,
+} from '../protocol/types.ts';
+import { addChunk, askOf, cancelDetail, detailParts, failDetail, isOpen, startDetail } from '../state/detail.ts';
+import type { DetailState } from '../state/detail.ts';
 import { applyPage, beginOpen, beginResume, emptyTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import type { ActionContext, Actions } from './index.ts';
@@ -121,6 +125,28 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     });
   }
 
+  /** Whether the slice still holds `d` as row `rowKey`'s detail, in an open transcript. */
+  function stillAsked(rowKey: number, d: DetailState): boolean {
+    const t = store.get().transcript;
+    return t.phase === 'open' && t.details[rowKey] === d;
+  }
+
+  /** Puts `next` as row `rowKey`'s detail, when `was` is still the one there. */
+  function putDetail(rowKey: number, was: DetailState, next: DetailState): void {
+    if (next === was) return;
+    setTranscript((t) => (t.details[rowKey] === was ? { ...t, details: { ...t.details, [rowKey]: next } } : t));
+  }
+
+  /** Removes row `rowKey`'s detail, when `was` is still the one there. */
+  function dropDetail(rowKey: number, was: DetailState): void {
+    setTranscript((t) => {
+      if (t.details[rowKey] !== was) return t;
+      const details = { ...t.details };
+      delete details[rowKey];
+      return { ...t, details };
+    });
+  }
+
   return {
     /** Opens `ref`'s transcript from its tail, with the "Show details" setting. */
     openTranscript(ref: PhoneSessionRef): void {
@@ -187,8 +213,56 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
 
     /**
      * Opens or closes one part of the row with key `rowKey`, loading its chunks, and resolves
-     * once they landed or failed. Task 6c-5 fills it; until then it resolves at once.
+     * once they landed or failed. `part` is the part the row names (`detailParts`).
+     * - **A tap on a row whose detail shows** (loading, loaded or too large) collapses it
+     *   (`cancelDetail`): the reply on its way is dropped, and nothing more is asked.
+     * - **Any other tap**, on a closed row, a collapsed one or a failed one, starts the detail
+     *   over from its first chunk, while the transcript is open and the row holds an item.
+     *
+     * Each reply counts only while the slice still holds this very detail under `rowKey` and the
+     * transcript is open (`stillAsked`). So a reply that lands after a collapse, a second tap,
+     * a reset, a reopen, a close or a switch to another session changes nothing and asks for
+     * nothing: each of those replaces or drops the detail, and a reopen leaves the slice
+     * `opening` until its page drops every detail. A resume is the one new open that keeps the
+     * details, because it keeps the rows: `transcript.detail` is a read, which the client sends
+     * again after a dropped channel, so its reply still comes and the load carries on.
+     *
+     * A reply for another item ID than the one asked for fails the detail with `BAD_REPLY_TEXT`.
+     * An error fails it with the error's message: `not_found`, "That detail is not in the
+     * transcript.", is the usual one, since the laptop keeps the place of its last 8,192 items
+     * only and a remote prepend can move an item's ID. `superseded`, which the client never
+     * sends for a read today, removes the detail silently, so the row closes and nothing waits.
      */
-    async toggleDetail(rowKey: number, part: TranscriptDetailPart): Promise<void> {},
+    async toggleDetail(rowKey: number, part: TranscriptDetailPart): Promise<void> {
+      const t = store.get().transcript;
+      const shown = t.details[rowKey];
+      if (isOpen(shown) && shown.phase !== 'failed') {
+        putDetail(rowKey, shown, cancelDetail(shown));
+        return;
+      }
+      const row = t.rows.find((r) => r.key === rowKey);
+      if (t.phase !== 'open' || t.ref === null || row === undefined || row.kind !== 'item') return;
+      const session = t.ref;
+      const itemID = row.item.id;
+      let d = startDetail(detailParts(part, row.item));
+      setTranscript((s) => ({ ...s, details: { ...s.details, [rowKey]: d } }));
+      for (;;) {
+        const ask = askOf(d);
+        let result: TranscriptDetailResult;
+        try {
+          result = await ctx.client.request('transcript.detail', { session, itemID, part: ask.part, chunk: ask.chunk });
+        } catch (error) {
+          if (!stillAsked(rowKey, d)) return;
+          if (isSuperseded(error)) dropDetail(rowKey, d);
+          else putDetail(rowKey, d, failDetail(d, messageOf(error)));
+          return;
+        }
+        if (!stillAsked(rowKey, d)) return;
+        const step = result.itemID === itemID ? addChunk(d, result) : { next: failDetail(d, BAD_REPLY_TEXT), ask: null };
+        putDetail(rowKey, d, step.next);
+        if (step.ask === null) return;
+        d = step.next;
+      }
+    },
   };
 }

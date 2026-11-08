@@ -33,11 +33,7 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
       <div className="tx" id="tx" aria-live="polite">
         {rows.map((row) => (
           <div key={row.key} data-key={row.key} data-tx-row="" style={ROW_STYLE}>
-            <ItemRow
-              row={row}
-              expanded={t.details[row.key] !== undefined && !t.details[row.key]!.cancelled}
-              toggle={(part) => void actions.toggleDetail(row.key, part)}
-            />
+            <ItemRow row={row} detail={t.details[row.key]} toggle={(part) => void actions.toggleDetail(row.key, part)} />
           </div>
         ))}
       </div>

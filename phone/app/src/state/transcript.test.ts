@@ -51,7 +51,8 @@ function keyOf(s: TranscriptState, i: number): number {
 }
 
 const DETAIL: DetailState = {
-  parts: ['input', 'result'], partIndex: 0, chunk: 0, chunkCount: 1, text: {}, items: [], phase: 'loading', cancelled: false, error: null,
+  parts: ['input', 'result'], partIndex: 0, chunk: 0, chunkCount: 1, text: {}, items: [], bytes: 0, phase: 'loading', cancelled: false,
+  error: null,
 };
 
 test('the empty slice holds no transcript', () => {
