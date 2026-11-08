@@ -2,13 +2,15 @@
 
 *Evidence record gathered 2026-11-06, the day `libghostty-vt` 1.0.0 was tagged,
 against TBD at `43a009132`, with a proof of concept run on 2026-11-07 against
-TBD at `5891dd294`. Sources are the library's announcement, its documentation
-and headers at the `vt-1.0.0` tag, Ghostty's release notes, its maintainer's
-public statements, the repositories and write-ups of projects that embed
-libghostty, TBD's own tree, and the proof of concept on the branch
-[`spike/libghostty-vt-poc`](https://github.com/cheapsteak/tbd/tree/spike/libghostty-vt-poc/spikes/libghostty-vt).
-Statements carrying a date are evidence about that date. The record makes a
-recommendation; it changes no behavior.
+TBD at `5891dd294`. A/B runs of TBD's opt-in libghostty engine were taken on
+2026-11-08 against TBD at `ac44edb9d`, a release build. Sources are the
+library's announcement, its documentation and headers at the `vt-1.0.0` tag,
+Ghostty's release notes, its maintainer's public statements, the repositories
+and write-ups of projects that embed libghostty, TBD's own tree, the proof of
+concept on the branch
+[`spike/libghostty-vt-poc`](https://github.com/cheapsteak/tbd/tree/spike/libghostty-vt-poc/spikes/libghostty-vt),
+and the A/B runs. Statements carrying a date are evidence about that date. The
+record makes a recommendation; it changes no behavior.
 Companion record:
 [`docs/perf/2026-08-25-terminal-engine-options.md`](../perf/2026-08-25-terminal-engine-options.md),
 which surveys the same options as of 2026-08-25 in more depth, including prior
@@ -16,15 +18,25 @@ art and migration paths this record only summarizes.*
 
 ## Answer
 
-Stay on SwiftTerm for now. TBD could move to stock `libghostty-vt`, and the
-viewer could move before the daemon. But what a move buys does not yet pay for
-what it costs.
+TBD's default terminal engine is SwiftTerm, and it stays the default.
 
-The proof of concept measured both sides ("Proof of concept"):
+TBD also has an opt-in libghostty engine for holder and LocalPTY terminals
+([design](../specs/2026-11-07-libghostty-terminal-engine-design.md)). The flag
+`useGhosttyTerminalEngine` turns it on, and the flag is off by default. Its
+toggle is in Settings ▸ Terminal ▸ Experimental. Terminals that run through
+tmux stay on SwiftTerm, and so does the daemon.
+
+The first A/B of the two engines found no clear win, and libghostty had a
+longer draw wait ("A/B of the opt-in engine"). So the spec's graduation rule is
+not met, and the engine stays opt-in.
+
+The proof of concept measured what libghostty costs and what it gains ("Proof
+of concept"):
 
 - **Cost** – about 9,400 lines of renderer and view code for TBD to own, plus an
   estimated 1,000 to 2,000 lines to close the gaps it found. Both come before
-  the work on TBD's transport and handover.
+  any work on TBD's transport and handover. The opt-in engine carries this
+  cost: its target held about 11,900 lines of Swift at `ac44edb9d`.
 - **Gain** – parsing 1.1 to 6.3 times as fast as TBD's SwiftTerm fork, and about
   4 times as fast on real Claude Code output. Half the memory for idle
   terminals, which is about 12 MB per 100 terminals. A full scrollback 15%
@@ -35,17 +47,20 @@ question was traced to causes outside the engine ("Why TBD has stayed on
 SwiftTerm").
 
 The library itself is ready: `libghostty-vt` 1.0.0 was tagged on 2026-11-06
-with a declared ABI promise. Reopen the question when one of these becomes true:
+with a declared ABI promise. Reopen the question of the default when one of
+these becomes true:
 
 1. **The Ghostty project publishes a Swift renderer package for
-   `libghostty-vt`.** That removes most of the cost. No package was found on
-   2026-11-06, and the 1.0 announcement does not mention one.
+   `libghostty-vt`.** That would remove most of the code TBD owns for the
+   engine. No package was found on 2026-11-06, and the 1.0 announcement does
+   not mention one.
 2. **A measured TBD problem lives in the engine.** Examples are parse time in a
    profile of real use, memory held by many long scrollbacks, or defects in
    TBD's SwiftTerm fork that cost more to fix than a move would.
 
-Either way, the move starts with `/tbd-brainstorming` and ships behind a
-default-off flag ("Before a move").
+Either way, the default changes only under the spec's graduation rule: a clear
+win in two A/B/B/A runs, a soak with no libghostty crash, and no open daily-use
+gap ("Before a move").
 
 ## Two embedding surfaces
 
@@ -138,8 +153,8 @@ move first. That costs three things:
   reads and the viewer's picture can differ where the engines differ, such as
   grapheme clustering or `CSI S` on the primary screen ("Proof of concept").
 
-The live attach and detach flow did not run, so a trial through the real daemon
-and app is still owed.
+The proof of concept did not run the live attach and detach flow. The opt-in
+engine runs it through the real daemon and app.
 
 `libghostty-vt` fits the daemon's side with no renderer at all. The renderer is
 the cost of the viewer's side alone.
@@ -161,13 +176,19 @@ a fallback.
 
 ## What TBD has in place
 
-No code in the shipped tree. Measured at `43a009132`:
+At `ac44edb9d`, the app has the opt-in libghostty engine
+([design](../specs/2026-11-07-libghostty-terminal-engine-design.md)). Its
+`TBDGhosttyTerminal` target holds the view and the renderer, about 11,900 lines
+of Swift. A `TerminalEngine` protocol separates both engines from their
+callers. The daemon has no libghostty code.
 
-- **No engine boundary** – 17 source files import SwiftTerm, 9,963 lines in all,
-  as do 32 test files. `withTerminal` appears 21 times, 12 of them in
-  `TBDTerminalView.swift`. No protocol separates the engine from its callers.
-- **No flag** – nothing gates an engine change. `useMetalTerminalRenderer`
-  chooses a renderer inside SwiftTerm only.
+At `43a009132`, the shipped tree had no libghostty code:
+
+- **No engine boundary** – 17 source files imported SwiftTerm, 9,963 lines in
+  all, as did 32 test files. `withTerminal` appeared 21 times, 12 of them in
+  `TBDTerminalView.swift`. No protocol separated the engine from its callers.
+- **No flag** – nothing gated an engine change. `useMetalTerminalRenderer`
+  chose a renderer inside SwiftTerm only.
 - **A proof of concept, outside the build** – `spikes/libghostty-vt/` on the
   branch `spike/libghostty-vt-poc` (commit `4bc474f59`) holds a headless engine
   check (`check/`) and a standalone window (`view/`). The branch never merges.
@@ -337,6 +358,148 @@ TBD's own handover and in its SwiftTerm fork:
 The check also found state that TBD's writer never carries, such as a cursor
 left in pending wrap. It bounds what any viewer can show after attach.
 
+## A/B of the opt-in engine
+
+Run on 2026-11-08 against a release build of TBD at `ac44edb9d`. This is the
+first A/B round that the spec's "A/B and rollout" section calls for. It covers
+two of the spec's four measures: typed echo latency and the draw wait.
+
+The round had two runs, because libghostty always draws with Metal and
+SwiftTerm has two renderers. In one run SwiftTerm drew with Metal
+(`useMetalTerminalRenderer` on). In the other it drew with CoreGraphics
+(`useMetalTerminalRenderer` off when the SwiftTerm panel was built).
+
+**Setup.**
+
+- **Machine** – a 12-core Apple silicon laptop, with 8 performance cores and 4
+  efficiency cores.
+- **Terminals** – two holder shell terminals that ran `cat`, in one scratch
+  worktree. One was pinned to the dock at the side of the window, so both
+  stayed on screen and mounted for the whole run. The two panes had different
+  sizes. The two runs swapped which engine was in which pane.
+- **The SwiftTerm arm** – with the libghostty flag on, Switch Terminal Engine
+  (⌃⌘E) moved one terminal to SwiftTerm.
+- **The probe** – `scripts/diag/terminal-latency-probe.py` in engine mode, with
+  600 samples per arm and 250 ms between requests. It interleaved the arms
+  A/B/B/A, sample by sample. A sample counts as idle when the 1-minute load
+  average is 8 or less.
+- **Load** – each run had about 2.5 minutes at idle, at a 1-minute load of about
+  4 to 7. For the rest of the run, 12 `yes` processes ran, one per core, at a
+  1-minute load of about 47 to 54. A watcher checked every 2 seconds and saw no
+  compiler or build process during either run.
+- **Engine check** – the probe's check passed before and after both runs. Each
+  arm's latest "engine active" log line named its engine, and the flag was a
+  boolean true.
+
+**The two measures.**
+
+- **Echo** – the probe writes a token into the terminal's outbound path, after
+  the engine's own key handling. The app stamps the token's first copy when it
+  comes back at the feed seam, before either engine parses it. So the echo is
+  the same loop on both arms, and it leaves out the engine's key handling. In
+  engine mode it is the check that the arms match, not the comparison.
+- **Draw wait** – for each draw, how long the oldest undrawn chunk waited, from
+  the feed seam to the start of the draw. It includes the parse. It is the
+  comparison measure.
+
+**Echo at p90.** Times are in milliseconds, with the sample count in brackets.
+The ratio is libghostty ÷ SwiftTerm.
+
+| SwiftTerm renderer | band | libghostty | SwiftTerm | ratio |
+|---|---|---|---|---|
+| Metal | idle | 0.098 (300) | 0.109 (301) | 0.899 |
+| Metal | load | 0.075 (300) | 0.084 (299) | 0.893 |
+| CoreGraphics | idle | 0.099 (303) | 0.110 (303) | 0.900 |
+| CoreGraphics | load | 0.078 (297) | 0.076 (297) | 1.026 |
+
+Echo p50 was about 0.06 ms on both arms, in both bands of both runs.
+
+**Draw wait, with SwiftTerm on CoreGraphics.** Times are in milliseconds.
+
+| | libghostty, idle | SwiftTerm, idle | libghostty, load | SwiftTerm, load |
+|---|---|---|---|---|
+| p50 | 6.608 | 1.726 | 5.042 | 1.274 |
+| p90 | 9.383 | 2.724 | 8.928 | 2.822 |
+| max | 12.954 | 7.863 | 12.744 | 8.741 |
+| samples | 304 | 306 | 296 | 315 |
+
+At p90, libghostty ÷ SwiftTerm was 3.445 at idle and 3.164 under load. The
+latency tap timed 1,072 chunks on libghostty and 1,083 on SwiftTerm. Its ring of
+chunk timestamps never overflowed, so no chunk was left out of a draw wait.
+
+**Draw wait, with SwiftTerm on Metal.** SwiftTerm's Metal renderer writes no
+draw lines, so this run has no draw comparison. libghostty alone had a p50 of
+6.246 ms and a p90 of 9.121 ms at idle (302 samples). Under load it had a p50
+of 4.595 ms and a p90 of 8.633 ms (301 samples).
+
+**What the numbers show.**
+
+- **The arms shared one loop and one load** – the two arms' echoes agreed
+  within about 10% in every band. So the arms saw the same transport, and
+  neither engine kept the app's main or reader thread busy enough to show in
+  the echo. libghostty's echo p90 was about 10% lower at idle in both runs.
+  That is below the spec's 20% bar, and the echo does not measure engine work,
+  so it is not a win.
+- **Pane size is not ruled out** – the echo cannot show whether the draw
+  comparison was fair in other ways. The panes had different sizes, and the
+  only draw comparison comes from one run. So the pane swap between the runs
+  did not cancel out pane size for the draw wait.
+- **SwiftTerm drew sooner** – on the draw wait, SwiftTerm on CoreGraphics was
+  3.2 to 3.4 times shorter at p90.
+- **The engines start a draw at different points** – both engines stamp the
+  draw line when a draw begins. But the two draws begin at different points
+  relative to the screen's frame.
+  - libghostty builds a frame only on a display-link tick. Its `CADisplayLink`
+    stays paused until there is output. Output resumes the link, and the frame
+    is encoded inside the next tick (`renderTick` and `renderNow` in
+    `GhosttyTerminalView.swift`). So the oldest chunk waits for the next screen
+    frame. libghostty's waits spread fairly evenly from 0 to about 10 ms. That
+    fits a wait for the next frame of a 120 Hz display (8.3 ms), plus a small
+    hop to the main thread.
+  - SwiftTerm's frame driver also has a display link. But when output arrives
+    while that link is paused, the driver ticks at once, at most once in 16 ms,
+    and does not wait for the next frame. The CoreGraphics path then marks the
+    view for display, and the draw begins at the next main-loop commit. That
+    commit is not tied to the screen's frame. The link pauses after 8 idle
+    ticks, so with 250 ms between samples it was most likely paused when each
+    echo arrived.
+
+  The code shows where each draw starts. That this accounts for the whole gap
+  is a reading of the code, not a measurement.
+- **The gap on screen is not measured** – on both engines, pixels reach the
+  screen at a compositor frame. So the gap on screen is likely smaller than the
+  gap in draw wait: by this reasoning, at most about one frame. No TBD
+  instrument measures pixels, so this gap is not measured.
+- **The CPU load did not slow either arm** – under load, the echo p90s were 0.69
+  to 0.79 times their idle values, and the draw-wait p90s were 0.95 to 1.04
+  times. Hypothesis: the app's main thread runs at a higher QoS than the `yes`
+  processes, and a busy CPU runs at a higher clock. If so, this load band says
+  little about the build-heavy load that has made TBD's terminals lag.
+- **The graduation rule is not met** – the rule asks for at least 20% at p90 on
+  one measure, repeated in two A/B/B/A runs, with no regression beyond noise on
+  the others. No measure showed a 20% win in either run, and the draw wait is a
+  regression as measured. Under the spec's "flat A/B" outcome, the engine stays
+  opt-in.
+
+**Not measured yet.**
+
+- **A large stream** – the time to paint about 50 MB sent to a visible
+  terminal.
+- **Footprint** – app CPU and memory footprint with 8 and with 24 terminals
+  open.
+- **A second round** – the graduation rule needs a result repeated in two
+  A/B/B/A runs. The two runs here compared libghostty with two different
+  SwiftTerm renderers. Panes of equal size, or a pane swap with the same
+  SwiftTerm renderer, would rule out pane size.
+- **Pixels** – an on-screen measure. Only that can settle the draw-wait
+  question.
+- **SwiftTerm on Metal** – a draw-wait comparison against it. Its renderer
+  writes no draw lines today.
+
+One question follows from the mechanism and stays open: should libghostty
+build a frame when output arrives, instead of on the next tick? This record
+does not answer it.
+
 ## Ghostty on 2026-11-06
 
 **The library, per the 1.0 announcement and the `vt-1.0.0` tree.**
@@ -440,36 +603,38 @@ No evidence supports a date. The announcement said "Coming soon..." on
 2026-07-02, and the 1.0 announcement's stated direction does not include it. The
 C API underneath is stable, so an ABI break is not a reason to hold it back.
 
-If it never ships, the alternative is a renderer TBD writes or adapts on
-`render.h`, path B in the companion record. The proof of concept sized that
-path. Taking it would be a new decision needing its own motive, since
-performance is not one.
+If it never ships, the alternative is the renderer that TBD adapted on
+`render.h` for its opt-in engine, path B in the companion record. Making that
+engine the default needs a motive, and the first A/B found none in performance.
 
 ## Before a move
 
-- **Spec and flag** – replacing the terminal engine replaces a load-bearing
-  path, so it starts with `/tbd-brainstorming` and ships behind a default-off
-  flag.
-- **The renderer** – for a package, check its licence, its version pin against
-  `libghostty-vt`, and what it covers of IME, selection, scrolling and
-  accessibility. Without a package, start from the proof of concept's window
-  and close its gaps.
-- **Engine boundary** – add one first. The companion record describes a
-  runtime-switchable dual backend of about 240 lines in another project.
-- **First trial** – move one viewer behind the flag, keep the daemon on
-  SwiftTerm, and run attach, detach and resize through the real daemon and app.
-  The proof of concept checked the bytes. The trial checks the flow.
-- **What has to move with the viewer** – the reset before each preamble and a
-  writer for detach ("Two emulators, one snapshot format"); the OSC 7501 probe
-  and reports; OSC 9;4 suppression; mouse reporting, including the Option-drag
-  bypass; selection; and every `withTerminal` read in `TBDTerminalView`.
+A move here means making libghostty the default. The opt-in engine has done
+the first steps, as its
+[design](../specs/2026-11-07-libghostty-terminal-engine-design.md) records:
+
+- **Spec and flag** – the engine ships behind `useGhosttyTerminalEngine`, off
+  by default.
+- **Engine boundary** – the holder and LocalPTY coordinators talk to one
+  `TerminalEngine` protocol, with one implementation for each engine.
+- **First trial of one viewer** – the viewer runs on libghostty behind the
+  flag, and the daemon stays on SwiftTerm. Attach, detach and resize go through
+  the real daemon and app.
+
+These stay open:
+
+- **The A/B** – the measures and the second round that "A/B of the opt-in
+  engine" lists as not measured yet.
+- **A renderer package** – if Ghostty publishes one, check its licence, its
+  version pin against `libghostty-vt`, and what it covers of IME, selection,
+  scrolling and accessibility.
 - **What has to move with the daemon, later** – `TerminalSnapshotWriter` and
   `SGREncoder`, or libghostty's VT formatter in their place, and the mode
   readings that holder sends depend on.
 - **Images** – decide whether losing Sixel and iTerm2 inline images is
   acceptable.
-- **The pager** – check that the renderer releases GPU resources for hidden
-  views. The 1.4 GUI does; a Swift renderer package may not.
+- **The pager** – check that the libghostty renderer releases GPU resources for
+  hidden views. The 1.4 GUI does.
 
 ## Sources
 
