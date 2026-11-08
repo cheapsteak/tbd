@@ -1,18 +1,53 @@
 /**
  * The app protocol client (spec section 4.4). `AppClient` is the one owner of the app's
  * requests to the laptop and of the events the laptop sends back. It mints request IDs, keeps
- * each body within one frame, keeps at most 32 requests in flight, and turns each reply into
- * the request's result or an `AppError`.
+ * each body within one frame, keeps at most 32 requests in flight, turns each reply into the
+ * request's result or an `AppError`, resends what a dropped channel left unanswered, and
+ * numbers the event stream.
  *
  * It speaks to the loader through two seams, so tests can drive it without a port: `post`
  * sends one app body, and `handle` takes each message the loader sends the app.
+ *
+ * **Across a dropped channel.** The daemon finishes every request it started, whatever
+ * happens to the connection, and sends the reply through whatever connection the phone has
+ * then; a reply that finds the phone away is lost. So the client keeps every unanswered
+ * request through a drop. When the channel comes back up it does three things, in order:
+ * 1. It rejects every unanswered state request (`STATE_METHODS`) with `superseded`, because
+ *    its caller sends fresh ones from `onUp`.
+ * 2. It calls `onUp`. Whatever `onUp` requests goes out first: `sessions.subscribe`, then a
+ *    `transcript.open` with `resume`.
+ * 3. It posts every other unanswered request again, in the order each was first sent, with
+ *    the very body it first posted, then drains the queue.
+ *
+ * A resend is safe because of what the daemon does with a request ID (`PhoneAppService.swift`):
+ * - **A resend of a request still running** starts nothing, and the running request's one
+ *   reply comes to the new connection.
+ * - **A resend of an acting request** (`ACTING_METHODS`) that finished gets the reply the
+ *   daemon remembered and acts no more. The daemon remembers a reply for 600 s, and after that
+ *   a resend would act again: a message typed twice, a second worktree. So an acting request
+ *   is resent only within `RESEND_HORIZON_MS` (540 s) of its first send, and is otherwise
+ *   rejected with `not_confirmed`.
+ * - **A resend of a read** that finished runs again, which is harmless at any age.
+ * - **An ID reused for another method** is answered `bad_request`. So a resend posts the very
+ *   body first posted, and a new request always gets a new ID.
+ *
+ * The daemon also caps a phone at 32 running requests, counted across connections. The client
+ * never has more than 32 posted and unanswered on one channel, reposts included: `onUp`'s
+ * requests take slots first, then the reposts, then the queue.
+ *
+ * **Events.** Every event carries a `seq` on the phone's one stream. The daemon sends none on
+ * a connection before that connection's `sessions.subscribe` reply, so the client drops any
+ * that reaches it between a channel up and that reply. After it, an event at or below the last
+ * `seq` taken is a repeat and is dropped. The subscribe reply sets the numbering: a snapshot
+ * starts a stream whose later events are above the reply's `seq`, and a replay keeps the
+ * numbering as it was, because the missed events follow it with `seq` at or below the reply's.
  */
 
 import type { LoaderMessage } from '../host.ts';
-import { fitsFrame, MAX_IN_FLIGHT } from '../limits.ts';
+import { fitsFrame, MAX_IN_FLIGHT, RESEND_HORIZON_MS } from '../limits.ts';
 import { decodeEnvelope, decodeEventData, decodeResult, isErrorCode, requestBody } from '../protocol/wire.ts';
 import type { Envelope } from '../protocol/wire.ts';
-import type { AppEvent, ErrorCode, Method, ParamsOf, ResultOf } from '../protocol/types.ts';
+import type { AppEvent, ErrorCode, Method, ParamsOf, ResultOf, SessionsSubscribeResult } from '../protocol/types.ts';
 
 /**
  * The methods that act on a session or create something. The daemon keeps their replies in its
@@ -29,7 +64,10 @@ export const ACTING_METHODS: ReadonlySet<Method> = new Set<Method>([
   'remote.create',
 ]);
 
-/** The methods that set up or tear down what the laptop sends the phone. */
+/**
+ * The methods that set up or tear down what the laptop sends the phone. They are never resent:
+ * after a drop, the caller's `onUp` sends fresh ones for the state it wants now.
+ */
 export const STATE_METHODS: ReadonlySet<Method> = new Set<Method>(['sessions.subscribe', 'transcript.open', 'transcript.close']);
 
 /** The codes the client itself rejects with, beside the daemon's own. */
@@ -47,6 +85,16 @@ export const BAD_REPLY_TEXT = 'The laptop sent a reply this app cannot read.';
  */
 export const BAD_PARAMS_TEXT = "The request's params are not valid.";
 
+/** An acting request the channel dropped before the laptop answered, too old to send again. */
+export const NOT_CONFIRMED_TEXT =
+  'The laptop did not confirm this before the connection dropped. Check the session before you try again.';
+
+/**
+ * A state request a channel up replaced. Its caller sends a fresh one from `onUp`, so this is
+ * for logs and tests, never for the screen.
+ */
+export const SUPERSEDED_TEXT = 'The connection came back, and a fresh request replaces this one.';
+
 /** A request that failed: with a code from the daemon's closed list, or one of the client's own. */
 export class AppError extends Error {
   readonly code: ErrorCode | LocalErrorCode;
@@ -61,9 +109,12 @@ export class AppError extends Error {
 export interface ClientOptions {
   /** Sends one app body to the laptop: `HostLink.postApp` in the app. */
   post(body: Record<string, unknown>): void;
-  /** One event from the laptop, decoded. */
+  /** One event from the laptop, decoded, in order, each `seq` once. */
   onEvent(event: AppEvent): void;
-  /** The channel to the laptop came up. */
+  /**
+   * The channel to the laptop came up. Called on every change to up, before anything held is
+   * posted again, so the requests it makes go out first.
+   */
   onUp(): void;
   /** The channel to the laptop went down. */
   onDown(): void;
@@ -95,10 +146,13 @@ export function newRequestID(): string {
 /**
  * Where an unanswered request is:
  * - `queued`: never posted, waiting in FIFO order for the channel and a slot;
+ * - `first`: never posted, made by `onUp`, so it goes ahead of everything else;
  * - `posted`: posted on the current channel, holding one of the 32 slots;
- * - `held`: posted, then reported unsent by the loader (`sendFailed: offline`).
+ * - `held`: posted before, and owed a repost on the next channel up, because the channel went
+ *   down or the loader reported it unsent (`sendFailed: offline`);
+ * - `resend`: owed a repost since the latest channel up, waiting for a slot.
  */
-type Lane = 'queued' | 'posted' | 'held';
+type Lane = 'queued' | 'first' | 'posted' | 'held' | 'resend';
 
 interface Pending {
   readonly id: string;
@@ -110,6 +164,8 @@ interface Pending {
   lane: Lane;
   /** When it was first posted, by `now`. Null while it has never been posted. */
   firstSentAt: number | null;
+  /** Its place in first-send order, which reposts keep. */
+  sendOrder: number;
 }
 
 type Reply = Extract<Envelope, { kind: 'reply' }>;
@@ -126,10 +182,17 @@ export class AppClient {
   #up = false;
   #stream: string | null = null;
   #lastSeq: number | null = null;
+  /** True from each channel up until that connection's subscribe reply decodes. */
+  #awaitingSubscribe = true;
+  /** True while `onUp` runs, so only its own requests are posted then. */
+  #inOnUp = false;
+  #sends = 0;
 
   /** Every unanswered request, by ID, whatever its lane. */
   readonly #pending = new Map<string, Pending>();
   readonly #posted = new Set<Pending>();
+  #first: Pending[] = [];
+  #resends: Pending[] = [];
   #queue: Pending[] = [];
   #held: Pending[] = [];
 
@@ -147,12 +210,15 @@ export class AppClient {
     return this.#up;
   }
 
-  /** The event stream the phone follows, from the last `sessions.subscribe` snapshot. */
+  /**
+   * The event stream the phone follows: the stream of the last `sessions.subscribe` snapshot.
+   * A caller passes it, with `lastSeq`, to the next subscribe.
+   */
   get stream(): string | null {
     return this.#stream;
   }
 
-  /** The `seq` of the last event the phone took on that stream. */
+  /** The `seq` of the last event the phone took on that stream, or of the snapshot that started it. */
   get lastSeq(): number | null {
     return this.#lastSeq;
   }
@@ -178,12 +244,16 @@ export class AppClient {
 
   /**
    * Sends one request and resolves with its decoded result. It rejects with `AppError` only:
-   * the daemon's error, or `too_large` at once for a body over one frame (nothing is posted),
-   * or `bad_reply` for a result that does not decode. It has no timeout: the daemon answers
-   * every request it runs.
+   * - the daemon's error;
+   * - `too_large` at once for a body over one frame, with nothing posted;
+   * - `bad_reply` for a reply that does not decode;
+   * - `superseded` for a state request still unanswered when the channel comes back up;
+   * - `not_confirmed` for an acting request still unanswered when the channel comes back up
+   *   more than 540 s after its first send.
    *
-   * The request goes out at once when the channel is up and fewer than 32 requests are posted
-   * and unanswered. Otherwise it waits, in the order it was made.
+   * It has no timeout: the daemon answers every request it runs. The request goes out at once
+   * when the channel is up and fewer than 32 requests are posted and unanswered. Otherwise it
+   * waits, in the order it was made.
    */
   request<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
     const id = this.#newID();
@@ -199,27 +269,58 @@ export class AppClient {
     // the body is queued, while the caller can still be told which request it was.
     if (!fitsFrame(body)) return Promise.reject(new AppError('too_large', TOO_LONG_TEXT));
     return new Promise<ResultOf<M>>((resolve, reject) => {
+      const lane: Lane = this.#inOnUp ? 'first' : 'queued';
       const pending: Pending = {
-        id, method, body, resolve: resolve as (result: unknown) => void, reject, lane: 'queued', firstSentAt: null,
+        id, method, body, resolve: resolve as (result: unknown) => void, reject, lane, firstSentAt: null, sendOrder: 0,
       };
       this.#pending.set(id, pending);
-      this.#queue.push(pending);
+      if (lane === 'first') this.#first.push(pending);
+      else this.#queue.push(pending);
       this.#pump();
     });
   }
 
   // MARK: - The channel
 
+  /** A change to up: the three steps in this file's header, then the queue. */
   #channelUp(): void {
     if (this.#up) return;
     this.#up = true;
-    this.#onUp();
-    this.#pump();
+    this.#awaitingSubscribe = true;
+    for (const pending of [...this.#pending.values()]) {
+      if (STATE_METHODS.has(pending.method)) this.#fail(pending, 'superseded', SUPERSEDED_TEXT);
+    }
+    this.#inOnUp = true;
+    try {
+      this.#onUp();
+    } finally {
+      this.#inOnUp = false;
+      const held = this.#held.sort((a, b) => a.sendOrder - b.sendOrder);
+      this.#held = [];
+      for (const pending of held) {
+        pending.lane = 'resend';
+        this.#resends.push(pending);
+      }
+      // Told at once rather than when a slot frees; `#pump` checks again before each repost.
+      for (const pending of [...this.#resends]) {
+        if (this.#tooOldToResend(pending)) this.#fail(pending, 'not_confirmed', NOT_CONFIRMED_TEXT);
+      }
+      this.#pump();
+    }
   }
 
+  /** A change to down. Nothing is failed: every unanswered request waits for the next up. */
   #channelDown(): void {
     if (!this.#up) return;
     this.#up = false;
+    for (const pending of this.#posted) this.#hold(pending);
+    this.#posted.clear();
+    for (const pending of this.#resends) this.#hold(pending);
+    this.#resends = [];
+    // `onUp` requests never posted are queued requests now, still ahead of the rest.
+    for (const pending of this.#first) pending.lane = 'queued';
+    this.#queue = [...this.#first, ...this.#queue];
+    this.#first = [];
     this.#onDown();
   }
 
@@ -229,44 +330,66 @@ export class AppClient {
    * `request` checks the same limit the loader does, so this should never happen.
    */
   #failPosted(): void {
-    for (const pending of [...this.#posted]) {
-      this.#settle(pending);
-      pending.reject(new AppError('too_large', TOO_LONG_TEXT));
-    }
+    for (const pending of [...this.#posted]) this.#fail(pending, 'too_large', TOO_LONG_TEXT);
     this.#pump();
   }
 
   /**
    * `sendFailed: offline`. The loader names no request, so every posted, unanswered request is
-   * taken as unsent. Each keeps its ID and body, and is not posted again on this channel.
+   * taken as unsent and held for the next channel up. Reposting one sent after all is safe:
+   * the daemon reads it as a resend.
    */
   #holdPosted(): void {
-    for (const pending of this.#posted) {
-      pending.lane = 'held';
-      this.#held.push(pending);
-    }
+    for (const pending of this.#posted) this.#hold(pending);
     this.#posted.clear();
+  }
+
+  #hold(pending: Pending): void {
+    pending.lane = 'held';
+    this.#held.push(pending);
   }
 
   // MARK: - Sending
 
-  /** Posts what waits, oldest first, while the channel is up and a slot is free. */
+  /**
+   * Posts what waits while the channel is up and a slot is free: `onUp`'s requests, then the
+   * reposts in first-send order, then the queue. While `onUp` runs, only its own go.
+   */
   #pump(): void {
     while (this.#up && this.#posted.size < MAX_IN_FLIGHT) {
-      const next = this.#queue.shift();
+      const next = this.#first.shift() ?? (this.#inOnUp ? undefined : this.#resends.shift() ?? this.#queue.shift());
       if (next === undefined) return;
+      if (this.#tooOldToResend(next)) {
+        // Shifted out of its lane already, so only its entry is left to remove.
+        this.#pending.delete(next.id);
+        next.reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
+        continue;
+      }
       this.#send(next);
     }
   }
 
+  /**
+   * Whether `pending` is an acting request first sent more than 540 s ago, which the daemon may
+   * have forgotten by now. A request never sent is never too old.
+   */
+  #tooOldToResend(pending: Pending): boolean {
+    return pending.firstSentAt !== null
+      && ACTING_METHODS.has(pending.method)
+      && this.#now() - pending.firstSentAt > RESEND_HORIZON_MS;
+  }
+
   #send(pending: Pending): void {
-    if (pending.firstSentAt === null) pending.firstSentAt = this.#now();
+    if (pending.firstSentAt === null) {
+      pending.firstSentAt = this.#now();
+      pending.sendOrder = ++this.#sends;
+    }
     pending.lane = 'posted';
     this.#posted.add(pending);
     this.#post(pending.body);
   }
 
-  /** Takes an answered or failed request out of every lane. */
+  /** Takes an answered or failed request out of every lane, so a later reply to it is ignored. */
   #settle(pending: Pending): void {
     this.#pending.delete(pending.id);
     switch (pending.lane) {
@@ -276,10 +399,21 @@ export class AppClient {
       case 'queued':
         this.#queue = this.#queue.filter((p) => p !== pending);
         break;
+      case 'first':
+        this.#first = this.#first.filter((p) => p !== pending);
+        break;
       case 'held':
         this.#held = this.#held.filter((p) => p !== pending);
         break;
+      case 'resend':
+        this.#resends = this.#resends.filter((p) => p !== pending);
+        break;
     }
+  }
+
+  #fail(pending: Pending, code: ErrorCode | LocalErrorCode, message: string): void {
+    this.#settle(pending);
+    pending.reject(new AppError(code, message));
   }
 
   // MARK: - Receiving
@@ -297,9 +431,10 @@ export class AppClient {
   }
 
   /**
-   * The request a reply names, if this client sent it and it is still unanswered. A reply that
-   * names anything else is ignored: an ID never seen, one already answered or failed, and one
-   * still queued, which the laptop has never been sent.
+   * The request a reply names, if this client sent it and it is still unanswered, whichever
+   * channel it was sent on. A reply that names anything else is ignored: an ID never seen, one
+   * already answered or failed (`superseded` and `not_confirmed` included), and one still
+   * queued, which the laptop has never been sent.
    */
   #sentRequest(requestID: string): Pending | undefined {
     const pending = this.#pending.get(requestID);
@@ -309,24 +444,39 @@ export class AppClient {
   #reply(reply: Reply): void {
     const pending = this.#sentRequest(reply.requestID);
     if (pending === undefined) return;
-    this.#settle(pending);
     if (reply.error !== undefined) {
       // A code outside the closed list is a reply this build cannot fully read. Its message
       // is the daemon's own words for the phone, so it is kept.
       const { code, message } = reply.error;
-      pending.reject(new AppError(isErrorCode(code) ? code : 'bad_reply', message));
-    } else {
-      let result: unknown;
-      try {
-        result = decodeResult(pending.method, reply.result);
-      } catch {
-        pending.reject(new AppError('bad_reply', BAD_REPLY_TEXT));
-        this.#pump();
-        return;
-      }
-      pending.resolve(result);
+      this.#fail(pending, isErrorCode(code) ? code : 'bad_reply', message);
+      this.#pump();
+      return;
     }
+    let result: unknown;
+    try {
+      result = decodeResult(pending.method, reply.result);
+    } catch {
+      this.#fail(pending, 'bad_reply', BAD_REPLY_TEXT);
+      this.#pump();
+      return;
+    }
+    // Before the promise resolves, so the numbering holds for the very next port message.
+    if (pending.method === 'sessions.subscribe') this.#subscribed(result as SessionsSubscribeResult);
+    this.#settle(pending);
+    pending.resolve(result);
     this.#pump();
+  }
+
+  /**
+   * A subscribe reply that decoded. A snapshot starts the numbering at its `seq`; a replay
+   * keeps it, because the events it replays follow with `seq` at or below its own.
+   */
+  #subscribed(result: SessionsSubscribeResult): void {
+    if (!result.replayed) {
+      this.#stream = result.stream;
+      this.#lastSeq = result.seq;
+    }
+    this.#awaitingSubscribe = false;
   }
 
   /**
@@ -339,13 +489,19 @@ export class AppClient {
     if (body.kind !== 'reply' || typeof requestID !== 'string') return;
     const pending = this.#sentRequest(requestID);
     if (pending === undefined) return;
-    this.#settle(pending);
-    pending.reject(new AppError('bad_reply', BAD_REPLY_TEXT));
+    this.#fail(pending, 'bad_reply', BAD_REPLY_TEXT);
     this.#pump();
   }
 
-  /** Decodes an event's data by its name and hands it on. An event whose data does not decode is dropped. */
+  /**
+   * One event: dropped before this connection's subscribe reply, and dropped as a repeat at or
+   * below the last `seq` taken. Otherwise its `seq` is taken, and its data, decoded by its
+   * name, handed on. An event whose data does not decode is taken and not handed on.
+   */
   #event(event: EventEnvelope): void {
+    if (this.#awaitingSubscribe) return;
+    if (this.#lastSeq !== null && event.seq <= this.#lastSeq) return;
+    this.#lastSeq = event.seq;
     let data: unknown;
     try {
       data = decodeEventData(event.event, event.data);
