@@ -141,15 +141,25 @@ struct LaptopKeyStore: Sendable {
     ///
     /// `O_NOFOLLOW` refuses a symbolic link there, so what is checked, read
     /// and written is TBD's own folder and nothing a link points to.
-    /// `O_NONBLOCK` keeps a FIFO there from blocking the open; `fstat` then
-    /// refuses it.
+    /// `O_DIRECTORY` refuses a plain file, a FIFO or any other kind of file
+    /// at the open itself. Two second guards stay behind it: `O_NONBLOCK`
+    /// keeps a FIFO from blocking the open, and `fstat` refuses anything
+    /// that is not a folder.
+    ///
+    /// The open asks to read the folder, because the sweep lists it, so it
+    /// needs read permission there and not only search: a folder at mode
+    /// 0300 or 0100 is refused with "Permission denied", even when the key
+    /// in it could be read by its path. TBD makes the folder at 0700 and
+    /// `create(in:)` sets that mode again, so only a folder whose mode
+    /// someone else changed is refused this way.
     private func openFolder(_ directory: URL) throws -> Int32? {
-        let descriptor = Darwin.open(directory.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        let descriptor = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else {
             let code = errno
             switch code {
             case ENOENT: return nil
-            case ELOOP: throw LaptopKeyStoreError.io("\(directory.path) is a symbolic link; it must be a folder")
+            case ELOOP: throw Self.symbolicLinkRefusal(directory)
+            case ENOTDIR: throw Self.refusalForNonFolder(directory)
             default: throw Self.ioError("open", directory.path, code)
             }
         }
@@ -161,9 +171,36 @@ struct LaptopKeyStore: Sendable {
         }
         guard (info.st_mode & S_IFMT) == S_IFDIR else {
             close(descriptor)
-            throw LaptopKeyStoreError.io("\(directory.path) is not a folder")
+            throw Self.notAFolderRefusal(directory)
         }
         return descriptor
+    }
+
+    /// Why `directory` could not be opened as a folder (`ENOTDIR`). XNU
+    /// reports a symbolic link opened with `O_NOFOLLOW | O_DIRECTORY` as
+    /// `ENOTDIR`, not `ELOOP`, so `lstat`, which describes the entry itself
+    /// and never a link's target, tells a link from another kind of file.
+    /// It only picks the message; nothing is opened or read. When `lstat`
+    /// fails as well (a folder above it is not one), or the entry has become
+    /// a folder since the open, the open's own error stands.
+    private static func refusalForNonFolder(_ directory: URL) -> LaptopKeyStoreError {
+        var info = stat()
+        guard lstat(directory.path, &info) == 0 else {
+            return ioError("open", directory.path, ENOTDIR)
+        }
+        switch info.st_mode & S_IFMT {
+        case S_IFLNK: return symbolicLinkRefusal(directory)
+        case S_IFDIR: return ioError("open", directory.path, ENOTDIR)
+        default: return notAFolderRefusal(directory)
+        }
+    }
+
+    private static func symbolicLinkRefusal(_ directory: URL) -> LaptopKeyStoreError {
+        .io("\(directory.path) is a symbolic link; it must be a folder")
+    }
+
+    private static func notAFolderRefusal(_ directory: URL) -> LaptopKeyStoreError {
+        .io("\(directory.path) is not a folder")
     }
 
     /// Creates `directory` with mode 0700, and its parent if needed, and
@@ -399,11 +436,19 @@ struct LaptopKeyStore: Sendable {
         }
     }
 
-    /// The names in `folder`, or none when it cannot be listed. The listing
-    /// reads a copy of the descriptor, because closing it closes the
-    /// descriptor it reads; `F_DUPFD_CLOEXEC` keeps the copy out of any
-    /// process the daemon starts meanwhile. Every name is read before any
-    /// file is removed, so no removal can make the listing skip a name.
+    /// The names in `folder`, or none when it cannot be listed. Every name is
+    /// read before any file is removed, so no removal can make the listing
+    /// skip a name.
+    ///
+    /// The listing owns the descriptor it reads and closes it, so it reads a
+    /// second descriptor made with `F_DUPFD_CLOEXEC`, which also keeps that
+    /// one out of any process the daemon starts meanwhile. The second
+    /// descriptor is not independent: both share one open file, and so one
+    /// offset, so reading the listing moves `folder`'s offset to the end too.
+    /// No other call here reads at that offset (each names an entry relative
+    /// to `folder`, or acts on the folder itself), but `fdopendir` lists from
+    /// the current offset, so `rewinddir` puts it back at the start for any
+    /// later listing of `folder`.
     private static func names(in folder: Int32) -> [String] {
         let copy = fcntl(folder, F_DUPFD_CLOEXEC, 0)
         guard copy >= 0 else { return [] }
@@ -411,7 +456,10 @@ struct LaptopKeyStore: Sendable {
             close(copy)
             return []
         }
-        defer { closedir(listing) }
+        defer {
+            rewinddir(listing)
+            closedir(listing)
+        }
         var found: [String] = []
         while let entry = readdir(listing) {
             let length = Int(entry.pointee.d_namlen)
