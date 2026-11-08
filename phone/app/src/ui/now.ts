@@ -5,16 +5,26 @@
  *
  * Every component that asks for the same beat shares one ticker, so the ages on a screen move
  * together and one timer runs per beat, not one per row. A ticker runs its timer only while a
- * component listens.
+ * component listens. An idle ticker's reading goes stale, so the first listener to arrive takes
+ * the time afresh and hears that it moved.
  */
 
 import { useSyncExternalStore } from 'react';
 
-/** A clock that changes its reading only on its beat, as `useSyncExternalStore` needs. */
+/**
+ * A clock whose reading changes only when it tells its listeners, as `useSyncExternalStore`
+ * needs: two reads with no call to a listener between them return the same value.
+ */
 export interface Ticker {
-  /** The reading: the same value until the next beat, never older than one beat. */
+  /**
+   * The reading. It changes only on a beat, or when a first listener arrives, so while anything
+   * listens it is never older than one beat.
+   */
   get(): number;
-  /** Calls `listener` on every beat, and returns the function that stops it. */
+  /**
+   * Calls `listener` on every beat, and returns the function that stops it. The first listener
+   * takes the time afresh, and is called at once when that moved the reading.
+   */
   subscribe(listener: () => void): () => void;
 }
 
@@ -24,25 +34,32 @@ export function createTicker(intervalMs: number, now: () => number = Date.now): 
   const listeners = new Set<() => void>();
   let timer: ReturnType<typeof setInterval> | null = null;
 
-  function tick(): void {
-    current = now();
+  function notify(): void {
     // A copy, so a listener that unsubscribes does not change this round.
     for (const listener of [...listeners]) listener();
   }
 
+  function tick(): void {
+    current = now();
+    notify();
+  }
+
   return {
     get() {
-      // With no listener there is no beat, so a reading a beat old is taken afresh.
-      if (listeners.size === 0 && now() - current >= intervalMs) current = now();
       return current;
     },
     subscribe(listener) {
-      if (listeners.size === 0) {
-        // The first listener reads the time at once; React renders again if it moved.
-        current = now();
-        timer = setInterval(tick, intervalMs);
-      }
       listeners.add(listener);
+      if (listeners.size === 1) {
+        timer = setInterval(tick, intervalMs);
+        // With no listener there was no beat, so the reading may be old: a component that
+        // mounts after a long idle renders again with the time now.
+        const fresh = now();
+        if (fresh !== current) {
+          current = fresh;
+          notify();
+        }
+      }
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0 && timer !== null) {
