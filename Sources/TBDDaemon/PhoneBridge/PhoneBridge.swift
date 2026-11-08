@@ -11,10 +11,11 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     /// the relay answered with a status other than 200. The text says which.
     case relayCheckFailed(String)
     /// The relay answered, but not as a TBD relay: its body is not the info
-    /// object, or its `name` is not `tbd-relay`.
+    /// object, or its `name` is not `tbd-relay`. The bridge refuses it.
     case notATBDRelay
     /// The relay is a TBD relay whose `api` list lacks the version this
-    /// laptop speaks. The payload is the list it offered.
+    /// laptop speaks. The payload is the list it offered. The bridge refuses
+    /// it.
     case unsupportedRelayAPI([Int])
     /// A message for the phone would not fit one transport message:
     /// serialized, envelope included, it is over
@@ -51,6 +52,18 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     case notRunning(String)
     /// No `phone_device` row has that ID.
     case noSuchDevice
+
+    /// Whether a relay check that throws this found a relay this laptop can
+    /// never use as it stands, so its links stop until the relay is saved
+    /// again, rather than one it could not read this time.
+    var refusesTheRelay: Bool {
+        switch self {
+        case .notATBDRelay, .unsupportedRelayAPI:
+            return true
+        default:
+            return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -132,10 +145,13 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// change that comes later, such as the relay check's answer, broadcasts
 /// when it lands.
 ///
-/// **A refused relay** stops each link it refuses, for good; a later
-/// reconcile starts them again. Saving the relay URL is how the user asks.
-/// The refused connection stops in a task of its own, so its stop never
-/// holds up another link's events; halting and `stop()` wait for it.
+/// **A refused relay** (one that is not a TBD relay, or lacks API 1) stops
+/// each link it refuses, for good; a later reconcile starts them again.
+/// Saving the relay URL is how the user asks. A reconcile starts no link once
+/// the relay has been refused since it began, so a link refused while the
+/// reconcile waits is not started again from the list it read before. The
+/// refused connection stops in a task of its own, so its stop never holds up
+/// another link's events; halting and `stop()` wait for it.
 ///
 /// **Revoking** deletes the phone's row before anything else, so no later
 /// handshake from that phone is accepted, whatever its link is doing. Then
@@ -162,10 +178,12 @@ actor PhoneBridge: PhoneBridgeControlling {
     enum RelayCheck: Sendable, Equatable {
         case inFlight
         case ok(PhoneRelayInfo)
-        /// The relay could not be reached, or did not answer with an info
-        /// object. The links back off and try again.
+        /// The relay could not be read this time: the request failed, or the
+        /// answer was not a 200 the laptop would read. The links back off and
+        /// try again.
         case failed(String)
-        /// The relay is not one this laptop can use. The links stop.
+        /// The relay is not one this laptop can use: its answer is not a TBD
+        /// relay's info object, or it lacks API 1. The links stop.
         case incompatible(String)
     }
 
@@ -233,6 +251,9 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// the bridge stops or moves to another relay, so no pairing slips
     /// through the window of a re-check.
     private var refusal: PhoneBridgeError?
+    /// How many times the relay check has refused the relay. A reconcile
+    /// reads it as it begins and starts no link once it has moved.
+    private var relayRefusals: UInt64 = 0
     private var checkTask: Task<Void, Never>?
     /// Why the bridge is not running although phone control is on and a
     /// relay is set.
@@ -445,6 +466,7 @@ actor PhoneBridge: PhoneBridgeControlling {
     private func reconcileNow(seed: RelaySeed? = nil) async {
         guard !isStopped else { return }
         startPump()
+        let refusalsAtStart = relayRefusals
         let config: Config
         do {
             config = try await db.config.get()
@@ -524,6 +546,11 @@ actor PhoneBridge: PhoneBridgeControlling {
         }
         await Self.stopAll(gone.values.map(\.connection))
         for device in devices where links[device.id] == nil {
+            // `devices` was read before this pass's awaits. A link the relay
+            // refused meanwhile has left `links`, and starting it from that
+            // list would undo the refusal; like any refused link, it waits
+            // for a later reconcile.
+            guard relayRefusals == refusalsAtStart else { break }
             await startLink(for: device, in: current)
         }
     }
@@ -745,27 +772,27 @@ actor PhoneBridge: PhoneBridgeControlling {
     }
 
     /// Reads the relay's info and judges it, keeping the answer as `check`.
+    /// An answer that is not a TBD relay's info object is a refusal, as a
+    /// wrong `name` or a missing API is; a relay that could not be read this
+    /// time is a failure the links retry.
     private func checkRelay(at relayURL: URL) async -> RelayPreflight {
-        let info: PhoneRelayInfo
         do {
-            info = try await infoClient.info(relay: relayURL)
+            let info = try await infoClient.info(relay: relayURL)
+            try RelayCompatibility.check(info)
+            setCheck(.ok(info), for: relayURL)
+            return .proceed
         } catch is CancellationError {
             return .retryLater("the relay check was cancelled")
+        } catch let error as PhoneBridgeError where error.refusesTheRelay {
+            let detail = error.localizedDescription
+            setCheck(.incompatible(detail), for: relayURL, refusal: error)
+            PhoneBridgeLog.record(.relayRefused(reason: detail))
+            return .refuse(detail)
         } catch {
             let detail = error.localizedDescription
             setCheck(.failed(detail), for: relayURL)
             return .retryLater(detail)
         }
-        do {
-            try RelayCompatibility.check(info)
-        } catch {
-            let detail = error.localizedDescription
-            setCheck(.incompatible(detail), for: relayURL, refusal: error as? PhoneBridgeError)
-            PhoneBridgeLog.record(.relayRefused(reason: detail))
-            return .refuse(detail)
-        }
-        setCheck(.ok(info), for: relayURL)
-        return .proceed
     }
 
     /// Keeps `answer` as the relay check, unless the bridge has stopped or
@@ -784,6 +811,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             refusal = nil
         case .incompatible:
             refusal = newRefusal
+            relayRefusals &+= 1
         case .inFlight, .failed:
             break
         }

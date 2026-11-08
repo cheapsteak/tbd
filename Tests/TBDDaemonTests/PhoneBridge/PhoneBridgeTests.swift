@@ -439,6 +439,36 @@ struct PhoneBridgeTests {
         }
     }
 
+    /// A 200 whose body is not a TBD relay's info object is refused as a
+    /// wrong name is: the links stop rather than retry, pairing is refused,
+    /// and saving the relay again is what starts them.
+    @Test func anAnswerFromSomethingThatIsNotATBDRelayIsRefusedAndShown() async throws {
+        try await withBridge(devices: 2) { h in
+            await h.info.fail(with: .notATBDRelay)
+            await h.bridge.reconcile()
+            try await h.waitUntil("both links to stop on the refused relay") {
+                let state = try await h.bridge.status().relay.state
+                let links = await h.bridge.linkCount
+                return state == .incompatible && links == 0
+            }
+            #expect(h.relay.connectAttempts.isEmpty)
+            let status = try await h.bridge.status()
+            #expect(status.relay.detail == PhoneBridgeError.notATBDRelay.localizedDescription)
+            await #expect(throws: PhoneBridgeError.notATBDRelay) { try await h.bridge.pairStart() }
+            let pairing = try await h.bridge.status().pairing
+            #expect(pairing == nil)
+            #expect(h.relay.connectAttempts.isEmpty)
+
+            // The address is fixed; saving it reconciles again.
+            await h.info.answer(with: currentRelay)
+            await h.bridge.reconcile()
+            try await h.waitUntil("both rooms to open on the fixed relay") { h.relay.openLaptopRooms() == h.rooms }
+            try await h.waitUntil("the relay to show as connected") {
+                try await h.bridge.status().relay.state == .connected
+            }
+        }
+    }
+
     @Test func aRecheckOfAnIncompatibleRelayKeepsRefusingPairingUntilItAnswers() async throws {
         try await withBridge { h in
             await h.info.answer(with: PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [2]))
@@ -545,6 +575,61 @@ struct PhoneBridgeTests {
             try await h.waitUntil("the other phone to show as connected") {
                 try await h.bridge.status().connectedDeviceIDs == [other.device.id]
             }
+        }
+    }
+
+    /// A reconcile reads the paired phones before it waits on anything. A
+    /// link the relay refuses while it waits, here on another link's stop,
+    /// is not started again from that list.
+    @Test func aLinkRefusedDuringAReconcileIsNotStartedAgainByIt() async throws {
+        try await withBridge(devices: 2, holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            await h.bridge.reconcile()
+            let gone = h.phones[0]
+            let refused = h.phones[1]
+            try await h.waitUntil("both rooms to open") { h.relay.openLaptopRooms() == h.rooms }
+            _ = try await h.connectedPhone(gone)
+            try await h.waitUntil("the first phone to show as connected") {
+                try await h.bridge.status().connectedDeviceIDs == [gone.device.id]
+            }
+
+            // A frame for the first phone that cannot leave keeps its
+            // connection's stop waiting.
+            transport.hold(room: gone.device.roomID)
+            let latest = await h.app.lastOutbox
+            let outbox = try #require(latest)
+            let queued = await outbox.send(appBody: Data(#"{"note":"held"}"#.utf8))
+            #expect(queued)
+            try await h.waitUntil("the frame to reach the socket") { transport.heldSends == 1 }
+
+            // The first phone's row goes, so the next reconcile stops its
+            // link, and waits there.
+            try await h.db.phoneDevices.delete(id: gone.device.id)
+            let bridge = h.bridge
+            let pass = Task { await bridge.reconcile() }
+            try await h.waitUntil("the reconcile to stop the first link") { await bridge.linkCount == 1 }
+
+            // Meanwhile the relay, redeployed without API 1, drops the other
+            // phone's socket, and that link's next check refuses it.
+            await h.info.answer(with: PhoneRelayInfo(name: "tbd-relay", version: "1.0.0", api: [2]))
+            h.relay.closeLaptop(room: refused.device.roomID, code: 1011)
+            try await h.clock.advanceUntil("the other link to be refused", by: .seconds(1)) {
+                await bridge.linkCount == 0
+            }
+
+            // From here a check waits, so a link started again would stay
+            // in place, waiting on it.
+            await h.info.hold()
+            transport.release()
+            await pass.value
+            let links = await bridge.linkCount
+            #expect(links == 0)
+            let held = await h.info.heldCalls
+            #expect(held == 0)
+            let status = try await bridge.status()
+            #expect(status.relay.state == .incompatible)
         }
     }
 
