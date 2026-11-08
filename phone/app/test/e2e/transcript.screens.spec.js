@@ -11,10 +11,15 @@
 // - `pill`: Checkout v2's Claude tab read from its top while a row arrives below, so the "New
 //   messages" pill shows, as the mock's "New messages pill" shows it. The rows that arrive are
 //   the mock's live stream (`LIVE`, mock 671-677). The mock's transcript just outgrows its screen
-//   above the Working line and the composer, which this branch does not draw yet (Task 6c-8 and
-//   part 6d), so here the transcript is taller than its rows until all five of the mock's live
-//   rows are in. They arrive while the view keeps to the bottom; then the view is scrolled to the
-//   top and the stream's next row, its first again, arrives below.
+//   above the Working line and the composer, and this branch does not draw the composer (part
+//   6d), so here the transcript is taller than its rows until all five of the mock's live rows
+//   are in. They arrive while the view keeps to the bottom; then the view is scrolled to the top
+//   and the stream's next row, its first again, arrives below.
+// - `transcript-working`: Checkout v2's Claude tab at its newest rows, with the "Working…" line
+//   under them, as the mock's "Working, with tabs" shows it. Part 6b saves its own `working`, so
+//   this one pairs as `transcript-working=working`.
+// - `details`: the same tab with "Show details" on, so its thinking shows, as the mock's "Show
+//   details on" shows it. The switch is tapped, which opens the transcript again.
 
 import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -88,4 +93,35 @@ test('pill', async ({ page, appHost }) => {
   expect(await tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(30);
   await hostCall(page, 'emit', 'transcript.append', { session: CHECKOUT_REF, items: [live(LIVE.length)] });
   await capture(page, 'pill', app(page).locator('.pill'));
+});
+
+/**
+ * How far `.tx` is above its bottom.
+ * @param {Locator} tx
+ */
+function fromBottom(tx) {
+  return tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+}
+
+test('transcript-working', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  const working = tx.locator('.working');
+  await expect(working).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await capture(page, 'transcript-working', working);
+});
+
+test('details', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.working')).toBeInViewport();
+  await app(page).locator('.s-head .tg').click();
+  await expect(app(page).getByRole('switch', { name: 'Show details' })).toBeChecked();
+  const thinking = tx.locator('.extra', { hasText: 'ShippingMethod is a union of literals.' });
+  await expect(thinking).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await capture(page, 'details', thinking);
 });

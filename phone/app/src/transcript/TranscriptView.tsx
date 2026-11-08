@@ -19,6 +19,13 @@
  * and each row element carries `data-key` (the row key) and `data-tx-row`. (`data-row` is not
  * used: the e2e fixtures' `rowButtons` matches `button[data-row]`.)
  *
+ * **The "Working…" line** (`Working`, mock 932) follows `.tx-list` inside `.tx`, outside the
+ * virtual rows, while the session's chip is `working`. It reads how long since the chip changed
+ * (`status.changedAt`), the one start time the wire has, again every second, and only while it
+ * shows: no timer runs for a session that is not working. Its elapsed time is not announced on
+ * each beat, though `.tx` is a live region. The line's coming and going is a layout like any
+ * other, so a view that keeps to the bottom stays there (`settle`, below).
+ *
  * **Keeping to the bottom**, by the rules in `scroll.ts`. The view keeps to the bottom at mount
  * and after a page replaces the rows (an open, a reopen, a reset), and from then on while the
  * reader leaves it within 30 px of the bottom. While it does, whatever pushes it away from the
@@ -60,16 +67,26 @@
  * listener is a capture listener on `.tx-wrap`: it runs before the virtualizer's own listener on
  * `.tx`, which may draw rows on the spot, and so runs the list's effects, which must see the
  * reader's scroll already.
+ *
+ * **The size of `.tx`** reaches the virtualizer one animation frame late, after the first
+ * (`observeRect`). The virtualizer reads it from a resize observer of its own, and by default
+ * draws rows inside that observer's callback. WebKit then reports "ResizeObserver loop completed
+ * with undelivered notifications" as a page error when `.tx` changes size under a transcript
+ * taller than the screen, as when a status change makes the header taller. Late by a frame, it
+ * does not. The list's own observer, which keeps the view at the bottom, still runs at once, and
+ * for that frame the virtualizer draws the rows for the old size, with the overscan around them.
  */
 
 import { useCallback, useLayoutEffect, useRef, useState, type JSX } from 'react';
-import { elementScroll, useVirtualizer } from '@tanstack/react-virtual';
+import { elementScroll, observeElementRect, useVirtualizer, type Rect, type Virtualizer } from '@tanstack/react-virtual';
 import { useActions, useAppState } from '../state/context.tsx';
 import type { DetailState } from '../state/detail.ts';
 import type { TranscriptRow, TranscriptState } from '../state/transcript.ts';
 import type { PhoneSession } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
-import { Icon } from '../ui/Icon.tsx';
+import { dur } from '../state/status.ts';
+import { Dots, Icon } from '../ui/Icon.tsx';
+import { useNow } from '../ui/now.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
   anchorAt, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, sticksAfterScroll,
@@ -82,6 +99,9 @@ const ESTIMATE_PX = 48;
 
 /** The rows the virtualizer draws beyond each end of the screen. */
 const OVERSCAN = 8;
+
+/** How often the "Working…" line reads its elapsed time again, in milliseconds. */
+const WORKING_REFRESH_MS = 1_000;
 
 const NO_ROWS: readonly TranscriptRow[] = [];
 
@@ -97,6 +117,7 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
   if (!available) return <Note text={reason ?? ''} />;
   if (t.phase === 'failed') return <Note text={t.error ?? ''} />;
   const shown = t.ref !== null && sameRef(t.ref, p.session.ref);
+  const { status } = p.session;
   return (
     <List
       rows={shown ? t.rows : NO_ROWS}
@@ -104,6 +125,7 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
       paging={shown && t.phase === 'open' ? t : null}
       details={t.details}
       toggle={toggle}
+      workingSince={status.chip === 'working' ? status.changedAt : null}
     />
   );
 }
@@ -139,6 +161,8 @@ interface ViewState {
  * - `appended`: the slice's `appendedSinceSeen` for those rows; a rise means rows came in below.
  * - `paging`: the slice, while it holds those rows open, or null, when no older page may be
  *   asked for them.
+ * - `workingSince`: when the session's chip turned `working`, in Unix milliseconds, while it is
+ *   that; otherwise null, and no "Working…" line shows.
  */
 function List(p: {
   rows: readonly TranscriptRow[];
@@ -146,6 +170,7 @@ function List(p: {
   paging: Paging | null;
   details: Readonly<Record<number, DetailState>>;
   toggle: (rowKey: number, part: RowPart) => void;
+  workingSince: number | null;
 }): JSX.Element {
   const { rows, appended, paging } = p;
   const actions = useActions();
@@ -175,6 +200,7 @@ function List(p: {
     getItemKey,
     overscan: OVERSCAN,
     scrollToFn,
+    observeElementRect: observeRect,
   });
 
   /** Scrolls to the bottom, and notes where that left the view. */
@@ -372,6 +398,7 @@ function List(p: {
             );
           })}
         </div>
+        {p.workingSince !== null && <Working since={p.workingSince} />}
       </div>
       {pill && (
         <button className="pill" type="button" onClick={onPill}>
@@ -382,8 +409,51 @@ function List(p: {
   );
 }
 
+/**
+ * The "Working…" line (mock 932): the dots, "Working… " and how long since `since`, read again
+ * every `WORKING_REFRESH_MS`. A component of its own, so each beat draws this line again and
+ * not the list, and its timer runs only while the line shows. The elapsed time opts out of
+ * `.tx`'s live region (`aria-live="off"`), so a screen reader is not told the time every second.
+ */
+function Working(p: { since: number }): JSX.Element {
+  const now = useNow(WORKING_REFRESH_MS);
+  return (
+    <div className="working">
+      <Dots />
+      {'Working… '}
+      <span aria-live="off">{dur(now - p.since)}</span>
+    </div>
+  );
+}
+
 function estimateRow(): number {
   return ESTIMATE_PX;
+}
+
+/**
+ * The virtualizer's `observeElementRect`, with every size after the first passed on in the next
+ * animation frame, and only the latest of a frame's sizes (this file's header). The first comes
+ * at once, so the first render draws the rows that fill the screen.
+ */
+function observeRect(instance: Virtualizer<HTMLDivElement, HTMLDivElement>, cb: (rect: Rect) => void): () => void {
+  let first = true;
+  let frame: number | null = null;
+  const stop = observeElementRect(instance, (rect) => {
+    if (first) {
+      first = false;
+      cb(rect);
+      return;
+    }
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = null;
+      cb(rect);
+    });
+  });
+  return () => {
+    if (frame !== null) cancelAnimationFrame(frame);
+    stop?.();
+  };
 }
 
 function metricsOf(el: HTMLElement): Metrics {

@@ -7,11 +7,12 @@
 // there, and below a view scrolled up they show the "New messages" pill instead. Then the older
 // pages of a 2,000-item transcript: one at a time, each holding the reader's place as it goes
 // in, a failed one shown as nothing, a reset back to the newest rows, and the scroll back ending
-// at the first item.
+// at the first item. Then the "Working…" line and its elapsed time, and the "Show details"
+// switch, which opens the transcript again with thinking and system notes.
 //
 // mock.json has no slash item and no running tool, and its fake laptop leaves out thinking and
-// system notes unless "Show details" is on, so those arrive through `emit`, which the fake
-// forwards as the laptop would. The "Show details" filter itself is for Task 6c-8's tests.
+// system notes unless "Show details" is on, so the first test has those arrive through `emit`,
+// which the fake forwards as the laptop would. The Show details tests turn the switch on instead.
 // mock.json's details are all small, so a test that needs a large one loads a scenario object.
 //
 // Playwright has neither a wheel nor a swipe in mobile WebKit, so a test scrolls the transcript
@@ -1042,4 +1043,126 @@ test('a first page that fits the screen asks for the page above without a scroll
   expect(await pageCursors(page)).toHaveLength(1);
   await scrollTx(tx, 0);
   await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
+});
+
+// --- the "Working…" line and Show details -----------------------------------------------------
+
+/** Checkout v2's row in mock.json. */
+const CHECKOUT_ROW = MOCK.rows.find((/** @type {any} */ r) => r.name === 'Checkout v2');
+
+/**
+ * The laptop says Checkout v2's Claude session has `status` now, its other sessions unchanged.
+ * @param {Page} page
+ * @param {object} status
+ */
+function setCheckoutStatus(page, status) {
+  const sessions = CHECKOUT_ROW.sessions.map((/** @type {any} */ s) => (s.ref.terminalID === CHECKOUT_REF.terminalID ? { ...s, status } : s));
+  return hostCall(page, 'emit', 'sessions.changed', { rows: [{ ...CHECKOUT_ROW, sessions }], removedRowIDs: [] });
+}
+
+/**
+ * The seconds an elapsed time such as `1m 12s` or `9s` stands for.
+ * @param {string | null} text
+ */
+function secondsOf(text) {
+  const m = /^(?:(\d+)m )?(\d+)s$/.exec(text ?? '');
+  if (m === null) throw new Error(`not an elapsed time: ${JSON.stringify(text)}`);
+  return Number(m[1] ?? 0) * 60 + Number(m[2]);
+}
+
+/**
+ * When Checkout v2's Claude session's chip last changed, as the laptop sent it.
+ * @param {Page} page
+ * @returns {Promise<number>}
+ */
+function checkoutChangedAt(page) {
+  return page.evaluate((id) => {
+    const rows = /** @type {any} */ (window).__host.state.rows;
+    return rows.flatMap((/** @type {any} */ r) => r.sessions).find((/** @type {any} */ s) => s.ref.terminalID === id).status.changedAt;
+  }, CHECKOUT_REF.terminalID);
+}
+
+test('a working session shows Working… with its elapsed time, read every second', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const working = app(page).locator('.tx .working');
+  await expect(working).toBeVisible();
+  await expect(working).toHaveText(/^Working… (\d+m )?\d+s$/);
+  await expect(working.locator('.dots')).toHaveCount(1);
+  // Under the rows, in .tx and outside the virtual list.
+  expect(await working.evaluate((el) => [el.parentElement?.id, el.previousElementSibling?.className, el.closest('[data-tx-row]')])).toEqual(
+    ['tx', 'tx-list', null],
+  );
+
+  // The time since the chip turned Working, read again every second.
+  const elapsed = working.locator('span:not(.dots)');
+  const changedAt = await checkoutChangedAt(page);
+  const before = Date.now();
+  const shown = secondsOf(await elapsed.textContent());
+  const after = Date.now();
+  expect(shown).toBeGreaterThanOrEqual(Math.floor((before - changedAt) / 1000) - 1);
+  expect(shown).toBeLessThanOrEqual(Math.floor((after - changedAt) / 1000));
+  await expect.poll(async () => secondsOf(await elapsed.textContent()), { timeout: 3_000 }).toBeGreaterThan(shown);
+});
+
+test('a session that is not working shows no Working… line', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(app(page).locator('.tx .say').first()).toBeVisible();
+  await expect(app(page).locator('.working')).toHaveCount(0);
+});
+
+test('Working… goes when the session stops and comes back when it works, and a view at the bottom stays there', async ({ page, appHost }) => {
+  const tx = await openTall(page, appHost);
+  const working = app(page).locator('.tx .working');
+  const last = tx.locator('button.tool', { hasText: `npm run step-${TALL_ROWS - 1}` });
+  await expect(working).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+
+  await setCheckoutStatus(page, { chip: 'idle', changedAt: Date.now() });
+  await expect(working).toHaveCount(0);
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await expect(last).toBeInViewport();
+
+  // A new turn: the line comes back below the rows, counting from the chip's new change.
+  await setCheckoutStatus(page, { chip: 'working', changedAt: Date.now() });
+  await expect(working).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  expect(secondsOf(await working.locator('span:not(.dots)').textContent())).toBeLessThan(5);
+  await expect(app(page).locator('.pill')).toHaveCount(0);
+});
+
+test('Show details reopens the transcript with thinking and system notes, and off takes them away', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say').first()).toBeVisible();
+  await expect(tx.locator('.extra')).toHaveCount(0);
+  const opens = async () => (await hostRequests(page)).filter((r) => r.method === 'transcript.open').map((r) => r.params);
+  expect(await opens()).toEqual([{ session: LOGIN_REF, showDetails: false, resume: false }]);
+
+  // The switch in the session header, tapped as a reader taps it.
+  const head = app(page).locator('.s-head');
+  const toggle = head.getByRole('switch', { name: 'Show details' });
+  await head.locator('.tg').click();
+  await expect(toggle).toBeChecked();
+  await expect.poll(opens).toEqual([
+    { session: LOGIN_REF, showDetails: false, resume: false }, { session: LOGIN_REF, showDetails: true, resume: false },
+  ]);
+  const extra = tx.locator('.extra');
+  await expect(extra.locator('.dl')).toHaveText(['Thinking', 'System']);
+  await expect(extra.nth(0)).toContainText('The redirect target is probably lost in the sign-in callback. Look at finishLogin first.');
+  await expect(extra.nth(1)).toContainText('PostToolUse: eslint src/auth passed.');
+  // Each where the laptop put it: the thinking after your message, the note after the Bash call.
+  const order = await tx.locator('[data-tx-row]').evaluateAll((els) => els
+    .sort((a, b) => Number(a.getAttribute('data-index')) - Number(b.getAttribute('data-index')))
+    .map((el) => el.firstElementChild?.className ?? ''));
+  expect(order.indexOf('extra')).toBe(order.indexOf('me') + 1);
+  expect(order.lastIndexOf('extra')).toBe(order.length - 2);
+
+  await head.locator('.tg').click();
+  await expect(toggle).not.toBeChecked();
+  await expect.poll(async () => (await opens()).map((p) => p.showDetails)).toEqual([false, true, false]);
+  await expect(extra).toHaveCount(0);
+  await expect(tx.locator('.say').first()).toBeVisible();
 });
