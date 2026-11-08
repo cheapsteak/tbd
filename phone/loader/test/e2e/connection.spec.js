@@ -3,7 +3,7 @@
 // tab taking the room, and resumes that must open one socket each. WebKit as an iPhone and
 // Chromium as an Android phone.
 
-import { RESUME_COALESCE_MS } from '../../constants.js';
+import { HANDSHAKE_RETRIES, RESUME_COALESCE_MS } from '../../constants.js';
 import {
   appRoundTrip, deviceRoom, expect, linkFields, linkFromFields, pairViaFragment, phoneSocketsTo, readLoaderDB,
   screensSeen, socketLog, stripButton, test, waitForAppFrame, waitForAppText, watchSockets,
@@ -167,13 +167,15 @@ test('the header strip names the laptop from the handshake', async ({ page, serv
   await expect(stripButton(page).locator('b')).toHaveText('acme-mbp');
 });
 
-test('an unknown phone key reads as Laptop offline', async ({ page, server }) => {
+test('an unknown phone key reads as Laptop offline, through one round of retries and no more', async ({ page, server }) => {
   await page.clock.install();
   const { laptop } = await pairViaFragment(page, server);
   await waitForAppText(page);
+  const room = deviceRoom(laptop);
   // What a phone revoked while it was away meets: plan 3 refuses an unknown key with no reply.
   laptop.devices.clear();
   const refused = laptop.counts.refused;
+  await watchSockets(page);
   await page.reload();
   // Message 1 reached the laptop, so the handshake timeout is running.
   await expect.poll(() => laptop.counts.refused).toBe(refused + 1);
@@ -181,13 +183,25 @@ test('an unknown phone key reads as Laptop offline', async ({ page, server }) =>
   await page.clock.fastForward(10_000);
   await expect(page.locator('[data-state="offline"] h2')).toHaveText('Laptop offline');
 
-  // The phone retries on a fresh socket once the backoff (1 s, with up to a quarter of jitter)
-  // has passed. The laptop refuses that message 1 too, and the screen stays on Laptop offline.
-  await page.clock.fastForward(1_250);
-  await expect.poll(() => laptop.counts.refused).toBe(refused + 2);
+  // The phone retries on a fresh socket after each backoff (1 s, 2 s, 4 s, each with up to a
+  // quarter of jitter), HANDSHAKE_RETRIES times. The laptop refuses each message 1 too.
+  for (let i = 0; i < HANDSHAKE_RETRIES; i += 1) {
+    await page.clock.fastForward(1_250 * 2 ** i);
+    await expect.poll(() => laptop.counts.refused).toBe(refused + i + 2);
+    await page.clock.fastForward(10_000);
+  }
+  // After the round the socket stays and waits: no more sockets, and no more message 1s.
+  await page.clock.fastForward(5 * 60_000);
+  expect(await phoneSocketsTo(page, room)).toBe(1 + HANDSHAKE_RETRIES);
+  expect(laptop.counts.refused).toBe(refused + 1 + HANDSHAKE_RETRIES);
   const seen = await states(page);
   expect(seen.slice(seen.indexOf('offline'))).toEqual(['offline']);
   await expect(page.locator('[data-state="offline"] h2')).toHaveText('Laptop offline');
+
+  // A return to the page starts one more round, at once.
+  await returnToPage(page, ['visible']);
+  await expect.poll(() => laptop.counts.refused).toBe(refused + 2 + HANDSHAKE_RETRIES);
+  expect(await phoneSocketsTo(page, room)).toBe(2 + HANDSHAKE_RETRIES);
 });
 
 // --- keys and the socket -------------------------------------------------------------------

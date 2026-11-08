@@ -20,7 +20,9 @@ import { base64urlDecode } from './channel/pairingLink.js';
 import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
 import { TaskChain } from './chain.js';
 import { systemClock } from './clock.js';
-import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
+import {
+  CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS,
+} from './constants.js';
 import { relaySocketURL } from './links.js';
 import { isObject, isPlainObject } from './objects.js';
 import {
@@ -54,9 +56,13 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * `replaced` or `stop()` (even one called from inside `onEvent`), nothing more is reported.
  * `app` is reported only while the state is `ready`. `bundle` comes just before `ready`, except
  * when `welcome` names the bundle `runningBundle` reports: the app already runs it, so the
- * state goes to `ready` with no `bundle`. A handshake that goes unanswered reads `offline`
- * (`connecting` during the post-pairing grace), and the retries that follow keep that state
- * until the laptop answers one: `handshaking` comes back with message 2.
+ * state goes to `ready` with no `bundle`.
+ *
+ * A handshake that goes unanswered reads `offline` (`connecting` during the post-pairing
+ * grace), and so does the round of retries that follows (HANDSHAKE_RETRIES of them, each on a
+ * fresh socket through the backoff), a retry socket that fails included, until the laptop
+ * answers one: `handshaking` comes back with message 2. After the round, the connection waits
+ * on its open socket for the laptop's next `peer-joined`.
  * @typedef {{ kind: 'state', state: ConnectionState }
  *   | { kind: 'connected', laptopName: string }
  *   | { kind: 'bundle', sha256: string, text: string }
@@ -86,8 +92,10 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * @property {(event: ConnectionEvent) => void} onEvent
  * @property {number} [absentGraceMs] For this long after `start()`, `peer-absent`,
  *   `peer-left` and a handshake that goes unanswered read `connecting` rather than `offline`.
- *   Default 0; `main.js` passes `PAIRED_GRACE_MS` (a signal wait plus a handshake) right after
- *   pairing, while the laptop's device link joins the new room.
+ *   When it ends, a laptop that is away reads `offline` at once, but a retry that is pending,
+ *   or a handshake under way, reads `offline` only from its own outcome. Default 0; `main.js`
+ *   passes `PAIRED_GRACE_MS` (a signal wait plus a handshake) right after pairing, while the
+ *   laptop's device link joins the new room.
  * @property {() => boolean} [isVisible] Default `() => true`. While it is false, a reconnect
  *   waits for `resume()`.
  * @property {() => string | null} [runningBundle] The SHA-256 of the bundle the page's app
@@ -152,11 +160,13 @@ export class LaptopConnection {
   /** The current socket's last signal was `peer-absent` or `peer-left`. */
   #peerAbsent = false;
   /**
-   * The last handshake got no message 2 in time, and no answer or `peer-absent`/`peer-left`
-   * has come since. A retry's handshake then leaves the state as it is, so the screen does
-   * not flip from "Laptop offline" to connecting and back on every retry.
+   * Handshakes in a row that got no message 2 in time: the round so far. Message 2, `ready`,
+   * `peer-absent`, `peer-left` and `resume()` end the round (0). While one lasts, a retry's
+   * handshake and a retry socket that fails leave the state as it is, so the screen does not
+   * flip from "Laptop offline" to connecting and back on every retry. Above HANDSHAKE_RETRIES
+   * the round is over: no more retries, until one of those starts the next.
    */
-  #unanswered = false;
+  #unanswered = 0;
   #attempt = 0;
   #graceOver = false;
 
@@ -210,11 +220,9 @@ export class LaptopConnection {
       this.#graceTimer = this.#tasks.arm(this.#absentGraceMs, () => {
         this.#graceTimer = null;
         this.#graceOver = true;
-        const away = this.#socket !== null && this.#peerAbsent;
-        // `connecting` only from the timeout's grace reading: a retry that met a closed socket
-        // since reads `reconnecting`, and keeps it.
-        const unanswered = this.#unanswered && this.#state === 'connecting';
-        if (away || unanswered) this.#setState('offline');
+        // Only a wait with nothing under way turns offline here. A retry that is pending, or a
+        // handshake in flight, may still be answered: it reads offline from its own outcome.
+        if (this.#isWaiting()) this.#setState('offline');
       });
     } else {
       this.#graceOver = true;
@@ -233,11 +241,18 @@ export class LaptopConnection {
    * two events one return to the page can fire open one socket, not two. (The probe already
    * runs one at a time.) Should that socket hang, the signal timeout still ends it. A later
    * call is a later return to the page, and replaces the socket at once like any other.
+   *
+   * A return to the page also starts a fresh round of handshake retries. A socket that waits
+   * after a round went unanswered gets no new `peer-joined`, so it is replaced, and the new
+   * one handshakes at once.
    */
   resume() {
     if (!this.#started) return;
     this.#tasks.enqueue(() => {
-      if (this.#socketOpen) {
+      // An open socket left waiting by an unanswered round, with no handshake under way.
+      const afterRound = this.#roundOver() && this.#session === null;
+      this.#unanswered = 0;
+      if (this.#socketOpen && !afterRound) {
         this.#socket?.probe();
         return;
       }
@@ -303,7 +318,7 @@ export class LaptopConnection {
       this.#signalTimer = null;
       if (socket !== this.#socket || this.#gotSignal) return;
       this.#closeSocket();
-      this.#setState(this.#everOpened ? 'reconnecting' : 'relayUnreachable');
+      this.#setState(this.#lostState());
       this.#reconnectWithBackoff();
     });
     socket.open();
@@ -329,7 +344,7 @@ export class LaptopConnection {
         } else {
           this.#endSession();
           this.#peerAbsent = true;
-          this.#unanswered = false;
+          this.#unanswered = 0;
           this.#setState(this.#awayState());
         }
         return;
@@ -345,13 +360,13 @@ export class LaptopConnection {
           this.#shutdown();
           return;
         }
-        this.#setState(this.#everOpened ? 'reconnecting' : 'relayUnreachable');
+        this.#setState(this.#lostState());
         this.#reconnectWithBackoff();
         return;
       case 'dead':
         // A liveness failure, not a refusal, so it reconnects without waiting.
         this.#lostSocket();
-        this.#setState('reconnecting');
+        this.#setState(this.#lostState());
         this.#attempt = 0;
         this.#reconnectNow();
     }
@@ -402,7 +417,7 @@ export class LaptopConnection {
       socket, initiator: null, transport: null, timer: null, cacheTimer: null, welcome: null, assembler: null, ready: false,
     };
     this.#session = session;
-    if (!this.#unanswered) this.#setState('handshaking');
+    if (this.#unanswered === 0) this.#setState('handshaking');
     const initiator = await createInitiator({
       pattern: 'IK',
       localStatic: this.#keyPair,
@@ -422,8 +437,16 @@ export class LaptopConnection {
       // laptop's socket stays where it is, so this socket would get no new peer-joined. A
       // fresh socket, after the backoff, does: the laptop resets on the peer-joined it causes,
       // and a fresh handshake runs.
+      this.#unanswered = Math.min(this.#unanswered + 1, HANDSHAKE_RETRIES + 1);
+      if (this.#roundOver()) {
+        // The round went unanswered: a laptop that no longer knows this phone, which then
+        // sees it as offline (spec section 2). This socket stays, and waits for the laptop's
+        // next peer-joined.
+        this.#endSession();
+        this.#setState(this.#awayState());
+        return;
+      }
       this.#closeSocket();
-      this.#unanswered = true;
       this.#setState(this.#awayState());
       this.#reconnectWithBackoff();
     });
@@ -476,7 +499,7 @@ export class LaptopConnection {
     session.transport = result.transport;
     const laptopName = readLaptopName(result.payload);
     // The laptop answered: a retry after an unanswered handshake reads handshaking from here.
-    this.#unanswered = false;
+    this.#unanswered = 0;
     this.#setState('handshaking');
     this.#emit({ kind: 'connected', laptopName });
     // The laptop counts the phone as connected once this first transport message decrypts.
@@ -601,6 +624,7 @@ export class LaptopConnection {
     // Only a connection that got this far starts the backoff over, so one that keeps failing
     // after its handshake (a frame that will not decrypt, say) keeps backing off.
     this.#attempt = 0;
+    this.#unanswered = 0;
     this.#setState('ready');
   }
 
@@ -674,6 +698,30 @@ export class LaptopConnection {
    */
   #awayState() {
     return this.#graceOver ? 'offline' : 'connecting';
+  }
+
+  /**
+   * What a socket that closed, died or got no signal leaves the state at: `relayUnreachable`
+   * until any socket has opened, then `reconnecting`. While a round of unanswered handshakes
+   * lasts it is the away state instead: the laptop is no nearer for a retry socket failing.
+   * @returns {ConnectionState}
+   */
+  #lostState() {
+    if (!this.#everOpened) return 'relayUnreachable';
+    return this.#unanswered > 0 ? this.#awayState() : 'reconnecting';
+  }
+
+  /** The round of unanswered handshakes is over: no retry follows until a new round starts. */
+  #roundOver() {
+    return this.#unanswered > HANDSHAKE_RETRIES;
+  }
+
+  /**
+   * The connection sits on an open socket with nothing under way: the laptop is away, or a
+   * round of handshakes went unanswered. Only the laptop's next signal changes anything.
+   */
+  #isWaiting() {
+    return this.#socket !== null && this.#session === null && (this.#peerAbsent || this.#roundOver());
   }
 
   /** @param {ConnectionState} state */

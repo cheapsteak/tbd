@@ -16,8 +16,18 @@ export const RECONNECT_MAX_MS = 60_000;
 
 export const SIGNAL_TIMEOUT_MS = 10_000;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
-// Right after pairing the connection reads `connecting`, not `offline`, for one full signal wait plus
-// one handshake, so a lost message 2 shows no "Laptop offline" before the backoff retry.
+// A handshake with no message 2 within HANDSHAKE_TIMEOUT_MS is retried on a fresh socket, through
+// the backoff, this many times: a lost message 1 or 2 gets through on a retry. After the last one
+// goes unanswered too, the connection reads offline and waits on its open socket for the laptop's
+// next `peer-joined`, so a laptop that no longer knows this phone gets 1 + HANDSHAKE_RETRIES
+// message 1s, not one per backoff step for as long as the page is open. A return to the page,
+// and Try again, start a new round.
+export const HANDSHAKE_RETRIES = 3;
+// Right after pairing, a laptop that is away or does not answer reads `connecting`, not
+// `offline`, for one full signal wait plus one handshake: the laptop's device link may join the
+// new room any time within a signal wait, and its first handshake may lose message 2. The
+// grace's end shows offline only for a laptop that is away; a retry that is pending, or a
+// handshake under way, reads offline only from its own outcome.
 export const PAIRED_GRACE_MS = SIGNAL_TIMEOUT_MS + HANDSHAKE_TIMEOUT_MS;
 export const CACHE_READ_TIMEOUT_MS = 3_000;
 // A store request the page waits on with nothing else to show (opening the store, listing

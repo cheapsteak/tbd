@@ -6,9 +6,8 @@ import { deflateRawSync } from 'node:zlib';
 import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../channel/noise.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, PAIRED_GRACE_MS,
-  RESUME_COALESCE_MS,
-  RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
+  CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES,
+  PAIRED_GRACE_MS, RESUME_COALESCE_MS, RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
 import { relaySocketURL } from '../../links.js';
@@ -496,7 +495,7 @@ test('no signal within 10 s reconnects', async () => {
   c.conn.stop();
 });
 
-test('an unknown phone key gets no answer: offline after 10 s, and the retries keep it so, backing off to the cap', async () => {
+test('an unknown phone key gets no answer: offline after 10 s, the round of retries keeps it so, and then the socket waits', async () => {
   const env = await setup();
   env.laptop.devices.clear();
   const c = connection(env);
@@ -509,8 +508,9 @@ test('an unknown phone key gets no answer: offline after 10 s, and the retries k
   await env.clock.advance(1);
   await until(() => c.states().includes('offline'), 'offline');
 
-  // The phone ends that socket and retries on a fresh one, through the backoff. Each retry's
-  // handshake goes unanswered too: the laptop never answers a key it does not know.
+  // The phone ends that socket and retries on a fresh one, through the backoff, HANDSHAKE_RETRIES
+  // times. Each retry's handshake goes unanswered too: the laptop never answers a key it does
+  // not know.
   /** Waits for the laptop to refuse socket n's message 1, then for that handshake to time out. */
   const failed = async (/** @type {number} */ n) => {
     await until(() => env.laptop.counts.refused === n, `refusal ${n}`);
@@ -518,15 +518,101 @@ test('an unknown phone key gets no answer: offline after 10 s, and the retries k
     await until(() => env.net.count('close()') === n && env.clock.pending === 1, `timeout ${n}`);
   };
   await until(() => env.net.count('close()') === 1 && env.clock.pending === 1, 'the reconnect timer');
-  await checkBackoff(env, [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000, 60_000], failed);
-  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline'], 'offline throughout the retries');
-  assert.deepEqual(c.of('connected'), []);
-  assert.equal(env.net.message1s().length, env.joins(), 'one message 1 per socket');
+  await checkBackoff(env, [1000, 2000], failed);
+  await env.clock.advance(4000);
+  await until(() => env.laptop.counts.refused === 1 + HANDSHAKE_RETRIES, 'the last retry refused');
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+  await quiet();
 
-  // A return to the page retries at once.
-  const joins = env.joins();
+  // The last retry went unanswered too. Its socket stays open, and nothing more is sent.
+  await env.clock.advance(10 * 60_000);
+  await quiet();
+  assert.equal(env.joins(), 1 + HANDSHAKE_RETRIES);
+  assert.equal(env.net.count('close()'), HANDSHAKE_RETRIES, 'the last socket stays');
+  assert.equal(env.net.message1s().length, 1 + HANDSHAKE_RETRIES);
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline'], 'offline throughout');
+  assert.deepEqual(c.of('connected'), []);
+
+  // A return to the page replaces that socket at once, and the new one handshakes.
   c.conn.resume();
-  await until(() => env.joins() === joins + 1, 'a join on resume');
+  await until(() => env.laptop.counts.refused === 2 + HANDSHAKE_RETRIES, 'a message 1 on resume');
+  assert.equal(env.joins(), 2 + HANDSHAKE_RETRIES);
+  assert.equal(env.net.count('close()'), 1 + HANDSHAKE_RETRIES);
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline', 'handshaking']);
+  c.conn.stop();
+});
+
+test('a laptop that never answers gets 1 + HANDSHAKE_RETRIES message 1s, then none while the page stays; each resume() starts one more round', async () => {
+  const env = await setup();
+  env.laptop.devices.clear();
+  const c = connection(env);
+  /**
+   * Runs one round to its end: each message 1 refused, each handshake timed out, and each
+   * backoff (1 s, 2 s, 4 s with no jitter) waited out.
+   * @param {number} refused the laptop's refusals before the round
+   * @param {number} closes the phone's `close()` calls before the round
+   */
+  const round = async (refused, closes) => {
+    for (let i = 0; i <= HANDSHAKE_RETRIES; i += 1) {
+      await until(() => env.laptop.counts.refused === refused + i + 1, `refusal ${refused + i + 1}`);
+      await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+      if (i === HANDSHAKE_RETRIES) break;
+      await until(() => env.net.count('close()') === closes + i + 1 && env.clock.pending === 1, `the socket after refusal ${refused + i + 1} ended`);
+      await env.clock.advance(1000 * 2 ** i);
+    }
+    // Long after the round, still nothing more.
+    for (let minute = 0; minute < 10; minute += 1) {
+      await quiet();
+      await env.clock.advance(60_000);
+    }
+    await quiet();
+  };
+
+  c.conn.start();
+  await round(0, 0);
+  assert.equal(env.net.message1s().length, 1 + HANDSHAKE_RETRIES);
+  assert.equal(env.laptop.counts.refused, 1 + HANDSHAKE_RETRIES);
+  assert.equal(env.joins(), 1 + HANDSHAKE_RETRIES);
+
+  c.conn.resume();
+  await round(1 + HANDSHAKE_RETRIES, HANDSHAKE_RETRIES + 1);
+  assert.equal(env.net.message1s().length, 2 * (1 + HANDSHAKE_RETRIES));
+  assert.equal(env.laptop.counts.refused, 2 * (1 + HANDSHAKE_RETRIES));
+  assert.equal(env.joins(), 2 * (1 + HANDSHAKE_RETRIES));
+  assert.equal(c.states().at(-1), 'offline');
+  c.conn.stop();
+});
+
+test('during a round of unanswered handshakes, a retry socket that closes or gets no signal keeps offline', async () => {
+  const env = await setup();
+  env.laptop.devices.clear();
+  // The relay closes the second socket as soon as it opens.
+  let opened = 0;
+  env.net.hooks.afterOpen = (ws) => {
+    opened += 1;
+    if (opened === 2) ws.close(1000);
+  };
+  const c = connection(env);
+  c.conn.start();
+  // 0 s: message 1, refused. 10 s: no message 2; offline, and a retry in 1 s.
+  await until(() => env.laptop.counts.refused === 1, 'refusal 1');
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+  await until(() => c.states().includes('offline') && env.clock.pending === 1, 'offline, with a retry armed');
+  // 11 s: the retry socket closes as it opens. The next waits 2 s.
+  await env.clock.advance(1000);
+  await until(() => env.joins() === 2 && opened === 2 && env.clock.pending === 1, 'the second socket closed');
+  // 13 s: a third socket on a relay that passes nothing: no signal for 10 s. The next waits 4 s.
+  env.relay.blackHole(env.room, true);
+  await env.clock.advance(2000);
+  await until(() => env.joins() === 3, 'the third socket');
+  await quiet();
+  await env.clock.advance(SIGNAL_TIMEOUT_MS);
+  await until(() => env.clock.pending === 1, 'the third socket ended');
+  env.relay.blackHole(env.room, false);
+  // 27 s: a fourth socket, whose message 1 is refused as well.
+  await env.clock.advance(4000);
+  await until(() => env.laptop.counts.refused === 2, 'refusal 2');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'offline'], 'never reconnecting');
   c.conn.stop();
 });
 
@@ -563,7 +649,7 @@ test('a lost message 2 ends the socket after 10 s; the next one, after the backo
   c.conn.stop();
 });
 
-test('inside the post-pairing grace an unanswered handshake reads connecting, and offline once the grace ends', async () => {
+test('inside the post-pairing grace an unanswered handshake reads connecting; the grace ending under a handshake changes nothing, and its outcome reads offline', async () => {
   const env = await setup();
   env.laptop.devices.clear();
   const c = connection(env, { absentGraceMs: 30_000 });
@@ -579,11 +665,15 @@ test('inside the post-pairing grace an unanswered handshake reads connecting, an
   await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
   await until(() => env.net.count('close()') === 2 && env.clock.pending === 2, 'the second timeout');
   assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
-  // 23 s: a third handshake. 30 s: the grace ends while it waits.
+  // 23 s: a third handshake. 30 s: the grace ends while it waits, which changes nothing.
   await env.clock.advance(2000);
   await until(() => env.laptop.counts.refused === 3, 'refusal 3');
   await env.clock.advance(7000);
-  await until(() => c.states().at(-1) === 'offline', 'offline when the grace ends');
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
+  // 33 s: that handshake goes unanswered, after the grace: offline.
+  await env.clock.advance(3000);
+  await until(() => c.states().at(-1) === 'offline', 'offline from the handshake\'s outcome');
   assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting', 'offline']);
   c.conn.stop();
 });
@@ -605,22 +695,34 @@ test('with the post-pairing grace, a lost message 2 reads connecting through the
   c.conn.stop();
 });
 
-test('with the post-pairing grace, repeated lost handshakes read offline only once the grace ends', async () => {
+test('right after pairing, a laptop that joins at 9 s and loses message 2 never reads offline: the retry after the grace is answered', async () => {
   const env = await setup();
-  env.laptop.devices.clear();
-  const c = connection(env, { absentGraceMs: PAIRED_GRACE_MS });
+  env.laptop.leave(env.room);
+  let frames = 0;
+  env.relay.tamper(env.room, (frame) => (frames++ === 0 ? null : frame));
+  // With the most jitter, the retry comes 1,248 ms after the timeout: past the grace's end.
+  const c = connection(env, { absentGraceMs: PAIRED_GRACE_MS, random: () => 0.99 });
   c.conn.start();
-  await until(() => env.laptop.counts.refused === 1, 'refusal 1');
-  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
-  await until(() => env.net.count('close()') === 1 && env.clock.pending === 2, 'the first timeout');
-  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
-  await env.clock.advance(1000);
-  await until(() => env.laptop.counts.refused === 2, 'refusal 2');
-  await env.clock.advance(PAIRED_GRACE_MS - HANDSHAKE_TIMEOUT_MS - 1000 - 1);
+  await until(() => env.net.log.some((e) => e.text === 'peer-absent'), 'peer-absent');
   await quiet();
-  assert.ok(!c.states().includes('offline'), 'not offline before the grace ends');
+  // 9 s: the laptop's device link joins, and its message 2 is lost.
+  await env.clock.advance(9000);
+  env.laptop.join(env.room);
+  await until(() => env.laptop.counts.ikHandshakes === 1, 'the laptop answering message 1');
+  await quiet();
+  // 19 s: no message 2. The socket ends, and the retry waits.
   await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
-  await until(() => c.states().includes('offline'), 'offline after the grace');
+  await until(() => env.net.count('close()') === 1, 'the handshake timeout');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
+  // 20 s: the grace ends with the retry still pending, which changes nothing.
+  assert.equal(PAIRED_GRACE_MS, 20_000);
+  await env.clock.advance(1000);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
+  // 20.248 s: the retry, and the laptop answers it.
+  await env.clock.advance(248);
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting', 'handshaking', 'loading', 'ready']);
   c.conn.stop();
 });
 
