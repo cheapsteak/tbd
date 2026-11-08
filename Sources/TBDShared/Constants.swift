@@ -123,6 +123,20 @@ public enum TBDConstants {
         configDir(environment: environment).appendingPathComponent("sessions")
     }
 
+    /// Directory holding the phone bridge's files: `~/tbd/phone`, mode 0700.
+    /// Honors TBD_HOME.
+    public static func phoneDir(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        configDir(environment: environment).appendingPathComponent("phone")
+    }
+
+    /// The laptop's long-term X25519 private key for phone control:
+    /// `~/tbd/phone/laptop.key`, mode 0600. Every paired phone trusts the
+    /// public half, so losing or replacing this file unpairs every phone.
+    /// Honors TBD_HOME.
+    public static func phoneLaptopKeyPath(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        phoneDir(environment: environment).appendingPathComponent("laptop.key")
+    }
+
     /// Directory the update path owns: `~/tbd/updates`. Honors TBD_HOME.
     ///
     /// Holds the dedicated update clone (`src`), the append-only `update.log`

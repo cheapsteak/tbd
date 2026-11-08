@@ -497,6 +497,7 @@ struct TBDAppMain: App {
                     // problem, so the hook stays where it is.)
                     appState.appearance = appearance
                 }
+                .modifier(InstallSettingsOpener(appState: appState))
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)
                 }
@@ -514,6 +515,21 @@ struct TBDAppMain: App {
                 .environment(appState)
                 .environmentObject(appearance)
                 .environmentObject(overlayCoordinator)
+        }
+    }
+}
+
+/// Hands `AppState` the real "open Settings" action. SwiftUI ignores the
+/// `showSettingsWindow:` selector for a `Settings` scene (macOS 14+), so only
+/// `\.openSettings`, which exists in a view's environment, opens it. The
+/// action is installed on appear, outside `body`.
+private struct InstallSettingsOpener: ViewModifier {
+    let appState: AppState
+    @Environment(\.openSettings) private var openSettings
+
+    func body(content: Content) -> some View {
+        content.onAppear {
+            appState.settingsWindowOpener = { openSettings() }
         }
     }
 }

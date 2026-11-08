@@ -322,6 +322,16 @@ public final class RPCRouter: Sendable {
     /// built without one, where the method answers that it is unavailable.
     nonisolated(unsafe) var agentBackground: AgentBackgroundController?
 
+    /// The phone bridge. Assigned by the daemon before the socket serves; nil
+    /// in mock mode and in routers built without one, where the `phone.*`
+    /// methods that need it answer `phoneUnavailableRefusal`.
+    nonisolated(unsafe) var phoneBridge: (any PhoneBridgeControlling)?
+
+    /// How the `phone.*` methods confirm that the caller runs one of TBD's own
+    /// app binaries, after the envelope check has named it the app. Tests
+    /// replace it with a stated process table and file system.
+    nonisolated(unsafe) var phoneAppBinaryCheck: PhoneAppBinaryCheck = .production
+
     /// How the swap paths build the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
@@ -1155,6 +1165,9 @@ public final class RPCRouter: Sendable {
                 return try await handlePanelApply(request.paramsData)
             case RPCMethod.panelSyncTabs:
                 return try await handlePanelSyncTabs(request.paramsData)
+            case _ where RPCMethod.phoneAppOnlyMethods.contains(request.method):
+                // App-only: the handler checks the caller before anything else.
+                return try await handlePhoneRPC(request, connection: connection)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

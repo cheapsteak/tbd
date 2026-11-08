@@ -192,6 +192,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose". Resolve it through
     /// `Config.sessionRestoreDefault`, never through `?? false`.
     var session_restore_enabled: Bool?
+    /// Phone control gate. **Genuinely tri-state**: the `phone_control`
+    /// migration carries no SQL default, so `nil` means "never chose". Resolve
+    /// it through `Config.phoneControlEnabledDefault`, never through `?? false`.
+    var phone_control_enabled: Bool?
+    /// Normalized relay base URL; `nil` means phone control is not set up.
+    var phone_relay_url: String?
+    /// Loader URL override; `nil` means `Config.phoneLoaderURLDefault`.
+    var phone_loader_url: String?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -274,6 +282,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   gate.
     /// - Parameter sessionRestoreDefault: same shape again, for
     ///   `session_restore_enabled` — the restore pass's gate.
+    /// - Parameter phoneControlDefault: same shape again, for
+    ///   `phone_control_enabled` — the phone bridge's gate.
     /// - Parameter worktreeParksOnMerge: whether a worktree that is not
     ///   archived overrides park-on-merge to true. It lives in the `worktree`
     ///   table, so `ConfigStore.get()` reads it with one query beside this row;
@@ -302,6 +312,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
         sessionRestoreDefault: Bool = Config.sessionRestoreDefault,
+        phoneControlDefault: Bool = Config.phoneControlEnabledDefault,
         worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -423,6 +434,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
         // Session restore gate — NOT `?? false`.
         config.sessionRestoreEnabled = session_restore_enabled ?? sessionRestoreDefault
+        // Phone control gate — NOT `?? false`.
+        config.phoneControlEnabled = phone_control_enabled ?? phoneControlDefault
+        config.phoneRelayURL = phone_relay_url
+        config.phoneLoaderURL = phone_loader_url
         return config
     }
 }
@@ -933,6 +948,37 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET transcript_prompt_answer_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the phone control gate. Written on every call, so either value
+    /// is the explicit gesture that lifts the column out of NULL.
+    public func setPhoneControlEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET phone_control_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the relay base URL as given; nil writes NULL (not set up).
+    public func setPhoneRelayURL(_ url: String?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET phone_relay_url = ? WHERE id = ?",
+                arguments: [url, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the loader URL override as given; nil writes NULL (the default).
+    public func setPhoneLoaderURL(_ url: String?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET phone_loader_url = ? WHERE id = ?",
+                arguments: [url, Self.singletonID]
             )
         }
     }

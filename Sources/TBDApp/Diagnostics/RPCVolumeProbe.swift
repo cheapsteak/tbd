@@ -360,6 +360,7 @@ extension StateDelta {
         case .terminalPendingPromptsChanged: return "terminalPendingPromptsChanged"
         case .devServersChanged: return "devServersChanged"
         case .worktreeSiblingsReordered: return "worktreeSiblingsReordered"
+        case .phoneStatusChanged: return "phoneStatusChanged"
         }
     }
 }

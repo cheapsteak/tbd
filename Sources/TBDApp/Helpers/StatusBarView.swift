@@ -694,6 +694,9 @@ struct StatusBarView: View {
             // dev-server lists itself, so their changes re-evaluate the chip
             // alone.
             ServersStatusChip(worktreeID: ServersMenu.selectedWorktreeID(in: appState))
+            // Shown only while a paired phone is connected; it reads the
+            // phone status itself, like the Servers chip reads its lists.
+            PhoneStatusChip()
             if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
             }

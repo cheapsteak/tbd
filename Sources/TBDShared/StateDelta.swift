@@ -92,6 +92,11 @@ public enum StateDelta: Codable, Sendable {
     /// next poll. An app build that predates this case fails to decode it and
     /// drops the line, catching up at its next poll.
     case worktreeSiblingsReordered(WorktreeSiblingsReorderedDelta)
+    /// Phone control changed: a setting, the relay's status, a pairing offer,
+    /// a paired phone, or which phones are connected. No payload (mirrors
+    /// `.devServersChanged`) — subscribers refetch via `phone.status` and
+    /// `phone.devices`. An older app drops the line.
+    case phoneStatusChanged
 }
 
 /// Identifies the remote session a `.remoteSessionReconnectRequested` names.

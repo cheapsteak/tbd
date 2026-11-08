@@ -1344,6 +1344,78 @@ actor DaemonClient {
         )
     }
 
+    // MARK: - Phone control (app-only; the daemon refuses any other caller)
+
+    /// The phone bridge's status: the settings, the relay, the connected
+    /// phones and any pairing offer.
+    func phoneStatus() async throws -> PhoneStatusResult {
+        try await callNoParamsAsync(method: RPCMethod.phoneStatus, resultType: PhoneStatusResult.self)
+    }
+
+    /// Every paired phone.
+    func phoneDevices() async throws -> [PhoneDevice] {
+        try await callNoParamsAsync(
+            method: RPCMethod.phoneDevices, resultType: PhoneDeviceListResult.self
+        ).devices
+    }
+
+    /// Starts a pairing offer, replacing any live one, and returns it with
+    /// its link.
+    func phonePairStart() async throws -> PhonePairingStatus {
+        try await callNoParamsAsync(method: RPCMethod.phonePairStart, resultType: PhonePairingStatus.self)
+    }
+
+    /// The user clicked Allow: the daemon stores the phone and returns it.
+    func phonePairAllow(offerID: UUID) async throws -> PhoneDevice {
+        try await callAsync(
+            method: RPCMethod.phonePairAllow,
+            params: PhonePairOfferParams(offerID: offerID),
+            resultType: PhoneDevice.self
+        )
+    }
+
+    /// The user clicked Deny, or closed the pairing sheet while the offer
+    /// was live.
+    func phonePairDeny(offerID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.phonePairDeny,
+            params: PhonePairOfferParams(offerID: offerID)
+        )
+    }
+
+    /// Unpairs a phone.
+    func phoneRevoke(deviceID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.phoneRevoke,
+            params: PhoneRevokeParams(deviceID: deviceID)
+        )
+    }
+
+    /// Persist the "Phone control" setting (default OFF); the bridge starts
+    /// or stops at once.
+    func setPhoneControlEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPhoneControlEnabled,
+            params: ConfigSetPhoneControlEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the relay URL, after the daemon has checked it; nil removes it.
+    func setPhoneRelayURL(_ url: String?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPhoneRelayURL,
+            params: ConfigSetPhoneURLParams(url: url)
+        )
+    }
+
+    /// Persist the loader URL override; nil goes back to the default.
+    func setPhoneLoaderURL(_ url: String?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPhoneLoaderURL,
+            params: ConfigSetPhoneURLParams(url: url)
+        )
+    }
+
     /// Persist the transcript-streaming gate (default ON), which decides
     /// whether the transcript renders a provisional assistant row while the
     /// model streams. Applies to sessions started after the call.

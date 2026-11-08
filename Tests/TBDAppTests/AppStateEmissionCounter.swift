@@ -213,6 +213,13 @@ final class AppStateEmissionTracker {
         _ = state.parkedPromptReadback
         _ = state.parkedPromptDeliveryInFlight
         _ = state.changesListIsEmpty
+        _ = state.phoneStatus
+        _ = state.phoneDevices
+        _ = state.phoneStatusError
+        _ = state.phonePairingError
+        _ = state.phoneRevokeError
+        _ = state.settingsTab
+        _ = state.phoneRelaySetupRequested
     }
 
     /// The read list above, as data, for the coverage test.
@@ -346,6 +353,13 @@ final class AppStateEmissionTracker {
         "parkedPromptReadback",
         "parkedPromptDeliveryInFlight",
         "changesListIsEmpty",
+        "phoneStatus",
+        "phoneDevices",
+        "phoneStatusError",
+        "phonePairingError",
+        "phoneRevokeError",
+        "settingsTab",
+        "phoneRelaySetupRequested",
     ]
 }
 

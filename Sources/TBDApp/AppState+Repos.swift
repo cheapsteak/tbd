@@ -30,7 +30,12 @@ extension AppState {
         do {
             let repo = try await daemonClient.addRepo(path: path)
             repos.append(repo)
-            isConnected = true
+            if !isConnected {
+                isConnected = true
+                // A connect, as the poll tick's is: the daemon's phone
+                // status is read again.
+                refreshPhoneAtConnect()
+            }
             return repo
         } catch {
             handleConnectionError(error)

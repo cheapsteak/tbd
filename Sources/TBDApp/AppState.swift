@@ -893,7 +893,14 @@ final class AppState {
     @ObservationIgnored private var mainAreaSizeBroadcastTask: Task<Void, Never>?
     @ObservationIgnored private var lastBroadcastCols: Int = 0
     @ObservationIgnored private var lastBroadcastRows: Int = 0
-    var isConnected: Bool = false
+    /// Whether the app is connected to the daemon. Losing the connection
+    /// forgets the phone status, which belongs to the daemon that is gone
+    /// (`phoneConnectionLost`).
+    var isConnected: Bool = false {
+        didSet {
+            if oldValue, !isConnected { phoneConnectionLost() }
+        }
+    }
     var layouts: [UUID: LayoutNode] = [:] {
         didSet {
             persistLayouts()
@@ -1282,6 +1289,39 @@ final class AppState {
     /// Worktrees with a dev server running by a live running file or a live
     /// TBD server tab (`server.summary`) — the sidebar's green dot.
     var devServerRunningWorktreeIDs: Set<UUID> = []
+    /// Phone control's status from `phone.status`: the settings, the relay,
+    /// the connected phones and any pairing offer. Nil until the first read
+    /// after a connect succeeds; a failed read keeps the last one, and losing
+    /// the daemon connection clears it. See `AppState+Phone.swift`.
+    var phoneStatus: PhoneStatusResult?
+    /// The paired phones, from `phone.devices`. Emptied when the daemon
+    /// connection is lost.
+    var phoneDevices: [PhoneDevice] = []
+    /// Why the last phone read failed, in the daemon's words; nil once one
+    /// succeeds.
+    var phoneStatusError: String?
+    /// Why the last Allow or Deny failed, in the daemon's words, for the
+    /// pairing sheet; nil once one succeeds or a new offer starts.
+    var phonePairingError: String?
+    /// Why the last Revoke failed, in the daemon's words, for the Phone pane;
+    /// nil once one succeeds or the pane appears again.
+    var phoneRevokeError: String?
+    /// The Settings window's selected tab, so the Phone menu item and the
+    /// status-bar chip can open it on Phone.
+    var settingsTab: SettingsTab = .general
+    /// Set by "Set Up Phone Relay…": the Phone pane presents its relay setup
+    /// sheet and clears the flag.
+    var phoneRelaySetupRequested = false
+    /// The newest phone refresh started. Refreshes overlap (a delta, an
+    /// action, the pane appearing); an answer from an older one is dropped.
+    @ObservationIgnored var phoneRefreshGeneration: UInt64 = 0
+    /// The connect-time phone refresh, its first read and its retries. A
+    /// disconnect and the next connect's refresh cancel it. See
+    /// `refreshPhoneAtConnect`.
+    @ObservationIgnored var phoneConnectRefreshTask: Task<Void, Never>?
+    /// The clock the connect-time refresh's retries wait on, an init
+    /// parameter so a test's clock is in place before any retry can start.
+    let phoneRetryClock: any Clock<Duration>
     /// Failures from the last Start/Stop/Restart per worktree, shown at the
     /// bottom of the Servers menu.
     var devServerActionMessages: [UUID: [String]] = [:]
@@ -2598,6 +2638,17 @@ final class AppState {
             try await daemonClient.listDevServers(worktreeID: id, runStatusCommands: runStatus) }
     @ObservationIgnored lazy var devServerSummaryFetcher: @MainActor () async throws -> DevServerSummaryResult =
         { [daemonClient] in try await daemonClient.devServerSummary() }
+    /// The phone control RPCs, behind a protocol so tests drive them without
+    /// a daemon.
+    @ObservationIgnored lazy var phoneClient: any PhoneControlClient = daemonClient
+    /// Opens the Settings window. The main window's root view replaces this
+    /// with the `\.openSettings` action on appear. The selector below is only
+    /// the fallback until then: since macOS 14 SwiftUI ignores
+    /// `showSettingsWindow:` for a `Settings` scene and opens nothing. In unit
+    /// runs `NSApp` is nil, and tests replace this to see that it was asked.
+    @ObservationIgnored var settingsWindowOpener: @MainActor () -> Void = {
+        _ = NSApp?.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
     @ObservationIgnored lazy var devServerActionSender: @MainActor (DevServerAction, UUID, [String]) async throws -> DevServerActionResult =
         { [daemonClient] action, id, names in
             switch action {
@@ -2879,10 +2930,12 @@ final class AppState {
     init(
         userDefaults: UserDefaults = .standard,
         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
-        onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log
+        onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log,
+        phoneRetryClock: any Clock<Duration> = ContinuousClock()
     ) {
         self.userDefaults = userDefaults
         self.onEngineNotice = onEngineNotice
+        self.phoneRetryClock = phoneRetryClock
         self.windowChrome = WindowChromeState()
         self.tmuxExecutableResolver = tmuxExecutableResolver
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
@@ -3380,10 +3433,15 @@ final class AppState {
                     // composer-draft set. The daemon keeps the last set across
                     // a dropped subscription and loses it to a restart, so
                     // this report is what brings it back in line either way.
+                    //
+                    // And the phone status is read again: a new daemon's
+                    // phones are not the old one's, and the app may have seen
+                    // no disconnect to clear them.
                     Task { @MainActor [weak self] in
                         self?.panelSubscriptionRegistered()
                         self?.resendLastProgramStatusReports()
                         self?.pushComposerDrafts()
+                        self?.refreshPhoneAtConnect()
                     }
                     // An answered subscription may come from a new daemon,
                     // and the app may never have seen a disconnect. Record the
@@ -3510,6 +3568,8 @@ final class AppState {
             )
         case .devServersChanged:
             Task { [weak self] in await self?.refreshDevServersAfterChange() }
+        case .phoneStatusChanged:
+            Task { [weak self] in await self?.refreshPhone() }
         case .panelSurfaceChanged(let delta):
             applyPanelSurfaceDelta(delta)
         default:
@@ -4200,6 +4260,18 @@ final class AppState {
         if sweepNow { await sweepHolderClaims() }
     }
 
+    /// What the poll tick does once its plain reconnect succeeds, a connect
+    /// that loads no initial state: claim sweeps are allowed again (this
+    /// tick's own sweep follows), the spawn preferences and foreground state
+    /// go to the daemon, which may be a new one, and the phone status is read
+    /// again in a task of its own.
+    func pollTickDidReconnect() async {
+        await holderClaimSweepDidConnect(sweepNow: false)
+        pushClaudeSpawnPreferences()
+        pushForegroundState()
+        refreshPhoneAtConnect()
+    }
+
     /// Poll daemon for state changes every 2 seconds.
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -4222,9 +4294,7 @@ final class AppState {
                         let didConnect = await self.daemonClient.connect()
                         self.isConnected = didConnect
                         if didConnect {
-                            await self.holderClaimSweepDidConnect(sweepNow: false)
-                            self.pushClaudeSpawnPreferences()
-                            self.pushForegroundState()
+                            await self.pollTickDidReconnect()
                         } else if !AppState.pidFilePointsAtLiveDaemon() {
                             // The socket file exists but nothing accepted the
                             // connection, and the pid file doesn't name a live
@@ -4316,6 +4386,7 @@ final class AppState {
             startSubscription()
             await refreshPRStatuses()
             await refreshDevServerSummary()
+            refreshPhoneAtConnect()
             pushClaudeSpawnPreferences()
             pushForegroundState()
             // Last, so the initial load never waits on it.

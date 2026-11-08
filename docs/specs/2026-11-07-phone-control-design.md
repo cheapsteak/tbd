@@ -132,9 +132,17 @@ Research: `transports.md` section 7, `phone-clients.md` sections 1.3–1.5.
    '<phone name>' to control this laptop? Code 123 456". The phone shows "Check this code on your
    laptop: 123 456". The user names the phone before the handshake, starting from a name taken
    from the browser, such as "iPhone". The name travels encrypted in the first handshake message.
-5. On Allow, the daemon stores the phone's public key in a `phone_device` row, with the room ID as
-   that phone's permanent room. It then discards the offer. A QR code works once. On Deny or
-   expiry, the daemon discards the offer and the phone shows why.
+   The laptop shows this prompt only after the phone's first encrypted message, which the phone
+   sends right after the handshake, arrives and decrypts, so a replayed first handshake message can
+   never raise it.
+5. On Allow, the daemon makes a new 32-byte room ID for that phone and sends it to the phone
+   inside the encrypted channel. It stores the phone's public key in a `phone_device` row, with the
+   new room ID as that phone's permanent room, then closes its socket on the pairing room and never
+   listens there again. The phone keeps the new room ID and uses it for every later connection. The
+   QR code's room serves pairing only, because anyone who saw the code knows it, and anyone who
+   holds a room ID can open either role's socket there and knock the real peer off. The daemon then
+   discards the offer. A QR code works once. On Deny or expiry, the daemon discards the offer and
+   the phone shows why.
 
 **Every later connection.** The phone runs `Noise_IK_25519_AESGCM_SHA256` with the same prologue.
 The laptop accepts the handshake only when the phone's static key matches a non-revoked
@@ -364,6 +372,10 @@ carries message text or answers. Pairing, Allow, Deny and Revoke are logged the 
 **Laptop-side RPCs** are app-only, so no other local process can approve a pairing: `phone.status`,
 `phone.pairStart`, `phone.pairAllow`, `phone.pairDeny`, `phone.devices`, `phone.revoke`,
 `config.setPhoneControlEnabled`, `config.setPhoneRelayURL` and `config.setPhoneLoaderURL`.
+App-only phone RPCs also check that the caller's executable is one of TBD's own app binaries. This
+stops a process that only connects to the daemon's sockets. It does not stop a same-user process
+that can launch the TBD app binary, which section 1 already treats as trusted. Every pairing raises
+a TBD notification naming the phone, so a pairing the user did not make is visible.
 
 ## 6. Sessions the phone can reach
 
@@ -683,7 +695,9 @@ Merging to `main` deploys the loader, and the loader holds the keys.
   - "Pair a Phone…", which opens a sheet with the QR code, the link as text, and a 5-minute
     countdown, then the Allow or Deny step with the code;
   - paired phones: name, date paired, last seen, and Revoke;
-  - an advanced field for the loader URL, which is empty for the default.
+  - an advanced field for the loader URL. Pairing needs a loader URL: the field's value, or the
+    default once `Config.phoneLoaderURLDefault` records one (section 11). With neither, "Pair a
+    Phone…" is disabled and says to set the field.
 - **App menu item** "Set Up Phone Relay…".
 - **Status-bar chip** "Phone connected", shown while any phone is connected, so the user always
   sees when a phone is in.
@@ -696,14 +710,18 @@ One `.sql` migration, the GRDB record changes, and the `TBDShared` model changes
   - `phone_control_enabled INTEGER` – resolved as `?? Config.phoneControlEnabledDefault`, which is
     `false`.
   - `phone_relay_url TEXT` – NULL means not set up.
-  - `phone_loader_url TEXT` – NULL resolves to `Config.phoneLoaderURLDefault`, the loader org's URL.
+  - `phone_loader_url TEXT` – NULL resolves to `Config.phoneLoaderURLDefault`, the loader org's URL,
+    which is nil until the maintainer records it.
 - **New table `phone_device`:** `id` (text, primary key), `name`, `public_key` (blob), `room_id`,
   `paired_at`, and `last_seen_at`. Revoke deletes the row. The shared model's fields are optional or
   have defaults, so older rows and payloads still decode.
 - **File:** `~/tbd/phone/laptop.key`, mode 0600 (section 2).
 
-The loader org's name is chosen when the maintainer creates it. `Config.phoneLoaderURLDefault`
-records it.
+The loader org's name is chosen when the maintainer creates it, and `Config.phoneLoaderURLDefault`
+records its URL. Until then there is no default: `phone.pairStart` refuses with "Set a loader URL in
+Settings → Phone → Advanced before pairing a phone.", and pairing needs the advanced field set. The
+default is never a name nobody holds, because whoever registered that name would serve the page
+that receives every pairing secret and the laptop's key.
 
 ## 12. Who reclaims orphans
 
