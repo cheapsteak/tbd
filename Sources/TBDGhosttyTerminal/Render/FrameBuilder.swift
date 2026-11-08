@@ -73,6 +73,11 @@ final class FrameBuilder {
     private var glyphScratch: [TkzGlyphInstance] = []
     private var rectScratch: [TkzRectInstance] = []
 
+    /// Every row this builder has built, across all the surfaces it serves. Its change across one
+    /// update is that update's row work, counted where the work happens, so a test can tell one
+    /// pass over the grid from two whatever `FrameUpdate.rowsRebuilt` reports.
+    private(set) var rowBuildCount = 0
+
     init(glyphCache: GlyphCache) {
         self.glyphCache = glyphCache
     }
@@ -289,6 +294,7 @@ final class FrameBuilder {
         colors: SurfaceColors,
         surface: TerminalSurface
     ) throws {
+        rowBuildCount += 1
         // One selection query per row beats one `SELECTED` query per cell (render.h says so).
         var selection: ClosedRange<Int>?
         var rowSelection = GhosttyRenderStateRowSelection()
