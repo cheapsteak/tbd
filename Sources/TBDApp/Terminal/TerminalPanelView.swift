@@ -476,20 +476,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let coordinator = context.coordinator
+        let panelRow = appState.terminals.values
+            .lazy
+            .flatMap { $0 }
+            .first(where: { $0.id == terminalID })
+        // The engine is chosen once, here: a holder panel may be built on
+        // libghostty while `useGhosttyTerminalEngine` is on, and every other
+        // panel stays on SwiftTerm. A panel whose row AppState has not loaded
+        // yet resolves as tmux, as `panelTransport()` does, and so stays on
+        // SwiftTerm for its life.
+        let engineKind = TerminalEngineFactory.requestedKind(
+            flagEnabled: appState.ghosttyTerminalEngineEnabled,
+            host: .panel(panelRow?.transport ?? .tmux))
         // Wire up Cmd+Click file path detection: the worktree path is what a
         // clicked relative path resolves against.
         let engine = TerminalEngineFactory.make(
-            kind: .swiftTerm,
+            kind: engineKind,
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(
                 terminalID: terminalID,
                 worktreePath: worktreePath,
                 remoteURL: remoteURL,
-                isCodexTerminal: appState.terminals.values
-                    .flatMap { $0 }
-                    .first(where: { $0.id == terminalID })?
-                    .isCodexTerminal == true))
+                isCodexTerminal: panelRow?.isCodexTerminal == true))
 
         // Experimental GPU draw path (default off — Settings → Terminal →
         // Experimental). Requested here rather than in `updateNSView` so a

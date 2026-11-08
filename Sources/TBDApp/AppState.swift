@@ -5018,6 +5018,53 @@ final class AppState {
         stored ?? shippedDefault
     }
 
+    /// UserDefaults key for the experimental libghostty terminal engine. When
+    /// on, holder panels and local PTY terminals (remote attach and remote
+    /// sign-in) opened afterwards are built on `GhosttyEngine` instead of
+    /// `SwiftTermEngine`; tmux and control-mode panels stay on SwiftTerm
+    /// whatever it says. Off by default, because it replaces a load-bearing
+    /// rendering and input path. Design:
+    /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+    ///
+    /// App-side `UserDefaults`, on `.standard` in the app, for the reasons on
+    /// `useMetalTerminalRendererKey`. Nothing writes it except a person
+    /// choosing, so an unset key means nobody has chosen. Reads go through
+    /// `ghosttyTerminalEngineEnabled(defaults:)`, never `bool(forKey:)`.
+    static let useGhosttyTerminalEngineKey = "useGhosttyTerminalEngine"
+
+    /// The one default for `useGhosttyTerminalEngineKey`. Graduation is a
+    /// one-line change here: it reaches everyone who never chose and keeps
+    /// every explicit `false`.
+    static let ghosttyTerminalEngineDefault = false
+
+    /// Whether terminals opened now should be built on libghostty, where their
+    /// host allows it (`TerminalEngineFactory.requestedKind`). Three-state: an
+    /// unset key takes `shippedDefault`, and an explicit `false` or `true`
+    /// holds against any change to it.
+    static func ghosttyTerminalEngineEnabled(
+        defaults: UserDefaults = .standard,
+        shippedDefault: Bool = ghosttyTerminalEngineDefault
+    ) -> Bool {
+        ghosttyTerminalEngineEnabled(
+            stored: defaults.object(forKey: useGhosttyTerminalEngineKey) as? Bool,
+            shippedDefault: shippedDefault)
+    }
+
+    /// The three-state decision on its own: nil, nobody chose, follows
+    /// `shippedDefault`.
+    static func ghosttyTerminalEngineEnabled(
+        stored: Bool?,
+        shippedDefault: Bool = ghosttyTerminalEngineDefault
+    ) -> Bool {
+        stored ?? shippedDefault
+    }
+
+    /// This app's reading of `useGhosttyTerminalEngineKey`, from the store it
+    /// was built with: `.standard` in the app, an isolated suite in a test.
+    var ghosttyTerminalEngineEnabled: Bool {
+        Self.ghosttyTerminalEngineEnabled(defaults: userDefaults)
+    }
+
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less
     /// scratch spaces). Default on.
     static let showScratchSectionKey = "showScratchSection"
