@@ -2106,11 +2106,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 terminalEngineSwitchLog.info(
                     "switching terminal engine terminal=\(self.panelID, privacy: .public) from=\(builtOn.rawValue, privacy: .public) to=\(target.rawValue, privacy: .public) override=\(override?.rawValue ?? "none", privacy: .public)"
                 )
-                if let override {
-                    appState.terminalEngineOverrides[panelID] = override
-                } else {
-                    appState.terminalEngineOverrides.removeValue(forKey: panelID)
-                }
+                // Nil removes the entry.
+                appState.terminalEngineOverrides[panelID] = override
                 return
             case .skipFellBack:
                 skipped = "libghostty did not start here and would fall back again"

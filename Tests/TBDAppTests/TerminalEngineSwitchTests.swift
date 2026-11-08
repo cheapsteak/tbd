@@ -232,6 +232,40 @@ struct TerminalEngineSwitchTests {
         #expect(fixture.state.terminalEngineKind(for: fixture.terminalID) == .ghostty)
     }
 
+    /// A libghostty override left from before the flag went off: the panel
+    /// is built on SwiftTerm, since the override counts for nothing then, and
+    /// its identity carries the override. Once the flag is on, writing
+    /// libghostty again would change nothing, so the switch removes the
+    /// override, and the rebuilt panel asks for libghostty by default.
+    @Test("A panel built on SwiftTerm under a libghostty override from before the flag went off switches by removing the override")
+    func switchRemovesAnOverrideThatAlreadyNamesTheTarget() {
+        let fixture = SwitchFixture(label: "StaleOverride", flag: false)
+        defer { fixture.tearDown() }
+        fixture.state.terminalEngineOverrides[fixture.terminalID] = .ghostty
+        let first = fixture.makePanel()
+        #expect(first.engine.kind == .swiftTerm, "with the flag off the panel was built on \(first.engine.kind)")
+
+        fixture.suite.defaults.set(true, forKey: AppState.useGhosttyTerminalEngineKey)
+        let identity = fixture.identity
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+        let override = fixture.state.terminalEngineOverrides[fixture.terminalID]
+        #expect(override == nil, "the switch left the override at \(String(describing: override))")
+        #expect(fixture.identity != identity,
+                "the switch left the identity alone, so the panel would stay on SwiftTerm")
+        #expect(fixture.identity == TerminalPanePresentation.attachIdentity(
+            for: fixture.row, attachEpoch: 0, attachRetry: 0, engineOverride: nil))
+
+        fixture.dismantle(first)
+        let attempts = MakerAttemptLog()
+        _ = fixture.makePanel(
+            makeGhostty: { _, _, _ in
+                attempts.count += 1
+                throw GhosttyError.metalUnavailable
+            },
+            fallbacks: attempts)
+        #expect(attempts.count == 1, "the rebuilt panel did not ask for libghostty")
+    }
+
     /// Every branch of the decision, including the one where the override
     /// already names the target but the panel was built on the other engine:
     /// writing it again would change nothing, so the override goes and the
