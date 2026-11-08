@@ -258,6 +258,37 @@ struct WheelPowerlineKittyTests {
         #expect(end == afterFlip, "after the flip the wheel moved the viewport from row \(afterFlip) to \(end)")
     }
 
+    /// Vim with the mouse off, then `:set mouse=a`: the fraction banked for arrow keys on the
+    /// alternate screen is not carried into the first report, as the app's monitor carries
+    /// nothing while reporting is off.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func arrowKeyFractionIsNotReportedOnceTheMouseIsOn() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1049h")
+        let line = Double(view.cellSize.height)
+
+        // 0.9 of a row down with the mouse off: no arrow key yet, 0.9 banked.
+        Self.wheel(view, deltaY: -0.9 * line, phase: .gestureBegan, at: 1)
+        #expect(recorder.sent.isEmpty, "0.9 of a row with the mouse off sent \(recorder.sent)")
+
+        // `:set mouse=a`.
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+        let reporting = terminal.isMouseReporting
+        try #require(reporting, "?1000h did not turn mouse reporting on")
+
+        // 0.2 more. With the 0.9 kept, it would make a whole row, and a report.
+        let small = Self.wheel(view, deltaY: -0.2 * line, phase: .gestureChanged, at: 1.01)
+        #expect(recorder.sent.isEmpty, "0.2 of a row after :set mouse=a sent \(recorder.sent), from \(describe(small))")
+
+        // 0.9 more makes 1.1 rows since the mouse came on: one report, button 5.
+        let whole = Self.wheel(view, deltaY: -0.9 * line, phase: .gestureChanged, at: 1.02)
+        let sent = Array(recorder.sent.joined())
+        let reports = sent.filter { $0 == 0x1B }.count
+        let isWheelDown = sent.starts(with: Array("\u{1b}[<65;".utf8))
+        #expect(reports == 1 && isWheelDown,
+                "1.1 rows after :set mouse=a sent \(String(decoding: sent, as: UTF8.self).debugDescription), from \(describe(whole))")
+    }
+
     /// After `?1000h ?1003h ?1003l` the 1000 bit is still set, but libghostty reports nothing, so
     /// the wheel scrolls the viewport, and at the viewport's speed: a notch of 3 lines moves it 3
     /// rows, not the one row a notch is when it goes to the program.

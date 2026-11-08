@@ -201,13 +201,12 @@ extension GhosttyTerminal {
         }
     }
 
-    /// Whether wheel rows would scroll the viewport rather than reach the program, under one lock:
-    /// nothing is reported and the primary screen is showing, as `MouseEncoder.wheel` decides.
-    /// Read from what libghostty reports, like `isMouseReporting`, not from the mode bits. True
-    /// once the terminal is closed, when the wheel does nothing anyway.
-    var wheelScrollsViewport: Bool {
-        input("reading where the wheel goes", fallback: true) { raw, binding in
-            !binding.mouseEncoder.isReporting(terminal: raw) && !GhosttyTerminalState(raw: raw).isAlternateScreen
+    /// Where wheel rows would go, under one lock, as `MouseEncoder.wheel` decides: reports, arrow
+    /// keys or the viewport. Read from what libghostty reports, like `isMouseReporting`, not from
+    /// the mode bits. The viewport once the terminal is closed, when the wheel does nothing anyway.
+    var wheelRoute: WheelRoute {
+        input("reading where the wheel goes", fallback: .viewport) { raw, binding in
+            binding.mouseEncoder.wheelRoute(terminal: raw)
         }
     }
 

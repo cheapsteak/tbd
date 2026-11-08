@@ -188,6 +188,17 @@ enum WheelOutcome: Sendable, Equatable {
     case scrolledViewport(rows: Int)
 }
 
+/// Where wheel rows go under the terminal's modes as they stand, as `MouseEncoder.wheel` decides.
+enum WheelRoute: Sendable, Equatable {
+    /// To the program as mouse reports: libghostty reports the mouse.
+    case reports
+    /// To the program as arrow keys under `?1007`, or nowhere without it: the alternate screen,
+    /// with nothing reported.
+    case alternateScroll
+    /// To the viewport: the primary screen, with nothing reported.
+    case viewport
+}
+
 // MARK: - The encoder
 
 /// Wraps `GhosttyMouseEncoder` plus one reusable `GhosttyMouseEvent`.
@@ -468,12 +479,21 @@ final class MouseEncoder {
         return Array(stack.prefix(written))
     }
 
+    /// Where wheel rows go under `terminal`'s modes as they stand: reports while libghostty
+    /// reports the mouse, by the flags rather than the mode bits, then alternate scroll on the
+    /// alternate screen, then the viewport. `wheel` goes by it, and the view reads it to choose
+    /// its arithmetic. Caller holds the terminal lock.
+    func wheelRoute(terminal: VtTerminal) -> WheelRoute {
+        if isReporting(terminal: terminal) { return .reports }
+        return GhosttyTerminalState(raw: terminal).isAlternateScreen ? .alternateScroll : .viewport
+    }
+
     /// Turn accumulated whole rows of scrolling into mouse reports, arrow keys or a viewport scroll.
     ///
     /// - Parameter rows: whole rows to scroll; **negative = up**, matching
     ///   `GHOSTTY_SCROLL_VIEWPORT_DELTA` ("up is negative"). Feed it from `ScrollAccumulator`.
     ///
-    /// The order is Ghostty's own (`Surface.zig`, `scrollCallback`):
+    /// The order is Ghostty's own (`Surface.zig`, `scrollCallback`), as `wheelRoute` gives it:
     ///   * With tracking on, one *press* report per row is due for button four (up) / five (down);
     ///     that is what xterm-style wheel reporting is — see the measured bytes in the tests. Every
     ///     row's report is the same press in the same cell, so it is encoded once and counted.
@@ -491,24 +511,26 @@ final class MouseEncoder {
     ) throws -> WheelOutcome {
         guard rows != 0 else { return .none }
 
-        guard isReporting(terminal: terminal) else {
+        switch wheelRoute(terminal: terminal) {
+        case .alternateScroll:
+            // Arrow keys here match SwiftTerm's own view, and are what makes the wheel work
+            // in less and vim. TBD's holder panels drop these wheel events instead, because
+            // arrow keys typed into an agent's composer recall its history; they get that
+            // policy from the app's scroll monitor (`ScrollWheelAccumulator`) in front of
+            // this view, so this view does not repeat it.
             let state = GhosttyTerminalState(raw: terminal)
-            if state.isAlternateScreen {
-                // Arrow keys here match SwiftTerm's own view, and are what makes the wheel work
-                // in less and vim. TBD's holder panels drop these wheel events instead, because
-                // arrow keys typed into an agent's composer recall its history; they get that
-                // policy from the app's scroll monitor (`ScrollWheelAccumulator`) in front of
-                // this view, so this view does not repeat it.
-                guard state.mode(Self.alternateScrollMode) else { return .none }
-                let key = Self.alternateScrollKey(
-                    up: rows < 0, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode))
-                return .cursorKeys(key: key, count: abs(rows))
-            }
+            guard state.mode(Self.alternateScrollMode) else { return .none }
+            let key = Self.alternateScrollKey(
+                up: rows < 0, applicationCursorKeys: state.mode(Self.applicationCursorKeysMode))
+            return .cursorKeys(key: key, count: abs(rows))
+        case .viewport:
             var behavior = GhosttyTerminalScrollViewport()
             behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
             behavior.value.delta = rows
             _ = ghostty_terminal_scroll_viewport(terminal, behavior)
             return .scrolledViewport(rows: rows)
+        case .reports:
+            break
         }
 
         syncFromTerminal(terminal)
