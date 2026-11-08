@@ -724,12 +724,6 @@ actor PhoneAppService: PhoneAppHandling {
         devices[deviceID]?.stream.streamID
     }
 
-    /// The `seq` of the device's last event, or nil when the service keeps
-    /// no state for it. For tests.
-    func lastSeq(for deviceID: UUID) -> Int? {
-        devices[deviceID]?.stream.lastSeq
-    }
-
     /// The device's connection's resume decision, or nil when the service
     /// keeps no state for it.
     func resumeDecision(for deviceID: UUID) -> PhoneResumeDecision? {

@@ -153,7 +153,7 @@ extension PhoneAppService {
             break
         case .codex:
             throw PhoneAppError(code: .unavailable, message: PhoneSessionStatus.codexTranscriptReason)
-        case nil:
+        case .remote, nil:
             throw PhoneAppError(code: .unsupported, message: Self.notAClaudeTranscriptReason)
         }
 
@@ -284,7 +284,7 @@ extension PhoneAppService {
         do {
             guard let terminal = try await db.terminals.get(id: terminalID),
                   let worktree = try await db.worktrees.get(id: terminal.worktreeID) else { return nil }
-            return locateTranscript(terminal, worktree.path)
+            return locateTranscript(terminal, worktree.localPath)
         } catch {
             Self.transcriptLogger.error(
                 "Phone transcript: could not read a terminal row: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
