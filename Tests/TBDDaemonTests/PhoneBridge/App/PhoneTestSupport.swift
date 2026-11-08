@@ -54,9 +54,13 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
         var remoteLoadEarliers: [RemoteTranscriptLoadEarlierParams] = []
     }
 
+    /// Answers one call at the moment it is made.
+    typealias Handler = @Sendable () -> RPCResponse
+
     private let lock = NSLock()
     private var log = Log()
     private var responses: [Method: RPCResponse] = [:]
+    private var handlers: [Method: Handler] = [:]
     private var gates: [Method: PhoneTestGate] = [:]
 
     init() {}
@@ -76,6 +80,14 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     /// Every later call of `method` answers `response`.
     func respond(to method: Method, with response: RPCResponse) {
         lock.withLock { responses[method] = response }
+    }
+
+    /// Every later call of `method` answers what `handler` returns when the
+    /// call is made, in place of any `respond(to:with:)`. The handler runs
+    /// outside the fake's lock, so it may do work of its own, such as
+    /// writing the file a remote transcript sync would.
+    func handle(_ method: Method, with handler: @escaping Handler) {
+        lock.withLock { handlers[method] = handler }
     }
 
     /// Every later call of `method` is recorded at once, then holds its
@@ -99,11 +111,12 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     }
 
     private func record(_ method: Method, deviceID: UUID?, keep: (inout Log) -> Void = { _ in }) -> RPCResponse {
-        lock.withLock {
+        let (handler, response) = lock.withLock { () -> (Handler?, RPCResponse) in
             log.calls.append(Call(method: method, deviceID: deviceID))
             keep(&log)
-            return responses[method] ?? .ok()
+            return (handlers[method], responses[method] ?? .ok())
         }
+        return handler?() ?? response
     }
 
     func phoneSessionStates() async throws -> RPCResponse {

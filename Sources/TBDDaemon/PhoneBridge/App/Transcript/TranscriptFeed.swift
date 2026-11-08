@@ -5,9 +5,6 @@ import TBDShared
 // MARK: - Source and events
 
 /// Where a transcript feed reads from.
-///
-/// A remote session's source joins this enum as its own case; `open()` and
-/// `refreshSession()` are the places that switch on it.
 enum TranscriptFeedSource: Sendable {
     /// A local Claude session. `resolvePath` finds the session's transcript
     /// file as the terminal row names it now (`ClaudeTranscriptLocator`), or
@@ -15,6 +12,10 @@ enum TranscriptFeedSource: Sendable {
     /// every session change, so a session that moved to a new file is followed
     /// there. The path never comes from the phone.
     case local(terminalID: UUID, resolvePath: @Sendable () async -> String?)
+    /// A remote session's transcript cache, which `follower` syncs while the
+    /// feed is live. Each sync names the cache file; the path never comes from
+    /// the phone.
+    case remote(RemoteTranscriptFollower)
 }
 
 /// One live event of an open transcript, as the feed hands it to the
@@ -84,6 +85,29 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 /// as the incremental parser would, and takes the batch's start as its
 /// offset.
 ///
+/// **A remote session** reads the daemon's transcript cache instead of a
+/// session file, and follows it through `RemoteTranscriptFollower` rather
+/// than a watcher: `open()` syncs once and pages the cache the sync names,
+/// and the live part runs one sync per `remoteSyncInterval`, the phone
+/// counting as a viewer while the transcript is open. Each sync's result is
+/// applied in order by the worker:
+/// - **a newer cache generation**, or another cache file, starts over with
+///   reason `generation`;
+/// - **a newer `head`**, earlier history prepended to the cache, moves the
+///   cursor past the prepend (`TranscriptAppendCursor.rebaseAfterPrepend`),
+///   and every line offset the feed keeps with it, so the live part goes on
+///   appending; when the cursor's bytes cannot be found, the feed starts over
+///   with reason `rewrite`;
+/// - **then a step**, as for a local file. A step that finds the cache
+///   changed before the cursor tries the same move first, since within a
+///   generation the cache only grows at either end, and a load another
+///   viewer ran can prepend before any sync reports it.
+///
+/// A sync that fails sends nothing; the next one that succeeds brings the
+/// phone up to date. An older page that reaches the top of the cache while
+/// the last sync said earlier history can be loaded loads it first
+/// (`olderPage(cursor:)`).
+///
 /// **Bounded state.** Every index drops the entry added first once it is
 /// full (`TranscriptFeedIndex`):
 /// - **results** – `resultLimit` tool results from every page read and from
@@ -119,6 +143,12 @@ actor TranscriptFeed {
 
     static let rewriteReason = "rewrite"
     static let rolloverReason = "rollover"
+    static let generationReason = "generation"
+
+    private static let staleCursor = PhoneAppError(code: .staleCursor, message: TranscriptPager.staleCursorMessage)
+    /// The kinds of item that count as messages for an older page's
+    /// `olderPageMessages`, as `TranscriptParser.parseWindow` counts them.
+    private static let messageKinds: Set<PhoneItemKind> = [.user, .slash, .assistant, .peer]
 
     /// The page of a transcript with no file yet.
     static let emptyPage = TranscriptPage(items: [], cursor: nil, reachedStart: true, omittedItems: 0)
@@ -163,6 +193,31 @@ actor TranscriptFeed {
     /// tests, which wait on it to know a read is behind them.
     private(set) var readCount = 0
 
+    /// What the last sync, or load of earlier history, said about a remote
+    /// session's cache. Nil for a local source.
+    private var remote: RemoteCache?
+    /// The newest sync result the worker has yet to apply.
+    private var pendingSync: RemoteTranscriptSyncResult?
+    /// A start-over a load of earlier history asked the worker for, with its
+    /// reason.
+    private var pendingReset: String?
+    /// The follower's syncs, while the live part runs for a remote session.
+    private var syncLoop: Task<Void, Never>?
+
+    /// A remote session's cache, as the feed last heard of it.
+    private struct RemoteCache: Sendable {
+        /// The cache's own generation, which a provider reset bumps. Not the
+        /// feed's `generation`, which the phone's cursors carry.
+        var generation: Int
+        /// Bumped by every prepend of earlier history within a generation.
+        var head: Int
+        /// Whether earlier history can be loaded now.
+        var hasEarlier: Bool
+        /// Whether a load reached the start in this generation, so no later
+        /// sync offers earlier history again.
+        var earlierEnded = false
+    }
+
     /// The last detail the phone was sent, for the generation it was read in.
     private struct CachedDetail: Sendable {
         let generation: Int
@@ -189,18 +244,23 @@ actor TranscriptFeed {
 
     /// The first page, generation 0: `TranscriptPager.firstPage` over the
     /// session's file, or `emptyPage` when it has none or it cannot be read.
-    /// Starts nothing.
+    /// A remote session's file is the cache one sync names, and a sync that
+    /// fails is the error thrown. Starts nothing.
     func open() async throws -> TranscriptPage {
         switch source {
         case .local(_, let resolvePath):
             path = await resolvePath()
+        case .remote(let follower):
+            let result = try await follower.sync()
+            adopt(result)
         }
         return loadFirstPage(generation: generation) ?? Self.emptyPage
     }
 
-    /// Starts the live part: the worker, the watcher, and a first wakeup that
-    /// resolves the path again and reads what was appended since `open()`.
-    /// Does nothing once started or closed.
+    /// Starts the live part: the worker, the watcher (for a remote session,
+    /// the follower's syncs), and a first wakeup that resolves the path again
+    /// and reads what was appended since `open()`. Does nothing once started
+    /// or closed.
     func start() {
         guard !closed, worker == nil else { return }
         let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -214,11 +274,17 @@ actor TranscriptFeed {
                 await self.runWanted()
             }
         }
-        startWatcher()
+        switch source {
+        case .local:
+            startWatcher()
+        case .remote(let follower):
+            startSyncLoop(follower)
+        }
     }
 
-    /// Ends the worker and the watcher for good. A later `start()` does
-    /// nothing, and a read in progress emits nothing more.
+    /// Ends the worker, the watcher and the follower's syncs for good. A
+    /// later `start()` does nothing, and a read in progress emits nothing
+    /// more.
     func close() {
         closed = true
         lastDetail = nil
@@ -227,11 +293,20 @@ actor TranscriptFeed {
         worker?.cancel()
         worker = nil
         stopWatcher()
+        syncLoop?.cancel()
+        syncLoop = nil
+        pendingSync = nil
+        pendingReset = nil
     }
 
     /// Whether a watcher task runs. For tests.
     var isWatching: Bool {
         watcher != nil
+    }
+
+    /// Whether the follower's syncs run. For tests.
+    var isSyncing: Bool {
+        syncLoop != nil
     }
 
     /// The file the feed reads, or nil with none. For tests.
@@ -277,18 +352,33 @@ actor TranscriptFeed {
         wakeups?.yield()
     }
 
+    /// A remote sync's result, in place of any the worker has yet to apply:
+    /// each is compared with what the feed holds, so the newest is enough.
+    private func noteSynced(_ result: RemoteTranscriptSyncResult) {
+        guard !closed else { return }
+        pendingSync = result
+        wakeups?.yield()
+    }
+
     /// Does what the wakeups asked for, until nothing more is wanted, and
     /// emits each read's events in order before the next read. Lines held
     /// by a reset's fresh cursor ask for a step of their own, so they follow
     /// the reset at once.
     private func runWanted() async {
-        while !closed, sessionCheckWanted || stepWanted || heldLines != nil {
+        while !closed,
+              sessionCheckWanted || stepWanted || heldLines != nil || pendingSync != nil || pendingReset != nil {
             // With no file read yet, any wakeup looks for the file again.
             let checkSession = sessionCheckWanted || cursor == nil
             sessionCheckWanted = false
             stepWanted = false
             let events: [TranscriptFeedEvent]
-            if checkSession {
+            if let reason = pendingReset {
+                pendingReset = nil
+                events = [reset(reason: reason)]
+            } else if let result = pendingSync {
+                pendingSync = nil
+                events = applySync(result)
+            } else if checkSession {
                 events = await refreshSession()
             } else {
                 events = step()
@@ -307,13 +397,17 @@ actor TranscriptFeed {
     // MARK: - Reading
 
     /// Resolves the path again. A different file is a rollover; the same one
-    /// takes a step. Nil changes nothing.
+    /// takes a step. Nil changes nothing. A remote session's path comes with
+    /// each sync instead, so it takes a step.
     private func refreshSession() async -> [TranscriptFeedEvent] {
-        let resolved: String?
+        let resolvePath: @Sendable () async -> String?
         switch source {
-        case .local(_, let resolvePath):
-            resolved = await resolvePath()
+        case .local(_, let resolve):
+            resolvePath = resolve
+        case .remote:
+            return step()
         }
+        let resolved = await resolvePath()
         guard !closed else { return [] }
         guard let resolved, resolved != path else { return step() }
         path = resolved
@@ -334,11 +428,21 @@ actor TranscriptFeed {
         }
         // Lines held from when the cursor was built come first; they end
         // where the cursor now stands.
-        let held = heldLines
+        var held = heldLines
         heldLines = nil
+        var start = held?.start ?? cursor.offset
+        var outcome = cursor.step(path: path)
+        if outcome == .reset, case .remote = source, let shift = rebaseCursor(), let rebased = self.cursor {
+            // Within a generation a remote cache only grows at either end, so
+            // a change before the cursor is earlier history that a load
+            // prepended before any sync reported it: read on past it.
+            held = held.map { (lines: $0.lines, start: $0.start + shift) }
+            cursor = rebased
+            start = held?.start ?? cursor.offset
+            outcome = cursor.step(path: path)
+        }
         var lines = held?.lines ?? []
-        let start = held?.start ?? cursor.offset
-        switch cursor.step(path: path) {
+        switch outcome {
         case .unreadable, .unchanged:
             break
         case .reset:
@@ -348,6 +452,84 @@ actor TranscriptFeed {
             self.cursor = cursor
         }
         return ingest(lines, from: start, to: cursor.offset)
+    }
+
+    // MARK: - A remote cache
+
+    /// Takes a sync's cache file and state as the feed's own.
+    private func adopt(_ result: RemoteTranscriptSyncResult) {
+        path = result.path
+        remote = RemoteCache(generation: result.generation, head: result.head, hasEarlier: result.hasEarlier)
+    }
+
+    /// Applies a sync's result, then steps. A newer cache generation, or
+    /// another cache file, starts over with reason `generation`. A newer
+    /// `head` moves the cursor past the earlier history prepended, or starts
+    /// over with reason `rewrite` when it cannot. A result from a sync that
+    /// read the cache before something the feed already applied (an older
+    /// generation or `head`) changes nothing but the step.
+    private func applySync(_ result: RemoteTranscriptSyncResult) -> [TranscriptFeedEvent] {
+        guard var cache = remote else { return step() }
+        if result.generation > cache.generation || result.path != path {
+            adopt(result)
+            return [reset(reason: Self.generationReason)]
+        }
+        guard result.generation == cache.generation, result.head >= cache.head else { return step() }
+        let prepended = result.head > cache.head
+        cache.head = result.head
+        cache.hasEarlier = result.hasEarlier && !cache.earlierEnded
+        remote = cache
+        if prepended, rebaseCursor() == nil {
+            return [reset(reason: Self.rewriteReason)]
+        }
+        return step()
+    }
+
+    /// Moves the cursor past earlier history prepended to a remote cache,
+    /// with every offset the feed keeps beside it, and returns how many bytes
+    /// were prepended. Nil, with nothing moved, when there is no cursor or
+    /// the bytes it read are not found within `anchorScanLimit` past it; the
+    /// caller then starts over.
+    private func rebaseCursor() -> UInt64? {
+        guard var moved = cursor else { return nil }
+        let before = moved.offset
+        guard moved.rebaseAfterPrepend(limit: PhoneAppConstants.anchorScanLimit), moved.offset >= before else {
+            return nil
+        }
+        let shift = moved.offset - before
+        cursor = moved
+        if shift > 0 {
+            lineOffsets.mapValues { $0 + shift }
+            heldLines = heldLines.map { (lines: $0.lines, start: $0.start + shift) }
+        }
+        return shift
+    }
+
+    /// Runs the follower's syncs while the live part runs, each result handed
+    /// to the worker. `close()` cancels the task, which ends the follower's
+    /// stream and its syncing with it.
+    private func startSyncLoop(_ follower: RemoteTranscriptFollower) {
+        syncLoop = Task { [weak self] in
+            let ticks = await follower.ticks()
+            for await result in ticks {
+                guard let self else { return }
+                await self.noteSynced(result)
+            }
+        }
+    }
+
+    /// `build`'s page as the phone gets it, `build` read in `generation`. A
+    /// remote page that reached the top of the cache while earlier history
+    /// can be loaded has not reached the start: its cursor names offset 0, so
+    /// the phone asks for the page before it, which loads that history. Any
+    /// other page is as built.
+    private func phonePage(_ build: PageBuild, generation: Int) -> TranscriptPage {
+        guard build.page.reachedStart, remote?.hasEarlier == true, let path,
+              let cursor = TranscriptPager.makeCursor(generation: generation, offset: 0, filePath: path) else {
+            return build.page
+        }
+        return TranscriptPage(
+            items: build.page.items, cursor: cursor, reachedStart: false, omittedItems: build.page.omittedItems)
     }
 
     /// Starts over at the file's tail in a new generation.
@@ -401,7 +583,7 @@ actor TranscriptFeed {
             heldLines = (lines: lines, start: build.endOffset)
         }
         cursor = fresh
-        return build.page
+        return phonePage(build, generation: generation)
     }
 
     /// The events for `lines`, read from `start` to `end`.
@@ -526,8 +708,10 @@ actor TranscriptFeed {
 
     /// Watches the file, when there is one, in place of any earlier watcher.
     /// A watcher whose stream ends on its own (the file went away) is
-    /// replaced after the next read that finds the file again.
+    /// replaced after the next read that finds the file again. A remote
+    /// session's cache changes only through syncs, so it has no watcher.
     private func startWatcher() {
+        guard case .local = source else { return }
         stopWatcher()
         guard !closed, let path, FileManager.default.fileExists(atPath: path) else { return }
         watcherToken &+= 1
@@ -558,14 +742,115 @@ actor TranscriptFeed {
     /// Its results, its rows' offsets and its calls still `running` are kept
     /// too, so the page before it can join a result that sits on this one.
     /// Throws `stale_cursor` for a cursor of another generation, or one that
-    /// no longer names a line of the file.
-    func olderPage(cursor: String) throws -> TranscriptPage {
-        guard let path else {
-            throw PhoneAppError(code: .staleCursor, message: TranscriptPager.staleCursorMessage)
+    /// no longer names a line of the file. A remote session's page can load
+    /// earlier history first (`remoteOlderPage`).
+    func olderPage(cursor: String) async throws -> TranscriptPage {
+        guard let path else { throw Self.staleCursor }
+        switch source {
+        case .local:
+            let build = try TranscriptPager.olderPage(
+                filePath: path, cursor: cursor, generation: generation, ctx: pageContext(path: path))
+            return keep(build)
+        case .remote(let follower):
+            return try await remoteOlderPage(cursor: cursor, path: path, follower: follower)
         }
-        let ctx = ShapingContext(
+    }
+
+    /// An older page of a remote cache: the page before `cursor`, and, when
+    /// that page reaches the top of the cache with fewer than
+    /// `olderPageMessages` messages while the last sync said earlier history
+    /// can be loaded, one `remote.transcriptLoadEarlier`, after which the
+    /// cursor is resolved again past what it prepended and the page built
+    /// again. The page has reached the start only when it reaches the top of
+    /// the cache and no earlier history can be loaded.
+    ///
+    /// - **A load that fails** leaves the cache as it was. The phone gets the
+    ///   cache's page, whose cursor still asks for more, so it can try again;
+    ///   with nothing in the cache to show, the load's error is the reply.
+    /// - **A load that met a newer generation** fetched nothing: a sync
+    ///   replaced the cache first. The feed starts over with reason
+    ///   `generation`, and the cursor is stale.
+    /// - **A load that reached the start**, or found the history expired,
+    ///   ends the scroll: no later sync in this generation offers earlier
+    ///   history again, and the page reaches the start.
+    /// - **A prepend the feed cannot follow** starts the feed over with reason
+    ///   `rewrite`, and the cursor is stale.
+    /// - **A feed that started over or closed** while the load ran makes the
+    ///   cursor stale.
+    private func remoteOlderPage(
+        cursor: String, path: String, follower: RemoteTranscriptFollower
+    ) async throws -> TranscriptPage {
+        let pageGeneration = generation
+        let cached = try remoteBuild(cursor: cursor, path: path)
+        guard needsEarlier(cached) else { return keep(cached) }
+        let loaded: RemoteTranscriptLoadEarlierResult
+        do {
+            loaded = try await follower.loadEarlier()
+        } catch {
+            if error is CancellationError { throw error }
+            Self.logger.error(
+                "Phone transcript: loading earlier remote history failed: \(PhoneAppService.errorType(error), privacy: .public)")
+            guard !closed, generation == pageGeneration, self.path == path else { throw Self.staleCursor }
+            guard !cached.page.items.isEmpty else { throw error }
+            return keep(cached)
+        }
+        guard !closed, generation == pageGeneration, self.path == path, var cache = remote else {
+            throw Self.staleCursor
+        }
+        guard loaded.generation == cache.generation else {
+            if loaded.generation > cache.generation {
+                remote = RemoteCache(generation: loaded.generation, head: loaded.head, hasEarlier: false)
+                pendingReset = Self.generationReason
+                wakeups?.yield()
+            }
+            throw Self.staleCursor
+        }
+        if loaded.reachedStart || loaded.expired {
+            cache.earlierEnded = true
+            cache.hasEarlier = false
+        }
+        let prepended = loaded.head > cache.head
+        cache.head = max(cache.head, loaded.head)
+        remote = cache
+        if prepended, rebaseCursor() == nil {
+            pendingReset = Self.rewriteReason
+            wakeups?.yield()
+            throw Self.staleCursor
+        }
+        let rebuilt = try remoteBuild(cursor: cursor, path: path)
+        return keep(rebuilt)
+    }
+
+    /// The page before `cursor` in the remote cache at `path`, or
+    /// `stale_cursor` when the cursor names no line of it.
+    private func remoteBuild(cursor: String, path: String) throws -> PageBuild {
+        guard let offset = TranscriptPager.resolveCursor(cursor, generation: generation, filePath: path),
+              let build = TranscriptPager.olderPage(
+                filePath: path, before: offset, generation: generation, ctx: pageContext(path: path)) else {
+            throw Self.staleCursor
+        }
+        return build
+    }
+
+    /// Whether a remote page needs earlier history loaded: it reaches the top
+    /// of the cache, the last sync said earlier history can be loaded, and it
+    /// holds fewer than `olderPageMessages` messages.
+    private func needsEarlier(_ build: PageBuild) -> Bool {
+        guard build.startOffset == 0, remote?.hasEarlier == true else { return false }
+        let messages = build.page.items.filter { Self.messageKinds.contains($0.kind) }.count
+        return messages < PhoneAppConstants.olderPageMessages
+    }
+
+    /// How an older page is shaped: with the results the feed keeps.
+    private func pageContext(path: String) -> ShapingContext {
+        ShapingContext(
             showDetails: showDetails, joinedResults: results.dictionary, subagentItemCount: subagentCount(path: path))
-        let build = try TranscriptPager.olderPage(filePath: path, cursor: cursor, generation: generation, ctx: ctx)
+    }
+
+    /// Keeps an older page's results, its rows' offsets, its calls still
+    /// `running` and its subagent IDs, and returns the page as the phone gets
+    /// it.
+    private func keep(_ build: PageBuild) -> TranscriptPage {
         for (id, result) in build.results {
             results.set(Self.statusOnly(result), for: id)
         }
@@ -578,7 +863,7 @@ actor TranscriptFeed {
         for (id, agentID) in build.subagentAgentIDs {
             pageAgentIDs.set(agentID, for: id)
         }
-        return build.page
+        return phonePage(build, generation: generation)
     }
 
     /// Where to look up `itemID`'s detail, or nil when the feed has no file:
@@ -708,6 +993,11 @@ struct TranscriptFeedIndex<Value: Sendable>: Sendable {
             order = order[head...].filter { entries[$0.key]?.stamp == $0.stamp }
             head = 0
         }
+    }
+
+    /// Every value replaced by `transform` of it, each keeping its place.
+    mutating func mapValues(_ transform: (Value) -> Value) {
+        entries = entries.mapValues { Entry(stamp: $0.stamp, value: transform($0.value)) }
     }
 
     @discardableResult

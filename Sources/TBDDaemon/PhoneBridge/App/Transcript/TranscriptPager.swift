@@ -72,14 +72,30 @@ enum TranscriptPager {
     /// (`resolveCursor`) or names no line start the file still holds.
     static func olderPage(filePath: String, cursor: String, generation: Int, ctx: ShapingContext) throws -> PageBuild {
         guard let offset = resolveCursor(cursor, generation: generation, filePath: filePath),
-              let window = TranscriptParser.parseWindow(
-                filePath: filePath, endingBefore: offset,
-                messageLimit: PhoneAppConstants.olderPageMessages,
-                itemLimit: PhoneAppConstants.olderPageItemLimit) else {
+              let build = olderPage(filePath: filePath, before: offset, generation: generation, ctx: ctx) else {
             throw PhoneAppError(code: .staleCursor, message: staleCursorMessage)
         }
+        return build
+    }
+
+    /// The page that ends at `offset`, a line start a cursor resolved to, as
+    /// `olderPage(filePath:cursor:generation:ctx:)` builds it. Nil when the
+    /// file cannot be read there. At offset 0 it is an empty page that has
+    /// reached the start, which a remote cache with earlier history to load
+    /// asks for.
+    static func olderPage(filePath: String, before offset: UInt64, generation: Int, ctx: ShapingContext) -> PageBuild? {
+        guard offset > 0 else { return emptyBuild }
+        guard let window = TranscriptParser.parseWindow(
+            filePath: filePath, endingBefore: offset,
+            messageLimit: PhoneAppConstants.olderPageMessages,
+            itemLimit: PhoneAppConstants.olderPageItemLimit) else { return nil }
         return build(window, filePath: filePath, generation: generation, ctx: ctx, budget: PhoneFrameBudget.olderPageBytes)
     }
+
+    /// The page before offset 0: no items, and the start reached.
+    static let emptyBuild = PageBuild(
+        page: TranscriptPage(items: [], cursor: nil, reachedStart: true, omittedItems: 0),
+        startOffset: 0, endOffset: 0, lineOffsets: [:], unresolvedCalls: [:], results: [:], subagentAgentIDs: [:])
 
     // MARK: - Cursors
 

@@ -13,7 +13,9 @@ import TBDShared
 // - `PhonePromptSet` and `PhonePromptAttribution` turn the set the phone was
 //   last sent and the set open now into a `PromptChangedData`, or nil.
 // - `PhoneLocalPromptSource` reads a local terminal's open prompts again on
-//   every `.terminalPendingPromptsChanged` for it.
+//   every `.terminalPendingPromptsChanged` for it, and
+//   `PhoneRemotePromptSource` a remote session's on every
+//   `.remoteSessionsChanged`.
 // - `PhonePromptFeed`, in `PhoneDeviceState.prompts`, ties them to one device's
 //   open session, through `openPrompts(_:for:)` and `closePrompts(for:)`.
 
@@ -460,7 +462,15 @@ struct PhonePromptSet: Sendable {
     }
 }
 
-// MARK: - A local session's source
+// MARK: - Sources
+
+/// What reads one open session's prompts for a device's prompt feed: it
+/// reads the set once on `start()` and again on every change, and `stop()`
+/// ends it for good.
+protocol PhonePromptSource: Sendable {
+    func start() async
+    func stop() async
+}
 
 /// The open prompts of one local terminal, read again whenever its set
 /// changes.
@@ -474,7 +484,7 @@ struct PhonePromptSet: Sendable {
 ///
 /// `stop()` removes the subscriber and ends the work for good; a later
 /// `start()` does nothing.
-actor PhoneLocalPromptSource {
+actor PhoneLocalPromptSource: PhonePromptSource {
     typealias Delivery = @Sendable (
         _ open: [PendingPromptPayload], _ resolved: [String: PendingPromptStore.Resolution]
     ) async -> Void
@@ -557,15 +567,143 @@ actor PhoneLocalPromptSource {
     }
 }
 
+/// The open prompt of one remote session, as its provider last reported it
+/// (`effectivePendingPrompt`), read from the laptop's remote session list
+/// when the feed starts and again on every `.remoteSessionsChanged`.
+///
+/// The delta is only a wakeup, as for a local terminal: the list is read
+/// itself (`phoneRemoteSessions`), so a delta that arrives out of order
+/// cannot bring an old set back. A session missing from the list, or
+/// dismissed, has no open prompt. A list the daemon refuses to give, or that
+/// does not decode, delivers nothing, and the next change reads it again.
+///
+/// One task reads and delivers, one read at a time, and a wakeup that comes
+/// while it works makes one more read. So a delivery that waits, for a
+/// phone's answer to a prompt that closed (up to the provider's answer
+/// timeout), holds up only the next read, never the transcript's syncs,
+/// which run on a task of their own.
+///
+/// `stop()` removes the subscriber and ends the work for good; a later
+/// `start()` does nothing.
+actor PhoneRemotePromptSource: PhonePromptSource {
+    typealias Delivery = @Sendable (_ open: [RemotePendingPrompt]) async -> Void
+
+    /// The bytes every `.remoteSessionsChanged` delta holds, checked before
+    /// a delta is decoded.
+    private static let marker = Data(#""remoteSessionsChanged""#.utf8)
+    private static let logger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
+
+    private let provider: String
+    private let sessionID: String
+    private let actions: any PhoneSessionActions
+    private let subscriptions: StateSubscriptionManager
+    private let deliver: Delivery
+    private var subscriberID: StateSubscriptionManager.SubscriberID?
+    private var wakeups: AsyncStream<Void>.Continuation?
+    private var consumer: Task<Void, Never>?
+    private var stopped = false
+
+    init(provider: String, sessionID: String, actions: any PhoneSessionActions,
+         subscriptions: StateSubscriptionManager, deliver: @escaping Delivery) {
+        self.provider = provider
+        self.sessionID = sessionID
+        self.actions = actions
+        self.subscriptions = subscriptions
+        self.deliver = deliver
+    }
+
+    /// Whether the source is subscribed to state deltas: between `start`
+    /// and `stop`. For tests.
+    var isSubscribed: Bool {
+        subscriberID != nil
+    }
+
+    /// Subscribes to state deltas and reads the prompt once. Does nothing
+    /// once started or stopped.
+    func start() {
+        guard !stopped, consumer == nil else { return }
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        wakeups = continuation
+        subscriberID = subscriptions.addSubscriber { data in
+            if Self.isSessionsChange(data) {
+                continuation.yield()
+            }
+            return true
+        }
+        // The first read, after the subscriber is in place, so no change
+        // falls between them.
+        continuation.yield()
+        let provider = self.provider
+        let sessionID = self.sessionID
+        let actions = self.actions
+        let deliver = self.deliver
+        consumer = Task {
+            for await _ in stream {
+                let open = await Self.openPrompts(provider: provider, sessionID: sessionID, actions: actions)
+                guard !Task.isCancelled else { return }
+                // A list that could not be read delivers nothing; the next
+                // change reads it again.
+                guard let open else { continue }
+                await deliver(open)
+            }
+        }
+    }
+
+    /// Removes the subscriber and stops for good.
+    func stop() {
+        stopped = true
+        if let subscriberID {
+            subscriptions.removeSubscriber(subscriberID)
+            self.subscriberID = nil
+        }
+        wakeups?.finish()
+        wakeups = nil
+        consumer?.cancel()
+        consumer = nil
+    }
+
+    /// The session's open prompt, none when the session is missing from the
+    /// list or dismissed, or nil when the list cannot be read.
+    private static func openPrompts(
+        provider: String, sessionID: String, actions: any PhoneSessionActions
+    ) async -> [RemotePendingPrompt]? {
+        do {
+            let response = try await actions.phoneRemoteSessions()
+            guard response.success else {
+                logger.error("Phone prompts: the remote session list was refused")
+                return nil
+            }
+            let sessions = try response.decodeResult(RemoteSessionsResult.self).sessions
+            guard let session = sessions.first(where: { $0.provider == provider && $0.payload.id == sessionID }),
+                  !session.dismissed else { return [] }
+            return session.payload.effectivePendingPrompt.map { [$0] } ?? []
+        } catch {
+            logger.error(
+                "Phone prompts: could not read the remote session list: \(PhoneAppService.errorType(error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// Whether the encoded delta `data` is a `.remoteSessionsChanged`.
+    static func isSessionsChange(_ data: Data) -> Bool {
+        guard data.range(of: marker) != nil,
+              case .remoteSessionsChanged? = try? JSONDecoder().decode(StateDelta.self, from: data) else {
+            return false
+        }
+        return true
+    }
+}
+
 /// A device's open-session prompt feed: the set the phone was last sent, and
-/// the source watching a local session's prompts. `token` tells this feed's
+/// the source watching the session's prompts. `token` tells this feed's
 /// reads from those of a feed it replaced.
 struct PhonePromptFeed: Sendable {
     let token: UInt64
     var set: PhonePromptSet
-    /// Nil for a remote session, whose prompts arrive through
-    /// `remotePromptsRead(_:session:deviceID:)`.
-    let source: PhoneLocalPromptSource?
+    /// `PhoneLocalPromptSource` for a local session and
+    /// `PhoneRemotePromptSource` for a remote one; nil only when a test
+    /// builds a feed by hand.
+    let source: (any PhonePromptSource)?
 }
 
 // MARK: - The service
@@ -735,9 +873,11 @@ extension PhoneAppService {
     /// Starts `prompt.changed` for `session` on the device, in place of any
     /// feed it had. The first event carries the session's set as soon as it
     /// is read, then one follows every change. A local session's set is read
-    /// from the pending prompt store; a remote session's arrives through
-    /// `remotePromptsRead(_:session:deviceID:)`, and the first event follows
-    /// its first call. Does nothing for a device with no state.
+    /// from the pending prompt store (`PhoneLocalPromptSource`); a remote
+    /// session's from the laptop's remote session list, once at once and
+    /// again on every `.remoteSessionsChanged` (`PhoneRemotePromptSource`),
+    /// on a task of its own so a slow read never holds up the transcript.
+    /// Does nothing for a device with no state.
     ///
     /// The transcript feed calls this once its `transcript.open` reply is
     /// queued, so the events follow the reply.
@@ -745,21 +885,26 @@ extension PhoneAppService {
         guard devices[deviceID] != nil else { return }
         let earlier = devices[deviceID]?.prompts?.source
         let token = mintToken()
-        let source: PhoneLocalPromptSource?
-        if case .local(let terminalID) = session {
+        let source: any PhonePromptSource
+        switch session {
+        case .local(let terminalID):
             source = PhoneLocalPromptSource(
                 terminalID: terminalID, store: pendingPrompts, subscriptions: subscriptions,
                 deliver: { [weak self] open, resolved in
                     await self?.localPromptsRead(open, resolved: resolved, deviceID: deviceID, token: token)
                 })
-        } else {
-            source = nil
+        case .remote(let provider, let sessionID):
+            source = PhoneRemotePromptSource(
+                provider: provider, sessionID: sessionID, actions: actions, subscriptions: subscriptions,
+                deliver: { [weak self] open in
+                    await self?.remotePromptsRead(open, deviceID: deviceID, token: token)
+                })
         }
         devices[deviceID]?.prompts = PhonePromptFeed(token: token, set: PhonePromptSet(session: session), source: source)
         // The earlier source's subscriber goes before the new one's comes.
         Task {
             await earlier?.stop()
-            await source?.start()
+            await source.start()
         }
     }
 
@@ -774,13 +919,20 @@ extension PhoneAppService {
 
     /// A remote session's pending prompts as its provider last reported them
     /// (`effectivePendingPrompt`), for a device whose open session it is.
-    /// The remote sync calls it after each `remoteSessionsChanged`, one call
-    /// at a time per device. Does nothing for any other session.
+    /// Does nothing for any other session.
     func remotePromptsRead(_ prompts: [RemotePendingPrompt], session: PhoneSessionRef, deviceID: UUID) async {
         guard let feed = devices[deviceID]?.prompts, feed.set.session == session else { return }
+        await remotePromptsRead(prompts, deviceID: deviceID, token: feed.token)
+    }
+
+    /// What `PhoneRemotePromptSource` read, one read at a time, for the
+    /// prompt feed `token` names: once when the feed starts and again after
+    /// every `.remoteSessionsChanged`. Does nothing once a later feed
+    /// replaced it.
+    private func remotePromptsRead(_ prompts: [RemotePendingPrompt], deviceID: UUID, token: UInt64) async {
         await promptsRead(
             prompts.map(PhonePromptShaper.remote), openedAt: [:], localResolutions: nil,
-            deviceID: deviceID, token: feed.token)
+            deviceID: deviceID, token: token)
     }
 
     private func localPromptsRead(

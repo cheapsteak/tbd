@@ -15,7 +15,8 @@ struct PendingTranscriptResume: Sendable {
 }
 
 /// A device's open transcript: its feed, the relay that hands the feed its
-/// terminal's state deltas, and whether the live part has started.
+/// terminal's state deltas, and whether the live part has started. A remote
+/// session's feed has no relay: its follower syncs the cache instead.
 struct PhoneTranscriptSlot: Sendable {
     /// Tells this slot's events from those of a slot it replaced.
     let token: UInt64
@@ -114,7 +115,12 @@ actor TranscriptDeltaRelay {
 /// `phoneVisibleTerminal`, so the phone opens nothing the laptop no longer
 /// shows it, and opens only a Claude session in a local worktree. The
 /// transcript path comes from the terminal row (`locateTranscript`), never
-/// from the phone. The reply goes out through `.onQueue`, so the stream's
+/// from the phone. A remote session needs its provider registered and
+/// declaring `transcript.read` (`unsupported` otherwise), and must be in the
+/// laptop's remote session list and not dismissed (`not_found` otherwise);
+/// its transcript is the daemon's cache, whose path comes from a sync
+/// (`RemoteTranscriptFollower`), and a sync that fails is the reply's error.
+/// The reply goes out through `.onQueue`, so the stream's
 /// `seq` it names is where the session's events start, and the feed and the
 /// prompt feed start only once the connection is live
 /// (`startTranscript(for:)`): at once when the phone's `sessions.subscribe`
@@ -149,7 +155,7 @@ extension PhoneAppService {
     private static let transcriptLogger = Logger(subsystem: "com.tbd.daemon", category: "phone-bridge")
 
     static let notAClaudeTranscriptReason = "Only a Claude session has a transcript."
-    static let remoteTranscriptReason = "This TBD build cannot open a remote transcript from a phone yet."
+    static let noTranscriptReadReason = "This provider does not support reading transcripts."
     static let transcriptNotOpenReason = "That transcript is not open. Open it again."
     static let transcriptChangedReason = "The transcript changed while it was opened. Try again."
 
@@ -163,13 +169,41 @@ extension PhoneAppService {
             Self.transcriptLogger.fault("Phone transcript: an open arrived with no stamp")
             throw PhoneAppError(code: .internalError, message: "Something went wrong on the laptop.")
         }
-        let terminalID: UUID
+        let source: TranscriptFeedSource
         switch params.session {
-        case .remote:
-            throw PhoneAppError(code: .unavailable, message: Self.remoteTranscriptReason)
-        case .local(let id):
-            terminalID = id
+        case .remote(let provider, let sessionID):
+            source = .remote(try await remoteTranscriptFollower(provider: provider, sessionID: sessionID))
+        case .local(let terminalID):
+            try await checkLocalTranscript(terminalID)
+            source = .local(terminalID: terminalID, resolvePath: { [weak self] in
+                await self?.transcriptPath(of: terminalID)
+            })
         }
+
+        if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
+            return .onQueue { service in
+                service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
+            }
+        }
+        let token = await mintToken()
+        let feed = TranscriptFeed(
+            session: params.session, showDetails: params.showDetails, source: source,
+            emit: { [weak self] event in
+                await self?.emitTranscript(event, to: deviceID, token: token)
+            },
+            clock: clock)
+        let page = try await feed.open()
+        try Task.checkCancellation()
+        return .onQueue { service in
+            service.queueOpenedTranscript(
+                params, feed: feed, token: token, stamp: stamp, page: page, requestID: requestID, deviceID: deviceID)
+        }
+    }
+
+    /// Checks that the phone may open `terminalID`'s transcript: a terminal
+    /// it can see (`phoneVisibleTerminal`), in a local worktree, running
+    /// Claude.
+    private nonisolated func checkLocalTranscript(_ terminalID: UUID) async throws {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         guard worktree.location.isLocal else {
             throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.remoteLaneTabReason)
@@ -182,28 +216,30 @@ extension PhoneAppService {
         case .remote, nil:
             throw PhoneAppError(code: .unsupported, message: Self.notAClaudeTranscriptReason)
         }
+    }
 
-        if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
-            return .onQueue { service in
-                service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
-            }
+    /// The follower of a remote session whose transcript the phone may open.
+    /// Its provider must be registered (`not_found` otherwise) and declare
+    /// `transcript.read`, as the sessions list reads it (`unsupported`
+    /// otherwise), and the session must be in the laptop's remote session
+    /// list and not dismissed, as the sessions list shows it (`not_found`
+    /// otherwise). A list the daemon refuses to give is `refused`.
+    private nonisolated func remoteTranscriptFollower(
+        provider: String, sessionID: String
+    ) async throws -> RemoteTranscriptFollower {
+        let declared = try await declaredCapabilities(ofProvider: provider)
+        let capability = PhoneSessionStatus.remoteCapabilities(declared: declared).transcript
+        guard capability.available else {
+            throw PhoneAppError(code: .unsupported, message: capability.reason ?? Self.noTranscriptReadReason)
         }
-        let token = await mintToken()
-        let feed = TranscriptFeed(
-            session: params.session, showDetails: params.showDetails,
-            source: .local(terminalID: terminalID, resolvePath: { [weak self] in
-                await self?.transcriptPath(of: terminalID)
-            }),
-            emit: { [weak self] event in
-                await self?.emitTranscript(event, to: deviceID, token: token)
-            },
-            clock: clock)
-        let page = try await feed.open()
+        let response = try await actions.phoneRemoteSessions()
+        guard response.success else { throw Self.refusal(response.error) }
+        let sessions = try Self.decoded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
+        guard sessions.contains(where: { $0.provider == provider && $0.payload.id == sessionID && !$0.dismissed }) else {
+            throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
+        }
         try Task.checkCancellation()
-        return .onQueue { service in
-            service.queueOpenedTranscript(
-                params, feed: feed, token: token, stamp: stamp, page: page, requestID: requestID, deviceID: deviceID)
-        }
+        return RemoteTranscriptFollower(provider: provider, sessionID: sessionID, actions: actions, clock: clock)
     }
 
     /// Whether `params` may keep the device's open feed: the connection's
@@ -329,7 +365,8 @@ extension PhoneAppService {
     }
 
     /// Starts the device's open feed's live part, with its relay and the
-    /// session's prompt feed, once the connection is live. Does nothing with
+    /// session's prompt feed, once the connection is live. A remote session
+    /// has no relay; its feed's follower syncs the cache. Does nothing with
     /// no feed, a feed already started, or a connection that is not live yet:
     /// `transcriptConnectionWentLive(for:)` calls this again when the
     /// connection goes live.
