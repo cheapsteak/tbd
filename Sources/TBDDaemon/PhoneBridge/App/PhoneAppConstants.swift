@@ -34,25 +34,70 @@ enum PhoneAppConstants {
     static let remoteSyncInterval: Duration = .seconds(3)
     /// How long `worktree.create` waits for the new worktree's session.
     static let worktreeSessionWait: Duration = .seconds(30)
+    /// The least time, in seconds, between two sessions gathers that re-read
+    /// the provider registry (`phoneRemoteProviders`); a gather inside it
+    /// reads the providers as last read. A `sessions.subscribe` always
+    /// re-reads. Compared on the service's date seam (`now`), as it stamps a
+    /// moment rather than waiting.
+    static let providerRefreshInterval: TimeInterval = 30
+    /// The longest a `prompt.changed` waits for a phone's answer, still
+    /// running, to a prompt that closed, so it can say who answered. Past it
+    /// the running answer is taken as the one that closed the prompt.
+    static let answerAttributionWait: Duration = .seconds(2)
     /// The most events kept for a reconnecting phone to replay.
     static let eventRingCount = 512
     /// The most bytes of events kept for replay.
     static let eventRingBytes = 4_194_304
     /// The most request IDs kept for one device.
     static let requestMemoryPerDevice = 1_000
+    /// The most requests one device may have running at once. A new request
+    /// past it is refused, so a phone cannot start runs without bound.
+    static let requestsInFlightPerDevice = 32
+    /// The longest request ID the service accepts, in UTF-8 bytes. A longer
+    /// one is refused before it reaches the request memory.
+    static let requestIDMaxBytes = 128
+    /// The most UTF-8 bytes of text one `message.send` or `session.setModel`
+    /// may type into a session. A frame already bounds a request near 64 KB;
+    /// this makes the limit explicit, so it holds whatever carries the text.
+    static let messageMaxBytes = 262_144
+    /// The most UTF-8 bytes a phone message that starts a session on the
+    /// tmux transport may take in its spawn command, shell-quoted
+    /// (`PhoneAppService.fitsTmuxFirstPrompt(_:)`): a phone
+    /// `worktree.create`'s first message, or a message that wakes a parked
+    /// tmux session. Such a message rides the spawn command, and tmux packs
+    /// the whole command into one client message of about 16 KB and refuses
+    /// a longer one with "command too long" (on tmux 3.6a a 16,013-byte
+    /// command was accepted and a 17,013-byte one refused). The quoting
+    /// counts against the limit because each `'` grows to four bytes, so
+    /// 12,000 leaves about 4 KB for the rest of the command: the agent's
+    /// flags and environment. A pty-holder spawn hands its command to the
+    /// holder through a socket and execs it with argv, bounded by `ARG_MAX`
+    /// (1 MiB on macOS) rather than by tmux, so it takes up to
+    /// `messageMaxBytes`, as a running session does.
+    static let firstPromptMaxBytes = 12_000
     /// The most rows one `sessions.subscribe` snapshot carries.
     static let snapshotMaxRows = 1_000
     /// The most items one first page carries.
     static let firstPageItemLimit = 256
     /// The most items one older page carries.
     static let olderPageItemLimit = 1_024
-    /// Prompt and question text is cut at this many bytes.
+    /// A permission prompt's summary and target are cut at this many bytes,
+    /// and a deny reason may be at most this long. A question's text is never
+    /// cut, since an answer is keyed on it.
     static let promptTextCap = 4_096
-    /// An option's label or description is cut at this many bytes.
+    /// An option's description and a suggestion line are cut at this many
+    /// bytes. An option's label is never cut, since it is an answer value.
     static let promptOptionCap = 1_024
     /// The most bytes read back from an offset to find a page's start.
     static let anchorScanLimit = 8_388_608
-    /// The most items a subagent's count reports.
+    /// The longest item ID `transcript.detail` accepts, in UTF-8 bytes. Its
+    /// reply echoes the ID, so the ID's size counts against the frame.
+    static let detailItemIDMaxBytes = 256
+    /// Bounds a subagent row's item count, two ways: the most bytes of a
+    /// subagent's transcript file that `TranscriptPager.subagentItemCount`
+    /// reads, so a larger file has no count, and the largest count a row
+    /// carries, which is also the count a row is measured with while a page
+    /// is fitted.
     static let subagentCountLimit = 1_048_576
 }
 
@@ -87,15 +132,20 @@ enum PhoneFrameBudget {
     static func escapedLength(_ s: Substring.UnicodeScalarView) -> Int {
         var length = 0
         for scalar in s {
-            switch scalar.value {
-            case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D:
-                length += 2
-            case 0x00..<0x20:
-                length += 6
-            default:
-                length += UTF8.width(scalar)
-            }
+            length += escapedLength(scalar)
         }
         return length
+    }
+
+    /// The length one scalar takes in a JSON string body, by the rules above.
+    static func escapedLength(_ scalar: Unicode.Scalar) -> Int {
+        switch scalar.value {
+        case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D:
+            return 2
+        case 0x00..<0x20:
+            return 6
+        default:
+            return UTF8.width(scalar)
+        }
     }
 }

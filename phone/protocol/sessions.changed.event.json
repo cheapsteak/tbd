@@ -50,24 +50,27 @@
             "capabilities": {
               "answer": {
                 "available": false,
-                "reason": "Codex sessions have no prompts the phone can answer"
+                "reason": "Codex sessions show status only."
               },
               "fork": {
                 "available": false,
-                "reason": "Only Claude sessions fork"
+                "reason": "Codex sessions show status only."
               },
               "model": {
-                "available": true
+                "available": false,
+                "reason": "Codex sessions show status only."
               },
               "send": {
-                "available": true
+                "available": false,
+                "reason": "Codex sessions show status only."
               },
               "switchProfile": {
                 "available": false,
-                "reason": "Only Claude sessions switch profiles"
+                "reason": "Codex sessions show status only."
               },
               "transcript": {
-                "available": true
+                "available": false,
+                "reason": "Codex transcripts arrive in a later TBD release"
               }
             },
             "ref": {
@@ -102,6 +105,7 @@
                 "available": true
               }
             },
+            "profileID": "8DFEE22E-09D8-5BE1-B331-221F570DC1C6",
             "profileName": "Work",
             "ref": {
               "kind": "local",
@@ -144,6 +148,7 @@
                 "available": true
               }
             },
+            "profileID": "6C2471BC-B073-5CE4-B694-F648094C061D",
             "profileName": "Personal",
             "ref": {
               "kind": "local",

@@ -1398,8 +1398,7 @@ extension WorktreeLifecycle {
     /// If the command is already the user's shell, returns it unchanged.
     private func shellWrapped(_ command: String) -> String {
         if command == defaultShell { return command }
-        let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
-        return "'\(escaped)'; exec \(defaultShell)"
+        return "\(shellEscape(command)); exec \(defaultShell)"
     }
 
     /// Restates a tmux window spawn as a holder launch, without restating any

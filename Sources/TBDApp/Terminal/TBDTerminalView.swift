@@ -5,6 +5,7 @@ import SwiftTerm
 // would collide with `SwiftTerm.Terminal`.
 import enum TBDShared.ProgramStatusParser
 import enum TBDShared.ProgramStatusProtocol
+import enum TBDShared.ShellQuoting
 import os
 
 private let terminalViewLogger = Logger(subsystem: "com.tbd.app", category: "terminalRenderer")
@@ -809,13 +810,13 @@ class TBDTerminalView: TerminalView {
         send(Array(text.utf8))
     }
 
-    /// Shell-quotes a path using single quotes, escaping embedded single quotes.
+    /// Shell-quotes a path using single quotes, escaping embedded single quotes
+    /// (`ShellQuoting.singleQuoted(_:)`).
     private func shellQuote(_ path: String) -> String {
         if path.rangeOfCharacter(from: .shellUnsafe) == nil {
             return path
         }
-        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
-        return "'\(escaped)'"
+        return ShellQuoting.singleQuoted(path)
     }
 
     /// Plain (unmodified) clicks are forwarded into the pane; clicks carrying

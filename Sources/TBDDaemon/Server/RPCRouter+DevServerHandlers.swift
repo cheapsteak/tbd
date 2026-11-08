@@ -40,7 +40,7 @@ extension RPCRouter {
     /// the tab's process group and its exit status is the pane's — read back
     /// through `#{pane_dead_status}`.
     static func devServerShellCommand(_ command: String) -> String {
-        "exec /bin/sh -c '" + command.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        "exec /bin/sh -c " + shellEscape(command)
     }
 
     func handleServerList(_ paramsData: Data) async throws -> RPCResponse {

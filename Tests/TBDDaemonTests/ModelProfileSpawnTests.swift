@@ -737,7 +737,7 @@ struct ModelProfileSpawnTests {
         #expect(launch.contains("CODEX_HOME=\(home.path)"))
         #expect(!launch.contains("/synthetic/elsewhere"))
         #expect(recorder.shellBodies.contains(
-            #"-c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'synthetic prompt'"#))
+            #"-c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'synthetic prompt'"#))
         #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent("tbd.config.toml").path))
         let terminal = try response.decodeResult(Terminal.self)
         #expect(try await db.terminals.get(id: terminal.id)?.codexLaunchOptions

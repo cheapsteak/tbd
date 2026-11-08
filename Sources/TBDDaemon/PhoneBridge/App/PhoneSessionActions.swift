@@ -9,15 +9,20 @@ import TBDShared
 /// `Server/RPCRouter+PhoneSessionActions.swift`, the daemon's root hands it to
 /// the bridge, and the bridge's tests use a fake.
 ///
-/// **Each method is an existing RPC, minus its socket edge.** It returns the
+/// **Each method is an existing RPC, minus its socket edge**, except
+/// `phoneSpawnsOnHolder`, which answers the question every spawn path asks.
+/// It returns the
 /// `RPCResponse` that RPC returns, refusal text included, so the phone hears a
 /// refusal in the words the app hears. It runs exactly the checks the matching
 /// core function or handler runs, in the same order. The only checks it adds
 /// keep shells, which spec section 6 hides from the phone, out of its reach,
 /// and keep its messages to text: `phoneSessionStates` drops every report on
-/// a shell, and the send rail refuses a shell, a message part that is not
-/// text, an empty message and a message holding a control character, inside
-/// the send core, on the terminal row the core sends to (see `phoneSend`).
+/// a shell; the send rail refuses a shell, a message part that is not text,
+/// an empty message and a message holding a control character, inside the
+/// send core, on the terminal row the core sends to (see `phoneSend`); and
+/// `phoneWake`, `phoneCreateWorktree`, `phoneRemoteCreate` and
+/// `phoneRemoteSendMessage` hold the message they carry to the same rule
+/// (`PhoneMessageText`) before their handler runs.
 ///
 /// **A method that acts takes `deviceID`**, the device of the verified pairing
 /// the request came through. The actuation record names it, and an answer
@@ -71,27 +76,85 @@ protocol PhoneSessionActions: Sendable {
 
     /// `terminal.wake` with only the terminal and the message the wake
     /// carries. A `TerminalWakeResult`.
+    ///
+    /// A message that is not empty is held to the phone message rule
+    /// (`PhoneMessageText.vetted`) first: every CRLF becomes LF, then a blank
+    /// message is refused with `PhoneMessageText.emptyRefusal` and one
+    /// holding a control character with
+    /// `PhoneMessageText.controlCharacterRefusal`. These refusals return
+    /// before the handler runs, so they record no actuation row; the phone
+    /// action recorder has already logged the action. A nil or empty prompt
+    /// is no message and goes to the handler as it came.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.swapProfile` with only the terminal, the new profile and the
     /// mode `p` names. The window size takes its default.
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `worktree.create` with only the repo and the first message.
+    /// `worktree.create` with only the repo and the first message. The
+    /// pending `Worktree`.
+    ///
+    /// A first message that is not empty is held to the phone message rule
+    /// (`PhoneMessageText.vetted`) first, because it rides the first agent's
+    /// spawn command: every CRLF becomes LF, then a blank message is refused
+    /// with `PhoneMessageText.emptyRefusal` and one holding a control
+    /// character with `PhoneMessageText.controlCharacterRefusal`. These
+    /// refusals return before the handler runs, so they create nothing and
+    /// record no actuation row; the phone action recorder has already logged
+    /// the action. A nil or empty first message is no message and goes to the
+    /// handler as it came.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse
 
-    /// `remote.providers`. A `RemoteProvidersResult`.
+    /// Whether a session spawned now goes onto the pty-holder transport, as
+    /// every spawn path decides it (`TerminalSpawnTransport.decide`): the
+    /// holder flag is on and a holder can be started. A config that cannot
+    /// be read means tmux, as it does for a spawn. Not an RPC: the phone app
+    /// service reads it to hold a new worktree's first message to
+    /// `PhoneAppConstants.firstPromptMaxBytes` on tmux alone.
+    func phoneSpawnsOnHolder() async -> Bool
+
+    /// `remote.providers`. A `RemoteProvidersResult`. Like the RPC, it first
+    /// re-reads the provider registry file, registering and enrolling a
+    /// provider added since, so the phone app service calls it only from its
+    /// debounced sessions gather.
     func phoneRemoteProviders() async throws -> RPCResponse
+
+    /// `remote.providers` without re-reading the registry file: the
+    /// providers as the registry was last read, by the sessions gather, the
+    /// app or the daemon's start. A `RemoteProvidersResult`. The phone app
+    /// service reads it for every check one action makes, so an action costs
+    /// no file read.
+    func phoneCachedRemoteProviders() async throws -> RPCResponse
 
     /// `remote.sessions`. A `RemoteSessionsResult`.
     func phoneRemoteSessions() async throws -> RPCResponse
 
     /// `remote.create` with only the provider and its form values. The new
     /// session's `RemoteSessionPayload`.
+    ///
+    /// A first message in the form values, a `prompt` string that is not
+    /// empty, is held to the phone message rule (`PhoneMessageText.vetted`)
+    /// first, because the provider pastes it into the new session: every
+    /// CRLF becomes LF, then a blank message is refused with
+    /// `PhoneMessageText.emptyRefusal` and one holding a control character
+    /// with `PhoneMessageText.controlCharacterRefusal`. These refusals return
+    /// before the handler runs, so they create nothing, reach no provider and
+    /// record no actuation row; the phone action recorder has already logged
+    /// the action. Form values with no such `prompt` go to the handler as
+    /// they came.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.sendMessage` with only the provider, the session and the text.
     /// It refuses a session waiting on a prompt.
+    ///
+    /// The text is held to the phone message rule (`PhoneMessageText.vetted`)
+    /// first, because the provider pastes it into its session: every CRLF
+    /// becomes LF, then a blank message is refused with
+    /// `PhoneMessageText.emptyRefusal` and one holding a control character
+    /// with `PhoneMessageText.controlCharacterRefusal`. These refusals return
+    /// before the handler runs, so they reach no provider and record no
+    /// actuation row; the phone action recorder has already logged the
+    /// action.
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.transcriptSync` with only the provider and the session.

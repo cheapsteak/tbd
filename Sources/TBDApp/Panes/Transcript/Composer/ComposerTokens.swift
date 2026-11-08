@@ -82,7 +82,7 @@ enum ComposerTokens {
                 result += ns.substring(
                     with: NSRange(location: cursor, length: token.range.location - cursor))
             }
-            result += "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+            result += ShellQuoting.singleQuoted(path)
             cursor = token.range.location + token.range.length
         }
         if cursor < ns.length { result += ns.substring(from: cursor) }

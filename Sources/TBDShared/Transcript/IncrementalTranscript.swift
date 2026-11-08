@@ -128,8 +128,33 @@ public struct IncrementalTranscript: Sendable {
         toolResultsByID[toolUseID]
     }
 
+    /// One transcript line a caller has already parsed: its text, and the
+    /// JSON object the text parses to, or nil when it is not a JSON object.
+    /// `json` must be what `text` parses to, because a tool call's row is
+    /// kept as `text` and parsed again when its result arrives.
+    public struct ParsedLine {
+        public let text: String
+        public let json: [String: Any]?
+
+        public init(text: String, json: [String: Any]?) {
+            self.text = text
+            self.json = json
+        }
+    }
+
     @discardableResult
     public mutating func ingest(lines: [String]) -> Change {
+        ingest(parsed: lines.map { line in
+            ParsedLine(text: line, json: line.data(using: .utf8).flatMap { data in
+                try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            })
+        })
+    }
+
+    /// `ingest(lines:)` for lines the caller has already parsed, so a caller
+    /// that reads each line's JSON for itself does not parse it twice.
+    @discardableResult
+    public mutating func ingest(parsed lines: [ParsedLine]) -> Change {
         guard !lines.isEmpty else { return Change(appended: items.count..<items.count, updated: []) }
 
         var rawLines: [[String: Any]] = []
@@ -139,14 +164,11 @@ public struct IncrementalTranscript: Sendable {
         var resolvedToolUseIDs: [String] = []
         var seenResolved: Set<String> = []
 
-        for line in lines where !line.isEmpty {
+        for line in lines where !line.text.isEmpty {
             defer { lineCursor += 1 }
-            guard let data = line.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                continue
-            }
+            guard let json = line.json else { continue }
             rawLines.append(json)
-            rawText.append(line)
+            rawText.append(line.text)
             stableIDs.append((json["uuid"] as? String) ?? "line-\(lineCursor)")
 
             if json["isSidechain"] as? Bool != true, let uuid = json["uuid"] as? String {

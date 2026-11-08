@@ -42,8 +42,17 @@ private struct ClaudeCloudSendReply: Decodable {
 
 extension ClaudeCloudInvoker {
     /// `send` posts one message through
-    /// `claude -p "<msg>" --cloud <id> --output-format json`. `ok` plus a
+    /// `claude -p --cloud=<id> --output-format json -- <msg>`. `ok` plus a
     /// `session_id` matching the id sent is the success condition.
+    ///
+    /// **The message follows `--`, and the session id is attached to
+    /// `--cloud` with `=`.** The message is user text, from the app or a
+    /// phone, and may start with `-`; before `--` the CLI would parse it as
+    /// an option, so `--settings=…` would load settings. `-p` takes no value,
+    /// and the prompt is the command's positional argument, which `--` makes
+    /// the message whatever it starts with. `--cloud` takes an optional
+    /// value, which the `=` form assigns directly rather than leaving the
+    /// parser to decide whether the next argument is its value.
     ///
     /// No pseudo-terminal: `--print` is explicitly a non-interactive
     /// invocation and returns JSON on an ordinary pipe, and a pty would merge
@@ -55,7 +64,7 @@ extension ClaudeCloudInvoker {
                 message: "send received no message bytes")
         }
         let request = ClaudeCloudSpawnRequest(
-            arguments: ["-p", message, "--cloud", sessionID, "--output-format", "json"],
+            arguments: ["-p", "--cloud=\(sessionID)", "--output-format", "json", "--", message],
             workingDirectory: FileManager.default.temporaryDirectory.path,
             usesPseudoTerminal: false,
             timeout: timeout)

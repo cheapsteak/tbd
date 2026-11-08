@@ -33,9 +33,17 @@ extension ClaudeCloudInvoker {
                 + "in flight; retry once it resolves or the pending window elapses")
     }
 
-    /// `create` runs `claude --cloud "<prompt>"` from the repository
+    /// `create` runs `claude --cloud=<prompt>` from the repository
     /// checkout, on a pseudo-terminal, and reads the session id and its title
     /// out of what it prints.
+    ///
+    /// **The prompt is attached to `--cloud` with `=`, never passed as the
+    /// next argument.** `--cloud` takes an optional value, and the CLI's
+    /// parser does not take a following argument that starts with `-` as
+    /// that value: it reads it as another option. The prompt is user text,
+    /// from the app or a phone, and may start with `-`, so as a separate
+    /// argument `--settings=…` would load settings and `-h` would print help.
+    /// The `--cloud=<value>` form assigns the value whatever it starts with.
     ///
     /// **The ledger row is written BEFORE the invocation**, so a create whose
     /// output could not be read leaves a `pending` row rather than nothing,
@@ -146,9 +154,11 @@ extension ClaudeCloudInvoker {
         // The measured CLI surface (design §11) takes the description and
         // nothing else — no branch flag, no environment flag. Both are
         // recorded on the ledger row and reported as `meta`; inventing a flag
-        // would be a guess about a surface this design is written to.
+        // would be a guess about a surface this design is written to. The
+        // prompt rides `--cloud=` so it can never be read as an option (see
+        // this method's doc comment).
         let request = ClaudeCloudSpawnRequest(
-            arguments: ["--cloud", prompt],
+            arguments: ["--cloud=\(prompt)"],
             workingDirectory: repo.path,
             usesPseudoTerminal: true,
             timeout: timeout)

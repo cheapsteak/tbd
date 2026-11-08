@@ -1097,11 +1097,25 @@ public final class GhosttyTerminalView: NSView {
     }
 
     /// `path` as one shell word: unchanged when every character is safe, single-quoted otherwise.
+    ///
+    /// Each `'` is written `'\''`, replaced scalar by scalar so a `'` that a combining mark follows
+    /// is escaped too: `replacingOccurrences(of:with:)` compares composed character sequences and
+    /// would leave it, ending the quoted word early.
     static func shellQuoted(_ path: String) -> String {
         let safe = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-")
         if !path.isEmpty, path.unicodeScalars.allSatisfy({ safe.contains($0) }) { return path }
-        return "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        var quoted = String.UnicodeScalarView()
+        quoted.append("'")
+        for scalar in path.unicodeScalars {
+            if scalar == "'" {
+                quoted.append(contentsOf: #"'\''"#.unicodeScalars)
+            } else {
+                quoted.append(scalar)
+            }
+        }
+        quoted.append("'")
+        return String(quoted)
     }
 
     // MARK: - Input forwarding

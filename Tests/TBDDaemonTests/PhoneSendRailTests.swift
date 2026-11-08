@@ -254,11 +254,11 @@ struct PhoneSendRailTests {
             TerminalSendParams(terminalID: harness.terminal.id, text: "", submit: true),
             deviceID: device)
 
-        #expect(response.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(response.error == PhoneMessageText.emptyRefusal)
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
         try await harness.expectRecordedRefusal(
-            device: device, message: "", error: RPCRouter.phoneEmptySendRefusal)
+            device: device, message: "", error: PhoneMessageText.emptyRefusal)
     }
 
     /// Whitespace text is empty too. Parts are the send core's shape check's
@@ -284,7 +284,7 @@ struct PhoneSendRailTests {
         let textBesidePartsResponse = try await harness.router.sendFromPairedPhone(
             textBesideParts, deviceID: UUID())
 
-        #expect(textResponse.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(textResponse.error == PhoneMessageText.emptyRefusal)
         #expect(partsResponse.error == blankPartsRefusal, "blank parts get the core's refusal")
         #expect(
             textBesidePartsResponse.error == textBesidePartsRefusal,
@@ -322,9 +322,9 @@ struct PhoneSendRailTests {
             deviceID: device)
 
         let coreSeesNoContent = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        #expect(textResponse.error == RPCRouter.phoneEmptySendRefusal)
+        #expect(textResponse.error == PhoneMessageText.emptyRefusal)
         try await textHarness.expectRecordedRefusal(
-            device: device, message: text, error: RPCRouter.phoneEmptySendRefusal)
+            device: device, message: text, error: PhoneMessageText.emptyRefusal)
         #expect(textHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(textHarness.tmux.sentKeys.isEmpty, "no key may be pressed")
         #expect(partsHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
@@ -339,9 +339,9 @@ struct PhoneSendRailTests {
                 .filter { $0.method == RPCMethod.terminalSend }
             #expect(requests.isEmpty, "a malformed send writes no request row")
         } else {
-            #expect(partsResponse.error == RPCRouter.phoneEmptySendRefusal)
+            #expect(partsResponse.error == PhoneMessageText.emptyRefusal)
             try await partsHarness.expectRecordedRefusal(
-                device: device, message: text, error: RPCRouter.phoneEmptySendRefusal)
+                device: device, message: text, error: PhoneMessageText.emptyRefusal)
         }
     }
 
@@ -384,11 +384,11 @@ struct PhoneSendRailTests {
             TerminalSendParams(terminalID: harness.terminal.id, text: "a\u{1b}b", submit: true),
             deviceID: device)
 
-        #expect(response.error == RPCRouter.phoneControlCharacterRefusal)
+        #expect(response.error == PhoneMessageText.controlCharacterRefusal)
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
         try await harness.expectRecordedRefusal(
-            device: device, message: "a\u{1b}b", error: RPCRouter.phoneControlCharacterRefusal)
+            device: device, message: "a\u{1b}b", error: PhoneMessageText.controlCharacterRefusal)
     }
 
     /// Ctrl-C, a lone CR (an early Enter), DEL and a C1 control are refused
@@ -401,7 +401,7 @@ struct PhoneSendRailTests {
             TerminalSendParams(terminalID: harness.terminal.id, submit: true, parts: [.text(text)]),
             deviceID: UUID())
 
-        #expect(response.error == RPCRouter.phoneControlCharacterRefusal)
+        #expect(response.error == PhoneMessageText.controlCharacterRefusal)
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
     }

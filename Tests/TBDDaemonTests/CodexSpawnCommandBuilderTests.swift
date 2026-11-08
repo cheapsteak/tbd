@@ -237,8 +237,25 @@ struct CodexSpawnCommandBuilderTests {
                 initialPrompt: "fix the failing test",
                 executablePath: "codex"
             )
-                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'fix the failing test'"
+                == "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'fix the failing test'"
         )
+    }
+
+    /// Codex parses an argument that starts with `-` as an option even when
+    /// the shell passes it as one quoted word, so the prompt follows `--`:
+    /// `- fix it` would fail to parse, and `--config=…` would set a
+    /// configuration override for the session.
+    @Test("a prompt that looks like an option follows the end of options")
+    func optionLookingPromptFollowsEndOfOptions() {
+        let base = "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+        #expect(CodexSpawnCommandBuilder.build(initialPrompt: "- fix it", executablePath: "codex")
+            == "\(base) -- '- fix it'")
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: #"--config=notify=["touch","x"]"#, executablePath: "codex")
+            == #"\#(base) -- '--config=notify=["touch","x"]'"#)
+        // No prompt, no marker.
+        #expect(CodexSpawnCommandBuilder.build(initialPrompt: "", executablePath: "codex") == base)
+        #expect(CodexSpawnCommandBuilder.build(initialPrompt: nil, executablePath: "codex") == base)
     }
 
     @Test("resume thread is appended without an initial prompt")
@@ -251,6 +268,34 @@ struct CodexSpawnCommandBuilderTests {
             )
                 == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123'"
         )
+    }
+
+    /// A resumed session with a first message: the subcommand and its thread,
+    /// then the message after `--`, so the message is never read as an
+    /// option of `resume`.
+    @Test("a prompt on a resumed session follows the thread and the end of options")
+    func resumeWithPromptPutsThePromptAfterTheEndOfOptions() {
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: "fix the failing test",
+                resumeThreadID: "thread-123",
+                executablePath: "/opt/bin/codex"
+            )
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'thread-123' -- 'fix the failing test'"
+        )
+    }
+
+    /// A first message that is exactly the name of a Codex subcommand stays
+    /// the message: it lands after `--`, where Codex reads it as the prompt
+    /// and never runs `completion` or `logout`.
+    @Test("a prompt that names a subcommand follows the end of options", arguments: ["completion", "logout"])
+    func subcommandNamedPromptFollowsEndOfOptions(_ prompt: String) {
+        let base = "unset CODEX_CI CODEX_THREAD_ID; 'codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+        #expect(CodexSpawnCommandBuilder.build(initialPrompt: prompt, executablePath: "codex")
+            == "\(base) -- '\(prompt)'")
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: prompt, resumeThreadID: "thread-123", executablePath: "codex")
+            == "\(base) resume 'thread-123' -- '\(prompt)'")
     }
 
     @Test("nil resume thread preserves the ordinary launch command")
@@ -268,7 +313,7 @@ struct CodexSpawnCommandBuilderTests {
 
     @Test("no model override is byte-identical to the existing launch command")
     func nilModelIsByteIdentical() {
-        let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"
+        let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'ship it'"
         #expect(CodexSpawnCommandBuilder.build(
             initialPrompt: "ship it",
             executablePath: "/opt/bin/codex") == expected)
@@ -289,7 +334,7 @@ struct CodexSpawnCommandBuilderTests {
                 executablePath: "/opt/bin/codex",
                 model: "acme-model"
             )
-                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"#
+                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'ship it'"#
         )
         #expect(
             CodexSpawnCommandBuilder.build(
@@ -318,7 +363,7 @@ struct CodexSpawnCommandBuilderTests {
 
     @Test("no disabled features is byte-identical to the existing launch command")
     func emptyDisabledFeaturesIsByteIdentical() {
-        let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"
+        let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'ship it'"
         #expect(CodexSpawnCommandBuilder.build(
             initialPrompt: "ship it",
             executablePath: "/opt/bin/codex", disabledFeatures: []) == expected)
@@ -331,7 +376,7 @@ struct CodexSpawnCommandBuilderTests {
                 initialPrompt: "ship it",
                 executablePath: "/opt/bin/codex",
                 disabledFeatures: ["computer_use", "browser_use"])
-                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --disable 'computer_use' --disable 'browser_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'ship it'"
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --disable 'computer_use' --disable 'browser_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'ship it'"
         )
         // With a model: the model override comes first, then the features.
         #expect(

@@ -16,6 +16,8 @@ private let pluginDirLogger = Logger(subsystem: "com.tbd.daemon", category: "cla
 /// - `resumeID` non-nil → `claude --resume <id> --dangerously-skip-permissions`
 ///   with optional trailing initial-prompt arg (delivered atomically with the
 ///   resume — no post-spawn paste, so it can never land in the wrong process).
+///   Every initial prompt, inline or from a file, follows a `--` so that
+///   Claude Code never reads it as an option; no `--` is emitted without one.
 ///   With `forkSession: true`, ` --fork-session` is appended: Claude Code's
 ///   `--resume` REUSES the original session ID unless that flag is passed, and
 ///   the `.fork` swap mode needs a genuinely new ID because the source session
@@ -165,11 +167,20 @@ enum ClaudeSpawnCommandBuilder {
         // The trailing initial-prompt argument. Inline text is shell-escaped
         // into the command; a file path is read by the launching shell at
         // spawn, so the prompt never has to fit in the command string.
+        //
+        // `--` ends Claude Code's options before the prompt. Shell quoting
+        // keeps the prompt one argument, but Claude Code still parses an
+        // argument that starts with `-` as an option: `- fix the tests` fails
+        // with "unknown option", and a prompt of `--settings={…}` would load
+        // settings whose hooks run shell commands. The prompt is user text
+        // from the composer, a phone or a worktree's first message, so it is
+        // never allowed to be read as a flag. No option before the `--`
+        // takes a variable number of values, so nothing earlier swallows it.
         let promptArgument: String
         if let p = initialPrompt, !p.isEmpty {
-            promptArgument = " \(shellEscape(p))"
+            promptArgument = " -- \(shellEscape(p))"
         } else if let path = initialPromptFilePath, !path.isEmpty {
-            promptArgument = " \"$(cat \(shellEscape(path)))\""
+            promptArgument = " -- \"$(cat \(shellEscape(path)))\""
         } else {
             promptArgument = ""
         }

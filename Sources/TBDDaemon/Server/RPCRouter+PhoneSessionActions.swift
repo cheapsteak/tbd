@@ -4,13 +4,16 @@ import TBDShared
 /// The router behind the phone bridge's one door (`PhoneSessionActions`).
 ///
 /// Every method is one call to an existing core function or handler. It adds
-/// only four things: the params a phone may set, rebuilt from those fields
+/// only five things: the params a phone may set, rebuilt from those fields
 /// alone; the encoding of params for a handler that decodes them, with the
 /// router's own `encoder` to match the router's own `decoder`; the phone's
-/// identity, built from the one `deviceID` it is given; and, in
-/// `phoneSessionStates`, the removal of every report on a shell. So each runs
-/// the checks of the RPC it mirrors, in that RPC's order, and returns that
-/// RPC's response.
+/// identity, built from the one `deviceID` it is given; in
+/// `phoneSessionStates`, the removal of every report on a shell; and, in
+/// `phoneWake`, `phoneCreateWorktree`, `phoneRemoteCreate` and
+/// `phoneRemoteSendMessage`, the phone message rule the send rail applies
+/// (`PhoneMessageText`) to the phone's message, whose refusal answers before
+/// the handler runs. Past that, each runs the checks of the RPC it mirrors,
+/// in that RPC's order, and returns that RPC's response.
 ///
 /// **The rebuild names what a phone keeps, never what it loses.** Every params
 /// value the bridge passes is rebuilt field by field into fresh params holding
@@ -62,9 +65,20 @@ extension RPCRouter: PhoneSessionActions {
         try await sendFromPairedPhone(p, deviceID: deviceID)
     }
 
+    /// A wake from a phone. A message it carries is held to the phone message
+    /// rule first (`PhoneMessageText.vettedFirstMessage`), and a refused one
+    /// wakes nothing. A wake with no message, a nil or empty prompt, is not a
+    /// phone message and goes to the handler as it came.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleTerminalWake(
-            encoder.encode(Self.phoneWakeParams(p)), actor: .phone(deviceID: deviceID))
+        let narrowed = Self.phoneWakeParams(p)
+        switch PhoneMessageText.vettedFirstMessage(narrowed.prompt) {
+        case .refused(let reason):
+            return RPCResponse(error: reason)
+        case .deliver(let prompt):
+            return try await handleTerminalWake(
+                encoder.encode(TerminalWakeParams(terminalID: narrowed.terminalID, prompt: prompt)),
+                actor: .phone(deviceID: deviceID))
+        }
     }
 
     func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
@@ -72,27 +86,68 @@ extension RPCRouter: PhoneSessionActions {
             encoder.encode(Self.phoneSwapProfileParams(p)), actor: .phone(deviceID: deviceID))
     }
 
+    /// A worktree create from a phone. Its first message rides the spawn
+    /// command of the worktree's first agent, so it is held to the phone
+    /// message rule first (`phoneWorktreeCreateVetted`), and a refused one
+    /// creates nothing. A create with no first message goes to the handler as
+    /// it came.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleWorktreeCreate(
-            encoder.encode(Self.phoneWorktreeCreateParams(p)), actor: .phone(deviceID: deviceID))
+        switch Self.phoneWorktreeCreateVetted(p) {
+        case .refused(let reason):
+            return RPCResponse(error: reason)
+        case .deliver(let params):
+            return try await handleWorktreeCreate(encoder.encode(params), actor: .phone(deviceID: deviceID))
+        }
+    }
+
+    func phoneSpawnsOnHolder() async -> Bool {
+        let config = try? await db.config.get()
+        return TerminalSpawnTransport.decide(config: config, registry: holderRegistry).isHolder
     }
 
     func phoneRemoteProviders() async throws -> RPCResponse {
         try await handleRemoteProviders()
     }
 
+    func phoneCachedRemoteProviders() async throws -> RPCResponse {
+        try await handleRemoteProviders(refreshingRegistry: false)
+    }
+
     func phoneRemoteSessions() async throws -> RPCResponse {
         try await handleRemoteSessions()
     }
 
+    /// A remote session create from a phone. A first message in its form
+    /// values is pasted by the provider into the new session, so it is held
+    /// to the phone message rule first (`phoneRemoteCreateVetted`), and a
+    /// refused one creates nothing. A create with no first message goes to
+    /// the handler as it came. The form's other values are the phone app
+    /// service's to vet, which alone knows which of them the phone set.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleRemoteCreate(
-            encoder.encode(Self.phoneRemoteCreateParams(p)), actor: .phone(deviceID: deviceID))
+        switch Self.phoneRemoteCreateVetted(p) {
+        case .refused(let reason):
+            return RPCResponse(error: reason)
+        case .deliver(let params):
+            return try await handleRemoteCreate(encoder.encode(params), actor: .phone(deviceID: deviceID))
+        }
     }
 
+    /// A message from a phone to a remote session, held to the phone message
+    /// rule first (`PhoneMessageText.vetted`). The provider pastes the text
+    /// into its own session, so an ESC sequence such as the bracketed-paste
+    /// end marker would end the paste early and reach the agent as keys; a
+    /// refused message reaches no provider.
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
-        try await handleRemoteSendMessage(
-            encoder.encode(Self.phoneRemoteSendMessageParams(p)), actor: .phone(deviceID: deviceID))
+        let params = Self.phoneRemoteSendMessageParams(p)
+        switch PhoneMessageText.vetted(params.text) {
+        case .refused(let reason):
+            return RPCResponse(error: reason)
+        case .deliver(let text):
+            return try await handleRemoteSendMessage(
+                encoder.encode(RemoteSendMessageParams(
+                    provider: params.provider, sessionID: params.sessionID, text: text)),
+                actor: .phone(deviceID: deviceID))
+        }
     }
 
     func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse {
@@ -114,6 +169,24 @@ extension RPCRouter: PhoneSessionActions {
         WorktreeCreateParams(repoID: p.repoID, prompt: p.prompt)
     }
 
+    /// A worktree a phone creates, as the handler gets it: the repo and the
+    /// first message (`phoneWorktreeCreateParams`), with the first message
+    /// held to the phone message rule (`PhoneMessageText.vettedFirstMessage`).
+    /// A nil or empty first message is no message and is kept as it came.
+    /// Either the params with the message's CRLFs made bare LFs, or the
+    /// refusal that answers in place of the create.
+    static func phoneWorktreeCreateVetted(
+        _ p: WorktreeCreateParams
+    ) -> PhoneMessageText.Vetted<WorktreeCreateParams> {
+        let narrowed = phoneWorktreeCreateParams(p)
+        switch PhoneMessageText.vettedFirstMessage(narrowed.prompt) {
+        case .refused(let reason):
+            return .refused(reason)
+        case .deliver(let prompt):
+            return .deliver(WorktreeCreateParams(repoID: narrowed.repoID, prompt: prompt))
+        }
+    }
+
     /// A wake from a phone: the terminal and the message it carries. The
     /// window size and the default-profile fallback take their defaults, so a
     /// session pinned to a missing profile stays parked rather than resuming
@@ -126,6 +199,67 @@ extension RPCRouter: PhoneSessionActions {
     /// seed and a parent worktree take their defaults, none.
     static func phoneRemoteCreateParams(_ p: RemoteCreateParams) -> RemoteCreateParams {
         RemoteCreateParams(provider: p.provider, paramsJSON: p.paramsJSON)
+    }
+
+    /// A remote session a phone creates, as the handler gets it: the provider
+    /// and its form values (`phoneRemoteCreateParams`), with the first
+    /// message, the form's `prompt` value
+    /// (`PhoneMessageText.remoteCreatePromptField`), held to the phone
+    /// message rule (`PhoneMessageText.vetted`).
+    ///
+    /// **Only the first message is vetted here.** The form also holds values
+    /// the laptop filled in: the repo's and the laptop's stored create
+    /// defaults, the repo's remote and a generated slug. The router cannot
+    /// tell those from the values the phone set, and holding a laptop value to
+    /// the phone message rule would let one stored default refuse every phone
+    /// create. The phone app service knows which values the phone set: it
+    /// allows only keys the provider's form asks for and holds every one of
+    /// them to the rule (`PhoneAppService.vettedFormStrings`) before it calls
+    /// here.
+    ///
+    /// - **A `prompt` that is there and is not a string** (a number, an
+    ///   array, an object, a null) is refused with
+    ///   `RemoteCreateRefusal.promptNotString`. The provider would paste
+    ///   whatever text it makes of the value, which the rule never saw.
+    /// - **Form values that are not a JSON object, and a `prompt` that is
+    ///   absent or empty,** carry no phone message and are kept as they came,
+    ///   for the handler to judge.
+    /// - **When the rule changes the message,** its CRLFs made bare LFs, the
+    ///   form values are written out again with it, every other value as it
+    ///   came; otherwise they pass byte for byte.
+    ///
+    /// Either the params, or the refusal that answers in place of the create:
+    /// `RemoteCreateRefusal`'s or `PhoneMessageText`'s, which reach the phone
+    /// as they are.
+    static func phoneRemoteCreateVetted(
+        _ p: RemoteCreateParams
+    ) -> PhoneMessageText.Vetted<RemoteCreateParams> {
+        let narrowed = phoneRemoteCreateParams(p)
+        let field = PhoneMessageText.remoteCreatePromptField
+        guard let data = narrowed.paramsJSON.data(using: .utf8),
+              var form = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let value = form[field] else {
+            return .deliver(narrowed)
+        }
+        guard let prompt = value as? String else {
+            return .refused(RemoteCreateRefusal.promptNotString)
+        }
+        guard !prompt.isEmpty else {
+            return .deliver(narrowed)
+        }
+        switch PhoneMessageText.vetted(prompt) {
+        case .refused(let reason):
+            return .refused(reason)
+        case .deliver(let normalized):
+            guard normalized != prompt else { return .deliver(narrowed) }
+            form[field] = normalized
+            // A form that came out of `JSONSerialization` always goes back in.
+            guard let written = try? JSONSerialization.data(withJSONObject: form),
+                  let json = String(data: written, encoding: .utf8) else {
+                return .refused(RemoteCreateRefusal.formNotWritable)
+            }
+            return .deliver(RemoteCreateParams(provider: narrowed.provider, paramsJSON: json))
+        }
     }
 
     /// A profile swap from a phone: the terminal, the profile to move it to

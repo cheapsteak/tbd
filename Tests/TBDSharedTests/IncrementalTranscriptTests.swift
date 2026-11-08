@@ -65,6 +65,33 @@ struct IncrementalTranscriptTests {
         #expect(incremental.items == whole)
     }
 
+    /// Lines the caller already parsed build what the same lines as text
+    /// build, a late result still patching its call, and a line that is not
+    /// a JSON object still counts toward the `line-N` ids after it.
+    @Test("parsed-line ingestion equals text ingestion")
+    func parsedLinesMatchTextLines() throws {
+        let lines = try fixtureLines() + ["not json", #"{"type":"summary","summary":"acme"}"#]
+        let resultIdx = try #require(lines.firstIndex { $0.contains("tool_result") })
+        func parsed(_ slice: ArraySlice<String>) -> [IncrementalTranscript.ParsedLine] {
+            slice.map { line in
+                IncrementalTranscript.ParsedLine(
+                    text: line, json: (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any])
+            }
+        }
+
+        var fromText = IncrementalTranscript()
+        let textFirst = fromText.ingest(lines: Array(lines[..<resultIdx]))
+        let textSecond = fromText.ingest(lines: Array(lines[resultIdx...]))
+        var fromParsed = IncrementalTranscript()
+        let parsedFirst = fromParsed.ingest(parsed: parsed(lines[..<resultIdx]))
+        let parsedSecond = fromParsed.ingest(parsed: parsed(lines[resultIdx...]))
+
+        #expect(fromParsed.items == fromText.items)
+        #expect(parsedFirst == textFirst)
+        #expect(parsedSecond == textSecond)
+        #expect(parsedSecond.updated.isEmpty == false, "the late result patches its call")
+    }
+
     /// The raw JSON of a tool-call row is held only so a late `tool_result` can
     /// rebuild that item. Once the result has landed nothing can name the row
     /// again, and a tool call's line — carrying the whole tool input — is

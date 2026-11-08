@@ -31,17 +31,14 @@ extension WorktreeLifecycle {
     /// Unlike `preSessionCommand` (which always execs the shell so the pane
     /// stays usable), this execs the interactive shell ONLY on failure — a
     /// clean run lets the pane exit so the watcher's teardown races nothing,
-    /// and a failed run keeps the pane alive for debugging. Single-quote
-    /// escaping matches `preSessionCommand` / `shellWrapped`.
+    /// and a failed run keeps the pane alive for debugging. Paths are quoted
+    /// with `shellEscape`, as in `preSessionCommand` / `shellWrapped`.
     static func setupAutoCloseCommand(
         hookPath: String, runtimeDir: String, markerPath: String, shell: String
     ) -> String {
-        func quoted(_ s: String) -> String {
-            "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        }
-        return "\(quoted(hookPath)); __tbd_rc=$?; "
-            + "/bin/mkdir -p \(quoted(runtimeDir)); "
-            + "/bin/echo $__tbd_rc > \(quoted(markerPath)); "
+        return "\(shellEscape(hookPath)); __tbd_rc=$?; "
+            + "/bin/mkdir -p \(shellEscape(runtimeDir)); "
+            + "/bin/echo $__tbd_rc > \(shellEscape(markerPath)); "
             + "if [ $__tbd_rc -ne 0 ]; then exec \(shell); fi"
     }
 

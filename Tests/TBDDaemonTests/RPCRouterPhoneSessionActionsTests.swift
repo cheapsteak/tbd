@@ -3,6 +3,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 import DaemonTestSupport
+import TBDKernel
 import TestSupport
 
 /// The router's conformance to `PhoneSessionActions`, the phone bridge's one
@@ -57,6 +58,29 @@ struct RPCRouterPhoneSessionActionsTests {
             path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
     }
 
+    // MARK: - The spawn transport
+
+    /// `phoneSpawnsOnHolder` answers as every spawn path decides: tmux with
+    /// no registry, or with the flag off; the holder with the flag on and a
+    /// registry that can spawn.
+    @Test func phoneSpawnsOnHolderFollowsTheSpawnTransportGate() async throws {
+        let f = try makeFixture()
+        #expect(await f.actions.phoneSpawnsOnHolder() == false)
+
+        let home = fencedScratchRoot(prefix: "tbd-phone-holder")
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        f.router.holderRegistry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
+            listTerminals: { [] },
+            spawner: HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder")))
+        try await f.db.config.setPtyHolderEnabled(true)
+        #expect(await f.actions.phoneSpawnsOnHolder() == true)
+
+        try await f.db.config.setPtyHolderEnabled(false)
+        #expect(await f.actions.phoneSpawnsOnHolder() == false)
+    }
+
     // MARK: - Handler-backed methods carry the phone actor
 
     @Test func phoneWakeRecordsThePhoneActor() async throws {
@@ -72,6 +96,135 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(request.actor.kind == ActuationActor.Kind.phone)
         #expect(request.actor.device == d.uuidString, "the record names the phone's pairing")
         #expect(request.target?.terminal == terminal.id.uuidString)
+    }
+
+    // MARK: - A phone's message outside the send rail
+
+    /// Messages the send rail refuses, each with the refusal it gets: a NUL,
+    /// the bracketed-paste end marker, and a message of zero-width characters
+    /// only.
+    private static let refusedMessages: [(text: String, refusal: String)] = [
+        ("\u{0}", PhoneMessageText.controlCharacterRefusal),
+        ("\u{1b}[201~", PhoneMessageText.controlCharacterRefusal),
+        ("\u{200B}\u{2060}", PhoneMessageText.emptyRefusal),
+    ]
+
+    @Test func aPhoneMessageIsVettedByTheSendRailsRules() {
+        #expect(PhoneMessageText.vetted("first\r\nsecond\tthird") == .deliver("first\nsecond\tthird"))
+        #expect(PhoneMessageText.vetted("lone\rreturn") == .refused(PhoneMessageText.controlCharacterRefusal))
+        #expect(PhoneMessageText.vetted("bell\u{7}") == .refused(PhoneMessageText.controlCharacterRefusal))
+        #expect(PhoneMessageText.vetted("\r\n") == .refused(PhoneMessageText.emptyRefusal))
+        #expect(PhoneMessageText.vetted("") == .refused(PhoneMessageText.emptyRefusal))
+    }
+
+    /// A first message that may be absent, as a wake or a create carries it:
+    /// nil or empty is no message and passes as it came, and any other text
+    /// meets the whole rule.
+    @Test func aFirstMessageIsVettedOnlyWhenThereIsOne() {
+        #expect(PhoneMessageText.vettedFirstMessage(nil) == .deliver(nil))
+        #expect(PhoneMessageText.vettedFirstMessage("") == .deliver(""))
+        #expect(PhoneMessageText.vettedFirstMessage("first\r\nsecond") == .deliver("first\nsecond"))
+        #expect(PhoneMessageText.vettedFirstMessage(" \n") == .refused(PhoneMessageText.emptyRefusal))
+        #expect(PhoneMessageText.vettedFirstMessage("\u{0}") == .refused(PhoneMessageText.controlCharacterRefusal))
+    }
+
+    /// A new worktree's first message rides its first agent's spawn command,
+    /// so it meets the send rail's refusals before the create handler runs,
+    /// and a refused one creates nothing. The repo does not exist, so a
+    /// create that reached the handler would throw `WorktreeLifecycleError`
+    /// rather than answer.
+    @Test func phoneCreateWorktreeRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try makeFixture()
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneCreateWorktree(
+                WorktreeCreateParams(repoID: UUID(), prompt: text), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        let worktrees = try await f.db.worktrees.list()
+        #expect(worktrees.isEmpty, "a refused message creates no worktree row")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.worktreeCreate }
+        #expect(createRows.isEmpty, "a refused message never reaches the create handler")
+    }
+
+    /// The create handler gets the first message with the send rail's line
+    /// endings, and still only the repo and the message.
+    @Test func phoneWorktreeCreateHandsTheHandlerTheMessageWithBareLineFeeds() throws {
+        let repoID = UUID()
+        let vetted = RPCRouter.phoneWorktreeCreateVetted(
+            WorktreeCreateParams(repoID: repoID, prompt: "first\r\nsecond", model: "opus"))
+
+        guard case .deliver(let params) = vetted else {
+            Issue.record("a message with CRLF line endings was refused: \(vetted)")
+            return
+        }
+        #expect(params.repoID == repoID)
+        #expect(params.prompt == "first\nsecond")
+        #expect(try encodedKeys(params) == ["repoID", "prompt"])
+    }
+
+    /// A create with no first message, nil or empty, carries no phone message,
+    /// so no message rule applies and it reaches the handler, which throws for
+    /// the missing repo.
+    @Test func phoneCreateWorktreeWithNoFirstMessageStillReachesTheHandler() async throws {
+        let f = try makeFixture()
+
+        for prompt in [nil, ""] as [String?] {
+            await #expect(throws: WorktreeLifecycleError.self) {
+                _ = try await f.actions.phoneCreateWorktree(
+                    WorktreeCreateParams(repoID: UUID(), prompt: prompt), deviceID: UUID())
+            }
+        }
+    }
+
+    /// A wake's message is the respawned session's first prompt, carried in a
+    /// process's argument list, so it meets the send rail's refusals before
+    /// the wake handler runs, and a refused one records no wake.
+    @Test func phoneWakeRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-wt")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneWake(
+                TerminalWakeParams(terminalID: terminal.id, prompt: text), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
+        #expect(wakeRows.isEmpty, "a refused message never reaches the wake handler")
+    }
+
+    /// The handler gets the message with the send rail's line endings.
+    @Test func phoneWakeHandsTheHandlerTheMessageWithBareLineFeeds() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-wt")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        _ = try await f.actions.phoneWake(
+            TerminalWakeParams(terminalID: terminal.id, prompt: "first\r\nsecond"), deviceID: UUID())
+
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.terminalWake })
+        #expect(request.prompt == "first\nsecond")
+    }
+
+    /// A wake with an empty prompt carries no message, so no message rule
+    /// applies and the handler runs.
+    @Test func phoneWakeWithAnEmptyPromptStillReachesTheHandler() async throws {
+        let f = try makeFixture()
+        let worktree = try await makeWorktree(f, name: "acme-wt")
+        let terminal = try await f.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        let response = try await f.actions.phoneWake(
+            TerminalWakeParams(terminalID: terminal.id, prompt: ""), deviceID: UUID())
+
+        #expect(response.error != PhoneMessageText.emptyRefusal)
+        let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
+        #expect(wakeRows.count == 1)
     }
 
     /// Every worktree is asked about, and a plain shell is never reported on.
@@ -318,6 +471,7 @@ struct RPCRouterPhoneSessionActionsTests {
         let manager: RemoteProviderManager
         let invoker: FakeProviderInvoker
         let logPath: String
+        let registryURL: URL
 
         var actions: any PhoneSessionActions { router }
 
@@ -356,12 +510,35 @@ struct RPCRouterPhoneSessionActionsTests {
             subscriptions: subs,
             remoteManager: manager,
             actuationLog: ActuationLog(path: logPath))
-        return RemoteFixture(router: router, manager: manager, invoker: invoker, logPath: logPath)
+        return RemoteFixture(
+            router: router, manager: manager, invoker: invoker, logPath: logPath, registryURL: registryURL)
     }
 
     private static func describeDeclaring(_ capabilities: [String]) -> ProviderResult {
         let caps = capabilities.map { "\"\($0)\"" }.joined(separator: ", ")
         return providerOK(#"{"contract_versions": [1], "name": "agentbox", "capabilities": [\#(caps)]}"#)
+    }
+
+    /// A provider added to the registry file while the daemon runs is
+    /// invisible to `phoneCachedRemoteProviders`, which reads the registry as
+    /// last read, and registered by `phoneRemoteProviders`, which re-reads
+    /// it as `remote.providers` does. The new provider's enrollment describe
+    /// fails, so it starts no poll loop.
+    @Test func onlyPhoneRemoteProvidersReReadsTheRegistry() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            ProviderResult(exitCode: 1, stdout: Data(), stderr: "acme describe failed"),
+        ])
+        try #"[{"name": "agentbox", "exec": "/nonexistent"}, {"name": "acmebox", "exec": "/nonexistent"}]"#
+            .write(to: f.registryURL, atomically: true, encoding: .utf8)
+
+        let cached = try await f.actions.phoneCachedRemoteProviders()
+        let cachedNames = try cached.decodeResult(RemoteProvidersResult.self).providers.map(\.config.name)
+        #expect(cachedNames == ["agentbox"])
+
+        let refreshed = try await f.actions.phoneRemoteProviders()
+        let refreshedNames = try refreshed.decodeResult(RemoteProvidersResult.self).providers.map(\.config.name)
+        #expect(refreshedNames == ["acmebox", "agentbox"])
     }
 
     /// The socket's create refuses a seed for a provider that never declared
@@ -387,6 +564,188 @@ struct RPCRouterPhoneSessionActionsTests {
         let stdin = try #require(f.invoker.stdinsSnapshot().compactMap { $0 }.first)
         let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
         #expect(body.keys.sorted() == ["idempotency_key", "params"])
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteCreate })
+        #expect(request.actor == ActuationActor.phone(deviceID: d))
+    }
+
+    /// Remote create form values holding `prompt` as their one value.
+    private static func promptForm(_ prompt: String) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [PhoneMessageText.remoteCreatePromptField: prompt])
+        return try #require(String(data: data, encoding: .utf8))
+    }
+
+    /// The provider pastes a new session's first message into it, so a first
+    /// message the send rail refuses reaches no provider, creates nothing and
+    /// records no create.
+    @Test func phoneRemoteCreateRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try await makeRemoteFixture([Self.describeDeclaring([])])
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneRemoteCreate(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: try Self.promptForm(text)),
+                deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused message never reaches the provider")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
+        #expect(createRows.isEmpty)
+    }
+
+    /// The create handler gets the first message with the send rail's line
+    /// endings, the other form values as they came, and still only the
+    /// provider and the form values.
+    @Test func phoneRemoteCreateVettedHandsTheHandlerTheMessageWithBareLineFeeds() throws {
+        let full = RemoteCreateParams(
+            provider: "agentbox", paramsJSON: #"{"prompt": "first\r\nsecond", "repo": "acme/api"}"#,
+            parentWorktreeID: UUID(), seedRetainedKey: "acme-key")
+
+        let vetted = RPCRouter.phoneRemoteCreateVetted(full)
+
+        guard case .deliver(let params) = vetted else {
+            Issue.record("a message with CRLF line endings was refused: \(vetted)")
+            return
+        }
+        #expect(try encodedKeys(params) == ["provider", "paramsJSON"])
+        #expect(params.provider == "agentbox")
+        let form = try #require(
+            try JSONSerialization.jsonObject(with: Data(params.paramsJSON.utf8)) as? [String: String])
+        #expect(form == ["prompt": "first\nsecond", "repo": "acme/api"])
+    }
+
+    /// Form values with no first message carry no phone message, so they pass
+    /// as they came, byte for byte.
+    @Test func phoneRemoteCreateVettedKeepsFormValuesWithNoFirstMessage() {
+        for paramsJSON in ["{}", #"{"prompt": ""}"#, #"{"repo": "acme/api"}"#, "not json"] {
+            let vetted = RPCRouter.phoneRemoteCreateVetted(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON))
+            guard case .deliver(let params) = vetted else {
+                Issue.record("form values \(paramsJSON) were refused: \(vetted)")
+                continue
+            }
+            #expect(params.paramsJSON == paramsJSON)
+        }
+    }
+
+    /// A `prompt` that is there and is not a string is refused, whatever it
+    /// holds: the provider would paste its own text for the value, which the
+    /// phone message rule never saw, such as an array or an object holding
+    /// the bracketed-paste end marker.
+    @Test func phoneRemoteCreateVettedRefusesAPromptThatIsNotAString() throws {
+        let marker = "\u{1b}[201~"
+        let forms: [[String: Any]] = [
+            [PhoneMessageText.remoteCreatePromptField: [marker, "acme"]],
+            [PhoneMessageText.remoteCreatePromptField: ["text": marker]],
+            [PhoneMessageText.remoteCreatePromptField: 3],
+            [PhoneMessageText.remoteCreatePromptField: NSNull()],
+        ]
+        for form in forms {
+            let data = try JSONSerialization.data(withJSONObject: form)
+            let paramsJSON = try #require(String(data: data, encoding: .utf8))
+            let vetted = RPCRouter.phoneRemoteCreateVetted(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON))
+            guard case .refused(let reason) = vetted else {
+                Issue.record("form values \(paramsJSON) were not refused: \(vetted)")
+                continue
+            }
+            #expect(reason == RemoteCreateRefusal.promptNotString, "form \(paramsJSON)")
+        }
+    }
+
+    /// Through the door, an array or an object `prompt` holding the
+    /// bracketed-paste end marker reaches no provider, creates nothing and
+    /// records no create.
+    @Test func phoneRemoteCreateRefusesAPromptThatIsNotAString() async throws {
+        let f = try await makeRemoteFixture([Self.describeDeclaring([])])
+        let marker = "\u{1b}[201~"
+        let forms: [[String: Any]] = [
+            [PhoneMessageText.remoteCreatePromptField: [marker]],
+            [PhoneMessageText.remoteCreatePromptField: ["text": marker]],
+        ]
+
+        for form in forms {
+            let data = try JSONSerialization.data(withJSONObject: form)
+            let paramsJSON = try #require(String(data: data, encoding: .utf8))
+            let response = try await f.actions.phoneRemoteCreate(
+                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON), deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == RemoteCreateRefusal.promptNotString, "form \(paramsJSON)")
+        }
+        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused prompt never reaches the provider")
+        let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
+        #expect(createRows.isEmpty)
+    }
+
+    /// Only the first message is held to the phone message rule. Every other
+    /// form value may be one the laptop filled in, a stored create default
+    /// among them, so a lone CR, a CRLF or a blank in one passes as it came:
+    /// byte for byte when the first message needs no change, and as it was
+    /// when the form is written out again around a changed first message.
+    @Test func phoneRemoteCreateVettedLeavesEveryOtherFormValueAsItCame() throws {
+        let unchanged = #"{"title": "first\rsecond", "prompt": "hi"}"#
+        let kept = RPCRouter.phoneRemoteCreateVetted(RemoteCreateParams(provider: "agentbox", paramsJSON: unchanged))
+        guard case .deliver(let keptParams) = kept else {
+            Issue.record("a laptop default with a lone CR was refused: \(kept)")
+            return
+        }
+        #expect(keptParams.paramsJSON == unchanged)
+
+        let vetted = RPCRouter.phoneRemoteCreateVetted(RemoteCreateParams(
+            provider: "agentbox",
+            paramsJSON: #"{"title": "   ", "branch": "one\r\ntwo", "note": "a\rb", "prompt": "first\r\nsecond"}"#))
+        guard case .deliver(let params) = vetted else {
+            Issue.record("a laptop default was refused: \(vetted)")
+            return
+        }
+        let form = try #require(
+            try JSONSerialization.jsonObject(with: Data(params.paramsJSON.utf8)) as? [String: String])
+        #expect(form == ["title": "   ", "branch": "one\r\ntwo", "note": "a\rb", "prompt": "first\nsecond"])
+    }
+
+    /// Through the door, a laptop default holding a lone CR in a field other
+    /// than the first message reaches the provider as it came, with the
+    /// first message's CRLF made a bare LF.
+    @Test func phoneRemoteCreatePassesALaptopDefaultWithALoneCarriageReturn() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": []}"#),
+        ])
+        let data = try JSONSerialization.data(withJSONObject: [
+            "title": "acme\rdefault", PhoneMessageText.remoteCreatePromptField: "first\r\nsecond",
+        ])
+        let paramsJSON = try #require(String(data: data, encoding: .utf8))
+
+        let response = try await f.actions.phoneRemoteCreate(
+            RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON), deviceID: UUID())
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        let stdin = try #require(f.invoker.stdinsSnapshot().compactMap { $0 }.first)
+        let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
+        let form = try #require(body["params"] as? [String: Any])
+        #expect(form["title"] as? String == "acme\rdefault")
+        #expect(form["prompt"] as? String == "first\nsecond")
+    }
+
+    /// The provider's create gets the first message with bare line feeds, and
+    /// the record names the phone.
+    @Test func phoneRemoteCreateDeliversTheMessageWithBareLineFeeds() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": []}"#),
+        ])
+        let d = UUID()
+
+        let response = try await f.actions.phoneRemoteCreate(
+            RemoteCreateParams(provider: "agentbox", paramsJSON: try Self.promptForm("first\r\nsecond")),
+            deviceID: d)
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        let stdin = try #require(f.invoker.stdinsSnapshot().compactMap { $0 }.first)
+        let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
+        let form = try #require(body["params"] as? [String: Any])
+        #expect(form["prompt"] as? String == "first\nsecond")
         let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteCreate })
         #expect(request.actor == ActuationActor.phone(deviceID: d))
     }
@@ -418,5 +777,44 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(f.invoker.callsSnapshot().filter { $0.first == "answer" } == [["answer", "s-1", "p-1"]])
         let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteAnswer })
         #expect(request.actor == ActuationActor.phone(deviceID: d), "the record names the phone's pairing")
+    }
+
+    /// The provider pastes a remote message into its session, so a message the
+    /// send rail refuses reaches no provider and records no send.
+    @Test func phoneRemoteSendMessageRefusesAMessageTheSendRailRefuses() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring(["send", RemoteCapability.sendSubmit]),
+        ])
+
+        for (text, refusal) in Self.refusedMessages {
+            let response = try await f.actions.phoneRemoteSendMessage(
+                RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: text),
+                deviceID: UUID())
+            #expect(response.success == false)
+            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+        }
+        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused message never reaches the provider")
+        let sendRows = f.actuationRows().filter { $0.method == RPCMethod.remoteSendMessage }
+        #expect(sendRows.isEmpty)
+    }
+
+    /// The provider gets the message with the send rail's line endings, and
+    /// the record names the phone.
+    @Test func phoneRemoteSendMessageDeliversTheMessageWithBareLineFeeds() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring(["send", RemoteCapability.sendSubmit]),
+            providerOK("{}"),
+        ])
+        let d = UUID()
+
+        let response = try await f.actions.phoneRemoteSendMessage(
+            RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: "first\r\nsecond"),
+            deviceID: d)
+
+        #expect(response.success, "error: \(response.error ?? "none")")
+        #expect(f.invoker.callsSnapshot().last == ["send", "s-1", "--submit"])
+        #expect(f.invoker.stdinsSnapshot().last ?? nil == Data("first\nsecond".utf8))
+        let request = try #require(f.actuationRows().first { $0.method == RPCMethod.remoteSendMessage })
+        #expect(request.actor == ActuationActor.phone(deviceID: d))
     }
 }

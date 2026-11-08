@@ -1606,14 +1606,22 @@ public final class Daemon: Sendable {
         // reason step 8f gives: the hook is a plain `nonisolated(unsafe)` var
         // a request handler reads. Building opens nothing: no socket, no
         // relay check and no key read happen until step 11a-phone-bridge
-        // reconciles. Until a phone app service hands over its handler, every
-        // phone request is answered "unavailable".
+        // reconciles. The phone app service goes in here too, so every
+        // channel, from the first, uses it; it reaches the router only
+        // through `PhoneSessionActions` and the transcript locator it is
+        // handed here.
         var phoneBridge: PhoneBridge?
         if mockMode == nil {
             let bridge = PhoneBridge(
                 db: database, keyStore: LaptopKeyStore(path: TBDConstants.phoneLaptopKeyPath()),
                 transport: URLSessionRelayTransport(), infoClient: URLSessionRelayInfoClient(),
                 broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            await bridge.setAppHandler(PhoneAppService(
+                db: database, actions: rpcRouter, subscriptions: subs,
+                pendingPrompts: rpcRouter.pendingQuestions,
+                locateTranscript: { [rpcRouter] terminal, worktreePath in
+                    rpcRouter.claudeTranscriptFilePath(terminal: terminal, worktreePath: worktreePath)
+                }))
             phoneBridge = bridge
             self.phoneBridge = bridge
             rpcRouter.phoneBridge = bridge
@@ -1858,9 +1866,9 @@ public final class Daemon: Sendable {
             // is immediate and final. From the moment it is called the bridge
             // loads no key and starts nothing, this reconcile, if still in
             // progress, ends at its next check, and `stop()` waits for it; a
-            // reconcile that arrives after `stop` changes nothing. Any `await
-            // phoneBridge?.setAppHandler(...)` belongs before this task, so
-            // the first channels already use the real handler.
+            // reconcile that arrives after `stop` changes nothing. Step
+            // 8f-phone installed the phone app service before this task, so
+            // the first channels already use it.
             if let phoneBridge {
                 Task { await phoneBridge.reconcile() }
             }

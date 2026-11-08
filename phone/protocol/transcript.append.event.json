@@ -13,7 +13,7 @@
         "id": "abf9ad0c-0702-5b65-adfa-e32f4ae2ea3c",
         "kind": "assistant",
         "text": "I'll look at the redirect handling first. The session cookie is set after the redirect is issued, so the next request has no session and is sent back to /login.",
-        "truncated": true
+        "truncated": false
       },
       {
         "at": 1762499520000,
@@ -30,7 +30,7 @@
         "id": "1879c58d-152e-5804-acfd-ce69e8fee214",
         "kind": "fileEdit",
         "removed": 3,
-        "target": "src/auth/redirect.ts",
+        "target": "redirect.ts",
         "toolName": "Edit",
         "toolStatus": "ok",
         "truncated": false
@@ -42,7 +42,7 @@
         "itemCount": 14,
         "kind": "subagent",
         "target": "Find every caller of setSession",
-        "toolName": "Task",
+        "toolName": "Agent",
         "toolStatus": "ok",
         "truncated": false
       },

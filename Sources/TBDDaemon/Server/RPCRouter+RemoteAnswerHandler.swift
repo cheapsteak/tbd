@@ -14,8 +14,9 @@ extension RPCRouter {
     static let remoteAnswerTimeout: TimeInterval = 30
 
     /// The session has no mirror row, so there is no prompt to match the
-    /// answer against.
-    static let remoteAnswerNotMirroredRefusal = "session is not in the mirror; refresh and try again"
+    /// answer against. In `Base` (`PromptAnswerRefusal`), so the phone app
+    /// service can let it through to a phone as TBD's own words.
+    static let remoteAnswerNotMirroredRefusal = PromptAnswerRefusal.notMirrored
 
     /// Answers a remote session's open prompt through
     /// `answer <session_id> <prompt_id>`, the `PromptAnswer` JSON on stdin
