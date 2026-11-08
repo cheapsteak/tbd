@@ -680,6 +680,36 @@ test('inside the post-pairing grace an unanswered handshake reads connecting; th
   c.conn.stop();
 });
 
+test('the post-pairing grace counts only visible time: a peer-absent after a hide longer than the grace reads connecting until the grace has run while visible', async () => {
+  const env = await setup();
+  const page = fakeVisibility();
+  const hanging = hangingSockets();
+  const c = connection(env, { absentGraceMs: PAIRED_GRACE_MS, visibility: page, openSocket: hanging.factory });
+  c.conn.start();
+  // Pairing has just ended, and the phone locks before the relay answers the new socket.
+  page.hide();
+  await env.clock.advance(PAIRED_GRACE_MS * 3);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting']);
+
+  // On the return the socket opens, and the laptop's device link has not joined yet.
+  page.show();
+  const ws = hanging.sockets[0];
+  ws.readyState = 1;
+  ws.onopen?.({});
+  ws.onmessage?.({ data: 'peer-absent' });
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting']);
+  await env.clock.advance(PAIRED_GRACE_MS - 1);
+  await quiet();
+  assert.deepEqual(c.states(), ['connecting'], 'connecting for the whole grace, counted from the return');
+  await env.clock.advance(1);
+  await until(() => c.states().at(-1) === 'offline', 'offline once the grace has run while visible');
+  assert.deepEqual(c.states(), ['connecting', 'offline']);
+  c.conn.stop();
+  assert.equal(page.listeners(), 0, 'no timer is left listening');
+});
+
 test('with the post-pairing grace, a lost message 2 reads connecting through the handshake timeout and retry', async () => {
   const env = await setup();
   let frames = 0;

@@ -11,11 +11,11 @@
 // in hand, as checking a download's does, so a slow phone hashing a large bundle never turns a
 // good cache entry into a miss.
 //
-// Time. The signal and handshake timeouts, and the relay socket's waits for a pong, count only
-// time while the page is visible: iOS freezes a hidden page, so a timer that falls due while it
-// is hidden must not tear down a session whose answer simply could not arrive. Each return to
-// the page gives them a fresh window. The other timers (backoff, grace, cache read) run on the
-// clock alone.
+// Time. The signal and handshake timeouts, the relay socket's waits for a pong, and the
+// post-pairing grace count only time while the page is visible: iOS freezes a hidden page, so a
+// timer that falls due while it is hidden must not tear down a session whose answer simply could
+// not arrive, nor end a grace sized from those waits. Each return to the page gives them a fresh
+// window. The other timers (backoff, cache read) run on the clock alone.
 //
 // Sessions. Each `peer-joined` starts a new session: a fresh initiator, and later its
 // transport, welcome and bundle assembly. Anything an older session started that finishes
@@ -97,15 +97,17 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * @property {BundleCache} cache
  * @property {(url: string) => WebSocketLike} openSocket
  * @property {(event: ConnectionEvent) => void} onEvent
- * @property {number} [absentGraceMs] For this long after `start()`, `peer-absent`,
- *   `peer-left` and a handshake that goes unanswered read `connecting` rather than `offline`.
- *   When it ends, a laptop that is away reads `offline` at once, but a retry that is pending,
- *   or a handshake under way, reads `offline` only from its own outcome. Default 0; `main.js`
- *   passes `PAIRED_GRACE_MS` (a signal wait plus a handshake) right after pairing, while the
- *   laptop's device link joins the new room.
+ * @property {number} [absentGraceMs] For this long after `start()`, counting only time while
+ *   the page is visible (as the waits it is sized from do), `peer-absent`, `peer-left` and a
+ *   handshake that goes unanswered read `connecting` rather than `offline`. When it ends, a
+ *   laptop that is away reads `offline` at once, but a retry that is pending, or a handshake
+ *   under way, reads `offline` only from its own outcome. Default 0; `main.js` passes
+ *   `PAIRED_GRACE_MS` (a signal wait plus a handshake) right after pairing, while the laptop's
+ *   device link joins the new room.
  * @property {Visibility} [visibility] The page's visibility. Default: always visible. While
  *   the page is hidden, a reconnect waits for `resume()`, and the signal and handshake
- *   timeouts and the socket's waits for a pong stop (`startVisibleTimer`).
+ *   timeouts, the socket's waits for a pong and the post-pairing grace stop
+ *   (`startVisibleTimer`).
  * @property {() => string | null} [runningBundle] The SHA-256 of the bundle the page's app
  *   frame runs now, or null. Default `() => null`. A `welcome` naming it skips the cache read
  *   and the download, so a reconnect under a running app reads no 16 MB row and hashes nothing.
@@ -226,7 +228,7 @@ export class LaptopConnection {
     this.#started = true;
     this.#setState('connecting');
     if (this.#absentGraceMs > 0) {
-      this.#graceTimer = this.#tasks.arm(this.#absentGraceMs, () => {
+      this.#graceTimer = this.#tasks.armVisible(this.#absentGraceMs, () => {
         this.#graceTimer = null;
         this.#graceOver = true;
         // Only a wait with nothing under way turns offline here. A retry that is pending, or a

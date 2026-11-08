@@ -25,8 +25,9 @@ export const HANDSHAKE_TIMEOUT_MS = 10_000;
 // and Try again, start a new round.
 export const HANDSHAKE_RETRIES = 3;
 // Right after pairing, a laptop that is away or does not answer reads `connecting`, not
-// `offline`, for one full signal wait plus one handshake: the laptop's device link may join the
-// new room any time within a signal wait, and its first handshake may lose message 2. The
+// `offline`, for one full signal wait plus one handshake, counted as they are, in time while the
+// page is visible: the laptop's device link may join the new room any time within a signal
+// wait, and its first handshake may lose message 2. The
 // grace's end shows offline only for a laptop that is away; a retry that is pending, or a
 // handshake under way, reads offline only from its own outcome.
 export const PAIRED_GRACE_MS = SIGNAL_TIMEOUT_MS + HANDSHAKE_TIMEOUT_MS;
