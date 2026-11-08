@@ -57,6 +57,7 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     private let lock = NSLock()
     private var log = Log()
     private var responses: [Method: RPCResponse] = [:]
+    private var gates: [Method: PhoneTestGate] = [:]
 
     init() {}
 
@@ -75,6 +76,16 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     /// Every later call of `method` answers `response`.
     func respond(to method: Method, with response: RPCResponse) {
         lock.withLock { responses[method] = response }
+    }
+
+    /// Every later call of `method` is recorded at once, then holds its
+    /// response until `gate` opens. Only the answer methods honour it.
+    func hold(_ method: Method, on gate: PhoneTestGate) {
+        lock.withLock { gates[method] = gate }
+    }
+
+    private func gate(for method: Method) -> PhoneTestGate? {
+        lock.withLock { gates[method] }
     }
 
     /// Every later `phoneRemoteProviders` answers one registered provider,
@@ -100,11 +111,15 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     }
 
     func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {
-        record(.answerPrompt, deviceID: deviceID) { $0.answers.append(p) }
+        let response = record(.answerPrompt, deviceID: deviceID) { $0.answers.append(p) }
+        await gate(for: .answerPrompt)?.wait()
+        return response
     }
 
     func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse {
-        record(.answerRemotePrompt, deviceID: deviceID) { $0.remoteAnswers.append(p) }
+        let response = record(.answerRemotePrompt, deviceID: deviceID) { $0.remoteAnswers.append(p) }
+        await gate(for: .answerRemotePrompt)?.wait()
+        return response
     }
 
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse {
@@ -262,14 +277,16 @@ enum PhoneTestRequests {
 
 /// A `PhoneAppService` over an in-memory database with phone control on and
 /// one paired phone named "Acme Phone", with fakes for everything it calls
-/// and an `EventDrivenTestClock` for its timers. `subscriptions` is the
-/// service's own, so a test can broadcast state deltas to it.
+/// and an `EventDrivenTestClock` for its timers. `subscriptions` and
+/// `pendingPrompts` are the service's own, so a test can open prompts and
+/// broadcast state deltas to it.
 struct PhoneServiceHarness: Sendable {
     let db: TBDDatabase
     let actions: FakeSessionActions
     let recorder: CapturingRecorder
     let clock: EventDrivenTestClock
     let subscriptions: StateSubscriptionManager
+    let pendingPrompts: PendingPromptStore
     let service: PhoneAppService
     let peer: PhonePeer
 
@@ -284,12 +301,13 @@ struct PhoneServiceHarness: Sendable {
         let recorder = CapturingRecorder()
         let clock = EventDrivenTestClock()
         let subscriptions = StateSubscriptionManager()
+        let pendingPrompts = PendingPromptStore()
         let service = PhoneAppService(
             db: db, actions: actions, subscriptions: subscriptions,
-            pendingPrompts: PendingPromptStore(), recorder: recorder, clock: clock)
+            pendingPrompts: pendingPrompts, recorder: recorder, clock: clock)
         return PhoneServiceHarness(
             db: db, actions: actions, recorder: recorder, clock: clock, subscriptions: subscriptions,
-            service: service, peer: peer)
+            pendingPrompts: pendingPrompts, service: service, peer: peer)
     }
 
     /// Connects the phone through a fresh outbox and returns it.

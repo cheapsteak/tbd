@@ -371,6 +371,20 @@ struct ActionOutcomeResult: Codable, Equatable, Sendable {
 }
 
 /// `prompt.answer`'s params. The result is `PromptAnswerResult`.
+///
+/// The daemon hands `answer` to the core as it came, and the core checks it
+/// against the prompt. The phone builds it exactly as the laptop's prompt card
+/// does (`PromptAnswerController.questionAnswer` and `permissionAnswer`):
+/// - **A question** is answered under its text, as `PhonePrompt.questions`
+///   gives it. A single-select value is the chosen option's label, or the
+///   "Other" text when "Other" is chosen and not blank: "Other" wins. A
+///   multi-select value is the chosen labels in option order, then the
+///   "Other" text when chosen, joined with ", ". Every question needs a
+///   value.
+/// - **A permission** is `allow`, `allow_always` (only where `allowAlways` is
+///   offered) or `deny`. A deny may carry a reason of at most
+///   `PhoneAppConstants.promptTextCap` UTF-8 bytes; one that is blank once
+///   trimmed is sent as no reason.
 struct PhonePromptAnswerParams: Codable, Equatable, Sendable {
     let session: PhoneSessionRef
     let promptID: String

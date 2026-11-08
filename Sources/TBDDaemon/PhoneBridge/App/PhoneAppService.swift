@@ -76,6 +76,11 @@ struct PhoneDeviceState: Sendable {
     /// first `sessions.subscribe` until this state is dropped. It runs on
     /// while the phone is away, so a resume replays what changed.
     var sessions: PhoneSessionsFeed?
+    /// The open session's `prompt.changed` feed: what the phone was last sent
+    /// and the source that watches the session's prompts. Set by
+    /// `openPrompts(_:for:)` and cleared by `closePrompts(for:)`; the
+    /// transcript feed takes it over.
+    var prompts: PhonePromptFeed?
     /// Drops this state `parseStateGrace` after a disconnect; nil while the
     /// phone is connected.
     var grace: Task<Void, Never>?
@@ -89,6 +94,7 @@ struct PhoneDeviceState: Sendable {
         grace?.cancel()
         outbox?.close()
         await sessions?.publisher.stop()
+        await prompts?.source?.stop()
     }
 }
 
@@ -200,6 +206,9 @@ actor PhoneAppService: PhoneAppHandling {
     let clock: any Clock<Duration>
     /// Request IDs and their replies, per device.
     let memory: PhoneRequestMemory
+    /// Which phone is answering, or answered, which prompt, across every
+    /// device, for `prompt.changed`'s `answeredBy`.
+    var phoneAnswerLedger = PhonePromptAnswerLedger()
 
     /// Each phone the service keeps state for, by device ID.
     var devices: [UUID: PhoneDeviceState] = [:]
@@ -538,8 +547,12 @@ actor PhoneAppService: PhoneAppHandling {
             return Self.typed(SessionSetModelParams.self) { [self] params, context in
                 try await self.sessionSetModel(params, context)
             }
+        case .promptAnswer:
+            return Self.typed(PhonePromptAnswerParams.self) { [self] params, context in
+                try await self.promptAnswer(params, context)
+            }
         case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
-             .promptAnswer, .profilesList, .sessionSwitchProfile, .sessionFork,
+             .profilesList, .sessionSwitchProfile, .sessionFork,
              .worktreeCreate, .remoteProviders, .remoteCreate:
             return nil
         }

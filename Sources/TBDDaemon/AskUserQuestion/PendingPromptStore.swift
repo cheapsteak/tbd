@@ -152,6 +152,16 @@ public actor PendingPromptStore {
     }
 
     private var promptRecords: [Key: PromptRecord] = [:]
+    /// How each recently resolved prompt ended, so a reader that saw a prompt
+    /// leave the open set can ask how (``promptsAndResolutions(forTerminal:)``).
+    /// It holds at most ``recentResolutionLimit`` entries, the oldest dropped
+    /// first, and a prompt that opens again under its key loses its entry, so
+    /// an entry always names a prompt that is not open.
+    private var recentResolutions: [Key: Resolution] = [:]
+    /// The keys of `recentResolutions`, oldest first.
+    private var recentResolutionOrder: [Key] = []
+    /// The most resolutions `recentResolutions` keeps.
+    static let recentResolutionLimit = 256
     /// Signals that reached a pending answer between its two parks (after a
     /// pickup, before it parked for the receipt), by answer token. The parked
     /// call collects its own entry, so none outlives its `answer`.
@@ -223,6 +233,22 @@ public actor PendingPromptStore {
             .values
             .map(\.payload)
             .sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
+    }
+
+    /// The terminal's open prompts, oldest first, and how each of its
+    /// recently resolved prompts ended, by prompt id, read in one actor turn
+    /// so a prompt that just closed is in one or the other. A resolution is
+    /// kept until ``recentResolutionLimit`` later ones push it out or its
+    /// prompt opens again, so a prompt that closed long ago can be in
+    /// neither.
+    public func promptsAndResolutions(
+        forTerminal terminalID: UUID
+    ) -> (open: [PendingPromptPayload], resolved: [String: Resolution]) {
+        var resolved: [String: Resolution] = [:]
+        for (key, resolution) in recentResolutions where key.terminalID == terminalID {
+            resolved[key.toolUseID] = resolution
+        }
+        return (prompts(forTerminal: terminalID), resolved)
     }
 
     /// The set and its revision, read together. This is what a broadcaster
@@ -312,6 +338,7 @@ public actor PendingPromptStore {
             promptRecords[key] = PromptRecord(
                 payload: payload, sessionID: sessionID, lastWaitAt: now(),
                 generation: UUID(), waiter: nil, pendingAnswer: nil)
+            forgetResolution(key)
         }
         bumpRevision(terminalID)
         Self.log.debug(
@@ -666,10 +693,29 @@ public actor PendingPromptStore {
         if let answer = record.pendingAnswer {
             signal(answer, .resolved(resolution))
         }
+        noteResolution(key, resolution)
         if bump { bumpRevision(key.terminalID) }
         Self.log.debug(
             "prompt resolved id=\(key.toolUseID, privacy: .public) resolution=\(resolution.rawValue, privacy: .public)")
         return key.terminalID
+    }
+
+    /// Keeps how the prompt under `key` ended, as the newest entry, dropping
+    /// the oldest past ``recentResolutionLimit``.
+    private func noteResolution(_ key: Key, _ resolution: Resolution) {
+        if recentResolutions.updateValue(resolution, forKey: key) != nil {
+            recentResolutionOrder.removeAll { $0 == key }
+        }
+        recentResolutionOrder.append(key)
+        while recentResolutionOrder.count > Self.recentResolutionLimit {
+            recentResolutions.removeValue(forKey: recentResolutionOrder.removeFirst())
+        }
+    }
+
+    /// Drops the kept resolution under `key`: its prompt is open again.
+    private func forgetResolution(_ key: Key) {
+        guard recentResolutions.removeValue(forKey: key) != nil else { return }
+        recentResolutionOrder.removeAll { $0 == key }
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {

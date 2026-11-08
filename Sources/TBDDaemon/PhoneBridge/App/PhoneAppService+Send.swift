@@ -204,8 +204,9 @@ extension PhoneAppService {
     /// The capabilities `provider` declares, read the way the sessions list
     /// reads them. A provider list the daemon refuses to give is `refused`
     /// with its reason; one that does not decode is `internal`; a provider
-    /// missing from it is `not_found`.
-    private nonisolated func declaredCapabilities(ofProvider provider: String) async throws -> Set<String> {
+    /// missing from it is `not_found`. `prompt.answer` reads them the same
+    /// way.
+    nonisolated func declaredCapabilities(ofProvider provider: String) async throws -> Set<String> {
         let response = try await actions.phoneRemoteProviders()
         guard response.success else { throw Self.refusal(response.error) }
         let providers = try Self.decoded(RemoteProvidersResult.self, from: response, method: "remote.providers").providers
