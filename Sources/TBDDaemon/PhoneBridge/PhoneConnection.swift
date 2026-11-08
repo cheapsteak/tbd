@@ -371,19 +371,34 @@ actor PhoneConnection {
     /// established and the app layer hears of it. False when `stop()` or
     /// `revokeAndStop()` began meanwhile, in which case nothing is called: a
     /// revoked phone never becomes connected, even for the moment before its
-    /// connection closes.
+    /// connection closes. The channel stays handshaken, and `close()` ends
+    /// it silently.
+    ///
+    /// The check runs after each wait, the last-seen write included, and the
+    /// channel counts as established only after the last one, so a revoke
+    /// that lands during a wait finds it handshaken: it sends no `revoked`,
+    /// and the app layer hears neither `phoneConnected` nor
+    /// `phoneDisconnected`.
     private func establish(_ channelID: UUID) async -> Bool {
         channel?.confirmed = true
         await cancelHandshakeTimer()
         let handler = await appSlot.current()
-        guard !isClosing, !isRevoked, let current = channel, current.id == channelID else { return false }
+        guard canEstablish(channelID) else { return false }
+        await touchLastSeen()
+        guard canEstablish(channelID), let current = channel else { return false }
         let peer = PhonePeer(deviceID: deviceID, deviceName: current.deviceName)
         channel?.established = Established(peer: peer, handler: handler, loader: LoaderHandler(bundle: bundle))
-        await touchLastSeen()
         emit(.connected(deviceID: deviceID))
         PhoneBridgeLog.record(.connected(name: peer.deviceName, deviceID: deviceID))
         await handler.phoneConnected(peer, outbox: PhoneChannelOutbox(connection: self, channelID: channelID))
         return true
+    }
+
+    /// Whether handshaken channel `channelID` may still become established:
+    /// it is the current channel, and neither `stop()` nor `revokeAndStop()`
+    /// has begun.
+    private func canEstablish(_ channelID: UUID) -> Bool {
+        !isClosing && !isRevoked && channel?.id == channelID
     }
 
     /// Hands one decrypted message to the channel's loader and carries out

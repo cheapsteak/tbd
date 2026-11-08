@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import GRDB
 import TBDShared
 import Testing
 import TestSupport
@@ -17,6 +18,18 @@ private func ikMessage1(room: String, laptopKey: Curve25519.KeyAgreement.PublicK
     var initiator = try NoiseInitiator(pattern: .ik, staticKey: key, remoteStatic: laptopKey, psk: nil,
                                        prologue: PhoneChannelPrologue.make(roomID: roomBytes))
     return try initiator.writeMessage1(payload: Data("{}".utf8))
+}
+
+/// Holds `writer` inside one write until `release` is signalled, so every
+/// other access to it waits, and records on `holding` once it holds.
+/// Synchronous, so the hold blocks the calling thread; the caller keeps that
+/// thread off the cooperative pool with `gateHoldingTask`.
+private func holdWrites(_ writer: any DatabaseWriter, until release: DispatchSemaphore,
+                        holding: FireRecorder<Void>) {
+    _ = try? writer.write { _ -> Void in
+        holding.record(())
+        release.waitForGate("the phone_device write hold")
+    }
 }
 
 /// One connection under test, with everything it talks to.
@@ -88,11 +101,18 @@ private struct ConnectionHarness: Sendable {
 /// Builds a connection for one paired phone on a fake relay, starts it,
 /// waits for its socket to open, runs `body`, and stops the connection
 /// whatever happens, so no task outlives the test. The connection opens its
-/// sockets through `transport`, `relay` itself when nil.
+/// sockets through `transport`, `relay` itself when nil. `onNow` runs on
+/// every read of the connection's date seam, which it reads only to stamp
+/// the phone's last-seen time, just before it writes it.
 private func withConnection(relay: FakeRelay = FakeRelay(), transport: (any RelayTransport)? = nil,
+                            onNow: (@Sendable () -> Void)? = nil,
                             _ body: (ConnectionHarness) async throws -> Void) async throws {
     let db = try TBDDatabase(inMemory: true)
     let dates = TestDateSource()
+    let now: @Sendable () -> Date = { [dates] in
+        onNow?()
+        return dates.now
+    }
     let phoneKey = Curve25519.KeyAgreement.PrivateKey()
     let laptopKey = Curve25519.KeyAgreement.PrivateKey()
     let room = try PhoneRoom.newToken()
@@ -107,7 +127,7 @@ private func withConnection(relay: FakeRelay = FakeRelay(), transport: (any Rela
     let connection = PhoneConnection(
         device: device, relayURL: relayURL, transport: sockets, laptopKey: laptopKey, laptopName: "acme-laptop",
         devices: db.phoneDevices, bundle: bundle, appSlot: PhoneAppHandlerSlot(app),
-        preflight: { .proceed }, onEvent: { events.record($0) }, now: dates.provider,
+        preflight: { .proceed }, onEvent: { events.record($0) }, now: now,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
     let harness = ConnectionHarness(db: db, device: device, phoneKey: phoneKey, laptopKey: laptopKey, relay: relay,
                                     clock: clock, dates: dates, app: app, events: events, connection: connection)
@@ -630,6 +650,46 @@ struct PhoneConnectionTests {
             #expect(left == "peer-left")
             let log = await h.app.log
             #expect(log == ["connected", "disconnected"])
+            let connected = await h.connection.isConnected
+            #expect(connected == false)
+        }
+    }
+
+    /// A revoke that lands while the first transport message's last-seen
+    /// time is being written finds the channel still handshaken: the phone
+    /// never counts as connected, and the app layer hears nothing.
+    @Test func aRevokeDuringTheLastSeenWriteNeverConnects() async throws {
+        let lastSeenStamps = FireRecorder<Void>()
+        try await withConnection(onNow: { lastSeenStamps.record(()) }) { h in
+            let phone = try await h.joinedPhone()
+            try await phone.connectIK(room: h.room, laptopKey: h.laptopKey.publicKey)
+
+            // From here the database waits, so the last-seen write that
+            // `hello` starts cannot finish until the test releases it.
+            let release = DispatchSemaphore(value: 0)
+            // However the test ends, the database is let go.
+            defer { release.signal() }
+            let holding = FireRecorder<Void>()
+            let writer = h.db.writerForTests
+            let hold = gateHoldingTask { holdWrites(writer, until: release, holding: holding) }
+            let held = await holding.next()
+            try #require(held != nil)
+
+            try await phone.sendHello()
+            let stamped = await lastSeenStamps.next()
+            try #require(stamped != nil)
+            let connection = h.connection
+            let revoking = Task { await connection.revokeAndStop() }
+            // The socket closes once the revoke has begun stopping.
+            let left = try await phone.nextSignal()
+            #expect(left == "peer-left")
+
+            release.signal()
+            await hold.value
+            await revoking.value
+            #expect(!h.events.values.contains(.connected(deviceID: h.device.id)))
+            let log = await h.app.log
+            #expect(log.isEmpty)
             let connected = await h.connection.isConnected
             #expect(connected == false)
         }
