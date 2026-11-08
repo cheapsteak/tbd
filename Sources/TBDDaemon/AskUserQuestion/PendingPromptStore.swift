@@ -152,16 +152,30 @@ public actor PendingPromptStore {
     }
 
     private var promptRecords: [Key: PromptRecord] = [:]
-    /// How each recently resolved prompt ended, so a reader that saw a prompt
-    /// leave the open set can ask how (``promptsAndResolutions(forTerminal:)``).
-    /// It holds at most ``recentResolutionLimit`` entries, the oldest dropped
-    /// first, and a prompt that opens again under its key loses its entry, so
-    /// an entry always names a prompt that is not open.
-    private var recentResolutions: [Key: Resolution] = [:]
-    /// The keys of `recentResolutions`, oldest first.
-    private var recentResolutionOrder: [Key] = []
-    /// The most resolutions `recentResolutions` keeps.
-    static let recentResolutionLimit = 256
+    /// How one terminal's recently resolved prompts ended, by tool-use ID.
+    private struct TerminalResolutions {
+        var endings: [String: Resolution] = [:]
+        /// The keys of `endings`, oldest first.
+        var order: [String] = []
+    }
+
+    /// How each recently resolved prompt ended, by terminal, so a reader that
+    /// saw a prompt leave the open set can ask how
+    /// (``promptsAndResolutions(forTerminal:)``). Each terminal keeps at most
+    /// ``recentResolutionLimit`` entries, its oldest dropped first, so a burst
+    /// in one terminal cannot push out another's. At most
+    /// ``recentResolutionTerminalLimit`` terminals are kept, the one whose
+    /// last entry is oldest dropped first. A prompt that opens again under
+    /// its key loses its entry, so an entry always names a prompt that is not
+    /// open.
+    private var recentResolutions: [UUID: TerminalResolutions] = [:]
+    /// The terminals in `recentResolutions`, the one whose last entry is
+    /// oldest first.
+    private var recentResolutionTerminals: [UUID] = []
+    /// The most resolutions `recentResolutions` keeps for one terminal.
+    static let recentResolutionLimit = 32
+    /// The most terminals `recentResolutions` keeps resolutions for.
+    static let recentResolutionTerminalLimit = 256
     /// Signals that reached a pending answer between its two parks (after a
     /// pickup, before it parked for the receipt), by answer token. The parked
     /// call collects its own entry, so none outlives its `answer`.
@@ -238,17 +252,14 @@ public actor PendingPromptStore {
     /// The terminal's open prompts, oldest first, and how each of its
     /// recently resolved prompts ended, by prompt id, read in one actor turn
     /// so a prompt that just closed is in one or the other. A resolution is
-    /// kept until ``recentResolutionLimit`` later ones push it out or its
-    /// prompt opens again, so a prompt that closed long ago can be in
-    /// neither.
+    /// kept until ``recentResolutionLimit`` later ones in its terminal push it
+    /// out, ``recentResolutionTerminalLimit`` other terminals resolve a
+    /// prompt after its terminal last did, or its prompt opens again, so a
+    /// prompt that closed long ago can be in neither.
     public func promptsAndResolutions(
         forTerminal terminalID: UUID
     ) -> (open: [PendingPromptPayload], resolved: [String: Resolution]) {
-        var resolved: [String: Resolution] = [:]
-        for (key, resolution) in recentResolutions where key.terminalID == terminalID {
-            resolved[key.toolUseID] = resolution
-        }
-        return (prompts(forTerminal: terminalID), resolved)
+        (prompts(forTerminal: terminalID), recentResolutions[terminalID]?.endings ?? [:])
     }
 
     /// The set and its revision, read together. This is what a broadcaster
@@ -717,22 +728,39 @@ public actor PendingPromptStore {
         return key.terminalID
     }
 
-    /// Keeps how the prompt under `key` ended, as the newest entry, dropping
-    /// the oldest past ``recentResolutionLimit``.
+    /// Keeps how the prompt under `key` ended, as its terminal's newest
+    /// entry, dropping the terminal's oldest past ``recentResolutionLimit``,
+    /// and makes the terminal the newest one kept, dropping the oldest
+    /// terminal's entries past ``recentResolutionTerminalLimit``.
     private func noteResolution(_ key: Key, _ resolution: Resolution) {
-        if recentResolutions.updateValue(resolution, forKey: key) != nil {
-            recentResolutionOrder.removeAll { $0 == key }
+        var kept = recentResolutions[key.terminalID] ?? TerminalResolutions()
+        if kept.endings.updateValue(resolution, forKey: key.toolUseID) != nil {
+            kept.order.removeAll { $0 == key.toolUseID }
         }
-        recentResolutionOrder.append(key)
-        while recentResolutionOrder.count > Self.recentResolutionLimit {
-            recentResolutions.removeValue(forKey: recentResolutionOrder.removeFirst())
+        kept.order.append(key.toolUseID)
+        while kept.order.count > Self.recentResolutionLimit {
+            kept.endings.removeValue(forKey: kept.order.removeFirst())
+        }
+        recentResolutions[key.terminalID] = kept
+        recentResolutionTerminals.removeAll { $0 == key.terminalID }
+        recentResolutionTerminals.append(key.terminalID)
+        while recentResolutionTerminals.count > Self.recentResolutionTerminalLimit {
+            recentResolutions.removeValue(forKey: recentResolutionTerminals.removeFirst())
         }
     }
 
-    /// Drops the kept resolution under `key`: its prompt is open again.
+    /// Drops the kept resolution under `key`: its prompt is open again. A
+    /// terminal left with none is no longer kept.
     private func forgetResolution(_ key: Key) {
-        guard recentResolutions.removeValue(forKey: key) != nil else { return }
-        recentResolutionOrder.removeAll { $0 == key }
+        guard var kept = recentResolutions[key.terminalID],
+              kept.endings.removeValue(forKey: key.toolUseID) != nil else { return }
+        kept.order.removeAll { $0 == key.toolUseID }
+        if kept.order.isEmpty {
+            recentResolutions.removeValue(forKey: key.terminalID)
+            recentResolutionTerminals.removeAll { $0 == key.terminalID }
+        } else {
+            recentResolutions[key.terminalID] = kept
+        }
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {

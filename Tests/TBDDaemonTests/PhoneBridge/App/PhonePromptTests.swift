@@ -708,8 +708,8 @@ struct PhonePromptTests {
     }
 
     /// The store keeps how each recently closed prompt ended, at most
-    /// `recentResolutionLimit` of them, and forgets a prompt's ending when it
-    /// opens again.
+    /// `recentResolutionLimit` of them for one terminal, and forgets a
+    /// prompt's ending when it opens again.
     @Test func theStoreKeepsRecentResolutionsBounded() async {
         let store = PendingPromptStore()
         let terminalID = UUID()
@@ -742,6 +742,64 @@ struct PhonePromptTests {
         #expect(many.resolved.count == limit)
         #expect(many.resolved["toolu-b0"] == nil)
         #expect(many.resolved["toolu-b\(limit)"] == .answeredInTerminal)
+    }
+
+    /// A burst of closed prompts in one terminal pushes out only that
+    /// terminal's oldest endings: another terminal's ending stays, though the
+    /// burst is longer than the store keeps for all terminals together.
+    @Test func oneTerminalsBurstLeavesAnothersResolutions() async {
+        let store = PendingPromptStore()
+        let quiet = UUID()
+        let busy = UUID()
+        await Self.openAndClose(store, terminalID: quiet, toolUseID: "toolu-q")
+
+        let limit = PendingPromptStore.recentResolutionLimit
+        let burst = PendingPromptStore.recentResolutionTerminalLimit + limit
+        for index in 0..<burst {
+            await Self.openAndClose(store, terminalID: busy, toolUseID: "toolu-b\(index)")
+        }
+
+        let quietResolved = await store.promptsAndResolutions(forTerminal: quiet).resolved
+        #expect(quietResolved == ["toolu-q": .answeredInTerminal])
+        let busyResolved = await store.promptsAndResolutions(forTerminal: busy).resolved
+        #expect(busyResolved.count == limit)
+        #expect(busyResolved["toolu-b\(burst - limit - 1)"] == nil)
+        #expect(busyResolved["toolu-b\(burst - limit)"] == .answeredInTerminal)
+        #expect(busyResolved["toolu-b\(burst - 1)"] == .answeredInTerminal)
+    }
+
+    /// The store keeps endings for at most `recentResolutionTerminalLimit`
+    /// terminals, dropping the one whose last ending is oldest: a terminal
+    /// that closes a prompt again moves to the newest.
+    @Test func theStoreKeepsResolutionsForBoundedTerminals() async {
+        let store = PendingPromptStore()
+        let terminalLimit = PendingPromptStore.recentResolutionTerminalLimit
+        let terminals = (0...terminalLimit).map { _ in UUID() }
+        for terminalID in terminals.dropLast() {
+            await Self.openAndClose(store, terminalID: terminalID, toolUseID: "toolu-1")
+        }
+        // The first terminal closes another prompt, so the second is now the
+        // one whose last ending is oldest.
+        await Self.openAndClose(store, terminalID: terminals[0], toolUseID: "toolu-2")
+
+        await Self.openAndClose(store, terminalID: terminals[terminalLimit], toolUseID: "toolu-1")
+
+        let first = await store.promptsAndResolutions(forTerminal: terminals[0]).resolved
+        #expect(first == ["toolu-1": .answeredInTerminal, "toolu-2": .answeredInTerminal])
+        let second = await store.promptsAndResolutions(forTerminal: terminals[1]).resolved
+        #expect(second.isEmpty)
+        let third = await store.promptsAndResolutions(forTerminal: terminals[2]).resolved
+        #expect(third == ["toolu-1": .answeredInTerminal])
+        let newest = await store.promptsAndResolutions(forTerminal: terminals[terminalLimit]).resolved
+        #expect(newest == ["toolu-1": .answeredInTerminal])
+    }
+
+    /// Opens a Bash prompt in `terminalID` and closes it in the terminal.
+    private static func openAndClose(_ store: PendingPromptStore, terminalID: UUID, toolUseID: String) async {
+        await store.open(
+            terminalID: terminalID, sessionID: nil, toolUseID: toolUseID, toolName: "Bash",
+            toolInputJSON: bashInput, suggestionsJSON: nil)
+        await store.closed(terminalID: terminalID, toolUseID: toolUseID)
     }
 
     // MARK: - Shaping
