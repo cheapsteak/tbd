@@ -189,11 +189,24 @@ function nav(title, left, onLeft) {
 }
 
 /**
- * An inline error, styled as the mock's composer refusal.
- * @param {string} text
+ * An inline error, styled as the mock's composer refusal; nothing without one.
+ * @param {string | null} text
  */
 function refusal(text) {
-  return h('div', { class: 'refusal', role: 'alert' }, icon('warn'), h('span', null, text));
+  return text === null ? null : h('div', { class: 'refusal', role: 'alert' }, icon('warn'), h('span', null, text));
+}
+
+/**
+ * A form's submit listener: hands `field`'s value to `onSubmit` instead of submitting.
+ * @param {HTMLInputElement | HTMLTextAreaElement} field
+ * @param {(value: string) => void} onSubmit
+ * @returns {(event: Event) => void}
+ */
+function submitValue(field, onSubmit) {
+  return (event) => {
+    event.preventDefault();
+    onSubmit(field.value);
+  };
 }
 
 /**
@@ -297,7 +310,7 @@ export function renderPairStart({ error, onCancel, onPaste }) {
     nav('Pair a laptop', 'Cancel', onCancel),
     h('div', { class: 'ld-body' },
       h('div', { class: 'cam', role: 'img', 'aria-label': 'Camera view' }, video, h('span', { class: 'brk' })),
-      error === null ? null : refusal(error),
+      refusal(error),
       h('p', null, 'On the laptop, open TBD Settings, then Phone, then ', h('b', null, 'Pair a Phone…'),
         ' Point this camera at the code it shows.'),
       h('button', { class: 'btn wide', type: 'button', onClick: onPaste }, icon('link'), 'Paste link instead')));
@@ -316,18 +329,12 @@ export function renderPaste({ error, value, onBack, onSubmit }) {
   });
   const root = h('div', { class: 'ld', 'data-state': 'paste' },
     nav('Paste link', 'Back', onBack),
-    h('form', {
-      class: 'ld-body',
-      onSubmit: (/** @type {Event} */ event) => {
-        event.preventDefault();
-        onSubmit(field.value);
-      },
-    },
-    h('p', null, 'On the laptop, the pairing sheet shows the same link as text. Copy it there, then paste it here.'),
-    h('label', { class: 'sr', for: 'paste-link' }, 'Pairing link'),
-    field,
-    error === null ? null : refusal(error),
-    h('button', { class: 'btn pri wide', type: 'submit' }, 'Continue')));
+    h('form', { class: 'ld-body', onSubmit: submitValue(field, onSubmit) },
+      h('p', null, 'On the laptop, the pairing sheet shows the same link as text. Copy it there, then paste it here.'),
+      h('label', { class: 'sr', for: 'paste-link' }, 'Pairing link'),
+      field,
+      refusal(error),
+      h('button', { class: 'btn pri wide', type: 'submit' }, 'Continue')));
   return { root, field };
 }
 
@@ -343,17 +350,11 @@ export function renderName({ laptopName, value, error, onBack, onSubmit }) {
   });
   const root = h('div', { class: 'ld', 'data-state': 'name' },
     nav('Name this phone', 'Back', onBack),
-    h('form', {
-      class: 'ld-body',
-      onSubmit: (/** @type {Event} */ event) => {
-        event.preventDefault();
-        onSubmit(field.value);
-      },
-    },
-    h('p', null, 'Found ', h('b', null, laptopName), '. The laptop shows this name when it asks you to allow this phone.'),
-    h('div', { class: 'group' }, h('div', { class: 'frow' }, h('label', { for: 'phone-name' }, 'Phone name'), field)),
-    error === null ? null : refusal(error),
-    h('button', { class: 'btn pri wide', type: 'submit' }, 'Continue')));
+    h('form', { class: 'ld-body', onSubmit: submitValue(field, onSubmit) },
+      h('p', null, 'Found ', h('b', null, laptopName), '. The laptop shows this name when it asks you to allow this phone.'),
+      h('div', { class: 'group' }, h('div', { class: 'frow' }, h('label', { for: 'phone-name' }, 'Phone name'), field)),
+      refusal(error),
+      h('button', { class: 'btn pri wide', type: 'submit' }, 'Continue')));
   return { root, field };
 }
 
