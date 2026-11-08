@@ -121,7 +121,8 @@ final class EngineUnderTest {
             kind: kind,
             font: appearance.font,
             appearance: appearance,
-            configuration: TerminalEngineConfiguration())
+            configuration: TerminalEngineConfiguration(),
+            experimentEnabled: false)
         let recorder = EngineEventRecorder()
         engine.delegate = recorder
         self.suite = suite

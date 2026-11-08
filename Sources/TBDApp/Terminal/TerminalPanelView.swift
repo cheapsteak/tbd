@@ -498,7 +498,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 terminalID: terminalID,
                 worktreePath: worktreePath,
                 remoteURL: remoteURL,
-                isCodexTerminal: panelRow?.isCodexTerminal == true))
+                isCodexTerminal: panelRow?.isCodexTerminal == true),
+            experimentEnabled: appState.ghosttyTerminalEngineEnabled)
 
         // Experimental GPU draw path (default off — Settings → Terminal →
         // Experimental). Requested here rather than in `updateNSView` so a

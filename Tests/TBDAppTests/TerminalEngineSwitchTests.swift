@@ -777,6 +777,7 @@ private final class SwitchFixture {
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(terminalID: terminalID),
+            experimentEnabled: state.ghosttyTerminalEngineEnabled,
             makeGhostty: makeGhostty,
             onFallback: { requested, _ in fallbacks?.fallbacks.append(requested) })
         let coordinator = TerminalPanelRepresentable.Coordinator(clock: clock)
