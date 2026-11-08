@@ -571,6 +571,50 @@ test('a close drops every queued read unsent, and their taps resolve', async () 
   assert.deepEqual(h.sent.filter((s) => s.method === 'transcript.detail').map((s) => s.params.itemID), ['t1', 't2', 't3', 't4']);
 });
 
+/** `value` behind a proxy that counts each read of a property `counts` names. */
+function counting<T extends object>(value: T, counts: (prop: string) => boolean): { value: T; reads: () => number } {
+  let reads = 0;
+  const proxy = new Proxy(value, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && counts(prop)) reads += 1;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  return { value: proxy, reads: () => reads };
+}
+
+test('reads waiting for a slot cost no search of the rows at a change of the state', async () => {
+  const h = harness(tools(10));
+  const taps = h.t().rows.map((r) => h.actions.toggleDetail(r.key, 'input'));
+  await flush();
+  assert.equal(h.sent.length, MAX_DETAIL_READS, 'six reads wait for a slot');
+  // Each read of one of the rows, as a search over them makes, and each read of a detail.
+  const rows = counting(h.t().rows, (prop) => /^\d+$/.test(prop));
+  const details = counting(h.t().details, () => true);
+  h.setTranscript((t) => ({ ...t, rows: rows.value, details: details.value }));
+  const before = { rows: rows.reads(), details: details.reads() };
+  // A change to another slice leaves the queue nothing to look at.
+  for (let i = 0; i < 20; i += 1) h.store.update((s) => ({ ...s, ui: { ...s.ui, toast: { id: i, text: 'acme' } } }));
+  assert.equal(details.reads() - before.details, 0);
+  // A change to the transcript that leaves its rows as they are looks at the details only.
+  for (let i = 0; i < 20; i += 1) h.setTranscript((t) => ({ ...t, olderFailed: !t.olderFailed }));
+  assert.ok(details.reads() > before.details);
+  assert.equal(rows.reads() - before.rows, 0);
+  assert.equal(h.sent.length, MAX_DETAIL_READS);
+
+  // The waiting reads still go out in turn, and every row loads.
+  const answered = new Set<Sent>();
+  for (let i = 0; i < 200 && answered.size < h.sent.length; i += 1) {
+    const s = h.sent.find((x) => !answered.has(x))!;
+    answered.add(s);
+    answer(s, 1);
+    await flush();
+  }
+  await Promise.all(taps);
+  assert.ok(h.t().rows.every((r) => h.t().details[r.key]?.phase === 'open'));
+  assert.equal(h.sent.length, 20);
+});
+
 test('a running tool whose input loaded goes on to load its result once it stops running', async () => {
   const h = harness([tool('t1', 'running')]);
   const done = h.actions.toggleDetail(h.key(0), 'input');

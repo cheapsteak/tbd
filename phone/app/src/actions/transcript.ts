@@ -63,7 +63,11 @@ type ReadOutcome = { ok: true; result: TranscriptDetailResult } | { ok: false; e
  */
 export const MAX_DETAIL_READS = 4;
 
-/** A detail read waiting for a slot: `go(true)` sends it, `go(false)` drops it unsent. */
+/**
+ * A detail read waiting for a slot: `go(true)` sends it, `go(false)` drops it unsent, and
+ * `wanted` says whether its detail still waits on it (`waitsOn`), at a cost that does not grow
+ * with the transcript.
+ */
 interface QueuedRead {
   wanted: () => boolean;
   go: (send: boolean) => void;
@@ -148,8 +152,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
 
   /**
    * Drops each queued read no longer wanted, unsent, and sends the oldest wanted ones while a
-   * slot is free. It runs when a read settles and at every change of the state, so a collapse,
-   * a reset or a close drops the reads it made unwanted at once.
+   * slot is free. It runs when a read settles and at every change of the transcript, so a
+   * collapse, a reset or a close drops the reads it made unwanted at once.
    */
   function pump(): void {
     for (let i = 0; i < queued.length; ) {
@@ -209,7 +213,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
   /**
    * The request row `rowKey`'s detail waits on, with the row's item: while the transcript is
    * open, the slice holds a loading detail for the row, and the row holds an item. Null
-   * otherwise.
+   * otherwise. It looks the row up, so it runs once a step of a row's load, never once per
+   * waiting read at each change (`waitsOn`).
    */
   function askFor(rowKey: number): { params: TranscriptDetailParams; item: PhoneItem } | null {
     const t = store.get().transcript;
@@ -219,6 +224,23 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     if (row === undefined || row.kind !== 'item') return null;
     const ask = askOf(d);
     return { params: { session: t.ref, itemID: row.item.id, part: ask.part, chunk: ask.chunk }, item: row.item };
+  }
+
+  /**
+   * Whether row `rowKey`'s detail still waits on just `params`: the transcript is open on its
+   * session, and the slice holds a loading detail for the row that asks for the same part and
+   * chunk. It reads the slice's details and no row, so its cost does not grow with the
+   * transcript, though the queue asks it of every waiting read at each change of the transcript
+   * (`pump`). It needs no row: a row's item ID never changes under its detail, since an item
+   * replaces a row only for its own ID and the details go with the rows they were for, and a
+   * message whose text changes loses its detail at once (`followItem`), which this sees.
+   */
+  function waitsOn(rowKey: number, params: TranscriptDetailParams): boolean {
+    const t = store.get().transcript;
+    const d = t.details[rowKey];
+    if (t.phase !== 'open' || t.ref === null || !sameRef(t.ref, params.session) || d === undefined || d.phase !== 'loading') return false;
+    const ask = askOf(d);
+    return ask.part === params.part && ask.chunk === params.chunk;
   }
 
   /** The loop loading each row's detail, by row key, while it runs (`drive`). */
@@ -244,7 +266,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
    * (`followItem`), carries on from where it stands. A reply counts only for the detail the
    * slice holds when it lands, and only while that detail still waits on just that request, of
    * the same item text for a message's text. Otherwise the loop asks again for what the detail
-   * waits on then, or stops when it waits on nothing.
+   * waits on then, or stops when it waits on nothing. While its read waits for a slot, the queue
+   * checks it with `waitsOn`; the full check, row included, runs once its reply lands.
    */
   async function load(rowKey: number): Promise<void> {
     try {
@@ -254,7 +277,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
           const now = askFor(rowKey);
           return now !== null && sameRead(now.params, params) && (params.part !== 'text' || now.item.text === item.text);
         };
-        const outcome = await readDetail(params, counts);
+        const outcome = await readDetail(params, () => waitsOn(rowKey, params));
         if (outcome === null || !counts()) continue;
         const d = store.get().transcript.details[rowKey]!;
         if (!outcome.ok) {
@@ -280,7 +303,12 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     }
   }
 
+  // The transcript the queue and the loops last looked at: a change to any other slice gives them nothing to do.
+  let looked = store.get().transcript;
   store.subscribe(() => {
+    const t = store.get().transcript;
+    if (t === looked) return;
+    looked = t;
     if (queued.length > 0) pump();
     driveAll();
   });
