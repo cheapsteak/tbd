@@ -279,8 +279,8 @@ struct MouseEncoderTests {
         let outcome = try terminal.withLocked { state in
             try encoder.wheel(rows: 2, at: Self.point, terminal: try #require(state.raw, "the terminal is closed"))
         }
-        guard case .report(let bytes) = outcome, !bytes.isEmpty else {
-            Issue.record("two rows of wheel under mode 1000 gave \(outcome), not a report")
+        guard case .report(let press, let count) = outcome, !press.isEmpty, count == 2 else {
+            Issue.record("two rows of wheel under mode 1000 gave \(outcome), not two reports")
             return
         }
         #expect(encoder.heldButtons.isEmpty, "the wheel left \(encoder.heldButtons) held")

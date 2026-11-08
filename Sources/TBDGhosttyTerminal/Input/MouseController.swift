@@ -120,34 +120,37 @@ enum WheelPhase: Sendable, Equatable {
     }
 }
 
-/// Bounds the arrow keys the wheel types under alternate scroll: `sustainedKeysPerSecond`, with a
-/// burst of `burstKeys`, the bound the app's wheel monitor puts on its reports. Keys over it are
-/// dropped, not queued, because a backlog would keep scrolling after the fingers stop. Each key
-/// makes a pager or an editor redraw, and a flick's momentum tail would otherwise type keys at
-/// the event rate.
+/// Bounds what the wheel sends the program, mouse reports under tracking and arrow keys under
+/// alternate scroll alike: `sustainedPerSecond`, with a burst of `burst`. The policy and the
+/// numbers are those of the app's wheel monitor (`ScrollWheelAccumulator` in TBDApp), so a panel
+/// gets the same bound whichever of the two sits in front of the program. What goes over it is
+/// dropped, not queued: a backlog would keep scrolling after the fingers stop, and reports still
+/// arriving after the program leaves mouse mode would land in it as literal text. Each report or
+/// key makes a full-screen program redraw, and a flick's momentum tail, 60 to 120 events a second,
+/// would otherwise send one per row of every event.
 ///
 /// Time is the events' own `timestamp`, so tests drive it without a clock or a timer.
-struct WheelKeyBound: Sendable, Equatable {
-    /// Keys the bucket regains per second of event time.
-    static let sustainedKeysPerSecond: Double = 100
-    /// Keys the bucket holds when full: what passes at once after a pause.
-    static let burstKeys = 6
+struct WheelInputBound: Sendable, Equatable {
+    /// Reports or keys the bucket regains per second of event time.
+    static let sustainedPerSecond: Double = 100
+    /// Reports or keys the bucket holds when full: what passes at once after a pause.
+    static let burst = 6
 
-    /// Keys the bucket can still let through. Starts full.
-    private var tokens = Double(WheelKeyBound.burstKeys)
-    /// `timestamp` of the last refill; nil until the first key.
+    /// Reports or keys the bucket can still let through. Starts full.
+    private var tokens = Double(WheelInputBound.burst)
+    /// `timestamp` of the last refill; nil until the first admission.
     private var lastRefill: TimeInterval?
 
     init() {}
 
-    /// How many of `count` keys pass at `timestamp`, after refilling the bucket for the event time
-    /// since the last refill. The rest are dropped.
+    /// How many of `count` reports or keys pass at `timestamp`, after refilling the bucket for the
+    /// event time since the last refill. The rest are dropped.
     mutating func admit(_ count: Int, at timestamp: TimeInterval) -> Int {
         guard count > 0 else { return 0 }
         if let lastRefill {
             // Clamped, so an out-of-order timestamp never drains the bucket.
             let elapsed = max(0, timestamp - lastRefill)
-            tokens = min(Double(Self.burstKeys), tokens + elapsed * Self.sustainedKeysPerSecond)
+            tokens = min(Double(Self.burst), tokens + elapsed * Self.sustainedPerSecond)
         }
         lastRefill = timestamp
         let admitted = min(count, Int(tokens))
@@ -208,7 +211,8 @@ final class MouseController: NSObject {
 
     private var trackingArea: NSTrackingArea?
     private var accumulator = ScrollAccumulator()
-    private var arrowKeyBound = WheelKeyBound()
+    /// One bucket for the wheel's reports and arrow keys: a program gets one or the other.
+    private var programInputBound = WheelInputBound()
     private var autoscrollTask: Task<Void, Never>?
     private var autoscrollPosition = SurfacePoint(x: 0, y: 0)
     /// Where the last reported press or drag was. A release sent on focus loss, with no event of
@@ -485,15 +489,15 @@ final class MouseController: NSObject {
         return true
     }
 
-    /// One wheel event, from its deltas on: whole rows, then a report or arrow keys sent to the
-    /// program, or a viewport scroll. Returns what was done; arrow keys are counted after
-    /// `arrowKeyBound`, which drops those over it.
+    /// One wheel event, from its deltas on: whole rows, then reports or arrow keys sent to the
+    /// program, or a viewport scroll. Returns what was done; reports and arrow keys are counted
+    /// after `programInputBound`, which drops those over it.
     ///
     /// Separate from `scrollWheel` because `NSEvent.phase` is not settable on a synthesized event,
     /// so the tests drive the whole path from here, gesture phases and timestamps included.
     ///
-    /// - Parameter timestamp: the event's own `timestamp`, in seconds. The arrow-key bound refills
-    ///   from its progress, so no clock is involved.
+    /// - Parameter timestamp: the event's own `timestamp`, in seconds. The bound on reports and
+    ///   arrow keys refills from its progress, so no clock is involved.
     @discardableResult
     func handleWheel(
         deltaY: Double,
@@ -521,19 +525,26 @@ final class MouseController: NSObject {
 
         let outcome = view.terminal.mouseWheel(rows: rows, at: position, mods: mods)
         switch outcome {
-        case .report(let bytes):
-            send(bytes)
+        case .report(let press, let count):
+            let sent = sendBounded(press, count: count, at: timestamp)
+            return sent > 0 ? .report(press: press, count: sent) : .none
         case .cursorKeys(let key, let count):
-            let admitted = arrowKeyBound.admit(count, at: timestamp)
-            guard admitted > 0 else { return .none }
-            send(Array([[UInt8]](repeating: key, count: admitted).joined()))
-            return .cursorKeys(key: key, count: admitted)
+            let sent = sendBounded(key, count: count, at: timestamp)
+            return sent > 0 ? .cursorKeys(key: key, count: sent) : .none
         case .scrolledViewport:
             view.requestFrame()
         case .none:
             break
         }
         return outcome
+    }
+
+    /// Sends `unit`, one report or key, as many of `count` times as `programInputBound` admits at
+    /// `timestamp`, back to back, and returns how many that was. The rest are dropped.
+    private func sendBounded(_ unit: [UInt8], count: Int, at timestamp: TimeInterval) -> Int {
+        let admitted = programInputBound.admit(count, at: timestamp)
+        if admitted > 0 { send(Array([[UInt8]](repeating: unit, count: admitted).joined())) }
+        return admitted
     }
 
     /// Turns one wheel event into whole rows, carrying the sub-row remainder between events.

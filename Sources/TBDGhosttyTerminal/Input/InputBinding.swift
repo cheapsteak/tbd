@@ -211,10 +211,10 @@ extension GhosttyTerminal {
         }
     }
 
-    /// Whole rows of wheel scrolling. With tracking on the reports are returned in `.report`. With
-    /// tracking off, on the alternate screen under `?1007`, the arrow key and how many of it are
-    /// returned in `.cursorKeys`; elsewhere the viewport is scrolled under the lock and the caller
-    /// should ask for a frame.
+    /// Whole rows of wheel scrolling. With tracking on, the report and how many of it are returned
+    /// in `.report`. With tracking off, on the alternate screen under `?1007`, the arrow key and
+    /// how many of it are returned in `.cursorKeys`; elsewhere the viewport is scrolled under the
+    /// lock and the caller should ask for a frame.
     func mouseWheel(rows: Int, at position: SurfacePoint, mods: TerminalModifiers) -> WheelOutcome {
         input("encoding the wheel", fallback: .none) { raw, binding in
             try binding.mouseEncoder.wheel(rows: rows, at: position, mods: mods, terminal: raw)

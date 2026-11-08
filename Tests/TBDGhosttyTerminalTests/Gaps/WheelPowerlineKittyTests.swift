@@ -37,7 +37,7 @@ private let cursorUp = Array("\u{1b}[A".utf8)
 private func describe(_ outcome: WheelOutcome) -> String {
     switch outcome {
     case .none: "nothing"
-    case .report(let bytes): "the report \(String(decoding: bytes, as: UTF8.self).debugDescription)"
+    case .report(let press, let count): "\(count) of the report \(String(decoding: press, as: UTF8.self).debugDescription)"
     case .cursorKeys(let key, let count): "\(count) of the key \(String(decoding: key, as: UTF8.self).debugDescription)"
     case .scrolledViewport(let rows): "a viewport scroll of \(rows) rows"
     }
@@ -116,7 +116,7 @@ struct WheelPowerlineKittyTests {
 
         terminal.feed(text: "\u{1b}[?1007h\u{1b}[?1000h\u{1b}[?1006h")
         let tracked = terminal.mouseWheel(rows: 1, at: wheelPoint, mods: [])
-        guard case .report(let bytes) = tracked, bytes.starts(with: Array("\u{1b}[<65;".utf8)) else {
+        guard case .report(let press, 1) = tracked, press.starts(with: Array("\u{1b}[<65;".utf8)) else {
             Issue.record(UnexpectedWheelOutcome(
                 description: "with mouse reporting on the wheel gave \(describe(tracked)), not a button-5 report"))
             return
@@ -245,15 +245,56 @@ struct WheelPowerlineKittyTests {
         }
         let sent = Array(recorder.sent.joined())
         let typed = sent.count / cursorDown.count
-        let bound = WheelKeyBound.burstKeys + Int(span * WheelKeyBound.sustainedKeysPerSecond)
+        let bound = WheelInputBound.burst + Int(span * WheelInputBound.sustainedPerSecond)
         #expect(sent == repeated("\u{1b}[B", typed), "the momentum tail sent \(String(decoding: sent, as: UTF8.self).debugDescription)")
-        #expect(typed >= WheelKeyBound.burstKeys && typed <= bound,
-                "120 lines of momentum in 100 ms typed \(typed) arrow keys, not from \(WheelKeyBound.burstKeys) to \(bound)")
+        #expect(typed >= WheelInputBound.burst && typed <= bound,
+                "120 lines of momentum in 100 ms typed \(typed) arrow keys, not from \(WheelInputBound.burst) to \(bound)")
 
         recorder.sent = []
         // A line and a half, so the one whole line does not hang on rounding.
         Self.wheel(view, deltaY: -1.5 * line, phase: .gestureBegan, at: 11)
         #expect(recorder.sent == [cursorDown], "a line and a half a second after the tail sent \(recorder.sent)")
+    }
+
+    /// Wheel reports under mouse tracking have the same bound as the arrow keys, the app's wheel
+    /// monitor's: the burst at once, then 100 a second, the rest dropped. Time is the events' own
+    /// timestamps, as in the app's monitor, so the test sets it; each is a binary fraction, so the
+    /// refills are exact.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func wheelReportsAreBoundedLikeTheArrowKeys() throws {
+        let (terminal, view, recorder) = try makeView()
+        terminal.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+        let reporting = terminal.isMouseReporting
+        try #require(reporting, "?1000h did not turn mouse reporting on")
+        let line = Double(view.cellSize.height)
+        /// The reports sent since the last call: each starts with the one ESC it holds.
+        func reportsSent() -> Int {
+            defer { recorder.sent = [] }
+            return recorder.sent.joined().filter { $0 == 0x1B }.count
+        }
+
+        // Ten notches at once: one report each, until the burst is spent.
+        for _ in 0..<10 { Self.wheel(view, deltaY: -1, precise: false, phase: .unphased, at: 8) }
+        let burst = reportsSent()
+        #expect(burst == WheelInputBound.burst, "ten notches at once sent \(burst) reports")
+
+        // A thirty-second of a second later the bucket holds 3.125 reports, so three go out.
+        for _ in 0..<10 { Self.wheel(view, deltaY: -1, precise: false, phase: .unphased, at: 8.03125) }
+        let refilled = reportsSent()
+        #expect(refilled == 3, "ten notches 1/32 s after the burst sent \(refilled) reports, not 3")
+
+        // After a second the bucket is full again, and holds no more than the burst: one event
+        // worth twenty rows sends six.
+        let outcome = Self.wheel(view, deltaY: -20 * line, phase: .momentum, at: 9.03125)
+        let afterPause = reportsSent()
+        #expect(afterPause == WheelInputBound.burst,
+                "twenty rows a second after the refill sent \(afterPause) reports: \(describe(outcome))")
+        guard case .report(let press, WheelInputBound.burst) = outcome,
+              press.starts(with: Array("\u{1b}[<65;".utf8)) else {
+            Issue.record(UnexpectedWheelOutcome(
+                description: "twenty rows of momentum gave \(describe(outcome)), not \(WheelInputBound.burst) button-5 reports"))
+            return
+        }
     }
 
     /// On the primary screen the wheel moves the viewport through scrollback and sends the program
@@ -466,6 +507,9 @@ struct WheelPowerlineKittyTests {
             cursor: .init(r: 0xFF, g: 0xFF, b: 0xFF))
         let view = try GhosttyTerminalView(terminal: terminal, appearance: appearance)
         view.setFrameSize(NSSize(width: 400, height: 200))
+        // The mouse encoder has the geometry it would get on the view's first event, so a report
+        // at `wheelPoint` lands inside the screen.
+        view.mouseController.syncGeometry()
         let recorder = WheelSent()
         view.onSend = { recorder.sent.append($0) }
         return (terminal, view, recorder)

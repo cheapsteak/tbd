@@ -176,8 +176,10 @@ struct ScrollAccumulator: Sendable, Equatable {
 enum WheelOutcome: Sendable, Equatable {
     /// Nothing to do (zero rows, or the terminal wanted no report).
     case none
-    /// Write these bytes to the pty (mouse tracking is on).
-    case report([UInt8])
+    /// Write `press`, the report of one wheel press for button four (up) or five (down), to the
+    /// pty `count` times, once per row (mouse tracking is on). A count rather than the bytes, so
+    /// the view can bound how many it sends.
+    case report(press: [UInt8], count: Int)
     /// Write `key`, a cursor-up or cursor-down key, to the pty `count` times, once per row, because
     /// a program on the alternate screen with alternate scroll (`?1007h`) asked for the wheel as
     /// arrow keys. A count rather than the bytes, so the view can bound how many it sends.
@@ -472,8 +474,9 @@ final class MouseEncoder {
     ///   `GHOSTTY_SCROLL_VIEWPORT_DELTA` ("up is negative"). Feed it from `ScrollAccumulator`.
     ///
     /// The order is Ghostty's own (`Surface.zig`, `scrollCallback`):
-    ///   * With tracking on, one *press* report per row is emitted for button four (up) / five
-    ///     (down); that is what xterm-style wheel reporting is — see the measured bytes in the tests.
+    ///   * With tracking on, one *press* report per row is due for button four (up) / five (down);
+    ///     that is what xterm-style wheel reporting is — see the measured bytes in the tests. Every
+    ///     row's report is the same press in the same cell, so it is encoded once and counted.
     ///   * Otherwise, on the alternate screen, the wheel is arrow keys when the program has
     ///     alternate scroll (`?1007`) set, which is how `less`, `man` and vim scroll by wheel, and
     ///     nothing when it has not: the alternate screen has no scrollback to move through.
@@ -506,14 +509,13 @@ final class MouseEncoder {
         syncFromTerminal(terminal)
         lastMotion = nil
         let press = MousePress(action: .press, button: rows < 0 ? .four : .five, mods: mods, position: position)
-        var bytes: [UInt8] = []
-        for _ in 0..<abs(rows) {
-            // A wheel "click" is a press with no release. It goes straight to the encoder, so it
-            // never joins `pressEncodings`, where it would count as a held button. The encoder is
-            // still told a button is down, as for any press.
-            if let encoded = try encodeEvent(press, with: handle, anyPressed: true) { bytes += encoded }
+        // A wheel "click" is a press with no release. It goes straight to the encoder, so it never
+        // joins `pressEncodings`, where it would count as a held button. The encoder is still told
+        // a button is down, as for any press.
+        guard let report = try encodeEvent(press, with: handle, anyPressed: true), !report.isEmpty else {
+            return .none
         }
-        return bytes.isEmpty ? .none : .report(bytes)
+        return .report(press: report, count: abs(rows))
     }
 
     // MARK: Alternate scroll
