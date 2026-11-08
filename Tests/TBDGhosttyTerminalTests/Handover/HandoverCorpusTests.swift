@@ -478,22 +478,63 @@ struct HandoverCorpusTests {
         }
     }
 
-    /// A sequence longer than the 64 KiB libghostty keeps of one cannot be handed on. The handback
-    /// then ends without it and still rebuilds the screen in view. On the alternate screen that
-    /// screen comes alone, because a terminal inside such a sequence cannot be cloned for its
-    /// primary.
-    @Test(arguments: ["sgr-colors", "alt-tui-full"])
-    func handbackRebuildsTheScreenWhenTheUnfinishedSequenceOutgrewItsBound(_ name: String) async throws {
+    struct OverlongSequence: Sendable, CustomTestStringConvertible {
+        let name: String
+        /// More of one sequence than libghostty keeps.
+        let head: [UInt8]
+        /// The end of the sequence, which arrives after the handback.
+        let rest: [UInt8]
+
+        var testDescription: String { name }
+    }
+
+    static let overlongSequences: [OverlongSequence] = {
+        let base64 = String(repeating: "QUJD", count: 17_500)
+        return [
+            OverlongSequence(
+                name: "a window title", head: Array(("\u{1b}]2;" + String(repeating: "t", count: 70_000)).utf8),
+                rest: Array("t\u{07}".utf8)),
+            OverlongSequence(
+                name: "an OSC 52 copy", head: Array(("\u{1b}]52;c;" + base64).utf8), rest: Array("QUJD\u{07}".utf8)),
+            OverlongSequence(
+                name: "a sixel image",
+                head: Array(("\u{1b}Pq\"1;1;10;10#0;2;100;0;0#0" + String(repeating: "~", count: 70_000)).utf8),
+                rest: Array("~-\u{1b}\\".utf8)),
+            OverlongSequence(
+                name: "a kitty graphics image", head: Array(("\u{1b}_Ga=t,f=100,i=1;" + base64).utf8),
+                rest: Array("QUJD\u{1b}\\".utf8)),
+        ]
+    }()
+
+    /// A sequence longer than the 64 KiB libghostty keeps of one cannot be handed on, and a title,
+    /// an OSC 52 copy, a sixel image or a kitty graphics image can be that long. The handback then
+    /// rebuilds the screen in view and ends with an opener that takes in the rest of the sequence,
+    /// so the rest prints nothing and what follows it prints as it does on the viewer. On the
+    /// alternate screen that screen comes alone, because a terminal inside such a sequence cannot
+    /// be cloned for its primary.
+    @Test(arguments: ["sgr-colors", "alt-tui-full"], HandoverCorpusTests.overlongSequences)
+    func handbackDropsTheRestOfASequenceThatOutgrewItsBound(_ name: String, _ sequence: OverlongSequence) async throws {
         try await onHandoverThread {
             let state = HandoverFixtures.state(named: name)
             let source = try state.ghostty()
-            source.feed(Array(("\u{1b}]2;" + String(repeating: "t", count: 70_000)).utf8)[...])
-            #expect(source.withLocked { !$0.isAtGround && $0.pendingContinuationBytes() == nil })
-
+            source.feed(sequence.head[...])
+            #expect(
+                source.withLocked { !$0.isAtGround && $0.pendingContinuationBytes() == nil },
+                "\(name) must be left inside \(sequence.name), past what libghostty keeps of it")
             let receiver = try Self.handedBack(source, state: state)
-            let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
-                .filtered(to: handoverScreenCategories)
-            #expect(tally.isEmpty, "\(name), inside an overlong title: the handback differs on screen: \(tally.summary)")
+
+            func expectScreensMatch(_ moment: String) {
+                let tally = handoverCompare(source.handoverSnap(history: false), receiver.handoverSnap(history: false), history: false)
+                    .filtered(to: handoverScreenCategories)
+                #expect(tally.isEmpty, "\(name), inside \(sequence.name), \(moment): the screens differ: \(tally.summary)")
+            }
+            expectScreensMatch("at the handback")
+            let rest = sequence.rest + Array("X".utf8)
+            source.feed(rest[...])
+            receiver.feed(rest)
+            expectScreensMatch("once the rest arrived")
+            let (text, _) = Self.writtenBeforeCursor(receiver, count: 1)
+            #expect(text == "X", "\(name), \(sequence.name): what follows the sequence wrote \(text.debugDescription)")
         }
     }
 

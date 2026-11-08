@@ -37,10 +37,10 @@ public enum GhosttySnapshotWriter {
     /// A terminal left inside an escape sequence or a UTF-8 character hands back the bytes of it
     /// last, so the receiver's parser is left inside the same sequence and the rest of it, read
     /// live after the handback, finishes it there. libghostty keeps those bytes only up to
-    /// `GhosttyTerminal.continuationMaxBytes`; past that nothing of the sequence is handed back and
-    /// the receiver reads its rest as text. A terminal that cannot be cloned, which that case also
-    /// leaves, hands back an alternate screen without the primary behind it: the receiver's
-    /// primary is blank, with its cursor at home.
+    /// `GhosttyTerminal.continuationMaxBytes`. Past that the handback ends with an opener the rest
+    /// is read into and dropped, `overlongSequenceSink`. A terminal that cannot be cloned, which
+    /// that case also leaves, hands back an alternate screen without the primary behind it: the
+    /// receiver's primary is blank, with its cursor at home.
     public static func snapshot(of terminal: GhosttyTerminal, maxScrollbackLines: Int) throws -> Data {
         let cap = max(0, maxScrollbackLines)
         let bytes: [UInt8]? = try terminal.withLocked { state in
@@ -102,9 +102,30 @@ public enum GhosttySnapshotWriter {
         // Last of all, so the receiver's parser is left inside the same sequence and the live bytes
         // after the handback finish it. A decoded snapshot replays these bytes itself; a handback is
         // parsed as plain bytes, so they are written out here.
-        out += unfinished ?? []
+        if let unfinished, !unfinished.isEmpty {
+            out += unfinished
+        } else if !state.isAtGround {
+            terminalEngineLog.notice(
+                "libghostty handback: the terminal stopped inside a sequence too long to keep, so the handback opens one that drops its rest")
+            out += overlongSequenceSink
+        }
         return out
     }
+
+    /// What a handback ends with when the terminal stopped inside a sequence longer than libghostty
+    /// keeps: an opener for the receiver to read the rest of that sequence into and drop. Only a
+    /// string sequence grows that long, such as a sixel image or an OSC 52 or 1337 payload, and
+    /// without an opener the receiver reads its rest as text, base64 on the screen and in the
+    /// scrollback.
+    ///
+    /// libghostty does not say which kind of sequence is open, so one opener serves them all, and an
+    /// unknown OSC does. SwiftTerm ends an OSC on BEL, on ESC (as ST begins), or on CAN or SUB, so
+    /// it takes in the rest of an OSC that ends with BEL or ST and of a DCS, APC, SOS or PM, which
+    /// end with ST. Its OSC payload has no limit. It hands the unknown code to its OSC observers,
+    /// none of which acts on 9999, and shows nothing. A DCS opener would not do: SwiftTerm passes
+    /// BEL through a DCS, and SOS and PM ignore it, so either would take in the output after an
+    /// OSC that ends with BEL, up to the next ESC.
+    static let overlongSequenceSink: [UInt8] = Array("\u{1b}]9999;".utf8)
 
     /// An alternate screen, with the primary screen behind it written first, from a clone that has
     /// left the alternate screen. The primary's cursor, pen, protection and charsets are put in
