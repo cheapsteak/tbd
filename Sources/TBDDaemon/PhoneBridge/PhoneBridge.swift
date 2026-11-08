@@ -134,6 +134,8 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// **Revoking** deletes the phone's row before anything else, so no later
 /// handshake from that phone is accepted, whatever its link is doing. Then
 /// `revoked` goes to the phone, if it is connected, and the link stops.
+/// `phoneRevoked` goes last, to the handler the phone's channel kept when it
+/// had one, else to the current one.
 /// Turning phone control off and `stop()` never send `revoked`. A bridge
 /// that a problem keeps from running reconciles after a revoke, in the same
 /// line of changes: a key file missing while phones were paired is what
@@ -211,8 +213,6 @@ actor PhoneBridge: PhoneBridgeControlling {
     private let linkEvents: AsyncStream<LinkEvent>
     private let linkEventSink: AsyncStream<LinkEvent>.Continuation
 
-    /// The handler `phoneRevoked` goes to: the one `setAppHandler` last set.
-    private var handler: any PhoneAppHandling
     /// Nil while the bridge is not running.
     private var running: Running?
     /// The paired phones' links, by device ID.
@@ -257,9 +257,7 @@ actor PhoneBridge: PhoneBridgeControlling {
         self.now = now
         self.backoff = backoff
         self.clock = clock
-        let stub = UnavailablePhoneApp()
-        self.handler = stub
-        self.appSlot = PhoneAppHandlerSlot(stub)
+        self.appSlot = PhoneAppHandlerSlot()
         let (stream, continuation) = AsyncStream.makeStream(of: LinkEvent.self)
         self.linkEvents = stream
         self.linkEventSink = continuation
@@ -341,9 +339,9 @@ actor PhoneBridge: PhoneBridgeControlling {
     // MARK: - The hand-off and stopping
 
     /// Sets the app layer's handler. A channel reads it when it becomes
-    /// established, so it serves the channels established from now on.
+    /// established, so it serves the channels established from now on, and
+    /// the revokes of phones with no established channel.
     func setAppHandler(_ handler: any PhoneAppHandling) async {
-        self.handler = handler
         await appSlot.set(handler)
     }
 
@@ -545,10 +543,17 @@ actor PhoneBridge: PhoneBridgeControlling {
             // The row goes first, before anything waits on the link: a
             // handler slow to return can never leave the phone paired.
             try await db.phoneDevices.delete(id: deviceID)
-            if let link = links[deviceID] {
-                await link.connection.revokeAndStop()
-            }
+            // `phoneRevoked` goes to the handler that heard the channel's
+            // `phoneDisconnected`, so one channel's calls never split across
+            // two handlers; with no established channel, to the current one.
+            let channelHandler = await links[deviceID]?.connection.revokeAndStop()
             links[deviceID] = nil
+            let handler: any PhoneAppHandling
+            if let channelHandler {
+                handler = channelHandler
+            } else {
+                handler = await appSlot.current()
+            }
             await handler.phoneRevoked(deviceID: deviceID)
             PhoneBridgeLog.record(.revoked(name: device.name, deviceID: deviceID))
             // The revoke may have removed what kept the bridge from running.

@@ -33,12 +33,15 @@ public protocol PhoneAppHandling: Sendable {
     /// Called once per `app` message, in arrival order, awaited before the next.
     func handleAppMessage(_ body: Data, from peer: PhonePeer) async
     func phoneDisconnected(_ peer: PhonePeer) async
+    /// The phone was unpaired. When it had an established channel, this
+    /// comes after that channel's `phoneDisconnected`, on the handler the
+    /// channel kept; otherwise it goes to the handler set when the revoke ran.
     func phoneRevoked(deviceID: UUID) async
 }
 
 /// Holds the current handler. A channel reads it once, when it becomes
-/// established, and keeps that handler for its whole life, so one channel's
-/// calls never split across two handlers.
+/// established, and keeps that handler for its whole life, `phoneRevoked`
+/// included, so one channel's calls never split across two handlers.
 actor PhoneAppHandlerSlot {
     private var handler: any PhoneAppHandling
 

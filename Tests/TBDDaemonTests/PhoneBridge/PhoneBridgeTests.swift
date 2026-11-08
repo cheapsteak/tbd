@@ -654,6 +654,37 @@ struct PhoneBridgeTests {
         }
     }
 
+    /// A channel's calls never split across two handlers, `phoneRevoked`
+    /// included: a phone connected under one handler is revoked on it after
+    /// another is set, and a phone with no channel is revoked on the new one.
+    @Test func revokeGoesToTheHandlerTheChannelKept() async throws {
+        try await withBridge(devices: 2) { h in
+            await h.bridge.reconcile()
+            let connectedPhone = h.phones[0]
+            let offlinePhone = h.phones[1]
+            let phone = try await h.connectedPhone(connectedPhone)
+            try await h.waitUntil("the phone to show as connected") {
+                await h.bridge.status().connectedDeviceIDs == [connectedPhone.device.id]
+            }
+            let later = RecordingPhoneApp()
+            await h.bridge.setAppHandler(later)
+
+            try await h.bridge.revoke(deviceID: connectedPhone.device.id)
+            let message = try await phone.next()
+            #expect(message["type"] as? String == "revoked")
+            let first = await h.app.log
+            #expect(first == ["connected", "disconnected", "revoked:\(connectedPhone.device.id)"])
+            let laterFirst = await later.log
+            #expect(laterFirst.isEmpty)
+
+            try await h.bridge.revoke(deviceID: offlinePhone.device.id)
+            let second = await h.app.log
+            #expect(second == first)
+            let laterSecond = await later.log
+            #expect(laterSecond == ["revoked:\(offlinePhone.device.id)"])
+        }
+    }
+
     @Test func revokeWhileOfflineDeletesTheRow() async throws {
         try await withBridge(devices: 1) { h in
             await h.bridge.reconcile()

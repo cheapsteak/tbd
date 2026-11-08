@@ -643,13 +643,16 @@ struct PhoneConnectionTests {
     @Test func revokeAndStopSendsRevokedThenCloses() async throws {
         try await withConnection { h in
             let phone = try await h.connectedPhone()
-            await h.connection.revokeAndStop()
+            let handler = await h.connection.revokeAndStop()
             let revoked = try await phone.next()
             #expect(revoked["type"] as? String == "revoked")
             let left = try await phone.nextSignal()
             #expect(left == "peer-left")
             let log = await h.app.log
             #expect(log == ["connected", "disconnected"])
+            // The handler that heard the channel, for `phoneRevoked`.
+            let channelHandler = handler as? RecordingPhoneApp
+            #expect(channelHandler === h.app)
             let connected = await h.connection.isConnected
             #expect(connected == false)
         }
@@ -686,7 +689,10 @@ struct PhoneConnectionTests {
 
             release.signal()
             await hold.value
-            await revoking.value
+            let handler = await revoking.value
+            // No channel was established, so no handler kept one.
+            let noChannelHandler = handler == nil
+            #expect(noChannelHandler)
             #expect(!h.events.values.contains(.connected(deviceID: h.device.id)))
             let log = await h.app.log
             #expect(log.isEmpty)
@@ -773,7 +779,7 @@ struct PhoneConnectionTests {
             #expect(log == ["connected", "disconnected"])
 
             transport.release()
-            await revoking.value
+            _ = await revoking.value
             let after = await h.app.log
             #expect(after == ["connected", "disconnected"])
             let connected = await h.connection.isConnected

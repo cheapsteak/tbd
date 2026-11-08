@@ -201,14 +201,23 @@ actor PhoneConnection {
     /// for it to leave, then `stop()`s. From the moment it is called, every
     /// frame from the phone is dropped and the outbox answers false, so the
     /// phone can neither act nor hear more while `revoked` leaves.
-    func revokeAndStop() async {
+    ///
+    /// Returns the handler the channel established at the call captured,
+    /// which has heard `phoneDisconnected` for it by the time this returns,
+    /// so the caller can send `phoneRevoked` to the same one. Nil when no
+    /// channel was established; none can become established once this is
+    /// called.
+    @discardableResult
+    func revokeAndStop() async -> (any PhoneAppHandling)? {
         isRevoked = true
+        let channelHandler = channel?.established?.handler
         if !isClosing, let current = channel, current.established != nil {
             let (left, signal) = AsyncStream.makeStream(of: Void.self)
             enqueueEncrypted(LoaderHandler.revoked, channelID: current.id, onLeft: { signal.finish() })
             await waitUntilLeft(left, clock: clock)
         }
         await stop()
+        return channelHandler
     }
 
     /// Sends one `app` message on channel `channelID`, for
