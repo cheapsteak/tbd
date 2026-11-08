@@ -6,7 +6,10 @@
 // asynchronous, so a `peer-left` right behind a frame waits until that frame is handled.
 // Within one chain task only `stop()` can change what is current, and each task checks for it
 // after every await. The bundle cache read is the one wait kept off the chain: IndexedDB can
-// stall, so the read runs beside it, and its answer or its timeout comes back as a task.
+// stall, so the store read runs beside it, and its answer or its timeout comes back as a task.
+// Only the store read is timed. Checking a cached row's hash runs on the chain once the row is
+// in hand, as checking a download's does, so a slow phone hashing a large bundle never turns a
+// good cache entry into a miss.
 //
 // Sessions. Each `peer-joined` starts a new session: a fresh initiator, and later its
 // transport, welcome and bundle assembly. Anything an older session started that finishes
@@ -48,7 +51,9 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
 /**
  * What a LaptopConnection reports. A state is never reported twice in a row. After `fatal`,
  * `replaced` or `stop()` (even one called from inside `onEvent`), nothing more is reported.
- * `app` is reported only while the state is `ready`.
+ * `app` is reported only while the state is `ready`. `bundle` comes just before `ready`, except
+ * when `welcome` names the bundle `runningBundle` reports: the app already runs it, so the
+ * state goes to `ready` with no `bundle`.
  * @typedef {{ kind: 'state', state: ConnectionState }
  *   | { kind: 'connected', laptopName: string }
  *   | { kind: 'bundle', sha256: string, text: string }
@@ -59,7 +64,8 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
 /**
  * The bundle cache, as `main.js` adapts the store to it. `get` may resolve null or undefined
  * for a miss, or reject (read as a miss). A `get` that has not answered within
- * CACHE_READ_TIMEOUT_MS is a miss too, and so is a row whose text does not hash to its name.
+ * CACHE_READ_TIMEOUT_MS is a miss too, and so is a row whose text does not hash to its name
+ * (that check runs after the read, outside its timeout).
  * `put` may resolve false (the laptop was forgotten meanwhile) or reject, and `markUsed` may
  * reject: neither is ever fatal.
  * @typedef {object} BundleCache
@@ -80,6 +86,9 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  *   SIGNAL_TIMEOUT_MS right after pairing, while the laptop's device link joins the new room.
  * @property {() => boolean} [isVisible] Default `() => true`. While it is false, a reconnect
  *   waits for `resume()`.
+ * @property {() => string | null} [runningBundle] The SHA-256 of the bundle the page's app
+ *   frame runs now, or null. Default `() => null`. A `welcome` naming it skips the cache read
+ *   and the download, so a reconnect under a running app reads no 16 MB row and hashes nothing.
  * @property {() => number} [random] In [0, 1), for the backoff jitter. Default Math.random.
  * @property {Clock} [clock]
  */
@@ -112,6 +121,7 @@ export class LaptopConnection {
   #onEvent;
   #absentGraceMs;
   #isVisible;
+  #runningBundle;
   #random;
   #clock;
   #url;
@@ -155,7 +165,7 @@ export class LaptopConnection {
    */
   constructor({
     record, keyPair, cache, openSocket, onEvent, absentGraceMs = 0, isVisible = () => true,
-    random = Math.random, clock = systemClock,
+    runningBundle = () => null, random = Math.random, clock = systemClock,
   }) {
     this.#record = record;
     this.#keyPair = keyPair;
@@ -164,6 +174,7 @@ export class LaptopConnection {
     this.#onEvent = onEvent;
     this.#absentGraceMs = Number.isFinite(absentGraceMs) && absentGraceMs > 0 ? absentGraceMs : 0;
     this.#isVisible = isVisible;
+    this.#runningBundle = runningBundle;
     this.#random = random;
     this.#clock = clock;
     // A ProtocolError (a message the laptop should never send) is `fatal('protocol')`, a
@@ -478,9 +489,10 @@ export class LaptopConnection {
   }
 
   /**
-   * Starts the cache read beside the chain, so a store that stalls holds up no signal, timer
-   * or `resume()`. A read with no answer within CACHE_READ_TIMEOUT_MS is a miss, and an answer
-   * after that is dropped.
+   * A bundle the app frame already runs goes straight to `ready`. Otherwise the cache read
+   * starts beside the chain, so a store that stalls holds up no signal, timer or `resume()`.
+   * A read with no answer within CACHE_READ_TIMEOUT_MS is a miss, and an answer after that is
+   * dropped.
    * @param {Session} session
    * @param {WelcomeMessage} welcome
    */
@@ -493,24 +505,33 @@ export class LaptopConnection {
       this.#fail('incompatibleLoader');
       return;
     }
-    session.cacheTimer = this.#tasks.arm(CACHE_READ_TIMEOUT_MS, () => this.#onCacheRead(session, welcome, null));
-    this.#readCache(welcome.bundle.sha256)
-      .then((text) => this.#tasks.enqueue(() => this.#onCacheRead(session, welcome, text)));
+    const { sha256 } = welcome.bundle;
+    if (this.#runningBundle() === sha256) {
+      // The laptop still serves the bundle the app runs, which was checked against this hash
+      // when it was loaded: the app goes on, and its channel comes back up.
+      this.#markUsed(sha256);
+      this.#ready(session);
+      return;
+    }
+    session.cacheTimer = this.#tasks.arm(CACHE_READ_TIMEOUT_MS, () => this.#onCacheRow(session, welcome, null));
+    this.#readCache(sha256).then((row) => this.#tasks.enqueue(() => this.#onCacheRow(session, welcome, row)));
   }
 
   /**
-   * The cache read answered or timed out, whichever came first.
+   * The store answered the cache read, or its time ran out first. The timer stops here, before
+   * the row's hash is checked, so only the store read is timed.
    * @param {Session} session
    * @param {WelcomeMessage} welcome
-   * @param {string | null} text the cached bundle, or null for a miss
+   * @param {BundleRecord | null} row the stored row, or null for a miss or a timeout
    */
-  async #onCacheRead(session, welcome, text) {
+  async #onCacheRow(session, welcome, row) {
     if (!this.#isCurrent(session) || session.cacheTimer === null) return;
     session.cacheTimer = this.#tasks.disarm(session.cacheTimer);
     const { sha256 } = welcome.bundle;
+    const text = row === null ? null : await verifiedText(row, sha256);
+    if (!this.#isCurrent(session)) return;
     if (text !== null) {
-      const at = this.#clock.now();
-      settle(() => this.#cache.markUsed(this.#record.id, sha256, at));
+      this.#markUsed(sha256);
       this.#bundleReady(session, sha256, text);
       return;
     }
@@ -546,31 +567,37 @@ export class LaptopConnection {
    * @param {string} text
    */
   #bundleReady(session, sha256, text) {
+    this.#emit({ kind: 'bundle', sha256, text });
+    this.#ready(session);
+  }
+
+  /** @param {Session} session */
+  #ready(session) {
     session.ready = true;
     // Only a connection that got this far starts the backoff over, so one that keeps failing
     // after its handshake (a frame that will not decrypt, say) keeps backing off.
     this.#attempt = 0;
-    this.#emit({ kind: 'bundle', sha256, text });
     this.#setState('ready');
   }
 
   /**
-   * Reads the cached bundle and checks its text still hashes to its name. Never rejects.
+   * Reads the cached row for `sha256` from the store, and nothing more. Never rejects.
    * @param {string} sha256
-   * @returns {Promise<string | null>} the bundle text, or null for a miss: no row, a failed
-   *   read, or a row whose text is damaged (the fetch that follows replaces it)
+   * @returns {Promise<BundleRecord | null>} the row, or null for no row or a failed read
    */
   async #readCache(sha256) {
     try {
-      const record = await this.#cache.get(this.#record.id, sha256);
-      if (record == null || typeof record.text !== 'string' || record.sha256 !== sha256) {
-        return null;
-      }
-      return await sha256Hex(utf8Encoder.encode(record.text)) === sha256 ? record.text : null;
+      return (await this.#cache.get(this.#record.id, sha256)) ?? null;
     } catch {
       // A cache that cannot be read is a miss.
       return null;
     }
+  }
+
+  /** @param {string} sha256 */
+  #markUsed(sha256) {
+    const at = this.#clock.now();
+    settle(() => this.#cache.markUsed(this.#record.id, sha256, at));
   }
 
   /**
@@ -635,6 +662,24 @@ export class LaptopConnection {
         throw error;
       });
     }
+  }
+}
+
+/**
+ * A cached row's text, once it is checked to still hash to its name. Never rejects.
+ * @param {unknown} row
+ * @param {string} sha256
+ * @returns {Promise<string | null>} the text, or null for a row that is not a bundle or whose
+ *   text is damaged (the fetch that follows replaces it)
+ */
+async function verifiedText(row, sha256) {
+  if (row === null || typeof row !== 'object') return null;
+  const { text, sha256: name } = /** @type {Record<string, unknown>} */ (row);
+  if (typeof text !== 'string' || name !== sha256) return null;
+  try {
+    return await sha256Hex(utf8Encoder.encode(text)) === sha256 ? text : null;
+  } catch {
+    return null;
   }
 }
 

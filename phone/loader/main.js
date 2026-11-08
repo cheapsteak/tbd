@@ -734,6 +734,9 @@ class LoaderPage {
         onEvent: (event) => this.#onConnectionEvent(connection, event),
         absentGraceMs,
         isVisible: this.#visibility.isVisible,
+        // A reconnect under a running app finds its bundle here, and goes on without reading
+        // or downloading it again; `ready` brings the app's channel back up.
+        runningBundle: () => (this.#connection === connection && this.#frame !== null ? this.#frameSha : null),
         clock: this.#clock,
       });
     } catch {

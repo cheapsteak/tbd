@@ -647,6 +647,89 @@ test('a cached bundle whose text does not hash to its name is a miss, and the fe
   c.conn.stop();
 });
 
+test('a welcome naming the bundle the app runs skips the cache read and the download, and reads ready', async () => {
+  const env = await setup();
+  /** @type {string | null} */
+  let running = null;
+  const c = connection(env, { runningBundle: () => running });
+  c.conn.start();
+  await until(() => c.states().includes('ready'), 'ready');
+  const [bundle] = c.of('bundle');
+  assert.equal(env.cache.calls.get, 1, 'the first welcome reads the cache: nothing runs yet');
+  // main.js starts the app frame on the bundle, and from then on reports it as running.
+  running = bundle.sha256;
+
+  env.laptop.leave(env.room);
+  await until(() => c.states().includes('offline'), 'offline');
+  env.laptop.join(env.room);
+  await until(() => c.count('ready') === 2, 'ready again');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready', 'offline', 'handshaking', 'ready']);
+  assert.equal(env.cache.calls.get, 1, 'no cache read for the bundle that runs');
+  assert.equal(env.laptop.counts.bundleGet, 1, 'nor a download');
+  assert.deepEqual(c.of('bundle'), [bundle], 'nor a second bundle event: the app goes on as it is');
+  assert.deepEqual(env.cache.calls.markUsed, [{ laptopID: env.record.id, sha: bundle.sha256, at: START }]);
+  assert.equal(c.of('connected').length, 2);
+
+  // App messages flow again on the new session.
+  assert.equal(c.conn.sendApp({ method: 'acme.ping' }), 'sent');
+  c.conn.stop();
+});
+
+test('a welcome naming a bundle other than the running one reads the cache as before', async () => {
+  const env = await setup();
+  const c = connection(env, { runningBundle: () => 'f'.repeat(64) });
+  c.conn.start();
+  await until(() => c.states().includes('ready'), 'ready');
+  const [bundle] = c.of('bundle');
+  env.laptop.leave(env.room);
+  await until(() => c.states().includes('offline'), 'offline');
+  env.laptop.join(env.room);
+  await until(() => c.count('ready') === 2, 'ready again');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'loading', 'ready', 'offline', 'handshaking', 'ready']);
+  assert.equal(env.cache.calls.get, 2, 'each welcome reads the cache');
+  assert.equal(env.laptop.counts.bundleGet, 1, 'the second from the cache');
+  assert.deepEqual(c.of('bundle'), [bundle, bundle]);
+  c.conn.stop();
+});
+
+test('the cache read timeout covers the store read only: a hit whose hash outlasts it is still a hit', async () => {
+  const env = await setup();
+  const text = 'globalThis.tbdScriptedLaptop = true;\n';
+  const sha256 = sha256Hex(text);
+  /** @type {Array<(record: object) => void>} */
+  const answers = [];
+  const c = connection(env, {
+    cache: { ...env.cache, get: () => new Promise((resolve) => { answers.push(resolve); }) },
+  });
+  c.conn.start();
+  await until(() => answers.length === 1, 'the cache read');
+
+  // From here on, the handshake is done, so the only digest is the cached row's hash. Hold it,
+  // as a slow phone hashing 16 MB would.
+  const subtle = /** @type {any} */ (crypto.subtle);
+  /** @type {Array<() => void>} */
+  const held = [];
+  subtle.digest = (/** @type {any[]} */ ...args) => new Promise((resolve, reject) => {
+    held.push(() => SubtleCrypto.prototype.digest.apply(crypto.subtle, /** @type {any} */ (args)).then(resolve, reject));
+  });
+  try {
+    answers[0]({ laptopID: env.record.id, sha256, text, size: 1, usedAt: 0 });
+    await until(() => held.length === 1, 'the hash of the cached row');
+    await env.clock.advance(CACHE_READ_TIMEOUT_MS * 2);
+    await quiet();
+    assert.deepEqual(c.states(), ['connecting', 'handshaking'], 'no miss while the hash runs');
+    assert.equal(env.laptop.counts.bundleGet, 0);
+  } finally {
+    delete subtle.digest;
+  }
+  held[0]();
+  await until(() => c.states().includes('ready'), 'ready from the cache');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'ready']);
+  assert.deepEqual(c.of('bundle'), [{ kind: 'bundle', sha256, text }]);
+  assert.equal(env.laptop.counts.bundleGet, 0);
+  c.conn.stop();
+});
+
 test('a transfer cut by the laptop leaving caches nothing; after it rejoins the bundle completes and is cached once', async () => {
   const text = textWithChunks(2);
   const env = await setup({ bundleText: text });
