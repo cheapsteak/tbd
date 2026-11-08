@@ -56,10 +56,13 @@ const BANNED = [
   { pattern: /\bFunction\s*\(/, samples: ["new Function('return 1');", "Function('return 1')();", "globalThis.Function ('x');"] },
   { pattern: /\bset(?:Timeout|Interval)\s*\(\s*['"`]/, samples: ["setTimeout('tick()', 10);", 'setInterval(`tick()`, 10);'] },
   { pattern: /\bimport\s*\(/, samples: ["const m = await import('./x.ts');"] },
-  // Elements that load something or navigate, made outside JSX or in it.
+  // Elements that load something or navigate, and <style>, made outside JSX or in it. The
+  // runner's policy refuses a <style>, but the end-to-end tests let WebKit's refusal of one
+  // through while they take a screenshot, so this ban is what stops the app making one then.
   {
-    pattern: /createElement(?:NS)?\s*\([^)]*?['"`](?:a|area|script|iframe|frame|object|embed|form|meta|base|link)['"`]/,
-    samples: ["document.createElement('a');", 'document.createElementNS(SVG_NS, "script");', 'React.createElement(`iframe`, props);'],
+    pattern: /createElement(?:NS)?\s*\([^)]*?['"`](?:a|area|script|iframe|frame|object|embed|form|meta|base|link|style)['"`]/,
+    samples: ["document.createElement('a');", 'document.createElementNS(SVG_NS, "script");', 'React.createElement(`iframe`, props);',
+      "document.createElement('style');", "document.createElementNS(SVG_NS, 'style');", 'React.createElement("style", null, css);'],
   },
   {
     // The lookbehind lets a type argument such as `Array<object>` through: in JSX, `<` never
@@ -67,6 +70,13 @@ const BANNED = [
     pattern: /(?<![\w$])<(?:script|iframe|frame|object|embed|form|meta|base|area|link)(?![\w-])/,
     samples: ['<iframe src={u} />', '<form action={u}>', '<meta httpEquiv="refresh" content="0;url=x" />',
       '<base href="x" />', '<link rel="prefetch" href={u} />', 'return (<object data={u}></object>);'],
+  },
+  {
+    // A backtick may come before it too: that is prose naming the element in code type, as
+    // styles/apply.ts does, never JSX. A string that holds it is HTML only through the HTML
+    // sinks banned above.
+    pattern: /(?<![\w$`])<style(?![\w-])/,
+    samples: ['<style>{css}</style>', 'return (<style>{css}</style>);', '<style\n  media="print">'],
   },
   // Attributes that load, navigate or run code, and styles outside the constructed sheets and
   // React's style prop. HTML attribute names ignore case.
@@ -134,6 +144,10 @@ const ALLOWED = [
   '<Abbr title={label}>{name}</Abbr>',
   '<img src={dataURL} />',
   "el.style.setProperty('--dock-pad', value);",
+  '<div style={{ color }} />',
+  'document.adoptedStyleSheets = [sheet];',
+  " * frame's content policy allows where a `<style>` element or a style attribute would not.",
+  'function first(xs: Array<style>): style | undefined { return xs[0]; }',
   "el.setAttribute('aria-hidden', 'true');",
   "el.setAttribute('data-src', u);",
   "el.setAttribute('open', '');",

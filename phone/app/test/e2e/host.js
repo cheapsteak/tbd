@@ -5,7 +5,9 @@
 //
 // Everything a test drives lives in this page, outside the frame, on `window.__host`. Nothing
 // is put into the frame: the app reaches the fake laptop only through its real port, through
-// `AppFrame`, and every body it sends passes the loader's own size check first.
+// `AppFrame`, and every body it sends passes the loader's own size check first. Bodies cross as
+// JSON both ways, as they do between a phone and a laptop, so neither side ever holds an
+// object the other made.
 //
 // The page's query:
 // - `scenario=<name>` loads `/__app/scenarios/<name>.json` (`mock` by default); an empty name
@@ -15,7 +17,8 @@
 //
 // `window.__host`:
 // - `requests`: every request that reached the laptop, `{ requestID, method, params }`, in
-//   order, resends included. `links`: every URL the app asked to open. `faults`: every
+//   order, resends included. A request sent on a connection that ended before it arrived
+//   never reaches the laptop, as the relay drops it. `links`: every URL the app asked to open. `faults`: every
 //   `AppFrame` fault, each also logged as a console error, which fails the test.
 // - `emit(event, data)`: the laptop sends an event (`emitEvent` in fake-laptop-app.js).
 // - `setReply(method, reply | (params, state) => reply | null)`, `hold(name)`,
@@ -31,7 +34,7 @@
 import { alwaysVisible } from '/clock.js';
 import { MAX_PLAINTEXT_LENGTH } from '/channel/noise.js';
 import { AppFrame, readEnv } from '/frame.js';
-import { encodeMessage } from '/protocol.js';
+import { decodeMessage, encodeMessage } from '/protocol.js';
 import { renderStrip } from '/ui.js';
 import { createFakeLaptop } from '/__app/fake-laptop-app.js';
 
@@ -40,6 +43,8 @@ import { createFakeLaptop } from '/__app/fake-laptop-app.js';
 const LAPTOP_NAME = 'acme-laptop';
 const SEND_RESULTS = new Set(['sent', 'offline', 'tooLarge']);
 const SCENARIO_NAME = /^[A-Za-z0-9_-]+$/;
+/** As the laptop reads a frame's plaintext: UTF-8, nothing else. */
+const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 const strip = element('strip');
 const frameHost = element('frame-host');
@@ -66,15 +71,22 @@ let lastEnvKey = null;
 let frame = null;
 const laptop = createFakeLaptop({
   scenario: await fetchScenario(query.get('scenario') ?? 'mock'),
-  emit: (body) => frame?.deliver(body),
+  // As the loader hands the app a laptop message's body: decoded from the frame's bytes.
+  emit: (body) => frame?.deliver(decodeMessage(encodeMessage({ type: 'app', body })).body),
 });
 
-const text = await (await fetch('/__app/app.js', { cache: 'no-store' })).text();
+// The bundle, read as the loader reads it (`BundleAssembler.finish` in phone/loader/bundle.js):
+// the hash is of the bytes, and the text is their strict UTF-8, a leading U+FEFF kept.
+const bundle = await fetch('/__app/app.js', { cache: 'no-store' });
+if (!bundle.ok) throw new Error(`TBD app host: app.js answered ${bundle.status}`);
+const bundleBytes = new Uint8Array(await bundle.arrayBuffer());
+const sha256 = await sha256Hex(bundleBytes);
+const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bundleBytes);
 frame = new AppFrame({
   host: frameHost,
   runnerURL: `${location.origin}/runner.html`,
   text,
-  sha256: await sha256Hex(text),
+  sha256,
   sendApp,
   onOpenLink: (url) => links.push(url),
   onFault: (reason) => {
@@ -118,18 +130,22 @@ Object.defineProperty(window, '__host', {
  * The loader's `sendApp`, with the fake laptop for the relay: offline while the channel is
  * down, and the loader's own size check (`sendApp` in phone/loader/connection.js) before
  * anything else. A body that passes both, while the send result is `sent`, reaches the laptop
- * on a later task, as a message through the relay would.
+ * on a later task, as a message through the relay would: parsed from the bytes the loader
+ * encoded, and only while the connection it was sent on lasts.
  * @param {object} body
  * @returns {SendResult}
  */
 function sendApp(body) {
   if (!up) return 'offline';
-  if (encodeMessage({ type: 'app', body }).length > MAX_PLAINTEXT_LENGTH) return 'tooLarge';
+  const bytes = encodeMessage({ type: 'app', body });
+  if (bytes.length > MAX_PLAINTEXT_LENGTH) return 'tooLarge';
   if (sendResult !== 'sent') return sendResult;
+  const connection = laptop.state.connection;
   setTimeout(() => {
-    const { requestID, method, params } = /** @type {Record<string, unknown>} */ (body);
-    requests.push(structuredClone({ requestID, method, params }));
-    laptop.handle(body);
+    if (connection === null || connection !== laptop.state.connection) return;
+    const sent = JSON.parse(utf8.decode(bytes)).body;
+    requests.push(structuredClone({ requestID: sent.requestID, method: sent.method, params: sent.params }));
+    laptop.handle(sent, connection);
   }, 0);
   return 'sent';
 }
@@ -208,9 +224,9 @@ async function fetchScenario(name) {
   return response.json();
 }
 
-/** @param {string} value */
-async function sha256Hex(value) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+/** @param {Uint8Array} bytes */
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 

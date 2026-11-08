@@ -86,6 +86,10 @@ function makeLaptop(scenario = scenarioWith()) {
     replyTo(requestID) {
       return sent.find((body) => body.kind === 'reply' && body.requestID === requestID);
     },
+    /** Every reply to `requestID`, in order. */
+    repliesTo(requestID) {
+      return sent.filter((body) => body.kind === 'reply' && body.requestID === requestID);
+    },
     events() {
       return sent.filter((body) => body.kind === 'event');
     },
@@ -324,10 +328,118 @@ test('a resent action gets its first reply and acts once', () => {
   assert.deepEqual(replies.map((body) => body.result), [{ outcome: 'sent' }, { outcome: 'sent' }]);
   assert.deepEqual(t.events().map((body) => body.event), ['transcript.append', 'sessions.changed']);
   assert.equal(t.events()[1].data.rows[0].sessions[0].status.chip, 'working');
-  t.ask('profiles.list', {}, 'send-1');
+  t.ask('prompt.answer', { session: REF, promptID: 'p1', answer: { kind: 'permission', decision: 'allow' } }, 'send-1');
   assert.deepEqual(t.sent.at(-1).error, { code: 'bad_request', message: TEXT.idInUse });
   t.ask('message.send', { session: REF, text: '  ' });
   assert.deepEqual(t.sent.at(-1).error, { code: 'bad_request', message: TEXT.emptyMessage });
+});
+
+test('a resend of an action still running gets no reply of its own, across a blip too', () => {
+  const t = makeLaptop(scenarioWith(itemsOf(['user', 'assistant'])));
+  t.subscribe();
+  t.ask('transcript.open', { session: REF, showDetails: false, resume: false });
+  t.laptop.hold('message.send');
+  t.sent.length = 0;
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'send-1');
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'send-1');
+  // Another method under a running ID is refused at once, past the hold.
+  t.ask('session.setModel', { session: REF, model: 'sonnet' }, 'send-1');
+  assert.deepEqual(t.repliesTo('send-1').map((body) => body.error), [{ code: 'bad_request', message: TEXT.idInUse }]);
+
+  // The phone reconnects and resends: the run is still going, so still nothing.
+  t.laptop.disconnect();
+  t.subscribe({ stream: STREAM, sinceSeq: t.laptop.state.seq });
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'send-1');
+  t.laptop.release('message.send');
+  const replies = t.repliesTo('send-1').filter((body) => body.result !== undefined);
+  assert.deepEqual(replies.map((body) => body.result), [{ outcome: 'sent' }], 'one reply, on the connection the phone has now');
+  assert.equal(t.events().filter((body) => body.event === 'transcript.append').length, 1, 'it acted once');
+
+  // Once the reply is out, a resend gets it from the memory.
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'send-1');
+  assert.deepEqual(t.repliesTo('send-1').at(-1).result, { outcome: 'sent' });
+  assert.equal(t.events().filter((body) => body.event === 'transcript.append').length, 1);
+});
+
+test('only an acting request is remembered, so another method may reuse a read\'s ID', () => {
+  const t = makeLaptop(scenarioWith(itemsOf(['user', 'assistant'])));
+  t.subscribe();
+  t.ask('transcript.open', { session: REF, showDetails: false, resume: false });
+  // A read is not remembered: its resend runs again, and an action may take its ID.
+  t.ask('profiles.list', {}, 'r-1');
+  t.laptop.setReply('profiles.list', (params, state) => ({ result: { profiles: state.profiles.slice(1) } }));
+  t.ask('profiles.list', {}, 'r-1');
+  assert.deepEqual(t.repliesTo('r-1').at(-1).result.profiles, [PROFILES[1]]);
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'r-1');
+  assert.deepEqual(t.repliesTo('r-1').at(-1).result, { outcome: 'sent' });
+  // A read that reuses an action's ID runs as well: it never reaches the memory.
+  t.laptop.setReply('profiles.list', null);
+  t.ask('profiles.list', {}, 'r-1');
+  assert.deepEqual(t.repliesTo('r-1').at(-1).result.profiles, PROFILES);
+});
+
+test('a reply that says the action certainly did not happen is not remembered; a refusal is', () => {
+  const t = makeLaptop(scenarioWith(itemsOf(['user', 'assistant'])));
+  t.subscribe();
+  t.ask('transcript.open', { session: REF, showDetails: false, resume: false });
+  const forgotten = [
+    { code: 'phone_control_off', message: TEXT.phoneControlOff },
+    { code: 'refused', message: TEXT.tooManyRequests },
+    { code: 'internal', message: TEXT.settingUnreadable },
+    { code: 'internal', message: TEXT.pairingUnreadable },
+    { code: 'internal', message: TEXT.stopped },
+  ];
+  for (const [i, error] of forgotten.entries()) {
+    const id = `send-${i}`;
+    t.laptop.setReply('message.send', { error });
+    t.ask('message.send', { session: REF, text: 'Ship it.' }, id);
+    assert.deepEqual(t.repliesTo(id).at(-1).error, error);
+    t.laptop.setReply('message.send', null);
+    t.ask('message.send', { session: REF, text: 'Ship it.' }, id);
+    assert.deepEqual(t.repliesTo(id).at(-1).result, { outcome: 'sent' }, `${error.code}: ${error.message}`);
+  }
+
+  // The handler's own refusals are kept, as the daemon keeps them: a resend gets the refusal.
+  t.ask('message.send', { session: REF, text: '  ' }, 'empty');
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'empty');
+  assert.deepEqual(t.repliesTo('empty').at(-1).error, { code: 'bad_request', message: TEXT.emptyMessage });
+  t.laptop.setReply('message.send', { error: { code: 'internal', message: 'Something went wrong on the laptop.' } });
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'broke');
+  t.laptop.setReply('message.send', null);
+  t.ask('message.send', { session: REF, text: 'Ship it.' }, 'broke');
+  assert.deepEqual(t.repliesTo('broke').map((body) => body.error?.code), ['internal', 'internal']);
+});
+
+test('a request sent on a connection that has ended is dropped, and its resend is taken afresh', () => {
+  const t = makeLaptop();
+  t.laptop.connect();
+  const first = t.laptop.state.connection;
+  // The channel blips while the phone's subscribe is on its way.
+  t.laptop.disconnect();
+  t.laptop.connect();
+  const subscribe = { kind: 'request', requestID: 'sub-1', method: 'sessions.subscribe', params: {} };
+  assert.equal(t.laptop.handle(subscribe, first), false);
+  t.laptop.emitEvent('sessions.changed', { rows: [], removedRowIDs: [] });
+  assert.deepEqual(t.sent, [], 'no reply, and the new connection is not live');
+  assert.equal(t.laptop.handle(subscribe), true);
+  assert.equal(t.replyTo('sub-1').result.seq, 1);
+
+  // A subscribe held when its connection ends never replies, so its resend is not taken for it.
+  t.sent.length = 0;
+  t.laptop.hold('sessions.subscribe');
+  t.laptop.disconnect();
+  t.laptop.connect();
+  t.ask('sessions.subscribe', {}, 'sub-2');
+  t.laptop.disconnect();
+  t.laptop.connect();
+  t.ask('sessions.subscribe', {}, 'sub-2');
+  t.laptop.release('sessions.subscribe');
+  assert.deepEqual(t.sent.map((body) => [body.kind, body.requestID]), [['reply', 'sub-2']]);
+  assert.equal(t.laptop.state.connection?.live, true);
+
+  // With no connection at all, nothing is taken.
+  t.laptop.disconnect();
+  assert.equal(t.laptop.handle({ kind: 'request', requestID: 'r-1', method: 'profiles.list', params: {} }), false);
 });
 
 test('every body its default handlers send decodes with the app\'s decoders', () => {

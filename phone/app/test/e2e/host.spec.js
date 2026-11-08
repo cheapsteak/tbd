@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { app, expect, hostCall, hostRequests, openApp, test } from './fixtures.js';
+import { app, expect, hostCall, hostRequests, openApp, takeProblems, test } from './fixtures.js';
 import { BUNDLE_PATH } from './server.js';
 
 const RUNNER_SOURCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../loader/runner.html');
@@ -68,19 +68,19 @@ test('the app frame is the staged runner, under its own policy alone, with an op
   expect(bundle.equals(await readFile(BUNDLE_PATH))).toBe(true);
 });
 
-test('a refused load or a Trusted Types refusal inside the app frame reaches the console check', async ({ page, appHost, pageProblems }) => {
+test('a refused load, a Trusted Types refusal and an uncaught error in the app frame reach the console check', async ({ page, appHost, pageProblems }) => {
   await openApp(page, appHost);
   await waitForSubscribed(page);
   // The one place a test reaches into the frame: to break its policy on purpose, and see the
-  // fixture catch it. Each is taken out of `pageProblems` once seen, so the test can pass.
+  // fixture catch it. `takeProblems` takes out only what each step caused, so the test passes
+  // only when nothing else went wrong.
   const runner = runnerFrame(page);
   await runner.evaluate((origin) => {
     const img = document.createElement('img');
     img.src = `${origin}/__app/host.html`;
     document.body.append(img);
   }, appHost.origin);
-  await expect.poll(() => pageProblems.join('\n')).toMatch(/img-src/);
-  pageProblems.length = 0;
+  await takeProblems(pageProblems, /img-src/);
 
   const thrown = await runner.evaluate(() => {
     try {
@@ -91,8 +91,22 @@ test('a refused load or a Trusted Types refusal inside the app frame reaches the
     }
   });
   expect(thrown).toBe('TypeError');
-  await expect.poll(() => pageProblems.join('\n')).toMatch(/TrustedHTML/);
-  pageProblems.length = 0;
+  await takeProblems(pageProblems, /TrustedHTML/);
+
+  await runner.evaluate(() => {
+    setTimeout(() => {
+      throw new Error('planted uncaught error');
+    }, 0);
+  });
+  await takeProblems(pageProblems, /^page error: .*planted uncaught error/);
+
+  // WebKit gives an unhandled rejection an empty stack; its line still names it.
+  await runner.evaluate(() => {
+    setTimeout(() => {
+      void Promise.reject(new Error('planted rejection'));
+    }, 0);
+  });
+  await takeProblems(pageProblems, /^page error: .*planted rejection/);
 });
 
 test('an object scenario is loaded before the channel comes up', async ({ page, appHost }) => {

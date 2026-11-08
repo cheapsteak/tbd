@@ -20,15 +20,27 @@
 // `changedAt`, as the daemon's does.
 //
 // **Connections.** `connect()` starts a connection (the channel came up) and `disconnect()`
-// ends it. As in 4b:
+// ends it. `handle(body, connection)` takes a request sent on `connection`, which is
+// `state.connection` when it was sent. As in 4b:
+// - A request sent on a connection that has ended is dropped, as the relay drops it.
 // - No event goes out on a connection before its `sessions.subscribe` reply. Events made
 //   meanwhile are numbered and kept, so a later subscribe can replay them.
 // - A reply goes out through whatever connection the phone has when it is ready, and is lost
 //   when it has none. A subscribe reply goes only to the connection that asked for it.
 // - A transcript's prompt feed starts only once the connection is live, and a resumed
 //   `transcript.open` is answered only then.
-// - An acting request's reply is remembered by its request ID: a resend gets it again and acts
-//   no more. An ID reused for another method is `bad_request`.
+//
+// **Resends** (`PhoneAppService.handleAppMessage` and `PhoneRequestMemory`):
+// - A request runs from when it is taken until its reply goes out. A resend of a request still
+//   running, such as one under `hold`, gets no reply of its own. A request that reuses a running
+//   request's ID for another method is answered `bad_request` at once.
+// - When a connection ends, a subscribe still running, and a request waiting for the connection
+//   to go live, stop running: they can never reply, so a resend on the next connection is taken
+//   afresh.
+// - Only an acting request's reply is remembered, by its request ID (`ACTING`): a resend gets it
+//   again and acts no more, and an acting request that reuses the ID for another method is
+//   `bad_request`. Every reply is kept except one that says the request certainly did not act
+//   (`remembers`), so a resend of that acts. The other methods run again on a resend.
 //
 // **Size.** Every reply and event is measured as the loader wraps it, `{"type":"app","body":…}`
 // in UTF-8, against one frame's 65,519 bytes. One that does not fit throws, so a scenario
@@ -70,6 +82,11 @@ const DETAIL_KINDS = new Set(['thinking', 'systemNote']);
 export const TEXT = Object.freeze({
   unknownMethod: 'This TBD build has no such request.',
   idInUse: 'That request ID is already in use.',
+  tooManyRequests: 'Too many requests are in progress. Try again in a moment.',
+  phoneControlOff: 'Phone control is off on this laptop.',
+  settingUnreadable: 'TBD could not read its phone control setting. Try again.',
+  pairingUnreadable: "TBD could not check this phone's pairing. Try again.",
+  stopped: 'The request was stopped before it finished.',
   badParams: "The request's params are not valid.",
   noSuchSession: 'That session is no longer on this laptop.',
   noSuchProfile: 'That profile is no longer on this laptop.',
@@ -151,7 +168,13 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
   const holds = new Map();
   /** @type {Map<string, ReplySetting>} */
   const overrides = new Map();
-  /** @type {Map<string, { method: string, outcome: Outcome | null }>} */
+  /**
+   * The requests still running, by request ID. `queued` is set once the reply is made, which a
+   * hold can keep from going out.
+   * @type {Map<string, { method: string, queued: boolean }>}
+   */
+  const running = new Map();
+  /** @type {Map<string, { method: string, outcome: Outcome }>} The acting replies kept, by request ID. */
   const memory = new Map();
   let minted = 0;
   let worktreesMade = 0;
@@ -226,12 +249,25 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
   function connect() {
     state.connection = { live: false, replayed: false };
     afterLive = [];
+    dropConnectionRequests();
   }
 
   /** The channel went down. Anything waiting for the connection to go live is dropped. */
   function disconnect() {
     state.connection = null;
     afterLive = [];
+    dropConnectionRequests();
+  }
+
+  /**
+   * Stops counting the requests that could reply only on the connection that just ended: a
+   * subscribe, and a request still waiting for that connection to go live (the daemon's
+   * `dropUnstartedRequests`). Any other request keeps running, and replies on the next one.
+   */
+  function dropConnectionRequests() {
+    for (const [requestID, entry] of running) {
+      if (!entry.queued || entry.method === 'sessions.subscribe') running.delete(requestID);
+    }
   }
 
   /**
@@ -326,13 +362,17 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
    */
   function reply(request, outcome, onSent) {
     const conn = state.connection;
+    const entry = running.get(request.requestID);
+    if (entry !== undefined) entry.queued = true;
     const make = typeof outcome === 'function' ? outcome : () => outcome;
     if (typeof outcome !== 'function') {
       checkFits(replyBody(request, outcome), request.method);
-      const remembered = memory.get(request.requestID);
-      if (remembered !== undefined && ACTING.has(request.method)) remembered.outcome = outcome;
+      if (ACTING.has(request.method) && !memory.has(request.requestID) && remembers(outcome)) {
+        memory.set(request.requestID, { method: request.method, outcome });
+      }
     }
     heldOr(request.method, () => {
+      if (running.get(request.requestID) === entry) running.delete(request.requestID);
       if (state.connection === null) return;
       if (request.method === 'sessions.subscribe' && state.connection !== conn) return;
       const body = replyBody(request, make());
@@ -340,6 +380,18 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       emit(body);
       onSent?.();
     });
+  }
+
+  /**
+   * Answers `request` at once, past any hold, without counting it as running: a refusal the
+   * daemon sends before it starts anything.
+   * @param {Request} request
+   * @param {Outcome} outcome
+   */
+  function replyNow(request, outcome) {
+    const body = replyBody(request, outcome);
+    checkFits(body, request.method);
+    if (state.connection !== null) emit(body);
   }
 
   /**
@@ -411,31 +463,33 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
   // --- requests -------------------------------------------------------------------------
 
   /**
-   * One app body from the phone. Only a request is expected; anything else throws.
+   * One app body from the phone, sent on `connection`. Only a request is expected; anything
+   * else throws. Returns false, and does nothing, when `connection` has ended.
    * @param {unknown} body
+   * @param {FakeLaptopState['connection']} [connection]
+   * @returns {boolean}
    */
-  function handle(body) {
+  function handle(body, connection = state.connection) {
     if (!isRecord(body) || body.kind !== 'request' || typeof body.requestID !== 'string' || typeof body.method !== 'string') {
       throw new TypeError(`fake laptop: not a request: ${JSON.stringify(body)}`);
     }
+    if (connection === null || connection !== state.connection) return false;
     /** @type {Request} */
     const request = { requestID: body.requestID, method: body.method, params: isRecord(body.params) ? body.params : {} };
-    const seen = memory.get(request.requestID);
-    if (seen !== undefined) {
-      if (seen.method !== request.method) {
-        reply(request, failure('bad_request', TEXT.idInUse));
-        return;
-      }
-      if (seen.outcome !== null) {
-        reply(request, seen.outcome);
-        return;
-      }
-    } else {
-      memory.set(request.requestID, { method: request.method, outcome: null });
+    const busy = running.get(request.requestID);
+    if (busy !== undefined) {
+      if (busy.method !== request.method) replyNow(request, failure('bad_request', TEXT.idInUse));
+      return true;
     }
     if (!METHODS.has(request.method)) {
-      reply(request, failure('unknown_method', TEXT.unknownMethod));
-      return;
+      replyNow(request, failure('unknown_method', TEXT.unknownMethod));
+      return true;
+    }
+    running.set(request.requestID, { method: request.method, queued: false });
+    const seen = ACTING.has(request.method) ? memory.get(request.requestID) : undefined;
+    if (seen !== undefined) {
+      reply(request, seen.method === request.method ? seen.outcome : failure('bad_request', TEXT.idInUse));
+      return true;
     }
     const override = overrides.get(request.method);
     if (override !== undefined) {
@@ -448,9 +502,10 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       } else {
         reply(request, outcome);
       }
-      return;
+      return true;
     }
     HANDLERS[/** @type {keyof typeof HANDLERS} */ (request.method)](request);
+    return true;
   }
 
   /**
@@ -910,6 +965,22 @@ function checkFits(body, name) {
 /** @param {Request} request @param {Outcome} outcome */
 function replyBody(request, outcome) {
   return { kind: 'reply', requestID: request.requestID, ...outcome };
+}
+
+/**
+ * Whether the daemon keeps `outcome` in its request memory: every reply but one that says the
+ * request certainly did not act. That is a reply made before the memory (phone control off, too
+ * many requests, the setting unreadable) and one the memory forgets (the pairing unreadable, or
+ * the request stopped): `PhoneAppService.serve` and `perform`. A test gets one with `setReply`.
+ * @param {Outcome} outcome
+ */
+function remembers(outcome) {
+  if (!('error' in outcome)) return true;
+  const { code, message } = outcome.error;
+  if (code === 'phone_control_off') return false;
+  if (code === 'refused') return message !== TEXT.tooManyRequests;
+  if (code === 'internal') return ![TEXT.settingUnreadable, TEXT.pairingUnreadable, TEXT.stopped].includes(message);
+  return true;
 }
 
 /** @param {string} code @param {string} message @returns {Outcome} */
