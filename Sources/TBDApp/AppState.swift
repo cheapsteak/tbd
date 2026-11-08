@@ -1306,6 +1306,11 @@ final class AppState {
     /// The newest phone refresh started. Refreshes overlap (a delta, an
     /// action, the pane appearing); an answer from an older one is dropped.
     @ObservationIgnored var phoneRefreshGeneration: UInt64 = 0
+    /// The connect-time phone refresh's retries, while it has any left. See
+    /// `refreshPhoneAtConnect`.
+    @ObservationIgnored var phoneConnectRetryTask: Task<Void, Never>?
+    /// The clock those retries wait on, so a test can step them.
+    @ObservationIgnored var phoneRetryClock: any Clock<Duration> = ContinuousClock()
     /// Failures from the last Start/Stop/Restart per worktree, shown at the
     /// bottom of the Servers menu.
     var devServerActionMessages: [UUID: [String]] = [:]
@@ -4350,7 +4355,7 @@ final class AppState {
             startSubscription()
             await refreshPRStatuses()
             await refreshDevServerSummary()
-            await refreshPhone()
+            await refreshPhoneAtConnect()
             pushClaudeSpawnPreferences()
             pushForegroundState()
             // Last, so the initial load never waits on it.

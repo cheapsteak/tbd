@@ -13,6 +13,9 @@ actor FakePhoneClient: PhoneControlClient {
     let allowError: (any Error)?
     let revokeError: (any Error)?
     let pairing: PhonePairingStatus?
+    /// How many `phone.status` calls, from the first, are refused as a
+    /// daemon still recording the app's identity refuses them.
+    let refusedStatusCalls: Int
     private(set) var statusCalls = 0
     private(set) var relayURLs: [String?] = []
     private(set) var allowedOffers: [UUID] = []
@@ -21,7 +24,7 @@ actor FakePhoneClient: PhoneControlClient {
     init(
         status: PhoneStatusResult, devices: [PhoneDevice] = [], statusError: (any Error)? = nil,
         relayURLError: (any Error)? = nil, allowError: (any Error)? = nil, revokeError: (any Error)? = nil,
-        pairing: PhonePairingStatus? = nil
+        pairing: PhonePairingStatus? = nil, refusedStatusCalls: Int = 0
     ) {
         self.status = status
         self.devices = devices
@@ -30,10 +33,16 @@ actor FakePhoneClient: PhoneControlClient {
         self.allowError = allowError
         self.revokeError = revokeError
         self.pairing = pairing
+        self.refusedStatusCalls = refusedStatusCalls
     }
+
+    static let identityRefusal = "phone control is managed only from the TBD app"
 
     func phoneStatus() async throws -> PhoneStatusResult {
         statusCalls += 1
+        if statusCalls <= refusedStatusCalls {
+            throw DaemonClientError.rpcError(Self.identityRefusal, code: nil)
+        }
         if let statusError { throw statusError }
         return status
     }
@@ -111,6 +120,64 @@ struct AppStatePhoneTests {
             await state.refreshPhone()
             #expect(state.phoneStatus == nil)
             #expect(state.phoneStatusError?.contains("Unknown method") == true)
+        }
+    }
+
+    @Test(.clockDriven) func aRefusedConnectTimeStatusIsRetriedUntilItAnswers() async throws {
+        try await withState { state in
+            let expected = status(connected: [UUID()])
+            let fake = FakePhoneClient(status: expected, refusedStatusCalls: 2)
+            state.phoneClient = fake
+            let clock = EventDrivenTestClock()
+            state.phoneRetryClock = clock
+            state.isConnected = true
+
+            await state.refreshPhoneAtConnect()
+            #expect(state.phoneStatus == nil)
+            #expect(state.phoneStatusError == FakePhoneClient.identityRefusal)
+
+            // The retries arm on the main actor, so their guards take the
+            // saturated-pass budget.
+            let delays = AppState.phoneConnectRetryDelays
+            try await clock.requireAdvanceWhenArmed(by: delays[0], timeout: TestDeadlines.saturatedPass)
+            try await clock.requireAdvanceWhenArmed(by: delays[1], timeout: TestDeadlines.saturatedPass)
+            // The third call answers, and the retries end there.
+            await state.phoneConnectRetryTask?.value
+            #expect(state.phoneStatus == expected)
+            #expect(state.phoneStatusError == nil)
+            let calls = await fake.statusCalls
+            #expect(calls == 3)
+            #expect(!clock.hasSleeper)
+        }
+    }
+
+    @Test(.clockDriven) func theConnectTimeRetriesStopWhenTheAppDisconnects() async throws {
+        try await withState { state in
+            let fake = FakePhoneClient(status: status(), refusedStatusCalls: 10)
+            state.phoneClient = fake
+            let clock = EventDrivenTestClock()
+            state.phoneRetryClock = clock
+            state.isConnected = true
+
+            await state.refreshPhoneAtConnect()
+            state.isConnected = false
+            try await clock.requireAdvanceWhenArmed(
+                by: AppState.phoneConnectRetryDelays[0], timeout: TestDeadlines.saturatedPass)
+            await state.phoneConnectRetryTask?.value
+            let calls = await fake.statusCalls
+            #expect(calls == 1)
+            #expect(state.phoneStatus == nil)
+        }
+    }
+
+    @Test func aConnectTimeStatusThatAnswersSchedulesNoRetry() async {
+        await withState { state in
+            let expected = status()
+            state.phoneClient = FakePhoneClient(status: expected)
+            state.isConnected = true
+            await state.refreshPhoneAtConnect()
+            #expect(state.phoneStatus == expected)
+            #expect(state.phoneConnectRetryTask == nil)
         }
     }
 

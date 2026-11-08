@@ -28,28 +28,85 @@ protocol PhoneControlClient: Sendable {
 extension DaemonClient: PhoneControlClient {}
 
 extension AppState {
+    /// How long the connect-time phone refresh waits before each retry,
+    /// after its first try fails. About 7.5 s in all.
+    nonisolated static let phoneConnectRetryDelays: [Duration] = [
+        .milliseconds(500), .seconds(1), .seconds(2), .seconds(4),
+    ]
+
     /// Reads `phone.status`, then `phone.devices`. Only the newest refresh
     /// started may publish, so an older answer never lands over a newer one.
     /// A failure sets `phoneStatusError` and keeps what was last read; an
     /// older daemon, which lacks the methods, leaves `phoneStatus` nil.
     func refreshPhone() async {
+        _ = await readPhone()
+    }
+
+    /// The phone refresh at connect, which tries again when it fails.
+    ///
+    /// The daemon can refuse the first `phone.status` while it is still
+    /// recording the app's identity, and no delta follows that refusal, so
+    /// `phoneStatus` would stay nil and the "Phone connected" chip hidden
+    /// while a phone may be controlling the laptop. So a failed first try is
+    /// retried after each of `phoneConnectRetryDelays` on `phoneRetryClock`,
+    /// in a task of its own, so the rest of the connect does not wait. The
+    /// retries stop at the first `phone.status` that answers, once the app
+    /// disconnects, and when a later connect starts its own.
+    func refreshPhoneAtConnect() async {
+        phoneConnectRetryTask?.cancel()
+        phoneConnectRetryTask = nil
+        let answered = await readPhone()
+        guard !answered else { return }
+        phoneConnectRetryTask = Task { [weak self] in
+            await self?.retryPhoneRefresh()
+        }
+    }
+
+    private func retryPhoneRefresh() async {
+        for delay in Self.phoneConnectRetryDelays {
+            do {
+                try await phoneRetryClock.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard isConnected, !Task.isCancelled else { return }
+            if await readPhone() { return }
+        }
+    }
+
+    /// `refreshPhone`'s work. Returns whether `phone.status` answered,
+    /// whether or not a newer refresh then took over publishing.
+    private func readPhone() async -> Bool {
         phoneRefreshGeneration &+= 1
         let generation = phoneRefreshGeneration
         let client = phoneClient
+        let status: PhoneStatusResult
         do {
-            let status = try await client.phoneStatus()
-            guard phoneRefreshGeneration == generation else { return }
-            if status != phoneStatus { phoneStatus = status }
+            status = try await client.phoneStatus()
+        } catch {
+            recordPhoneRefreshFailure(error, generation: generation)
+            return false
+        }
+        guard phoneRefreshGeneration == generation else { return true }
+        if status != phoneStatus { phoneStatus = status }
+        do {
             let devices = try await client.phoneDevices()
-            guard phoneRefreshGeneration == generation else { return }
+            guard phoneRefreshGeneration == generation else { return true }
             if devices != phoneDevices { phoneDevices = devices }
             if phoneStatusError != nil { phoneStatusError = nil }
         } catch {
-            guard phoneRefreshGeneration == generation else { return }
-            let text = Self.phoneErrorText(error)
-            phoneLogger.debug("phone refresh failed: \(text, privacy: .public)")
-            if text != phoneStatusError { phoneStatusError = text }
+            recordPhoneRefreshFailure(error, generation: generation)
         }
+        return true
+    }
+
+    /// Keeps a failed refresh's reason as `phoneStatusError`, unless a newer
+    /// refresh has started since.
+    private func recordPhoneRefreshFailure(_ error: any Error, generation: UInt64) {
+        guard phoneRefreshGeneration == generation else { return }
+        let text = Self.phoneErrorText(error)
+        phoneLogger.debug("phone refresh failed: \(text, privacy: .public)")
+        if text != phoneStatusError { phoneStatusError = text }
     }
 
     /// Turns phone control on or off.
