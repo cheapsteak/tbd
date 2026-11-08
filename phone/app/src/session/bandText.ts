@@ -61,28 +61,16 @@ interface WallClock {
   minute: number;
 }
 
-const formatters = new Map<string, Intl.DateTimeFormat>();
-
-/** The formatter for `timeZone` (the phone's own zone when undefined), built once. */
-function formatter(timeZone: string | undefined): Intl.DateTimeFormat {
-  const key = timeZone ?? '';
-  let f = formatters.get(key);
-  if (f === undefined) {
-    f = new Intl.DateTimeFormat('en-US', {
-      timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
-    });
-    formatters.set(key, f);
-  }
-  return f;
-}
-
 /**
  * What a clock in `timeZone` reads at `ms`. Intl gives the fields as numbers in a fixed locale
  * and a 24-hour cycle; the text around them is built by hand, so the phone's locale never
- * changes it.
+ * changes it. The formatter is built on each call, so the phone's own zone is read afresh
+ * after the user travels.
  */
 function wallClock(ms: number, timeZone: string | undefined): WallClock {
-  const parts = formatter(timeZone).formatToParts(ms);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
+  }).formatToParts(ms);
   const field = (type: Intl.DateTimeFormatPartTypes): number => Number(parts.find((p) => p.type === type)?.value);
   const day = Date.UTC(field('year'), field('month') - 1, field('day')) / DAY_MS;
   return { day, weekday: new Date(day * DAY_MS).getUTCDay(), hour: field('hour'), minute: field('minute') };

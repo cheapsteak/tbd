@@ -31,7 +31,7 @@ export function TabStrip({ row, session }: { row: PhoneRow; session: PhoneSessio
   const actions = useActions();
   const open = refKey(session.ref);
   return (
-    <div className="tabs" role="tablist" onKeyDown={moveFocus}>
+    <div className="tabs" role="tablist" aria-label={row.name} onKeyDown={moveFocus}>
       {row.sessions.map((s) => {
         const st = STATUS[s.status.chip];
         const key = refKey(s.ref);

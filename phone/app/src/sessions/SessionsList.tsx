@@ -47,7 +47,7 @@ function Group({ view, shut, lastRowID, now }: { view: GroupView; shut: boolean;
   return (
     <>
       <div className="repo-row">
-        <button className="repo" type="button" aria-expanded={!shut} onClick={() => actions.toggleRepo(group.id)}>
+        <button className="repo" type="button" aria-expanded={rows.length > 0 ? !shut : undefined} onClick={() => actions.toggleRepo(group.id)}>
           <Icon name="chev-d" />
           {group.name}
         </button>

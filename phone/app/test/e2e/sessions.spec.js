@@ -271,7 +271,11 @@ test('an empty repo still shows its header and "+"', async ({ page, appHost }) =
   await openApp(page, appHost, { scenario });
   // Last, after every repo with rows; the empty scratch and provider groups are not shown.
   await expect.poll(() => shownOutline(page)).toEqual([...expectedOutline(MOCK), ['acme-docs', []]]);
-  await expect(app(page).getByRole('button', { name: 'acme-docs', exact: true })).toBeVisible();
+  const docs = app(page).getByRole('button', { name: 'acme-docs', exact: true });
+  await expect(docs).toBeVisible();
+  // A group with no rows has nothing to collapse, so its header is not marked expanded.
+  await expect(docs).not.toHaveAttribute('aria-expanded', /.*/);
+  await expect(app(page).getByRole('button', { name: 'acme-api', exact: true })).toHaveAttribute('aria-expanded', 'true');
   await expect(app(page).getByRole('button', { name: 'New session in acme-docs' })).toBeVisible();
 });
 
@@ -521,6 +525,7 @@ test('a worktree with several sessions shows one tab each, marking the open one'
   await openSessionByName(page, 'Checkout v2');
   const tabs = app(page).getByRole('tab');
   await expect(app(page).getByRole('tablist')).toHaveCount(1);
+  await expect(app(page).getByRole('tablist', { name: 'Checkout v2' })).toHaveCount(1);
   await expect(tabs).toHaveCount(3);
   expect(await tabs.evaluateAll(visibleNames)).toEqual(['Claude', 'Review', 'Codex']);
   // The row opens its working Claude tab.
