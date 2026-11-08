@@ -1,8 +1,8 @@
 import Foundation
 
 // The app-layer hand-off: what the phone bridge calls once a paired phone's
-// channel is established. Plan 04's phone app service implements
-// `PhoneAppHandling`; until it does, `UnavailablePhoneApp` stands in.
+// channel is established. `UnavailablePhoneApp` stands in until
+// `PhoneBridge.setAppHandler` sets another handler.
 
 /// A paired phone with an established channel.
 public struct PhonePeer: Sendable, Hashable {
@@ -55,8 +55,8 @@ actor PhoneAppHandlerSlot {
     }
 }
 
-/// Stands in until plan 04. Replies to every request with error code
-/// "unavailable".
+/// The handler until `PhoneBridge.setAppHandler` sets another. Replies to
+/// every request with error code "unavailable".
 ///
 /// It answers only a well-formed request: a JSON object whose `kind` is
 /// `"request"` and whose `requestID` is a string. Anything else gets no
@@ -65,8 +65,6 @@ actor PhoneAppHandlerSlot {
 /// until `phoneDisconnected` or `phoneRevoked`.
 actor UnavailablePhoneApp: PhoneAppHandling {
     private var outboxes: [UUID: any PhoneAppOutbox] = [:]
-
-    init() {}
 
     func phoneConnected(_ peer: PhonePeer, outbox: any PhoneAppOutbox) {
         outboxes[peer.deviceID] = outbox

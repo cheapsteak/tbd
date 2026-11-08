@@ -84,11 +84,11 @@ struct URLSessionRelayTransportTests {
         try await withLoopbackRelay { server in
             try await withRoomSocket(server) { socket, _ in
                 try await socket.send(.binary(Data([1, 2, 3])))
-                let awaited1 = try await socket.receive()
-                #expect(awaited1 == .binary(Data([1, 2, 3])))
+                let echo = try await socket.receive()
+                #expect(echo == .binary(Data([1, 2, 3])))
                 try await socket.send(.text("ping"))
-                let awaited2 = try await socket.receive()
-                #expect(awaited2 == .text("pong"))
+                let pong = try await socket.receive()
+                #expect(pong == .text("pong"))
             }
         }
     }
@@ -98,8 +98,8 @@ struct URLSessionRelayTransportTests {
             try await withRoomSocket(server) { socket, _ in
                 let frame = Data((0..<65_536).map { UInt8(truncatingIfNeeded: $0) })
                 try await socket.send(.binary(frame))
-                let awaited3 = try await socket.receive()
-                #expect(awaited3 == .binary(frame))
+                let echo = try await socket.receive()
+                #expect(echo == .binary(frame))
             }
         }
     }
@@ -155,11 +155,11 @@ struct URLSessionRelayTransportTests {
                 // A task receive the cancelled call started may still be in
                 // flight; the frame it brings goes to the next receive.
                 try await socket.send(.binary(Data([7])))
-                let awaited4 = try await socket.receive()
-                #expect(awaited4 == .binary(Data([7])))
+                let first = try await socket.receive()
+                #expect(first == .binary(Data([7])))
                 try await socket.send(.binary(Data([8])))
-                let awaited5 = try await socket.receive()
-                #expect(awaited5 == .binary(Data([8])))
+                let second = try await socket.receive()
+                #expect(second == .binary(Data([8])))
             }
         }
     }
@@ -266,8 +266,8 @@ struct URLSessionRelayTransportTests {
                 // The check reads the relay every time: a fixed relay is
                 // seen as fixed at once.
                 server.setInfoResponse(status: 200, body: #"{"name":"tbd-relay","version":"1.1.0","api":[1]}"#)
-                let awaited6 = try await client.info(relay: server.baseURL).version
-                #expect(awaited6 == "1.1.0")
+                let version = try await client.info(relay: server.baseURL).version
+                #expect(version == "1.1.0")
             }
         }
     }

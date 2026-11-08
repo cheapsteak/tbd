@@ -68,8 +68,7 @@ extension RPCRouter {
         case RPCMethod.phoneStatus:
             return try await handlePhoneStatus()
         case RPCMethod.phoneDevices:
-            let devices = try await db.phoneDevices.list()
-            return try RPCResponse(result: PhoneDeviceListResult(devices: devices))
+            return try await handlePhoneDevices()
         case RPCMethod.phonePairStart:
             return try await handlePhonePairStart()
         case RPCMethod.phonePairAllow:
@@ -91,9 +90,9 @@ extension RPCRouter {
 
     // MARK: - Status and devices
 
-    /// The bridge's status. Without a bridge, the saved settings and
-    /// `phoneUnavailableRefusal` as the problem, so the pane can still show
-    /// what is set.
+    /// The bridge's status. Without a bridge, the saved settings,
+    /// `phoneUnavailableRefusal` as the problem, and the relay state a stopped
+    /// bridge reports, so the pane can still show what is set.
     private func handlePhoneStatus() async throws -> RPCResponse {
         if let bridge = phoneBridge {
             return try RPCResponse(result: await bridge.status())
@@ -106,11 +105,16 @@ extension RPCRouter {
             running: false,
             problem: Self.phoneUnavailableRefusal,
             relay: PhoneRelayStatus(
-                state: config.phoneRelayURL == nil ? .notSetUp : .unknown,
+                state: config.phoneRelayURL == nil ? .notSetUp : .checking,
                 bundledVersion: PhoneBridgeConstants.bundledRelayVersion),
             connectedDeviceIDs: [],
             pairing: nil)
         return try RPCResponse(result: status)
+    }
+
+    private func handlePhoneDevices() async throws -> RPCResponse {
+        let devices = try await db.phoneDevices.list()
+        return try RPCResponse(result: PhoneDeviceListResult(devices: devices))
     }
 
     // MARK: - Pairing and revoking

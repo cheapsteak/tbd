@@ -24,7 +24,7 @@ enum PhoneBridgeConstants {
     /// The relay API version this laptop speaks; a relay whose `api` list
     /// lacks it is refused.
     static let relayAPIVersion = 1
-    /// The relay version this build ships with. Plan 02 keeps it in step with
+    /// The relay version this build ships with, kept in step with
     /// `RELAY_VERSION` in `relay/cloudflare/src`.
     static let bundledRelayVersion = "1.0.0"
     /// The most raw (compressed) bundle bytes one `bundle.chunk` carries.

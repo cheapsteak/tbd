@@ -1850,9 +1850,8 @@ public final class Daemon: Sendable {
             // relay is set: load the laptop key, check the relay, and open one
             // room socket per paired phone. After the bind, so a slow relay
             // never delays the socket; with the setting off it opens nothing.
-            // The phone app service's `await phoneBridge?.setAppHandler(...)`
-            // goes immediately before this call, so the first channels already
-            // use the real handler.
+            // Any `await phoneBridge?.setAppHandler(...)` belongs before this
+            // call, so the first channels already use the real handler.
             await phoneBridge?.reconcile()
 
             // 11a-reader-census. Record the holder transport's double-reader

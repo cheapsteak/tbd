@@ -13,20 +13,6 @@ private let otherRelayAddress = "https://other-relay.acme.workers.dev"
 private let currentRelay = PhoneRelayInfo(name: "tbd-relay", version: PhoneBridgeConstants.bundledRelayVersion,
                                           api: [PhoneBridgeConstants.relayAPIVersion])
 
-/// `count` bytes from the system's random generator.
-private func randomBytes(_ count: Int) -> Data {
-    Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-}
-
-/// An `app` message carrying a request with `requestID`, as the phone sends
-/// it.
-private func request(_ requestID: String) -> [String: Any] {
-    let body: [String: Any] = [
-        "kind": "request", "requestID": requestID, "method": "sessions.subscribe", "params": [String: Any](),
-    ]
-    return ["type": "app", "body": body]
-}
-
 /// The error code of an `app` reply, if it carries one.
 private func errorCode(of reply: [String: Any]) -> String? {
     let body = reply["body"] as? [String: Any]
@@ -159,15 +145,8 @@ private struct PhoneBridgeHarness: Sendable {
     func connectedPhone(_ paired: PairedPhone) async throws -> TestPhone {
         let room = paired.device.roomID
         try await waitUntil("the laptop to open the room of \(paired.device.id)") { relay.laptopPresent(room: room) }
-        let phone = try TestPhone(relay: relay, room: room, key: paired.key)
-        let joined = try await phone.nextSignal()
-        try #require(joined == "peer-joined")
         let laptopKey = try #require(laptopPublicKey)
-        try await phone.connectIK(room: room, laptopKey: laptopKey)
-        try await phone.sendHello()
-        let welcome = try await phone.next()
-        try #require(welcome["type"] as? String == "welcome")
-        return phone
+        return try await TestPhone.connected(relay: relay, room: room, key: paired.key, laptopKey: laptopKey)
     }
 
     /// Starts a pairing offer, parses its link, and waits until the laptop's
@@ -183,10 +162,7 @@ private struct PhoneBridgeHarness: Sendable {
 
     /// A phone in the offer's room, with the relay's `peer-joined` read.
     func joinedPairingPhone(_ link: PairingLink) async throws -> TestPhone {
-        let phone = try TestPhone(relay: relay, room: link.room)
-        let joined = try await phone.nextSignal()
-        try #require(joined == "peer-joined")
-        return phone
+        try await TestPhone.joined(relay: relay, room: link.room)
     }
 
     /// Pairs a phone named `name` the way a person does: scan, `hello`, Allow.
@@ -264,7 +240,7 @@ private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress, 
     case .loose:
         try FileManager.default.createDirectory(at: keyPath.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
-        try randomBytes(LaptopKeyStore.keyByteCount).write(to: keyPath)
+        try PhoneTestVectors.randomBytes(LaptopKeyStore.keyByteCount).write(to: keyPath)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: keyPath.path)
     }
 
@@ -592,7 +568,7 @@ struct PhoneBridgeTests {
             await h.bridge.reconcile()
             let paired = h.phones[0]
             let first = try await h.connectedPhone(paired)
-            try await first.send(json: request("r1"))
+            try await first.sendRequest("r1")
             let reply = try await first.next()
             #expect(reply["type"] as? String == "app")
             #expect(errorCode(of: reply) == "unavailable")
@@ -600,7 +576,7 @@ struct PhoneBridgeTests {
 
             await h.bridge.setAppHandler(h.app)
             let second = try await h.connectedPhone(paired)
-            try await second.send(json: request("r2"))
+            try await second.sendRequest("r2")
             try await h.waitUntil("r2 to reach the new handler") { await h.app.log.contains("message:r2") }
             let log = await h.app.log
             #expect(log == ["connected", "message:r2"])
@@ -648,7 +624,7 @@ struct PhoneBridgeTests {
             let digest = SHA256.hash(data: inflated).map { String(format: "%02x", $0) }.joined()
             #expect(digest == sha)
 
-            try await phone.send(json: request("r1"))
+            try await phone.sendRequest("r1")
             let reply = try await phone.next()
             #expect(errorCode(of: reply) == "unavailable")
             try await h.waitUntil("the phone to show as connected") {

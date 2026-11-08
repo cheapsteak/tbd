@@ -10,11 +10,6 @@ import TestSupport
 private let relayURL = URL(string: "https://acme-relay.acme.workers.dev")!
 private let loaderURL = URL(string: "https://acme.github.io/tbd-phone/")!
 
-/// `count` bytes from the system's random generator.
-private func randomBytes(_ count: Int) -> Data {
-    Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-}
-
 /// IKpsk2 message 1 for `link`, from a phone with `key` that names itself
 /// `deviceName`: the first frame a pairing phone sends. Built here rather
 /// than through ``TestPhone/pair(link:deviceName:sendHello:)``, which waits
@@ -91,10 +86,7 @@ private struct PairingHarness {
 
     /// A phone in the offer's room, with the relay's `peer-joined` read.
     func joinedPhone(_ link: PairingLink) async throws -> TestPhone {
-        let phone = try TestPhone(relay: relay, room: link.room)
-        let signal = try await phone.nextSignal()
-        try #require(signal == "peer-joined")
-        return phone
+        try await TestPhone.joined(relay: relay, room: link.room)
     }
 
     /// Waits until `condition` holds, or throws naming `what` and the
@@ -663,7 +655,7 @@ struct PairingServiceTests {
             let (code, _) = try await phone.pair(link: link, deviceName: "iPhone", sendHello: false)
             // Nothing has decrypted on the attempt, so the junk is tried as a
             // message 1, refused, and dropped; the attempt stays.
-            try await phone.sendRaw(randomBytes(100))
+            try await phone.sendRaw(PhoneTestVectors.randomBytes(100))
             try await phone.sendHello()
             try await h.waitForState(.awaitingApproval)
             let shown = await h.service.status
@@ -756,7 +748,7 @@ struct PairingServiceTests {
         try await withPairing { h in
             let (status, link) = try await h.startOffer()
             let phone = try await h.joinedPhone(link)
-            try await phone.sendRaw(randomBytes(100))
+            try await phone.sendRaw(PhoneTestVectors.randomBytes(100))
             let (code, _) = try await phone.pair(link: link, deviceName: "iPhone")
             try await h.waitForState(.awaitingApproval)
             let shown = await h.service.status

@@ -194,8 +194,8 @@ struct LoaderHandler: Sendable {
     /// JSON object: its first byte other than JSON whitespace is `{`, and the
     /// whole of it parses as one object, as Foundation parses it, with
     /// nothing after it. Foundation accepts a trailing comma (`{"a":1,}`),
-    /// which a strict phone parser rejects, so callers must emit strict JSON
-    /// (plan 04's encoders do); this check does not enforce it. A body like
+    /// which a strict phone parser rejects, so callers must emit strict JSON;
+    /// this check does not enforce it. A body like
     /// `{"a":1},"type":"revoked"` would otherwise make the phone read another
     /// `type`. Throws `.notAJSONObject` when it is not, and `.messageTooLarge`
     /// when the message would not fit one transport message.
@@ -224,6 +224,13 @@ struct LoaderHandler: Sendable {
     /// `{"type":"pairDenied","reason":"denied"|"expired"}`.
     static func pairDenied(_ reason: PairDeniedReason) -> Data {
         Data(#"{"type":"pairDenied","reason":\#(jsonString(reason.rawValue))}"#.utf8)
+    }
+
+    /// `{"laptopName":"<laptopName>"}`, handshake message 2's payload.
+    /// `laptopName` goes in as given, so callers cut it with
+    /// `LaptopName.limited` first.
+    static func message2Payload(laptopName: String) -> Data {
+        Data(#"{"laptopName":\#(jsonString(laptopName))}"#.utf8)
     }
 
     // MARK: - JSON

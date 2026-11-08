@@ -210,7 +210,7 @@ actor PairingService {
         self.laptopKey = laptopKey
         let name = LaptopName.limited(laptopName)
         self.laptopName = name
-        self.message2Payload = Data(#"{"laptopName":\#(LoaderHandler.jsonString(name))}"#.utf8)
+        self.message2Payload = LoaderHandler.message2Payload(laptopName: name)
         self.devices = devices
         self.preflight = preflight
         self.onChange = onChange
@@ -275,14 +275,9 @@ actor PairingService {
         let id = UUID()
         let task = Task { try await self.commitAllow(offerID: offerID, claim: claim) }
         commit = (id, task)
-        let device: PhoneDevice
-        do {
-            device = try await task.value
-        } catch {
-            if commit?.id == id { commit = nil }
-            throw error
-        }
+        let outcome = await task.result
         if commit?.id == id { commit = nil }
+        let device = try outcome.get()
         await onPaired(device)
         return device
     }
@@ -392,8 +387,14 @@ actor PairingService {
         }
     }
 
+    /// Offer `offerID`, while it is the current offer and its room is open.
+    private func liveOffer(_ offerID: UUID) -> Offer? {
+        guard let current = offer, current.id == offerID, session != nil else { return nil }
+        return current
+    }
+
     private func handle(_ event: RelayLinkEvent, offerID: UUID) async {
-        guard let current = offer, current.id == offerID, session != nil else { return }
+        guard let current = liveOffer(offerID) else { return }
         switch event {
         case .opened, .connectFailed, .peerAbsent:
             return
@@ -420,7 +421,7 @@ actor PairingService {
     }
 
     private func receiveFrame(_ frame: Data, offerID: UUID) async {
-        guard let current = offer, current.id == offerID, session != nil else { return }
+        guard let current = liveOffer(offerID) else { return }
         switch current.phase {
         case .waiting(.some(let attempt)):
             guard let plaintext = try? channel?.decrypt(frame) else {
@@ -459,7 +460,7 @@ actor PairingService {
     /// the handshake as the offer's attempt, replacing the attempt it had, if
     /// any. A refused frame leaves the attempt as it was.
     private func answerMessage1(_ frame: Data, offerID: UUID) async {
-        guard let current = offer, current.id == offerID, session != nil else { return }
+        guard let current = liveOffer(offerID) else { return }
         var responder: NoiseResponder
         let read: (remoteStatic: Curve25519.KeyAgreement.PublicKey, payload: Data)
         do {
@@ -619,7 +620,7 @@ actor PairingService {
     }
 
     private func expire(_ offerID: UUID) async {
-        guard let current = offer, current.id == offerID, session != nil else { return }
+        guard let current = liveOffer(offerID) else { return }
         let last: Data?
         switch current.phase {
         case .waiting:
@@ -708,7 +709,7 @@ actor PairingService {
         if let last {
             let (left, signal) = AsyncStream.makeStream(of: Void.self)
             if case .enqueued = ending.outbox.yield(Outgoing(frame: last, onLeft: { signal.finish() })) {
-                await waitUntilLeft(left)
+                await waitUntilLeft(left, clock: clock)
             }
         }
         await ending.link.stop()
@@ -738,22 +739,6 @@ actor PairingService {
                 PhoneBridgeLog.record(.frameNotSent(deviceID: nil, detail: error.localizedDescription))
             }
             item.onLeft?()
-        }
-    }
-
-    /// Waits until `left` finishes or the flush limit passes, whichever comes
-    /// first.
-    private func waitUntilLeft(_ left: AsyncStream<Void>) async {
-        let clock = self.clock
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for await _ in left {}
-            }
-            group.addTask {
-                try? await clock.sleep(for: PhoneBridgeConstants.flushLimit)
-            }
-            _ = await group.next()
-            group.cancelAll()
         }
     }
 

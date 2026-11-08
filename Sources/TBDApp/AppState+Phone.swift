@@ -54,93 +54,60 @@ extension AppState {
 
     /// Turns phone control on or off.
     func setPhoneControlEnabled(_ enabled: Bool) async {
-        do {
+        await performPhoneAction(RPCMethod.configSetPhoneControlEnabled) {
             try await phoneClient.setPhoneControlEnabled(enabled)
-        } catch {
-            logPhoneFailure("config.setPhoneControlEnabled", error)
         }
-        await refreshPhone()
     }
 
     /// Saves the relay URL; nil or blank removes it. The daemon checks the
     /// relay before it saves. Returns nil on success, or the daemon's reason
     /// for the setup sheet to show inline.
     func setPhoneRelayURL(_ raw: String?) async -> String? {
-        let failure: String?
-        do {
+        await performPhoneAction(RPCMethod.configSetPhoneRelayURL) {
             try await phoneClient.setPhoneRelayURL(Self.nonBlankPhoneURL(raw))
-            failure = nil
-        } catch {
-            logPhoneFailure("config.setPhoneRelayURL", error)
-            failure = Self.phoneErrorText(error)
         }
-        await refreshPhone()
-        return failure
     }
 
     /// Saves the loader URL override; nil or blank goes back to the default.
     /// Returns nil on success, or the reason for the pane to show inline.
     func setPhoneLoaderURL(_ raw: String?) async -> String? {
-        let failure: String?
-        do {
+        await performPhoneAction(RPCMethod.configSetPhoneLoaderURL) {
             try await phoneClient.setPhoneLoaderURL(Self.nonBlankPhoneURL(raw))
-            failure = nil
-        } catch {
-            logPhoneFailure("config.setPhoneLoaderURL", error)
-            failure = Self.phoneErrorText(error)
         }
-        await refreshPhone()
-        return failure
     }
 
     /// Starts a pairing offer. The new offer is published into `phoneStatus`
     /// before the refresh, so the pairing sheet sees it even if that refresh
     /// fails. Returns nil on success, or the reason pairing could not start.
     func startPhonePairing() async -> String? {
-        let failure: String?
-        do {
+        await performPhoneAction(RPCMethod.phonePairStart) {
             let pairing = try await phoneClient.phonePairStart()
             phoneStatus?.pairing = pairing
-            failure = nil
-        } catch {
-            logPhoneFailure("phone.pairStart", error)
-            failure = Self.phoneErrorText(error)
         }
-        await refreshPhone()
-        return failure
     }
 
     /// Allows the phone waiting on the shown offer.
     func allowPhonePairing() async {
         guard let offerID = phoneStatus?.pairing?.offerID else { return }
-        do {
+        await performPhoneAction(RPCMethod.phonePairAllow) {
             _ = try await phoneClient.phonePairAllow(offerID: offerID)
-        } catch {
-            logPhoneFailure("phone.pairAllow", error)
         }
-        await refreshPhone()
     }
 
     /// Denies the shown offer: the user clicked Deny, or closed the pairing
     /// sheet while it was live.
     func denyPhonePairing() async {
         guard let offerID = phoneStatus?.pairing?.offerID else { return }
-        do {
+        await performPhoneAction(RPCMethod.phonePairDeny) {
             try await phoneClient.phonePairDeny(offerID: offerID)
-        } catch {
-            logPhoneFailure("phone.pairDeny", error)
         }
-        await refreshPhone()
     }
 
     /// Unpairs a phone.
     func revokePhone(deviceID: UUID) async {
-        do {
+        await performPhoneAction(RPCMethod.phoneRevoke) {
             try await phoneClient.phoneRevoke(deviceID: deviceID)
-        } catch {
-            logPhoneFailure("phone.revoke", error)
         }
-        await refreshPhone()
     }
 
     /// Opens Settings on the Phone tab, with the relay setup sheet when
@@ -169,8 +136,20 @@ extension AppState {
         return trimmed
     }
 
-    private func logPhoneFailure(_ method: String, _ error: any Error) {
-        let text = Self.phoneErrorText(error)
-        phoneLogger.error("\(method, privacy: .public) failed: \(text, privacy: .public)")
+    /// Runs one phone RPC, logs it if it fails, then refreshes either way.
+    /// Returns nil on success, or the failure's text.
+    @discardableResult
+    private func performPhoneAction(_ method: String, _ action: () async throws -> Void) async -> String? {
+        let failure: String?
+        do {
+            try await action()
+            failure = nil
+        } catch {
+            let text = Self.phoneErrorText(error)
+            phoneLogger.error("\(method, privacy: .public) failed: \(text, privacy: .public)")
+            failure = text
+        }
+        await refreshPhone()
+        return failure
     }
 }

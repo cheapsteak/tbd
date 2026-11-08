@@ -161,8 +161,7 @@ actor PhoneConnection {
         self.link = RelayLink(url: PhoneRoom.socketURL(relay: relayURL, roomID: device.roomID), transport: transport,
                               backoff: backoff, preflight: preflight, clock: clock)
         self.laptopKey = laptopKey
-        let name = LoaderHandler.jsonString(LaptopName.limited(laptopName))
-        self.message2Payload = Data(#"{"laptopName":\#(name)}"#.utf8)
+        self.message2Payload = LoaderHandler.message2Payload(laptopName: LaptopName.limited(laptopName))
         self.devices = devices
         self.bundle = bundle
         self.appSlot = appSlot
@@ -207,7 +206,7 @@ actor PhoneConnection {
         if !isClosing, let current = channel, current.established != nil {
             let (left, signal) = AsyncStream.makeStream(of: Void.self)
             enqueueEncrypted(LoaderHandler.revoked, channelID: current.id, onLeft: { signal.finish() })
-            await waitUntilLeft(left)
+            await waitUntilLeft(left, clock: clock)
         }
         await stop()
     }
@@ -416,7 +415,7 @@ actor PhoneConnection {
                 // A fixed phrase from the loader, never message content.
                 PhoneBridgeLog.record(.channelEnded(deviceID: deviceID, reason: reason))
                 if let lastLeft {
-                    await waitUntilLeft(lastLeft)
+                    await waitUntilLeft(lastLeft, clock: clock)
                 }
                 // `stop()` may have begun while the message left; `close()`
                 // ends the channel then.
@@ -522,22 +521,6 @@ actor PhoneConnection {
         }
     }
 
-    /// Waits until `left` finishes or the flush limit passes, whichever comes
-    /// first.
-    private func waitUntilLeft(_ left: AsyncStream<Void>) async {
-        let clock = self.clock
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for await _ in left {}
-            }
-            group.addTask {
-                try? await clock.sleep(for: PhoneBridgeConstants.flushLimit)
-            }
-            _ = await group.next()
-            group.cancelAll()
-        }
-    }
-
     // MARK: - Stopping
 
     /// Runs in `stopTask`, which nothing cancels, so the channel ends here
@@ -593,5 +576,21 @@ struct PhoneChannelOutbox: PhoneAppOutbox {
 
     func send(appBody: Data) async -> Bool {
         await connection.sendApp(body: appBody, channelID: channelID)
+    }
+}
+
+/// Waits until `left` finishes or `PhoneBridgeConstants.flushLimit` passes on
+/// `clock`, whichever comes first. `PhoneConnection` and `PairingService` use
+/// it to give a last message time to leave before a socket closes.
+func waitUntilLeft(_ left: AsyncStream<Void>, clock: any Clock<Duration>) async {
+    await withTaskGroup(of: Void.self) { group in
+        group.addTask {
+            for await _ in left {}
+        }
+        group.addTask {
+            try? await clock.sleep(for: PhoneBridgeConstants.flushLimit)
+        }
+        _ = await group.next()
+        group.cancelAll()
     }
 }

@@ -38,7 +38,7 @@ struct PhonePresentationTests {
         #expect(PhonePresentation.relayLine(for: status(running: false, problem: "The laptop key file is missing.",
                                                         relayState: .checking))
             == "Not checked while phone control is not running")
-        // A daemon without a bridge reports `unknown`; it reads the same.
+        // A state a newer daemon added reads the same.
         #expect(PhonePresentation.relayLine(for: status(running: false, relayState: .unknown))
             == "Not checked while phone control is not running")
         #expect(PhonePresentation.relayLine(for: status(relayURL: nil, running: false, relayState: .notSetUp)) == nil)

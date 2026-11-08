@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Testing
 
 @testable import TBDDaemonLib
 
@@ -42,8 +43,8 @@ enum TestPhoneError: Error, Equatable, LocalizedError {
 }
 
 /// A phone for the phone bridge's tests: a key, a socket on a ``FakeRelay``,
-/// and the phone's side of the Noise channel, built on plan 01's
-/// `NoiseInitiator`. It does what the loader does, one step at a time.
+/// and the phone's side of the Noise channel, built on `NoiseInitiator`. It
+/// does what the loader does, one step at a time.
 ///
 /// - **Rooms.** `init(relay:room:key:)` and `rejoin(room:)` join a room;
 ///   `connectIK` and `pair` join the room they name when the phone is not in
@@ -86,6 +87,29 @@ final class TestPhone: @unchecked Sendable {
     convenience init(relay: FakeRelay, room: String, key: Curve25519.KeyAgreement.PrivateKey = .init()) throws {
         self.init(relay: relay, key: key)
         try join(room)
+    }
+
+    /// A phone with a socket in `room` that has read the relay's
+    /// `peer-joined`: the laptop's socket was in the room first.
+    static func joined(relay: FakeRelay, room: String,
+                       key: Curve25519.KeyAgreement.PrivateKey = .init()) async throws -> TestPhone {
+        let phone = try TestPhone(relay: relay, room: room, key: key)
+        let signal = try await phone.nextSignal()
+        try #require(signal == "peer-joined")
+        return phone
+    }
+
+    /// A phone from ``joined(relay:room:key:)`` that has then run a whole
+    /// `Noise_IK` handshake with the laptop whose public key is `laptopKey`,
+    /// sent `hello` and read `welcome`, so its channel is established.
+    static func connected(relay: FakeRelay, room: String, key: Curve25519.KeyAgreement.PrivateKey,
+                          laptopKey: Curve25519.KeyAgreement.PublicKey) async throws -> TestPhone {
+        let phone = try await joined(relay: relay, room: room, key: key)
+        try await phone.connectIK(room: room, laptopKey: laptopKey)
+        try await phone.sendHello()
+        let welcome = try await phone.next()
+        try #require(welcome["type"] as? String == "welcome")
+        return phone
     }
 
     /// The room the phone's socket is in; nil before it joins.
@@ -179,6 +203,15 @@ final class TestPhone: @unchecked Sendable {
     /// Encrypts `json` on the channel and sends it as one binary frame.
     func send(json: [String: Any]) async throws {
         try sendEncrypted(JSONSerialization.data(withJSONObject: json))
+    }
+
+    /// Sends an `app` message carrying a `sessions.subscribe` request with
+    /// `requestID`, as the phone app does.
+    func sendRequest(_ requestID: String) async throws {
+        let body: [String: Any] = [
+            "kind": "request", "requestID": requestID, "method": "sessions.subscribe", "params": [String: Any](),
+        ]
+        try await send(json: ["type": "app", "body": body])
     }
 
     /// Sends `bytes` as one binary frame, unencrypted.

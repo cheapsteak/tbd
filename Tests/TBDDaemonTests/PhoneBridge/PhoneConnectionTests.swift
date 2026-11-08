@@ -8,11 +8,6 @@ import TestSupport
 
 private let relayURL = URL(string: "https://acme-relay.acme.workers.dev")!
 
-/// `count` bytes from the system's random generator.
-private func randomBytes(_ count: Int) -> Data {
-    Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-}
-
 /// IK message 1 for `room`, to the laptop whose public key is `laptopKey`,
 /// from a phone with `key`. Built here rather than through ``TestPhone``,
 /// whose socket would join the room and end the channel under test.
@@ -22,15 +17,6 @@ private func ikMessage1(room: String, laptopKey: Curve25519.KeyAgreement.PublicK
     var initiator = try NoiseInitiator(pattern: .ik, staticKey: key, remoteStatic: laptopKey, psk: nil,
                                        prologue: PhoneChannelPrologue.make(roomID: roomBytes))
     return try initiator.writeMessage1(payload: Data("{}".utf8))
-}
-
-/// An `app` message carrying a request with `requestID`, as the phone sends
-/// it.
-private func request(_ requestID: String) -> [String: Any] {
-    let body: [String: Any] = [
-        "kind": "request", "requestID": requestID, "method": "sessions.subscribe", "params": [String: Any](),
-    ]
-    return ["type": "app", "body": body]
 }
 
 /// One connection under test, with everything it talks to.
@@ -56,21 +42,13 @@ private struct ConnectionHarness: Sendable {
     /// A phone in the device room with `key` (the paired one by default),
     /// with the relay's `peer-joined` read.
     func joinedPhone(key: Curve25519.KeyAgreement.PrivateKey? = nil) async throws -> TestPhone {
-        let phone = try TestPhone(relay: relay, room: room, key: key ?? phoneKey)
-        let signal = try await phone.nextSignal()
-        try #require(signal == "peer-joined")
-        return phone
+        try await TestPhone.joined(relay: relay, room: room, key: key ?? phoneKey)
     }
 
     /// A phone with the paired key that has handshaken, sent `hello` and
     /// read `welcome`, so its channel is established.
     func connectedPhone() async throws -> TestPhone {
-        let phone = try await joinedPhone()
-        try await phone.connectIK(room: room, laptopKey: laptopKey.publicKey)
-        try await phone.sendHello()
-        let welcome = try await phone.next()
-        try #require(welcome["type"] as? String == "welcome")
-        return phone
+        try await TestPhone.connected(relay: relay, room: room, key: phoneKey, laptopKey: laptopKey.publicKey)
     }
 
     /// Waits until `condition` holds, or throws naming `what` and the app's
@@ -296,7 +274,7 @@ struct PhoneConnectionTests {
     @Test func aJunkFrameBeforeMessage1IsDroppedAndIKStillConnects() async throws {
         try await withConnection { h in
             let phone = try await h.joinedPhone()
-            try await phone.sendRaw(randomBytes(100))
+            try await phone.sendRaw(PhoneTestVectors.randomBytes(100))
             let refused = await h.events.next()
             #expect(refused == .handshakeRefused("unreadable handshake message"))
             #expect(h.relay.laptopFrames(room: h.room).isEmpty)
@@ -345,7 +323,7 @@ struct PhoneConnectionTests {
             try await phone.connectIK(room: h.room, laptopKey: h.laptopKey.publicKey)
             // Nothing has decrypted yet, so the junk is tried as a message 1,
             // refused, and dropped; the handshaken channel stays.
-            try await phone.sendRaw(randomBytes(100))
+            try await phone.sendRaw(PhoneTestVectors.randomBytes(100))
             try await h.waitForEvent(.handshakeRefused("unreadable handshake message"))
             try await phone.sendHello()
             let welcome = try await phone.next()
@@ -475,7 +453,7 @@ struct PhoneConnectionTests {
             let phone = try await h.connectedPhone()
             await h.app.closeGate(on: "r1")
             for requestID in ["r1", "r2", "r3"] {
-                try await phone.send(json: request(requestID))
+                try await phone.sendRequest(requestID)
             }
             try await h.waitUntil("r1 to reach the app") { await h.app.log.contains("message:r1") }
             // r2 and r3 have reached the laptop's socket; neither starts
@@ -661,7 +639,7 @@ struct PhoneConnectionTests {
         try await withConnection { h in
             let phone = try await h.connectedPhone()
             await h.app.closeGate(on: "r1")
-            try await phone.send(json: request("r1"))
+            try await phone.sendRequest("r1")
             try await h.waitUntil("r1 to reach the app") { await h.app.log.contains("message:r1") }
             let stopping = Task { await h.connection.stop() }
             // The socket closes at once.
@@ -728,7 +706,7 @@ struct PhoneConnectionTests {
             // The phone acts after `revoked` was queued, then leaves. The
             // laptop handles its events in order, so once the channel has
             // ended, the phone's request has been handled too.
-            try await phone.send(json: request("r9"))
+            try await phone.sendRequest("r9")
             phone.close()
             try await h.waitUntil("the channel to end") { await h.app.log.contains("disconnected") }
             let log = await h.app.log

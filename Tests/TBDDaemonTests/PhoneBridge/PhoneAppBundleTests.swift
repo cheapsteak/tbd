@@ -10,12 +10,6 @@ private func hexSHA256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
-/// `count` bytes from the system's random generator, which DEFLATE cannot
-/// shrink, so the compressed stream is about as long as the input.
-private func randomBytes(_ count: Int) -> Data {
-    Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-}
-
 /// Whether `bytes` starts with a zlib (RFC 1950) header: a CMF byte whose
 /// method nibble is 8 (DEFLATE), and a CMF-FLG pair that is a multiple of 31.
 private func startsWithZlibHeader(_ bytes: Data) -> Bool {
@@ -41,7 +35,7 @@ struct PhoneAppBundleTests {
     }
 
     @Test func chunksAreBoundedAndReassemble() throws {
-        let source = randomBytes(200_000)
+        let source = PhoneTestVectors.randomBytes(200_000)
         let bundle = try PhoneAppBundle(source: source)
         #expect(bundle.chunks.allSatisfy { $0.count <= 45_000 })
         #expect(bundle.chunks.count == (bundle.compressed.count + 44_999) / 45_000)

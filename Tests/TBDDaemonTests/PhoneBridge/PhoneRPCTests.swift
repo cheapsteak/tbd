@@ -151,6 +151,12 @@ struct PhoneRPCTests {
             #expect(r.success == false)
             #expect(r.error == refusal, "\(method)")
         }
+        try await expectNothingHappened(f, onlyRow: device)
+    }
+
+    /// Checks that nothing happened: no bridge call, no config write, no row
+    /// deleted (`device` is still the only one), no delta.
+    private func expectNothingHappened(_ f: Fixture, onlyRow device: PhoneDevice) async throws {
         let calls = await f.fake.calls
         #expect(calls.isEmpty)
         let config = try await f.db.config.get()
@@ -204,15 +210,7 @@ struct PhoneRPCTests {
                     "\(method) from \(String(describing: connection)) with \(request.params)")
             }
         }
-        let calls = await f.fake.calls
-        #expect(calls.isEmpty)
-        let config = try await f.db.config.get()
-        #expect(config.phoneControlEnabled == false)
-        #expect(config.phoneRelayURL == nil)
-        #expect(config.phoneLoaderURL == nil)
-        let rows = try await f.db.phoneDevices.list()
-        #expect(rows == [device])
-        #expect(f.deltas.count == 0)
+        try await expectNothingHappened(f, onlyRow: device)
     }
 
     /// The same nine answer the app, with the params it sends.
@@ -483,7 +481,7 @@ struct PhoneRPCTests {
         #expect(status.running == false && status.problem == RPCRouter.phoneUnavailableRefusal)
         #expect(status.enabled == true)
         #expect(status.relayURL == Self.relayURL && status.loaderURLOverride == Self.loaderURL)
-        #expect(status.relay.state == .unknown)
+        #expect(status.relay.state == .checking)
     }
 
     @Test func devicesListsTheRows() async throws {

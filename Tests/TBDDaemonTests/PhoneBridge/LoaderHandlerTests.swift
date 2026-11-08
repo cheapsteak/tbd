@@ -4,12 +4,6 @@ import Testing
 
 @testable import TBDDaemonLib
 
-/// `count` bytes from the system's random generator, which DEFLATE cannot
-/// shrink, so the compressed stream is about as long as the input.
-private func randomBytes(_ count: Int) -> Data {
-    Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-}
-
 /// A small bundle, for the tests that do not care about its size.
 private func smallBundle() throws -> PhoneAppBundle {
     try PhoneAppBundle(source: Data("globalThis.app = 1;\n".utf8))
@@ -166,7 +160,7 @@ struct LoaderHandlerTests {
 
     @Test func bundleGetSendsEveryChunkInOrder() throws {
         // Random bytes do not compress, so 120,000 of them need three chunks.
-        let b = try PhoneAppBundle(source: randomBytes(120_000))
+        let b = try PhoneAppBundle(source: PhoneTestVectors.randomBytes(120_000))
         try #require(b.chunks.count >= 2)
         var handler = try welcomed(b)
         let actions = handler.handle(bundleGet(b.sha256Hex))
@@ -188,7 +182,7 @@ struct LoaderHandlerTests {
 
     @Test func aFullChunkFitsTheFrameBudget() throws {
         // An incompressible source, so the first chunk holds the full 45,000 bytes.
-        let b = try PhoneAppBundle(source: randomBytes(100_000))
+        let b = try PhoneAppBundle(source: PhoneTestVectors.randomBytes(100_000))
         try #require(b.chunks.count >= 2)
         #expect(b.chunks[0].count == 45_000)
         var handler = try welcomed(b)

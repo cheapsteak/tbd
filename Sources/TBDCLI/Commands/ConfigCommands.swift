@@ -190,10 +190,10 @@ struct ConfigSet: AsyncParsableCommand {
     }
 
     mutating func run() async throws {
-        let client = SocketClient()
-        if Self.appOnlyKeys.contains(key) {
+        guard !Self.appOnlyKeys.contains(key) else {
             throw CLIError.invalidArgument(Self.appOnlyKeyMessage(key))
         }
+        let client = SocketClient()
         switch key {
         case "auto-archive-on-merge":
             let parsed = try Self.parseOnOff(value, key: key)
