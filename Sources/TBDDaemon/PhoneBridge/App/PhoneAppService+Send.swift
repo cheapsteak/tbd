@@ -105,6 +105,17 @@ extension PhoneAppService {
     ///   that found it running delivered nothing, so it is `refused` and the
     ///   phone is asked to send again.
     ///
+    /// **`woken` means the wake respawned the session with the message as its
+    /// first prompt, and no more.** It does not confirm that Claude received
+    /// the message: the laptop's composer holds a woken message until the
+    /// respawned session's own SessionStart reports in, because a session
+    /// that cannot resume exits with the prompt lost while the respawn still
+    /// succeeds, and the phone does not wait. On the tmux transport the
+    /// prompt rides the respawn command, which tmux refuses past about 16 KB
+    /// with "command too long", so a longer wake message fails the respawn
+    /// and comes back `refused` with that reason, although
+    /// `PhoneAppConstants.messageMaxBytes` lets it through.
+    ///
     /// **A remote session** needs the capability `purpose` names, as the
     /// sessions list shows it (`PhoneSessionStatus.remoteCapabilities`), or
     /// it is `unsupported` with the same reason; a provider that is not
