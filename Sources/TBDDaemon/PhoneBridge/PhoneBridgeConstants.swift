@@ -57,9 +57,10 @@ enum LaptopName {
     /// else its local host name, the Bonjour name without `.local`; else the
     /// kernel's host name; cut to fit, and "Mac" when none can be read.
     ///
-    /// None of these waits on DNS or mDNS. The bridge reads the name while
-    /// it reconciles, which daemon startup awaits, so `ProcessInfo.hostName`,
-    /// which can resolve the name over the network, is not used.
+    /// None of these waits on DNS or mDNS. The bridge reads the name on its
+    /// actor while it reconciles, where a wait would hold up every phone
+    /// request, so `ProcessInfo.hostName`, which can resolve the name over
+    /// the network, is not used.
     static func current() -> String {
         let candidates = [
             SCDynamicStoreCopyComputerName(nil, nil).map { $0 as String },

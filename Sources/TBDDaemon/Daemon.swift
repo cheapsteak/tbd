@@ -1850,9 +1850,19 @@ public final class Daemon: Sendable {
             // relay is set: load the laptop key, check the relay, and open one
             // room socket per paired phone. After the bind, so a slow relay
             // never delays the socket; with the setting off it opens nothing.
-            // Any `await phoneBridge?.setAppHandler(...)` belongs before this
-            // call, so the first channels already use the real handler.
-            await phoneBridge?.reconcile()
+            // Not awaited: the first reconcile reads or creates the key file,
+            // with an fsync, and compresses the phone app bundle, and nothing
+            // later in startup needs the bridge running. Phone RPCs have been
+            // served since step 9 either way, and `pairStart` reconciles on its
+            // own. Shutdown's `stop()` needs no handle on this task: the bridge
+            // runs `reconcile` and `stop` one at a time, in call order, so a
+            // reconcile already in line finishes first, and one that arrives
+            // after `stop` changes nothing. Any `await
+            // phoneBridge?.setAppHandler(...)` belongs before this task, so
+            // the first channels already use the real handler.
+            if let phoneBridge {
+                Task { await phoneBridge.reconcile() }
+            }
 
             // 11a-reader-census. Record the holder transport's double-reader
             // violation count where a human can read it back. The detector is
