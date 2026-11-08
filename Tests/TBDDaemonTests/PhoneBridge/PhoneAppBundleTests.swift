@@ -43,10 +43,10 @@ private func bundleOffThePool(_ source: Data) async throws -> PhoneAppBundle {
 
 @Suite("PhoneAppBundle")
 struct PhoneAppBundleTests {
-    @Test func theShippedPlaceholderLoads() throws {
+    @Test func theShippedBundleLoads() throws {
         let bundle = try PhoneAppBundle.loadShipped()
         #expect(bundle.sha256Hex == hexSHA256(bundle.source))
-        #expect(String(decoding: bundle.source, as: UTF8.self).contains("Connected to TBD. The phone app is not built yet."))
+        #expect(String(decoding: bundle.source, as: UTF8.self).hasPrefix("/* TBD phone app. Built by `npm run build:app`"))
         #expect(!bundle.chunks.isEmpty)
         #expect(try (bundle.compressed as NSData).decompressed(using: .zlib) as Data == bundle.source)
     }
