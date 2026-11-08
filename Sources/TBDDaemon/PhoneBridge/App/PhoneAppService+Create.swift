@@ -320,22 +320,14 @@ extension PhoneAppService {
     }
 
     /// `providers` in order, as many as fit `budget` bytes once encoded as a
-    /// `PhoneRemoteProvidersResult`. A provider that does not fit is left out
-    /// and the next one tried, which takes a form far larger than any
-    /// provider declares.
+    /// `PhoneRemoteProvidersResult` (`PhoneFrameFit`). A provider that does
+    /// not fit is left out and the next one tried, which takes a form far
+    /// larger than any provider declares.
     static func fittedProviders(
         _ providers: [PhoneProvider], budget: Int = providersResultBytes
     ) -> PhoneRemoteProvidersResult {
-        let encoder = PhoneAppCoding.makeEncoder()
-        var used = (try? encoder.encode(PhoneRemoteProvidersResult(providers: [])).count) ?? 0
-        var kept: [PhoneProvider] = []
-        for provider in providers {
-            // A provider's bytes, and a comma unless it is the first.
-            let cost = ((try? encoder.encode(provider).count) ?? Int.max / 2) + (kept.isEmpty ? 0 : 1)
-            guard used + cost <= budget else { continue }
-            used += cost
-            kept.append(provider)
-        }
+        let empty = (try? PhoneAppCoding.makeEncoder().encode(PhoneRemoteProvidersResult(providers: [])).count) ?? 0
+        let kept = PhoneFrameFit.fitted(providers, used: empty, budget: budget, onMisfit: .skip)
         let dropped = providers.count - kept.count
         if dropped > 0 {
             Self.logger.notice(

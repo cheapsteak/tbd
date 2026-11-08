@@ -131,9 +131,11 @@ extension PhoneAppService {
     }
 
     /// The snapshot reply with the layout and as many rows, in order, as fit
-    /// `PhoneFrameBudget.eventDataBytes`, and the rows left for events. The
-    /// reply is nil when it cannot fit a frame at all, which the snapshot
-    /// builder's limits rule out.
+    /// `PhoneFrameBudget.eventDataBytes`, and the rows left for events.
+    /// Fitting stops at the first row that does not fit (`PhoneFrameFit`), so
+    /// the rows left follow on from the reply's. The reply is nil when it
+    /// cannot fit a frame at all, which the snapshot builder's limits rule
+    /// out.
     static func snapshotReply(_ snapshot: PhoneSnapshot, requestID: String, stream: String, seq: Int) -> (reply: Data?, rest: [PhoneRow]) {
         func encoded(_ rows: [PhoneRow], more: Bool) -> Data? {
             try? PhoneAppCoding.reply(requestID: requestID, result: SessionsSubscribeResult(
@@ -142,18 +144,10 @@ extension PhoneAppService {
         }
         // `more: false` is the longer spelling, so this is an upper bound.
         guard let empty = encoded([], more: false) else { return (nil, snapshot.rows) }
-        let encoder = PhoneAppCoding.makeEncoder()
-        var used = empty.count
-        var count = 0
-        for row in snapshot.rows {
-            // A row's bytes, and a comma unless it is the first.
-            let cost = ((try? encoder.encode(row).count) ?? Int.max / 2) + (count == 0 ? 0 : 1)
-            guard used + cost <= PhoneFrameBudget.eventDataBytes else { break }
-            used += cost
-            count += 1
-        }
-        let rest = Array(snapshot.rows.dropFirst(count))
-        guard let reply = encoded(Array(snapshot.rows.prefix(count)), more: !rest.isEmpty),
+        let kept = PhoneFrameFit.fitted(
+            snapshot.rows, used: empty.count, budget: PhoneFrameBudget.eventDataBytes, onMisfit: .stop)
+        let rest = Array(snapshot.rows.dropFirst(kept.count))
+        guard let reply = encoded(kept, more: !rest.isEmpty),
               PhoneAppCoding.framedSize(reply) <= PhoneFrameBudget.maxPlaintext else {
             return (nil, snapshot.rows)
         }

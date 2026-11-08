@@ -119,6 +119,20 @@ struct PhoneProfileTests {
         #expect(PhoneAppCoding.framedSize(reply) <= PhoneFrameBudget.maxPlaintext)
     }
 
+    /// A profile too large for what is left of the budget is left out alone:
+    /// the profiles after it that fit are still kept, in order.
+    @Test func aProfileThatDoesNotFitDropsOnlyItself() throws {
+        let short = PhoneProfile(id: UUID(), name: "Acme Work", kind: "oauth", isDefault: true)
+        let long = PhoneProfile(
+            id: UUID(), name: String(repeating: "a", count: PhoneText.fieldLimit), kind: "oauth", isDefault: false)
+        let after = PhoneProfile(id: UUID(), name: "Acme Home", kind: "oauth", isDefault: false)
+        let budget = try PhoneAppCoding.makeEncoder().encode(ProfilesListResult(profiles: [short, after])).count
+
+        let fitted = PhoneAppService.fittedProfiles([short, long, after], budget: budget)
+
+        #expect(fitted.profiles == [short, after])
+    }
+
     // MARK: - session.switchProfile
 
     @Test func switchProfileSwapsInPlace() async throws {

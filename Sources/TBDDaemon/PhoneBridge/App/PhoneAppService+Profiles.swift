@@ -65,20 +65,13 @@ extension PhoneAppService {
     }
 
     /// `profiles` in order, as many as fit `budget` bytes once encoded as a
-    /// `ProfilesListResult`. The rest are dropped from the end, which takes
-    /// far more profiles than anyone keeps, since a name is cut to
-    /// `PhoneText.fieldLimit` bytes.
+    /// `ProfilesListResult` (`PhoneFrameFit`). A profile that does not fit is
+    /// left out and the next one tried, so one cannot hide the profiles after
+    /// it. Leaving any out takes far more profiles than anyone keeps, since a
+    /// name is cut to `PhoneText.fieldLimit` bytes.
     static func fittedProfiles(_ profiles: [PhoneProfile], budget: Int = profilesResultBytes) -> ProfilesListResult {
-        let encoder = PhoneAppCoding.makeEncoder()
-        var used = (try? encoder.encode(ProfilesListResult(profiles: [])).count) ?? 0
-        var kept: [PhoneProfile] = []
-        for profile in profiles {
-            // A profile's bytes, and a comma unless it is the first.
-            let cost = ((try? encoder.encode(profile).count) ?? Int.max / 2) + (kept.isEmpty ? 0 : 1)
-            guard used + cost <= budget else { break }
-            used += cost
-            kept.append(profile)
-        }
+        let empty = (try? PhoneAppCoding.makeEncoder().encode(ProfilesListResult(profiles: [])).count) ?? 0
+        let kept = PhoneFrameFit.fitted(profiles, used: empty, budget: budget, onMisfit: .skip)
         if kept.count < profiles.count {
             Self.logger.notice(
                 "Phone profiles: \(profiles.count - kept.count, privacy: .public) of \(profiles.count, privacy: .public) profiles left out to fit one frame")
