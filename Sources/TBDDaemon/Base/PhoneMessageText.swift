@@ -9,7 +9,11 @@ import Foundation
 ///
 /// `vetted(_:)` applies the whole rule: every CRLF becomes a bare LF
 /// (`lineEndingsNormalized`), then a blank message is refused (`isBlank`),
-/// then one holding a control character (`hasControlCharacter`).
+/// then one holding a control character (`hasControlCharacter`). A remote
+/// session's create form carries the first message in its
+/// `remoteCreatePromptField`, which gets the whole rule; every other string
+/// value of the form gets `vettedFormValue(_:)`, the rule less its blank
+/// check, since a provider can paste those into its session too.
 ///
 /// Each path needs it for its own reason. A message pasted into a pane, or
 /// pasted by a remote provider into its session, reaches an agent whose
@@ -38,6 +42,10 @@ enum PhoneMessageText {
     /// What a paired phone hears when its message holds a control character.
     static let controlCharacterRefusal = "a phone message cannot contain control characters"
 
+    /// The field of a remote session's create form that TBD fills with a
+    /// phone's first message.
+    static let remoteCreatePromptField = "prompt"
+
     /// `text` held to the whole rule: every CRLF made a bare LF, then a blank
     /// message refused, then one holding a control character refused.
     static func vetted(_ text: String) -> Vetted<String> {
@@ -45,6 +53,18 @@ enum PhoneMessageText {
         if isBlank(normalized) {
             return .refused(emptyRefusal)
         }
+        if hasControlCharacter(normalized) {
+            return .refused(controlCharacterRefusal)
+        }
+        return .deliver(normalized)
+    }
+
+    /// `value`, a string value of a remote session's create form other than
+    /// its first message, held to the rule less its blank check: every CRLF
+    /// made a bare LF, then a value holding a control character refused. A
+    /// blank value passes, since an optional field may be left blank.
+    static func vettedFormValue(_ value: String) -> Vetted<String> {
+        let normalized = lineEndingsNormalized(value)
         if hasControlCharacter(normalized) {
             return .refused(controlCharacterRefusal)
         }

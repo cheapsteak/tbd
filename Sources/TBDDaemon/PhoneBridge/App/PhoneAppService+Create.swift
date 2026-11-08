@@ -45,7 +45,7 @@ extension PhoneAppService {
     static let worktreeCreateFailedReason = "The worktree could not be created. Check the laptop."
 
     /// The create field TBD fills with the phone's first message.
-    static let promptFieldName = "prompt"
+    static let promptFieldName = PhoneMessageText.remoteCreatePromptField
     /// The field type whose value is a bool, not a string.
     static let boolFieldType = "bool"
     /// The field type whose value is one of the field's choices.
@@ -452,8 +452,10 @@ extension PhoneAppService {
     ///
     /// 1. Every CRLF becomes LF, and a value holding a control character is
     ///    `refused` with `PhoneMessageText.controlCharacterRefusal`, the code
-    ///    and words the phone's message gets for the same text. A provider can
-    ///    paste a value into its session as it does the message.
+    ///    and words the phone's message gets for the same text
+    ///    (`PhoneMessageText.vettedFormValue`, which the router applies to the
+    ///    same values). A provider can paste a value into its session as it
+    ///    does the message.
     /// 2. An `enum` field's value must be one of the field's choices, the only
     ///    values the sheet's picker offers, or `bad_request` with
     ///    `notAChoiceReason`. A blank value passes here: the picker offers it
@@ -465,9 +467,14 @@ extension PhoneAppService {
     static func vettedFormStrings(
         _ strings: [String: String], fields: [String: ProviderCreateParamField]
     ) throws -> [String: String] {
-        let normalized = strings.mapValues { value in PhoneMessageText.lineEndingsNormalized(value) }
-        guard !normalized.values.contains(where: { value in PhoneMessageText.hasControlCharacter(value) }) else {
-            throw PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal)
+        var normalized: [String: String] = [:]
+        for (name, value) in strings {
+            switch PhoneMessageText.vettedFormValue(value) {
+            case .deliver(let text):
+                normalized[name] = text
+            case .refused(let reason):
+                throw PhoneAppError(code: .refused, message: reason)
+            }
         }
         for (name, value) in normalized {
             guard let field = fields[name], field.type == enumFieldType,

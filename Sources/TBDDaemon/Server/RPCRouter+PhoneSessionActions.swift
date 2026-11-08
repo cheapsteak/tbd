@@ -195,49 +195,93 @@ extension RPCRouter: PhoneSessionActions {
     static let phoneRemoteCreatePromptNotStringRefusal = "remote.create prompt must be a string"
 
     /// A remote session a phone creates, as the handler gets it: the provider
-    /// and its form values (`phoneRemoteCreateParams`), with the first
-    /// message, the form's `prompt` value (`PhoneAppService.promptFieldName`),
-    /// held to the phone message rule (`PhoneMessageText.vetted`).
+    /// and its form values (`phoneRemoteCreateParams`), with every string in
+    /// the form held to the phone message rule, since a provider can paste
+    /// any of them into its session.
     ///
-    /// - **A `prompt` that is there and is not a string** (a number, an
-    ///   array, an object, a null) is refused with
-    ///   `phoneRemoteCreatePromptNotStringRefusal`. The provider would paste
-    ///   whatever text it makes of the value, which the rule never saw.
-    /// - **Form values that are not a JSON object, and a `prompt` that is
-    ///   absent or empty,** carry no phone message and are kept as they came,
-    ///   for the handler to judge.
-    /// - **When the rule changes the message,** its CRLFs made bare LFs, the
-    ///   form values are written out again with it.
+    /// - **The first message**, the form's `prompt` value
+    ///   (`PhoneMessageText.remoteCreatePromptField`), gets the whole rule
+    ///   (`PhoneMessageText.vetted`), blank check included, and is judged
+    ///   first, so its refusal does not depend on the order of the keys. One
+    ///   that is there and is not a string (a number, an array, an object, a
+    ///   null) is refused with `phoneRemoteCreatePromptNotStringRefusal`: the
+    ///   provider would paste whatever text it makes of the value, which the
+    ///   rule never saw. One that is absent or empty carries no message.
+    /// - **Every other string value** gets the rule less its blank check
+    ///   (`PhoneMessageText.vettedFormValue`), as the phone app service holds
+    ///   the form's strings, so a blank optional field stays allowed. A value
+    ///   that is an array or an object is refused when any string in it, at
+    ///   any depth, holds a control character, a CR of a CRLF included.
+    /// - **Form values that are not a JSON object** carry nothing the rule
+    ///   can read and are kept as they came, for the handler to judge.
+    /// - **When the rule changes a value,** its CRLFs made bare LFs, the form
+    ///   values are written out again with it; otherwise they pass byte for
+    ///   byte.
     ///
     /// Either the params, or the refusal that answers in place of the create.
     static func phoneRemoteCreateVetted(
         _ p: RemoteCreateParams
     ) -> PhoneMessageText.Vetted<RemoteCreateParams> {
         let narrowed = phoneRemoteCreateParams(p)
-        let field = PhoneAppService.promptFieldName
+        let promptField = PhoneMessageText.remoteCreatePromptField
         guard let data = narrowed.paramsJSON.data(using: .utf8),
-              var form = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let value = form[field] else {
+              var form = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return .deliver(narrowed)
         }
-        guard let prompt = value as? String else {
+        if let value = form[promptField], !(value is String) {
             return .refused(phoneRemoteCreatePromptNotStringRefusal)
         }
-        guard !prompt.isEmpty else {
-            return .deliver(narrowed)
-        }
-        switch PhoneMessageText.vetted(prompt) {
-        case .refused(let reason):
-            return .refused(reason)
-        case .deliver(let normalized):
-            guard normalized != prompt else { return .deliver(narrowed) }
-            form[field] = normalized
-            // A form that came out of `JSONSerialization` always goes back in.
-            guard let rewritten = try? JSONSerialization.data(withJSONObject: form),
-                  let json = String(data: rewritten, encoding: .utf8) else {
-                return .refused("remote.create paramsJSON could not be written out again")
+        var rewritten: [String: String] = [:]
+        if let prompt = form[promptField] as? String, !prompt.isEmpty {
+            switch PhoneMessageText.vetted(prompt) {
+            case .refused(let reason):
+                return .refused(reason)
+            case .deliver(let normalized):
+                if normalized != prompt { rewritten[promptField] = normalized }
             }
-            return .deliver(RemoteCreateParams(provider: narrowed.provider, paramsJSON: json))
+        }
+        for (name, value) in form where name != promptField {
+            guard let text = value as? String else {
+                if holdsControlCharacter(value) {
+                    return .refused(PhoneMessageText.controlCharacterRefusal)
+                }
+                continue
+            }
+            switch PhoneMessageText.vettedFormValue(text) {
+            case .refused(let reason):
+                return .refused(reason)
+            case .deliver(let normalized):
+                if normalized != text { rewritten[name] = normalized }
+            }
+        }
+        guard !rewritten.isEmpty else { return .deliver(narrowed) }
+        for (name, text) in rewritten {
+            form[name] = text
+        }
+        // A form that came out of `JSONSerialization` always goes back in.
+        guard let written = try? JSONSerialization.data(withJSONObject: form),
+              let json = String(data: written, encoding: .utf8) else {
+            return .refused("remote.create paramsJSON could not be written out again")
+        }
+        return .deliver(RemoteCreateParams(provider: narrowed.provider, paramsJSON: json))
+    }
+
+    /// Whether `value`, a form value that is not a string, holds a string, at
+    /// any depth, with a control character a phone message may not carry
+    /// (`PhoneMessageText.hasControlCharacter`), its keys included. Its
+    /// strings are judged as they are, with no line endings made bare LFs.
+    private static func holdsControlCharacter(_ value: Any) -> Bool {
+        switch value {
+        case let text as String:
+            return PhoneMessageText.hasControlCharacter(text)
+        case let array as [Any]:
+            return array.contains { element in holdsControlCharacter(element) }
+        case let object as [String: Any]:
+            return object.contains { key, element in
+                PhoneMessageText.hasControlCharacter(key) || holdsControlCharacter(element)
+            }
+        default:
+            return false
         }
     }
 
