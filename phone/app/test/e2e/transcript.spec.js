@@ -8,7 +8,9 @@
 // pages of a 2,000-item transcript: one at a time, each holding the reader's place as it goes
 // in, a failed one shown as nothing, a reset back to the newest rows, and the scroll back ending
 // at the first item. Then the "Working…" line and its elapsed time, and the "Show details"
-// switch, which opens the transcript again with thinking and system notes.
+// switch, which opens the transcript again with thinking and system notes. Last, links: each
+// leaves only through the loader's `openLink`, and links the app does not offer, and raw HTML,
+// stay text.
 //
 // mock.json has no slash item and no running tool, and its fake laptop leaves out thinking and
 // system notes unless "Show details" is on, so the first test has those arrive through `emit`,
@@ -22,7 +24,7 @@
 import { readFileSync } from 'node:fs';
 
 import { chunkText, DETAIL_CHUNK_BYTES, FIRST_PAGE_MESSAGES, OLDER_PAGE_MESSAGES, startBefore, TEXT } from './fake-laptop-app.js';
-import { app, expect, hostCall, hostRequests, openApp, openSessionByName, test } from './fixtures.js';
+import { app, expect, frameURL, hostCall, hostLinks, hostRequests, openApp, openSessionByName, test } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
 
@@ -1165,4 +1167,137 @@ test('Show details reopens the transcript with thinking and system notes, and of
   await expect.poll(async () => (await opens()).map((p) => p.showDetails)).toEqual([false, true, false]);
   await expect(extra).toHaveCount(0);
   await expect(tx.locator('.say').first()).toBeVisible();
+});
+
+// --- links: they leave only through the loader ------------------------------------------------
+//
+// A link is a `.lnk` that the app hands to the loader as `openLink` (`__host.links`), never an
+// element that could navigate the frame, so the frame stays on the runner after a click. Links
+// the app does not offer (another scheme, a user name or password) and raw HTML stay text.
+
+/** The scheme that runs script, built in pieces, as the app's source policy asks of its own files. */
+const SCRIPT_SCHEME = 'java' + 'script:';
+const DOCS = 'https://acme.example/docs';
+const GUIDE = 'https://acme.example/guide';
+const IMG_TAG = `<img src=x onerror="console.error('img-ran')">`;
+const ANCHOR_TAG = '<a href="https://acme.example">x</a>';
+
+/**
+ * mock.json with Checkout v2's Claude transcript holding links: one in your message, one in a
+ * message, three the app does not offer, and raw HTML with a markdown image. Four messages, so
+ * the first page holds them all.
+ */
+function linkScenario() {
+  return checkoutWith([
+    { id: 'link-1', kind: 'user', text: `Read [the guide](${GUIDE}) before the docs.`, truncated: false },
+    { id: 'link-2', kind: 'assistant', text: `See [docs](${DOCS}).`, truncated: false },
+    {
+      id: 'link-3', kind: 'assistant', truncated: false,
+      text: `Not links: [run](${SCRIPT_SCHEME}alert(1)), [sign in](https://u:p@acme.example) and [inline](data:text/html,hi).`,
+    },
+    { id: 'link-4', kind: 'assistant', text: `Raw: ${ANCHOR_TAG} and ${IMG_TAG} and ![logo](https://acme.example/logo.png).`, truncated: false },
+  ]);
+}
+
+/**
+ * Opens Checkout v2's Claude tab from `linkScenario`, and returns its transcript once its last
+ * message shows.
+ * @param {Page} page
+ * @param {AppHost} appHost
+ */
+async function openLinks(page, appHost) {
+  await openApp(page, appHost, { scenario: linkScenario() });
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Raw:' })).toBeVisible();
+  return tx;
+}
+
+test('a link in a message reaches the loader as openLink and never navigates the frame', async ({ page, appHost }) => {
+  const tx = await openLinks(page, appHost);
+  const docs = tx.locator('.say .lnk');
+  await expect(docs).toHaveText('docs');
+  await expect(docs).toHaveAttribute('role', 'link');
+  await docs.click();
+  await expect.poll(() => hostLinks(page)).toEqual([DOCS]);
+  expect(await frameURL(page)).toContain('/runner.html');
+  await expect(app(page).locator('#app')).toBeAttached();
+
+  // Each link is a span with its class, role and tab stop, and nothing built from its URL.
+  const attrs = await tx.locator('.lnk').evaluateAll((els) => els.map((el) => [...el.attributes].map((a) => [a.name, a.value])));
+  expect(attrs).toHaveLength(2);
+  for (const list of attrs) expect(list.map(([name]) => name).sort()).toEqual(['class', 'role', 'tabindex']);
+  expect(JSON.stringify(attrs)).not.toContain('acme.example');
+  await expect(tx.locator('a, [href]')).toHaveCount(0);
+});
+
+test('Enter on a focused link opens it once, and a held Enter does not open it again', async ({ page, appHost }) => {
+  const tx = await openLinks(page, appHost);
+  const docs = tx.locator('.say .lnk');
+  await docs.focus();
+  await expect(docs).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => hostLinks(page)).toEqual([DOCS]);
+  // Held: the first keydown opens it, and the repeats after it do not.
+  await page.keyboard.down('Enter');
+  await page.keyboard.down('Enter');
+  await page.keyboard.down('Enter');
+  await page.keyboard.up('Enter');
+  // A click behind the keys, on the same port: once its URL arrives, every key's has.
+  await tx.locator('.me .lnk').click();
+  await expect.poll(() => hostLinks(page)).toEqual([DOCS, DOCS, GUIDE]);
+  expect(await frameURL(page)).toContain('/runner.html');
+});
+
+test('a script, data or credentials link is plain text, and opens nothing', async ({ page, appHost }) => {
+  const tx = await openLinks(page, appHost);
+  const say = tx.locator('.say', { hasText: 'Not links:' });
+  await expect(say).toHaveText('Not links: run, sign in and inline.');
+  await expect(say.locator('.lnk, [role="link"], [tabindex]')).toHaveCount(0);
+  await say.click();
+  // A link behind the click, on the same port: once its URL arrives, the click's would have.
+  await tx.locator('.say .lnk').click();
+  await expect.poll(() => hostLinks(page)).toEqual([DOCS]);
+  expect(await frameURL(page)).toContain('/runner.html');
+  const html = await tx.evaluate((el) => [...el.querySelectorAll('*')].flatMap((node) => [...node.attributes].map((a) => a.value)).join(' '));
+  expect(html).not.toContain(SCRIPT_SCHEME);
+  expect(html).not.toContain('u:p@');
+  expect(html).not.toContain('data:');
+});
+
+test('raw HTML in a message shows as its text, makes no element and runs nothing', async ({ page, appHost }) => {
+  const tx = await openLinks(page, appHost);
+  const say = tx.locator('.say', { hasText: 'Raw:' });
+  // The image's markdown shows its alt text. A run of the handler would log a console error,
+  // and a load the runner's policy refused would report a violation: the fixture fails on both.
+  await expect(say).toHaveText(`Raw: ${ANCHOR_TAG} and ${IMG_TAG} and logo.`);
+  await expect(tx.locator('a, img')).toHaveCount(0);
+  await expect(say.locator('.lnk')).toHaveCount(0);
+  await say.click();
+  expect(await hostLinks(page)).toEqual([]);
+});
+
+test('a link in your message opens through the loader too', async ({ page, appHost }) => {
+  const tx = await openLinks(page, appHost);
+  const guide = tx.locator('.me .lnk');
+  await expect(guide).toHaveText('the guide');
+  await expect(tx.locator('.me')).toHaveText('YouRead the guide before the docs.');
+  await guide.click();
+  await expect.poll(() => hostLinks(page)).toEqual([GUIDE]);
+  expect(await frameURL(page)).toContain('/runner.html');
+});
+
+test('a link in a message shown in full through Show more opens through the loader too', async ({ page, appHost }) => {
+  const notes = 'https://acme.example/redirects';
+  const scenario = structuredClone(MOCK);
+  scenario.details['login-10'].text += `\n\nSee [the redirect notes](${notes}).`;
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const say = app(page).locator('.tx .say').last();
+  await say.locator('.morebtn').click();
+  const link = say.locator('.lnk', { hasText: 'the redirect notes' });
+  await expect(link).toBeVisible();
+  await link.click();
+  await expect.poll(() => hostLinks(page)).toEqual([notes]);
+  expect(await frameURL(page)).toContain('/runner.html');
 });
