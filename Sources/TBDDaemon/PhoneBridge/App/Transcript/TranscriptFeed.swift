@@ -585,9 +585,10 @@ actor TranscriptFeed {
         var patched: Set<Int> = []
         var resolved: [String] = []
         for line in lines {
-            var text = line
-            if let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
-               let json = object as? [String: Any] {
+            // Parsed once here, and handed to the transcript as it is.
+            var parsed = IncrementalTranscript.ParsedLine(
+                text: line, json: (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any])
+            if let json = parsed.json {
                 for (id, stats) in TranscriptParser.fileEditStats(fromLine: json) {
                     liveFileEdits.set(stats, for: id)
                 }
@@ -599,7 +600,7 @@ actor TranscriptFeed {
                 if !(json["uuid"] is String) {
                     let id = exact ? "at-\(lineOffset)" : "line-\(liveLineCount)"
                     if let stamped = Self.stamped(json, id: id) {
-                        text = stamped
+                        parsed = stamped
                     }
                 }
             }
@@ -607,7 +608,7 @@ actor TranscriptFeed {
                 liveLineCount += 1
             }
             let before = transcript.items.count
-            let change = transcript.ingest(lines: [text])
+            let change = transcript.ingest(parsed: [parsed])
             for index in before..<transcript.items.count {
                 lineOffsets.set(lineOffset, for: transcript.items[index].id)
             }
@@ -675,13 +676,15 @@ actor TranscriptFeed {
             sender: row.sender)
     }
 
-    /// `json` with `"uuid": id`, encoded again, or nil when it does not
-    /// encode.
-    private static func stamped(_ json: [String: Any], id: String) -> String? {
+    /// `json` with `"uuid": id`, as an object and encoded again, or nil when
+    /// it does not encode. The text is what the transcript keeps for a tool
+    /// call whose result may come later.
+    private static func stamped(_ json: [String: Any], id: String) -> IncrementalTranscript.ParsedLine? {
         var copy = json
         copy["uuid"] = id
-        guard let data = try? JSONSerialization.data(withJSONObject: copy) else { return nil }
-        return String(data: data, encoding: .utf8)
+        guard let data = try? JSONSerialization.data(withJSONObject: copy),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return IncrementalTranscript.ParsedLine(text: text, json: copy)
     }
 
     /// The subagent counts for the transcript at `path`, through the cache.
