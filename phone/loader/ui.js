@@ -449,14 +449,19 @@ export function renderLoading() {
 }
 
 /**
- * Connecting to a laptop, before its app has started.
+ * Connecting to a laptop, before its app has started. `setName` changes the laptop's name in
+ * place, for a handshake that reports a new one while the screen shows.
  * @param {{ laptopName: string }} model
- * @returns {HTMLElement}
+ * @returns {{ root: HTMLElement, setName: (laptopName: string) => void }}
  */
 export function renderConnecting({ laptopName }) {
-  return h('div', { class: 'center', 'data-state': 'connecting' },
-    h('span', { class: 'spin lg' }),
-    h('p', { role: 'status' }, `Connecting to ${laptopName}…`));
+  /** @param {string} name */
+  const text = (name) => `Connecting to ${name}…`;
+  const status = h('p', { role: 'status' }, text(laptopName));
+  return {
+    root: h('div', { class: 'center', 'data-state': 'connecting' }, h('span', { class: 'spin lg' }), status),
+    setName: (name) => status.replaceChildren(text(name)),
+  };
 }
 
 // --- header strip -----------------------------------------------------------------------

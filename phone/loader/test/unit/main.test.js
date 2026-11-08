@@ -576,6 +576,15 @@ test('a session that ends incompatible after message 2 records nothing, though t
   assert.deepEqual(page.idb.writes, []);
 });
 
+test('the connecting screen takes the name the handshake reports, as the strip does', async () => {
+  // The laptop was renamed since the last visit: stored as old-name, it is acme-mbp now. The
+  // cache read stalls, so the page stays on the connecting screen after message 2.
+  const { page } = await bootOnScriptedLaptop({ plan: ['stall'] });
+  await waitFor(() => page.stripButton()?.textContent.includes('acme-mbp') ?? false, 'the strip naming the laptop from the handshake');
+  assert.equal(page.screen(), 'connecting');
+  assert.equal(page.text(), 'Connecting to acme-mbp…');
+});
+
 /**
  * Boots on the scripted laptop and waits until the app frame runs its bundle and the page has
  * recorded the connection. The store answers the cache read (a miss), stalls the cache write

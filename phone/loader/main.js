@@ -185,6 +185,8 @@ class LoaderPage {
   #state = null;
   /** @type {string | null} The full screen showing for the current laptop, if any. */
   #shown = null;
+  /** @type {((laptopName: string) => void) | null} Renames the laptop on the connecting screen. */
+  #renameConnecting = null;
   /** @type {AppFrame | null} */
   #frame = null;
   /** @type {string | null} */
@@ -816,8 +818,10 @@ class LoaderPage {
   }
 
   /**
-   * The handshake named the laptop: the strip shows the name at once. Nothing is stored yet,
-   * since the session may still end `incompatible` or in a protocol error.
+   * The handshake named the laptop: the strip, and the connecting screen if it shows, take the
+   * name at once. (The connecting screen is not drawn again for each state that keeps it, so
+   * it is renamed in place.) Nothing is stored yet, since the session may still end
+   * `incompatible` or in a protocol error.
    * @param {string} laptopName
    */
   #onConnected(laptopName) {
@@ -825,6 +829,7 @@ class LoaderPage {
     if (current === null) return;
     this.#current = { ...current, laptopName };
     this.#renderStrip();
+    if (this.#shown === 'connecting') this.#renameConnecting?.(laptopName);
   }
 
   /**
@@ -905,9 +910,12 @@ class LoaderPage {
     const switchLaptop = { label: 'Switch laptop', onClick: () => this.#goLaptops() };
     const tryAgain = { label: 'Try again', kind: /** @type {const} */ ('pri'), onClick: () => this.#retry() };
     switch (screen) {
-      case 'connecting':
-        this.#mount(renderConnecting({ laptopName: name }));
+      case 'connecting': {
+        const { root, setName } = renderConnecting({ laptopName: name });
+        this.#mount(root);
+        this.#renameConnecting = setName;
         return;
+      }
       case 'offline': {
         const last = lastConnectedText(current.lastConnectedAt, this.#clock.now());
         this.#mount(renderMessage({
