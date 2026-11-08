@@ -360,6 +360,28 @@ struct TerminalEngineSwitchTests {
         #expect(fixture.identity != identity, "a switch with the flag on would not rebuild the panel")
     }
 
+    /// The command is disabled on a tmux panel, and the panel's own check
+    /// holds as well: a switch that reaches a tmux panel with the flag on
+    /// records nothing and touches no session. Without that check the switch
+    /// would record libghostty for a panel the factory keeps on SwiftTerm.
+    @Test("A switch that reaches a tmux panel with the flag on records no override and touches no session")
+    func switchDoesNothingForATmuxPanel() {
+        let fixture = SwitchFixture(label: "Tmux", flag: true, transport: .tmux)
+        defer { fixture.tearDown() }
+        let panel = fixture.makePanel()
+        #expect(panel.engine.kind == .swiftTerm, "a tmux panel was built on \(panel.engine.kind)")
+        #expect(fixture.state.terminalEngineSwitchers[fixture.terminalID] != nil,
+                "the panel registered no switch, so this would pass without the panel's check")
+        let identity = fixture.identity
+
+        fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
+
+        #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == nil,
+                "a switch recorded an engine for a tmux panel")
+        #expect(fixture.identity == identity, "a switch would rebuild a tmux panel")
+        #expect(fixture.daemon.events.isEmpty, "a switch on a tmux panel sent \(fixture.daemon.events)")
+    }
+
     @Test("The command is enabled for a focused holder panel only: not a tmux panel, a remote attach terminal, or a remote sign-in terminal")
     func switchCommandDisabledOnRemoteAndAuthTerminals() {
         withTestDefaults("TerminalEngineSwitch.Disabled") { defaults in
@@ -590,8 +612,8 @@ struct TerminalEngineSwitchTests {
 
 // MARK: - Fixture
 
-/// One holder terminal on an AppState with an isolated store, a stub daemon,
-/// and the panels made for it.
+/// One terminal, a holder one unless asked otherwise, on an AppState with an
+/// isolated store, a stub daemon, and the panels made for it.
 @MainActor
 private final class SwitchFixture {
     let suite: TestDefaultsSuite
@@ -606,14 +628,14 @@ private final class SwitchFixture {
     private var panels: [SwitchPanel] = []
 
     /// `flag` is the stored `useGhosttyTerminalEngine`, nil for unset.
-    init(label: String, flag: Bool?) {
+    init(label: String, flag: Bool?, transport: TerminalTransport = .holder) {
         let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineSwitch.\(label)")
         if let flag {
             suite.defaults.set(flag, forKey: AppState.useGhosttyTerminalEngineKey)
         }
         let worktreeID = UUID()
         let terminalID = UUID()
-        let row = TerminalEngineSwitchTests.row(terminalID, worktreeID: worktreeID, transport: .holder)
+        let row = TerminalEngineSwitchTests.row(terminalID, worktreeID: worktreeID, transport: transport)
         let ptys = [HolderTestPTY(), HolderTestPTY()]
         let state = AppState(userDefaults: suite.defaults)
         state.terminals[worktreeID] = [row]
