@@ -59,7 +59,10 @@ final class GlyphRasterizer {
     /// Font smoothing (stem darkening) on grayscale glyphs, off by default — see the file header.
     let thicken: Bool
 
-    private let colorSpace = CGColorSpaceCreateDeviceRGB()
+    // sRGB, the colour space the Metal layer is tagged with, so a colour glyph's pixels are converted
+    // once, by Core Animation, and not first into a device space as well. SwiftTerm's Metal glyph
+    // rasterizer draws into sRGB too.
+    private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
     // Ignored for an alpha-only context, but Swift's CGContext initializer requires a non-nil space.
     private let grayColorSpace = CGColorSpaceCreateDeviceGray()
 
