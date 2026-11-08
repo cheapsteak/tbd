@@ -77,6 +77,42 @@ test('a layout placement whose row has not arrived is passed over', () => {
   assert.equal(resolvePendingOpen({ worktreeID: 'W9', toast: null }, d), null);
 });
 
+test('a row the layout does not place lists no session', () => {
+  // The daemon drops trailing groups from a layout too large for a frame, but still sends
+  // their rows (`PhoneSnapshotBuilder.build`). Such a row shows nowhere in the list.
+  const placedW1: PhoneGroupLayout[] = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }] }];
+  const d = list([row('W1', [OTHER]), row('W2', [R2, R]), row(WT, [R2])], placedW1);
+  assert.equal(findSession(d, R), null);
+  assert.equal(findSession(d, R2), null);
+  // A placed row is found as before, in whichever group places it.
+  assert.equal(findSession(d, OTHER)?.row, d.rows.W1);
+  const twoGroups: PhoneGroupLayout[] = [...placedW1, { id: 'scratch', kind: 'scratch', name: 'Scratch', rows: [{ id: 'W2', depth: 1 }] }];
+  const both = list([row('W1', [OTHER]), row('W2', [R2, R])], twoGroups);
+  assert.equal(findSession(both, R)?.session, both.rows.W2!.sessions[1]);
+});
+
+test('a route on a session in a row the layout does not place goes back to the list once it is complete', () => {
+  const route: Route = { screen: 'session', ref: R };
+  const placedW1: PhoneGroupLayout[] = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }] }];
+  assert.equal(resolveRoute(route, list([row('W1', [OTHER]), row('W2', [R])], placedW1)), SESSIONS_ROUTE);
+  // While a placed row has not arrived, the route stands, as for any partial list.
+  const waiting: PhoneGroupLayout[] = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W9', depth: 0 }] }];
+  assert.equal(resolveRoute(route, list([row('W1', [OTHER]), row('W2', [R])], waiting)), route);
+});
+
+test('a pending open never opens a session in a row the layout does not place', () => {
+  const placedW1: PhoneGroupLayout[] = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }] }];
+  const d = list([row('W1', [OTHER]), row(WT, [R2, R])], placedW1);
+  assert.equal(resolvePendingOpen({ ref: R }, d), null);
+  assert.equal(resolvePendingOpen({ worktreeID: WT, toast: null }, d), null);
+  // Once the layout places the row, both open.
+  const placed = applySessionsChanged(d, {
+    rows: [], removedRowIDs: [], layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: WT, depth: 0 }] }],
+  });
+  assert.deepEqual(resolvePendingOpen({ ref: R }, placed), { screen: 'session', ref: R });
+  assert.deepEqual(resolvePendingOpen({ worktreeID: WT, toast: null }, placed), { screen: 'session', ref: R2 });
+});
+
 test('a session route stands while a row the layout places has not arrived', () => {
   const layout: PhoneGroupLayout[] = [{
     id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: 'W2', depth: 0 }, { id: 'W3', depth: 0 }],
@@ -104,8 +140,9 @@ test('a pending open becomes the route once its session appears', () => {
 test('a pending worktree open waits for the row with that ID and opens its first session', () => {
   const p = { worktreeID: WT, toast: 'Created {name}' };
   assert.equal(resolvePendingOpen(p, without), null);
-  // The row can arrive before its first session.
-  const empty = applySessionsChanged(without, { rows: [row(WT, [])], removedRowIDs: [] });
+  // The row can arrive before its first session. The daemon sends a layout with every row it adds.
+  const layout: PhoneGroupLayout[] = [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }, { id: WT, depth: 0 }] }];
+  const empty = applySessionsChanged(without, { rows: [row(WT, [])], removedRowIDs: [], layout });
   assert.equal(resolvePendingOpen(p, empty), null);
   const ready = applySessionsChanged(empty, { rows: [row(WT, [R2, R])], removedRowIDs: [] });
   assert.deepEqual(resolvePendingOpen(p, ready), { screen: 'session', ref: R2 });

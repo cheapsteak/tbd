@@ -332,7 +332,8 @@ test('a subscribe the client refuses before posting still resumes the transcript
 
 /**
  * A `sessions.changed`. With `placed`, it carries a layout whose one group places those rows,
- * as the daemon's does whenever it removes a row.
+ * as the daemon's does whenever it adds or removes a row. A row the layout does not place shows
+ * nowhere, so nothing opens it.
  */
 function changed(rows: PhoneRow[], removedRowIDs: string[] = [], placed?: string[]): AppEvent {
   const data: SessionsChangedData = { rows, removedRowIDs };
@@ -353,7 +354,7 @@ test('a pending open that an event resolves opens its transcript and marks its r
   const h = await subscribed([row('W2', [OTHER])]);
   h.actions.openPending({ ref: R });
   assert.deepEqual(h.calls, []);
-  h.actions.onEvent(changed([row('W3', [R])]));
+  h.actions.onEvent(changed([row('W3', [R])], [], ['W2', 'W3']));
   assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R });
   assert.equal(h.state().ui.lastRowID, 'W3');
   assert.equal(h.state().ui.pendingOpen, null);
@@ -363,7 +364,7 @@ test('a pending open that an event resolves opens its transcript and marks its r
 test('a pending worktree open toasts once its row lists a session', async () => {
   const h = await subscribed([row('W2', [OTHER])]);
   h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' });
-  h.actions.onEvent(changed([row(WT, [R], 'fix-login')]));
+  h.actions.onEvent(changed([row(WT, [R], 'fix-login')], [], ['W2', WT]));
   assert.deepEqual(h.state().ui.toast, { id: 1, text: 'Created fix-login' });
   assert.deepEqual(h.calls, [['openTranscript', R]]);
 });
@@ -405,7 +406,7 @@ test('back clears a pending open, so a worktree the user moved away from never o
   h.actions.back();
   assert.equal(h.state().ui.pendingOpen, null);
   h.calls.length = 0;
-  h.actions.onEvent(changed([row(WT, [R2], 'fix-login')]));
+  h.actions.onEvent(changed([row(WT, [R2], 'fix-login')], [], ['W1', WT]));
   assert.equal(h.state().ui.route, SESSIONS_ROUTE);
   assert.equal(h.state().ui.toast, null);
   assert.deepEqual(h.calls, []);
@@ -424,7 +425,7 @@ test('a navigation between the mark and the reply drops the open', async () => {
   h.actions.openPending({ worktreeID: WT, toast: 'Created {name}' }, createMark);
   assert.equal(h.state().ui.pendingOpen, null);
   h.calls.length = 0;
-  h.actions.onEvent(changed([row('W1', [R, R2]), row(WT, [R2], 'fix-login')]));
+  h.actions.onEvent(changed([row('W1', [R, R2]), row(WT, [R2], 'fix-login')], [], ['W1', 'W2', WT]));
   assert.equal(h.state().ui.route, SESSIONS_ROUTE);
   assert.equal(h.state().ui.toast, null);
   assert.deepEqual(h.calls, []);
@@ -491,7 +492,7 @@ test("a pending open that opens is not the user's navigation: the user's own sta
   h.actions.openSheet({ name: 'new', repoID: 'R1', repoName: 'acme' });
   h.actions.openPending({ worktreeID: WT, toast: null });
   const before = h.state().ui;
-  h.actions.onEvent(changed([row(WT, [R2])]));
+  h.actions.onEvent(changed([row(WT, [R2])], [], ['W1', WT]));
   const ui = h.state().ui;
   assert.deepEqual(ui.route, { screen: 'session', ref: R2 });
   assert.equal(ui.pendingOpen, null);
@@ -558,7 +559,7 @@ test('back on the sessions list changes nothing and closes no transcript', async
   assert.equal(h.state(), before);
   assert.deepEqual(h.calls, []);
   // The user stayed put, so the worktree still opens and toasts.
-  h.actions.onEvent(changed([row(WT, [R2], 'fix-login')]));
+  h.actions.onEvent(changed([row(WT, [R2], 'fix-login')], [], ['W1', WT]));
   assert.deepEqual(h.state().ui.route, { screen: 'session', ref: R2 });
   assert.deepEqual(h.state().ui.toast, { id: 1, text: 'Created fix-login' });
 });

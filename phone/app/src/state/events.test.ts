@@ -43,7 +43,8 @@ function stateWith(rows: PhoneRow[], ui: Partial<UIState> = {}): AppState {
 
 /**
  * A `sessions.changed`. With `placed`, it carries a layout whose one group places those rows,
- * as the daemon's does whenever it removes a row.
+ * as the daemon's does whenever it adds or removes a row. A row the layout does not place shows
+ * nowhere, so nothing opens it.
  */
 function changed(rows: PhoneRow[], removedRowIDs: string[] = [], placed?: string[]): AppEvent {
   const data: SessionsChangedData = { rows, removedRowIDs };
@@ -89,11 +90,11 @@ test('New stays open when the route goes back to the list, and closes when it go
   assert.equal(s1.ui.route, SESSIONS_ROUTE);
   assert.equal(s1.ui.sheet, sheet);
   // The worktree New created lists its session: it opens, and New closes.
-  const s2 = applyEvent({ ...s1, ui: { ...s1.ui, pendingOpen: { worktreeID: WT, toast: 'Created {name}' } } }, changed([row(WT, [R2], 'fix-login')]));
+  const s2 = applyEvent({ ...s1, ui: { ...s1.ui, pendingOpen: { worktreeID: WT, toast: 'Created {name}' } } }, changed([row(WT, [R2], 'fix-login')], [], ['W1', WT]));
   assert.deepEqual(s2.ui.route, { screen: 'session', ref: R2 });
   assert.equal(s2.ui.sheet, null);
   // So does a { ref } open, and one the list shows already.
-  const s3 = applyEvent(stateWith([row('W1', [OTHER])], { sheet, pendingOpen: { ref: R } }), changed([row('W3', [R])]));
+  const s3 = applyEvent(stateWith([row('W1', [OTHER])], { sheet, pendingOpen: { ref: R } }), changed([row('W3', [R])], [], ['W1', 'W3']));
   assert.deepEqual(s3.ui.route, { screen: 'session', ref: R });
   assert.equal(s3.ui.sheet, null);
   const s4 = withPendingOpen(stateWith([row('W1', [R])], { sheet }), { ref: R });
@@ -106,7 +107,7 @@ test('a pending open becomes the route once its session appears', () => {
   const s1 = applyEvent(s0, changed([row('W1', [OTHER])]));
   assert.deepEqual(s1.ui.pendingOpen, { ref: R });
   assert.equal(s1.ui.route, SESSIONS_ROUTE);
-  const s2 = applyEvent(s1, changed([row('W3', [R])]));
+  const s2 = applyEvent(s1, changed([row('W3', [R])], [], ['W1', 'W3']));
   assert.deepEqual(s2.ui.route, { screen: 'session', ref: R });
   assert.equal(s2.ui.pendingOpen, null);
   assert.equal(s2.ui.lastRowID, 'W3');
@@ -117,7 +118,7 @@ test('a pending open becomes the route once its session appears', () => {
 
 test('a pending worktree open opens its first session and toasts its name', () => {
   const s0 = stateWith([row('W1', [OTHER])], { pendingOpen: { worktreeID: WT, toast: 'Created {name}' } });
-  const s1 = applyEvent(s0, changed([row(WT, [], 'fix-login')]));
+  const s1 = applyEvent(s0, changed([row(WT, [], 'fix-login')], [], ['W1', WT]));
   assert.notEqual(s1.ui.pendingOpen, null, 'the row has no session yet');
   assert.equal(s1.ui.toast, null);
   const s2 = applyEvent(s1, changed([row(WT, [R2, R], 'fix-login')]));
@@ -129,13 +130,13 @@ test('a pending worktree open opens its first session and toasts its name', () =
 
 test('the toast template takes the name as it is, and follows the toast showing', () => {
   const s0 = stateWith([], { pendingOpen: { worktreeID: WT, toast: '{name}: Created {name}' }, toast: { id: 7, text: 'older' } });
-  const s1 = applyEvent(s0, changed([row(WT, [R], "fix-$&-$1-$$-$'")]));
+  const s1 = applyEvent(s0, changed([row(WT, [R], "fix-$&-$1-$$-$'")], [], [WT]));
   assert.deepEqual(s1.ui.toast, { id: 8, text: "fix-$&-$1-$$-$': Created fix-$&-$1-$$-$'" });
 });
 
 test('a pending worktree open with no toast template shows none', () => {
   const s0 = stateWith([], { pendingOpen: { worktreeID: WT, toast: null } });
-  const s1 = applyEvent(s0, changed([row(WT, [R])]));
+  const s1 = applyEvent(s0, changed([row(WT, [R])], [], [WT]));
   assert.deepEqual(s1.ui.route, { screen: 'session', ref: R });
   assert.equal(s1.ui.toast, null);
 });
@@ -150,10 +151,14 @@ test('a pending open for the session already shown keeps the route and clears th
 
 test('a snapshot resolves the route and a pending open too', () => {
   const s0 = stateWith([row('W2', [R])], { route: { screen: 'session', ref: R }, pendingOpen: { ref: R2 } });
-  const s1 = applySessions(s0, applySnapshot({ stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: false, rows: [row('W1', [OTHER])] }));
+  const snapshot = (r: PhoneRow) => applySnapshot({
+    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: false, rows: [r],
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: r.id, depth: 0 }] }],
+  });
+  const s1 = applySessions(s0, snapshot(row('W1', [OTHER])));
   assert.equal(s1.ui.route, SESSIONS_ROUTE);
   assert.deepEqual(s1.ui.pendingOpen, { ref: R2 });
-  const s2 = applySessions(s1, applySnapshot({ stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: false, rows: [row('W4', [R2])] }));
+  const s2 = applySessions(s1, snapshot(row('W4', [R2])));
   assert.deepEqual(s2.ui.route, { screen: 'session', ref: R2 });
   assert.equal(s2.ui.lastRowID, 'W4');
 });
