@@ -234,6 +234,34 @@ struct HandoverCorpusTests {
         }
     }
 
+    /// A program that saved its cursor on the primary screen, entered the alternate one with
+    /// `?47h` and left it again gets the saved cursor back from DECRC. `?47h` saves nothing, so
+    /// the receiver's DECRC reads what the handback's `?1049h` saved: the primary's cursor, which
+    /// the clone's `?1049l` put back from DECSC. A receiver switched with `?47h` would restore
+    /// its defaults instead, the home cell with autowrap off.
+    @Test func handbackKeepsThePrimarysSavedCursorBehindALegacyAlternateScreen() async throws {
+        try await onHandoverThread {
+            let e = "\u{1b}"
+            let bytes = "one\r\ntwo\r\n\(e)[3;10H\(e)7\(e)[6;20Hprimary\(e)[?47h\(e)[2J\(e)[12;30Halt"
+            let state = HandoverState(
+                name: "decsc-then-alt-47", bytes: Array(bytes.utf8),
+                cols: HandoverCorpus.scenarioCols, rows: HandoverCorpus.scenarioRows)
+            let source = try state.ghostty()
+            let receiver = try Self.handedBack(source, state: state)
+            let direct = state.swiftTerm()
+            let leaveThenRestore = Array("\(e)[?47l\(e)8".utf8)
+            receiver.feed(leaveThenRestore)
+            direct.feed(leaveThenRestore)
+            #expect(
+                direct.locked { [$0.buffer.x, $0.buffer.y] } == [9, 2],
+                "SwiftTerm fed the program's bytes must put back the cursor DECSC saved")
+            let tally = handoverCompare(direct.handoverSnap(), receiver.handoverSnap()).excluding(handoverInertCategories)
+            #expect(
+                tally.isEmpty,
+                "handed back on ?47h, then ?47l and DECRC: the receiver differs from SwiftTerm fed the program's bytes: \(tally.summary)")
+        }
+    }
+
     struct MouseCase: Sendable, CustomTestStringConvertible {
         let state: String
         /// The one tracking mode the handback may set, or 0 for none.
