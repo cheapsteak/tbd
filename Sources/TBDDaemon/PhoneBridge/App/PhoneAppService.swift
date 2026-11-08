@@ -601,8 +601,9 @@ actor PhoneAppService: PhoneAppHandling {
                 try await self.transcriptClose(params, context)
             }
         case .transcriptDetail:
-            // Not served yet.
-            return nil
+            return Self.typed(TranscriptDetailParams.self) { [self] params, context in
+                try await self.transcriptDetail(params, context)
+            }
         }
     }
 

@@ -177,20 +177,18 @@ struct PhoneAppServiceTests {
         #expect(h.recorder.records == [PhoneActionRecord(deviceName: "Acme Phone", action: "transcript.close", target: "transcript")])
     }
 
-    /// A known method no task serves yet replies `unavailable`, and is not
-    /// recorded: nothing happened.
-    @Test func aMethodWithNoHandlerRepliesUnavailable() async throws {
+    /// Every method of the protocol has a handler, so none falls through to
+    /// the `unavailable` reply a method with no handler would get.
+    @Test func everyMethodHasAHandler() async throws {
         let h = try await PhoneServiceHarness.make()
-        let outbox = await h.connect()
-
-        let (reply, _) = try await h.request(
-            .transcriptDetail,
-            params: TranscriptDetailParams(session: .local(terminalID: terminalID), itemID: "x", part: .text, chunk: 0),
-            on: outbox)
-
-        #expect(reply.error?.code == .unavailable)
-        #expect(h.actions.calls.isEmpty)
-        #expect(h.recorder.records.isEmpty)
+        var unserved: [String] = []
+        for method in PhoneAppMethod.allCases {
+            let handler = await h.service.registeredHandler(for: method)
+            if handler == nil {
+                unserved.append(method.rawValue)
+            }
+        }
+        #expect(unserved.isEmpty, "methods with no handler: \(unserved)")
     }
 
     /// The window between a revoke's row delete and its `phoneRevoked`: a

@@ -307,6 +307,103 @@ extension PhoneAppService {
         return slot.feed
     }
 
+    // MARK: - transcript.detail
+
+    static let detailItemIDReason = "That item ID is not valid."
+    static let detailChunkReason = "That part of the detail does not exist."
+    static let detailNotFoundReason = "That detail is not in the transcript."
+
+    /// One part of one item of the open transcript, in chunks that each fit
+    /// one frame (spec section 7, "Large details"): a tool call's input or
+    /// result, the whole of a message whose preview was cut, or a subagent's
+    /// items.
+    ///
+    /// - **Inputs are bounded.** An item ID that is empty or over
+    ///   `detailItemIDMaxBytes` is `bad_request`, since the reply echoes it,
+    ///   and so is a `chunk` below 0 or at or past `chunkCount`. The session
+    ///   must be the open feed's, or the reply is `not_open`.
+    /// - **Text parts** come from `TranscriptDetailReader.text`, starting at
+    ///   the item's line, and are split by `TranscriptDetailChunker.chunk`.
+    ///   Over `detailLimitBytes`, only the first chunk is served and
+    ///   `tooLarge` is set.
+    /// - **`subagent`** reads the transcript of the agent the feed recorded
+    ///   for the row (`TranscriptDetailReader.subagent`) and serves its items
+    ///   in runs of whole items.
+    /// - **Later chunks come from the feed's cache** of the last item and part
+    ///   read in the current generation, so they read no file.
+    /// - A detail the transcript does not hold is `not_found`.
+    ///
+    /// A pure read: its replies are not remembered and it records nothing.
+    nonisolated func transcriptDetail(
+        _ params: TranscriptDetailParams, _ context: DeviceContext
+    ) async throws -> TranscriptDetailResult {
+        let itemID = params.itemID
+        guard !itemID.isEmpty, itemID.utf8.count <= PhoneAppConstants.detailItemIDMaxBytes else {
+            throw PhoneAppError(code: .badRequest, message: Self.detailItemIDReason)
+        }
+        guard params.chunk >= 0 else {
+            throw PhoneAppError(code: .badRequest, message: Self.detailChunkReason)
+        }
+        guard let feed = await openTranscriptFeed(for: params.session, deviceID: context.peer.deviceID) else {
+            throw PhoneAppError(code: .notOpen, message: Self.transcriptNotOpenReason)
+        }
+        switch params.part {
+        case .subagent:
+            let detail = try await subagentDetail(itemID: itemID, feed: feed)
+            guard params.chunk < detail.chunks.count else {
+                throw PhoneAppError(code: .badRequest, message: Self.detailChunkReason)
+            }
+            return TranscriptDetailResult(
+                itemID: itemID, part: params.part, chunk: params.chunk, chunkCount: detail.chunks.count,
+                totalBytes: detail.totalBytes, tooLarge: detail.tooLarge, text: nil, items: detail.chunks[params.chunk])
+        case .input, .result, .text:
+            let detail = try await textDetail(itemID: itemID, part: params.part, feed: feed)
+            guard params.chunk < detail.ranges.count else {
+                throw PhoneAppError(code: .badRequest, message: Self.detailChunkReason)
+            }
+            return TranscriptDetailResult(
+                itemID: itemID, part: params.part, chunk: params.chunk, chunkCount: detail.ranges.count,
+                totalBytes: detail.totalBytes, tooLarge: detail.tooLarge, text: detail.chunkText(params.chunk),
+                items: nil)
+        }
+    }
+
+    /// `itemID`'s text `part`, chunked, from the feed's cache or else read
+    /// and cached.
+    private nonisolated func textDetail(
+        itemID: String, part: TranscriptDetailPart, feed: TranscriptFeed
+    ) async throws -> DetailChunks {
+        if let cached = await feed.cachedDetail(itemID: itemID, part: part, as: DetailChunks.self) {
+            return cached
+        }
+        guard let place = await feed.detailContext(itemID: itemID),
+              let text = TranscriptDetailReader.text(
+                itemID: itemID, part: part, filePath: place.filePath, lineOffset: place.lineOffset) else {
+            throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
+        }
+        try Task.checkCancellation()
+        let chunks = TranscriptDetailChunker.chunk(text)
+        await feed.cacheDetail(chunks, itemID: itemID, part: part, generation: place.generation)
+        return chunks
+    }
+
+    /// The items of the subagent behind `itemID`'s row, chunked, from the
+    /// feed's cache or else read and cached. The agent ID is the one the
+    /// transcript recorded with the call's result, as the feed kept it.
+    private nonisolated func subagentDetail(itemID: String, feed: TranscriptFeed) async throws -> SubagentDetailChunks {
+        if let cached = await feed.cachedDetail(itemID: itemID, part: .subagent, as: SubagentDetailChunks.self) {
+            return cached
+        }
+        guard let place = await feed.detailContext(itemID: itemID), let agentID = place.agentID,
+              let detail = TranscriptDetailReader.subagent(
+                agentID: agentID, transcriptPath: place.filePath, showDetails: feed.showDetails) else {
+            throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
+        }
+        try Task.checkCancellation()
+        await feed.cacheDetail(detail, itemID: itemID, part: .subagent, generation: place.generation)
+        return detail
+    }
+
     // MARK: - transcript.close
 
     nonisolated func transcriptClose(_ params: PhoneEmpty, _ context: DeviceContext) async throws -> PhoneEmpty {

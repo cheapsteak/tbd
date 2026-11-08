@@ -65,6 +65,9 @@ enum PhoneAppConstants {
     static let promptOptionCap = 1_024
     /// The most bytes read back from an offset to find a page's start.
     static let anchorScanLimit = 8_388_608
+    /// The longest item ID `transcript.detail` accepts, in UTF-8 bytes. Its
+    /// reply echoes the ID, so the ID's size counts against the frame.
+    static let detailItemIDMaxBytes = 256
     /// Bounds a subagent row's item count, two ways: the most bytes of a
     /// subagent's transcript file that `TranscriptPager.subagentItemCount`
     /// reads, so a larger file has no count, and the largest count a row
@@ -104,15 +107,20 @@ enum PhoneFrameBudget {
     static func escapedLength(_ s: Substring.UnicodeScalarView) -> Int {
         var length = 0
         for scalar in s {
-            switch scalar.value {
-            case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D:
-                length += 2
-            case 0x00..<0x20:
-                length += 6
-            default:
-                length += UTF8.width(scalar)
-            }
+            length += escapedLength(scalar)
         }
         return length
+    }
+
+    /// The length one scalar takes in a JSON string body, by the rules above.
+    static func escapedLength(_ scalar: Unicode.Scalar) -> Int {
+        switch scalar.value {
+        case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D:
+            return 2
+        case 0x00..<0x20:
+            return 6
+        default:
+            return UTF8.width(scalar)
+        }
     }
 }

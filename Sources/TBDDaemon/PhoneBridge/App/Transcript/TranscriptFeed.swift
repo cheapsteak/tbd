@@ -87,6 +87,8 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 ///   update when their result arrives;
 /// - **live facts** – `liveFactLimit` file-edit stats and subagent IDs from
 ///   live lines;
+/// - **page subagent IDs** – `liveFactLimit` subagent IDs from the pages read,
+///   so `transcript.detail` can find a page row's subagent;
 /// - **subagent counts** – `SubagentCountCache.limit` counts, each read once
 ///   per agent and read again once the agent's result arrives.
 ///
@@ -125,6 +127,7 @@ actor TranscriptFeed {
     private var waitingCalls = TranscriptFeedIndex<PhoneItem>(limit: TranscriptFeed.waitingCallLimit)
     private var liveFileEdits = TranscriptFeedIndex<FileEditStats>(limit: TranscriptFeed.liveFactLimit)
     private var liveAgentIDs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
+    private var pageAgentIDs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
     private let subagentCounts = SubagentCountCache()
     private var lastDetail: CachedDetail?
 
@@ -190,6 +193,7 @@ actor TranscriptFeed {
     /// nothing, and a read in progress emits nothing more.
     func close() {
         closed = true
+        lastDetail = nil
         wakeups?.finish()
         wakeups = nil
         worker?.cancel()
@@ -323,6 +327,7 @@ actor TranscriptFeed {
         waitingCalls.removeAll()
         liveFileEdits.removeAll()
         liveAgentIDs.removeAll()
+        pageAgentIDs.removeAll()
         subagentCounts.removeAll()
         lastDetail = nil
         guard let path,
@@ -338,6 +343,9 @@ actor TranscriptFeed {
         }
         for (id, item) in build.unresolvedCalls {
             waitingCalls.set(item, for: id)
+        }
+        for (id, agentID) in build.subagentAgentIDs {
+            pageAgentIDs.set(agentID, for: id)
         }
         cursor = TranscriptAppendCursor(path: path, offset: build.endOffset) { path, offset in
             TranscriptAppendCursor.diskTailWindow(path: path, endingAt: offset)
@@ -482,15 +490,20 @@ actor TranscriptFeed {
         for (id, item) in build.unresolvedCalls {
             waitingCalls.set(item, for: id)
         }
+        for (id, agentID) in build.subagentAgentIDs {
+            pageAgentIDs.set(agentID, for: id)
+        }
         return build.page
     }
 
-    /// Where to look up `itemID`'s detail: the transcript file, and the offset
-    /// of the item's line when the feed kept it (a lookup then starts there),
-    /// or nil when the feed has no file.
-    func detailContext(itemID: String) -> (filePath: String, lineOffset: UInt64?)? {
+    /// Where to look up `itemID`'s detail, or nil when the feed has no file:
+    /// the transcript file, the offset of the item's line and its subagent's
+    /// ID when the feed kept them, and the generation they belong to.
+    func detailContext(itemID: String) -> TranscriptDetailContext? {
         guard let path else { return nil }
-        return (path, lineOffsets[itemID])
+        return TranscriptDetailContext(
+            filePath: path, lineOffset: lineOffsets[itemID],
+            agentID: liveAgentIDs[itemID] ?? pageAgentIDs[itemID], generation: generation)
     }
 
     /// The detail last cached for `itemID`'s `part` in this generation, as
@@ -501,9 +514,11 @@ actor TranscriptFeed {
         return lastDetail.value as? Value
     }
 
-    /// Keeps `value` as the detail of `itemID`'s `part` in this generation, in
-    /// place of the one kept before.
-    func cacheDetail<Value: Sendable>(_ value: Value, itemID: String, part: TranscriptDetailPart) {
+    /// Keeps `value`, read in `generation`, as the detail of `itemID`'s
+    /// `part`, in place of the one kept before. Keeps nothing once the feed
+    /// is closed or has moved to another generation.
+    func cacheDetail<Value: Sendable>(_ value: Value, itemID: String, part: TranscriptDetailPart, generation: Int) {
+        guard !closed, generation == self.generation else { return }
         lastDetail = CachedDetail(generation: generation, itemID: itemID, part: part, value: value)
     }
 

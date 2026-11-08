@@ -23,6 +23,10 @@ struct PageBuild: Sendable {
     /// Every tool result in the bytes the window read, for joins into older
     /// pages.
     let results: [String: ToolResult]
+    /// `tool_use` id → subagent `agentId`, for every subagent call whose
+    /// result is in the bytes the window read, so `transcript.detail` can
+    /// find a subagent row's transcript.
+    let subagentAgentIDs: [String: String]
 }
 
 /// Builds transcript pages (spec section 7, "Pages"): the first page from the
@@ -278,7 +282,8 @@ enum TranscriptPager {
             endOffset: window.endOffset,
             lineOffsets: lineOffsets,
             unresolvedCalls: unresolvedCalls,
-            results: window.toolResultsByID)
+            results: window.toolResultsByID,
+            subagentAgentIDs: window.subagentAgentIDs)
     }
 
     // MARK: - Reading
