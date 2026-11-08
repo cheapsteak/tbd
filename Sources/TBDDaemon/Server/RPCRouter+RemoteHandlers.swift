@@ -995,7 +995,8 @@ extension RPCRouter {
 
     /// Why `remote.sendMessage` declines a session in its mirrored state, or
     /// nil when it may send. Separate from the handler so the wording lives in
-    /// one place the tests can pin.
+    /// one place the tests can pin: `RemoteSendMessageRefusal`, whose words
+    /// the phone app service lets through to a phone.
     ///
     /// A session with no mirror row is not refused: the provider is the source
     /// of truth, and a session it has not reported yet is not known to be in
@@ -1019,16 +1020,14 @@ extension RPCRouter {
         return nil
     }
 
-    static let sendMessageExitedRefusal = "session has exited; a message cannot be sent to it"
+    static let sendMessageExitedRefusal = RemoteSendMessageRefusal.exited
 
-    static let sendMessageWaitingInputRefusal =
-        "the agent is waiting on a prompt; answer it in the terminal"
+    static let sendMessageWaitingInputRefusal = RemoteSendMessageRefusal.waitingInput
 
     /// The `waiting_input` refusal when the prompt can be answered from its
     /// transcript card (`remote.answer`): the session mirrors a pending
     /// prompt, and the provider can answer it.
-    static let sendMessageWaitingInputAnswerOnCardRefusal =
-        "the agent is waiting on a prompt; answer it on the card in the transcript"
+    static let sendMessageWaitingInputAnswerOnCardRefusal = RemoteSendMessageRefusal.waitingInputAnswerOnCard
 
     /// Whether a prompt on `provider`'s sessions can be answered from the
     /// transcript: the flag is on and the provider declares `answer`.

@@ -12,6 +12,8 @@ import TestSupport
 @Suite("Phone message.send and session.setModel", .fastPassBounded)
 struct PhoneSendTests {
     private static let remoteSession = PhoneSessionRef.remote(provider: "acme-cloud", sessionID: "rs-1")
+    /// A provider's error that quotes a URL with an access token in it.
+    private static let providerSecret = "POST https://acme-control.example/v1?access_token=sk-test"
 
     /// The fields of a `TerminalSendParams`, which is not `Equatable`, so a
     /// test can compare whole sends.
@@ -426,15 +428,28 @@ struct PhoneSendTests {
         #expect(try Self.outcome(bytes) == "unknown")
     }
 
-    @Test func aRefusedRemoteSendReturnsTheDaemonsReason() async throws {
+    /// A remote send's refusal reaches the phone only in words TBD wrote:
+    /// the phone message rule's and a session state's pass as they are, and
+    /// a provider's own words, which can quote a token, become
+    /// `remoteRefusedReason`.
+    @Test func aRefusedRemoteSendKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
-        h.actions.respond(to: .remoteSendMessage, with: RPCResponse(error: "The session is waiting on a prompt."))
         let outbox = await h.connect()
+        let cases: [(daemon: String, phone: String)] = [
+            (Self.providerSecret, PhoneAppService.remoteRefusedReason),
+            (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
+            (RemoteSendMessageRefusal.waitingInput, RemoteSendMessageRefusal.waitingInput),
+        ]
 
-        let (reply, _) = try await h.request(.messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
-
-        #expect(reply.error == PhoneAppError(code: .refused, message: "The session is waiting on a prompt."))
+        for (daemon, phone) in cases {
+            h.actions.respond(to: .remoteSendMessage, with: RPCResponse(error: daemon))
+            let (reply, bytes) = try await h.request(
+                .messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
+            let text = String(decoding: bytes, as: UTF8.self)
+            #expect(!text.contains("access_token") && !text.contains("sk-test"), "the daemon said \(daemon)")
+        }
     }
 
     @Test func aRemoteSessionOfAnUnregisteredProviderIsNotFound() async throws {

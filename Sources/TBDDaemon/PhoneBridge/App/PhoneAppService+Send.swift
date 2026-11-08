@@ -34,6 +34,20 @@ extension PhoneAppService {
     static let noSuchSessionReason = "That session is no longer on this laptop."
     static let noSuchProviderReason = "That remote session's provider is not registered on this laptop."
     static let refusedFallbackReason = "The laptop refused the message."
+    /// What a phone hears when a remote create or message is refused in
+    /// words TBD did not write (`remoteRefusal(_:method:)`).
+    static let remoteRefusedReason = "The remote provider refused this. Check the laptop."
+    /// The refusals TBD itself writes on the remote create and message paths,
+    /// which reach a phone as they are: the phone message rule's
+    /// (`PhoneMessageText`), and a remote session's state
+    /// (`RemoteSendMessageRefusal`).
+    static let tbdRemoteRefusals: Set<String> = [
+        PhoneMessageText.emptyRefusal,
+        PhoneMessageText.controlCharacterRefusal,
+        RemoteSendMessageRefusal.exited,
+        RemoteSendMessageRefusal.waitingInput,
+        RemoteSendMessageRefusal.waitingInputAnswerOnCard,
+    ]
     /// The most UTF-8 bytes of a refusal the laptop's text is cut to, so an
     /// error reply always fits one frame however long the daemon's reason is.
     static let refusalLimit = PhoneAppConstants.promptTextCap
@@ -121,7 +135,8 @@ extension PhoneAppService {
     /// sessions list shows it (`PhoneSessionStatus.remoteCapabilities`), or
     /// it is `unsupported` with the same reason; a provider that is not
     /// registered is `not_found`. Then `phoneRemoteSendMessage`: the
-    /// provider's `sent` is `sent` and its `unknown` is `unknown`.
+    /// provider's `sent` is `sent` and its `unknown` is `unknown`. A refusal
+    /// reaches the phone only in words TBD wrote (`remoteRefusal(_:method:)`).
     ///
     /// A response that does not decode as its method's result is `internal`,
     /// never a success. A revoke noticed before the send stops it.
@@ -186,7 +201,7 @@ extension PhoneAppService {
         try Task.checkCancellation()
         let response = try await actions.phoneRemoteSendMessage(
             RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text), deviceID: deviceID)
-        switch try Self.succeeded(RemoteSendMessageResult.self, from: response, method: "remote.sendMessage").outcome {
+        switch try Self.remoteSucceeded(RemoteSendMessageResult.self, from: response, method: "remote.sendMessage").outcome {
         case .sent:
             return ActionOutcomeResult(outcome: "sent")
         case .unknown:
@@ -231,6 +246,32 @@ extension PhoneAppService {
     static func succeeded<R: Decodable>(_ type: R.Type, from response: RPCResponse, method: String) throws -> R {
         guard response.success else { throw Self.refusal(response.error) }
         return try Self.decoded(type, from: response, method: method)
+    }
+
+    /// `response`'s result as `R`, as `succeeded(_:from:method:)` reads it,
+    /// for a remote create or message, whose refusal can be a provider's own
+    /// words: a refusal is `remoteRefusal(_:method:)`.
+    static func remoteSucceeded<R: Decodable>(_ type: R.Type, from response: RPCResponse, method: String) throws -> R {
+        guard response.success else { throw Self.remoteRefusal(response.error, method: method) }
+        return try Self.decoded(type, from: response, method: method)
+    }
+
+    /// A `refused` error for a remote create or message that the daemon
+    /// refused with `reason`.
+    ///
+    /// **Only words TBD wrote reach the phone.** A reason in
+    /// `tbdRemoteRefusals` is sent as `refusal(_:)` sends it. Anything else
+    /// can be a provider's own error message, or its raw stderr, which can
+    /// quote a URL with an access token in it, and cutting it short does not
+    /// make it safe; the phone gets `remoteRefusedReason` in its place, and
+    /// the reason goes to the log as private data.
+    static func remoteRefusal(_ reason: String?, method: String) -> PhoneAppError {
+        if let reason, Self.tbdRemoteRefusals.contains(reason) {
+            return Self.refusal(reason)
+        }
+        Self.logger.notice(
+            "Phone \(method, privacy: .public): refused in words the phone is not sent: \(reason ?? "<none>", privacy: .private)")
+        return PhoneAppError(code: .refused, message: Self.remoteRefusedReason)
     }
 
     /// `response`'s result as `R`. One that does not decode is `internal`:

@@ -816,15 +816,29 @@ struct PhoneCreateTests {
         #expect(!h.actions.calls.contains(FakeSessionActions.Call(method: .remoteProviders, deviceID: nil)))
     }
 
-    @Test func aRefusedRemoteCreateReturnsTheDaemonsReason() async throws {
+    /// A remote create's refusal reaches the phone only in words TBD wrote:
+    /// the phone message rule's pass as they are, and a provider's own words,
+    /// which can quote a token, become `remoteRefusedReason`.
+    @Test func aRefusedRemoteCreateKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
         try Self.offer(h, [Self.status()])
-        h.actions.respond(to: .remoteCreate, with: RPCResponse(error: "acme-cloud: quota reached"))
         let outbox = await h.connect()
+        let secret = "POST https://acme-control.example/v1?access_token=sk-test"
+        let cases: [(daemon: String, phone: String)] = [
+            (secret, PhoneAppService.remoteRefusedReason),
+            ("acme-cloud: quota reached", PhoneAppService.remoteRefusedReason),
+            (PhoneMessageText.emptyRefusal, PhoneMessageText.emptyRefusal),
+            (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
+        ]
 
-        let (reply, _) = try await h.request(.remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
-
-        #expect(reply.error == PhoneAppError(code: .refused, message: "acme-cloud: quota reached"))
+        for (daemon, phone) in cases {
+            h.actions.respond(to: .remoteCreate, with: RPCResponse(error: daemon))
+            let (reply, bytes) = try await h.request(
+                .remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
+            let text = String(decoding: bytes, as: UTF8.self)
+            #expect(!text.contains("access_token") && !text.contains("sk-test"), "the daemon said \(daemon)")
+        }
     }
 }
