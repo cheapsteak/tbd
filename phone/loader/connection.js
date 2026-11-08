@@ -86,8 +86,8 @@ import { REPLACED, RelaySocket, reconnectDelay } from './relay.js';
  * @property {(event: ConnectionEvent) => void} onEvent
  * @property {number} [absentGraceMs] For this long after `start()`, `peer-absent`,
  *   `peer-left` and a handshake that goes unanswered read `connecting` rather than `offline`.
- *   Default 0; `main.js` passes
- *   SIGNAL_TIMEOUT_MS right after pairing, while the laptop's device link joins the new room.
+ *   Default 0; `main.js` passes `PAIRED_GRACE_MS` (a signal wait plus a handshake) right after
+ *   pairing, while the laptop's device link joins the new room.
  * @property {() => boolean} [isVisible] Default `() => true`. While it is false, a reconnect
  *   waits for `resume()`.
  * @property {() => string | null} [runningBundle] The SHA-256 of the bundle the page's app

@@ -16,6 +16,9 @@ export const RECONNECT_MAX_MS = 60_000;
 
 export const SIGNAL_TIMEOUT_MS = 10_000;
 export const HANDSHAKE_TIMEOUT_MS = 10_000;
+// Right after pairing the connection reads `connecting`, not `offline`, for one full signal wait plus
+// one handshake, so a lost message 2 shows no "Laptop offline" before the backoff retry.
+export const PAIRED_GRACE_MS = SIGNAL_TIMEOUT_MS + HANDSHAKE_TIMEOUT_MS;
 export const CACHE_READ_TIMEOUT_MS = 3_000;
 // A store request the page waits on with nothing else to show (opening the store, listing
 // the laptops, saving or forgetting one) that takes longer shows "Reload this page". Only time

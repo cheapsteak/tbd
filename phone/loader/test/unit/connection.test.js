@@ -6,7 +6,8 @@ import { deflateRawSync } from 'node:zlib';
 import { MAX_PLAINTEXT_LENGTH, createInitiator, phonePrologue } from '../../channel/noise.js';
 import { LaptopConnection } from '../../connection.js';
 import {
-  CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, RESUME_COALESCE_MS,
+  CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, LOADER_VERSION, MAX_CHUNK_BYTES, PAIRED_GRACE_MS,
+  RESUME_COALESCE_MS,
   RESUME_PONG_TIMEOUT_MS, SIGNAL_TIMEOUT_MS,
 } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
@@ -584,6 +585,42 @@ test('inside the post-pairing grace an unanswered handshake reads connecting, an
   await env.clock.advance(7000);
   await until(() => c.states().at(-1) === 'offline', 'offline when the grace ends');
   assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting', 'offline']);
+  c.conn.stop();
+});
+
+test('with the post-pairing grace, a lost message 2 reads connecting through the handshake timeout and retry', async () => {
+  const env = await setup();
+  let frames = 0;
+  env.relay.tamper(env.room, (frame) => (frames++ === 0 ? null : frame));
+  const c = connection(env, { absentGraceMs: PAIRED_GRACE_MS });
+  c.conn.start();
+  await until(() => env.laptop.counts.ikHandshakes === 1, 'the laptop answering message 1');
+  await quiet();
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+  await until(() => env.net.count('close()') === 1 && env.clock.pending === 2, 'the timeout and its retry');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
+  await env.clock.advance(1000);
+  await until(() => c.states().includes('ready'), 'ready');
+  assert.ok(!c.states().includes('offline'), 'never offline');
+  c.conn.stop();
+});
+
+test('with the post-pairing grace, repeated lost handshakes read offline only once the grace ends', async () => {
+  const env = await setup();
+  env.laptop.devices.clear();
+  const c = connection(env, { absentGraceMs: PAIRED_GRACE_MS });
+  c.conn.start();
+  await until(() => env.laptop.counts.refused === 1, 'refusal 1');
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+  await until(() => env.net.count('close()') === 1 && env.clock.pending === 2, 'the first timeout');
+  assert.deepEqual(c.states(), ['connecting', 'handshaking', 'connecting']);
+  await env.clock.advance(1000);
+  await until(() => env.laptop.counts.refused === 2, 'refusal 2');
+  await env.clock.advance(PAIRED_GRACE_MS - HANDSHAKE_TIMEOUT_MS - 1000 - 1);
+  await quiet();
+  assert.ok(!c.states().includes('offline'), 'not offline before the grace ends');
+  await env.clock.advance(HANDSHAKE_TIMEOUT_MS);
+  await until(() => c.states().includes('offline'), 'offline after the grace');
   c.conn.stop();
 });
 

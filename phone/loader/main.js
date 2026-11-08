@@ -5,7 +5,7 @@
 
 import { systemClock, withVisibleTimeout } from './clock.js';
 import { LaptopConnection } from './connection.js';
-import { SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from './constants.js';
+import { PAIRED_GRACE_MS, STORE_TIMEOUT_MS } from './constants.js';
 import { AppFrame, readEnv } from './frame.js';
 import { unwrapPhoneKeyPair } from './keys.js';
 import {
@@ -655,7 +655,7 @@ class LoaderPage {
     if (epoch !== this.#epoch) return;
     // The laptop's device link joins the new room just after `paired`, so a `peer-absent`
     // right away reads as connecting for a while, not offline.
-    this.#connect(record, { pair: result.pair, absentGraceMs: SIGNAL_TIMEOUT_MS });
+    this.#connect(record, { pair: result.pair, absentGraceMs: PAIRED_GRACE_MS });
   }
 
   #cancelPairing() {
