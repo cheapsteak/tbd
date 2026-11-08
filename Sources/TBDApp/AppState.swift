@@ -1217,6 +1217,9 @@ final class AppState {
     /// app, such as `defaults write`, so those reach the tabs, the menu and
     /// the Settings toggle too.
     @ObservationIgnored private var ghosttyTerminalEngineFlagObservation: NSKeyValueObservation?
+    /// Where each change of `ghosttyTerminalEngineFlag` is reported:
+    /// `TerminalEngineNotice.log` in the app, a recorder in a test.
+    private let onEngineNotice: @MainActor (TerminalEngineNotice) -> Void
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
     /// attaches again from scratch.
@@ -2875,9 +2878,11 @@ final class AppState {
 
     init(
         userDefaults: UserDefaults = .standard,
-        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver()
+        tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
+        onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log
     ) {
         self.userDefaults = userDefaults
+        self.onEngineNotice = onEngineNotice
         self.windowChrome = WindowChromeState()
         self.tmuxExecutableResolver = tmuxExecutableResolver
         self.tmuxBridge = TmuxBridge(tmuxExecutableResolver: tmuxExecutableResolver)
@@ -5134,15 +5139,15 @@ final class AppState {
         }
     }
 
-    /// Logs each change of the mirror as a `TerminalEngineNotice`, including
-    /// the first read at launch when the flag is on. A terminal built while
-    /// the flag is off logs no engine notice, so the latency probe reads this
-    /// line to know that an arm's latest engine notice may be stale.
+    /// Sends each change of the mirror to `onEngineNotice`, including the
+    /// first read at launch when the flag is on. A terminal built while the
+    /// flag is off logs no engine notice, so the latency probe reads this line
+    /// to know that an arm's latest engine notice may be stale.
     private func refreshGhosttyTerminalEngineFlag() {
         let enabled = ghosttyTerminalEngineEnabled
         if ghosttyTerminalEngineFlag != enabled {
             ghosttyTerminalEngineFlag = enabled
-            TerminalEngineNotice.log(.experiment(enabled: enabled))
+            onEngineNotice(.experiment(enabled: enabled))
         }
     }
 
