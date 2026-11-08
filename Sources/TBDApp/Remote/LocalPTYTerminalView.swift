@@ -97,7 +97,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
                 // Option-drag selects locally instead of reaching the app, as
                 // Shift-drag already does — the iTerm2 convention, matching
                 // the holder panels in `TerminalPanelView`.
-                optionBypassesMouseReporting: true))
+                optionBypassesMouseReporting: true),
+            experimentEnabled: ghosttyTerminalEngineEnabled)
         // The GPU draw path applies to every terminal surface, not just the
         // tmux panes. Leaving this one out would silently mix renderers inside
         // a single A/B — a user evaluating the flag would open a remote-attach

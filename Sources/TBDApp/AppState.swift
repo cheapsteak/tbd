@@ -5134,10 +5134,15 @@ final class AppState {
         }
     }
 
+    /// Logs each change of the mirror as a `TerminalEngineNotice`, including
+    /// the first read at launch when the flag is on. A terminal built while
+    /// the flag is off logs no engine notice, so the latency probe reads this
+    /// line to know that an arm's latest engine notice may be stale.
     private func refreshGhosttyTerminalEngineFlag() {
         let enabled = ghosttyTerminalEngineEnabled
         if ghosttyTerminalEngineFlag != enabled {
             ghosttyTerminalEngineFlag = enabled
+            TerminalEngineNotice.log(.experiment(enabled: enabled))
         }
     }
 

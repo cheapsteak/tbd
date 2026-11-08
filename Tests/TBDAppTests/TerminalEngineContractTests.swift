@@ -562,8 +562,7 @@ struct TerminalEngineContractTests {
     /// Not parameterised: it is about what a libghostty request yields on this
     /// machine. With a Metal device it is libghostty and no fallback; without
     /// one it is SwiftTerm and one fallback that says why. The fallback is
-    /// observed through the factory's `onFallback`; the factory also logs it
-    /// at `.notice`.
+    /// observed through the factory's `onFallback`.
     @Test("A libghostty request yields libghostty where it can start and SwiftTerm, reported once, where it cannot; a SwiftTerm request reports none")
     func ghosttyRequestFallsBackToSwiftTerm() {
         let suite = TestDefaultsSuite("TBDAppTests.TerminalEngineContract")
@@ -576,6 +575,7 @@ struct TerminalEngineContractTests {
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(),
+            experimentEnabled: false,
             onFallback: { fallbacks.append((requested: $0, reason: $1)) })
         if TerminalEngineFactory.availableKinds.contains(.ghostty) {
             #expect(ghostty.kind == .ghostty)
@@ -593,6 +593,7 @@ struct TerminalEngineContractTests {
             font: appearance.font,
             appearance: appearance,
             configuration: TerminalEngineConfiguration(),
+            experimentEnabled: false,
             onFallback: { fallbacks.append((requested: $0, reason: $1)) })
         #expect(swiftTerm.kind == .swiftTerm)
         #expect(fallbacks.isEmpty, "a SwiftTerm request reported a fallback: \(fallbacks)")
@@ -771,7 +772,8 @@ private final class EngineFixture {
             kind: kind,
             font: appearance.font,
             appearance: appearance,
-            configuration: TerminalEngineConfiguration())
+            configuration: TerminalEngineConfiguration(),
+            experimentEnabled: false)
         let recorder = RecordingEngineDelegate()
         engine.delegate = recorder
         self.suite = suite
