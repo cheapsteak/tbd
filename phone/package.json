@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test \"loader/**/*.test.js\"",
+    "test:app": "node --test \"app/**/*.test.js\"",
+    "build:app": "node app/build.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "vectors": "node test-vectors/generate.mjs",
     "vectors:check": "node test-vectors/generate.mjs --check",
