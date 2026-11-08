@@ -10,6 +10,11 @@ struct DeviceContext: Sendable {
     /// never reads a device ID or name from the request body.
     let peer: PhonePeer
     let requestID: String
+    /// For `transcript.open` and `transcript.close`: the stamp
+    /// `handleAppMessage` gave the request as it arrived, which
+    /// `PhoneDeviceState.transcriptStamp` also holds until a later one
+    /// arrives. Nil for every other method.
+    let transcriptStamp: UInt64?
 }
 
 /// Serves one method. It takes the whole request body and returns its reply:
@@ -85,6 +90,11 @@ struct PhoneDeviceState: Sendable {
     /// so a resume replays what changed. Set by `transcript.open` and cleared
     /// by `transcript.close`.
     var transcript: PhoneTranscriptSlot?
+    /// The stamp of the newest `transcript.open` or `transcript.close` the
+    /// phone sent, in arrival order; nil before the first. Their handlers
+    /// finish in any order, so an open takes effect only while its stamp is
+    /// still this one, and a close leaves alone a feed opened after it.
+    var transcriptStamp: UInt64?
     /// Drops this state `parseStateGrace` after a disconnect; nil while the
     /// phone is connected.
     var grace: Task<Void, Never>?
@@ -383,7 +393,23 @@ actor PhoneAppService: PhoneAppHandling {
         if method == .sessionsSubscribe {
             await decideResume(body, deviceID: deviceID)
         }
-        start(method, body: body, context: DeviceContext(peer: peer, requestID: requestID))
+        var transcriptStamp: UInt64?
+        if method == .transcriptOpen || method == .transcriptClose {
+            transcriptStamp = stampTranscriptRequest(deviceID: deviceID)
+        }
+        start(method, body: body, context: DeviceContext(
+            peer: peer, requestID: requestID, transcriptStamp: transcriptStamp))
+    }
+
+    /// A new stamp for a `transcript.open` or `transcript.close` that just
+    /// arrived, kept as the device's newest. Stamps grow with arrival, since
+    /// they come from `mintToken()`. Stamping only orders the requests, so it
+    /// happens whatever the flag says: a request made while phone control is
+    /// off still calls nothing.
+    private func stampTranscriptRequest(deviceID: UUID) -> UInt64 {
+        let stamp = mintToken()
+        devices[deviceID]?.transcriptStamp = stamp
+        return stamp
     }
 
     /// Makes this connection's resume decision for a `sessions.subscribe`,

@@ -11,6 +11,9 @@ import TBDShared
 struct PhoneTranscriptSlot: Sendable {
     /// Tells this slot's events from those of a slot it replaced.
     let token: UInt64
+    /// The stamp of the `transcript.open` that installed or last resumed
+    /// this slot (`PhoneDeviceState.transcriptStamp`).
+    var stamp: UInt64
     let session: PhoneSessionRef
     let showDetails: Bool
     let feed: TranscriptFeed
@@ -120,6 +123,14 @@ actor TranscriptDeltaRelay {
 /// missed, the current prompt set included. Any other open starts over from
 /// the tail.
 ///
+/// **Order.** Opens and closes take effect in the order the phone sent them,
+/// though their handlers can finish in any order. `handleAppMessage` stamps
+/// each as it arrives (`PhoneDeviceState.transcriptStamp`). An open installs
+/// or resumes a feed only while its stamp is still the newest; otherwise a
+/// later open or close came after it, so it replies `transcriptChangedReason`
+/// and closes the feed it built. A close stops only a feed whose open came
+/// before it.
+///
 /// **`transcript.page`** needs an open feed for the same session, or it is
 /// `not_open`. **`transcript.close`** stops the feed and the prompt feed.
 /// The grace after a disconnect, and a revoke, stop them too
@@ -137,6 +148,11 @@ extension PhoneAppService {
     nonisolated func transcriptOpen(_ params: TranscriptOpenParams, _ context: DeviceContext) async throws -> PhoneHandlerReply {
         let deviceID = context.peer.deviceID
         let requestID = context.requestID
+        guard let stamp = context.transcriptStamp else {
+            // `handleAppMessage` stamps every `transcript.open`.
+            Self.transcriptLogger.fault("Phone transcript: an open arrived with no stamp")
+            throw PhoneAppError(code: .internalError, message: "Something went wrong on the laptop.")
+        }
         let terminalID: UUID
         switch params.session {
         case .remote:
@@ -159,7 +175,7 @@ extension PhoneAppService {
 
         if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
             return .onQueue { service in
-                service.queueResumedTranscript(params, requestID: requestID, deviceID: deviceID)
+                service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
             }
         }
         let token = await mintToken()
@@ -176,7 +192,7 @@ extension PhoneAppService {
         try Task.checkCancellation()
         return .onQueue { service in
             service.queueOpenedTranscript(
-                params, feed: feed, token: token, page: page, requestID: requestID, deviceID: deviceID)
+                params, feed: feed, token: token, stamp: stamp, page: page, requestID: requestID, deviceID: deviceID)
         }
     }
 
@@ -190,11 +206,13 @@ extension PhoneAppService {
     }
 
     /// Replies `{resumed: true, seq}` and keeps the feed, starting its live
-    /// part if it never started. When the feed changed since the handler
-    /// looked, the reply is an error and the phone opens again.
-    func queueResumedTranscript(_ params: TranscriptOpenParams, requestID: String, deviceID: UUID) {
-        guard canResumeTranscript(params, deviceID: deviceID), let state = devices[deviceID] else {
-            send(Self.failure(requestID, .internalError, Self.transcriptChangedReason), to: deviceID)
+    /// part if it never started. When a later open or close came after this
+    /// open, or the feed changed since the handler looked, the reply is
+    /// `transcriptChangedReason` and the phone opens again.
+    func queueResumedTranscript(_ params: TranscriptOpenParams, stamp: UInt64, requestID: String, deviceID: UUID) {
+        guard let state = devices[deviceID], state.transcriptStamp == stamp,
+              canResumeTranscript(params, deviceID: deviceID) else {
+            refuseChangedTranscript(requestID, deviceID: deviceID)
             return
         }
         let result = TranscriptOpenResult(resumed: true, seq: state.stream.lastSeq, page: nil)
@@ -202,6 +220,7 @@ extension PhoneAppService {
             send(Self.failure(requestID, .internalError, "Something went wrong on the laptop."), to: deviceID)
             return
         }
+        devices[deviceID]?.transcript?.stamp = stamp
         send(reply, to: deviceID)
         startTranscript(for: deviceID)
     }
@@ -209,12 +228,20 @@ extension PhoneAppService {
     /// Installs a freshly opened feed in place of the device's earlier one,
     /// replies with its first page, and starts its live part when the
     /// connection is live. Until then the earlier session's prompt feed is
-    /// stopped, and this session's starts with the live part.
+    /// stopped, and this session's starts with the live part. When a later
+    /// open or close came after this open, it installs nothing, replies
+    /// `transcriptChangedReason` and closes `feed`.
     func queueOpenedTranscript(
-        _ params: TranscriptOpenParams, feed: TranscriptFeed, token: UInt64, page: TranscriptPage,
+        _ params: TranscriptOpenParams, feed: TranscriptFeed, token: UInt64, stamp: UInt64, page: TranscriptPage,
         requestID: String, deviceID: UUID
     ) {
-        guard let state = devices[deviceID] else { return }
+        guard let state = devices[deviceID], state.transcriptStamp == stamp else {
+            refuseChangedTranscript(requestID, deviceID: deviceID)
+            Task {
+                await feed.close()
+            }
+            return
+        }
         let result = TranscriptOpenResult(resumed: false, seq: state.stream.lastSeq, page: page)
         guard let reply = try? PhoneAppCoding.reply(requestID: requestID, result: result) else {
             Self.transcriptLogger.error("Phone transcript: the open reply does not encode")
@@ -223,7 +250,7 @@ extension PhoneAppService {
         }
         let earlier = state.transcript
         devices[deviceID]?.transcript = PhoneTranscriptSlot(
-            token: token, session: params.session, showDetails: params.showDetails,
+            token: token, stamp: stamp, session: params.session, showDetails: params.showDetails,
             feed: feed, relay: nil, started: false)
         send(reply, to: deviceID)
         if devices[deviceID]?.live == true {
@@ -263,6 +290,12 @@ extension PhoneAppService {
             await relay?.start()
             await feed.start()
         }
+    }
+
+    /// Replies to an open that can no longer take effect, so the phone opens
+    /// again.
+    func refuseChangedTranscript(_ requestID: String, deviceID: UUID) {
+        send(Self.failure(requestID, .internalError, Self.transcriptChangedReason), to: deviceID)
     }
 
     /// Emits a feed's event, unless a later open replaced the feed.
@@ -407,12 +440,17 @@ extension PhoneAppService {
     // MARK: - transcript.close
 
     nonisolated func transcriptClose(_ params: PhoneEmpty, _ context: DeviceContext) async throws -> PhoneEmpty {
-        await closeTranscript(for: context.peer.deviceID)
+        await closeTranscript(for: context.peer.deviceID, stamp: context.transcriptStamp)
         return PhoneEmpty()
     }
 
-    /// Stops the device's open feed and its prompt feed.
-    func closeTranscript(for deviceID: UUID) {
+    /// Stops the device's open feed and its prompt feed, unless the feed was
+    /// opened or resumed by a `transcript.open` the phone sent after the
+    /// close stamped `stamp`. A nil stamp stops whatever is open.
+    func closeTranscript(for deviceID: UUID, stamp: UInt64?) {
+        if let stamp, let current = devices[deviceID]?.transcript, current.stamp > stamp {
+            return
+        }
         let slot = devices[deviceID]?.transcript
         devices[deviceID]?.transcript = nil
         closePrompts(for: deviceID)

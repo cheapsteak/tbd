@@ -79,7 +79,7 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 ///
 /// **Bounded state.** Every index drops the entry added first once it is
 /// full (`TranscriptFeedIndex`):
-/// - **results** – `resultLimit` tool results from the first page and from
+/// - **results** – `resultLimit` tool results from every page read and from
 ///   live lines, joined into older pages as `ShapingContext.joinedResults`.
 ///   A call on an older page whose result has been dropped shows `running`;
 /// - **line offsets** – `lineOffsetLimit` item IDs, for detail lookups;
@@ -138,6 +138,9 @@ actor TranscriptFeed {
     private var stepWanted = false
     private var sessionCheckWanted = false
     private var closed = false
+    /// The reads the worker has finished, each with its events emitted. For
+    /// tests, which wait on it to know a read is behind them.
+    private(set) var readCount = 0
 
     /// The last detail the phone was sent, for the generation it was read in.
     private struct CachedDetail: Sendable {
@@ -265,6 +268,7 @@ actor TranscriptFeed {
                 guard !closed else { return }
                 await emit(event)
             }
+            readCount += 1
         }
     }
 
@@ -474,9 +478,10 @@ actor TranscriptFeed {
     // MARK: - Older pages and details
 
     /// The page before `cursor`, with the results the feed keeps joined in.
-    /// Its rows' offsets and its calls still `running` are kept too. Throws
-    /// `stale_cursor` for a cursor of another generation, or one that no
-    /// longer names a line of the file.
+    /// Its results, its rows' offsets and its calls still `running` are kept
+    /// too, so the page before it can join a result that sits on this one.
+    /// Throws `stale_cursor` for a cursor of another generation, or one that
+    /// no longer names a line of the file.
     func olderPage(cursor: String) throws -> TranscriptPage {
         guard let path else {
             throw PhoneAppError(code: .staleCursor, message: TranscriptPager.staleCursorMessage)
@@ -484,6 +489,9 @@ actor TranscriptFeed {
         let ctx = ShapingContext(
             showDetails: showDetails, joinedResults: results.dictionary, subagentItemCount: subagentCount(path: path))
         let build = try TranscriptPager.olderPage(filePath: path, cursor: cursor, generation: generation, ctx: ctx)
+        for (id, result) in build.results {
+            results.set(result, for: id)
+        }
         for (id, offset) in build.lineOffsets {
             lineOffsets.set(offset, for: id)
         }

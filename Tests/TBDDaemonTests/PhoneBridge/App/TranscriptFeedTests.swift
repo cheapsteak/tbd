@@ -16,8 +16,9 @@ import TestSupport
 struct TranscriptFeedTests {
     // MARK: - The feed on its own
 
-    /// The first page is the file's tail, and a line appended after it
-    /// reaches the phone through the watcher alone, with no state delta.
+    /// The first page is the file's tail, and a line appended after the
+    /// feed's first read reaches the phone through the watcher alone: with
+    /// no state delta, and only once the watcher's debounce has run out.
     @Test func openReturnsTheFirstPageAndAppendsArriveLive() async throws {
         let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
         defer { fixture.remove() }
@@ -30,10 +31,18 @@ struct TranscriptFeedTests {
         #expect(page.cursor == nil)
 
         await d.feed.start()
+        // The read `start()` asks for is behind us, so nothing but the
+        // watcher can read the line appended next.
+        try await Self.waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
         try fixture.append([FeedLine.prompt("m3", "placeholder prompt 3")])
         let events = d.events
         let arrived: @Sendable () async -> Bool = { Self.appendedIDs(events.values) == ["m3"] }
         try await Self.appendUntilArmed(fixture.path, clock: d.clock, or: arrived)
+        let early = Self.appendedIDs(d.events.values)
+        #expect(early.isEmpty, "the line arrived before the watcher's debounce ran out")
+        // One step per armed debounce: a write event that lands after an
+        // advance replaces the debounce it fired, so a single advance can
+        // lose the tick.
         try await d.clock.advanceUntil(
             "the append of m3", by: FileWatcher.debounceInterval, timeout: TestDeadlines.saturatedPass
         ) {
@@ -72,6 +81,46 @@ struct TranscriptFeedTests {
         #expect(update.items.first?.toolStatus == TranscriptShaper.okStatus)
         #expect(update.session == d.session)
         #expect(d.events.values.count == 1)
+        await d.feed.close()
+    }
+
+    /// A call on an older page whose result sits on the page after it, which
+    /// is itself an older page, shows the result's status: the feed keeps
+    /// every page's results to join into the pages before it.
+    @Test func aCallWhoseResultIsOnTheNextOlderPageShowsItsStatus() async throws {
+        // Oldest first: a prompt and a call; twenty prompts, the call's result
+        // after the first of them; a line longer than the first page's first
+        // read (`TranscriptParser.windowInitialChunkBytes`, 64 KiB), so the
+        // first page never reads the result; and the first page's four
+        // prompts.
+        var lines: [[String: Any]] = [
+            FeedLine.prompt("x0", "placeholder prompt x0"),
+            FeedLine.bash("a0", id: "toolu_0", command: "echo 0"),
+            FeedLine.prompt("y1", "placeholder prompt y1"),
+            FeedLine.toolResult("r0", toolUseID: "toolu_0", text: "output 0"),
+        ]
+        lines += (2...20).map { FeedLine.prompt("y\($0)", "placeholder prompt y\($0)") }
+        lines.append(FeedLine.toolResult("pad", toolUseID: "toolu_pad", text: String(repeating: "x", count: 100_000)))
+        lines += (1...4).map { FeedLine.prompt("z\($0)", "placeholder prompt z\($0)") }
+        let fixture = try FeedFixture(lines)
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+
+        let first = try await d.feed.open()
+        let firstIDs = first.items.map(\.id)
+        #expect(firstIDs == ["z1", "z2", "z3", "z4"])
+        let firstCursor = try #require(first.cursor)
+        let newer = try await d.feed.olderPage(cursor: firstCursor)
+        let newerIDs = newer.items.map(\.id)
+        let expectedNewerIDs = (1...20).map { "y\($0)" }
+        #expect(newerIDs == expectedNewerIDs)
+        let newerCursor = try #require(newer.cursor)
+        let older = try await d.feed.olderPage(cursor: newerCursor)
+        let olderIDs = older.items.map(\.id)
+        #expect(olderIDs == ["x0", "toolu_0"])
+        #expect(older.reachedStart)
+        let status = older.items.first(where: { $0.id == "toolu_0" })?.toolStatus
+        #expect(status == TranscriptShaper.okStatus)
         await d.feed.close()
     }
 
@@ -459,6 +508,86 @@ struct TranscriptFeedTests {
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
+    /// An open sent after another takes effect even when it finishes first:
+    /// the earlier open, finishing late, installs nothing, is refused, and
+    /// starts no watcher, relay or prompt feed.
+    @Test func anOpenThatFinishesAfterALaterOneIsDiscarded() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let first = try FeedFixture(FeedLine.conversation(messages: 2))
+        defer { first.remove() }
+        let second = try FeedFixture([FeedLine.prompt("n1", "placeholder prompt 1")])
+        defer { second.remove() }
+        let firstTerminal = try await Self.seedTerminal(h, path: first.path)
+        let secondTerminal = try await Self.seedTerminal(h, path: second.path)
+        let firstSession = PhoneSessionRef.local(terminalID: firstTerminal.id)
+        let secondSession = PhoneSessionRef.local(terminalID: secondTerminal.id)
+        let gate = PhoneTestGate()
+        await Self.holdOpens(of: firstSession, on: gate, in: h)
+        let outbox = try await Self.liveConnection(h)
+        let baseline = h.subscriptions.subscriberCount
+
+        let firstBody = try PhoneTestRequests.body(.transcriptOpen, id: "open-first", params: Self.openParams(firstSession))
+        await h.service.handleAppMessage(firstBody, from: h.peer)
+        let opened = try await Self.open(h, secondSession, id: "open-second", on: outbox)
+        #expect(opened.page != nil)
+        let secondFeed = try #require(await h.service.transcriptFeed(for: deviceID))
+        try await Self.waitUntil("the second feed's live part to start") {
+            let watching = await secondFeed.isWatching
+            return watching && h.subscriptions.subscriberCount == baseline + 2
+        }
+
+        gate.open()
+        try await Self.waitUntil("the first open's reply") { !Self.replyIndices("open-first", in: outbox).isEmpty }
+        let firstReply = outbox.bodies[Self.replyIndices("open-first", in: outbox)[0]]
+        #expect(try Self.error(firstReply)?.message == PhoneAppService.transcriptChangedReason)
+        let current = await h.service.transcriptFeed(for: deviceID)
+        #expect(current === secondFeed)
+        #expect(await h.service.transcriptSession(for: deviceID) == secondSession)
+        #expect(await h.service.promptsSession(for: deviceID) == secondSession)
+        #expect(h.subscriptions.subscriberCount == baseline + 2)
+        #expect((Self.watchers(first.path) ?? 0) == 0)
+
+        try first.append([FeedLine.prompt("m3", "placeholder prompt 3")])
+        h.subscriptions.broadcast(delta: Self.activity(firstTerminal))
+        try second.append([FeedLine.prompt("n2", "placeholder prompt 2")])
+        h.subscriptions.broadcast(delta: Self.activity(secondTerminal))
+        try await Self.waitUntil("the second session's append") { Self.appendedIDs(in: outbox).contains("n2") }
+        let appended = Self.appendedIDs(in: outbox)
+        #expect(appended == ["n2"])
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// A close sent after an open wins even when the open finishes later: no
+    /// feed is left open, and nothing the open built runs.
+    @Test func aCloseSentAfterAnOpenInProgressLeavesNothingOpen() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let deviceID = h.peer.deviceID
+        let fixture = try FeedFixture(FeedLine.conversation(messages: 2))
+        defer { fixture.remove() }
+        let terminal = try await Self.seedTerminal(h, path: fixture.path)
+        let session = PhoneSessionRef.local(terminalID: terminal.id)
+        let gate = PhoneTestGate()
+        await Self.holdOpens(of: session, on: gate, in: h)
+        let outbox = try await Self.liveConnection(h)
+        let baseline = h.subscriptions.subscriberCount
+
+        let openBody = try PhoneTestRequests.body(.transcriptOpen, id: "open", params: Self.openParams(session))
+        await h.service.handleAppMessage(openBody, from: h.peer)
+        let closed = try await Self.ask(h, .transcriptClose, id: "close", PhoneEmpty(), on: outbox)
+        #expect(try Self.error(closed) == nil)
+
+        gate.open()
+        try await Self.waitUntil("the open's reply") { !Self.replyIndices("open", in: outbox).isEmpty }
+        let openReply = outbox.bodies[Self.replyIndices("open", in: outbox)[0]]
+        #expect(try Self.error(openReply)?.message == PhoneAppService.transcriptChangedReason)
+        #expect(await h.service.transcriptFeed(for: deviceID) == nil)
+        #expect(await h.service.promptsSession(for: deviceID) == nil)
+        #expect(h.subscriptions.subscriberCount == baseline)
+        #expect((Self.watchers(fixture.path) ?? 0) == 0)
+        await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
     /// The phone comes back inside the grace, its `sessions.subscribe`
     /// replays the stream, and its `transcript.open` with `resume` keeps the
     /// feed: the reply has no page, and the line appended while it was away
@@ -664,6 +793,19 @@ struct TranscriptFeedTests {
             await h.service.sessionsPublisher(for: deviceID)?.isSubscribed == true
         }
         return outbox
+    }
+
+    /// Holds every `transcript.open` of `session` on `gate` before its
+    /// handler runs, so a request sent after it can finish first.
+    private static func holdOpens(of session: PhoneSessionRef, on gate: PhoneTestGate, in h: PhoneServiceHarness) async {
+        let service = h.service
+        await service.setHandler({ body, context in
+            let params = try PhoneAppCoding.params(TranscriptOpenParams.self, from: body)
+            if params.session == session {
+                await gate.wait()
+            }
+            return try await service.transcriptOpen(params, context)
+        }, for: .transcriptOpen)
     }
 
     private static func openParams(_ session: PhoneSessionRef, resume: Bool = false) -> TranscriptOpenParams {
