@@ -450,12 +450,16 @@ extension PhoneAppService {
     /// lets its user enter. `fields` is the form by field name, and every key
     /// of `strings` names one of them.
     ///
+    /// **This is the one place the values the phone set are vetted.** The
+    /// router vets only the first message (`phoneRemoteCreate`), since the
+    /// form it gets also holds values the laptop filled in, which it cannot
+    /// tell from the phone's, and which the phone message rule does not bind.
+    ///
     /// 1. Every CRLF becomes LF, and a value holding a control character is
     ///    `refused` with `PhoneMessageText.controlCharacterRefusal`, the code
     ///    and words the phone's message gets for the same text
-    ///    (`PhoneMessageText.vettedFormValue`, which the router applies to the
-    ///    same values). A provider can paste a value into its session as it
-    ///    does the message.
+    ///    (`PhoneMessageText.vettedFormValue`). A provider can paste a value
+    ///    into its session as it does the message.
     /// 2. An `enum` field's value must be one of the field's choices, the only
     ///    values the sheet's picker offers, or `bad_request` with
     ///    `notAChoiceReason`. A blank value passes here: the picker offers it

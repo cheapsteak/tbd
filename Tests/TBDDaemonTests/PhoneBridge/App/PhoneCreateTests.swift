@@ -657,6 +657,34 @@ struct PhoneCreateTests {
         #expect(branch == "acme\nfix")
     }
 
+    /// The service, not the router, vets the values the phone set: a phone's
+    /// value for a field other than the first message holding the
+    /// bracketed-paste end marker is refused before any create, while a
+    /// laptop default holding a lone CR in that field passes to the router
+    /// as it is, since the phone message rule binds only the phone's text.
+    @Test func remoteCreateVetsThePhonesValuesAndPassesTheLaptopsDefaults() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let repo = try await Self.seedRepo(h)
+        try await h.db.config.setRemoteCreateDefaults(["branch": "acme\rdefault"])
+        try Self.offer(h, [Self.status()])
+        try Self.startsSession(h)
+        let outbox = await h.connect()
+
+        let (refused, _) = try await h.request(
+            .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["branch": "main\u{1b}[201~"]),
+            on: outbox)
+
+        #expect(refused.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
+        #expect(h.actions.remoteCreates.isEmpty)
+
+        let (created, _) = try await h.request(.remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
+
+        #expect(created.error == nil)
+        let sent = try Self.sentForm(h)
+        let branch = sent["branch"] as? String
+        #expect(branch == "acme\rdefault")
+    }
+
     /// An `enum` field takes only one of its choices, as the laptop's picker
     /// does, and a blank value where the field is not required, which leaves
     /// it out.

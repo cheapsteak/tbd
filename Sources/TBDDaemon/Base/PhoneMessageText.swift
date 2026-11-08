@@ -11,9 +11,11 @@ import Foundation
 /// (`lineEndingsNormalized`), then a blank message is refused (`isBlank`),
 /// then one holding a control character (`hasControlCharacter`). A remote
 /// session's create form carries the first message in its
-/// `remoteCreatePromptField`, which gets the whole rule; every other string
-/// value of the form gets `vettedFormValue(_:)`, the rule less its blank
-/// check, since a provider can paste those into its session too.
+/// `remoteCreatePromptField`, which gets the whole rule at the router; every
+/// other string value the phone set in the form gets `vettedFormValue(_:)`,
+/// the rule less its blank check, in the phone app service, which alone
+/// knows which values the phone set. A provider can paste those into its
+/// session too.
 ///
 /// Each path needs it for its own reason. A message pasted into a pane, or
 /// pasted by a remote provider into its session, reaches an agent whose

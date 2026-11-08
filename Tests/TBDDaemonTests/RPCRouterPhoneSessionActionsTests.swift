@@ -628,62 +628,55 @@ struct RPCRouterPhoneSessionActionsTests {
         #expect(createRows.isEmpty)
     }
 
-    /// Every string value of the form, not only the first message, is held
-    /// to the control-character rule, since a provider can paste any of them:
-    /// the bracketed-paste end marker or a lone CR in another field, or in a
-    /// string nested in one, is refused.
-    @Test func phoneRemoteCreateVettedRefusesAControlCharacterInAnyFormValue() throws {
-        let marker = "\u{1b}[201~"
-        let forms: [[String: Any]] = [
-            ["title": marker],
-            ["title": "first\rsecond", PhoneMessageText.remoteCreatePromptField: "hi"],
-            ["labels": ["acme", marker]],
-            ["meta": ["note": marker]],
-        ]
-        for form in forms {
-            let data = try JSONSerialization.data(withJSONObject: form)
-            let paramsJSON = try #require(String(data: data, encoding: .utf8))
-            let vetted = RPCRouter.phoneRemoteCreateVetted(
-                RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON))
-            guard case .refused(let reason) = vetted else {
-                Issue.record("form values \(paramsJSON) were not refused: \(vetted)")
-                continue
-            }
-            #expect(reason == PhoneMessageText.controlCharacterRefusal, "form \(paramsJSON)")
+    /// Only the first message is held to the phone message rule. Every other
+    /// form value may be one the laptop filled in, a stored create default
+    /// among them, so a lone CR, a CRLF or a blank in one passes as it came:
+    /// byte for byte when the first message needs no change, and as it was
+    /// when the form is written out again around a changed first message.
+    @Test func phoneRemoteCreateVettedLeavesEveryOtherFormValueAsItCame() throws {
+        let unchanged = #"{"title": "first\rsecond", "prompt": "hi"}"#
+        let kept = RPCRouter.phoneRemoteCreateVetted(RemoteCreateParams(provider: "agentbox", paramsJSON: unchanged))
+        guard case .deliver(let keptParams) = kept else {
+            Issue.record("a laptop default with a lone CR was refused: \(kept)")
+            return
         }
-    }
+        #expect(keptParams.paramsJSON == unchanged)
 
-    /// A field other than the first message gets no blank check, so a blank
-    /// optional field stays allowed, and its CRLFs become bare LFs as the
-    /// first message's do.
-    @Test func phoneRemoteCreateVettedKeepsABlankFieldAndMakesEveryLineEndABareLineFeed() throws {
         let vetted = RPCRouter.phoneRemoteCreateVetted(RemoteCreateParams(
-            provider: "agentbox", paramsJSON: #"{"title": "   ", "branch": "one\r\ntwo", "prompt": "hi"}"#))
-
+            provider: "agentbox",
+            paramsJSON: #"{"title": "   ", "branch": "one\r\ntwo", "note": "a\rb", "prompt": "first\r\nsecond"}"#))
         guard case .deliver(let params) = vetted else {
-            Issue.record("a blank field or a CRLF was refused: \(vetted)")
+            Issue.record("a laptop default was refused: \(vetted)")
             return
         }
         let form = try #require(
             try JSONSerialization.jsonObject(with: Data(params.paramsJSON.utf8)) as? [String: String])
-        #expect(form == ["title": "   ", "branch": "one\ntwo", "prompt": "hi"])
+        #expect(form == ["title": "   ", "branch": "one\r\ntwo", "note": "a\rb", "prompt": "first\nsecond"])
     }
 
-    /// Through the door, a control character in a field other than the first
-    /// message reaches no provider, creates nothing and records no create.
-    @Test func phoneRemoteCreateRefusesAControlCharacterInAnotherField() async throws {
-        let f = try await makeRemoteFixture([Self.describeDeclaring([])])
-        let data = try JSONSerialization.data(withJSONObject: ["title": "\u{1b}[201~"])
+    /// Through the door, a laptop default holding a lone CR in a field other
+    /// than the first message reaches the provider as it came, with the
+    /// first message's CRLF made a bare LF.
+    @Test func phoneRemoteCreatePassesALaptopDefaultWithALoneCarriageReturn() async throws {
+        let f = try await makeRemoteFixture([
+            Self.describeDeclaring([]),
+            providerOK(#"{"id": "new-1", "state": "starting"}"#),
+            providerOK(#"{"complete": true, "sessions": []}"#),
+        ])
+        let data = try JSONSerialization.data(withJSONObject: [
+            "title": "acme\rdefault", PhoneMessageText.remoteCreatePromptField: "first\r\nsecond",
+        ])
         let paramsJSON = try #require(String(data: data, encoding: .utf8))
 
         let response = try await f.actions.phoneRemoteCreate(
             RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON), deviceID: UUID())
 
-        #expect(response.success == false)
-        #expect(response.error == PhoneMessageText.controlCharacterRefusal)
-        #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused field never reaches the provider")
-        let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
-        #expect(createRows.isEmpty)
+        #expect(response.success, "error: \(response.error ?? "none")")
+        let stdin = try #require(f.invoker.stdinsSnapshot().compactMap { $0 }.first)
+        let body = try #require(try JSONSerialization.jsonObject(with: stdin) as? [String: Any])
+        let form = try #require(body["params"] as? [String: Any])
+        #expect(form["title"] as? String == "acme\rdefault")
+        #expect(form["prompt"] as? String == "first\nsecond")
     }
 
     /// The provider's create gets the first message with bare line feeds, and
