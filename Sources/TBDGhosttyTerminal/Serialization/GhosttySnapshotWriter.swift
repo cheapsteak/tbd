@@ -118,13 +118,30 @@ public enum GhosttySnapshotWriter {
     /// without an opener the receiver reads its rest as text, base64 on the screen and in the
     /// scrollback.
     ///
-    /// libghostty does not say which kind of sequence is open, so one opener serves them all, and an
-    /// unknown OSC does. SwiftTerm ends an OSC on BEL, on ESC (as ST begins), or on CAN or SUB, so
-    /// it takes in the rest of an OSC that ends with BEL or ST and of a DCS, APC, SOS or PM, which
-    /// end with ST. Its OSC payload has no limit. It hands the unknown code to its OSC observers,
-    /// none of which acts on 9999, and shows nothing. A DCS opener would not do: SwiftTerm passes
-    /// BEL through a DCS, and SOS and PM ignore it, so either would take in the output after an
-    /// OSC that ends with BEL, up to the next ESC.
+    /// The opener is an unknown OSC. SwiftTerm ends an OSC on BEL, on ESC (as ST begins), or on CAN
+    /// or SUB, so it takes in the rest of an OSC that ends with BEL or ST and of a DCS, APC, SOS or
+    /// PM, which end with ST. It hands the unknown code to its OSC observers, none of which acts on
+    /// 9999, and shows nothing.
+    ///
+    /// One opener serves every kind of sequence, because nothing at the handback says which kind is
+    /// open: libghostty names a string's kind only in the stops of `ghostty_terminal_vt_write_until`
+    /// while bytes are written, and the terminal is fed with `ghostty_terminal_vt_write`. A DCS
+    /// opener would cost less, since SwiftTerm drops a DCS it cannot read without buffering it, such
+    /// as one whose parameters start with a colon. But SwiftTerm passes BEL through a DCS, and SOS
+    /// and PM ignore it, so either would take in the output after an OSC that ends with BEL, up to
+    /// the next ESC, and OSC 52 and 1337 payloads often end that way.
+    ///
+    /// Known limits:
+    /// - **Cost.** SwiftTerm buffers an OSC payload without a limit and grows the buffer to the
+    ///   exact size on every run of bytes it reads, so the rest of a sequence megabytes long is
+    ///   copied again on each read, a cost that grows with the square of its length, under the
+    ///   daemon's lock. The buffer keeps its capacity after the OSC ends. SwiftTerm pays as much for
+    ///   any OSC or APC that long; for the rest of a DCS it would have dropped, it is extra.
+    /// - **A BEL in a DCS or APC rest.** libghostty ends only an OSC on BEL. A DCS or APC rest that
+    ///   holds one ends the opener there, and what follows the BEL prints.
+    /// - **The 8-bit ST.** SwiftTerm, like libghostty, reads 0x9C inside an OSC as content, so the
+    ///   opener does not end on it. libghostty does end an APC, SOS or PM on 0x9C, so after one that
+    ///   ends that way the opener takes in the output up to the next ESC or BEL.
     static let overlongSequenceSink: [UInt8] = Array("\u{1b}]9999;".utf8)
 
     /// An alternate screen, with the primary screen behind it written first, from a clone that has
