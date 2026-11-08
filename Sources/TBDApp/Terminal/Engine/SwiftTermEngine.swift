@@ -153,6 +153,10 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
         feedTarget.view.feed(byteArray: bytes)
     }
 
+    nonisolated var isAtSequenceBoundary: Bool {
+        feedTarget.view.isAtSequenceBoundary
+    }
+
     /// Nothing, on purpose. SwiftTerm's RIS does not give a used terminal a
     /// fresh screen: its reset activates the normal buffer with
     /// `clearAlt: false`, so stale alternate-screen content survives it, and the
@@ -286,7 +290,11 @@ final class SwiftTermEngine: TerminalEngine, TerminalViewDelegate {
     ///    This is R16's shape, in the direction R16 said it would also be
     ///    needed. Without the hop every mode reads "reset" — and wraparound
     ///    and cursor-visible are *on* by default, so the daemon would be
-    ///    handed a screen with autowrap off and the cursor hidden.
+    ///    handed a screen with autowrap off and the cursor hidden. The batch
+    ///    must go into a parser between sequences, or its first `ESC` cuts
+    ///    the session's open sequence short, so the holder reader, before it
+    ///    closes, reads on within a bound until that sequence ends
+    ///    (`isAtSequenceBoundary`).
     /// 2. **Walk.** The serialization itself is synchronous inside the
     ///    terminal's own lock, and it must be: the caller has already closed
     ///    the descriptor, so nothing else is feeding this terminal.

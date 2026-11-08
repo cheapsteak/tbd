@@ -44,6 +44,11 @@ protocol TerminalEngine: AnyObject, Sendable {
 
     /// Live bytes from the session. Callable from any thread.
     nonisolated func feed(_ bytes: ArraySlice<UInt8>)
+    /// Whether the session's output so far ends between sequences, so a query
+    /// the app feeds now cannot cut one of the session's sequences short.
+    /// Callable from any thread, like `feed(_:)`; the holder reader asks it
+    /// before the handback snapshot feeds its probe.
+    nonisolated var isAtSequenceBoundary: Bool { get }
     /// Called before a preamble goes into a view that has been used before.
     func prepareForPreamble()
     /// Feeds a snapshot preamble so that no callback, OSC event or pty reply it

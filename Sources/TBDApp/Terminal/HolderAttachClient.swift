@@ -485,8 +485,13 @@ final class HolderStreamReader: @unchecked Sendable {
     private let fd: Int32
     private let label: String
     private let onChunk: @Sendable (Data) -> Void
-    /// Runs on the reader thread after the loop has exited and immediately
-    /// before the descriptor is closed. Unset in production.
+    /// Whether the terminal `onChunk` feeds is between sequences. Asked on the
+    /// reader thread once a stop has ended the loop (`finishOpenSequence`).
+    private let isAtSequenceBoundary: @Sendable () -> Bool
+    private let sequenceBoundaryBudget: Duration
+    private let clock: any Clock<Duration>
+    /// Runs on the reader thread after the loop has exited, before any wait
+    /// for an open sequence and the close. Unset in production.
     ///
     /// A seam because the close is the one event the handback's ordering is
     /// about, and in production it lands within one poll interval of the stop
@@ -505,21 +510,37 @@ final class HolderStreamReader: @unchecked Sendable {
     /// Callers parked in `awaitClosed()`. Resumed once, from the reader thread,
     /// after the `close`.
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var abandonedOpenSequence = false
 
     /// How long one `poll` waits before the loop re-checks `stopped`. Short
     /// enough that a closing view releases the pty promptly, long enough that
     /// an idle session costs 5 wakeups a second.
     private static let pollIntervalMilliseconds: Int32 = 200
 
+    /// How long a stopped reader waits by default for the output to finish a
+    /// sequence: the daemon's bound for the attach, `HolderReader`'s
+    /// `defaultSequenceBoundaryBudget`.
+    static let defaultSequenceBoundaryBudget: Duration = .milliseconds(250)
+    private static let sequenceBoundaryPollMilliseconds: Int32 = 5
+    /// Bufferfuls per poll of that wait, so a job that never stops writing
+    /// cannot hold the thread past the budget: 1 MiB.
+    private static let sequenceBoundaryMaxReads = 64
+
     init(
         label: String, fd: Int32,
         beforeClose: (@Sendable (HolderStreamReader) -> Void)? = nil,
-        onChunk: @escaping @Sendable (Data) -> Void
+        isAtSequenceBoundary: @escaping @Sendable () -> Bool = { true },
+        sequenceBoundaryBudget: Duration = HolderStreamReader.defaultSequenceBoundaryBudget,
+        onChunk: @escaping @Sendable (Data) -> Void,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.label = label
         self.fd = fd
         self.beforeClose = beforeClose
+        self.isAtSequenceBoundary = isAtSequenceBoundary
+        self.sequenceBoundaryBudget = sequenceBoundaryBudget
         self.onChunk = onChunk
+        self.clock = clock
     }
 
     /// Whether anyone is parked in `awaitClosed()` right now. For tests: it is
@@ -533,6 +554,13 @@ final class HolderStreamReader: @unchecked Sendable {
     private var isStopped: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return stopped
+    }
+
+    /// Whether the reader closed with the output still part-way through a
+    /// sequence, and logged so. For tests: the notice goes to the unified log.
+    var closedMidSequence: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return abandonedOpenSequence
     }
 
     /// Whether `start()` has been called. Read by `awaitClosed()`, which must
@@ -596,7 +624,14 @@ final class HolderStreamReader: @unchecked Sendable {
 
     private func readLoop() {
         var buffer = [UInt8](repeating: 0, count: 16 * 1024)
-        loop: while !isStopped {
+        // Set only where a stop ends the loop. Every other exit is the end of
+        // the output, which leaves nothing to wait for.
+        var stoppedReading = false
+        loop: while true {
+            guard !isStopped else {
+                stoppedReading = true
+                break
+            }
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let ready = poll(&descriptor, 1, Self.pollIntervalMilliseconds)
             if ready < 0 {
@@ -625,7 +660,10 @@ final class HolderStreamReader: @unchecked Sendable {
                     // close by construction (`detachHolderSession` clears it
                     // only after `awaitClosed()`).
                     onChunk(Data(buffer[0..<count]))
-                    if isStopped { break loop }
+                    if isStopped {
+                        stoppedReading = true
+                        break loop
+                    }
                     continue
                 }
                 // 0 is EOF. EIO is what a pty master reports once its last
@@ -638,8 +676,61 @@ final class HolderStreamReader: @unchecked Sendable {
             if revents & POLLHUP != 0 { break }
         }
         beforeClose?(self)
+        if stoppedReading { finishOpenSequence(into: &buffer) }
         Darwin.close(fd)
         noteClosed()
         logger.info("holder reader exited \(self.label, privacy: .public)")
+    }
+
+    /// Reads on, after a stop, while the output so far ends part-way through
+    /// a sequence: `HolderReader.awaitSequenceBoundary`, for the handback.
+    ///
+    /// The handback snapshot feeds this terminal a `DECRQM` probe, whose first
+    /// `ESC` would end the child's sequence early here, and the rest, left on
+    /// the pty, would print as text in the daemon's emulator, whose parser
+    /// starts in the ground state. Bounded on `clock`, because a child can
+    /// leave a sequence open for good; output that has ended ends the wait at
+    /// once, with no notice. Nothing waits on main meanwhile: the handback is
+    /// parked in `awaitClosed()`, and the sink outlives this as it outlives
+    /// the loop's last chunk.
+    private func finishOpenSequence(into buffer: inout [UInt8]) {
+        let elapsed = ClockStopwatch.start(on: clock)
+        while !isAtSequenceBoundary() {
+            guard elapsed() < sequenceBoundaryBudget else {
+                stateLock.lock()
+                abandonedOpenSequence = true
+                stateLock.unlock()
+                logger.notice("""
+                    holder reader \(self.label, privacy: .public) closed with its output part-way \
+                    through a sequence, so the handback may cut it short and the daemon may print \
+                    its remainder as text
+                    """)
+                return
+            }
+            var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&descriptor, 1, Self.sequenceBoundaryPollMilliseconds)
+            if ready < 0, errno != EINTR { return }
+            guard ready > 0 else { continue }
+            if Int32(descriptor.revents) & POLLNVAL != 0 { return }
+            guard readAvailable(into: &buffer) else { return }
+        }
+    }
+
+    /// Feeds what the descriptor holds right now, at most
+    /// `sequenceBoundaryMaxReads` bufferfuls.
+    ///
+    /// - Returns: false once the output has ended.
+    private func readAvailable(into buffer: inout [UInt8]) -> Bool {
+        for _ in 0..<Self.sequenceBoundaryMaxReads {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if count > 0 {
+                onChunk(Data(buffer[0..<count]))
+                continue
+            }
+            if count == 0 { return false }
+            if errno == EINTR { continue }
+            return errno == EAGAIN
+        }
+        return true
     }
 }

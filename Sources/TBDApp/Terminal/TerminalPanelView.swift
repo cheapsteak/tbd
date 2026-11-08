@@ -1505,11 +1505,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let holder = viewHolder
             let reader = HolderStreamReader(
                 label: panelID.uuidString, fd: attachment.ptyFD,
-                beforeClose: holderReaderBeforeClose
-            ) { chunk in
-                let bytes = [UInt8](chunk)
-                holder.feed(bytes[...])
-            }
+                beforeClose: holderReaderBeforeClose,
+                // A cleared holder has no screen left to hand back, so
+                // nothing to finish a sequence for.
+                isAtSequenceBoundary: { holder.withEngine { $0.isAtSequenceBoundary } ?? true },
+                onChunk: { chunk in
+                    let bytes = [UInt8](chunk)
+                    holder.feed(bytes[...])
+                },
+                clock: clock)
             holderReader = reader
             onHolderReaderWillStart?()
             reader.start()
@@ -1843,9 +1847,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// **The order is the whole function**, and it is the attach's run
         /// backwards:
         ///
-        /// 1. The reader stops and its thread closes the `dup`; the write `dup`
-        ///    is closed on this actor. `awaitClosed()` is what makes step 3
-        ///    strictly later, because `stop()` only raises a flag.
+        /// 1. The reader stops and its thread closes the `dup`, first reading
+        ///    on, briefly, if the output ends part-way through a sequence; the
+        ///    write `dup` is closed on this actor. `awaitClosed()` is what
+        ///    makes step 3 strictly later, because `stop()` only raises a flag.
         /// 2. The screen is serialized *after* the close, which is the same
         ///    reason the daemon quiesces before it snapshots on the way in:
         ///    everything this panel consumed is in its terminal, everything
@@ -1901,6 +1906,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // here would drop the preamble — and, worse, the detach — whenever
             // SwiftUI released the coordinator inside the poll interval, which
             // is exactly the tab-close case. It is bounded: one poll interval,
+            // the reader's wait for an open sequence to end (250 ms at most),
             // one main-queue turn, one RPC; resends run in a task of their own.
             //
             // Registered with the ledger so a successor panel for this same
