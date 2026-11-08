@@ -363,6 +363,33 @@ struct GhosttyTerminalViewTests {
                 "\(view.mouseController.pendingReportReleases) wait for a release")
     }
 
+    /// The report route can still carry a press that encodes as nothing: X10 tracking (`?9h`)
+    /// reports only left, middle and right presses, so a back-button press goes out as nothing.
+    /// That button must not wait for a release, which the program would get on its own once it
+    /// set 1000: it never saw the button go down.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func anUnreportedPressOnTheReportRouteWaitsForNoRelease() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let content = try #require(window.contentView)
+        place(view, in: content)
+        view.onSend = { recorder.sent.append($0) }
+        fixture.terminal.feed(text: "\u{1b}[?9h")
+        try #require(fixture.terminal.isMouseReporting, "X10 tracking did not turn reporting on")
+
+        view.otherMouseDown(with: try otherButtonEvent(.otherMouseDown, number: 3))
+        try #require(recorder.sent.isEmpty, "X10 tracking reported a back-button press: \(recorder.sent)")
+        #expect(view.mouseController.pendingReportReleases.isEmpty,
+                "\(view.mouseController.pendingReportReleases) wait for a release the program never saw pressed")
+
+        fixture.terminal.feed(text: "\u{1b}[?1000h")
+        view.otherMouseUp(with: try otherButtonEvent(.otherMouseUp, number: 3))
+        #expect(recorder.sent.isEmpty, "the release of the unreported press sent \(recorder.sent)")
+    }
+
     /// Left and right come from the event's type, every phase of it. An event built with
     /// `NSEvent.mouseEvent(with:…)` has `buttonNumber` 0 whatever its type, so a mapping that read
     /// the number would call these right-button events left. Only an "other" event is read by its

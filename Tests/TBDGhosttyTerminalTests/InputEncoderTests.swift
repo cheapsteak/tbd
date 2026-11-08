@@ -112,6 +112,27 @@ struct MouseEncoderTests {
         #expect(release == nil, "with tracking off the release encoded as \(String(describing: release))")
     }
 
+    /// A press that went out unreported earns no release, even when the program turns reporting
+    /// on before the button comes up: a release alone would tell it a button came up that it
+    /// never saw go down.
+    @Test func releaseOfAnUnreportedPressStaysSilentAfterTrackingTurnsOn() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 10, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        let encoder = try MouseEncoder(geometry: Self.geometry)
+        let down = MousePress(action: .press, button: .left, position: Self.point)
+        let up = MousePress(action: .release, button: .left, position: Self.point)
+
+        let press = try encode(down, with: encoder, on: terminal)
+        try #require(press == nil, "with tracking off the press encoded as \(String(describing: press))")
+        terminal.feed(text: "\u{1b}[?1000h")
+        let release = try encode(up, with: encoder, on: terminal)
+        #expect(release == nil, "once 1000 was set the unreported press's release encoded as \(String(describing: release))")
+
+        // Reporting really is on now, or the nil above proves nothing.
+        let click = try encode(down, with: encoder, on: terminal)
+        #expect(click != nil, "with 1000 set a press still encoded as nothing")
+    }
+
     /// Under any-event tracking a move is reported once per cell, not once per pixel: the encoder
     /// drops a motion report that repeats the last one, and forgets it when the modes change.
     /// Driven through the terminal's own input seam, so the encoder is the one bound to the
