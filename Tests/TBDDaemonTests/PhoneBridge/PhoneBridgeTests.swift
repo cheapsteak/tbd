@@ -959,6 +959,47 @@ struct PhoneBridgeTests {
         }
     }
 
+    @Test func aLinkOpenedForTheRowOfAnUndoneAllowStops() async throws {
+        try await withBridge(holdSends: true) { h in
+            let transport = try #require(h.holdingTransport)
+            // However the test ends, nothing stays held.
+            defer { transport.release() }
+            await h.bridge.reconcile()
+            let (offer, link) = try await h.startPairing()
+            let phone = try await h.joinedPairingPhone(link)
+            try await phone.pair(link: link, deviceName: "iPhone")
+            try await h.waitForPairingState(.awaitingApproval)
+
+            // Allow stores the row, then waits on `paired`, which is held in
+            // the pairing room only, so the device room can still open.
+            transport.hold(room: link.room)
+            let bridge = h.bridge
+            let offerID = offer.offerID
+            let allowing = Task { try await bridge.pairAllow(offerID: offerID) }
+            try await h.waitUntil("`paired` to reach the socket") { transport.heldSends == 1 }
+
+            // A reconcile now, such as a settings save's, lists the row Allow
+            // stored and opens a link for it.
+            await bridge.reconcile()
+            let stored = try await h.db.phoneDevices.list()
+            #expect(stored.count == 1)
+            let opened = await bridge.linkCount
+            #expect(opened == 1)
+
+            // `paired` fails, so Allow deletes the row again; the link it
+            // left must not outlive the row.
+            transport.release(failing: true)
+            await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
+            let rows = try await h.db.phoneDevices.list()
+            #expect(rows.isEmpty)
+            // Allow returns only after the undo's reconcile.
+            let links = await bridge.linkCount
+            #expect(links == 0)
+            let status = await bridge.status()
+            #expect(status.running && status.connectedDeviceIDs.isEmpty)
+        }
+    }
+
     @Test func thePairingNotificationSkipsHiddenRepositoriesAndPrefersHealthyOnes() async throws {
         try await withBridge { h in
             // Listed in this order; each has a main worktree.

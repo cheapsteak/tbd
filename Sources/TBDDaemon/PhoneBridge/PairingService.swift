@@ -51,12 +51,14 @@ import TBDShared
 ///   room for good, and then calls `onPaired`. The row is stored first,
 ///   because the phone may connect to its room as soon as it reads `paired`.
 /// - When `paired` cannot have reached the phone, Allow undoes the pairing:
-///   the row is deleted again, the offer is interrupted, `allow` throws
-///   `.pairingNotFinished`, and `onPaired` is not called. That is when the
-///   send fails or is still in flight at the flush limit, and when
-///   `peer-joined`, `peer-left`, a link `.closed` or a refusal arrives before
-///   `paired` has reached the relay; such an event ends Allow's wait at once.
-///   One that arrives after is the phone leaving with its room.
+///   the row is deleted again, the offer is interrupted, `onPairingUndone` is
+///   called, `allow` throws `.pairingNotFinished`, and `onPaired` is not
+///   called. That is when the send fails or is still in flight at the flush
+///   limit, and when `peer-joined`, `peer-left`, a link `.closed` or a
+///   refusal arrives before `paired` has reached the relay; such an event
+///   ends Allow's wait at once. One that arrives after is the phone leaving
+///   with its room. A reconcile that ran while the row existed may have
+///   opened a link for it; `onPairingUndone` is how the owner stops it.
 /// - `deny`, expiry, an interruption, `cancel` and a replacing `start` close
 ///   the pairing room. Deny and expiry first send `pairDenied`, but only to a
 ///   confirmed phone, the only one with a channel to receive it.
@@ -208,6 +210,7 @@ actor PairingService {
     private let preflight: @Sendable () async -> RelayPreflight
     private let onChange: @Sendable () -> Void
     private let onPaired: @Sendable (PhoneDevice) async -> Void
+    private let onPairingUndone: @Sendable () async -> Void
     private let now: @Sendable () -> Date
     private let backoff: PhoneBackoff
     private let clock: any Clock<Duration>
@@ -238,6 +241,7 @@ actor PairingService {
          preflight: @escaping @Sendable () async -> RelayPreflight,
          onChange: @escaping @Sendable () -> Void,
          onPaired: @escaping @Sendable (PhoneDevice) async -> Void,
+         onPairingUndone: @escaping @Sendable () async -> Void,
          now: @escaping @Sendable () -> Date = Date.init,
          backoff: PhoneBackoff = PhoneBackoff(), clock: any Clock<Duration> = ContinuousClock()) {
         self.relayURL = relayURL
@@ -250,6 +254,7 @@ actor PairingService {
         self.preflight = preflight
         self.onChange = onChange
         self.onPaired = onPaired
+        self.onPairingUndone = onPairingUndone
         self.now = now
         self.backoff = backoff
         self.clock = clock
@@ -306,7 +311,13 @@ actor PairingService {
     /// other offer that is not awaiting approval, including one that is not
     /// the current offer. Throws `.pairingNotFinished` when `paired` cannot
     /// have reached the phone; the row is gone again, the offer is
-    /// interrupted, and `onPaired` is not called.
+    /// interrupted, `onPairingUndone` has returned, and `onPaired` is not
+    /// called.
+    ///
+    /// Both callbacks run on the caller's task once the commit has cleared,
+    /// never inside it: `cancel` and `start` wait for the commit, and an
+    /// owner's callback may wait for them. So either can run after `cancel()`
+    /// has returned.
     func allow(offerID: UUID) async throws -> PhoneDevice {
         let claim = try claimApproval(offerID)
         let id = UUID()
@@ -314,9 +325,17 @@ actor PairingService {
         commit = (id, task)
         let outcome = await task.result
         if commit?.id == id { commit = nil }
-        let device = try outcome.get()
-        await onPaired(device)
-        return device
+        switch outcome {
+        case .success(let device):
+            await onPaired(device)
+            return device
+        case .failure(let error):
+            // Only an undone Allow stored a row and deleted it again.
+            if (error as? PhoneBridgeError) == .pairingNotFinished {
+                await onPairingUndone()
+            }
+            throw error
+        }
     }
 
     /// The user denied the offer. A confirmed phone hears `pairDenied` with
@@ -712,9 +731,9 @@ actor PairingService {
     }
 
     /// `paired` cannot have reached the phone: the row Allow stored goes
-    /// again, and the offer ends as interrupted. `allow` then throws, so
-    /// `onPaired` is not called: no pairing notification, and no link for the
-    /// room. `cancel` and `start` wait for the room's close.
+    /// again, and the offer ends as interrupted. `allow` then calls
+    /// `onPairingUndone` and throws, so `onPaired` is not called: no pairing
+    /// notification. `cancel` and `start` wait for the room's close.
     private func undoAllow(_ device: PhoneDevice, because reason: String) async {
         do {
             try await devices.delete(id: device.id)

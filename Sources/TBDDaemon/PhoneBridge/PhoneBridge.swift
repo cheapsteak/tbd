@@ -103,7 +103,8 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// before it to finish. So two RPCs that change the setting at once never
 /// interleave a start with a stop, and whichever reconcile runs last acts on
 /// the settings as they are by then. `pairAllow` and `pairDeny` are not in
-/// that line, because Allow's `onPaired` reconciles, and so waits on it.
+/// that line, because Allow reconciles when it ends, paired or undone, and
+/// so waits on it.
 ///
 /// **Reconciling.**
 /// 1. With phone control off or no relay set, everything stops.
@@ -150,9 +151,12 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
 /// **Every pairing raises a TBD notification** naming the phone, so a pairing
 /// the user did not make is visible.
 ///
+/// **An undone Allow** stored the phone's row and deleted it again, because
+/// `paired` cannot have reached the phone. A reconcile in between listed the
+/// row and opened a link for it, so the undo reconciles, and that link stops.
+///
 /// `stop()` is final: no task or socket outlives it, and a later
-/// `reconcile()`, such as the one a late Allow's `onPaired` makes, changes
-/// nothing.
+/// `reconcile()`, such as the one a late Allow makes, changes nothing.
 actor PhoneBridge: PhoneBridgeControlling {
     /// The latest answer of the relay check (`GET /v1/info`).
     enum RelayCheck: Sendable, Equatable {
@@ -644,6 +648,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             devices: db.phoneDevices, preflight: preflight(for: relayURL),
             onChange: { broadcast(.phoneStatusChanged) },
             onPaired: { [weak self] device in await self?.paired(device) },
+            onPairingUndone: { [weak self] in await self?.pairingUndone() },
             now: now, backoff: backoff, clock: clock)
     }
 
@@ -652,6 +657,15 @@ actor PhoneBridge: PhoneBridgeControlling {
     /// exists, and the reconcile then changes nothing.
     private func paired(_ device: PhoneDevice) async {
         await postPairingNotice(for: device)
+        await reconcile()
+    }
+
+    /// Allow deleted the row it stored. A reconcile that ran while the row
+    /// existed opened a link for it; this one, in the line of changes, finds
+    /// the row gone and stops that link. Like `paired`, it can run after
+    /// `stop()`, on the Allow caller's task, and then does nothing.
+    private func pairingUndone() async {
+        guard !isStopped else { return }
         await reconcile()
     }
 

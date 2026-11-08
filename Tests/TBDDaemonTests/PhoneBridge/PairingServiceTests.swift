@@ -71,6 +71,8 @@ private struct PairingHarness {
     let states: PairingStateLog
     /// Every device `onPaired` was called with.
     let paired: FireRecorder<PhoneDevice>
+    /// One value per `onPairingUndone` call.
+    let undone: FireRecorder<Bool>
     let service: PairingService
 
     /// Starts an offer, parses its link, and waits until the laptop's socket
@@ -134,15 +136,16 @@ private func withPairing(laptopName: String = "acme-laptop", relayAddress: URL =
     let clock = EventDrivenTestClock()
     let states = PairingStateLog()
     let paired = FireRecorder<PhoneDevice>()
+    let undone = FireRecorder<Bool>()
     let service = PairingService(
         relayURL: relayAddress, transport: sockets, laptopKey: laptopKey, laptopName: laptopName,
         devices: db.phoneDevices, preflight: preflight,
         onChange: { states.capture() },
-        onPaired: { paired.record($0) }, now: dates.provider,
+        onPaired: { paired.record($0) }, onPairingUndone: { undone.record(true) }, now: dates.provider,
         backoff: PhoneBackoff(jitter: { $0 }), clock: clock)
     states.attach(service)
     let harness = PairingHarness(db: db, laptopKey: laptopKey, relay: relay, clock: clock, dates: dates,
-                                 states: states, paired: paired, service: service)
+                                 states: states, paired: paired, undone: undone, service: service)
     do {
         try await body(harness)
     } catch {
@@ -395,6 +398,7 @@ struct PairingServiceTests {
             // The laptop left the pairing room for good before `onPaired`.
             #expect(!h.relay.laptopPresent(room: link.room))
             #expect(h.paired.values == [device])
+            #expect(h.undone.values.isEmpty)
             let left = try await phone.nextSignal()
             #expect(left == "peer-left")
             let after = await h.service.status
@@ -491,10 +495,12 @@ struct PairingServiceTests {
             transport.release(failing: true)
             await #expect(throws: PhoneBridgeError.pairingNotFinished) { try await allowing.value }
 
-            // The row Allow stored is gone, and `onPaired` never ran.
+            // The row Allow stored is gone, `onPaired` never ran, and the
+            // owner heard of the undo once, before `allow` threw.
             let rows = try await h.db.phoneDevices.list()
             #expect(rows.isEmpty)
             #expect(h.paired.values.isEmpty)
+            #expect(h.undone.values.count == 1)
             let after = await h.service.status
             #expect(after?.state == .interrupted)
             #expect(after?.link == nil && after?.deviceName == nil && after?.confirmationCode == nil)
