@@ -105,9 +105,11 @@ less), repeated in two A/B/B/A runs, with no regression beyond noise on the
 others. Each line says whether this run meets the 20% bar. The ratio prints to
 three decimals and the verdict is read off that printed ratio, with the
 percentage rounded down, so a line never shows a ratio on one side of the bar
-and a verdict on the other. A measure that could not be banded prints its
-pooled figures and no verdict. The second run and the no-regression condition
-are a human judgement.
+and a verdict on the other. Every line prints both arms' sample counts. A
+measure that could not be banded prints its pooled figures and no verdict, and
+so does a band with fewer than ten samples on either arm, where the p90 is just
+the largest sample. The second run, the no-regression condition and whether
+the sample size is enough are a human judgement.
 
 USAGE
 -----
@@ -175,6 +177,10 @@ ENGINE_TRANSPORT = "holder"
 # The libghostty engine spec's bar for a clear win: libghostty's p90 at most
 # 0.80 of SwiftTerm's, which is 20% lower.
 ENGINE_WIN_RATIO = 0.80
+
+# The fewest samples an arm needs on a measure before an ENGINES line gives a
+# verdict. Below ten, the nearest-rank p90 is the arm's largest sample.
+ENGINE_MIN_SAMPLES = 10
 
 # The load map's entry for when each request was issued, beside the arms'
 # entries. The driver writes it in engine mode only.
@@ -269,18 +275,8 @@ class Capture:
     # taken from a build that does not.
     negative_waits: int = 0
 
-    def lost_counts(self, wanted: set[str] | None = None) -> dict[str, int]:
-        """Lost tokens per transport, over the terminals asked for."""
-        out: dict[str, int] = {}
-        for record in self.lost:
-            if wanted is not None and record.terminal.lower() not in wanted:
-                continue
-            out[record.transport] = out.get(record.transport, 0) + 1
-        return out
-
     def lost_count(self, arm: Arm, wanted: set[str] | None = None) -> int:
-        """Lost tokens on one arm, over the terminals asked for. In transport
-        mode this is `lost_counts(wanted)` for the arm's transport."""
+        """Lost tokens on one arm, over the terminals asked for."""
         return sum(
             1
             for record in self.lost
@@ -524,13 +520,16 @@ def engine_comparison_line(
 
     `unbanded` says why the samples are pooled across load bands. Such a line
     prints its figures and no verdict: a pooled p90 can hide a regression in
-    one band behind a win in the other.
+    one band behind a win in the other. So does a line with fewer than
+    `ENGINE_MIN_SAMPLES` samples on either arm.
     """
     if not ghostty or not swiftterm:
-        return f"  {name:<22} (no samples on one arm)"
+        return f"  {name:<22} libghostty n={len(ghostty)} / swiftterm n={len(swiftterm)} (no samples on one arm)"
     ghostty_p90 = percentile(sorted(ghostty), 0.90)
     swiftterm_p90 = percentile(sorted(swiftterm), 0.90)
-    figures = f"libghostty {ghostty_p90:.3f} / swiftterm {swiftterm_p90:.3f}"
+    figures = (
+        f"libghostty {ghostty_p90:.3f} (n={len(ghostty)}) / swiftterm {swiftterm_p90:.3f} (n={len(swiftterm)})"
+    )
     if swiftterm_p90 <= 0:
         return f"  {name:<22} {figures} (no ratio: swiftterm's p90 is 0)"
     # The verdict is read off the ratio as printed, in thousandths, and the
@@ -539,6 +538,8 @@ def engine_comparison_line(
     shown = f"{ghostty_p90 / swiftterm_p90:.3f}"
     if unbanded is not None:
         return f"  {name:<22} {figures} = {shown}x (not banded: {unbanded}; no verdict)"
+    if min(len(ghostty), len(swiftterm)) < ENGINE_MIN_SAMPLES:
+        return f"  {name:<22} {figures} = {shown}x (too few samples; no verdict)"
     thousandths = int(shown.replace(".", ""))
     bar = round(ENGINE_WIN_RATIO * 1000)
     if thousandths == 1000:
@@ -811,7 +812,7 @@ def report(
     swiftterm, libghostty = ENGINES
     print(
         "\nENGINES (p90, libghostty / swiftterm; a clear win is 0.80x or less,"
-        " repeated in two runs)",
+        f" repeated in two runs; a verdict needs {ENGINE_MIN_SAMPLES} samples an arm)",
         file=out,
     )
     if banded:
@@ -952,10 +953,10 @@ SELF_TEST_LOAD_MAP = {
 
 def self_test_draw_run() -> tuple[list[str], dict, dict]:
     """Engine-mode draw lines, load map and request times for a run of 100
-    requests per arm: 95 at idle, then 5 under load. Idle, libghostty draws
-    in 2 ms and SwiftTerm in 5; under load, libghostty in 40 and SwiftTerm
-    in 30. Pooled, libghostty's p90 is 0.40x SwiftTerm's and the load-band
-    regression vanishes; banded, it shows.
+    requests per arm: 90 at idle, then 10 under load, the fewest a verdict
+    needs. Idle, libghostty draws in 2 ms and SwiftTerm in 5; under load,
+    libghostty in 40 and SwiftTerm in 30. Pooled, libghostty's p90 is far
+    below SwiftTerm's and the load-band regression vanishes; banded, it shows.
 
     SwiftTerm's draws also test the placement. The load of its second
     request is missing, so the draw after it joins neither band. Four more
@@ -981,7 +982,7 @@ def self_test_draw_run() -> tuple[list[str], dict, dict]:
     times: dict[str, dict[str, float]] = {"swiftterm": {}, "libghostty": {}}
     seq = 0
     for index in range(100):
-        under_load = index >= 95
+        under_load = index >= 90
         for arm, terminal, idle_ms, load_ms in (
             ("swiftterm", "SSSS", 5.0, 30.0),
             ("libghostty", "GGGG", 2.0, 40.0),
@@ -993,9 +994,9 @@ def self_test_draw_run() -> tuple[list[str], dict, dict]:
             wait = load_ms if under_load else idle_ms
             # The echo comes back 3 ms after the request; its chunk then waits.
             lines.append(draw(issued + datetime.timedelta(milliseconds=3 + wait), terminal, wait))
-    # SwiftTerm's last idle request is seq 189 at 47.25 s, its first under
-    # load seq 191 at 47.75 s.
-    lines.append(draw(base + datetime.timedelta(seconds=47.80), "SSSS", 500.0))
+    # SwiftTerm's last idle request is seq 179 at 44.75 s, its first under
+    # load seq 181 at 45.25 s.
+    lines.append(draw(base + datetime.timedelta(seconds=45.30), "SSSS", 500.0))
     lines.append(draw(base + datetime.timedelta(seconds=0.1), "SSSS", 1.0))
     lines.append(draw(base + datetime.timedelta(seconds=52.0), "SSSS", 1.0))
     lines.append(draw(None, "SSSS", 1.0))
@@ -1016,7 +1017,8 @@ def self_test() -> int:
 
     check("echo count", len(capture.echoes), 8)
     check("draw count", len(capture.draws), 3)
-    check("tmux lost", capture.lost_counts().get("tmux"), 1)
+    tmux_arm, holder_arm = transport_arms()
+    check("tmux lost", capture.lost_count(tmux_arm), 1)
     check("refused notshell", capture.refusal_counts().get("notshell"), 1)
     check("refused malformed", capture.refusal_counts().get("malformed"), 1)
     # The truncated `draw ... chunks=9` line matched the verb and is counted,
@@ -1182,9 +1184,9 @@ def self_test() -> int:
     # somebody else's number.
     foreign = parse(io.StringIO(SELF_TEST_FOREIGN_ARM_LINES))
     check("foreign lost records", len(foreign.lost), 2)
-    check("foreign lost, unfiltered", foreign.lost_counts().get("holder"), 1)
-    check("foreign lost, filtered out", foreign.lost_counts({"aaaa"}).get("holder"), None)
-    check("own lost, filtered in", foreign.lost_counts({"aaaa"}).get("tmux"), 1)
+    check("foreign lost, unfiltered", foreign.lost_count(holder_arm), 1)
+    check("foreign lost, filtered out", foreign.lost_count(holder_arm, {"aaaa"}), 0)
+    check("own lost, filtered in", foreign.lost_count(tmux_arm, {"aaaa"}), 1)
     check("foreign refusal, unfiltered", foreign.refusal_counts().get("unwritable"), 1)
     check("foreign refusal, filtered out", foreign.refusal_counts({"aaaa"}).get("unwritable"), None)
     check("own refusal, filtered in", foreign.refusal_counts({"aaaa"}).get("noview"), 1)
@@ -1249,11 +1251,14 @@ def self_test() -> int:
         "libghostty on screen",
         "libghostty chunks      3 fed, 0 dropped past the ring",
         "ENGINES (p90, libghostty / swiftterm",
-        "echo idle              libghostty 0.700 / swiftterm 3.000 = 0.233x"
-        " (libghostty 76% lower: MEETS the 20% bar)",
-        "echo load              libghostty 5.000 / swiftterm 4.000 = 1.250x (libghostty 25% higher)",
+        "a verdict needs 10 samples an arm)",
+        # Two samples a band: the ratio prints, the verdict does not.
+        "echo idle              libghostty 0.700 (n=2) / swiftterm 3.000 (n=2) = 0.233x"
+        " (too few samples; no verdict)",
+        "echo load              libghostty 5.000 (n=2) / swiftterm 4.000 (n=2) = 1.250x"
+        " (too few samples; no verdict)",
         # No request times, so the draws are not banded and get no verdict.
-        "draw on screen         libghostty 9.000 / swiftterm 10.000 = 0.900x"
+        "draw on screen         libghostty 9.000 (n=1) / swiftterm 10.000 (n=1) = 0.900x"
         " (not banded: no request times; no verdict)",
     ):
         if needle not in engine_text:
@@ -1273,9 +1278,9 @@ def self_test() -> int:
     report(engine_capture, out=engine_plain, arms=arms)
     engine_plain_text = engine_plain.getvalue()
     for needle in (
-        "echo all               libghostty 5.000 / swiftterm 4.000 = 1.250x"
+        "echo all               libghostty 5.000 (n=4) / swiftterm 4.000 (n=4) = 1.250x"
         " (not banded: no load map; no verdict)",
-        "draw on screen         libghostty 9.000 / swiftterm 10.000 = 0.900x"
+        "draw on screen         libghostty 9.000 (n=1) / swiftterm 10.000 (n=1) = 0.900x"
         " (not banded: no load map; no verdict)",
     ):
         if needle not in engine_plain_text:
@@ -1284,8 +1289,8 @@ def self_test() -> int:
         if absent in engine_plain_text:
             failures.append(f"unbanded engine report printed {absent!r}")
 
-    # Draws banded by time. Pooled, libghostty's p90 is 0.40x SwiftTerm's,
-    # which would MEET the bar while hiding a regression under load.
+    # Draws banded by time. Pooled, libghostty's p90 would MEET the bar
+    # while hiding a regression under load.
     draw_lines, draw_loads, draw_times = self_test_draw_run()
     draw_capture = parse(io.StringIO("\n".join(draw_lines) + "\n"))
     check("timed draws", sum(d.at is not None for d in draw_capture.draws), len(draw_lines) - 1)
@@ -1297,15 +1302,17 @@ def self_test() -> int:
     )
     drawn_text = drawn.getvalue()
     for needle in (
-        "swiftterm draw idle    n=95",
-        "swiftterm draw load    n=5 ",
+        "swiftterm draw idle    n=90",
+        "swiftterm draw load    n=10 ",
         "swiftterm draw bands   in neither band: 4"
         " (2 outside the run, 1 no load recorded, 1 no log time)",
-        "libghostty draw idle   n=95",
+        "libghostty draw idle   n=90",
         "libghostty draw bands  in neither band: 0",
-        "draw idle              libghostty 2.000 / swiftterm 5.000 = 0.400x"
+        "draw idle              libghostty 2.000 (n=90) / swiftterm 5.000 (n=90) = 0.400x"
         " (libghostty 60% lower: MEETS the 20% bar)",
-        "draw load              libghostty 40.000 / swiftterm 30.000 = 1.333x (libghostty 33% higher)",
+        # Ten samples a band is enough for a verdict.
+        "draw load              libghostty 40.000 (n=10) / swiftterm 30.000 (n=10) = 1.333x"
+        " (libghostty 33% higher)",
     ):
         if needle not in drawn_text:
             failures.append(f"banded draw report is missing {needle!r}")
@@ -1339,7 +1346,7 @@ def self_test() -> int:
     )
     metal_out = io.StringIO()
     report(metal, out=metal_out, arms=arms)
-    if "draw on screen         (no samples on one arm)" not in metal_out.getvalue():
+    if "draw on screen         libghostty n=1 / swiftterm n=0 (no samples on one arm)" not in metal_out.getvalue():
         failures.append("engine report invented a draw comparison with one arm empty")
 
     # The bar is inclusive. The verdict is the printed ratio's, and the
@@ -1355,8 +1362,18 @@ def self_test() -> int:
         (1.0059, "1.006x (libghostty under 1% higher)"),
         (1.0199, "1.020x (libghostty 2% higher)"),
     ):
-        line = engine_comparison_line("x", [ghostty_p90], [1.0])
+        line = engine_comparison_line("x", [ghostty_p90] * ENGINE_MIN_SAMPLES, [1.0] * ENGINE_MIN_SAMPLES)
         check(f"ratio line for {ghostty_p90}", line.split(" = ", 1)[-1], expected)
+    # Below the floor on either arm the ratio prints and the verdict does not.
+    floor = ENGINE_MIN_SAMPLES
+    for ghostty_n, swiftterm_n, expected in (
+        (floor - 1, floor, "0.500x (too few samples; no verdict)"),
+        (floor, floor - 1, "0.500x (too few samples; no verdict)"),
+        (floor, floor, "0.500x (libghostty 50% lower: MEETS the 20% bar)"),
+    ):
+        line = engine_comparison_line("x", [0.5] * ghostty_n, [1.0] * swiftterm_n)
+        check(f"verdict at n={ghostty_n}/{swiftterm_n}", line.split(" = ", 1)[-1], expected)
+        check(f"counts at n={ghostty_n}/{swiftterm_n}", f"(n={ghostty_n}) / swiftterm 1.000 (n={swiftterm_n})" in line, True)
     # The arms are refused alongside `terminals`.
     try:
         report(engine_capture, out=io.StringIO(), terminals={"ssss"}, arms=arms)

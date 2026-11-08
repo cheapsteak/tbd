@@ -2,7 +2,8 @@
 
 They cover the arguments of both modes, the daemon-row refusals, engine
 mode's check of each arm's engine against canned `log show --style ndjson`
-lines and a canned `defaults read`, the A/B/B/A request order, and whole runs
+lines and a canned `defaults read` and `read-type`, the A/B/B/A request order,
+the shared `log show` call, and whole runs
 of both modes with every outside call replaced. Nothing here reaches `tbd`,
 `log`, `defaults`, `pgrep`, `ps` or a running app. Request files go to a temp
 directory.
@@ -31,6 +32,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
@@ -59,7 +61,7 @@ TMUX_ID = "7C7C7C7C-0000-4000-8000-000000000003"
 AGENT_ID = "8D8D8D8D-0000-4000-8000-000000000004"
 ENGINE_TERMINALS = {"swiftterm": SWIFTTERM_ID, "libghostty": GHOSTTY_ID}
 BASE = datetime.datetime(2026, 11, 8, 10, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
-FLAG_ON = probe.EngineFlag("com.github.cheapsteak.tbd", "1")
+FLAG_ON = probe.EngineFlag("com.github.cheapsteak.tbd", "1", "boolean")
 
 
 def at(seconds: float) -> datetime.datetime:
@@ -415,16 +417,73 @@ class EngineCheckTests(unittest.TestCase):
             probe.parse_etime("")
 
 
+class LogShowTests(unittest.TestCase):
+    """Both `log show` calls, the report's capture and the engine lines, go
+    through `log_show`: one command shape and one way to fail."""
+
+    SINCE = datetime.datetime(2026, 11, 8, 10, 0, 0)
+    CAPTURE_COMMAND = (
+        "/usr/bin/log show --start '2026-11-08 10:00:00' --info --predicate"
+        " 'subsystem == \"com.tbd.app\" AND category == \"terminallatency\"'"
+    )
+
+    def test_the_capture_reads_info_lines_from_the_run_start(self):
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="lines\n", stderr="")
+        with mock.patch.object(probe.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(probe.capture_log(self.SINCE), "lines\n")
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/log", "show", "--start", "2026-11-08 10:00:00", "--info", "--predicate",
+                'subsystem == "com.tbd.app" AND category == "terminallatency"',
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["timeout"], probe.LOG_SHOW_TIMEOUT_SECONDS)
+
+    def failure(self, call: Callable[[datetime.datetime], str], error: Exception) -> str:
+        with mock.patch.object(probe.subprocess, "run", side_effect=error), self.assertRaises(SystemExit) as raised:
+            call(self.SINCE)
+        return str(raised.exception.code)
+
+    def test_a_capture_that_times_out_names_the_command_to_rerun(self):
+        message = self.failure(probe.capture_log, subprocess.TimeoutExpired(cmd="log", timeout=120))
+        self.assertTrue(message.startswith(
+            f"`{self.CAPTURE_COMMAND}` did not return within {probe.LOG_SHOW_TIMEOUT_SECONDS}s,"
+            " so this run has no capture to report."
+        ), message)
+        self.assertIn("re-run that command by hand and pipe it to terminal-latency-report.py.", message)
+
+    def test_both_calls_fail_the_same_way(self):
+        timeout = subprocess.TimeoutExpired(cmd="log", timeout=120)
+        failed = subprocess.CalledProcessError(64, "log", output="", stderr="log: bad predicate\n")
+        for call, consequence in (
+            (probe.capture_log, "so this run has no capture to report."),
+            (probe.read_app_log, "so no arm's engine could be checked."),
+        ):
+            for error, how in (
+                (timeout, f"did not return within {probe.LOG_SHOW_TIMEOUT_SECONDS}s"),
+                (failed, "failed (exit 64: log: bad predicate)"),
+            ):
+                message = self.failure(call, error)
+                self.assertTrue(message.startswith("`/usr/bin/log show --start "), message)
+                self.assertIn(f"` {how}, {consequence}", message)
+
+
 class EngineFlagTests(unittest.TestCase):
-    def read(self, executable: str, returncode: int, stdout: str = "", stderr: str = ""):
-        """`read_engine_flag` against a `ps` that finds `executable` and a
-        `defaults` that exits `returncode`, and each command it ran."""
+    def read(
+        self, executable: str, returncode: int, stdout: str = "", stderr: str = "", value_type: str = "boolean"
+    ):
+        """`read_engine_flag` against a `ps` that finds `executable`, a
+        `defaults read` that exits `returncode`, and a `defaults read-type`
+        that says `value_type`, and each command it ran."""
         commands: list[list[str]] = []
 
         def run(command, **kwargs):
             commands.append(command)
             if command[0] == "ps":
                 return subprocess.CompletedProcess(command, 0, stdout=executable + "\n", stderr="")
+            if command[1] == "read-type":
+                return subprocess.CompletedProcess(command, 0, stdout=f"Type is {value_type}\n", stderr="")
             return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
 
         with mock.patch.object(probe.subprocess, "run", run):
@@ -434,7 +493,8 @@ class EngineFlagTests(unittest.TestCase):
         flag, commands = self.read("/Applications/TBD.app/Contents/MacOS/TBDApp", 0, "1\n")
         self.assertEqual(commands[0], ["ps", "-o", "comm=", "-p", str(PID)])
         self.assertEqual(commands[1], ["defaults", "read", "com.github.cheapsteak.tbd", "useGhosttyTerminalEngine"])
-        self.assertEqual(flag, probe.EngineFlag("com.github.cheapsteak.tbd", "1"))
+        self.assertEqual(commands[2], ["defaults", "read-type", "com.github.cheapsteak.tbd", "useGhosttyTerminalEngine"])
+        self.assertEqual(flag, FLAG_ON)
         self.assertIsNone(probe.engine_flag_problem(flag))
 
     def test_an_unbundled_build_reads_the_tbdapp_domain(self):
@@ -447,7 +507,7 @@ class EngineFlagTests(unittest.TestCase):
             "/Applications/TBD.app/Contents/MacOS/TBDApp", 1,
             stderr="Error: Could not find key 'useGhosttyTerminalEngine' in domain 'com.github.cheapsteak.tbd'.",
         )
-        self.assertEqual(flag, probe.EngineFlag("com.github.cheapsteak.tbd", None))
+        self.assertEqual(flag, probe.EngineFlag("com.github.cheapsteak.tbd", None, None))
         problem = probe.engine_flag_problem(flag)
         assert problem is not None
         self.assertIn(
@@ -456,10 +516,27 @@ class EngineFlagTests(unittest.TestCase):
         )
 
     def test_only_a_true_boolean_is_on(self):
-        for value in ("0", "true", "YES", ""):
-            flag = probe.EngineFlag("TBDApp", value)
-            self.assertFalse(flag.enabled, value)
-            self.assertIn(f"reads {value!r}", probe.engine_flag_problem(flag) or "")
+        for value, value_type in (
+            ("0", "boolean"),
+            # `defaults write ... -string 1` prints 1 too, and the app reads it
+            # as unset.
+            ("1", "string"),
+            ("1", "integer"),
+            ("true", "string"),
+            ("YES", "string"),
+            ("", "string"),
+        ):
+            flag, _ = self.read("/Users/someone/tbd/.build/debug/TBDApp", 0, value + "\n", value_type=value_type)
+            self.assertEqual(flag, probe.EngineFlag("TBDApp", value, value_type))
+            self.assertFalse(flag.enabled, (value, value_type))
+            problem = probe.engine_flag_problem(flag) or ""
+            self.assertIn(f"reads {value!r}", problem)
+            if value_type != "boolean":
+                self.assertIn(
+                    f"`defaults read-type TBDApp useGhosttyTerminalEngine` says {value_type}, not boolean", problem
+                )
+        flag, _ = self.read("/Users/someone/tbd/.build/debug/TBDApp", 0, "1\n", value_type="boolean")
+        self.assertTrue(flag.enabled)
 
     def test_a_process_that_is_gone_is_refused(self):
         def run(command, **kwargs):
@@ -561,8 +638,9 @@ class ReportCommandTests(unittest.TestCase):
         out = stdout.getvalue()
         self.assertEqual(status, 0)
         self.assertIn(
-            "draw idle              libghostty 2.000 / swiftterm 4.000 = 0.500x"
-            " (libghostty 50% lower: MEETS the 20% bar)",
+            # One sample an arm: banded, with the ratio and no verdict.
+            "draw idle              libghostty 2.000 (n=1) / swiftterm 4.000 (n=1) = 0.500x"
+            " (too few samples; no verdict)",
             out,
         )
         self.assertIn("swiftterm draw bands   in neither band: 0", out)
@@ -657,8 +735,8 @@ class EngineRunTests(unittest.TestCase):
         self.assertIn("libghostty all         n=2", out)
         self.assertIn("swiftterm flatness     p90 load / p90 idle = 1.00x (WITHIN the 2x bound)", out)
         self.assertIn("libghostty absolute    p90 under load = 1.000 ms (WITHIN the 5 ms bound)", out)
-        self.assertIn("echo idle              libghostty 1.000 / swiftterm 2.000 = 0.500x", out)
-        self.assertIn("echo load              libghostty 1.000 / swiftterm 2.000 = 0.500x", out)
+        self.assertIn("echo idle              libghostty 1.000 (n=1) / swiftterm 2.000 (n=1) = 0.500x", out)
+        self.assertIn("echo load              libghostty 1.000 (n=1) / swiftterm 2.000 (n=1) = 0.500x", out)
         self.assertNotIn("NOT VERIFIED", out)
 
     def test_draws_are_banded_by_the_request_times_the_run_recorded(self):
@@ -683,8 +761,8 @@ class EngineRunTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         self.assertIn("swiftterm draw idle    n=1      p50=   4.000", out)
         self.assertIn("libghostty draw load   n=1      p50=   9.000", out)
-        self.assertIn("draw idle              libghostty 2.000 / swiftterm 4.000 = 0.500x", out)
-        self.assertIn("draw load              libghostty 9.000 / swiftterm 6.000 = 1.500x (libghostty 50% higher)", out)
+        self.assertIn("draw idle              libghostty 2.000 (n=1) / swiftterm 4.000 (n=1) = 0.500x", out)
+        self.assertIn("draw load              libghostty 9.000 (n=1) / swiftterm 6.000 (n=1) = 1.500x", out)
         self.assertNotIn("draw on screen         libghostty", out)
         # The kept map carries the times too, so a re-report bands the same way.
         self.assertEqual(kept["times"], {"swiftterm": {"1": 1000.25, "4": 1001.0}, "libghostty": {"2": 1000.5, "3": 1000.75}})
@@ -698,7 +776,7 @@ class EngineRunTests(unittest.TestCase):
         self.assertEqual(out, "")
 
     def test_flag_off_refuses_before_any_keystroke(self):
-        engine_flag = FakeFlag(probe.EngineFlag("com.github.cheapsteak.tbd", None))
+        engine_flag = FakeFlag(probe.EngineFlag("com.github.cheapsteak.tbd", None, None))
         log = FakeLog(STANDARD_ENGINE_LINES)
         status, out, err, written = self.run_main(log, engine_flag=engine_flag)
         self.assertIn("REFUSING TO RUN — the libghostty engine flag is not on", str(status))
@@ -712,7 +790,7 @@ class EngineRunTests(unittest.TestCase):
         log = FakeLog(STANDARD_ENGINE_LINES)
 
         def turn_off():
-            engine_flag.flag = probe.EngineFlag("com.github.cheapsteak.tbd", "0")
+            engine_flag.flag = probe.EngineFlag("com.github.cheapsteak.tbd", "0", "boolean")
             log.lines.append(flag(100, False))
 
         status, out, err, written = self.run_main(log, during_run=turn_off, engine_flag=engine_flag)
@@ -749,7 +827,7 @@ class EngineRunTests(unittest.TestCase):
         self.assertLess(out.index("ENGINES NOT VERIFIED"), out.index("ECHO"))
 
     def test_trust_engines_still_refuses_with_the_flag_off(self):
-        engine_flag = FakeFlag(probe.EngineFlag("TBDApp", "0"))
+        engine_flag = FakeFlag(probe.EngineFlag("TBDApp", "0", "boolean"))
         status, out, err, written = self.run_main(
             FakeLog([]), argv=self.ARGV + ["--trust-engines"], engine_flag=engine_flag
         )

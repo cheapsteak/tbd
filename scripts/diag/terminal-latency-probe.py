@@ -94,10 +94,12 @@ run against it.
 
 A build while the engine is off logs nothing, so a libghostty panel rebuilt
 then becomes SwiftTerm while its latest line still says libghostty. Two checks
-close that gap. The flag itself must read true in the app's own defaults
-domain (`com.github.cheapsteak.tbd` for an app inside a `.app` bundle,
-`TBDApp` for an unbundled build; unset is off). And no flag line may come
-after an arm's latest build line: the flag was off at some point since.
+close that gap. The flag itself must be a boolean true in the app's own
+defaults domain (`com.github.cheapsteak.tbd` for an app inside a `.app`
+bundle, `TBDApp` for an unbundled build; unset is off, and so is a string,
+which `defaults read` prints just as it prints a boolean). And no flag line
+may come after an arm's latest build line: the flag was off at some point
+since.
 
 The run is refused before any keystroke when the flag is not on, no build
 line names an arm's id, the latest one names the other engine, or a flag line
@@ -160,6 +162,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -174,10 +177,6 @@ REPORT_PATH = HERE / "terminal-latency-report.py"
 REQUEST_PREFIX = "terminal-latency-probe."
 REQUEST_SUFFIX = ".json"
 ARMS = ("tmux", "holder")
-# Engine mode's arms, in A/B order. They must match the report's `ENGINES`,
-# which labels the figures and looks the load map up by these names.
-ENGINE_ARMS = ("swiftterm", "libghostty")
-ENGINE_TRANSPORT = "holder"
 
 
 def load_report_module():
@@ -197,6 +196,14 @@ def load_report_module():
     sys.modules["terminal_latency_report"] = module
     spec.loader.exec_module(module)
     return module
+
+
+# Engine mode's arms, in A/B order, and the one transport both are on, as the
+# report labels its figures and looks the load map up by them. `main` loads
+# the report again for its run, so `report()` writes to the stdout of that run.
+_report_at_import = load_report_module()
+ENGINE_ARMS = _report_at_import.ENGINES
+ENGINE_TRANSPORT = _report_at_import.ENGINE_TRANSPORT
 
 
 def tbd_home() -> Path:
@@ -332,44 +339,57 @@ def remove_request_files(directory: Path) -> None:
                 pass
 
 
-def capture_log(since: datetime.datetime) -> str:
-    stamp = since.strftime("%Y-%m-%d %H:%M:%S")
+# The full path: `log` is a shell builtin in zsh, and this script, and the
+# command it prints for a re-run, must reach the macOS tool whatever runs them.
+LOG_BINARY = "/usr/bin/log"
+APP_SUBSYSTEM = "com.tbd.app"
+LATENCY_CATEGORY = "terminallatency"
+
+
+def log_show(start: datetime.datetime, options: list[str], category: str, consequence: str) -> str:
+    """The app's lines in `category` from `start` until now.
+
+    A `log show` that times out or fails ends the run, naming the command,
+    how it failed and what that leaves undone: `consequence`.
+    """
+    command = [
+        LOG_BINARY,
+        "show",
+        "--start",
+        start.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+        *options,
+        "--predicate",
+        f'subsystem == "{APP_SUBSYSTEM}" AND category == "{category}"',
+    ]
     try:
         result = subprocess.run(
-            [
-                "log",
-                "show",
-                "--start",
-                stamp,
-                "--info",
-                "--predicate",
-                'subsystem == "com.tbd.app" AND category == "terminallatency"',
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=LOG_SHOW_TIMEOUT_SECONDS,
+            command, check=True, capture_output=True, text=True, timeout=LOG_SHOW_TIMEOUT_SECONDS
         )
     except subprocess.TimeoutExpired:
-        raise SystemExit(
-            f"`log show` did not return within {LOG_SHOW_TIMEOUT_SECONDS}s, so this run"
-            " has no capture to report. The samples were taken and are in the log store;"
-            " re-run `log show --start"
-            f" '{stamp}' --info --predicate 'subsystem == \"com.tbd.app\" AND category =="
-            " \"terminallatency\"'` by hand and pipe it to terminal-latency-report.py."
-        ) from None
-    return result.stdout
+        failure = f"did not return within {LOG_SHOW_TIMEOUT_SECONDS}s"
+    except subprocess.CalledProcessError as error:
+        failure = f"failed (exit {error.returncode}: {error.stderr.strip()})"
+    else:
+        return result.stdout
+    raise SystemExit(f"`{shlex.join(command)}` {failure}, so {consequence}")
+
+
+def capture_log(since: datetime.datetime) -> str:
+    """The latency lines, `.info` included, for the report."""
+    return log_show(
+        since,
+        ["--info"],
+        LATENCY_CATEGORY,
+        "this run has no capture to report. The samples were taken and are in the log store;"
+        " re-run that command by hand and pipe it to terminal-latency-report.py.",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Engine mode: which engine each arm's terminal is on, from the app's log
 # ---------------------------------------------------------------------------
 
-# The full path: `log` is a shell builtin in zsh, and this script must reach
-# the macOS tool whatever ran it.
-LOG_BINARY = "/usr/bin/log"
 APP_PROCESS_NAME = "TBDApp"
-APP_SUBSYSTEM = "com.tbd.app"
 ENGINE_CATEGORY = "terminalEngine"
 # Taken off the app's age, so a line logged in the launch's first second is
 # still inside the window.
@@ -580,31 +600,9 @@ def read_app_log(start: datetime.datetime) -> str:
     No `--info`: the engine lines are `.notice`, which the store keeps
     longest, and the rule reads nothing else.
     """
-    command = [
-        LOG_BINARY,
-        "show",
-        "--start",
-        start.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
-        "--style",
-        "ndjson",
-        "--predicate",
-        f'subsystem == "{APP_SUBSYSTEM}" AND category == "{ENGINE_CATEGORY}"',
-    ]
-    try:
-        result = subprocess.run(
-            command, check=True, capture_output=True, text=True, timeout=LOG_SHOW_TIMEOUT_SECONDS
-        )
-    except subprocess.TimeoutExpired:
-        raise SystemExit(
-            f"`{LOG_BINARY} show` for the app's engine lines did not return within"
-            f" {LOG_SHOW_TIMEOUT_SECONDS}s, so no arm's engine could be checked."
-        ) from None
-    except subprocess.CalledProcessError as error:
-        raise SystemExit(
-            f"`{LOG_BINARY} show` failed reading the app's engine lines"
-            f" (exit {error.returncode}): {error.stderr.strip()}"
-        ) from None
-    return result.stdout
+    return log_show(
+        start, ["--style", "ndjson"], ENGINE_CATEGORY, "no arm's engine could be checked."
+    )
 
 
 def parse_etime(text: str) -> int:
@@ -667,15 +665,19 @@ ENGINE_FLAG_KEY = "useGhosttyTerminalEngine"
 
 @dataclass(frozen=True)
 class EngineFlag:
-    """The app's libghostty engine flag, as `defaults read` gives it."""
+    """The app's libghostty engine flag, as `defaults read` and
+    `defaults read-type` give it."""
 
     domain: str
     value: str | None  # as printed, or None when the key is unset
+    value_type: str | None  # "boolean", "string", ..., or None when unset or unread
 
     @property
     def enabled(self) -> bool:
-        # `defaults read` prints a boolean as 1 or 0.
-        return self.value == "1"
+        # `defaults read` prints a boolean true as 1, and a string "1" the
+        # same way. The app reads the key `as? Bool`, so the string is unset
+        # to it, which is off: only a boolean 1 is on.
+        return self.value_type == "boolean" and self.value == "1"
 
 
 def defaults_domain(executable: str) -> str:
@@ -694,17 +696,33 @@ def read_engine_flag(pid: int) -> EngineFlag:
         )
     domain = defaults_domain(executable)
     # A missing key and a missing domain both exit non-zero: unset.
-    result = subprocess.run(
+    value = subprocess.run(
         ["defaults", "read", domain, ENGINE_FLAG_KEY], capture_output=True, text=True, timeout=30
     )
-    return EngineFlag(domain, result.stdout.strip() if result.returncode == 0 else None)
+    if value.returncode != 0:
+        return EngineFlag(domain, None, None)
+    # Prints "Type is boolean".
+    kind = subprocess.run(
+        ["defaults", "read-type", domain, ENGINE_FLAG_KEY], capture_output=True, text=True, timeout=30
+    )
+    value_type = kind.stdout.strip().removeprefix("Type is ") if kind.returncode == 0 else None
+    return EngineFlag(domain, value.stdout.strip(), value_type)
 
 
 def engine_flag_problem(flag: EngineFlag) -> str | None:
     """Why the flag is not on, or None when it is."""
     if flag.enabled:
         return None
-    reads = "nothing (unset, which is off)" if flag.value is None else repr(flag.value)
+    if flag.value is None:
+        reads = "nothing (unset, which is off)"
+    elif flag.value_type != "boolean":
+        reads = (
+            f"{flag.value!r}, but `defaults read-type {flag.domain} {ENGINE_FLAG_KEY}` says"
+            f" {flag.value_type or 'nothing'}, not boolean. The app reads a string as unset,"
+            " which is off, and this check takes only the boolean the Settings toggle writes"
+        )
+    else:
+        reads = repr(flag.value)
     return (
         f"the libghostty engine flag is not on: `defaults read {flag.domain} {ENGINE_FLAG_KEY}`"
         f" reads {reads}. While it is off, a panel that is rebuilt lands on SwiftTerm and logs"
