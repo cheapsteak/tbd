@@ -338,8 +338,10 @@ struct PhoneServiceHarness: Sendable {
     /// A terminal of `kind` in a new worktree of a new repo: a local
     /// worktree, or with `inRemoteLane` a remote lane's row, whose location
     /// is a provider's session. A Claude terminal has a Claude session ID, so
-    /// it can be parked.
-    func seedTerminal(kind: TerminalKind = .claude, inRemoteLane: Bool = false) async throws -> TBDShared.Terminal {
+    /// it can be parked. `profileID` is the terminal's model profile.
+    func seedTerminal(
+        kind: TerminalKind = .claude, inRemoteLane: Bool = false, profileID: UUID? = nil
+    ) async throws -> TBDShared.Terminal {
         let repo = try await db.repos.create(
             path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktreeID: UUID
@@ -354,7 +356,7 @@ struct PhoneServiceHarness: Sendable {
         }
         return try await db.terminals.create(
             worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            claudeSessionID: kind == .claude ? "acme-session" : nil, kind: kind)
+            claudeSessionID: kind == .claude ? "acme-session" : nil, profileID: profileID, kind: kind)
     }
 
     /// Parks `terminalID` as the idle sweep does.

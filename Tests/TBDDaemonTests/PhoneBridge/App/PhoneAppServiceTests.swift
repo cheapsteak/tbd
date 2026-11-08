@@ -184,7 +184,9 @@ struct PhoneAppServiceTests {
         let outbox = await h.connect()
 
         let (reply, _) = try await h.request(
-            .sessionFork, params: SessionForkParams(session: .local(terminalID: terminalID), profileID: nil), on: outbox)
+            .transcriptOpen,
+            params: TranscriptOpenParams(session: .local(terminalID: terminalID), showDetails: false, resume: false),
+            on: outbox)
 
         #expect(reply.error?.code == .unavailable)
         #expect(h.actions.calls.isEmpty)

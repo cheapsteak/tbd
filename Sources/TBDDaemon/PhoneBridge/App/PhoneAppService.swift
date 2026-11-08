@@ -551,8 +551,19 @@ actor PhoneAppService: PhoneAppHandling {
             return Self.typed(PhonePromptAnswerParams.self) { [self] params, context in
                 try await self.promptAnswer(params, context)
             }
+        case .profilesList:
+            return Self.typed(PhoneEmpty.self) { [self] params, context in
+                try await self.profilesList(params, context)
+            }
+        case .sessionSwitchProfile:
+            return Self.typed(SessionSwitchProfileParams.self) { [self] params, context in
+                try await self.sessionSwitchProfile(params, context)
+            }
+        case .sessionFork:
+            return Self.typed(SessionForkParams.self) { [self] params, context in
+                try await self.sessionFork(params, context)
+            }
         case .transcriptOpen, .transcriptPage, .transcriptDetail, .transcriptClose,
-             .profilesList, .sessionSwitchProfile, .sessionFork,
              .worktreeCreate, .remoteProviders, .remoteCreate:
             return nil
         }

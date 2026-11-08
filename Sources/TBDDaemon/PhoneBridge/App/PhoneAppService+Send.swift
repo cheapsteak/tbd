@@ -227,8 +227,9 @@ extension PhoneAppService {
 
     /// `response`'s result as `R`. One that does not decode is `internal`:
     /// the handler catches the decoding error itself, so it never reads as
-    /// the phone's `bad_request`, and never as a success.
-    private static func decoded<R: Decodable>(_ type: R.Type, from response: RPCResponse, method: String) throws -> R {
+    /// the phone's `bad_request`, and never as a success. Every action
+    /// handler reads its `RPCResponse` through this.
+    static func decoded<R: Decodable>(_ type: R.Type, from response: RPCResponse, method: String) throws -> R {
         do {
             return try response.decodeResult(R.self)
         } catch {
