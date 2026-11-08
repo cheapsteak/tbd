@@ -2,13 +2,21 @@
 
 They cover the arguments of both modes, the daemon-row refusals, engine
 mode's check of each arm's engine against canned `log show --style ndjson`
-lines, the A/B/B/A request order, and whole engine-mode runs with every
-outside call replaced. Nothing here reaches `tbd`, `log`, `pgrep`, `ps` or a
-running app. Request files go to a temp directory.
+lines and a canned `defaults read`, the A/B/B/A request order, and whole runs
+of both modes with every outside call replaced. Nothing here reaches `tbd`,
+`log`, `defaults`, `pgrep`, `ps` or a running app. Request files go to a temp
+directory.
 
     python3 -I -m unittest discover -s scripts/diag -p 'test_terminal_latency_probe.py'
 
-The report's own fixtures, engine-mode labels included, are its `--self-test`.
+The report's own fixtures, engine-mode labels and draw bands included, are
+its `--self-test`.
+
+The engine lines below are the app's own words. They live in
+`TerminalEngineNotice.message`, in
+`Sources/TBDApp/Terminal/Engine/TerminalEngineFactory.swift`, and
+`Tests/TBDAppTests/TerminalEngineFactoryTests.swift` pins them there. A change
+to either side that the other does not follow fails one of the two suites.
 """
 
 from __future__ import annotations
@@ -34,6 +42,7 @@ def _load_probe():
     spec = importlib.util.spec_from_file_location(
         "terminal_latency_probe", HERE / "terminal-latency-probe.py"
     )
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["terminal_latency_probe"] = module
     spec.loader.exec_module(module)
@@ -50,6 +59,7 @@ TMUX_ID = "7C7C7C7C-0000-4000-8000-000000000003"
 AGENT_ID = "8D8D8D8D-0000-4000-8000-000000000004"
 ENGINE_TERMINALS = {"swiftterm": SWIFTTERM_ID, "libghostty": GHOSTTY_ID}
 BASE = datetime.datetime(2026, 11, 8, 10, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))
+FLAG_ON = probe.EngineFlag("com.github.cheapsteak.tbd", "1")
 
 
 def at(seconds: float) -> datetime.datetime:
@@ -80,9 +90,15 @@ def fallback(when: float, terminal: str) -> str:
     return record(when, f"libghostty engine unavailable for {terminal}, fell back to SwiftTerm: metalUnavailable")
 
 
-# The setup the docstring asks for: both terminals opened on libghostty, then
-# ⌃⌘E in the one that becomes the SwiftTerm arm, whose rebuild logs its line.
+def flag(when: float, enabled: bool) -> str:
+    return record(when, f"libghostty engine experiment turned {'on' if enabled else 'off'}")
+
+
+# The setup the docstring asks for: the app launched with the engine on, both
+# terminals opened on libghostty, then ⌃⌘E in the one that becomes the
+# SwiftTerm arm, whose rebuild logs its line.
 STANDARD_ENGINE_LINES = [
+    flag(1, True),
     libghostty(10, SWIFTTERM_ID),
     libghostty(11, GHOSTTY_ID),
     swiftterm(20, SWIFTTERM_ID),
@@ -104,6 +120,19 @@ class FakeLog:
             if datetime.datetime.strptime(json.loads(line)["timestamp"], "%Y-%m-%d %H:%M:%S.%f%z") >= start
         ]
         return "\n".join(kept) + "\n"
+
+
+class FakeFlag:
+    """`read_engine_flag`'s stand-in: the flag reads `initial` until a test
+    changes `self.flag`."""
+
+    def __init__(self, initial=FLAG_ON) -> None:
+        self.flag = initial
+        self.calls: list[int] = []
+
+    def __call__(self, pid):
+        self.calls.append(pid)
+        return self.flag
 
 
 def confirm(lines: list[str], terminals: dict[str, str] = ENGINE_TERMINALS):
@@ -141,6 +170,12 @@ class ArgumentTests(unittest.TestCase):
         self.assertEqual(args.transports, {"swiftterm": "holder", "libghostty": "holder"})
         self.assertFalse(args.trust_engines)
 
+    def test_an_equals_form_selects_engine_mode(self):
+        args = probe.parse_args(
+            ["--worktree", "w", f"--swiftterm-terminal={SWIFTTERM_ID}", "--ghostty-terminal", GHOSTTY_ID]
+        )
+        self.assertEqual(args.mode, "engine")
+
     def test_modes_cannot_be_combined(self):
         message = self.parse_error([
             "--worktree", "w", "--tmux-terminal", TMUX_ID,
@@ -149,8 +184,14 @@ class ArgumentTests(unittest.TestCase):
         self.assertIn("cannot be combined", message)
 
     def test_engine_mode_needs_both_arms(self):
-        self.assertIn("missing --ghostty-terminal", self.parse_error(["--worktree", "w", "--swiftterm-terminal", SWIFTTERM_ID]))
-        self.assertIn("missing --swiftterm-terminal", self.parse_error(["--worktree", "w", "--ghostty-terminal", GHOSTTY_ID]))
+        self.assertIn(
+            "the following arguments are required: --ghostty-terminal",
+            self.parse_error(["--worktree", "w", "--swiftterm-terminal", SWIFTTERM_ID]),
+        )
+        self.assertIn(
+            "the following arguments are required: --swiftterm-terminal",
+            self.parse_error(["--worktree", "w", "--ghostty-terminal", GHOSTTY_ID]),
+        )
 
     def test_engine_arms_must_be_two_terminals(self):
         message = self.parse_error([
@@ -158,17 +199,28 @@ class ArgumentTests(unittest.TestCase):
         ])
         self.assertIn("name the same terminal", message)
 
-    def test_engine_flags_are_refused_in_transport_mode(self):
-        base = ["--worktree", "w", "--tmux-terminal", TMUX_ID, "--holder-terminal", GHOSTTY_ID]
-        self.assertIn("belong to engine mode", self.parse_error(base + ["--trust-engines"]))
-        self.assertIn("belong to engine mode", self.parse_error(base + ["--app-pid", "12"]))
-
-    def test_a_mode_is_required(self):
-        self.assertIn("transport mode", self.parse_error(["--worktree", "w"]))
+    def test_transport_mode_parses_as_it_did_before_engine_mode(self):
+        # Both terminal flags are required in the usage, and missing ones get
+        # argparse's own words, as before engine mode existed.
+        message = self.parse_error(["--worktree", "w"])
+        usage = message.split("error:", 1)[0]
+        self.assertIn("--tmux-terminal TMUX_TERMINAL", usage)
+        self.assertIn("--holder-terminal HOLDER_TERMINAL", usage)
+        self.assertNotIn("[--tmux-terminal", usage)
+        for absent in ("swiftterm", "ghostty", "trust-engines", "app-pid"):
+            self.assertNotIn(absent, usage)
         self.assertIn(
-            "the following arguments are required: --holder-terminal",
+            "error: the following arguments are required: --tmux-terminal, --holder-terminal", message
+        )
+        self.assertIn(
+            "error: the following arguments are required: --holder-terminal",
             self.parse_error(["--worktree", "w", "--tmux-terminal", TMUX_ID]),
         )
+
+    def test_engine_flags_are_unknown_to_transport_mode(self):
+        base = ["--worktree", "w", "--tmux-terminal", TMUX_ID, "--holder-terminal", GHOSTTY_ID]
+        self.assertIn("unrecognized arguments: --trust-engines", self.parse_error(base + ["--trust-engines"]))
+        self.assertIn("unrecognized arguments: --app-pid 12", self.parse_error(base + ["--app-pid", "12"]))
 
 
 class VerifyTests(unittest.TestCase):
@@ -218,7 +270,7 @@ class EngineCheckTests(unittest.TestCase):
         self.assertEqual(set(confirm(STANDARD_ENGINE_LINES, lowered)), {"swiftterm", "libghostty"})
 
     def test_swiftterm_arm_still_on_libghostty_is_refused(self):
-        message = refusal(self, STANDARD_ENGINE_LINES[:2])
+        message = refusal(self, STANDARD_ENGINE_LINES[:3])
         self.assertIn(f"swiftterm arm {SWIFTTERM_ID}", message)
         self.assertIn("puts it on libghostty", message)
         self.assertIn("Nothing has been written to any terminal.", message)
@@ -252,6 +304,27 @@ class EngineCheckTests(unittest.TestCase):
         fell_back = [fallback(15, SWIFTTERM_ID), libghostty(11, GHOSTTY_ID)]
         self.assertEqual(confirm(fell_back)["swiftterm"].at, at(15))
 
+    def test_a_flag_line_after_an_arms_evidence_refuses_it(self):
+        # Off and on again after both builds: either arm may have been rebuilt
+        # while off, which logs nothing.
+        message = refusal(self, STANDARD_ENGINE_LINES + [flag(30, False), flag(31, True)])
+        self.assertIn(
+            f"swiftterm arm {SWIFTTERM_ID}: \"libghostty engine experiment turned off\"", message
+        )
+        self.assertIn(f"libghostty arm {GHOSTTY_ID}: \"libghostty engine experiment turned off\"", message)
+        self.assertIn("came after its latest engine line", message)
+        self.assertIn("until its tab label reads SwiftTerm", message)
+        # Between the two builds, it refuses only the arm built before it.
+        between = [flag(1, True), libghostty(11, GHOSTTY_ID), flag(15, False), flag(16, True), swiftterm(20, SWIFTTERM_ID)]
+        message = refusal(self, between)
+        self.assertIn(f"libghostty arm {GHOSTTY_ID}", message)
+        self.assertNotIn("swiftterm arm", message)
+
+    def test_a_flag_line_before_every_build_is_no_obstacle(self):
+        # The launch line, and a flag turned on before the terminals opened.
+        lines = [flag(0, True), flag(2, False), flag(3, True)] + STANDARD_ENGINE_LINES[1:]
+        self.assertEqual(confirm(lines)["swiftterm"].at, at(20))
+
     def test_another_terminals_lines_do_not_matter(self):
         other = "9E9E9E9E-0000-4000-8000-000000000005"
         lines = STANDARD_ENGINE_LINES + [fallback(30, other), swiftterm(31, other)]
@@ -261,6 +334,7 @@ class EngineCheckTests(unittest.TestCase):
         # An earlier app's line about the same id says nothing now: a relaunch
         # rebuilds every panel and forgets every switch.
         confirm(STANDARD_ENGINE_LINES + [libghostty(30, SWIFTTERM_ID, pid=PID + 1)])
+        confirm(STANDARD_ENGINE_LINES + [record(30, "libghostty engine experiment turned off", pid=PID + 1)])
         only_stale = [libghostty(11, GHOSTTY_ID), swiftterm(20, SWIFTTERM_ID, pid=PID + 1)]
         self.assertIn("no engine line names it", refusal(self, only_stale))
 
@@ -286,32 +360,42 @@ class EngineCheckTests(unittest.TestCase):
             record(6, "SwiftTerm engine active for a local PTY"),
             record(7, "libghostty engine unavailable for a local PTY, fell back to SwiftTerm: x"),
             record(8, f"libghostty engine active for {GHOSTTY_ID}", category="terminallatency"),
+            record(9, "libghostty engine experiment turned sideways"),
             *STANDARD_ENGINE_LINES,
         ])
         lines = probe.parse_engine_lines(text, PID)
-        self.assertEqual([line.engine for line in lines], ["libghostty", "libghostty", "swiftterm"])
-        self.assertEqual(lines[2].terminal, SWIFTTERM_ID.lower())
+        self.assertEqual(
+            [type(line).__name__ for line in lines], ["FlagLine", "EngineLine", "EngineLine", "EngineLine"]
+        )
+        self.assertTrue(lines[0].enabled)
+        self.assertEqual([line.engine for line in lines[1:]], ["libghostty", "libghostty", "swiftterm"])
+        self.assertEqual(lines[3].terminal, SWIFTTERM_ID.lower())
+
+    def recheck_after(self, landed: list[str]) -> list[str]:
+        """The post-run check's problems after the standard setup, once
+        `landed` has been logged during the run."""
+        log = FakeLog(STANDARD_ENGINE_LINES)
+        before = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), log)
+        log.lines.extend(landed)
+        return probe.recheck_engines(ENGINE_TERMINALS, PID, at(-60), before, log)
 
     def test_recheck_passes_when_nothing_changed(self):
-        log = FakeLog(STANDARD_ENGINE_LINES)
-        before = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), log)
-        self.assertEqual(probe.recheck_engines(ENGINE_TERMINALS, PID, at(-60), before, log), [])
+        self.assertEqual(self.recheck_after([]), [])
 
     def test_recheck_refuses_a_rebuild_during_the_run(self):
-        log = FakeLog(STANDARD_ENGINE_LINES)
-        before = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), log)
-        log.lines.append(libghostty(100, GHOSTTY_ID))
-        problems = probe.recheck_engines(ENGINE_TERMINALS, PID, at(-60), before, log)
+        problems = self.recheck_after([libghostty(100, GHOSTTY_ID)])
         self.assertEqual(len(problems), 1)
         self.assertIn(f"libghostty arm {GHOSTTY_ID}: a new engine line landed during the run", problems[0])
 
     def test_recheck_refuses_an_engine_change_during_the_run(self):
-        log = FakeLog(STANDARD_ENGINE_LINES)
-        before = probe.confirm_engines(ENGINE_TERMINALS, PID, at(-60), log)
-        log.lines.append(swiftterm(100, GHOSTTY_ID))
-        problems = probe.recheck_engines(ENGINE_TERMINALS, PID, at(-60), before, log)
+        problems = self.recheck_after([swiftterm(100, GHOSTTY_ID)])
         self.assertEqual(len(problems), 1)
         self.assertIn("puts it on swiftterm", problems[0])
+
+    def test_recheck_refuses_a_flag_line_during_the_run(self):
+        problems = self.recheck_after([flag(100, False)])
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(all("turned off" in problem for problem in problems))
 
     def test_the_log_query_reads_notice_lines_only(self):
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="{}\n", stderr="")
@@ -331,13 +415,73 @@ class EngineCheckTests(unittest.TestCase):
             probe.parse_etime("")
 
 
+class EngineFlagTests(unittest.TestCase):
+    def read(self, executable: str, returncode: int, stdout: str = "", stderr: str = ""):
+        """`read_engine_flag` against a `ps` that finds `executable` and a
+        `defaults` that exits `returncode`, and each command it ran."""
+        commands: list[list[str]] = []
+
+        def run(command, **kwargs):
+            commands.append(command)
+            if command[0] == "ps":
+                return subprocess.CompletedProcess(command, 0, stdout=executable + "\n", stderr="")
+            return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+
+        with mock.patch.object(probe.subprocess, "run", run):
+            return probe.read_engine_flag(PID), commands
+
+    def test_a_bundled_app_reads_its_bundle_domain(self):
+        flag, commands = self.read("/Applications/TBD.app/Contents/MacOS/TBDApp", 0, "1\n")
+        self.assertEqual(commands[0], ["ps", "-o", "comm=", "-p", str(PID)])
+        self.assertEqual(commands[1], ["defaults", "read", "com.github.cheapsteak.tbd", "useGhosttyTerminalEngine"])
+        self.assertEqual(flag, probe.EngineFlag("com.github.cheapsteak.tbd", "1"))
+        self.assertIsNone(probe.engine_flag_problem(flag))
+
+    def test_an_unbundled_build_reads_the_tbdapp_domain(self):
+        flag, commands = self.read("/Users/someone/tbd/.build/debug/TBDApp", 0, "1\n")
+        self.assertEqual(commands[1][2], "TBDApp")
+        self.assertTrue(flag.enabled)
+
+    def test_an_unset_key_is_off(self):
+        flag, _ = self.read(
+            "/Applications/TBD.app/Contents/MacOS/TBDApp", 1,
+            stderr="Error: Could not find key 'useGhosttyTerminalEngine' in domain 'com.github.cheapsteak.tbd'.",
+        )
+        self.assertEqual(flag, probe.EngineFlag("com.github.cheapsteak.tbd", None))
+        problem = probe.engine_flag_problem(flag)
+        assert problem is not None
+        self.assertIn(
+            "`defaults read com.github.cheapsteak.tbd useGhosttyTerminalEngine` reads nothing (unset, which is off)",
+            problem,
+        )
+
+    def test_only_a_true_boolean_is_on(self):
+        for value in ("0", "true", "YES", ""):
+            flag = probe.EngineFlag("TBDApp", value)
+            self.assertFalse(flag.enabled, value)
+            self.assertIn(f"reads {value!r}", probe.engine_flag_problem(flag) or "")
+
+    def test_a_process_that_is_gone_is_refused(self):
+        def run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+        with mock.patch.object(probe.subprocess, "run", run), self.assertRaises(SystemExit) as raised:
+            probe.read_engine_flag(PID)
+        self.assertIn(f"process {PID} is not running", str(raised.exception.code))
+
+
 class RunTests(unittest.TestCase):
     def test_engine_arms_interleave_a_b_b_a(self):
         with tempfile.TemporaryDirectory() as scratch:
             directory = Path(scratch)
             load_map = {arm: {} for arm in probe.ENGINE_ARMS}
             requested = {arm: 0 for arm in probe.ENGINE_ARMS}
-            probe.run_samples(directory, ENGINE_TERMINALS, 2, 0.0, load_map, requested, probe.ENGINE_ARMS)
+            request_times = {arm: {} for arm in probe.ENGINE_ARMS}
+            clock = iter([100.0, 101.0, 102.0, 103.0])
+            with mock.patch.object(probe.time, "time", lambda: next(clock)):
+                probe.run_samples(
+                    directory, ENGINE_TERMINALS, 2, 0.0, load_map, requested, probe.ENGINE_ARMS, request_times
+                )
             written = [
                 json.loads(path.read_text(encoding="utf-8"))
                 for path in sorted(directory.glob("terminal-latency-probe.*.json"))
@@ -350,6 +494,9 @@ class RunTests(unittest.TestCase):
         self.assertEqual({arm: sorted(readings) for arm, readings in load_map.items()},
                          {"swiftterm": ["1", "4"], "libghostty": ["2", "3"]})
         self.assertEqual(requested, {"swiftterm": 2, "libghostty": 2})
+        self.assertEqual(
+            request_times, {"swiftterm": {"1": 100.0, "4": 103.0}, "libghostty": {"2": 101.0, "3": 102.0}}
+        )
 
     def test_echoes_count_by_transport_and_id(self):
         capture = report.parse([
@@ -372,6 +519,104 @@ class RunTests(unittest.TestCase):
         self.assertEqual([arm.terminal for arm in arms], [SWIFTTERM_ID, GHOSTTY_ID])
 
 
+def draw_line(when: datetime.datetime, terminal: str, wait: float) -> str:
+    """One draw line as `log show` prints it by default, time first."""
+    return (
+        f"{when.astimezone().strftime('%Y-%m-%d %H:%M:%S.%f%z')} 0x1  Info 0x0 900 0 TBDApp:"
+        f" [com.tbd.app:terminallatency] draw transport=holder terminal={terminal} chunks=1"
+        f" oldestms={wait:.3f} newestms={wait:.3f} parsemaxms=0.100 dropped=0 vis=1"
+    )
+
+
+class ReportCommandTests(unittest.TestCase):
+    def test_a_kept_engine_map_bands_the_draws_by_its_times(self):
+        # A re-report by hand, from the capture and the map the driver kept.
+        stamp = datetime.datetime.fromtimestamp
+        capture = "\n".join([
+            f"x echo transport=holder terminal={SWIFTTERM_ID} seq=1 ms=2.000",
+            f"x echo transport=holder terminal={GHOSTTY_ID} seq=2 ms=1.000",
+            draw_line(stamp(1000.25 + 0.015), SWIFTTERM_ID, 4.0),
+            draw_line(stamp(1000.50 + 0.015), GHOSTTY_ID, 2.0),
+        ])
+        kept = {
+            "swiftterm": {"1": 1.0},
+            "libghostty": {"2": 1.0},
+            "times": {"swiftterm": {"1": 1000.25}, "libghostty": {"2": 1000.5}},
+        }
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as scratch:
+            capture_path = Path(scratch) / "capture.log"
+            capture_path.write_text(capture + "\n", encoding="utf-8")
+            map_path = Path(scratch) / "kept.json"
+            map_path.write_text(json.dumps(kept), encoding="utf-8")
+            argv = [
+                "terminal-latency-report.py", str(capture_path),
+                "--swiftterm-terminal", SWIFTTERM_ID, "--ghostty-terminal", GHOSTTY_ID,
+                "--load-map", str(map_path), "--idle-max", "8",
+            ]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(stdout):
+                # Loaded here, as the driver loads it: `report` takes its
+                # default output stream when the module loads.
+                status = probe.load_report_module().main()
+        out = stdout.getvalue()
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "draw idle              libghostty 2.000 / swiftterm 4.000 = 0.500x"
+            " (libghostty 50% lower: MEETS the 20% bar)",
+            out,
+        )
+        self.assertIn("swiftterm draw bands   in neither band: 0", out)
+
+
+class WholeRun:
+    """Runs `main` with every outside call replaced, for either mode."""
+
+    def __init__(self, rows: list[dict], capture: str, loads: list[float]) -> None:
+        self.rows = rows
+        self.capture = capture
+        self.loads = loads
+        self.clock = 1000.0
+
+    def tick(self) -> float:
+        # Each request's wall time, a quarter second apart.
+        self.clock += 0.25
+        return self.clock
+
+    def run(self, argv, extra_patches=(), during_run=None):
+        """`main`'s exit status, stdout and stderr, and the request files
+        written. `during_run` runs once the samples are written, before the
+        capture is read: whatever it changes, the post-run check sees."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        written: list[str] = []
+        real_run_samples = probe.run_samples
+        loads = iter(self.loads)
+
+        def run_samples(directory, *args, **kwargs):
+            real_run_samples(directory, *args, **kwargs)
+            written.extend(sorted(path.name for path in directory.glob("terminal-latency-probe.*")))
+            if during_run is not None:
+                during_run()
+
+        with tempfile.TemporaryDirectory() as scratch, contextlib.ExitStack() as stack:
+            # The machine's real load would decide the bands.
+            stack.enter_context(mock.patch.object(probe.os, "getloadavg", lambda: (next(loads), 0.0, 0.0)))
+            stack.enter_context(mock.patch.object(probe.time, "time", self.tick))
+            stack.enter_context(mock.patch.object(probe, "runtime_dir", lambda: Path(scratch)))
+            stack.enter_context(mock.patch.object(probe, "terminal_rows", lambda tbd, worktree: self.rows))
+            stack.enter_context(mock.patch.object(probe, "capture_log", lambda since: self.capture))
+            stack.enter_context(mock.patch.object(probe, "run_samples", run_samples))
+            stack.enter_context(mock.patch.object(probe.time, "sleep", lambda seconds: None))
+            for target, name, value in extra_patches:
+                stack.enter_context(mock.patch.object(target, name, value))
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            try:
+                status = probe.main(argv)
+            except SystemExit as exit_:
+                status = exit_.code
+        return status, stdout.getvalue(), stderr.getvalue(), written
+
+
 class EngineRunTests(unittest.TestCase):
     """Whole engine-mode runs of `main`, with every outside call replaced."""
 
@@ -389,41 +634,17 @@ class EngineRunTests(unittest.TestCase):
     ARGV = ["--worktree", "w", "--swiftterm-terminal", SWIFTTERM_ID,
             "--ghostty-terminal", GHOSTTY_ID, "--samples", "2", "--gap-ms", "0"]
 
-    def run_main(self, log, argv=None, during_run=None):
-        """`main`'s exit status, stdout and stderr, and the request files
-        written. `during_run` runs once the samples are written, before the
-        capture is read: whatever it changes, the post-run check sees."""
-        stdout, stderr = io.StringIO(), io.StringIO()
-        written: list[str] = []
-        real_run_samples = probe.run_samples
-
-        def run_samples(directory, *args, **kwargs):
-            real_run_samples(directory, *args, **kwargs)
-            written.extend(sorted(path.name for path in directory.glob("terminal-latency-probe.*")))
-            if during_run is not None:
-                during_run()
-
-        # The machine's real load would decide the bands. Requests 1 and 2 at
-        # idle, 3 and 4 under load: each arm gets one sample in each band.
-        loads = iter([1.0, 1.0, 30.0, 30.0])
-
-        with tempfile.TemporaryDirectory() as scratch, contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(probe.os, "getloadavg", lambda: (next(loads), 0.0, 0.0)))
-            stack.enter_context(mock.patch.object(probe, "runtime_dir", lambda: Path(scratch)))
-            stack.enter_context(mock.patch.object(probe, "terminal_rows", lambda tbd, worktree: self.ROWS))
-            stack.enter_context(mock.patch.object(probe, "resolve_app_pid", lambda given: PID))
-            stack.enter_context(mock.patch.object(probe, "app_launched_at", lambda pid: at(-60)))
-            stack.enter_context(mock.patch.object(probe, "read_app_log", log))
-            stack.enter_context(mock.patch.object(probe, "capture_log", lambda since: self.CAPTURE))
-            stack.enter_context(mock.patch.object(probe, "run_samples", run_samples))
-            stack.enter_context(mock.patch.object(probe.time, "sleep", lambda seconds: None))
-            stack.enter_context(contextlib.redirect_stdout(stdout))
-            stack.enter_context(contextlib.redirect_stderr(stderr))
-            try:
-                status = probe.main(argv or self.ARGV)
-            except SystemExit as exit_:
-                status = exit_.code
-        return status, stdout.getvalue(), stderr.getvalue(), written
+    def run_main(self, log, argv=None, during_run=None, engine_flag=None, capture=CAPTURE):
+        # Requests 1 and 2 at idle, 3 and 4 under load: each arm gets one
+        # sample in each band.
+        whole = WholeRun(self.ROWS, capture, [1.0, 1.0, 30.0, 30.0])
+        patches = [
+            (probe, "resolve_app_pid", lambda given: PID),
+            (probe, "app_launched_at", lambda pid: at(-60)),
+            (probe, "read_app_log", log),
+            (probe, "read_engine_flag", engine_flag or FakeFlag()),
+        ]
+        return whole.run(argv or self.ARGV, patches, during_run)
 
     def test_confirmed_run_reports_by_engine(self):
         status, out, err, written = self.run_main(FakeLog(STANDARD_ENGINE_LINES))
@@ -436,15 +657,70 @@ class EngineRunTests(unittest.TestCase):
         self.assertIn("libghostty all         n=2", out)
         self.assertIn("swiftterm flatness     p90 load / p90 idle = 1.00x (WITHIN the 2x bound)", out)
         self.assertIn("libghostty absolute    p90 under load = 1.000 ms (WITHIN the 5 ms bound)", out)
-        self.assertIn("echo idle              libghostty 1.000 / swiftterm 2.000 = 0.50x", out)
-        self.assertIn("echo load              libghostty 1.000 / swiftterm 2.000 = 0.50x", out)
+        self.assertIn("echo idle              libghostty 1.000 / swiftterm 2.000 = 0.500x", out)
+        self.assertIn("echo load              libghostty 1.000 / swiftterm 2.000 = 0.500x", out)
         self.assertNotIn("NOT VERIFIED", out)
 
+    def test_draws_are_banded_by_the_request_times_the_run_recorded(self):
+        # The run's requests go out at 1000.25 s, 1000.50, 1000.75 and 1001.00,
+        # seqs 1 and 2 at idle and 3 and 4 under load. Each draw is logged
+        # 10 ms after its request's echo was fed.
+        stamp = datetime.datetime.fromtimestamp
+        draws = [
+            draw_line(stamp(1000.25 + 0.015), SWIFTTERM_ID, 4.0),
+            draw_line(stamp(1000.50 + 0.015), GHOSTTY_ID, 2.0),
+            draw_line(stamp(1000.75 + 0.015), GHOSTTY_ID, 9.0),
+            draw_line(stamp(1001.00 + 0.015), SWIFTTERM_ID, 6.0),
+        ]
+        with tempfile.TemporaryDirectory() as keep_dir:
+            keep = Path(keep_dir) / "kept.json"
+            status, out, err, _ = self.run_main(
+                FakeLog(STANDARD_ENGINE_LINES),
+                argv=self.ARGV + ["--keep-load-map", str(keep)],
+                capture="\n".join([self.CAPTURE, *draws]),
+            )
+            kept = json.loads(keep.read_text(encoding="utf-8"))
+        self.assertEqual(status, 0, err)
+        self.assertIn("swiftterm draw idle    n=1      p50=   4.000", out)
+        self.assertIn("libghostty draw load   n=1      p50=   9.000", out)
+        self.assertIn("draw idle              libghostty 2.000 / swiftterm 4.000 = 0.500x", out)
+        self.assertIn("draw load              libghostty 9.000 / swiftterm 6.000 = 1.500x (libghostty 50% higher)", out)
+        self.assertNotIn("draw on screen         libghostty", out)
+        # The kept map carries the times too, so a re-report bands the same way.
+        self.assertEqual(kept["times"], {"swiftterm": {"1": 1000.25, "4": 1001.0}, "libghostty": {"2": 1000.5, "3": 1000.75}})
+        self.assertEqual(kept["swiftterm"], {"1": 1.0, "4": 30.0})
+
     def test_unconfirmed_engine_refuses_before_any_keystroke(self):
-        status, out, err, written = self.run_main(FakeLog(STANDARD_ENGINE_LINES[:2]))
+        status, out, err, written = self.run_main(FakeLog(STANDARD_ENGINE_LINES[:3]))
         self.assertIn("REFUSING TO RUN", str(status))
         self.assertIn("puts it on libghostty", str(status))
         self.assertEqual(written, [])
+        self.assertEqual(out, "")
+
+    def test_flag_off_refuses_before_any_keystroke(self):
+        engine_flag = FakeFlag(probe.EngineFlag("com.github.cheapsteak.tbd", None))
+        log = FakeLog(STANDARD_ENGINE_LINES)
+        status, out, err, written = self.run_main(log, engine_flag=engine_flag)
+        self.assertIn("REFUSING TO RUN — the libghostty engine flag is not on", str(status))
+        self.assertIn("Nothing has been written to any terminal.", str(status))
+        self.assertEqual(engine_flag.calls, [PID])
+        self.assertEqual(written, [])
+        self.assertEqual(out, "")
+
+    def test_flag_turned_off_during_the_run_refuses_the_report(self):
+        engine_flag = FakeFlag()
+        log = FakeLog(STANDARD_ENGINE_LINES)
+
+        def turn_off():
+            engine_flag.flag = probe.EngineFlag("com.github.cheapsteak.tbd", "0")
+            log.lines.append(flag(100, False))
+
+        status, out, err, written = self.run_main(log, during_run=turn_off, engine_flag=engine_flag)
+        self.assertEqual(status, 1)
+        self.assertEqual(len(written), 4)
+        self.assertIn("REFUSING TO REPORT — the engine check no longer holds after the run", err)
+        self.assertIn("`defaults read com.github.cheapsteak.tbd useGhosttyTerminalEngine` reads '0'", err)
+        self.assertIn("\"libghostty engine experiment turned off\"", err)
         self.assertEqual(out, "")
 
     def test_engine_change_during_the_run_refuses_the_report(self):
@@ -454,18 +730,86 @@ class EngineRunTests(unittest.TestCase):
         )
         self.assertEqual(status, 1)
         self.assertEqual(len(written), 4)
-        self.assertIn("REFUSING TO REPORT — an arm's engine line changed during the run", err)
+        self.assertIn("REFUSING TO REPORT — the engine check no longer holds after the run", err)
         self.assertIn(f"swiftterm arm {SWIFTTERM_ID}", err)
         self.assertEqual(out, "")
 
     def test_trust_engines_skips_the_log_and_says_so(self):
         log = FakeLog([])
-        status, out, err, written = self.run_main(log, argv=self.ARGV + ["--trust-engines"])
+        engine_flag = FakeFlag()
+        status, out, err, written = self.run_main(
+            log, argv=self.ARGV + ["--trust-engines"], engine_flag=engine_flag
+        )
         self.assertEqual(status, 0, err)
         self.assertEqual(log.calls, [])
+        # The flag is still checked, before the run and after it.
+        self.assertEqual(engine_flag.calls, [PID, PID])
         self.assertIn("ENGINES NOT VERIFIED", err)
         # Above the figures, so a reader meets it before any number.
         self.assertLess(out.index("ENGINES NOT VERIFIED"), out.index("ECHO"))
+
+    def test_trust_engines_still_refuses_with_the_flag_off(self):
+        engine_flag = FakeFlag(probe.EngineFlag("TBDApp", "0"))
+        status, out, err, written = self.run_main(
+            FakeLog([]), argv=self.ARGV + ["--trust-engines"], engine_flag=engine_flag
+        )
+        self.assertIn("REFUSING TO RUN — the libghostty engine flag is not on", str(status))
+        self.assertEqual(written, [])
+
+
+class TransportRunTests(unittest.TestCase):
+    """Whole transport-mode runs of `main`: the report, a refusal, and no
+    engine-mode call."""
+
+    ROWS = [
+        {"id": TMUX_ID, "kind": "shell", "transport": "tmux"},
+        {"id": GHOSTTY_ID, "kind": "shell", "transport": "holder"},
+    ]
+    ARGV = ["--worktree", "w", "--tmux-terminal", TMUX_ID, "--holder-terminal", GHOSTTY_ID,
+            "--samples", "2", "--gap-ms", "0"]
+
+    @staticmethod
+    def forbidden(name: str):
+        def call(*args, **kwargs):
+            raise AssertionError(f"transport mode called {name}")
+        return call
+
+    def run_main(self, capture: str):
+        whole = WholeRun(self.ROWS, capture, [1.0, 1.0, 30.0, 30.0])
+        patches = [
+            (probe, name, self.forbidden(name))
+            for name in ("resolve_app_pid", "app_launched_at", "read_app_log", "read_engine_flag")
+        ]
+        return whole.run(self.ARGV, patches)
+
+    def test_a_complete_run_reports_by_transport(self):
+        capture = "\n".join([
+            f"x echo transport=tmux terminal={TMUX_ID} seq=1 ms=3.000",
+            f"x echo transport=holder terminal={GHOSTTY_ID} seq=2 ms=1.000",
+            f"x echo transport=holder terminal={GHOSTTY_ID} seq=3 ms=1.000",
+            f"x echo transport=tmux terminal={TMUX_ID} seq=4 ms=3.000",
+        ])
+        status, out, err, written = self.run_main(capture)
+        self.assertEqual(status, 0, err)
+        self.assertEqual(len(written), 4)
+        self.assertTrue(out.startswith("terminal transport latency, milliseconds\n"), out)
+        self.assertIn("(compares transports)", out)
+        self.assertIn("tmux all               n=2", out)
+        self.assertIn("holder flatness        p90 load / p90 idle = 1.00x (WITHIN the 2x bound)", out)
+        for absent in ("ENGINES", "swiftterm", "libghostty", "draw idle"):
+            self.assertNotIn(absent, out)
+
+    def test_a_missing_echo_refuses_the_report(self):
+        capture = "\n".join([
+            f"x echo transport=tmux terminal={TMUX_ID} seq=1 ms=3.000",
+            f"x echo transport=holder terminal={GHOSTTY_ID} seq=2 ms=1.000",
+            f"x echo transport=tmux terminal={TMUX_ID} seq=4 ms=3.000",
+        ])
+        status, out, err, _ = self.run_main(capture)
+        self.assertEqual(status, 1)
+        self.assertIn("REFUSING TO REPORT — an arm's echoes do not match its requests:", err)
+        self.assertIn("holder: 1 echoes for 2 requests", err)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":

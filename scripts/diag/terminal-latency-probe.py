@@ -32,7 +32,9 @@ parses it, so the echo is the same loop on both arms: in this mode it is the
 CHECK. A gap between the arms' echoes means unmatched arms, or an engine that
 keeps the app's main or reader thread busy. The draw wait runs from the feed
 seam, parse included, to the engine's own draw start, so it is where the
-engines' own work shows.
+engines' own work shows. A draw line carries no sequence number, so the
+driver records when it issued each request, and the report places each draw
+in a load band by time.
 
 WHAT IT CANNOT SHOW
 -------------------
@@ -54,7 +56,8 @@ On this machine a load swing from 7 to 139 once faked a threefold effect that
 vanished under matched load. So this driver INTERLEAVES the arms sample by
 sample -- both arms see the same machine, sample for sample -- and records
 `os.getloadavg()[0]` alongside every request. The report splits echo figures
-into idle and load bands and never pools them. Both modes follow this rule.
+into idle and load bands and never pools them; in engine mode it splits the
+draw waits too. Both modes follow this rule.
 
 ONE invocation has to span both bands. The flatness verdict is p90 load over
 p90 idle, computed from the single capture and the single load map this run
@@ -70,35 +73,45 @@ not name one. So samples go to an arm by terminal id, and each id's engine is
 read from the app's own log (`com.tbd.app`, category `terminalEngine`), from
 the running TBDApp's launch until now. While the libghostty engine is on, the
 app logs a `.notice` line for every terminal build, naming the engine that
-build got. A switch's rebuild and a build that fell back log one too:
+build got. A switch's rebuild and a build that fell back log one too. The app
+also logs a line whenever the engine's flag changes, at launch included:
 
     libghostty engine active for <id>
     SwiftTerm engine active for <id>
     libghostty engine unavailable for <id>, fell back to SwiftTerm: <reason>
+    libghostty engine experiment turned on
+    libghostty engine experiment turned off
 
-The latest of these lines for an id decides its engine. The log store keeps
+`TerminalEngineNotice` in `Sources/TBDApp/Terminal/Engine/
+TerminalEngineFactory.swift` holds these words, and its tests pin them.
+
+The latest build line for an id decides its engine. The log store keeps
 `.notice` lines longest and drops its oldest lines first, so the latest line
 it holds is the terminal's last build. Lines from an earlier app process are
 ignored, because a relaunch rebuilds every panel. An app build too old to log
 the SwiftTerm line never confirms a SwiftTerm arm, so the check refuses every
 run against it.
 
-The run is refused before any keystroke when no line names an arm's id, or
-the latest one names the other engine. After the run the lines are read
-again, and the report is refused when either arm's latest line has changed:
-an arm that was rebuilt during the run, even on the same engine, does not
-hold one panel's samples.
+A build while the engine is off logs nothing, so a libghostty panel rebuilt
+then becomes SwiftTerm while its latest line still says libghostty. Two checks
+close that gap. The flag itself must read true in the app's own defaults
+domain (`com.github.cheapsteak.tbd` for an app inside a `.app` bundle,
+`TBDApp` for an unbundled build; unset is off). And no flag line may come
+after an arm's latest build line: the flag was off at some point since.
 
-A build while the engine is off logs nothing. So a terminal opened before the
-engine was turned on has no line and is refused, and the check cannot see a
-libghostty panel rebuilt after the engine was turned off. Keep the engine on
-from setup to the end of the run.
+The run is refused before any keystroke when the flag is not on, no build
+line names an arm's id, the latest one names the other engine, or a flag line
+follows it. After the run the flag and the lines are read again, and the
+report is refused when the flag is off, a flag line landed, or either arm's
+latest build line has changed: an arm that was rebuilt during the run, even
+on the same engine, does not hold one panel's samples.
 
 Why the log, and not the caller's word: an A/B that measured one engine twice
 by mistake looks like a flat result, and a flat result decides the engine's
-future. `--trust-engines` skips the check, for when the app's log cannot
+future. `--trust-engines` skips the log check, for when the app's log cannot
 answer. It prints a banner on stderr and above the report's figures, and the
-caller then vouches for each arm from its tab's engine label.
+caller then vouches for each arm from its tab's engine label. The flag check
+still runs, since a tab shows no engine label while the flag is off.
 
 SETUP THIS DRIVER CANNOT DO FOR YOU
 -----------------------------------
@@ -116,7 +129,8 @@ SETUP THIS DRIVER CANNOT DO FOR YOU
      press ⌃⌘E (Terminal > Switch Terminal Engine): it is rebuilt on
      SwiftTerm, its tab label reads SwiftTerm, and it is the SwiftTerm arm.
      While the engine is on, that press is how a holder terminal gets onto
-     SwiftTerm. The check reads the rebuild's own line, not the press.
+     SwiftTerm. The check reads the rebuild's own line, not the press. Leave
+     the engine on until the run ends.
 3. Pass their ids. This driver verifies each one's transport and kind from the
    daemon before the first sample and refuses anything that is not a plain
    shell -- it types into terminals, and an agent session must never be one of
@@ -133,6 +147,9 @@ USAGE
         --worktree my-scratch \\
         --swiftterm-terminal <uuid> --ghostty-terminal <uuid> \\
         --samples 200 --gap-ms 250 --idle-max 8
+
+Either engine-mode terminal flag selects engine mode. Without one, `--help`
+lists transport mode's arguments alone; with one, it lists engine mode's.
 """
 
 from __future__ import annotations
@@ -358,12 +375,12 @@ ENGINE_CATEGORY = "terminalEngine"
 # still inside the window.
 LAUNCH_SLACK = datetime.timedelta(seconds=5)
 
-# The app's `.notice` lines, as `TerminalEngineFactory.logActive` and
-# `logFallback` (`Sources/TBDApp/Terminal/Engine/`) emit them, and the arm
-# each one puts its terminal on. The app follows a fallback line with a
-# SwiftTerm line for the same terminal; the fallback line is read as well, so
-# the rule holds even without that second line. The ids are UUIDs, so a local
-# PTY's lines ("... for a local PTY") match none.
+# The app's `.notice` build lines, as `TerminalEngineNotice.message`
+# (`Sources/TBDApp/Terminal/Engine/TerminalEngineFactory.swift`) words them,
+# and the arm each one puts its terminal on. The app follows a fallback line
+# with a SwiftTerm line for the same terminal; the fallback line is read as
+# well, so the rule holds even without that second line. The ids are UUIDs,
+# so a local PTY's lines ("... for a local PTY") match none.
 ENGINE_LINE_PATTERNS = (
     (re.compile(r"^libghostty engine active for (?P<terminal>\S+)$"), "libghostty"),
     (re.compile(r"^SwiftTerm engine active for (?P<terminal>\S+)$"), "swiftterm"),
@@ -372,6 +389,11 @@ ENGINE_LINE_PATTERNS = (
         "swiftterm",
     ),
 )
+# The line the app logs when the flag's value changes, from the same place.
+FLAG_LINE_PATTERN = re.compile(r"^libghostty engine experiment turned (?P<state>on|off)$")
+
+# Each arm's engine as its tab label names it.
+ENGINE_LABELS = {"swiftterm": "SwiftTerm", "libghostty": "libghostty"}
 
 # Reads the app's engine lines from a start until now, as `log show --style
 # ndjson` prints them. The production reader runs `/usr/bin/log`; a test
@@ -381,12 +403,24 @@ LogReader = Callable[[datetime.datetime], str]
 
 @dataclass(frozen=True)
 class EngineLine:
-    """One engine line from the app's log: the engine a terminal was built on."""
+    """One build line from the app's log: the engine a terminal was built on."""
 
     at: datetime.datetime
     terminal: str  # lowercase
     engine: str  # the arm label: "swiftterm" or "libghostty"
     message: str
+
+
+@dataclass(frozen=True)
+class FlagLine:
+    """One flag line from the app's log: the libghostty engine's flag changed."""
+
+    at: datetime.datetime
+    enabled: bool
+    message: str
+
+
+AppLogLine = EngineLine | FlagLine
 
 
 def parse_log_timestamp(text: object) -> datetime.datetime | None:
@@ -398,15 +432,15 @@ def parse_log_timestamp(text: object) -> datetime.datetime | None:
         return None
 
 
-def parse_engine_lines(text: str, pid: int) -> list[EngineLine]:
-    """The engine lines one app process logged, oldest first.
+def parse_engine_lines(text: str, pid: int) -> list[AppLogLine]:
+    """The build and flag lines one app process logged, oldest first.
 
     Only that process: an app relaunch rebuilds every panel and forgets every
     switch, so a line from an earlier process says nothing about a terminal
     now. Filtered here rather than in the predicate, so the filter is the same
     code a test runs. Anything that is not a JSON object is skipped.
     """
-    lines = []
+    lines: list[AppLogLine] = []
     for raw in text.splitlines():
         raw = raw.strip()
         if not raw.startswith("{"):
@@ -424,6 +458,10 @@ def parse_engine_lines(text: str, pid: int) -> list[EngineLine]:
         at = parse_log_timestamp(record.get("timestamp"))
         message = record.get("eventMessage")
         if at is None or not isinstance(message, str):
+            continue
+        flag = FLAG_LINE_PATTERN.match(message)
+        if flag:
+            lines.append(FlagLine(at, flag["state"] == "on", message))
             continue
         for pattern, engine in ENGINE_LINE_PATTERNS:
             match = pattern.match(message)
@@ -449,25 +487,40 @@ ENGINE_HINTS = {
 }
 
 
-def engine_verdict(
-    lines: list[EngineLine], arm: str, terminal_id: str
-) -> tuple[EngineLine | None, str | None]:
-    """The latest line that names this terminal, and why it does not put the
-    terminal on `arm`'s engine, or None when it does."""
+def engine_verdict(lines: list[AppLogLine], arm: str, terminal_id: str) -> EngineLine | str:
+    """The latest build line that names this terminal, when it puts the
+    terminal on `arm`'s engine and no flag line follows it; otherwise why not.
+    """
     wanted = terminal_id.lower()
-    named = [line for line in lines if line.terminal == wanted]
+    named = [
+        (index, line)
+        for index, line in enumerate(lines)
+        if isinstance(line, EngineLine) and line.terminal == wanted
+    ]
     if not named:
-        return None, (
+        return (
             f"{arm} arm {terminal_id}: no engine line names it. A terminal built while"
             f" the libghostty engine was off logs none. {ENGINE_HINTS[arm]}"
         )
-    latest = named[-1]
+    index, latest = named[-1]
     if latest.engine != arm:
-        return latest, (
+        return (
             f"{arm} arm {terminal_id}: its latest engine line ({short_time(latest.at)})"
             f" puts it on {latest.engine}: \"{latest.message}\". {ENGINE_HINTS[arm]}"
         )
-    return latest, None
+    # In log order, so a flag line and a build line with one timestamp keep
+    # the order the store gave them.
+    flips = [line for line in lines[index + 1:] if isinstance(line, FlagLine)]
+    if flips:
+        flip = flips[0]
+        return (
+            f"{arm} arm {terminal_id}: \"{flip.message}\" ({short_time(flip.at)}) came after"
+            f" its latest engine line ({short_time(latest.at)}). A panel rebuilt while the"
+            " engine is off logs nothing, so the log no longer says which engine it is on."
+            f" With the engine on and left on, press ⌃⌘E in it, at least once, until its tab"
+            f" label reads {ENGINE_LABELS[arm]}."
+        )
+    return latest
 
 
 def confirm_engines(
@@ -479,11 +532,11 @@ def confirm_engines(
     evidence: dict[str, EngineLine] = {}
     reasons: list[str] = []
     for arm, terminal_id in terminals.items():
-        line, reason = engine_verdict(lines, arm, terminal_id)
-        if reason is None:
-            evidence[arm] = line
+        verdict = engine_verdict(lines, arm, terminal_id)
+        if isinstance(verdict, str):
+            reasons.append(verdict)
         else:
-            reasons.append(reason)
+            evidence[arm] = verdict
     if reasons:
         raise SystemExit(
             f"REFUSING TO RUN — the app's log (TBDApp pid {pid}, since"
@@ -504,18 +557,19 @@ def recheck_engines(
     """Why an arm's engine is not the one it had before the run, if it is not.
 
     Any change counts, a rebuild on the same engine included: a panel rebuilt
-    mid-run was handed over mid-run, and its samples straddle two panels.
+    mid-run was handed over mid-run, and its samples straddle two panels. So
+    does a flag line, which `engine_verdict` refuses.
     """
     lines = parse_engine_lines(read_log(since), pid)
     problems = []
     for arm, terminal_id in terminals.items():
-        line, reason = engine_verdict(lines, arm, terminal_id)
-        if reason is not None:
-            problems.append(reason)
-        elif line != before.get(arm):
+        verdict = engine_verdict(lines, arm, terminal_id)
+        if isinstance(verdict, str):
+            problems.append(verdict)
+        elif verdict != before.get(arm):
             problems.append(
                 f"{arm} arm {terminal_id}: a new engine line landed during the run"
-                f" ({short_time(line.at)}): \"{line.message}\""
+                f" ({short_time(verdict.at)}): \"{verdict.message}\""
             )
     return problems
 
@@ -601,6 +655,65 @@ def app_launched_at(pid: int) -> datetime.datetime:
     return datetime.datetime.now().astimezone() - datetime.timedelta(seconds=age) - LAUNCH_SLACK
 
 
+# The defaults domain the app's `UserDefaults.standard` reads: its bundle id
+# inside a `.app` bundle, its executable's name in an unbundled `swift run`
+# build.
+BUNDLED_DOMAIN = "com.github.cheapsteak.tbd"
+UNBUNDLED_DOMAIN = APP_PROCESS_NAME
+# `AppState.useGhosttyTerminalEngineKey`. An unset key is off: it follows
+# `AppState.ghosttyTerminalEngineDefault`, which ships false.
+ENGINE_FLAG_KEY = "useGhosttyTerminalEngine"
+
+
+@dataclass(frozen=True)
+class EngineFlag:
+    """The app's libghostty engine flag, as `defaults read` gives it."""
+
+    domain: str
+    value: str | None  # as printed, or None when the key is unset
+
+    @property
+    def enabled(self) -> bool:
+        # `defaults read` prints a boolean as 1 or 0.
+        return self.value == "1"
+
+
+def defaults_domain(executable: str) -> str:
+    return BUNDLED_DOMAIN if ".app/Contents/MacOS/" in executable else UNBUNDLED_DOMAIN
+
+
+def read_engine_flag(pid: int) -> EngineFlag:
+    """The flag in the defaults domain of the app running as `pid`."""
+    located = subprocess.run(
+        ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=30
+    )
+    executable = located.stdout.strip()
+    if located.returncode != 0 or not executable:
+        raise SystemExit(
+            f"process {pid} is not running, so the libghostty engine flag cannot be read."
+        )
+    domain = defaults_domain(executable)
+    # A missing key and a missing domain both exit non-zero: unset.
+    result = subprocess.run(
+        ["defaults", "read", domain, ENGINE_FLAG_KEY], capture_output=True, text=True, timeout=30
+    )
+    return EngineFlag(domain, result.stdout.strip() if result.returncode == 0 else None)
+
+
+def engine_flag_problem(flag: EngineFlag) -> str | None:
+    """Why the flag is not on, or None when it is."""
+    if flag.enabled:
+        return None
+    reads = "nothing (unset, which is off)" if flag.value is None else repr(flag.value)
+    return (
+        f"the libghostty engine flag is not on: `defaults read {flag.domain} {ENGINE_FLAG_KEY}`"
+        f" reads {reads}. While it is off, a panel that is rebuilt lands on SwiftTerm and logs"
+        " nothing, so an arm's latest engine line can name an engine it has left. Turn on"
+        " Settings > Terminal > Experimental > \"Use the libghostty terminal engine\", and"
+        " leave it on until the run ends."
+    )
+
+
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
@@ -614,6 +727,7 @@ def run_samples(
     load_map: dict[str, dict[str, float]],
     requested: dict[str, int],
     arms: tuple[str, ...] = ARMS,
+    request_times: dict[str, dict[str, float]] | None = None,
 ) -> None:
     """Interleave the arms A/B/B/A..., one request at a time.
 
@@ -630,6 +744,10 @@ def run_samples(
     interrupt is the normal way a long run ends, and a return value would take
     every reading taken before it with it — the caller would then report a full
     capture against an empty map, banding every sample as unknown-load.
+
+    `request_times`, also the caller's when given, gets each request's wall
+    time, taken just before its write, so the report can place a draw line,
+    which carries no sequence number, by time. Engine mode passes it.
     """
     gap = gap_ms / 1000.0
     seq = 0
@@ -643,38 +761,20 @@ def run_samples(
             # whose load it never saw.
             requested[arm] += 1
             load = os.getloadavg()[0]
+            issued = time.time()
             write_request(directory, terminals[arm], seq)
             load_map[arm][str(seq)] = load
+            if request_times is not None:
+                request_times[arm][str(seq)] = issued
             time.sleep(gap)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Drive a paired terminal latency run and report it: two transports,"
-        " or two terminal engines on the holder transport.",
-    )
-    parser.add_argument("--worktree", required=True, help="Worktree name or id holding both terminals.")
-    parser.add_argument("--tmux-terminal", help="Transport mode: terminal id of the tmux arm.")
-    parser.add_argument("--holder-terminal", help="Transport mode: terminal id of the holder arm.")
-    parser.add_argument(
-        "--swiftterm-terminal",
-        help="Engine mode: id of the holder terminal on SwiftTerm (the swiftterm arm).",
-    )
-    parser.add_argument(
-        "--ghostty-terminal",
-        help="Engine mode: id of the holder terminal on libghostty (the libghostty arm).",
-    )
-    parser.add_argument(
-        "--trust-engines",
-        action="store_true",
-        help="Engine mode: skip the log check of each arm's engine, with a banner on the"
-        " report. For when the app's log cannot answer.",
-    )
-    parser.add_argument(
-        "--app-pid",
-        type=int,
-        help="Engine mode: the TBDApp whose log to check, when more than one is running.",
-    )
+# Either one selects engine mode.
+ENGINE_TERMINAL_FLAGS = ("--swiftterm-terminal", "--ghostty-terminal")
+
+
+def add_run_options(parser: argparse.ArgumentParser) -> None:
+    """The options both modes share, after each mode's own."""
     parser.add_argument("--samples", type=int, default=200, help="Samples per arm (default 200).")
     parser.add_argument("--gap-ms", type=float, default=250.0, help="Gap between requests, ms (default 250).")
     parser.add_argument(
@@ -688,58 +788,96 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-load-map",
         help="Also write the per-sample load map to this path, for a later re-report.",
     )
+
+
+def build_transport_parser() -> argparse.ArgumentParser:
+    """Transport mode's parser. It knows none of engine mode's options, so its
+    usage and errors name transport mode's arguments alone; its epilog says how
+    to reach engine mode."""
+    parser = argparse.ArgumentParser(
+        description="Drive a paired terminal-transport latency run and report it.",
+        epilog="Engine mode compares the two terminal engines on the holder transport:"
+        " pass --swiftterm-terminal and --ghostty-terminal in place of the transport"
+        " flags. With them, --help lists engine mode's options.",
+    )
+    parser.add_argument("--worktree", required=True, help="Worktree name or id holding both terminals.")
+    parser.add_argument("--tmux-terminal", required=True, help="Terminal id of the tmux arm.")
+    parser.add_argument("--holder-terminal", required=True, help="Terminal id of the holder arm.")
+    add_run_options(parser)
+    return parser
+
+
+def build_engine_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Drive a paired terminal-engine latency run and report it: a SwiftTerm"
+        " holder terminal against a libghostty one.",
+    )
+    parser.add_argument("--worktree", required=True, help="Worktree name or id holding both terminals.")
+    parser.add_argument(
+        "--swiftterm-terminal",
+        required=True,
+        help="Terminal id of the holder terminal on SwiftTerm (the swiftterm arm).",
+    )
+    parser.add_argument(
+        "--ghostty-terminal",
+        required=True,
+        help="Terminal id of the holder terminal on libghostty (the libghostty arm).",
+    )
+    # Transport mode's terminal flags, known here only to refuse a mix of modes.
+    parser.add_argument("--tmux-terminal", help=argparse.SUPPRESS)
+    parser.add_argument("--holder-terminal", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--trust-engines",
+        action="store_true",
+        help="Skip the log check of each arm's engine, with a banner on the report, for"
+        " when the app's log cannot answer. The flag check still runs.",
+    )
+    parser.add_argument(
+        "--app-pid",
+        type=int,
+        help="The TBDApp whose log and defaults to check, when more than one is running.",
+    )
+    add_run_options(parser)
     return parser
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """The arguments, plus the mode they select.
 
-    Adds `mode` ("transport" or "engine"), `arms` (labels in A/B order),
+    Either engine-mode terminal flag selects engine mode's parser; otherwise
+    transport mode's parses them. Adds
+    `mode` ("transport" or "engine"), `arms` (labels in A/B order),
     `terminals` (arm -> id) and `transports` (arm -> the transport it must be
     on).
     """
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    transport_ids = {"--tmux-terminal": args.tmux_terminal, "--holder-terminal": args.holder_terminal}
-    engine_ids = {"--swiftterm-terminal": args.swiftterm_terminal, "--ghostty-terminal": args.ghostty_terminal}
-    given_transport = any(value is not None for value in transport_ids.values())
-    given_engine = any(value is not None for value in engine_ids.values())
+    argv = sys.argv[1:] if argv is None else argv
+    if not any(token.split("=", 1)[0] in ENGINE_TERMINAL_FLAGS for token in argv):
+        args = build_transport_parser().parse_args(argv)
+        args.mode = "transport"
+        args.arms = ARMS
+        args.terminals = {"tmux": args.tmux_terminal, "holder": args.holder_terminal}
+        args.transports = {arm: arm for arm in ARMS}
+        args.trust_engines = False
+        args.app_pid = None
+        return args
 
-    if given_transport and given_engine:
+    parser = build_engine_parser()
+    args = parser.parse_args(argv)
+    if args.tmux_terminal is not None or args.holder_terminal is not None:
         parser.error(
             "--swiftterm-terminal and --ghostty-terminal (engine mode) cannot be combined"
             " with --tmux-terminal and --holder-terminal (transport mode)"
         )
-    if given_engine:
-        missing = [flag for flag, value in engine_ids.items() if value is None]
-        if missing:
-            parser.error(f"engine mode needs both arms: missing {', '.join(missing)}")
-        if args.swiftterm_terminal.lower() == args.ghostty_terminal.lower():
-            parser.error(
-                "--swiftterm-terminal and --ghostty-terminal name the same terminal;"
-                " an engine comparison needs one terminal on each engine"
-            )
-        args.mode = "engine"
-        args.arms = ENGINE_ARMS
-        swiftterm, libghostty = ENGINE_ARMS
-        args.terminals = {swiftterm: args.swiftterm_terminal, libghostty: args.ghostty_terminal}
-        args.transports = {arm: ENGINE_TRANSPORT for arm in ENGINE_ARMS}
-        return args
-
-    if not given_transport:
+    if args.swiftterm_terminal.lower() == args.ghostty_terminal.lower():
         parser.error(
-            "give --tmux-terminal and --holder-terminal (transport mode), or"
-            " --swiftterm-terminal and --ghostty-terminal (engine mode)"
+            "--swiftterm-terminal and --ghostty-terminal name the same terminal;"
+            " an engine comparison needs one terminal on each engine"
         )
-    missing = [flag for flag, value in transport_ids.items() if value is None]
-    if missing:
-        parser.error(f"the following arguments are required: {', '.join(missing)}")
-    if args.trust_engines or args.app_pid is not None:
-        parser.error("--trust-engines and --app-pid belong to engine mode")
-    args.mode = "transport"
-    args.arms = ARMS
-    args.terminals = {"tmux": args.tmux_terminal, "holder": args.holder_terminal}
-    args.transports = {arm: arm for arm in ARMS}
+    args.mode = "engine"
+    args.arms = ENGINE_ARMS
+    swiftterm, libghostty = ENGINE_ARMS
+    args.terminals = {swiftterm: args.swiftterm_terminal, libghostty: args.ghostty_terminal}
+    args.transports = {arm: ENGINE_TRANSPORT for arm in ENGINE_ARMS}
     return args
 
 
@@ -787,6 +925,13 @@ def main(argv: list[str] | None = None) -> int:
     engine_pid = 0
     engine_since = datetime.datetime.now().astimezone()
     trust_note = None
+    if engine_mode:
+        engine_pid = resolve_app_pid(args.app_pid)
+        flag_problem = engine_flag_problem(read_engine_flag(engine_pid))
+        if flag_problem is not None:
+            raise SystemExit(
+                f"REFUSING TO RUN — {flag_problem}\nNothing has been written to any terminal."
+            )
     if engine_mode and args.trust_engines:
         trust_note = (
             "!!!!  ENGINES NOT VERIFIED — --trust-engines skipped the log check. Each arm's"
@@ -796,7 +941,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"\n{trust_note}\n", file=sys.stderr)
     elif engine_mode:
-        engine_pid = resolve_app_pid(args.app_pid)
         engine_since = app_launched_at(engine_pid)
         engine_evidence = confirm_engines(terminals, engine_pid, engine_since, read_app_log)
         for arm in arms:
@@ -826,8 +970,15 @@ def main(argv: list[str] | None = None) -> int:
     # it. Everything recorded up to the interrupt is still a measurement.
     load_map: dict[str, dict[str, float]] = {arm: {} for arm in arms}
     requested: dict[str, int] = {arm: 0 for arm in arms}
+    # Engine mode bands its draw waits by time, so it records when each
+    # request was issued. Transport mode compares no draws.
+    request_times: dict[str, dict[str, float]] | None = (
+        {arm: {} for arm in arms} if engine_mode else None
+    )
     try:
-        run_samples(directory, terminals, args.samples, args.gap_ms, load_map, requested, arms)
+        run_samples(
+            directory, terminals, args.samples, args.gap_ms, load_map, requested, arms, request_times
+        )
     except KeyboardInterrupt:
         print("\ninterrupted — reporting what was collected", file=sys.stderr)
     finally:
@@ -858,15 +1009,25 @@ def main(argv: list[str] | None = None) -> int:
     capture = report_module.parse(text.splitlines())
 
     if args.keep_load_map:
-        Path(args.keep_load_map).write_text(json.dumps(load_map, indent=2), encoding="utf-8")
+        kept: dict = dict(load_map)
+        if request_times is not None:
+            # The report reads this entry back as the request times, not as an arm.
+            kept[report_module.REQUEST_TIMES_KEY] = request_times
+        Path(args.keep_load_map).write_text(json.dumps(kept, indent=2), encoding="utf-8")
 
     # An arm whose engine moved during the run holds two engines' samples, or
-    # two panels', and no figure of it belongs to either.
-    if engine_evidence is not None:
-        problems = recheck_engines(terminals, engine_pid, engine_since, engine_evidence, read_app_log)
+    # two panels', and no figure of it belongs to either. The flag is read
+    # again whether or not the log check ran.
+    if engine_mode:
+        problems: list[str] = []
+        flag_problem = engine_flag_problem(read_engine_flag(engine_pid))
+        if flag_problem is not None:
+            problems.append(flag_problem)
+        if engine_evidence is not None:
+            problems += recheck_engines(terminals, engine_pid, engine_since, engine_evidence, read_app_log)
         if problems:
             print(
-                "\nREFUSING TO REPORT — an arm's engine line changed during the run:",
+                "\nREFUSING TO REPORT — the engine check no longer holds after the run:",
                 file=sys.stderr,
             )
             for problem in problems:
@@ -960,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
             load_map=load_map,
             note=note,
             arms=report_module.engine_arms(terminals[swiftterm], terminals[libghostty]),
+            request_times=request_times,
         )
     else:
         report_module.report(

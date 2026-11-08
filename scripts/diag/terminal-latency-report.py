@@ -50,10 +50,21 @@ alone, and lines from any other terminal are left out of every figure.
            parse included, to the engine starting a draw. SwiftTerm stamps
            that start in `viewWillDraw`, libghostty when it builds a frame.
 
+Because the draw wait is the measure that tells the engines apart, its
+on-screen samples are split into load bands too, never pooled. A draw line
+carries no sequence number, so each one is placed by time: by the latest
+request of its arm issued before the draw's oldest chunk reached the feed
+seam (the line's log time less that chunk's wait). A draw always follows its
+request, so the request after it cannot be the one. A draw with no log time,
+one fed before the arm's first request or more than a second after its last,
+or one whose request has no load recorded joins neither band and is counted
+on its arm's `draw bands` line. The request times come from the driver, in
+the load map's `times` entry.
+
 The latency lines do not name an engine, and only the app knows which engine
 a terminal is on. This script takes the two ids as given. The driver,
 `terminal-latency-probe.py`, confirms each id's engine from the app's own
-engine log lines before and after the run.
+engine log lines and its defaults, before and after the run.
 
 WHAT IT CANNOT SHOW
 -------------------
@@ -87,12 +98,16 @@ spec's four conditions (workload, sample size, absolute bound, flatness bound)
 is a human judgement.
 
 In engine mode those lines carry the engine's name, and an ENGINES section
-sets libghostty's p90 against SwiftTerm's, on each echo band and on the
-on-screen draw wait. The libghostty engine spec's A/B section makes graduation
-need a clear win: a p90 at least 20% lower on one measure (0.80x or less),
-repeated in two A/B/B/A runs, with no regression beyond noise on the others.
-Each line says whether this run meets the 20% bar. The second run and the
-no-regression condition are a human judgement.
+sets libghostty's p90 against SwiftTerm's, band against band: echo idle, echo
+load, draw idle, draw load. The libghostty engine spec's A/B section makes
+graduation need a clear win: a p90 at least 20% lower on one measure (0.80x or
+less), repeated in two A/B/B/A runs, with no regression beyond noise on the
+others. Each line says whether this run meets the 20% bar. The ratio prints to
+three decimals and the verdict is read off that printed ratio, with the
+percentage rounded down, so a line never shows a ratio on one side of the bar
+and a verdict on the other. A measure that could not be banded prints its
+pooled figures and no verdict. The second run and the no-regression condition
+are a human judgement.
 
 USAGE
 -----
@@ -113,9 +128,11 @@ USAGE
       --predicate 'subsystem == "com.tbd.app" AND category == "terminallatency"' \\
       | scripts/diag/terminal-latency-report.py
 
-    # an engine-mode capture by hand:
+    # an engine-mode capture by hand, banded with the map the driver kept
+    # (--keep-load-map), which carries the request times the draws need:
     ... | scripts/diag/terminal-latency-report.py \\
-        --swiftterm-terminal <uuid> --ghostty-terminal <uuid>
+        --swiftterm-terminal <uuid> --ghostty-terminal <uuid> \\
+        --load-map <kept map> --idle-max 8
 
     scripts/diag/terminal-latency-report.py --self-test
 """
@@ -123,6 +140,8 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import bisect
+import datetime
 import json
 import math
 import re
@@ -135,6 +154,18 @@ from dataclasses import dataclass, field
 # with its last field.
 LINE_RE = re.compile(r"\b(draw|echo|echolost|echorefused) ((?:[a-z]+=\S+)(?: [a-z]+=\S+)*)\s*$")
 
+# The time `log show` puts at the start of a line: with a UTC offset in its
+# default style, without one in `--style compact`. Read for draw lines only,
+# which engine mode places in load bands by time.
+LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{1,6})([+-]\d{4})?\s")
+
+# How long after an arm's last request a draw may be fed and still be placed
+# by it: the driver waits a second for the last echo before it reads the log.
+DRAW_SETTLE_SECONDS = 1.0
+
+# Why an on-screen draw joined neither band, in the order they print.
+DRAW_UNPLACED_REASONS = ("outside the run", "no load recorded", "no log time", "no request times")
+
 TRANSPORTS = ("tmux", "holder")
 
 # Engine mode's arm labels, in A/B order. Both arms are on one transport.
@@ -144,6 +175,10 @@ ENGINE_TRANSPORT = "holder"
 # The libghostty engine spec's bar for a clear win: libghostty's p90 at most
 # 0.80 of SwiftTerm's, which is 20% lower.
 ENGINE_WIN_RATIO = 0.80
+
+# The load map's entry for when each request was issued, beside the arms'
+# entries. The driver writes it in engine mode only.
+REQUEST_TIMES_KEY = "times"
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +233,9 @@ class Draw:
     parse_max_ms: float
     dropped: int
     visible: bool
+    # When the line was logged, in epoch seconds, or None when the capture
+    # carries no time.
+    at: float | None = None
 
 
 @dataclass(slots=True)
@@ -274,6 +312,21 @@ def parse_fields(blob: str) -> dict[str, str]:
     return out
 
 
+def parse_log_time(line: str) -> float | None:
+    """The epoch time at the start of a `log show` line, or None. A time with
+    no offset is local, as `--style compact` prints it."""
+    match = LOG_TIME_RE.match(line)
+    if not match:
+        return None
+    stamp, offset = match.group(1), match.group(2)
+    try:
+        if offset:
+            return datetime.datetime.strptime(stamp + offset, "%Y-%m-%d %H:%M:%S.%f%z").timestamp()
+        return datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S.%f").timestamp()
+    except ValueError:
+        return None
+
+
 def parse(stream) -> Capture:
     capture = Capture()
     for line in stream:
@@ -302,6 +355,7 @@ def parse(stream) -> Capture:
                     parse_max_ms=float(fields["parsemaxms"]),
                     dropped=int(fields["dropped"]),
                     visible=fields["vis"] == "1",
+                    at=parse_log_time(line),
                 )
                 if draw.oldest_ms < 0 or draw.newest_ms < 0:
                     capture.negative_waits += 1
@@ -419,9 +473,59 @@ def split_bands(
     return idle, under_load, unknown
 
 
-def engine_comparison_line(name: str, ghostty: list[float], swiftterm: list[float]) -> str:
+def split_draw_bands(
+    draws: list[Draw],
+    arm: str,
+    idle_max: float,
+    load_map: dict,
+    request_times: dict | None,
+) -> tuple[list[float], list[float], dict[str, int]]:
+    """One arm's draw waits split into the idle band and the load band, and
+    how many joined neither, by reason.
+
+    A draw line carries no sequence number, so a draw is placed by the
+    latest request of its arm issued before its oldest chunk reached the feed
+    seam: its log time less that chunk's wait. A draw always follows its
+    request, so the request after it cannot be the one. `request_times` is
+    {"<arm>": {"<seq>": <epoch seconds>}}, as the driver records it.
+    """
+    arm_times = (request_times or {}).get(arm) or {}
+    issued = sorted((float(when), int(seq)) for seq, when in arm_times.items())
+    issued_at = [when for when, _ in issued]
+    idle: list[float] = []
+    under_load: list[float] = []
+    unplaced: dict[str, int] = {}
+    for draw in draws:
+        if draw.at is None:
+            reason = "no log time"
+        elif not issued:
+            reason = "no request times"
+        else:
+            fed = draw.at - draw.oldest_ms / 1000.0
+            index = bisect.bisect_right(issued_at, fed) - 1
+            if index < 0 or fed > issued_at[-1] + DRAW_SETTLE_SECONDS:
+                reason = "outside the run"
+            else:
+                load = load_for(load_map, arm, issued[index][1])
+                if load is None:
+                    reason = "no load recorded"
+                else:
+                    (idle if load <= idle_max else under_load).append(draw.oldest_ms)
+                    continue
+        unplaced[reason] = unplaced.get(reason, 0) + 1
+    return idle, under_load, unplaced
+
+
+def engine_comparison_line(
+    name: str, ghostty: list[float], swiftterm: list[float], unbanded: str | None = None
+) -> str:
     """libghostty's p90 against SwiftTerm's on one measure, and whether it is
-    the clear win the libghostty engine spec's graduation asks for."""
+    the clear win the libghostty engine spec's graduation asks for.
+
+    `unbanded` says why the samples are pooled across load bands. Such a line
+    prints its figures and no verdict: a pooled p90 can hide a regression in
+    one band behind a win in the other.
+    """
     if not ghostty or not swiftterm:
         return f"  {name:<22} (no samples on one arm)"
     ghostty_p90 = percentile(sorted(ghostty), 0.90)
@@ -429,18 +533,25 @@ def engine_comparison_line(name: str, ghostty: list[float], swiftterm: list[floa
     figures = f"libghostty {ghostty_p90:.3f} / swiftterm {swiftterm_p90:.3f}"
     if swiftterm_p90 <= 0:
         return f"  {name:<22} {figures} (no ratio: swiftterm's p90 is 0)"
-    ratio = ghostty_p90 / swiftterm_p90
-    # The small tolerance keeps a ratio that is exactly the bar, computed in
-    # floating point, on the side of the bar it is on.
-    if ratio <= ENGINE_WIN_RATIO + 1e-9:
-        verdict = f"libghostty {round((1 - ratio) * 100)}% lower: MEETS the 20% bar"
-    elif ratio < 1.0:
-        verdict = f"libghostty {round((1 - ratio) * 100)}% lower: SHORT of the 20% bar"
-    elif ratio == 1.0:
-        verdict = "no difference"
+    # The verdict is read off the ratio as printed, in thousandths, and the
+    # percentage is rounded down: a line can then never print a ratio on one
+    # side of the bar beside a verdict from the other.
+    shown = f"{ghostty_p90 / swiftterm_p90:.3f}"
+    if unbanded is not None:
+        return f"  {name:<22} {figures} = {shown}x (not banded: {unbanded}; no verdict)"
+    thousandths = int(shown.replace(".", ""))
+    bar = round(ENGINE_WIN_RATIO * 1000)
+    if thousandths == 1000:
+        return f"  {name:<22} {figures} = {shown}x (no difference)"
+    percent = abs(1000 - thousandths) // 10
+    change = f"libghostty {percent}%" if percent else "libghostty under 1%"
+    if thousandths <= bar:
+        verdict = f"{change} lower: MEETS the 20% bar"
+    elif thousandths < 1000:
+        verdict = f"{change} lower: SHORT of the 20% bar"
     else:
-        verdict = f"libghostty {round((ratio - 1) * 100)}% higher"
-    return f"  {name:<22} {figures} = {ratio:.2f}x ({verdict})"
+        verdict = f"{change} higher"
+    return f"  {name:<22} {figures} = {shown}x ({verdict})"
 
 
 def report(
@@ -451,6 +562,7 @@ def report(
     terminals: set[str] | None = None,
     note: str | None = None,
     arms: list[Arm] | None = None,
+    request_times: dict | None = None,
 ) -> None:
     """Print the run's figures.
 
@@ -462,6 +574,10 @@ def report(
     `arms` selects engine mode (`engine_arms`). Engine arms name their own
     terminals, so `terminals` must be None with them. Omitted, the arms are
     the two transports.
+
+    `request_times`, {"<arm>": {"<seq>": <epoch seconds>}}, is when the driver
+    issued each request. Engine mode needs it, beside the load map, to band
+    the draw waits; transport mode reads none of it.
     """
     engine_mode = arms is not None
     if engine_mode:
@@ -470,6 +586,15 @@ def report(
         terminals = {arm.terminal for arm in arms if arm.terminal is not None}
     else:
         arms = transport_arms()
+    banded = idle_max is not None and load_map is not None
+    # Why engine mode's draw waits cannot be banded, or None when they can.
+    draw_unbanded: str | None
+    if not banded:
+        draw_unbanded = "no load map"
+    elif not request_times:
+        draw_unbanded = "no request times"
+    else:
+        draw_unbanded = None
 
     # A capture is whatever the app logged in the window, which includes every
     # OTHER panel that happened to be open. Restricting to the probed ids is
@@ -546,6 +671,7 @@ def report(
     echo_all: dict[str, list[float]] = {}
     echo_bands: dict[str, tuple[list[float], list[float]]] = {}
     draws_on_screen: dict[str, list[float]] = {}
+    draw_bands: dict[str, tuple[list[float], list[float]]] = {}
 
     print("\nECHO", file=out)
     for arm in arms:
@@ -634,6 +760,25 @@ def report(
             ),
             file=out,
         )
+        # Engine mode compares on-screen draws band against band, so they are
+        # split as the echoes are. `draw_unbanded` is None only when `idle_max`
+        # and `load_map` are both given; naming them again lets a type checker
+        # see it.
+        if engine_mode and draw_unbanded is None and idle_max is not None and load_map is not None:
+            idle, under_load, unplaced = split_draw_bands(
+                visible, label, idle_max, load_map, request_times
+            )
+            draw_bands[label] = (idle, under_load)
+            print(format_distribution(f"{label} draw idle", distribution(idle)), file=out)
+            print(format_distribution(f"{label} draw load", distribution(under_load)), file=out)
+            details = ", ".join(
+                f"{unplaced[reason]} {reason}" for reason in DRAW_UNPLACED_REASONS if unplaced.get(reason)
+            )
+            print(
+                f"  {label + ' draw bands':<22} in neither band: {sum(unplaced.values())}"
+                + (f" ({details})" if details else ""),
+                file=out,
+            )
         groups = by_terminal(own, arm.transport)
         if wanted is None and len(groups) > 1:
             # The draw line is the CHECK on the echo comparison, so an arm
@@ -659,16 +804,17 @@ def report(
     if not engine_mode:
         return
 
-    # Matched band against matched band, never pooled across bands when the
-    # bands exist. SwiftTerm under its Metal renderer emits no draw lines, so
-    # the draw comparison then says it has nothing to compare.
+    # Matched band against matched band. A measure that could not be banded
+    # prints its pooled figures with no verdict. SwiftTerm under its Metal
+    # renderer emits no draw lines, so the draw comparison then says it has
+    # nothing to compare.
     swiftterm, libghostty = ENGINES
     print(
         "\nENGINES (p90, libghostty / swiftterm; a clear win is 0.80x or less,"
         " repeated in two runs)",
         file=out,
     )
-    if idle_max is not None and load_map is not None:
+    if banded:
         for index, band in enumerate(("idle", "load")):
             print(
                 engine_comparison_line(
@@ -681,18 +827,33 @@ def report(
     else:
         print(
             engine_comparison_line(
-                "echo all", echo_all.get(libghostty, []), echo_all.get(swiftterm, [])
+                "echo all",
+                echo_all.get(libghostty, []),
+                echo_all.get(swiftterm, []),
+                unbanded="no load map",
             ),
             file=out,
         )
-    print(
-        engine_comparison_line(
-            "draw on screen",
-            draws_on_screen.get(libghostty, []),
-            draws_on_screen.get(swiftterm, []),
-        ),
-        file=out,
-    )
+    if draw_unbanded is None:
+        for index, band in enumerate(("idle", "load")):
+            print(
+                engine_comparison_line(
+                    f"draw {band}",
+                    draw_bands.get(libghostty, ([], []))[index],
+                    draw_bands.get(swiftterm, ([], []))[index],
+                ),
+                file=out,
+            )
+    else:
+        print(
+            engine_comparison_line(
+                "draw on screen",
+                draws_on_screen.get(libghostty, []),
+                draws_on_screen.get(swiftterm, []),
+                unbanded=draw_unbanded,
+            ),
+            file=out,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +948,59 @@ SELF_TEST_LOAD_MAP = {
     "tmux": {"1": 1.0, "2": 2.0, "3": 30.0, "4": 41.0},
     "holder": {"1": 1.0, "2": 2.0, "3": 30.0, "4": 41.0},
 }
+
+
+def self_test_draw_run() -> tuple[list[str], dict, dict]:
+    """Engine-mode draw lines, load map and request times for a run of 100
+    requests per arm: 95 at idle, then 5 under load. Idle, libghostty draws
+    in 2 ms and SwiftTerm in 5; under load, libghostty in 40 and SwiftTerm
+    in 30. Pooled, libghostty's p90 is 0.40x SwiftTerm's and the load-band
+    regression vanishes; banded, it shows.
+
+    SwiftTerm's draws also test the placement. The load of its second
+    request is missing, so the draw after it joins neither band. Four more
+    draws: one fed before the first request and one long after the last
+    (outside the run), one with no log time, and one logged just after an
+    under-load request whose chunk was fed 500 ms earlier, after the idle
+    request before it. That one is idle: placed by its log time, nearest or
+    latest before, it would be under load.
+    """
+    zone = datetime.timezone(datetime.timedelta(hours=-5))
+    base = datetime.datetime(2026, 11, 8, 11, 0, 0, tzinfo=zone)
+    prefix = "0x1  Info 0x0 900 0 TBDApp: [com.tbd.app:terminallatency]"
+
+    def draw(when: datetime.datetime | None, terminal: str, wait: float) -> str:
+        stamp = when.strftime("%Y-%m-%d %H:%M:%S.%f%z") if when else "x"
+        return (
+            f"{stamp} {prefix} draw transport=holder terminal={terminal} chunks=1"
+            f" oldestms={wait:.3f} newestms={wait:.3f} parsemaxms=0.100 dropped=0 vis=1"
+        )
+
+    lines: list[str] = []
+    loads: dict[str, dict[str, float]] = {"swiftterm": {}, "libghostty": {}}
+    times: dict[str, dict[str, float]] = {"swiftterm": {}, "libghostty": {}}
+    seq = 0
+    for index in range(100):
+        under_load = index >= 95
+        for arm, terminal, idle_ms, load_ms in (
+            ("swiftterm", "SSSS", 5.0, 30.0),
+            ("libghostty", "GGGG", 2.0, 40.0),
+        ):
+            seq += 1
+            issued = base + datetime.timedelta(seconds=seq * 0.25)
+            loads[arm][str(seq)] = 30.0 if under_load else 1.0
+            times[arm][str(seq)] = issued.timestamp()
+            wait = load_ms if under_load else idle_ms
+            # The echo comes back 3 ms after the request; its chunk then waits.
+            lines.append(draw(issued + datetime.timedelta(milliseconds=3 + wait), terminal, wait))
+    # SwiftTerm's last idle request is seq 189 at 47.25 s, its first under
+    # load seq 191 at 47.75 s.
+    lines.append(draw(base + datetime.timedelta(seconds=47.80), "SSSS", 500.0))
+    lines.append(draw(base + datetime.timedelta(seconds=0.1), "SSSS", 1.0))
+    lines.append(draw(base + datetime.timedelta(seconds=52.0), "SSSS", 1.0))
+    lines.append(draw(None, "SSSS", 1.0))
+    del loads["swiftterm"]["3"]
+    return lines, loads, times
 
 
 def self_test() -> int:
@@ -1035,29 +1249,82 @@ def self_test() -> int:
         "libghostty on screen",
         "libghostty chunks      3 fed, 0 dropped past the ring",
         "ENGINES (p90, libghostty / swiftterm",
-        "echo idle              libghostty 0.700 / swiftterm 3.000 = 0.23x"
-        " (libghostty 77% lower: MEETS the 20% bar)",
-        "echo load              libghostty 5.000 / swiftterm 4.000 = 1.25x (libghostty 25% higher)",
-        "draw on screen         libghostty 9.000 / swiftterm 10.000 = 0.90x"
-        " (libghostty 10% lower: SHORT of the 20% bar)",
+        "echo idle              libghostty 0.700 / swiftterm 3.000 = 0.233x"
+        " (libghostty 76% lower: MEETS the 20% bar)",
+        "echo load              libghostty 5.000 / swiftterm 4.000 = 1.250x (libghostty 25% higher)",
+        # No request times, so the draws are not banded and get no verdict.
+        "draw on screen         libghostty 9.000 / swiftterm 10.000 = 0.900x"
+        " (not banded: no request times; no verdict)",
     ):
         if needle not in engine_text:
             failures.append(f"engine report is missing {needle!r}")
+    for absent in ("draw idle", "draw load", "draw bands"):
+        if absent in engine_text:
+            failures.append(f"an engine report with no request times printed {absent!r}")
     # The third holder panel, the tmux panel, and their lost token and
     # refusal are another panel's traffic, and transport labels have no place.
     for absent in ("90.000", "80.000", "99.000", "ZZZZ", "TTTT", "noview", "holder ", "tmux "):
         if absent in engine_text:
             failures.append(f"engine report printed {absent!r}")
 
-    # Unbanded, the comparison sets the pooled figures side by side instead.
+    # Unbanded, the comparison sets the pooled figures side by side, with no
+    # verdict on either measure.
     engine_plain = io.StringIO()
     report(engine_capture, out=engine_plain, arms=arms)
     engine_plain_text = engine_plain.getvalue()
-    if "echo all               libghostty 5.000 / swiftterm 4.000 = 1.25x" not in engine_plain_text:
-        failures.append("unbanded engine report is missing the pooled echo comparison")
-    for absent in ("echo idle", "echo load", "flatness"):
+    for needle in (
+        "echo all               libghostty 5.000 / swiftterm 4.000 = 1.250x"
+        " (not banded: no load map; no verdict)",
+        "draw on screen         libghostty 9.000 / swiftterm 10.000 = 0.900x"
+        " (not banded: no load map; no verdict)",
+    ):
+        if needle not in engine_plain_text:
+            failures.append(f"unbanded engine report is missing {needle!r}")
+    for absent in ("echo idle", "echo load", "flatness", "MEETS", "SHORT", "higher"):
         if absent in engine_plain_text:
             failures.append(f"unbanded engine report printed {absent!r}")
+
+    # Draws banded by time. Pooled, libghostty's p90 is 0.40x SwiftTerm's,
+    # which would MEET the bar while hiding a regression under load.
+    draw_lines, draw_loads, draw_times = self_test_draw_run()
+    draw_capture = parse(io.StringIO("\n".join(draw_lines) + "\n"))
+    check("timed draws", sum(d.at is not None for d in draw_capture.draws), len(draw_lines) - 1)
+    draw_arms = engine_arms("SSSS", "GGGG")
+    drawn = io.StringIO()
+    report(
+        draw_capture, out=drawn, idle_max=8.0, load_map=draw_loads, arms=draw_arms,
+        request_times=draw_times,
+    )
+    drawn_text = drawn.getvalue()
+    for needle in (
+        "swiftterm draw idle    n=95",
+        "swiftterm draw load    n=5 ",
+        "swiftterm draw bands   in neither band: 4"
+        " (2 outside the run, 1 no load recorded, 1 no log time)",
+        "libghostty draw idle   n=95",
+        "libghostty draw bands  in neither band: 0",
+        "draw idle              libghostty 2.000 / swiftterm 5.000 = 0.400x"
+        " (libghostty 60% lower: MEETS the 20% bar)",
+        "draw load              libghostty 40.000 / swiftterm 30.000 = 1.333x (libghostty 33% higher)",
+    ):
+        if needle not in drawn_text:
+            failures.append(f"banded draw report is missing {needle!r}")
+    if "draw on screen         libghostty" in drawn_text:
+        failures.append("a banded draw report printed a pooled draw comparison")
+    swiftterm_visible = [d for d in draw_capture.draws if d.terminal == "SSSS" and d.visible]
+    late_idle, late_load, _ = split_draw_bands(
+        swiftterm_visible, "swiftterm", 8.0, draw_loads, draw_times
+    )
+    check("a draw goes by its feed time to the request before it", (500.0 in late_idle, 500.0 in late_load), (True, False))
+    check(
+        "an arm with no request times places nothing",
+        split_draw_bands(swiftterm_visible, "swiftterm", 8.0, draw_loads, {"libghostty": draw_times["libghostty"]})[2],
+        {"no request times": len(swiftterm_visible) - 1, "no log time": 1},
+    )
+    # Transport mode reads no request times and prints no draw band.
+    for absent in ("draw idle", "draw bands"):
+        if absent in text:
+            failures.append(f"a transport-mode report printed {absent!r}")
 
     # SwiftTerm under its Metal renderer emits no draw lines: the comparison
     # says there is nothing to compare rather than inventing a ratio.
@@ -1075,9 +1342,22 @@ def self_test() -> int:
     if "draw on screen         (no samples on one arm)" not in metal_out.getvalue():
         failures.append("engine report invented a draw comparison with one arm empty")
 
-    # The bar is inclusive, and the arms are refused alongside `terminals`.
-    check("ratio at the bar", "MEETS" in engine_comparison_line("x", [0.8], [1.0]), True)
-    check("ratio past the bar", "SHORT" in engine_comparison_line("x", [0.81], [1.0]), True)
+    # The bar is inclusive. The verdict is the printed ratio's, and the
+    # percentage rounds down, so neither can contradict the other.
+    for ghostty_p90, expected in (
+        (0.8, "0.800x (libghostty 20% lower: MEETS the 20% bar)"),
+        (0.8004, "0.800x (libghostty 20% lower: MEETS the 20% bar)"),
+        (0.8049, "0.805x (libghostty 19% lower: SHORT of the 20% bar)"),
+        (0.81, "0.810x (libghostty 19% lower: SHORT of the 20% bar)"),
+        (0.2336, "0.234x (libghostty 76% lower: MEETS the 20% bar)"),
+        (0.9995, "1.000x (no difference)"),
+        (0.999, "0.999x (libghostty under 1% lower: SHORT of the 20% bar)"),
+        (1.0059, "1.006x (libghostty under 1% higher)"),
+        (1.0199, "1.020x (libghostty 2% higher)"),
+    ):
+        line = engine_comparison_line("x", [ghostty_p90], [1.0])
+        check(f"ratio line for {ghostty_p90}", line.split(" = ", 1)[-1], expected)
+    # The arms are refused alongside `terminals`.
     try:
         report(engine_capture, out=io.StringIO(), terminals={"ssss"}, arms=arms)
         failures.append("report accepted engine arms together with terminals")
@@ -1102,7 +1382,8 @@ def main() -> int:
     parser.add_argument(
         "--load-map",
         help="JSON of {'<arm>': {'<seq>': <load1>}} written by the driver script."
-        " An arm is a transport, or in engine mode an engine.",
+        " An arm is a transport, or in engine mode an engine. An engine-mode map also"
+        " carries 'times': {'<arm>': {'<seq>': <epoch seconds>}}, which bands the draws.",
     )
     parser.add_argument(
         "--idle-max",
@@ -1163,9 +1444,13 @@ def main() -> int:
         arms = engine_arms(args.swiftterm_terminal, args.ghostty_terminal)
 
     load_map = None
+    request_times = None
     if args.load_map:
         with open(args.load_map, encoding="utf-8") as handle:
             load_map = json.load(handle)
+        # Not an arm: when each request was issued, which the draws are
+        # banded by. Only an engine-mode map carries it.
+        request_times = load_map.pop(REQUEST_TIMES_KEY, None)
 
     terminals: set[str] | None = None
     if args.terminals:
@@ -1191,7 +1476,14 @@ def main() -> int:
         )
         return 1
 
-    report(capture, idle_max=args.idle_max, load_map=load_map, terminals=terminals, arms=arms)
+    report(
+        capture,
+        idle_max=args.idle_max,
+        load_map=load_map,
+        terminals=terminals,
+        arms=arms,
+        request_times=request_times,
+    )
     return 0
 
 
