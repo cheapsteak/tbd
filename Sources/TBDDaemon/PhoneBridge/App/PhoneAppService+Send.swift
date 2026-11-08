@@ -46,11 +46,14 @@ extension PhoneAppService {
     ]
     /// The refusals TBD itself writes on the remote create and message paths,
     /// which reach a phone as they are: the gates' (`tbdRemoteGateRefusals`),
-    /// the phone message rule's (`PhoneMessageText`), and a remote session's
-    /// state (`RemoteSendMessageRefusal`).
+    /// the phone message rule's (`PhoneMessageText`), the router's own on a
+    /// create (`RemoteCreateRefusal`), and a remote session's state
+    /// (`RemoteSendMessageRefusal`).
     static let tbdRemoteRefusals: Set<String> = tbdRemoteGateRefusals.union([
         PhoneMessageText.emptyRefusal,
         PhoneMessageText.controlCharacterRefusal,
+        RemoteCreateRefusal.promptNotString,
+        RemoteCreateRefusal.formNotWritable,
         RemoteSendMessageRefusal.exited,
         RemoteSendMessageRefusal.waitingInput,
         RemoteSendMessageRefusal.waitingInputAnswerOnCard,

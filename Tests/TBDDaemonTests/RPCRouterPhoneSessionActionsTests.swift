@@ -600,7 +600,7 @@ struct RPCRouterPhoneSessionActionsTests {
                 Issue.record("form values \(paramsJSON) were not refused: \(vetted)")
                 continue
             }
-            #expect(reason == RPCRouter.phoneRemoteCreatePromptNotStringRefusal, "form \(paramsJSON)")
+            #expect(reason == RemoteCreateRefusal.promptNotString, "form \(paramsJSON)")
         }
     }
 
@@ -621,7 +621,7 @@ struct RPCRouterPhoneSessionActionsTests {
             let response = try await f.actions.phoneRemoteCreate(
                 RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON), deviceID: UUID())
             #expect(response.success == false)
-            #expect(response.error == RPCRouter.phoneRemoteCreatePromptNotStringRefusal, "form \(paramsJSON)")
+            #expect(response.error == RemoteCreateRefusal.promptNotString, "form \(paramsJSON)")
         }
         #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused prompt never reaches the provider")
         let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }

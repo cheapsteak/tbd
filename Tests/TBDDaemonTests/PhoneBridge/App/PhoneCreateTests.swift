@@ -845,9 +845,9 @@ struct PhoneCreateTests {
     }
 
     /// A remote create's refusal reaches the phone only in words TBD wrote:
-    /// the phone message rule's and the remote gates' pass as they are, and a
-    /// provider's own words, which can quote a token, become
-    /// `remoteRefusedReason`.
+    /// the phone message rule's, the remote gates' and the router's own
+    /// (`RemoteCreateRefusal`) pass as they are, and a provider's own words,
+    /// which can quote a token, become `remoteRefusedReason`.
     @Test func aRefusedRemoteCreateKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
@@ -859,6 +859,8 @@ struct PhoneCreateTests {
             (PhoneMessageText.emptyRefusal, PhoneMessageText.emptyRefusal),
             (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
             (RemoteGateRefusal.claudeCloudDisabled, RemoteGateRefusal.claudeCloudDisabled),
+            (RemoteCreateRefusal.promptNotString, RemoteCreateRefusal.promptNotString),
+            (RemoteCreateRefusal.formNotWritable, RemoteCreateRefusal.formNotWritable),
         ]
 
         for (daemon, phone) in cases {

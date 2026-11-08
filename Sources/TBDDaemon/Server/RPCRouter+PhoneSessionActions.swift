@@ -192,10 +192,6 @@ extension RPCRouter: PhoneSessionActions {
         RemoteCreateParams(provider: p.provider, paramsJSON: p.paramsJSON)
     }
 
-    /// What a paired phone hears when its new remote session's `prompt` form
-    /// value is there and is not a string.
-    static let phoneRemoteCreatePromptNotStringRefusal = "remote.create prompt must be a string"
-
     /// A remote session a phone creates, as the handler gets it: the provider
     /// and its form values (`phoneRemoteCreateParams`), with the first
     /// message, the form's `prompt` value
@@ -214,7 +210,7 @@ extension RPCRouter: PhoneSessionActions {
     ///
     /// - **A `prompt` that is there and is not a string** (a number, an
     ///   array, an object, a null) is refused with
-    ///   `phoneRemoteCreatePromptNotStringRefusal`. The provider would paste
+    ///   `RemoteCreateRefusal.promptNotString`. The provider would paste
     ///   whatever text it makes of the value, which the rule never saw.
     /// - **Form values that are not a JSON object, and a `prompt` that is
     ///   absent or empty,** carry no phone message and are kept as they came,
@@ -223,7 +219,9 @@ extension RPCRouter: PhoneSessionActions {
     ///   form values are written out again with it, every other value as it
     ///   came; otherwise they pass byte for byte.
     ///
-    /// Either the params, or the refusal that answers in place of the create.
+    /// Either the params, or the refusal that answers in place of the create:
+    /// `RemoteCreateRefusal`'s or `PhoneMessageText`'s, which reach the phone
+    /// as they are.
     static func phoneRemoteCreateVetted(
         _ p: RemoteCreateParams
     ) -> PhoneMessageText.Vetted<RemoteCreateParams> {
@@ -235,7 +233,7 @@ extension RPCRouter: PhoneSessionActions {
             return .deliver(narrowed)
         }
         guard let prompt = value as? String else {
-            return .refused(phoneRemoteCreatePromptNotStringRefusal)
+            return .refused(RemoteCreateRefusal.promptNotString)
         }
         guard !prompt.isEmpty else {
             return .deliver(narrowed)
@@ -249,7 +247,7 @@ extension RPCRouter: PhoneSessionActions {
             // A form that came out of `JSONSerialization` always goes back in.
             guard let written = try? JSONSerialization.data(withJSONObject: form),
                   let json = String(data: written, encoding: .utf8) else {
-                return .refused("remote.create paramsJSON could not be written out again")
+                return .refused(RemoteCreateRefusal.formNotWritable)
             }
             return .deliver(RemoteCreateParams(provider: narrowed.provider, paramsJSON: json))
         }
