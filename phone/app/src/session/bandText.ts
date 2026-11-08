@@ -3,7 +3,7 @@
  * pure function of the status and the time now, so its tests need no clock.
  *
  * An error or a rate limit shows the daemon's reason as it comes. A rate limit with no reason,
- * which is every local one, says when the limit lifts, in the phone's own time: the time alone
+ * which is every local one, says when the limit lifts (unless that time has passed), in the phone's own time: the time alone
  * when it lifts today, else after a short weekday, the laptop's own style. An error with no
  * reason shows its status word, so the band is never empty.
  */
@@ -39,7 +39,7 @@ export function bandText(status: PhoneStatus, now: number, timeZone?: string): s
 
 /** A rate limit's line when the daemon gave no reason. */
 function rateLimitText(untilAt: number | undefined, now: number, timeZone: string | undefined): string {
-  if (untilAt === undefined) return RATE_LIMIT_TEXT;
+  if (untilAt === undefined || untilAt <= now) return RATE_LIMIT_TEXT;
   const until = wallClock(untilAt, timeZone);
   const today = wallClock(now, timeZone);
   const day = until.day === today.day ? '' : `${WEEKDAYS[until.weekday]} `;
@@ -61,15 +61,28 @@ interface WallClock {
   minute: number;
 }
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The formatter for `timeZone` (the phone's own zone when undefined), built once. */
+function formatter(timeZone: string | undefined): Intl.DateTimeFormat {
+  const key = timeZone ?? '';
+  let f = formatters.get(key);
+  if (f === undefined) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
+    });
+    formatters.set(key, f);
+  }
+  return f;
+}
+
 /**
  * What a clock in `timeZone` reads at `ms`. Intl gives the fields as numbers in a fixed locale
  * and a 24-hour cycle; the text around them is built by hand, so the phone's locale never
  * changes it.
  */
 function wallClock(ms: number, timeZone: string | undefined): WallClock {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric',
-  }).formatToParts(ms);
+  const parts = formatter(timeZone).formatToParts(ms);
   const field = (type: Intl.DateTimeFormatPartTypes): number => Number(parts.find((p) => p.type === type)?.value);
   const day = Date.UTC(field('year'), field('month') - 1, field('day')) / DAY_MS;
   return { day, weekday: new Date(day * DAY_MS).getUTCDay(), hour: field('hour'), minute: field('minute') };

@@ -252,6 +252,8 @@ test('the row opened last is marked when you come back', async ({ page, appHost 
     await app(page).getByRole('button', { name: 'Back to sessions' }).click();
     await expect(marked).toHaveCount(1);
     await expect(marked.locator('.n')).toHaveText(name);
+    await expect(marked).toHaveAttribute('aria-current', 'true');
+    await expect(app(page).locator('.row:not(.sel)[aria-current]')).toHaveCount(0);
   }
 });
 
@@ -451,8 +453,8 @@ for (const [title, name, cls, text] of [
     await expect(band).toContainClass(cls);
     await expect(band).toHaveText(text);
     await expect(band.locator('svg')).toHaveCount(1);
-    // It appears and changes while the screen is open, so a screen reader announces it.
-    await expect(band).toHaveAttribute('role', 'status');
+    // It sits in a live region that stays mounted, so a screen reader announces it.
+    await expect(app(page).getByRole('status')).toHaveCount(1);
   });
 }
 
@@ -467,11 +469,16 @@ test.describe('in UTC', () => {
     const today = new Date();
     const at = (/** @type {number} */ days, /** @type {number} */ hour, /** @type {number} */ minute) =>
       Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + days, hour, minute);
-    await openApp(page, appHost, { scenario: withRows(MOCK, [limited(at(0, 15, 0))]) });
+    // A limit that lifts in a few minutes: a time still to come, whatever hour the test runs at.
+    const soon = Date.now() + 10 * 60_000;
+    const soonDate = new Date(soon);
+    const soonClock = `${soonDate.getUTCHours() % 12 || 12}:${String(soonDate.getUTCMinutes()).padStart(2, '0')} ${soonDate.getUTCHours() < 12 ? 'am' : 'pm'}`;
+    const soonDay = soonDate.getUTCDate() === today.getUTCDate() ? '' : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][soonDate.getUTCDay()]} `;
+    await openApp(page, appHost, { scenario: withRows(MOCK, [limited(soon)]) });
     await openSessionByName(page, 'Bulk import');
     const band = app(page).locator('.banner');
     await expect(band).toContainClass('st-rate');
-    await expect(band).toHaveText('Usage limit reached. It resets at 3:00 pm.');
+    await expect(band).toHaveText(`Usage limit reached. It resets at ${soonDay}${soonClock}.`);
 
     // On another day, the weekday comes first. The band changes while the screen is open.
     const tomorrow = at(1, 9, 5);
@@ -544,6 +551,32 @@ test("switching tabs changes the header's status", async ({ page, appHost }) => 
   await expect(head.locator('.t2a')).toHaveText('Idle· 20m');
   await expect(head.getByRole('button', { name: 'Account: acme-work. Switch account' })).toBeVisible();
   await expect(head.getByRole('button', { name: 'Model: opus. Change model' })).toBeVisible();
+});
+
+test('arrow keys move focus between tabs without switching; Enter switches', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2');
+  const tabs = app(page).getByRole('tab');
+  const status = app(page).locator('.s-head .t2a');
+  await expect(tabs.nth(0)).toHaveAttribute('tabindex', '0');
+  await expect(tabs.nth(1)).toHaveAttribute('tabindex', '-1');
+  await tabs.nth(0).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.nth(1)).toBeFocused();
+  await expect(status).toContainText('Working');
+  await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('End');
+  await expect(tabs.nth(2)).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.nth(0)).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(tabs.nth(2)).toBeFocused();
+  await page.keyboard.press('Home');
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.nth(1)).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(status).toContainText('Idle');
 });
 
 test('a Codex tab shows the note, and no Details switch, menu or composer', async ({ page, appHost }) => {

@@ -26,8 +26,8 @@ test("a rate limit's reason from the daemon wins, shown as it comes", () => {
 
 test('a rate limit that lifts today says the time alone', () => {
   for (const [hour, minute, text] of [
-    [0, 5, '12:05 am'],
-    [9, 30, '9:30 am'],
+    [10, 5, '10:05 am'],
+    [11, 30, '11:30 am'],
     [12, 0, '12:00 pm'],
     [15, 0, '3:00 pm'],
     [23, 59, '11:59 pm'],
@@ -41,8 +41,11 @@ test('a rate limit that lifts on another day names the weekday', () => {
   assert.equal(bandText(rate({ untilAt: at(0, 0, 3) }), NOW, 'UTC'), 'Usage limit reached. It resets at Mon 12:00 am.');
   // Seven days on is the same weekday, and still not today.
   assert.equal(bandText(rate({ untilAt: at(15, 0, 7) }), NOW, 'UTC'), 'Usage limit reached. It resets at Fri 3:00 pm.');
-  // A time already past on an earlier day is named the same way.
-  assert.equal(bandText(rate({ untilAt: at(15, 0, -1) }), NOW, 'UTC'), 'Usage limit reached. It resets at Thu 3:00 pm.');
+});
+
+test('a rate limit whose end has passed, or is now, does not say it resets', () => {
+  assert.equal(bandText(rate({ untilAt: at(15, 0, -1) }), NOW, 'UTC'), 'Usage limit reached.');
+  assert.equal(bandText(rate({ untilAt: NOW }), NOW, 'UTC'), 'Usage limit reached.');
 });
 
 test("the day and the time are the phone's own, in its time zone", () => {

@@ -80,7 +80,7 @@ function Row({ view, selected, now }: { view: RowView; selected: boolean; now: n
   const { row, best, count } = view;
   const st = STATUS[best.status.chip];
   return (
-    <button className={`row st-${st.cls}${selected ? ' sel' : ''}`} type="button" onClick={() => actions.openSession(best.ref)}>
+    <button className={`row st-${st.cls}${selected ? ' sel' : ''}`} type="button" aria-current={selected ? 'true' : undefined} onClick={() => actions.openSession(best.ref)}>
       <span className="n">
         {row.name}
         {count > 1 && (
