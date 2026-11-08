@@ -23,7 +23,7 @@ import { base64urlDecode, base64urlEncode } from './channel/pairingLink.js';
 import {
   CACHED_BUNDLES_PER_LAPTOP, DB_NAME, DB_VERSION, MAX_BUNDLE_COMPRESSED, MAX_BUNDLE_TEXT,
 } from './constants.js';
-import { isWrapKey } from './keys.js';
+import { IV_BYTES, KEY_BYTES, isWrapKey } from './keys.js';
 import { isRoomID, relaySocketURL } from './links.js';
 import { isSHA256 } from './protocol.js';
 
@@ -54,9 +54,6 @@ const LAPTOPS = 'laptops';
 const BUNDLES = 'bundles';
 const BUNDLE_META = 'bundleMeta';
 const BY_LAPTOP = 'byLaptop';
-
-const KEY_BYTES = 32;
-const IV_BYTES = 12;
 
 /** Another tab holds the database open at an older version, so this one cannot upgrade it. */
 export class StoreBlockedError extends Error {

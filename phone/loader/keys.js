@@ -16,8 +16,10 @@ import { base64urlEncode } from './channel/pairingLink.js';
 /** @typedef {import('./types.js').LaptopRecord} LaptopRecord */
 
 const X25519 = Object.freeze({ name: 'X25519' });
-const KEY_BYTES = 32;
-const IV_BYTES = 12;
+/** The length of an X25519 public key, and so of a laptop key and a phone key. */
+export const KEY_BYTES = 32;
+/** The length of the AES-GCM IV a wrapped phone key is stored with. */
+export const IV_BYTES = 12;
 const TAG_BITS = 128;
 const WRAP_BITS = 256;
 const WRAP_USAGES = Object.freeze(/** @type {KeyUsage[]} */ (['wrapKey', 'unwrapKey']));
