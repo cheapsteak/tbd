@@ -438,7 +438,13 @@ test('clearOlderFailed with nothing failed changes nothing', async () => {
   assert.equal(h.store.get(), before);
 });
 
-test('an older page that lands after a newer open replaced the transcript changes nothing', async () => {
+/** The slice as the list draws it and pages it, without `stalePage`, which a stale page's settling clears. */
+function withoutStale(t: TranscriptState): Omit<TranscriptState, 'stalePage'> {
+  const { stalePage: _, ...rest } = t;
+  return rest;
+}
+
+test('an older page that lands after a newer open replaced the transcript adds no row, and then frees the turn', async () => {
   const h = await showing();
   const pending = h.actions.loadOlder();
   const stale = h.last('transcript.page');
@@ -446,39 +452,81 @@ test('an older page that lands after a newer open replaced the transcript change
   h.last('transcript.open').resolve({ resumed: false, seq: 30, page: page([item('n1'), item('n2')], 'c8') });
   await flush();
   // The page still on its way holds the turn: no second transcript.page goes out beside it.
+  assert.equal(h.t().stalePage, true);
   await h.actions.loadOlder();
   assert.equal(h.count('transcript.page'), 1);
   const before = h.t();
   stale.resolve(page([item('u0')], 'c0'));
   await pending;
-  assert.equal(h.t(), before);
+  assert.deepEqual(withoutStale(h.t()), withoutStale(before));
   assert.deepEqual(ids(h.t()), ['n1', 'n2']);
-  // Once it settled, the reader's next scroll asks with the new cursor.
+  // Its settling is a change the list sees, so it can ask again, once, with the new cursor.
+  assert.equal(h.t().stalePage, false);
   void h.actions.loadOlder();
+  void h.actions.loadOlder();
+  assert.equal(h.count('transcript.page'), 2);
   assert.deepEqual(h.last('transcript.page').params, { session: R, cursor: 'c8' });
 });
 
-test('an older page that fails after a reset changes nothing and reopens nothing', async () => {
+test('an older page that fails after a reset adds no row and reopens nothing, and then frees the turn', async () => {
   const h = await showing();
   const pending = h.actions.loadOlder();
   h.actions.onEvent({ event: 'transcript.reset', seq: 21, data: { session: R, reason: 'rewrite', page: page([item('n1')], 'c9') } });
   const before = h.t();
+  assert.equal(before.stalePage, true);
   h.last('transcript.page').reject(new AppError('stale_cursor', STALE_TEXT));
   await pending;
-  assert.equal(h.t(), before);
+  assert.deepEqual(withoutStale(h.t()), withoutStale(before));
+  assert.equal(h.t().stalePage, false);
   assert.equal(h.count('transcript.open'), 1);
+  void h.actions.loadOlder();
+  assert.deepEqual(h.last('transcript.page').params, { session: R, cursor: 'c9' });
 });
 
-test('a superseded older page does not touch the slice a newer open made', async () => {
+test('a superseded older page does not touch the slice a newer open made, but frees the turn', async () => {
   const h = await showing();
   const pending = h.actions.loadOlder();
   const stale = h.last('transcript.page');
   h.actions.openSession(OTHER);
   const before = h.t();
+  assert.equal(before.stalePage, true);
   stale.reject(new AppError('superseded', SUPERSEDED_TEXT));
   await pending;
-  assert.equal(h.t(), before);
+  assert.deepEqual(withoutStale(h.t()), withoutStale(before));
+  assert.equal(h.t().stalePage, false);
   assert.deepEqual(h.t().ref, OTHER);
+});
+
+test('a page made stale by a close still holds the turn for the next transcript until it settles', async () => {
+  const h = await showing();
+  const pending = h.actions.loadOlder();
+  const stale = h.last('transcript.page');
+  h.actions.back();
+  assert.equal(h.t().stalePage, true);
+  h.actions.openSession(OTHER);
+  h.last('transcript.open').resolve({ resumed: false, seq: 30, page: page([item('o1')], 'c3') });
+  await flush();
+  assert.equal(h.t().stalePage, true);
+  await h.actions.loadOlder();
+  assert.equal(h.count('transcript.page'), 1);
+  stale.resolve(page([item('u0')], 'c0'));
+  await pending;
+  assert.deepEqual(ids(h.t()), ['o1']);
+  void h.actions.loadOlder();
+  assert.deepEqual(h.last('transcript.page').params, { session: OTHER, cursor: 'c3' });
+});
+
+test('a page whose own stale_cursor reopens the transcript does not hold the turn after it', async () => {
+  const h = await showing();
+  const pending = h.actions.loadOlder();
+  h.last('transcript.page').reject(new AppError('stale_cursor', STALE_TEXT));
+  await pending;
+  assert.equal(h.t().stalePage, false);
+  h.last('transcript.open').resolve({ resumed: false, seq: 30, page: page([item('u2')], 'c5') });
+  await flush();
+  void h.actions.loadOlder();
+  assert.equal(h.count('transcript.page'), 2);
+  assert.deepEqual(h.last('transcript.page').params, { session: R, cursor: 'c5' });
 });
 
 test('an older page that the slice still waits for and is superseded ends the wait without a failure', async () => {

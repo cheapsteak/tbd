@@ -1141,6 +1141,33 @@ test('a failed older page above rows that fit the screen loads again on a tap, a
   await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
 });
 
+test('an older page made stale by a reopen lets the reopened rows ask for theirs once it settles', async ({ page, appHost }) => {
+  const items = shortItems();
+  await openApp(page, appHost, { scenario: checkoutWith(items) });
+  await hostCall(page, 'hold', 'transcript.page');
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(1);
+
+  // "Show details" opens the transcript again while the page is on its way. The new rows fit the
+  // screen too, and their page waits for the one on the wire.
+  const opens = async () => (await hostRequests(page)).filter((r) => r.method === 'transcript.open').length;
+  await app(page).locator('.s-head .tg').click();
+  await expect.poll(opens).toBe(2);
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+  await frames(tx, 6);
+  expect(await pageCursors(page)).toHaveLength(1);
+
+  // The stale page lands and changes no row, and the new rows ask for their page, once.
+  await hostCall(page, 'release', 'transcript.page');
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
+  await expect.poll(async () => { const m = await metricsOf(tx); return m.scrollHeight > m.clientHeight; }).toBe(true);
+  await frames(tx, 6);
+  expect(await pageCursors(page)).toHaveLength(2);
+  await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+});
+
 // --- the "Working…" line and Show details -----------------------------------------------------
 
 /** Checkout v2's row in mock.json. */

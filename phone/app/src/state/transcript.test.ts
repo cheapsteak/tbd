@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
 import type { DetailState } from './detail.ts';
-import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, beginResume, emptyTranscript, prependPage } from './transcript.ts';
+import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, beginResume, clearTranscript, emptyTranscript, prependPage } from './transcript.ts';
 import type { TranscriptRow, TranscriptState } from './transcript.ts';
 
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
@@ -244,6 +244,25 @@ test('beginOpen keeps the rows of the session it opens again, and starts another
   assert.deepEqual(other.details, {});
   // Keys go on from where they were, so a new row never takes an old row's key.
   assert.equal(other.nextKey, s0.nextKey);
+});
+
+test('an open, a reset or a close while an older page is on its way leaves that page holding the turn', () => {
+  const waiting = { ...withRows([item('u1')]), loadingOlder: true };
+  const after = [
+    ['reopen', beginOpen(waiting, R, true, 'open-2')],
+    ['switch', beginOpen(waiting, OTHER, false, 'open-2')],
+    ['reset', applyTranscriptEvent(waiting, reset(page([item('n1')])))],
+    ['close', clearTranscript(waiting)],
+  ] as const;
+  for (const [what, s] of after) {
+    assert.equal(s.loadingOlder, false, what);
+    assert.equal(s.stalePage, true, what);
+  }
+  // With no page on its way there is none to wait for, and one already stale stays so.
+  assert.equal(beginOpen(withRows([item('u1')]), R, true, 'open-2').stalePage, false);
+  assert.equal(clearTranscript({ ...withRows([item('u1')]), stalePage: true }).stalePage, true);
+  // The page landing above its own rows holds nothing.
+  assert.equal(prependPage(waiting, page([item('u0')])).stalePage, false);
 });
 
 test('an open clears a close still unanswered', () => {

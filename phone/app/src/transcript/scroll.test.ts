@@ -40,7 +40,7 @@ test('fractional pixels count as they are', () => {
 });
 
 /** The slice's paging state with a cursor, nothing on its way, the start not reached and no failure. */
-const PAGING = { cursor: 'c1', loadingOlder: false, reachedStart: false, olderFailed: false } as const;
+const PAGING = { cursor: 'c1', loadingOlder: false, stalePage: false, reachedStart: false, olderFailed: false } as const;
 
 test('an older page is wanted within two screens of the top, and not at two', () => {
   const tall = (scrollTop: number): Metrics => ({ scrollTop, scrollHeight: 10_000, clientHeight: 800 });
@@ -55,6 +55,8 @@ test('no older page is wanted without a cursor, or with a page on its way, the s
   const near: Metrics = { scrollTop: 100, scrollHeight: 10_000, clientHeight: 800 };
   assert.equal(wantsOlder(near, { ...PAGING, cursor: null }), false);
   assert.equal(wantsOlder(near, { ...PAGING, loadingOlder: true }), false);
+  // A page on its way for rows a page replaced.
+  assert.equal(wantsOlder(near, { ...PAGING, stalePage: true }), false);
   assert.equal(wantsOlder(near, { ...PAGING, reachedStart: true }), false);
   assert.equal(wantsOlder(near, { ...PAGING, olderFailed: true }), false);
   assert.equal(wantsOlder(near, PAGING), true);

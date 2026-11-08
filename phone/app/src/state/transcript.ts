@@ -60,6 +60,12 @@ export interface TranscriptState {
   reachedStart: boolean;
   /** A `transcript.page` for these rows is on its way. */
   loadingOlder: boolean;
+  /**
+   * A `transcript.page` asked for rows that a page or a close has since replaced is still
+   * unanswered. At most one page is on the wire at a time, so none is asked for these rows
+   * until it settles, which clears this, and the list then asks again if it still wants one.
+   */
+  stalePage: boolean;
   /** The last older page failed to load. Nothing asks for another until the reader scrolls. */
   olderFailed: boolean;
   /**
@@ -89,6 +95,7 @@ export function emptyTranscript(): TranscriptState {
     cursor: null,
     reachedStart: false,
     loadingOlder: false,
+    stalePage: false,
     olderFailed: false,
     pendingClose: false,
     details: {},
@@ -98,23 +105,32 @@ export function emptyTranscript(): TranscriptState {
 
 /**
  * `s` with no transcript open: every field as `emptyTranscript` has it, except `nextKey`, which
- * only grows, so a key never names a second row.
+ * only grows, so a key never names a second row, and `stalePage`, since an older page on its
+ * way is still on the wire (`dropOlder`).
  */
 export function clearTranscript(s: TranscriptState): TranscriptState {
-  return { ...emptyTranscript(), nextKey: s.nextKey };
+  return { ...emptyTranscript(), nextKey: s.nextKey, stalePage: dropOlder(s).stalePage };
+}
+
+/**
+ * The paging fields once the rows an older page was asked for are gone: the slice no longer
+ * waits for that page, and while it was on its way, it is still on the wire (`stalePage`).
+ */
+function dropOlder(s: TranscriptState): Pick<TranscriptState, 'loadingOlder' | 'stalePage'> {
+  return { loadingOlder: false, stalePage: s.stalePage || s.loadingOlder };
 }
 
 /**
  * `s` opening `ref`'s transcript, the open's token being `requestID`. Opening the session the
  * slice holds already keeps its rows, cursor and details on screen until a page replaces them.
  * Opening another starts with none. Either way, an older page still on its way is dropped
- * (`loadingOlder` turns false), since it belongs above rows the open replaces. A close still
- * unanswered no longer matters, since the open replaces whatever the laptop had open.
+ * (`dropOlder`), since it belongs above rows the open replaces. A close still unanswered no
+ * longer matters, since the open replaces whatever the laptop had open.
  */
 export function beginOpen(s: TranscriptState, ref: PhoneSessionRef, showDetails: boolean, requestID: string): TranscriptState {
   const base = s.ref !== null && sameRef(s.ref, ref) ? s : clearTranscript(s);
   return {
-    ...base, ref, showDetails, openRequestID: requestID, phase: 'opening', error: null, loadingOlder: false, olderFailed: false,
+    ...base, ref, showDetails, openRequestID: requestID, phase: 'opening', error: null, ...dropOlder(base), olderFailed: false,
     pendingClose: false,
   };
 }
@@ -132,13 +148,13 @@ export function beginResume(s: TranscriptState, requestID: string): TranscriptSt
 /**
  * `s` with `page` as its rows, in place of every row it had, receipts and open details
  * included: an open's first page, or a `transcript.reset`. Each row gets a new key. It takes
- * the page's cursor, and drops an older page still on its way, which belongs above rows that
- * are gone. It leaves `phase` to the caller.
+ * the page's cursor, and drops an older page still on its way (`dropOlder`), which belongs above
+ * rows that are gone. It leaves `phase` to the caller.
  */
 export function applyPage(s: TranscriptState, page: TranscriptPage): TranscriptState {
   const { rows, nextKey } = itemRows(page.items, s.nextKey);
   return {
-    ...s, rows, nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, loadingOlder: false, olderFailed: false,
+    ...s, rows, nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, ...dropOlder(s), olderFailed: false,
     details: {}, appendedSinceSeen: 0,
   };
 }
