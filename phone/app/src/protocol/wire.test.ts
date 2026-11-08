@@ -303,11 +303,38 @@ test('sameRef compares kinds and every field', () => {
   assert.equal(sameRef(REMOTE, { kind: 'remote', provider: 'acme-batch', sessionID: 'rs-1042' }), false);
   assert.equal(sameRef(LOCAL, REMOTE), false);
   assert.equal(sameRef(REMOTE, LOCAL), false);
-  // refKey would give these two the same key; sameRef tells them apart.
   const a: PhoneSessionRef = { kind: 'remote', provider: 'acme/x', sessionID: 'y' };
   const b: PhoneSessionRef = { kind: 'remote', provider: 'acme', sessionID: 'x/y' };
-  assert.equal(refKey(a), refKey(b));
   assert.equal(sameRef(a, b), false);
+});
+
+test('no two session refs share a refKey', () => {
+  // Each pair would share a key if the provider were written as it is.
+  const pairs: Array<[PhoneSessionRef, PhoneSessionRef]> = [
+    [{ kind: 'remote', provider: 'acme/x', sessionID: 'y' }, { kind: 'remote', provider: 'acme', sessionID: 'x/y' }],
+    [{ kind: 'remote', provider: 'acme%2Fx', sessionID: 'y' }, { kind: 'remote', provider: 'acme/x', sessionID: 'y' }],
+    [{ kind: 'remote', provider: 'a%25', sessionID: 'b' }, { kind: 'remote', provider: 'a%', sessionID: 'b' }],
+  ];
+  for (const [a, b] of pairs) assert.notEqual(refKey(a), refKey(b), `${refKey(a)} and ${refKey(b)}`);
+  assert.equal(refKey({ kind: 'remote', provider: 'acme/x', sessionID: 'y' }), 'remote:acme%2Fx/y');
+  assert.equal(refKey({ kind: 'remote', provider: 'a%', sessionID: 'b' }), 'remote:a%25/b');
+  assert.equal(refKey({ kind: 'remote', provider: 'acme cloud', sessionID: 's/1' }), 'remote:acme cloud/s/1');
+  // A lone surrogate, which encodeURIComponent refuses, still makes a key.
+  assert.equal(refKey({ kind: 'remote', provider: 'acme\ud800', sessionID: 's' }), 'remote:acme\ud800/s');
+
+  // Every key a sample makes is its own: refs from providers and session IDs built of the
+  // characters that matter, each pair of distinct refs checked.
+  const parts = ['', 'a', '/', '%', '%2F', '%25', 'a/b', '2F'];
+  const refs: PhoneSessionRef[] = [];
+  for (const provider of parts) for (const sessionID of parts) refs.push({ kind: 'remote', provider, sessionID });
+  for (const terminalID of parts) refs.push({ kind: 'local', terminalID });
+  const seen = new Map<string, PhoneSessionRef>();
+  for (const ref of refs) {
+    const key = refKey(ref);
+    const other = seen.get(key);
+    assert.equal(other, undefined, `${JSON.stringify(ref)} and ${JSON.stringify(other)} share ${key}`);
+    seen.set(key, ref);
+  }
 });
 
 test("a remote session's refKey is its row ID in the session list", () => {

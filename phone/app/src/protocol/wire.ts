@@ -148,12 +148,20 @@ export const decodePhoneSessionRef: Decoder<PhoneSessionRef> = (raw, path = '') 
 };
 
 /**
- * `local:<terminalID>` or `remote:<provider>/<sessionID>`: the daemon's own description of a
- * session (`PhoneSessionRef.targetDescription`), which is also a remote row's ID. Two remote
- * refs can share a key only if a provider name holds a `/`; `sameRef` compares fields instead.
+ * A key that names one session, for maps keyed by session: `local:<terminalID>` or
+ * `remote:<provider>/<sessionID>`, with `%` and `/` in the provider written as `%25` and
+ * `%2F`, as `encodeURIComponent` writes them. So the first `/` always ends the provider, and no
+ * two refs share a key. For a provider with neither character, such as `acme-cloud`, the key is
+ * the daemon's own description of the session (`PhoneSessionRef.targetDescription`), which is
+ * also a remote row's ID; a row is still found by its sessions' refs, never by this key.
+ *
+ * Only those two characters are escaped, not all that `encodeURIComponent` escapes, because it
+ * throws on a lone surrogate, and a decoded string can hold one.
  */
 export function refKey(ref: PhoneSessionRef): string {
-  return ref.kind === 'local' ? `local:${ref.terminalID}` : `remote:${ref.provider}/${ref.sessionID}`;
+  if (ref.kind === 'local') return `local:${ref.terminalID}`;
+  const provider = ref.provider.replaceAll('%', '%25').replaceAll('/', '%2F');
+  return `remote:${provider}/${ref.sessionID}`;
 }
 
 /** Whether `a` and `b` name the same session. */
