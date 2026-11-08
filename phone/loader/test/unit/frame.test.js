@@ -408,6 +408,23 @@ test('AppFrame passes deliver, setChannel and sendEnv to the app', async (t) => 
   ]);
 });
 
+test('AppFrame posts the channel state only when it changes', async (t) => {
+  const f = openFrame(t);
+  const { received } = connect(t, f);
+  // reconnecting, connecting, handshaking, loading, ready, then reconnecting and ready again
+  for (const up of [false, false, false, false, true, true, false, true]) f.frame.setChannel(up);
+  f.frame.deliver({ last: true });
+  await until(() => received.length === 5, 'the channel changes and the last body');
+  await settle();
+  assert.deepEqual(received, [
+    { t: 'channel', state: 'down' },
+    { t: 'channel', state: 'up' },
+    { t: 'channel', state: 'down' },
+    { t: 'channel', state: 'up' },
+    { t: 'app', body: { last: true } },
+  ]);
+});
+
 test('AppFrame destroy removes the frame, its listeners and its timer, and nothing fires afterwards', async (t) => {
   const f = openFrame(t);
   const { port, received } = connect(t, f);

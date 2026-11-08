@@ -59,6 +59,8 @@ export class AppFrame {
   #bundleSent = false;
   /** The runner reported `started`. */
   #started = false;
+  /** @type {boolean | null} What `setChannel` last posted, or null before it has. */
+  #channelUp = null;
   #destroyed = false;
   /** @type {(() => void) | null} Cancels the start timeout, until `started` or the end. */
   #cancelStartTimer = null;
@@ -112,8 +114,15 @@ export class AppFrame {
     this.#post({ t: 'app', body });
   }
 
-  /** @param {boolean} up */
+  /**
+   * Tells the app whether its channel to the laptop is up. Only a change is posted: the
+   * connection passes through several states while it is down (reconnecting, connecting,
+   * handshaking, loading), and the app hears `down` once for all of them.
+   * @param {boolean} up
+   */
   setChannel(up) {
+    if (up === this.#channelUp) return;
+    this.#channelUp = up;
     this.#post({ t: 'channel', state: up ? 'up' : 'down' });
   }
 

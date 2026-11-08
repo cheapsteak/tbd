@@ -620,3 +620,19 @@ test('only a session that reaches ready records the visit, with the handshake\'s
   assert.equal(written.lastConnectedAt, page.clock.now());
   assert.equal(page.stripButton()?.textContent.includes('acme-mbp'), true);
 });
+
+test('the app frame hears its channel go down once and come up once across a reconnect', async (t) => {
+  const { page, laptop, room, channel } = await readyWithFrame(t);
+  await waitFor(() => channel.length === 1, 'the first channel message');
+  assert.deepEqual(channel, ['up']);
+
+  // The laptop leaves (offline), then comes back: handshaking, then ready on the bundle the
+  // frame already runs. Two states with the channel down, one message for them.
+  laptop.leave(room);
+  await waitFor(() => page.strip.textContent.includes('Reconnecting'), 'the strip reading Reconnecting…');
+  laptop.join(room);
+  await waitFor(() => channel.length > 1 && channel.at(-1) === 'up', 'the channel back up');
+  await quiet();
+  assert.deepEqual(channel, ['up', 'down', 'up']);
+  assert.equal(page.idb.calls.filter((c) => c.mode === 'readwrite' && c.names.join() === 'laptops').length, 2, 'each ready records a visit');
+});
