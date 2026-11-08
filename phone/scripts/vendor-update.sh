@@ -11,7 +11,8 @@
 # directory of its own in the vendor root, and nothing it copies lies outside the package.
 #
 # The new files are staged first and moved into place by rename, and the lock is replaced only
-# after them, so a run that fails at any step leaves the old files and the old lock as they were.
+# after them, so a run that fails at any step, or is stopped by a signal it can trap, leaves the
+# old files and the old lock as they were.
 #
 # env: VENDOR_REGISTRY (default https://registry.npmjs.org), VENDOR_ROOT.
 # Exit status: 0 vendored, 1 refused (nothing changed), 2 bad usage.
@@ -71,12 +72,30 @@ plain_file() {
 work="$(mktemp -d "${TMPDIR:-/tmp}/vendor-update.XXXXXX")"
 stage=''
 made_root=0
-# On any exit: a run stopped between step 4's two renames puts the old library back, the
-# scratch directories go, and a vendor root this run made and left empty goes too.
+# 1 while step 4 swaps the library and the lock: from just before the old library moves aside
+# until the new lock is in place. A run that ends in between, however it ends, is undone.
+swapping=0
+
+# True when $1 names anything, a dangling symlink included.
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+
+# Undoes step 4's renames while the old lock is still in place: the new library, if it moved
+# into place, goes back into the stage, and the old one, if it was moved aside, comes back, so
+# the vendor root matches the old lock again. Once the new lock is in place there is nothing to
+# undo. Each rename is atomic, so each directory is wholly in one place or the other.
+restore() {
+  present "$stage/vendor.lock" || return 0
+  if ! present "$stage/$name"; then mv "$root/$name" "$stage/$name" || return 1; fi
+  if present "$stage/old"; then mv "$stage/old" "$root/$name" || return 1; fi
+}
+
+# On any exit: an unfinished swap is undone, the scratch directories go, and a vendor root this
+# run made and left empty goes too. The stage holds the old library until the new lock is in
+# place, so it is kept, and named, when the old library could not be put back.
 finish() {
-  if [ -n "$stage" ] && { [ -e "$stage/old" ] || [ -L "$stage/old" ]; } \
-    && ! { [ -e "$root/$name" ] || [ -L "$root/$name" ]; }; then
-    mv "$stage/old" "$root/$name" || true
+  if [ "$swapping" -eq 1 ] && ! restore; then
+    echo "vendor-update: could not put the old $name back; it is in $stage/old" >&2
+    stage=''
   fi
   rm -rf "$work"
   if [ -n "$stage" ]; then rm -rf "$stage"; fi
@@ -160,7 +179,8 @@ EOT
 # 4. Build the new library and lock in a stage inside the vendor root, on its file system, so
 #    each step into place is a rename. The old library directory goes aside and the new one in,
 #    and only then does the new lock replace the old. A failure while staging changes nothing;
-#    a failed rename puts the old directory back, so it matches the old lock again.
+#    a run that ends before the new lock is in place, by a failed rename or a signal, is undone
+#    by `finish`, so the old directory matches the old lock again.
 if [ ! -d "$root" ]; then
   mkdir -p "$root"
   made_root=1
@@ -189,19 +209,11 @@ $all
 EOT
 } >"$stage/vendor.lock"
 
-# Puts the old library directory, if there was one, back where it was.
-put_back() {
-  if [ -e "$stage/old" ] || [ -L "$stage/old" ]; then mv "$stage/old" "$root/$name"; fi
-}
-if [ -e "$root/$name" ] || [ -L "$root/$name" ]; then
+swapping=1
+if present "$root/$name"; then
   mv "$root/$name" "$stage/old" || die "could not move the old $name aside; nothing changed"
 fi
-if ! mv "$stage/$name" "$root/$name"; then
-  put_back
-  die "could not move the new $name into place; nothing changed"
-fi
-if ! mv "$stage/vendor.lock" "$root/vendor.lock"; then
-  mv "$root/$name" "$stage/$name" && put_back
-  die "could not replace vendor.lock; nothing changed"
-fi
+mv "$stage/$name" "$root/$name" || die "could not move the new $name into place; nothing changed"
+mv "$stage/vendor.lock" "$root/vendor.lock" || die "could not replace vendor.lock; nothing changed"
+swapping=0
 echo "vendor-update: vendored $name@$version (provenance $provenance)"

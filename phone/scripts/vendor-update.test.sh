@@ -156,7 +156,8 @@ with_meta "a document that is not JSON refuses" 1 "{\"dist\":{\"tarball\":\"$tar
 # A run that fails while it vendors changes nothing: the old files and the old lock stay as they
 # were, and no scratch directory is left in the vendor root. The shims stand in for a cp or mv
 # that fails: cp for any argument ending in /$FAIL_CP_ON, mv for a source matching the pattern
-# $FAIL_MV_FROM. Otherwise each runs the real tool.
+# $FAIL_MV_FROM. For a source matching $TERM_AFTER_MV_FROM, mv renames and then sends the run
+# SIGTERM, as a run stopped at that point would be. Otherwise each runs the real tool.
 shim="$tmp/shim"
 mkdir -p "$shim"
 cat >"$shim/cp" <<'EOF'
@@ -173,6 +174,9 @@ cat >"$shim/mv" <<'EOF'
 if [ -n "${FAIL_MV_FROM:-}" ]; then
   case "$1" in $FAIL_MV_FROM) echo "mv: $1: Permission denied" >&2; exit 1 ;; esac
 fi
+if [ -n "${TERM_AFTER_MV_FROM:-}" ]; then
+  case "$1" in $TERM_AFTER_MV_FROM) "$REAL_MV" "$@" && kill -TERM "$PPID"; exit 0 ;; esac
+fi
 exec "$REAL_MV" "$@"
 EOF
 chmod +x "$shim/cp" "$shim/mv"
@@ -185,12 +189,17 @@ VENDOR_REGISTRY="file://$reg" VENDOR_ROOT="$base11" bash "$update" x 1.0.0 dist/
 two() { printf 'var x = 2;\n' >"$1/dist/x.js"; }
 reg11="$tmp/reg11"; make_registry "$reg11" yes "" two
 # update_with <root> <VAR=value>...: runs the update from reg11 into <root> through the shims.
+# The run goes in a subshell of its own, which reports a run killed by a signal as its exit
+# status and keeps the shell's "Terminated" line out of the output.
 update_with() {
   local into="$1"
   shift
   rc=0
-  env "$@" REAL_CP="$real_cp" REAL_MV="$real_mv" PATH="$shim:$PATH" \
-    VENDOR_REGISTRY="file://$reg11" VENDOR_ROOT="$into" bash "$update" x 1.0.0 dist/x.js >/dev/null 2>&1 || rc=$?
+  (
+    env "$@" REAL_CP="$real_cp" REAL_MV="$real_mv" PATH="$shim:$PATH" \
+      VENDOR_REGISTRY="file://$reg11" VENDOR_ROOT="$into" bash "$update" x 1.0.0 dist/x.js
+    exit "$?"
+  ) >/dev/null 2>&1 || rc=$?
 }
 # fails_unchanged <label> <VAR=value>...
 fails_unchanged() {
@@ -206,6 +215,29 @@ fails_unchanged() {
 fails_unchanged "a copy that fails leaves the old files and the old lock" FAIL_CP_ON=x.js
 fails_unchanged "a new library that cannot move into place puts the old one back" FAIL_MV_FROM='*/.vendor-update.*/x'
 fails_unchanged "a lock that cannot be replaced puts the old library back" FAIL_MV_FROM='*/.vendor-update.*/vendor.lock'
+
+# A run stopped between moving the new library into place and replacing the lock is undone too:
+# the old library comes back beside the old lock, and the copy saved aside is not lost.
+rm -rf "$tmp/root11"
+cp -R "$base11" "$tmp/root11"
+update_with "$tmp/root11" TERM_AFTER_MV_FROM='*/.vendor-update.*/x'
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ] && diff -r "$tmp/root11" "$base11" >/dev/null && bash "$check" "$tmp/root11" >/dev/null 2>&1; then
+  ok "a run stopped after the new library moved in, before the lock, puts the old library back"
+else bad "stopped before the lock: rc=$rc $(diff -r "$tmp/root11" "$base11" 2>&1 | head -5)"; fi
+
+update_with "$tmp/root13" TERM_AFTER_MV_FROM='*/.vendor-update.*/x'
+if [ "$rc" -ne 0 ] && [ ! -e "$tmp/root13" ]; then ok "a first vendoring stopped before the lock leaves no root behind"; else bad "first vendoring stopped: rc=$rc"; fi
+
+# Stopped just after the lock is replaced, the run is done: the new library and lock stay, and
+# the old copy goes with the stage.
+rm -rf "$tmp/root11"
+cp -R "$base11" "$tmp/root11"
+update_with "$tmp/root11" TERM_AFTER_MV_FROM='*/.vendor-update.*/vendor.lock'
+if [ "$rc" -ne 0 ] && [ "$(cat "$tmp/root11/x/dist/x.js")" = 'var x = 2;' ] \
+  && [ "$(cd "$tmp/root11" && find . -mindepth 1 -maxdepth 1 | LC_ALL=C sort | tr '\n' ' ')" = './vendor.lock ./x ' ] \
+  && bash "$check" "$tmp/root11" >/dev/null 2>&1; then
+  ok "a run stopped once the lock is replaced keeps the new library and leaves no scratch directory"
+else bad "stopped after the lock: rc=$rc"; fi
 
 update_with "$tmp/root12" FAIL_CP_ON=x.js
 if [ "$rc" -eq 1 ] && [ ! -e "$tmp/root12" ]; then ok "a copy that fails into a new vendor root leaves no root behind"; else bad "new root copy failure: rc=$rc"; fi
