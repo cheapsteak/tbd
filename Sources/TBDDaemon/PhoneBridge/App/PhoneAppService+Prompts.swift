@@ -892,14 +892,6 @@ extension PhoneAppService {
         }
     }
 
-    /// A remote session's pending prompts as its provider last reported them
-    /// (`effectivePendingPrompt`), for a device whose open session it is.
-    /// Does nothing for any other session.
-    func remotePromptsRead(_ prompts: [RemotePendingPrompt], session: PhoneSessionRef, deviceID: UUID) async {
-        guard let feed = devices[deviceID]?.prompts, feed.set.session == session else { return }
-        await remotePromptsRead(prompts, deviceID: deviceID, token: feed.token)
-    }
-
     /// What `PhoneRemotePromptSource` read, one read at a time, for the
     /// prompt feed `token` names: once when the feed starts and again after
     /// every `.remoteSessionsChanged`. Does nothing once a later feed

@@ -961,9 +961,11 @@ struct PhonePromptTests {
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
-    /// A remote session's set arrives through `remotePromptsRead`; a closed
-    /// remote prompt says `phone` when this phone answered it, and
-    /// `unknown` otherwise.
+    /// A remote session's set comes from the laptop's remote session list,
+    /// read once the feed opens and again on every `.remoteSessionsChanged`
+    /// (`PhoneRemotePromptSource`). Another session's prompt is not this
+    /// feed's, and a closed remote prompt says `phone` when this phone
+    /// answered it and `unknown` otherwise.
     @Test func aRemotePromptSaysPhoneOnlyWhenThePhoneAnsweredIt() async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
@@ -972,32 +974,52 @@ struct PhonePromptTests {
         h.actions.respond(to: .answerRemotePrompt, with: try Self.answered(.delivered))
         let answered = RemotePendingPrompt(
             id: "rp-1", kind: .permission, toolName: "Bash", toolInputJSON: #"{"command":"make"}"#)
-        let other = RemotePendingPrompt(
+        let unanswered = RemotePendingPrompt(
             id: "rp-2", kind: .permission, toolName: "Bash", toolInputJSON: #"{"command":"make test"}"#)
+        let elsewhere = RemotePendingPrompt(
+            id: "rp-3", kind: .permission, toolName: "Bash", toolInputJSON: #"{"command":"make lint"}"#)
+        try Self.listRemoteSessions(h, open: answered, elsewhere: elsewhere)
         let outbox = try await Self.liveConnection(h)
         await h.service.openPrompts(session, for: deviceID)
 
-        // Another session's prompts are not this feed's.
-        await h.service.remotePromptsRead(
-            [other], session: .remote(provider: "acme-cloud", sessionID: "rs-2"), deviceID: deviceID)
-        await h.service.remotePromptsRead([answered, other], session: session, deviceID: deviceID)
+        // `rs-2`'s prompt, open throughout, never reaches this feed.
         let first = try await Self.promptEvent(0, in: outbox)
         #expect(first.data == PromptChangedData(
-            session: session, prompts: [PhonePromptShaper.remote(answered), PhonePromptShaper.remote(other)],
-            resolved: nil))
+            session: session, prompts: [PhonePromptShaper.remote(answered)], resolved: nil))
 
         let (reply, _) = try await h.request(
             .promptAnswer, params: PhonePromptAnswerParams(session: session, promptID: "rp-1", answer: Self.allow),
             on: outbox)
         #expect(reply.error == nil)
-        await h.service.remotePromptsRead([], session: session, deviceID: deviceID)
+        try Self.listRemoteSessions(h, open: unanswered, elsewhere: elsewhere)
+        h.subscriptions.broadcast(delta: .remoteSessionsChanged)
+        let byPhone = try await Self.promptEvent(1, in: outbox)
+        #expect(byPhone.data == PromptChangedData(
+            session: session, prompts: [PhonePromptShaper.remote(unanswered)],
+            resolved: [PhonePromptResolution(promptID: "rp-1", answeredBy: .phone, deviceID: deviceID)]))
 
-        let closed = try await Self.promptEvent(1, in: outbox)
-        #expect(closed.data == PromptChangedData(session: session, prompts: [], resolved: [
-            PhonePromptResolution(promptID: "rp-1", answeredBy: .phone, deviceID: deviceID),
+        try Self.listRemoteSessions(h, open: nil, elsewhere: elsewhere)
+        h.subscriptions.broadcast(delta: .remoteSessionsChanged)
+        let unknown = try await Self.promptEvent(2, in: outbox)
+        #expect(unknown.data == PromptChangedData(session: session, prompts: [], resolved: [
             PhonePromptResolution(promptID: "rp-2", answeredBy: .unknown, deviceID: nil),
         ]))
         await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// Every later `phoneRemoteSessions` lists `acme-cloud`'s sessions `rs-1`,
+    /// with `open` open, and `rs-2`, with `elsewhere` open.
+    private static func listRemoteSessions(
+        _ h: PhoneServiceHarness, open: RemotePendingPrompt?, elsewhere: RemotePendingPrompt?
+    ) throws {
+        func info(_ sessionID: String, _ prompt: RemotePendingPrompt?) -> RemoteSessionInfo {
+            RemoteSessionInfo(
+                provider: "acme-cloud",
+                payload: RemoteSessionPayload(id: sessionID, state: .running, pendingPrompt: prompt),
+                gone: false, dismissed: false, lastSeen: Date(timeIntervalSince1970: 1_800_000_000))
+        }
+        let result = RemoteSessionsResult(sessions: [info("rs-1", open), info("rs-2", elsewhere)])
+        h.actions.respond(to: .remoteSessions, with: try RPCResponse(result: result))
     }
 
     /// Opening another session replaces the feed: the earlier terminal's
