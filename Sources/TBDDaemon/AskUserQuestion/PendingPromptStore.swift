@@ -633,6 +633,23 @@ public actor PendingPromptStore {
         Set(promptRecords.keys.map(\.terminalID))
     }
 
+    /// The oldest open prompt of every terminal holding one, read in one
+    /// actor turn: for each terminal, the first of
+    /// ``prompts(forTerminal:)``, so of two opened at the same moment the one
+    /// with the lower id.
+    public func oldestOpenPrompts() -> [UUID: PendingPromptPayload] {
+        var oldest: [UUID: PendingPromptPayload] = [:]
+        for (key, record) in promptRecords {
+            let payload = record.payload
+            if let current = oldest[key.terminalID],
+               (current.createdAt, current.id) <= (payload.createdAt, payload.id) {
+                continue
+            }
+            oldest[key.terminalID] = payload
+        }
+        return oldest
+    }
+
     /// Resolves `.modDisconnected` every prompt that has no wait request
     /// attached and whose `lastWaitAt` is more than `threshold` before `now`,
     /// and returns the terminals whose prompt set changed.

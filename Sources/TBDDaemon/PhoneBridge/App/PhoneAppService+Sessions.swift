@@ -223,12 +223,7 @@ extension PhoneAppService {
             }
         }
         let profiles = try await db.modelProfiles.list()
-        var openPrompts: [UUID: PendingPromptPayload] = [:]
-        for terminalID in await pendingPrompts.terminalsWithOpenPrompts() {
-            if let oldest = await pendingPrompts.prompts(forTerminal: terminalID).first {
-                openPrompts[terminalID] = oldest
-            }
-        }
+        let openPrompts = await pendingPrompts.oldestOpenPrompts()
         let states = await gatheredSessionStates()
         let remoteSessions = await gatheredRemoteSessions()
         let providers = await gatheredRemoteProviders()

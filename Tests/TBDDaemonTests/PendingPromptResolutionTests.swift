@@ -565,6 +565,37 @@ struct PendingPromptResolutionTests {
         #expect(await store.terminalsWithOpenPrompts().isEmpty)
     }
 
+    /// `oldestOpenPrompts()` holds, for each terminal with an open prompt,
+    /// the first of its `prompts(forTerminal:)`: the oldest, and of two
+    /// opened at the same moment the lower id. A terminal whose prompts all
+    /// closed is absent.
+    @Test func oldestOpenPromptsHoldsEachTerminalsFirstPrompt() async {
+        let dates = TestDateSource()
+        let store = makeStore(dates: dates)
+        let older = UUID()
+        let tied = UUID()
+        let closed = UUID()
+        await open(store, terminal: older, toolUseID: "toolu_a")
+        await open(store, terminal: tied, toolUseID: "toolu_z")
+        await open(store, terminal: tied, toolUseID: "toolu_m")
+        await open(store, terminal: closed, toolUseID: "toolu_c")
+        dates.advance(by: 30)
+        // Newer than `toolu_a`, though its id sorts first.
+        await open(store, terminal: older, toolUseID: "toolu_0")
+        await store.closed(terminalID: closed, toolUseID: "toolu_c")
+
+        let oldest = await store.oldestOpenPrompts()
+
+        let oldestIDs = oldest.mapValues(\.id)
+        #expect(oldestIDs == [older: "toolu_a", tied: "toolu_m"])
+        for terminal in [older, tied] {
+            let first = await store.prompts(forTerminal: terminal).first
+            #expect(oldest[terminal] == first)
+        }
+        let empty = await makeStore().oldestOpenPrompts()
+        #expect(empty.isEmpty)
+    }
+
     // MARK: Bulk resolution
 
     @Test func resolvePromptsKeepsCaptures() async {
