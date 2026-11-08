@@ -899,11 +899,14 @@ async function readyWithFrame(t) {
   t.after(() => port.close());
   /** @type {string[]} */
   const channel = [];
+  /** @type {any[]} */
+  const envs = [];
   port.addEventListener('message', (event) => {
     if (event.data?.t === 'channel') channel.push(event.data.state);
+    if (event.data?.t === 'env') envs.push(event.data);
   });
   port.start();
-  return { ...env, channel };
+  return { ...env, channel, envs };
 }
 
 test('only a session that reaches ready records the visit, with the handshake\'s name, after its bundle', async (t) => {
@@ -937,6 +940,23 @@ test('a rename after the app frame replaced the connecting screen does nothing t
   await waitFor(() => page.stripButton()?.textContent.includes('acme-studio') ?? false, 'the strip naming acme-studio');
   assert.equal(drawn.textContent, 'Connecting to acme-mbp…', 'the connecting screen that went keeps its text');
   assert.equal(connecting().length, 1, 'no connecting screen was drawn again');
+});
+
+test('a resize re-reads the environment once more and posts only what changed', async (t) => {
+  const { page, envs } = await readyWithFrame(t);
+  await waitFor(() => envs.length === 1, 'the first env');
+  await quiet();
+  // A resize whose first read shows a change, and a follow-up read that shows none: one post.
+  page.win.innerHeight = 500;
+  page.win.dispatchEvent(new Event('resize'));
+  await waitFor(() => envs.length === 2, 'the env after the resize');
+  await quiet();
+  assert.equal(envs.length, 2, 'the follow-up read posted nothing new');
+  assert.equal(envs[1].layout.height, 500);
+  // A resize that changes nothing posts nothing.
+  page.win.dispatchEvent(new Event('resize'));
+  await quiet();
+  assert.equal(envs.length, 2);
 });
 
 test('the app frame hears its channel go down once and come up once across a reconnect', async (t) => {

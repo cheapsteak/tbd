@@ -199,6 +199,11 @@ class LoaderPage {
   /** @type {string | null} */
   #frameSha = null;
   #envQueued = false;
+  /**
+   * The env last posted to the current frame, serialized; null before the first post.
+   * @type {string | null}
+   */
+  #lastEnvKey = null;
 
   /** @type {Menu | null} */
   #menu = null;
@@ -869,6 +874,7 @@ class LoaderPage {
     this.#screen.replaceChildren();
     this.#screen.hidden = true;
     this.#frameHost.hidden = false;
+    this.#lastEnvKey = null;
     this.#frame = new AppFrame({
       host: this.#frameHost,
       runnerURL: RUNNER_URL,
@@ -1133,25 +1139,19 @@ class LoaderPage {
     this.#raf(() => {
       this.#envQueued = false;
       this.#sendEnv();
-      // The frame's rectangle can lag a resize by a frame. If it still overran the layout
-      // viewport, read once more; that read never queues another.
-      if (!this.#frameFitsLayout() && this.#frame !== null) {
-        this.#envQueued = true;
-        this.#raf(() => {
-          this.#envQueued = false;
-          this.#sendEnv();
-        });
-      }
+      // The frame's rectangle can lag a resize by a frame, so read once more. This read
+      // never queues another, and it posts nothing when the env has not changed.
+      this.#raf(() => this.#sendEnv());
     });
   }
 
-  #frameFitsLayout() {
-    const r = this.#frameHost.getBoundingClientRect();
-    return r.right <= this.#win.innerWidth && r.bottom <= this.#win.innerHeight;
-  }
-
   #sendEnv() {
-    this.#frame?.sendEnv(readEnv(this.#win, this.#probe, this.#frameHost));
+    if (this.#frame === null) return;
+    const env = readEnv(this.#win, this.#probe, this.#frameHost);
+    const key = JSON.stringify(env);
+    if (key === this.#lastEnvKey) return;
+    this.#lastEnvKey = key;
+    this.#frame.sendEnv(env);
   }
 
   /** @param {string} url */
