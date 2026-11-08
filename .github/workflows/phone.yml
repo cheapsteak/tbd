@@ -178,9 +178,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.loader != 'false' }}
     runs-on: ubuntu-latest
-    # 10: `npm ci`, a type check, the loader's tests and the vector check, a
-    # few minutes cold.
-    timeout-minutes: 10
+    # 20: `npm ci`, a type check, the loader's tests and checks, one browser
+    # install, and two engines (WebKit and Chromium) running about a hundred
+    # end-to-end tests each, roughly 234 across both projects (about 80
+    # seconds locally), so a cold run takes several minutes.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: phone
@@ -204,6 +206,35 @@ jobs:
       - name: Check the generated test vectors
         if: ${{ !cancelled() }}
         run: npm run vectors:check
+      - name: Check the vendored files against their lock
+        if: ${{ !cancelled() }}
+        run: npm run vendor:check
+      - name: Test the phone scripts
+        if: ${{ !cancelled() }}
+        run: npm run test:scripts
+      - name: Install Playwright's WebKit and Chromium
+        if: ${{ !cancelled() }}
+        run: npx playwright install --with-deps chromium webkit
+      - name: Test the loader end to end
+        if: ${{ !cancelled() }}
+        run: npm run test:e2e
+      - name: Keep Playwright traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: loader-playwright
+          path: |
+            phone/loader/test/e2e/test-results
+            phone/loader/test/e2e/report
+          retention-days: 7
+      - name: Keep the loader screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: loader-screenshots
+          path: phone/loader/test/e2e/screenshots
+          retention-days: 14
+          if-no-files-found: warn
 
   phone-app:
     name: Phone app tests

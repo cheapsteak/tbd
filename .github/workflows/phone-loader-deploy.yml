@@ -28,6 +28,7 @@ on:
     branches: [main]
     paths:
       - 'phone/loader/**'
+      - 'phone/scripts/stage-loader.sh'
       - '.github/workflows/phone-loader-deploy.yml'
   workflow_dispatch:
 
@@ -70,6 +71,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run vendor:check
 
   dispatch:
     name: Dispatch the loader deploy
