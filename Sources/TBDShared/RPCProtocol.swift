@@ -3874,9 +3874,22 @@ public struct AttachRequestParams: Codable, Sendable {
     /// for wire compatibility: an older app sends none, and a claim without
     /// one is never swept.
     public let attachSeq: UInt64?
+    /// The size, in columns and rows, of the terminal the snapshot will be fed
+    /// into.
+    ///
+    /// Holder transport only. The snapshot preamble replays the history one
+    /// row per line and ends with an absolute cursor position, so it rebuilds
+    /// the screen only in a receiver of the emulator's own size. The emulator
+    /// is still at its previous viewer's size, so the daemon resizes the
+    /// session, emulator and tty both, to this grid before it writes the
+    /// snapshot. Optional for wire compatibility: an older app sends neither,
+    /// and a request without both leaves the session at the size it had.
+    public let cols: Int?
+    public let rows: Int?
     public init(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil, attachSeq: UInt64? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil,
+        cols: Int? = nil, rows: Int? = nil
     ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
@@ -3884,6 +3897,8 @@ public struct AttachRequestParams: Codable, Sendable {
         self.attachID = attachID
         self.terminalID = terminalID
         self.attachSeq = attachSeq
+        self.cols = cols
+        self.rows = rows
     }
 }
 

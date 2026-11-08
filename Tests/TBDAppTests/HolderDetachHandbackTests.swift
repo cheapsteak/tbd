@@ -109,7 +109,8 @@ struct HolderDetachHandbackTests {
         var readyGenerations: [UInt64] { lock.withLock { readyGenerationStorage } }
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64,
+            grid: (cols: Int, rows: Int)?
         ) async throws -> HolderAttachment {
             log.append("\(label)attach")
             await beforeAttachReturns?()

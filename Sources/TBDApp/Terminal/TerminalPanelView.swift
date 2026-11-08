@@ -1469,11 +1469,25 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // whatever ends up owning the descriptor. Never ended in the
             // `defer` above: that runs when a live attach returns too.
             let hold = ledger.beginHold(terminalID: panelID)
+            // **The daemon is asked to write the snapshot at this view's
+            // size.** A snapshot rebuilds the screen only in a terminal of the
+            // size it was written at (`AttachRequestParams.cols`), and the
+            // session is still at its previous viewer's size. Written for a
+            // short pane and fed into a tall one, the history fills this view
+            // to the bottom while the cursor lands at the old height, rows
+            // above the line it belongs to, and typing overwrites older lines.
+            // The resize after the ack below fixes the session's size but not
+            // what this view has already drawn. The floor is the resize
+            // path's: a transient size below it reaches neither the daemon nor
+            // the child.
+            let grid = engine.gridSize
+            let attachGrid: (cols: Int, rows: Int)? = ControlModeResizeGate.shouldSend(
+                controlModeAttached: true, cols: grid.cols, rows: grid.rows) ? grid : nil
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
-                    attachSeq: hold.attachSeq)
+                    attachSeq: hold.attachSeq, grid: attachGrid)
             } catch {
                 // The release of an attach whose descriptor never arrived may
                 // still be resending: recorded here, before this attempt
@@ -1742,14 +1756,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 return self.answerScreenRequest(request)
             }
             // One resize at the view's real size, now that this panel owns the
-            // pty — the holder twin of the control-mode path's initial resize,
-            // and for the same reason. Nothing has told this session that its
-            // viewer moved: it is at whatever geometry it was spawned or last
-            // resized at, so a viewport that differs from it paints mis-wrapped
-            // until the user happens to drag the window. `sizeChanged` cannot
-            // be relied on to cover it — it fires when the engine's own size
-            // changes, and attaching to an already-correctly-sized view changes
-            // nothing.
+            // pty — the holder twin of the control-mode path's initial resize.
+            // Usually a no-op, since the attach above carried the grid this
+            // view had then. It matters when the view changed size while the
+            // attach was in flight, when the daemon is too old to resize at
+            // attach, or when the grid was below the floor and none was sent:
+            // the session is then at a geometry nobody is painting, and the
+            // view paints mis-wrapped until the user happens to drag the
+            // window. `sizeChanged` cannot be relied on to cover it — it fires
+            // when the engine's own size changes, and attaching to an
+            // already-correctly-sized view changes nothing.
             let dimensions = engine.gridSize
             setHolderWindowSize(cols: dimensions.cols, rows: dimensions.rows)
             scheduleDaemonResize(cols: dimensions.cols, rows: dimensions.rows)

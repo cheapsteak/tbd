@@ -64,6 +64,31 @@ struct HolderAttachRPCTests {
         #expect(await !harness.fixture.reader.isDraining)
     }
 
+    /// The grid the request names reaches `beginAttach`, which reshapes the
+    /// session to it before writing the snapshot (`HolderAttachViewerGridTests`
+    /// has what that does to the snapshot).
+    @Test func aHolderAttachNamingAGridReshapesTheSessionToIt() async throws {
+        let harness = try await RPCHarness.start(command: Self.echoJob)
+        defer { harness.tearDown() }
+        let requested = (columns: 100, rows: 40)
+
+        let response = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: harness.worktreeID, paneID: "", windowID: "",
+                    attachID: UUID(), terminalID: harness.terminalID,
+                    cols: requested.columns, rows: requested.rows)))
+        #expect(response.success)
+        let (vendedFD, _) = try SidecarTestSupport.receiveVend(from: harness.appSide)
+        defer { Darwin.close(vendedFD) }
+
+        let grid = await harness.fixture.reader.gridSize
+        #expect(grid == requested, "the emulator is at \(grid.columns)x\(grid.rows)")
+        let onTheTTY = try #require(await harness.fixture.reader.ptyWindowSize)
+        #expect(onTheTTY == requested, "the tty is at \(onTheTTY.columns)x\(onTheTTY.rows)")
+    }
+
     /// The daemon's own copy of the descriptor is closed once the kernel has
     /// duplicated it into the app — on the success path and on the failure path
     /// alike.
