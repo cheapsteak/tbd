@@ -24,7 +24,7 @@ import { NoiseError, createInitiator, phonePrologue, MAX_PLAINTEXT_LENGTH } from
 import { base64urlDecode } from './channel/pairingLink.js';
 import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
 import { TaskChain } from './chain.js';
-import { alwaysVisible, systemClock } from './clock.js';
+import { alwaysVisible, isSoonAfter, systemClock } from './clock.js';
 import {
   CACHE_READ_TIMEOUT_MS, HANDSHAKE_RETRIES, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS,
 } from './constants.js';
@@ -265,7 +265,7 @@ export class LaptopConnection {
         return;
       }
       const now = this.#clock.now();
-      if (this.#socket !== null && this.#socket === this.#resumeSocket && isSoonAfter(this.#resumedAt, now)) return;
+      if (this.#socket !== null && this.#socket === this.#resumeSocket && isSoonAfter(this.#resumedAt, now, RESUME_COALESCE_MS)) return;
       this.#closeSocket();
       this.#reconnectTimer = this.#tasks.disarm(this.#reconnectTimer);
       this.#attempt = 0;
@@ -782,15 +782,4 @@ function settle(write) {
   } catch {
     // A cache that throws instead of rejecting is ignored the same way.
   }
-}
-
-/**
- * Whether `now` is within RESUME_COALESCE_MS after `then`, on the same clock. A clock that
- * went back reads as not soon, so the resume replaces the socket, as it would without coalescing.
- * @param {number} then
- * @param {number} now
- */
-function isSoonAfter(then, now) {
-  const elapsed = now - then;
-  return elapsed >= 0 && elapsed < RESUME_COALESCE_MS;
 }

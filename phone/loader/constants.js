@@ -9,7 +9,8 @@ export const KEEPALIVE_MS = 30_000;
 export const RESUME_PONG_TIMEOUT_MS = 3_000;
 // A return to the page can fire both `pageshow` and `visibilitychange`. A resume this soon
 // after the one that opened a socket keeps that socket while it connects; a later resume
-// replaces it at once, since it may have frozen while the page was hidden in between.
+// replaces it at once, since it may have frozen while the page was hidden in between. A
+// presence request asked this recently is left running by a resume in the same way.
 export const RESUME_COALESCE_MS = 1_000;
 export const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 60_000;

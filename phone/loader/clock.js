@@ -83,6 +83,18 @@ export function startVisibleTimer(ms, visibility, onExpire, clock = systemClock)
 }
 
 /**
+ * Whether `now` is less than `ms` after `then`, on the same clock. A clock that went back
+ * reads as not soon, so a caller that would skip work as just done does it after all.
+ * @param {number} then
+ * @param {number} now
+ * @param {number} ms
+ */
+export function isSoonAfter(then, now, ms) {
+  const elapsed = now - then;
+  return elapsed >= 0 && elapsed < ms;
+}
+
+/**
  * Settles as `promise` does, or rejects with a TimeoutError once the page has been visible for
  * `ms` on end, on `clock`, without an answer: `startVisibleTimer` counts the time. The timer
  * and the listener go as soon as either settles. `promise` itself is not cancelled: a late

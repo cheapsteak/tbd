@@ -36,14 +36,14 @@ import {
 /** @typedef {import('./connection.js').FatalReason} FatalReason */
 /** @typedef {import('./pairing.js').PairingFailure} PairingFailure */
 /** @typedef {import('./links.js').PairingLinkData} PairingLinkData */
-/** @typedef {import('./presence.js').PresenceStatus} PresenceStatus */
 /** @typedef {import('./presence.js').FetchLike} FetchLike */
 /** @typedef {import('./ui.js').RowHandle} RowHandle */
 
 /**
  * The strip's open laptop menu. `nodes` stays empty until the laptops are read and the menu
  * is drawn; from then on its nodes stay in the strip until it closes. `recheck` asks the relay
- * for every laptop's presence again, and `abort` cancels what is still out.
+ * again for each laptop whose presence is not known (`checkPresence`), and `abort` cancels
+ * what is still out.
  * @typedef {{ abort(): void, recheck(): void, nodes: HTMLElement[] }} Menu
  */
 
@@ -178,7 +178,7 @@ class LoaderPage {
   #epoch = 0;
   /** @type {(() => void) | null} Undoes what the current screen started (scanner, presence). */
   #leaveScreen = null;
-  /** @type {(() => void) | null} While the Laptops screen shows: asks for every row's presence again. */
+  /** @type {(() => void) | null} While the Laptops screen shows: asks again for presence not known. */
   #recheckLaptops = null;
 
   /** @type {LaptopRecord | null} The laptop the strip names. */
@@ -397,8 +397,6 @@ class LoaderPage {
   #showLaptops(list) {
     const epoch = this.#leave();
     if (this.#dead) return;
-    /** @type {Map<string, PresenceStatus>} */
-    const statuses = new Map();
     /** @type {Map<string, RowHandle>} Each laptop's row as now drawn, by laptop ID. */
     let rowsByID = new Map();
     /** @type {IDBValidKey | null} The key of the row asking to Forget, if any. */
@@ -420,7 +418,7 @@ class LoaderPage {
       const rows = [
         ...list.laptops.map((record) => ({
           name: record.laptopName,
-          line: presenceLine(statuses.get(record.id), record.lastConnectedAt, now, 'list'),
+          line: presenceLine(presence.status(record.id), record.lastConnectedAt, now, 'list'),
           onOpen: () => this.#connect(record),
           ...forgetActions(record.id),
         })),
@@ -443,30 +441,24 @@ class LoaderPage {
     // Presence comes from the relay's endpoint, never a socket, so listing the laptops never
     // knocks another tab off its room. Each answer changes only its row's status line, in
     // place, so a tap in progress and the scroll position survive it. A return to the page
-    // asks again (`#resume`), so an answer cut short while the phone was locked does not stay.
-    /** @type {{ abort(): void } | null} */
-    let checks = null;
-    const check = () => {
-      checks?.abort();
-      checks = checkPresence(list.laptops, {
-        fetch: this.#fetch,
-        visibility: this.#visibility,
-        clock: this.#clock,
-        onResult: (id, status) => {
-          if (epoch !== this.#epoch) return;
-          statuses.set(id, status);
-          const record = list.laptops.find((laptop) => laptop.id === id);
-          if (record === undefined) return;
-          rowsByID.get(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), 'list'));
-        },
-      });
-    };
-    check();
+    // asks again (`#resume`) for the rows not known to be online or offline, so an answer cut
+    // short while the phone was locked does not stay.
+    const presence = checkPresence(list.laptops, {
+      fetch: this.#fetch,
+      visibility: this.#visibility,
+      clock: this.#clock,
+      onResult: (id, status) => {
+        if (epoch !== this.#epoch) return;
+        const record = list.laptops.find((laptop) => laptop.id === id);
+        if (record === undefined) return;
+        rowsByID.get(id)?.setLine(presenceLine(status, record.lastConnectedAt, this.#clock.now(), 'list'));
+      },
+    });
     this.#mount(build(), () => {
       this.#recheckLaptops = null;
-      checks?.abort();
+      presence.abort();
     });
-    this.#recheckLaptops = check;
+    this.#recheckLaptops = () => presence.recheck();
   }
 
   /**
@@ -1078,23 +1070,18 @@ class LoaderPage {
     this.#renderStrip();
     // Each answer changes only its item's status line, in place, so a tap on the menu is
     // never lost to a redraw. A return to the page asks again, as the Laptops screen does.
-    /** @type {{ abort(): void } | null} */
-    let checks = null;
-    menu.recheck = () => {
-      checks?.abort();
-      checks = checkPresence(laptops, {
-        fetch: this.#fetch,
-        visibility: this.#visibility,
-        clock: this.#clock,
-        onResult: (id, status) => {
-          const at = laptops.findIndex((record) => record.id === id);
-          if (this.#menu !== menu || at < 0) return;
-          rows[at].setLine(presenceLine(status, laptops[at].lastConnectedAt, this.#clock.now(), 'menu'));
-        },
-      });
-    };
-    menu.abort = () => checks?.abort();
-    menu.recheck();
+    const presence = checkPresence(laptops, {
+      fetch: this.#fetch,
+      visibility: this.#visibility,
+      clock: this.#clock,
+      onResult: (id, status) => {
+        const at = laptops.findIndex((record) => record.id === id);
+        if (this.#menu !== menu || at < 0) return;
+        rows[at].setLine(presenceLine(status, laptops[at].lastConnectedAt, this.#clock.now(), 'menu'));
+      },
+    });
+    menu.recheck = () => presence.recheck();
+    menu.abort = () => presence.abort();
     items[0]?.focus();
   }
 
@@ -1159,8 +1146,10 @@ class LoaderPage {
 
   /**
    * The page is visible again, or came back from the back-forward cache. Presence showing on
-   * the Laptops screen or in the strip's menu is asked for again: a request the phone locked
-   * on may have failed meanwhile, and would leave "Can't reach the relay" on every row.
+   * the Laptops screen or in the strip's menu is asked for again where it is not known: a row
+   * that read "Can't reach the relay", perhaps because the phone locked with its request out,
+   * and a row whose request is still out. A row already online or offline keeps its answer,
+   * and a request just asked is left running, so the two events of one return ask once.
    */
   #resume() {
     this.#connection?.resume();

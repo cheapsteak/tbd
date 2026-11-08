@@ -3,8 +3,8 @@
 // the header strip's menu use it instead of joining the room: a phone socket would replace the
 // one another tab holds (close 4000), so a status check must never open one.
 
-import { startVisibleTimer, systemClock } from './clock.js';
-import { SIGNAL_TIMEOUT_MS } from './constants.js';
+import { isSoonAfter, startVisibleTimer, systemClock } from './clock.js';
+import { RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relayPresenceURL } from './links.js';
 import { isPlainObject } from './objects.js';
 
@@ -85,19 +85,64 @@ export async function fetchPresence({ fetch, relay, room, visibility, clock = sy
 }
 
 /**
- * Checks every laptop at once. Each answer goes to `onResult` as it arrives, until `abort()`,
- * which also cancels the requests still out.
+ * A screen's presence checks: `status` is a laptop's last answer, and `recheck` asks again,
+ * on a return to the page, for each laptop whose answer is not known to be good.
+ * @typedef {object} PresenceChecks
+ * @property {(id: string) => PresenceStatus | undefined} status
+ * @property {() => void} recheck
+ * @property {() => void} abort cancels every request still out; nothing is reported after it
+ */
+
+/**
+ * Checks every laptop at once. Each answer goes to `onResult` as it arrives, until `abort()`.
+ *
+ * `recheck()` asks again only for a laptop whose last answer was `relay`, and for one whose
+ * request is still out, perhaps frozen while the page was hidden, which it cancels. An answer
+ * of online or offline stands. A request asked less than RESUME_COALESCE_MS before is left
+ * running, so the two events one return to the page can fire ask once, not twice.
  * @param {ReadonlyArray<{ id: string, relay: string, room: string }>} laptops
  * @param {{ fetch: FetchLike, visibility: Visibility, clock?: Clock,
  *   onResult: (id: string, status: PresenceStatus) => void }} options
- * @returns {{ abort(): void }}
+ * @returns {PresenceChecks}
  */
 export function checkPresence(laptops, { fetch, visibility, clock = systemClock, onResult }) {
-  const controller = new AbortController();
-  for (const { id, relay, room } of laptops) {
+  /** @type {Map<string, PresenceStatus>} */
+  const statuses = new Map();
+  /** @type {Map<string, { controller: AbortController, askedAt: number }>} The requests still out. */
+  const asking = new Map();
+  let aborted = false;
+  /** @param {{ id: string, relay: string, room: string }} laptop */
+  const ask = ({ id, relay, room }) => {
+    const controller = new AbortController();
+    asking.set(id, { controller, askedAt: clock.now() });
     fetchPresence({ fetch, relay, room, visibility, clock, signal: controller.signal }).then((status) => {
-      if (!controller.signal.aborted) onResult(id, status);
+      if (controller.signal.aborted) return;
+      asking.delete(id);
+      statuses.set(id, status);
+      onResult(id, status);
     });
-  }
-  return { abort: () => controller.abort() };
+  };
+  for (const laptop of laptops) ask(laptop);
+  return {
+    status: (id) => statuses.get(id),
+    recheck() {
+      if (aborted) return;
+      const now = clock.now();
+      for (const laptop of laptops) {
+        const out = asking.get(laptop.id);
+        if (out !== undefined) {
+          if (isSoonAfter(out.askedAt, now, RESUME_COALESCE_MS)) continue;
+          out.controller.abort();
+        } else if (statuses.get(laptop.id) !== 'relay') {
+          continue;
+        }
+        ask(laptop);
+      }
+    },
+    abort() {
+      aborted = true;
+      for (const { controller } of asking.values()) controller.abort();
+      asking.clear();
+    },
+  };
 }

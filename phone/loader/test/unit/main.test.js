@@ -13,7 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { base64urlEncode } from '../../channel/pairingLink.js';
-import { SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from '../../constants.js';
+import { RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS, STORE_TIMEOUT_MS } from '../../constants.js';
 import { createWrappedPhoneKey } from '../../keys.js';
 import { boot } from '../../main.js';
 import { MESSAGES } from '../../messages.js';
@@ -576,14 +576,25 @@ test('the pairing\'s signal timeout counts only time while the page is visible',
 
 /** A presence fetch whose answers the test gives, call by call. */
 function presenceFetch() {
-  /** @type {Array<{ url: string, resolve: (value: unknown) => void, reject: (error: unknown) => void }>} */
+  /**
+   * @type {Array<{ url: string, signal: AbortSignal | null | undefined, resolve: (value: unknown) => void,
+   *   reject: (error: unknown) => void }>}
+   */
   const calls = [];
   return {
     calls,
-    /** @param {string} url */
-    fetch: (url) => new Promise((resolve, reject) => {
-      calls.push({ url, resolve, reject });
+    /**
+     * @param {string} url
+     * @param {RequestInit} init
+     */
+    fetch: (url, init) => new Promise((resolve, reject) => {
+      calls.push({ url, signal: init.signal, resolve, reject });
     }),
+    /**
+     * The calls from `from` on, by the room each asked about.
+     * @param {number} from
+     */
+    roomsFrom: (from) => calls.slice(from).map((call) => call.url.split('/').at(-2)),
     /**
      * @param {number} i
      * @param {boolean} laptop
@@ -633,6 +644,85 @@ test('a return to the page asks again for the presence the strip menu shows, and
   await until(() => !page.strip.textContent.includes(MESSAGES.relay), 'the menu updated');
   assert.ok(page.strip.textContent.includes(MESSAGES.online));
   assert.equal(page.menuShown(), true);
+});
+
+test('a return to the page asks again only for rows not known: one that read Can\'t reach the relay, and one still out', async () => {
+  const net = presenceFetch();
+  const laptops = [
+    await storedLaptop('acme-mbp'), await storedLaptop('acme-mini'), await storedLaptop('acme-studio'), await storedLaptop('acme-air'),
+  ];
+  const page = bootPage({ laptops, fetch: net.fetch });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => page.screen() === 'laptops' && net.calls.length === 4, 'the Laptops screen asking for presence');
+  /** @param {string} room */
+  const callFor = (room) => net.calls.findIndex((call) => call.url.split('/').at(-2) === room);
+  const [online, offline, relay, out] = laptops.map((laptop) => laptop.room);
+  net.answer(callFor(online), true);
+  net.answer(callFor(offline), false);
+  net.fail(callFor(relay));
+  await until(
+    () => page.text().includes(MESSAGES.online) && page.text().includes(MESSAGES.offlineRow) && page.text().includes(MESSAGES.relay),
+    'three rows answered',
+  );
+  const stillOut = net.calls[callFor(out)];
+
+  await page.clock.advance(RESUME_COALESCE_MS);
+  page.setVisibility('hidden');
+  page.setVisibility('visible');
+  assert.deepEqual(net.roomsFrom(4).sort(), [relay, out].sort(), 'only the relay row and the row still out are asked again');
+  assert.equal(stillOut.signal?.aborted, true, 'the request still out is cancelled');
+  net.answer(4, true);
+  net.answer(5, true);
+  await until(() => !page.text().includes(MESSAGES.relay), 'the relay row updated');
+  assert.ok(page.text().includes(MESSAGES.offlineRow), 'the offline row keeps its answer');
+  stillOut.resolve({ status: 200, json: async () => ({ laptop: false }) });
+  await flush();
+  assert.equal(page.text().split(MESSAGES.online).length, 4, 'the cancelled request\'s late answer is dropped');
+});
+
+test('the two events of one return to the page ask once; a later return asks again for a request still out', async () => {
+  const net = presenceFetch();
+  const page = bootPage({ laptops: [await storedLaptop('acme-mbp'), await storedLaptop('acme-mini')], fetch: net.fetch });
+  page.idb.plan.push('answer');
+  page.idb.succeed();
+  await until(() => page.screen() === 'laptops' && net.calls.length === 2, 'the Laptops screen asking for presence');
+  page.setVisibility('hidden');
+  net.fail(0);
+  net.fail(1);
+  await until(() => page.text().split(MESSAGES.relay).length === 3, 'both rows reading Can\'t reach the relay');
+
+  // Shown from the back-forward cache: visibilitychange and pageshow, back to back.
+  page.setVisibility('visible');
+  page.win.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+  assert.equal(net.calls.length, 4, 'one new request per row, not two');
+  await page.clock.advance(RESUME_COALESCE_MS - 1);
+  page.win.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+  assert.equal(net.calls.length, 4, 'still one within RESUME_COALESCE_MS');
+  assert.equal(net.calls[2].signal?.aborted, false);
+
+  // A later return, with those requests still out: asked again, the old ones cancelled.
+  await page.clock.advance(1);
+  page.setVisibility('hidden');
+  page.setVisibility('visible');
+  assert.equal(net.calls.length, 6);
+  assert.equal(net.calls[2].signal?.aborted, true);
+  assert.equal(net.calls[3].signal?.aborted, true);
+});
+
+test('a return to the page leaves a strip menu row that answered alone', async () => {
+  const net = presenceFetch();
+  const { page } = await bootOnOfflineLaptop({ fetch: net.fetch });
+  page.idb.plan.push('answer');
+  page.stripButton().dispatchEvent(new Event('click'));
+  await until(() => page.menuShown() && net.calls.length === 1, 'the menu asking for presence');
+  net.answer(0, false);
+  await until(() => page.strip.textContent.includes(MESSAGES.offlineRow), 'the menu reading offline');
+  await page.clock.advance(RESUME_COALESCE_MS);
+  page.setVisibility('hidden');
+  page.setVisibility('visible');
+  assert.equal(net.calls.length, 1, 'no new request');
+  assert.ok(page.strip.textContent.includes(MESSAGES.offlineRow));
 });
 
 test('a return to the page asks for no presence once the menu has closed', async () => {

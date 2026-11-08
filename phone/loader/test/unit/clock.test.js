@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { TimeoutError, startVisibleTimer, withVisibleTimeout } from '../../clock.js';
+import { TimeoutError, isSoonAfter, startVisibleTimer, withVisibleTimeout } from '../../clock.js';
 import { STORE_TIMEOUT_MS } from '../../constants.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { fakeVisibility } from '../support/helpers.js';
@@ -182,4 +182,11 @@ test('startVisibleTimer fires once after visible time on end, and never after ca
   page.show();
   await clock.advance(5000);
   assert.equal(fired, 1);
+});
+
+test('isSoonAfter holds from `then` until `ms` after it, and not for a clock that went back', () => {
+  assert.equal(isSoonAfter(1_000, 1_000, 500), true);
+  assert.equal(isSoonAfter(1_000, 1_499, 500), true);
+  assert.equal(isSoonAfter(1_000, 1_500, 500), false);
+  assert.equal(isSoonAfter(1_000, 999, 500), false);
 });

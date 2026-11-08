@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SIGNAL_TIMEOUT_MS } from '../../constants.js';
+import { RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS } from '../../constants.js';
 import { checkPresence, fetchPresence, readPresenceBody } from '../../presence.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { fakeVisibility } from '../support/helpers.js';
@@ -184,4 +184,58 @@ test('an answer after abort is dropped', async () => {
   answer({ status: 200, json: async () => ({ laptop: true }) });
   await flush();
   assert.deepEqual(results, []);
+});
+
+test('recheck asks again for a laptop that read relay and for one still out, and status keeps each answer', async () => {
+  const ROOM_C = 'I'.repeat(43);
+  const ROOM_D = 'M'.repeat(43);
+  /** @type {Map<string, Array<(value: { status: number, json(): Promise<unknown> }) => void>>} */
+  const waiting = new Map();
+  const { fetch, calls } = fakeFetch((url) => {
+    if (url.includes(ROOM)) return reply(200, { laptop: true })();
+    if (url.includes(ROOM_B)) return reply(200, { laptop: false })();
+    if (url.includes(ROOM_C)) return reply(503, null)();
+    return new Promise((resolve) => waiting.set(url, [...(waiting.get(url) ?? []), resolve]));
+  });
+  const clock = new FakeClock();
+  /** @type {Array<[string, string]>} */
+  const results = [];
+  const checks = checkPresence([
+    { id: 'a', relay: RELAY, room: ROOM }, { id: 'b', relay: RELAY, room: ROOM_B },
+    { id: 'c', relay: RELAY, room: ROOM_C }, { id: 'd', relay: RELAY, room: ROOM_D },
+  ], { fetch, visibility: fakeVisibility(), clock, onResult: (id, status) => results.push([id, status]) });
+  await flush();
+  assert.deepEqual([checks.status('a'), checks.status('b'), checks.status('c'), checks.status('d')], ['online', 'offline', 'relay', undefined]);
+
+  // Too soon after `d` was asked: only `c` is asked again.
+  checks.recheck();
+  await flush();
+  assert.deepEqual(calls.slice(4).map((call) => call.url.includes(ROOM_C)), [true]);
+  await clock.advance(RESUME_COALESCE_MS);
+  checks.recheck();
+  await flush();
+  assert.equal(calls.length, 7, '`c` and `d` asked again; `a` and `b` stand');
+  assert.ok(calls[3].init.signal?.aborted, '`d`\'s first request is cancelled');
+  const [first, second] = waiting.get(calls[3].url) ?? [];
+  first({ status: 200, json: async () => ({ laptop: true }) });
+  await flush();
+  assert.equal(checks.status('d'), undefined, 'a cancelled request\'s answer is dropped');
+  second({ status: 200, json: async () => ({ laptop: false }) });
+  await flush();
+  assert.equal(checks.status('d'), 'offline');
+  assert.deepEqual(results.filter(([id]) => id === 'd'), [['d', 'offline']]);
+  checks.abort();
+});
+
+test('recheck after abort asks nothing', async () => {
+  const { fetch, calls } = fakeFetch(reply(503, null));
+  const checks = checkPresence([{ id: 'a', relay: RELAY, room: ROOM }], {
+    fetch, visibility: fakeVisibility(), clock: new FakeClock(), onResult: () => {},
+  });
+  await flush();
+  assert.equal(checks.status('a'), 'relay');
+  checks.abort();
+  checks.recheck();
+  await flush();
+  assert.equal(calls.length, 1);
 });
