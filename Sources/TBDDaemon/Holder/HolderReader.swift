@@ -549,29 +549,71 @@ actor HolderReader {
     /// routinely mid-sequence there, with the rest a moment behind. So this
     /// waits for the rest, and the snapshot is taken between sequences.
     ///
-    /// Each poll drains what the descriptor holds, as the quiesce does, so a
-    /// frame much larger than the pty buffer is not held to one buffer per
-    /// poll, and it sleeps only while the output is still mid-sequence.
     /// Bounded, because a child can leave a sequence open indefinitely, and an
     /// attach that never returned would be worse than a remainder printed as
-    /// text. A child that exits mid-sequence ends the wait at once: nothing
-    /// more will arrive.
+    /// text. The budget is time measured on `clock`, sleeps and reads alike,
+    /// and it is checked before every sleep and every read, so the wait runs
+    /// past it by at most one poll interval, or one bufferful and its parse.
+    /// Each poll reads what the descriptor holds a bufferful at a time,
+    /// stopping when the sequence ends, so a frame larger than the pty buffer
+    /// is not held to one bufferful per poll, and a child that never stops
+    /// writing cannot hold one poll past the budget. The wait ends at once,
+    /// with no notice, when the child exits, since nothing more will arrive,
+    /// and when the attach is cancelled, which must not wait for anything.
     private func awaitSequenceBoundary() async {
-        var waited: Duration = .zero
-        while !emulator.isAtSequenceBoundary, waited < sequenceBoundaryBudget {
-            try? await clock.sleep(for: Self.stopPollInterval)
-            waited += Self.stopPollInterval
+        let elapsed = Self.stopwatch(on: clock)
+        while !emulator.isAtSequenceBoundary {
+            guard elapsed() < sequenceBoundaryBudget else {
+                abandonedSequenceBoundaryWaits += 1
+                Self.logger.notice(
+                    """
+                    session \(self.sessionID.uuidString, privacy: .public) was still part-way \
+                    through a sequence when the attach stopped waiting, so the snapshot may cut \
+                    it short and the viewer may print its remainder as text
+                    """)
+                return
+            }
+            do {
+                try await clock.sleep(for: Self.stopPollInterval)
+            } catch {
+                return
+            }
             guard state == .suspended || state == .idle else { return }
-            if drainRemainder() { return }
+            if readTowardSequenceBoundary(within: elapsed) { return }
         }
-        guard !emulator.isAtSequenceBoundary else { return }
-        abandonedSequenceBoundaryWaits += 1
-        Self.logger.notice(
-            """
-            session \(self.sessionID.uuidString, privacy: .public) was still part-way through a \
-            sequence when the attach stopped waiting, so the snapshot may cut it short and the \
-            viewer may print its remainder as text
-            """)
+    }
+
+    /// Reads a bufferful at a time while the output is still mid-sequence and
+    /// the budget lasts, until the descriptor would block.
+    ///
+    /// - Returns: whether the descriptor reported the end of the child's
+    ///   output, so that nothing more will ever arrive on it.
+    private func readTowardSequenceBoundary(within elapsed: () -> Duration) -> Bool {
+        var buffer = [UInt8](repeating: 0, count: Self.sequenceBoundaryReadSize)
+        while !emulator.isAtSequenceBoundary, elapsed() < sequenceBoundaryBudget {
+            switch descriptor.read(into: &buffer) {
+            case .bytes(let count): emulator.feed(buffer[0..<count])
+            case .interrupted: continue
+            case .childGone: return true
+            default: return false
+            }
+        }
+        return false
+    }
+
+    /// Times `clock` from this call: each call of the result is how far the
+    /// clock has moved since.
+    ///
+    /// `any Clock<Duration>` cannot subtract its own instants, so this opens
+    /// the clock once, at the start, as the app's `ClockStopwatch` does (the
+    /// daemon cannot import the app). Time measured, rather than poll
+    /// intervals counted, is what bounds a wait whose polls also read.
+    private static func stopwatch(on clock: any Clock<Duration>) -> () -> Duration {
+        func start<C: Clock>(_ clock: C) -> () -> Duration where C.Duration == Duration {
+            let origin = clock.now
+            return { origin.duration(to: clock.now) }
+        }
+        return start(clock)
     }
 
     /// How long the attach waits for the child to finish a sequence the
@@ -581,6 +623,9 @@ actor HolderReader {
 
     /// The read buffer the quiesce uses, matching the drain loop's own.
     private static let quiesceBufferSize = 64 * 1024
+    /// The read size of the wait for a sequence boundary, which checks its
+    /// budget between reads; matches the app's holder reader.
+    private static let sequenceBoundaryReadSize = 16 * 1024
     /// How many bufferfuls the quiesce will take before it stops trying. Four
     /// megabytes is far past any plausible tty queue and finite against a job
     /// that never stops writing.

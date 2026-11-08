@@ -205,6 +205,56 @@ import TestSupport
         #expect(abandoned == 0, "the attach logged a remainder that a gone child cannot send")
     }
 
+    /// A cancelled attach waits for nothing: the first sleep the wait
+    /// reaches throws, and the wait ends there, saying nothing about a
+    /// remainder.
+    @Test("a cancelled attach stops waiting for the child's sequence at once")
+    func aCancelledAttachDoesNotWait() async throws {
+        let harness = try Harness(reads: [], waitingAtMost: .milliseconds(20))
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("BEFORE\r\n\(Self.esc)]0;never-ends".utf8))
+
+        let reader = harness.reader
+        let handOver = Task {
+            // Cancelled before it asks, so every sleep it reaches throws.
+            withUnsafeCurrentTask { task in
+                task?.cancel()
+                return
+            }
+            return try await reader.suspendDraining()
+        }
+        close(try await handOver.value)
+        let waited = harness.elapsed
+        let abandoned = await harness.reader.abandonedSequenceBoundaryWaits
+
+        #expect(waited == .zero, "a cancelled attach waited \(waited) for the child's sequence")
+        #expect(abandoned == 0, "a cancelled attach logged that it had given up waiting")
+    }
+
+    /// A child that never stops writing, and never finishes its sequence,
+    /// cannot hold the attach past its budget: the budget is time on the
+    /// reader's clock, checked before every read. Each reading of that clock
+    /// is a millisecond later than the last, and the child has ten thousand
+    /// writes to give. A wait that read until the pty would block, or that
+    /// counted polls rather than time, would take hundreds of them.
+    @Test("a child that never stops writing cannot hold the attach past its budget")
+    func aNonstopWriterIsCutOff() async throws {
+        let chunk = [UInt8](repeating: UInt8(ascii: "A"), count: 512)
+        let harness = try Harness(
+            reads: Array(repeating: .write(chunk), count: 10_000),
+            waitingAtMost: .milliseconds(20),
+            on: SteppingClock(step: .milliseconds(1)))
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("BEFORE\r\n\(Self.esc)]0;never-ends".utf8))
+
+        close(try await harness.reader.suspendDraining())
+        let reads = harness.script.reads
+        let abandoned = await harness.reader.abandonedSequenceBoundaryWaits
+
+        #expect(abandoned == 1, "the attach stopped waiting without logging that it had")
+        #expect(reads < 200, "the attach made \(reads) reads of a child that never stops writing")
+    }
+
     // MARK: - Support
 
     /// Everything a vended descriptor will give right now. The descriptor is
@@ -232,12 +282,17 @@ import TestSupport
             /// nothing: the child finishing its write a moment after the
             /// reader looked.
             case deliver([UInt8])
+            /// Puts the bytes on the socket and lets the read happen, so it
+            /// finds them: a child writing as fast as the reader reads.
+            case write([UInt8])
             /// Reports the read as failing with this errno.
             case fail(Int32)
         }
 
         private let lock = NSLock()
-        private var steps: [Step]
+        private let steps: [Step]
+        private var nextStep = 0
+        private var readCount = 0
         private let socket: Int32
 
         init(_ steps: [Step], socket: Int32) {
@@ -245,37 +300,78 @@ import TestSupport
             self.socket = socket
         }
 
+        /// How many reads the reader has made.
+        var reads: Int { lock.withLock { readCount } }
+
         func nextErrno() -> Int32? {
             lock.lock()
             defer { lock.unlock() }
-            guard !steps.isEmpty else { return nil }
-            switch steps.removeFirst() {
-            case .deliver(let rest):
-                // A few bytes into an empty socket buffer. Were the write ever
-                // to fall short, the screens would lack `shows` and the test
-                // would say so.
-                if !rest.isEmpty {
-                    _ = rest.withUnsafeBytes { Darwin.write(socket, $0.baseAddress, $0.count) }
-                }
+            readCount += 1
+            guard nextStep < steps.count else { return nil }
+            let step = steps[nextStep]
+            nextStep += 1
+            switch step {
+            case .deliver(let bytes):
+                put(bytes)
                 return EAGAIN
+            case .write(let bytes):
+                put(bytes)
+                return nil
             case .fail(let code):
                 return code
+            }
+        }
+
+        /// A few bytes into an empty socket buffer: every read drains it.
+        /// Were a write ever to fall short, the screens would lack `shows`
+        /// and the test would say so.
+        private func put(_ bytes: [UInt8]) {
+            guard !bytes.isEmpty else { return }
+            _ = bytes.withUnsafeBytes { Darwin.write(socket, $0.baseAddress, $0.count) }
+        }
+    }
+
+    /// A clock whose every reading is `step` later than the one before, so a
+    /// wait bounded on it ends after a known number of readings however fast
+    /// or slow the machine is. Sleeping moves it to the deadline at once.
+    private final class SteppingClock: Clock, @unchecked Sendable {
+        typealias Instant = ImmediateClock<Duration>.Instant
+
+        private let lock = NSLock()
+        private var current = Instant()
+        private let step: Duration
+
+        init(step: Duration) { self.step = step }
+
+        var now: Instant {
+            lock.withLock {
+                current = current.advanced(by: step)
+                return current
+            }
+        }
+
+        var minimumResolution: Duration { .zero }
+
+        func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+            try Task.checkCancellation()
+            lock.withLock {
+                if current < deadline { current = deadline }
             }
         }
     }
 
     /// A `HolderReader` over one end of a socketpair, never started, on an
-    /// `ImmediateClock` so a wait costs no wall time and its length can be
-    /// read back.
+    /// `ImmediateClock` by default so a wait costs no wall time and its length
+    /// can be read back.
     private struct Harness {
         let reader: HolderReader
+        /// The reader's scripted reads, and the count of every read it made.
+        let script: ReadScript
         private let ours: Int32
-        private let clock: ImmediateClock<Duration>
-        private let start: ImmediateClock<Duration>.Instant
+        private let measure: @Sendable () -> Duration
 
-        /// How long the reader has slept on its clock since the harness was
-        /// made.
-        var elapsed: Duration { start.duration(to: clock.now) }
+        /// How far the reader's clock has moved since the harness was made.
+        var elapsed: Duration { measure() }
 
         /// The child finishes its sequence just after the quiesce looks.
         init(deliveringOnFirstRead rest: [UInt8]) throws {
@@ -286,13 +382,19 @@ import TestSupport
             reads: [ReadScript.Step],
             waitingAtMost budget: Duration = HolderReader.defaultSequenceBoundaryBudget
         ) throws {
+            try self.init(reads: reads, waitingAtMost: budget, on: ImmediateClock<Duration>())
+        }
+
+        init<C: Clock>(
+            reads: [ReadScript.Step], waitingAtMost budget: Duration, on clock: C
+        ) throws where C.Duration == Duration {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             ours = pair[1]
-            let script = ReadScript(reads, socket: pair[1])
-            let clock = ImmediateClock<Duration>()
-            self.clock = clock
-            start = clock.now
+            let readScript = ReadScript(reads, socket: pair[1])
+            script = readScript
+            let origin = clock.now
+            measure = { origin.duration(to: clock.now) }
             // The reader owns `pair[0]` and its `deinit` closes it, which is
             // safe because the reader is never started.
             reader = HolderReader(
@@ -302,7 +404,7 @@ import TestSupport
                 rows: 8,
                 scrollbackLines: 200,
                 sequenceBoundaryBudget: budget,
-                readFault: HolderReadFault(nextErrno: { script.nextErrno() }),
+                readFault: HolderReadFault(nextErrno: { readScript.nextErrno() }),
                 observedChildFromStart: true,
                 clock: clock)
         }

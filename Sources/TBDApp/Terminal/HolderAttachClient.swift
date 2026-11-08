@@ -690,11 +690,15 @@ final class HolderStreamReader: @unchecked Sendable {
     /// the pty, would print as text in the daemon's emulator, whose parser
     /// starts in the ground state. Bounded on `clock`, because a child can
     /// leave a sequence open for good; output that has ended ends the wait at
-    /// once, with no notice. One read per look, and the budget is checked
-    /// before each, so a child that never stops writing holds the wait past
-    /// the budget by at most one bufferful and its parse. Nothing waits on
-    /// main meanwhile: the handback is parked in `awaitClosed()`, and the sink
-    /// outlives this as it outlives the loop's last chunk.
+    /// once, with no notice. The budget is time measured on `clock`, polls and
+    /// reads alike, checked before every poll and every bufferful read, so the
+    /// wait runs past it by at most one poll interval, or one bufferful and its
+    /// parse, the same bound `HolderReader.awaitSequenceBoundary` keeps. There
+    /// is no task here to cancel: a panel that will hand nothing back clears
+    /// its view holder, and that ends the wait.
+    /// Nothing waits on main meanwhile: the handback is parked in
+    /// `awaitClosed()`, and the sink outlives this as it outlives the loop's
+    /// last chunk.
     private func finishOpenSequence(into buffer: inout [UInt8]) {
         let elapsed = ClockStopwatch.start(on: clock)
         while !isAtSequenceBoundary() {
