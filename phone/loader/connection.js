@@ -15,6 +15,7 @@
 import { NoiseError, createInitiator, phonePrologue, MAX_PLAINTEXT_LENGTH } from './channel/noise.js';
 import { base64urlDecode } from './channel/pairingLink.js';
 import { BundleAssembler, BundleError, sha256Hex } from './bundle.js';
+import { TaskChain } from './chain.js';
 import { systemClock } from './clock.js';
 import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relaySocketURL } from './links.js';
@@ -33,6 +34,7 @@ import { RelaySocket, reconnectDelay } from './relay.js';
 /** @typedef {import('./protocol.js').ChunkMessage} ChunkMessage */
 /** @typedef {import('./channel/noise.js').NoiseInitiator} NoiseInitiator */
 /** @typedef {import('./channel/noise.js').NoiseTransport} NoiseTransport */
+/** @typedef {import('./chain.js').Timer} Timer */
 
 /**
  * @typedef {'connecting' | 'handshaking' | 'offline' | 'loading' | 'ready' | 'reconnecting'
@@ -83,12 +85,6 @@ import { RelaySocket, reconnectDelay } from './relay.js';
  */
 
 /**
- * One timer, armed through the clock. When it fires, its work is queued on the chain, and
- * `cancelled` stops work that was queued but has not run yet.
- * @typedef {{ id: unknown, cancelled: boolean }} Timer
- */
-
-/**
  * One handshake on one socket, and what follows it.
  * @typedef {object} Session
  * @property {RelaySocket} socket
@@ -122,8 +118,8 @@ export class LaptopConnection {
   #url;
   #prologue;
 
-  /** @type {Promise<void>} */
-  #chain = Promise.resolve();
+  /** Every relay event, timer and `resume()`, one at a time and in arrival order. */
+  #tasks;
   #started = false;
   /** No more work and no more events: set by `stop()`, a fatal and `replaced`. */
   #ended = false;
@@ -171,6 +167,15 @@ export class LaptopConnection {
     this.#isVisible = isVisible;
     this.#random = random;
     this.#clock = clock;
+    // A ProtocolError (a message the laptop should never send) is `fatal('protocol')`, a
+    // BundleError is `fatal('badBundle')`, and anything else unexpected is `fatal('protocol')`.
+    this.#tasks = new TaskChain({
+      isEnded: () => this.#ended,
+      onError: (error) => {
+        if (!this.#ended) this.#fail(error instanceof BundleError ? 'badBundle' : 'protocol');
+      },
+      clock,
+    });
     // relaySocketURL checks the room, so the decode below has 32 bytes to work with.
     this.#url = relaySocketURL(record.relay, record.room);
     this.#prologue = phonePrologue(/** @type {Uint8Array} */ (base64urlDecode(record.room)));
@@ -182,7 +187,7 @@ export class LaptopConnection {
     this.#started = true;
     this.#setState('connecting');
     if (this.#absentGraceMs > 0) {
-      this.#graceTimer = this.#arm(this.#absentGraceMs, () => {
+      this.#graceTimer = this.#tasks.arm(this.#absentGraceMs, () => {
         this.#graceTimer = null;
         this.#graceOver = true;
         if (this.#socket !== null && this.#peerAbsent) this.#setState('offline');
@@ -207,7 +212,7 @@ export class LaptopConnection {
    */
   resume() {
     if (!this.#started) return;
-    this.#enqueue(() => {
+    this.#tasks.enqueue(() => {
       if (this.#socketOpen) {
         this.#socket?.probe();
         return;
@@ -215,7 +220,7 @@ export class LaptopConnection {
       const now = this.#clock.now();
       if (this.#socket !== null && this.#socket === this.#resumeSocket && isSoonAfter(this.#resumedAt, now)) return;
       this.#closeSocket();
-      this.#reconnectTimer = this.#disarm(this.#reconnectTimer);
+      this.#reconnectTimer = this.#tasks.disarm(this.#reconnectTimer);
       this.#attempt = 0;
       this.#connect();
       this.#resumeSocket = this.#socket;
@@ -261,7 +266,7 @@ export class LaptopConnection {
     const socket = new RelaySocket({
       url: this.#url,
       openSocket: this.#openSocket,
-      onEvent: (event) => this.#enqueue(() => this.#onRelayEvent(socket, event)),
+      onEvent: (event) => this.#tasks.enqueue(() => this.#onRelayEvent(socket, event)),
       clock: this.#clock,
     });
     this.#socket = socket;
@@ -270,7 +275,7 @@ export class LaptopConnection {
     this.#peerAbsent = false;
     // One bound for the WebSocket connecting and the first relay signal together: every phone
     // join gets a signal at once, so a socket without one by now is no use.
-    this.#signalTimer = this.#arm(SIGNAL_TIMEOUT_MS, () => {
+    this.#signalTimer = this.#tasks.arm(SIGNAL_TIMEOUT_MS, () => {
       this.#signalTimer = null;
       if (socket !== this.#socket || this.#gotSignal) return;
       this.#closeSocket();
@@ -293,7 +298,7 @@ export class LaptopConnection {
         return;
       case 'signal':
         this.#gotSignal = true;
-        this.#signalTimer = this.#disarm(this.#signalTimer);
+        this.#signalTimer = this.#tasks.disarm(this.#signalTimer);
         if (event.name === 'peer-joined') {
           this.#peerAbsent = false;
           await this.#handshake(socket);
@@ -336,7 +341,7 @@ export class LaptopConnection {
 
   /** Forgets the current socket and everything that hung on it. */
   #lostSocket() {
-    this.#signalTimer = this.#disarm(this.#signalTimer);
+    this.#signalTimer = this.#tasks.disarm(this.#signalTimer);
     this.#endSession();
     this.#socket = null;
     this.#socketOpen = false;
@@ -347,7 +352,7 @@ export class LaptopConnection {
   #reconnectWithBackoff() {
     const delay = reconnectDelay(this.#attempt, this.#random());
     this.#attempt = Math.min(this.#attempt + 1, MAX_ATTEMPT);
-    this.#reconnectTimer = this.#arm(delay, () => {
+    this.#reconnectTimer = this.#tasks.arm(delay, () => {
       this.#reconnectTimer = null;
       this.#reconnectNow();
     });
@@ -384,7 +389,7 @@ export class LaptopConnection {
     if (!this.#isCurrent(session)) return;
     session.initiator = initiator;
     socket.send(message1);
-    session.timer = this.#arm(HANDSHAKE_TIMEOUT_MS, () => {
+    session.timer = this.#tasks.arm(HANDSHAKE_TIMEOUT_MS, () => {
       if (!this.#isCurrent(session) || session.transport !== null) return;
       // Plan 3 refuses an unknown key without a reply, so a phone removed while it was away
       // reads as offline. The socket stays open for the next peer-joined.
@@ -435,7 +440,7 @@ export class LaptopConnection {
       throw error;
     }
     if (!this.#isCurrent(session)) return;
-    session.timer = this.#disarm(session.timer);
+    session.timer = this.#tasks.disarm(session.timer);
     session.initiator = null;
     session.transport = result.transport;
     const laptopName = readLaptopName(result.payload);
@@ -489,9 +494,9 @@ export class LaptopConnection {
       this.#fail('incompatibleLoader');
       return;
     }
-    session.cacheTimer = this.#arm(CACHE_READ_TIMEOUT_MS, () => this.#onCacheRead(session, welcome, null));
+    session.cacheTimer = this.#tasks.arm(CACHE_READ_TIMEOUT_MS, () => this.#onCacheRead(session, welcome, null));
     this.#readCache(welcome.bundle.sha256)
-      .then((text) => this.#enqueue(() => this.#onCacheRead(session, welcome, text)));
+      .then((text) => this.#tasks.enqueue(() => this.#onCacheRead(session, welcome, text)));
   }
 
   /**
@@ -502,7 +507,7 @@ export class LaptopConnection {
    */
   async #onCacheRead(session, welcome, text) {
     if (!this.#isCurrent(session) || session.cacheTimer === null) return;
-    session.cacheTimer = this.#disarm(session.cacheTimer);
+    session.cacheTimer = this.#tasks.disarm(session.cacheTimer);
     const { sha256 } = welcome.bundle;
     if (text !== null) {
       const at = this.#clock.now();
@@ -587,8 +592,8 @@ export class LaptopConnection {
   #endSession() {
     const session = this.#session;
     if (session === null) return;
-    session.timer = this.#disarm(session.timer);
-    session.cacheTimer = this.#disarm(session.cacheTimer);
+    session.timer = this.#tasks.disarm(session.timer);
+    session.cacheTimer = this.#tasks.disarm(session.cacheTimer);
     this.#session = null;
   }
 
@@ -606,55 +611,11 @@ export class LaptopConnection {
   #shutdown() {
     this.#ended = true;
     this.#closeSocket();
-    this.#reconnectTimer = this.#disarm(this.#reconnectTimer);
-    this.#graceTimer = this.#disarm(this.#graceTimer);
+    this.#reconnectTimer = this.#tasks.disarm(this.#reconnectTimer);
+    this.#graceTimer = this.#tasks.disarm(this.#graceTimer);
   }
 
   // --- plumbing -----------------------------------------------------------------------------
-
-  /**
-   * Runs `task` after every task queued before it, unless the connection has ended by then.
-   * A ProtocolError (a message the laptop should never send) is `fatal('protocol')`, a
-   * BundleError is `fatal('badBundle')`, and anything else unexpected is `fatal('protocol')`.
-   * @param {() => void | Promise<void>} task
-   */
-  #enqueue(task) {
-    this.#chain = this.#chain.then(async () => {
-      if (this.#ended) return;
-      try {
-        await task();
-      } catch (error) {
-        if (!this.#ended) this.#fail(error instanceof BundleError ? 'badBundle' : 'protocol');
-      }
-    });
-  }
-
-  /**
-   * @param {number} ms
-   * @param {() => void | Promise<void>} fn runs on the chain
-   * @returns {Timer}
-   */
-  #arm(ms, fn) {
-    /** @type {Timer} */
-    const timer = { id: null, cancelled: false };
-    timer.id = this.#clock.setTimeout(() => {
-      timer.id = null;
-      this.#enqueue(() => (timer.cancelled ? undefined : fn()));
-    }, ms);
-    return timer;
-  }
-
-  /**
-   * @param {Timer | null} timer
-   * @returns {null}
-   */
-  #disarm(timer) {
-    if (timer !== null) {
-      timer.cancelled = true;
-      if (timer.id !== null) this.#clock.clearTimeout(timer.id);
-    }
-    return null;
-  }
 
   /** @param {ConnectionState} state */
   #setState(state) {

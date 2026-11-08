@@ -15,6 +15,7 @@
 // that follows `paired` must wait until that frame is handled. Once pairing has an outcome
 // nothing more runs or is reported, and each task checks for that after every await.
 
+import { TaskChain } from './chain.js';
 import { confirmationCode } from './channel/confirm.js';
 import { NoiseError, createInitiator, phonePrologue } from './channel/noise.js';
 import { systemClock } from './clock.js';
@@ -34,6 +35,7 @@ import { laptopIDFromKey } from './store.js';
 /** @typedef {import('./relay.js').RelaySignal} RelaySignal */
 /** @typedef {import('./channel/noise.js').NoiseInitiator} NoiseInitiator */
 /** @typedef {import('./channel/noise.js').NoiseTransport} NoiseTransport */
+/** @typedef {import('./chain.js').Timer} Timer */
 
 /**
  * Why pairing ended without a device:
@@ -82,12 +84,6 @@ import { laptopIDFromKey } from './store.js';
  * as RelaySocket's `probe()` does; it does nothing while no socket is open, and a socket
  * found dead ends pairing as any lost connection does.
  * @typedef {{ result: Promise<PairingResult>, cancel(): void, probe(): void }} PairingRun
- */
-
-/**
- * One timer, armed through the clock. When it fires, its work is queued on the chain, and
- * `cancelled` stops work that was queued but has not run yet.
- * @typedef {{ id: unknown, cancelled: boolean }} Timer
  */
 
 /** @typedef {Awaited<ReturnType<typeof createWrappedPhoneKey>>} PhoneKey */
@@ -158,8 +154,8 @@ class Pairing {
   /** @type {(error: PairingError) => void} */
   #reject = () => {};
 
-  /** @type {Promise<void>} */
-  #chain = Promise.resolve();
+  /** Every relay event and timer, one at a time and in arrival order. */
+  #tasks;
   #ended = false;
   /** @type {PhoneKey | null} */
   #key = null;
@@ -188,6 +184,8 @@ class Pairing {
     this.#onCode = onCode;
     this.#subtle = subtle;
     this.#clock = clock;
+    // Anything a task throws ends pairing with `invalid`.
+    this.#tasks = new TaskChain({ isEnded: () => this.#ended, onError: (error) => this.#fail('invalid', error), clock });
     this.#url = relaySocketURL(link.fields.relay, link.fields.room);
     this.#prologue = phonePrologue(link.room);
     this.#laptopID = laptopIDFromKey(link.laptopKey);
@@ -202,7 +200,7 @@ class Pairing {
     // The whole pairing, not only the wait for Allow: a laptop socket that keeps rejoining
     // restarts the handshake each time, and must not keep pairing alive past the offer.
     this.#armExpiry();
-    this.#enqueue(async () => {
+    this.#tasks.enqueue(async () => {
       // Before the socket opens: the extractable private key exists only inside this call,
       // and the pair used for the handshake is rebuilt from the wrap that will be stored.
       const key = await createWrappedPhoneKey(this.#subtle, this.#laptopID);
@@ -224,12 +222,12 @@ class Pairing {
     const socket = new RelaySocket({
       url: this.#url,
       openSocket: this.#openSocket,
-      onEvent: (event) => this.#enqueue(() => this.#onRelayEvent(event)),
+      onEvent: (event) => this.#tasks.enqueue(() => this.#onRelayEvent(event)),
       clock: this.#clock,
     });
     this.#socket = socket;
     // One bound for the WebSocket connecting and the first relay signal together.
-    this.#signalTimer = this.#arm(SIGNAL_TIMEOUT_MS, () => {
+    this.#signalTimer = this.#tasks.arm(SIGNAL_TIMEOUT_MS, () => {
       this.#signalTimer = null;
       if (!this.#gotSignal) this.#fail(this.#opened ? 'offline' : 'relayUnreachable');
     });
@@ -266,7 +264,7 @@ class Pairing {
   /** @param {RelaySignal} name */
   async #onSignal(name) {
     this.#gotSignal = true;
-    this.#signalTimer = this.#disarm(this.#signalTimer);
+    this.#signalTimer = this.#tasks.disarm(this.#signalTimer);
     if (this.#transport !== null) {
       // The laptop's pairing socket left or was replaced, so this session is over there.
       this.#fail('invalid');
@@ -283,7 +281,7 @@ class Pairing {
   }
 
   async #sendMessage1() {
-    this.#handshakeTimer = this.#disarm(this.#handshakeTimer);
+    this.#handshakeTimer = this.#tasks.disarm(this.#handshakeTimer);
     this.#initiator = null;
     const key = /** @type {PhoneKey} */ (this.#key);
     const initiator = await createInitiator({
@@ -297,7 +295,7 @@ class Pairing {
     if (this.#ended) return;
     this.#initiator = initiator;
     /** @type {RelaySocket} */ (this.#socket).send(message1);
-    this.#handshakeTimer = this.#arm(HANDSHAKE_TIMEOUT_MS, () => {
+    this.#handshakeTimer = this.#tasks.arm(HANDSHAKE_TIMEOUT_MS, () => {
       this.#handshakeTimer = null;
       // Plan 3 refuses a used or unknown offer without a reply, and under a wrong secret
       // message 2 cannot be read.
@@ -323,7 +321,7 @@ class Pairing {
       throw error;
     }
     if (this.#ended) return;
-    this.#handshakeTimer = this.#disarm(this.#handshakeTimer);
+    this.#handshakeTimer = this.#tasks.disarm(this.#handshakeTimer);
     this.#initiator = null;
     this.#transport = handshake.transport;
     this.#laptopName = readLaptopName(handshake.payload);
@@ -375,7 +373,7 @@ class Pairing {
   /** Waits for the deadline, in steps of at most MAX_TIMER_MS. */
   #armExpiry() {
     const wait = Math.min(Math.max(0, this.#deadline - this.#clock.now()), MAX_TIMER_MS);
-    this.#expiryTimer = this.#arm(wait, () => {
+    this.#expiryTimer = this.#tasks.arm(wait, () => {
       this.#expiryTimer = null;
       if (this.#clock.now() >= this.#deadline) {
         this.#fail('expired');
@@ -419,58 +417,13 @@ class Pairing {
   /** Closes the socket with 1000 and stops every timer. */
   #end() {
     this.#ended = true;
-    this.#signalTimer = this.#disarm(this.#signalTimer);
-    this.#handshakeTimer = this.#disarm(this.#handshakeTimer);
-    this.#expiryTimer = this.#disarm(this.#expiryTimer);
+    this.#signalTimer = this.#tasks.disarm(this.#signalTimer);
+    this.#handshakeTimer = this.#tasks.disarm(this.#handshakeTimer);
+    this.#expiryTimer = this.#tasks.disarm(this.#expiryTimer);
     this.#initiator = null;
     this.#transport = null;
     const socket = this.#socket;
     this.#socket = null;
     socket?.close();
-  }
-
-  // --- plumbing -----------------------------------------------------------------------------
-
-  /**
-   * Runs `task` after every task queued before it, unless pairing has ended by then. Anything
-   * it throws ends pairing with `invalid`.
-   * @param {() => void | Promise<void>} task
-   */
-  #enqueue(task) {
-    this.#chain = this.#chain.then(async () => {
-      if (this.#ended) return;
-      try {
-        await task();
-      } catch (error) {
-        this.#fail('invalid', error);
-      }
-    });
-  }
-
-  /**
-   * @param {number} ms
-   * @param {() => void | Promise<void>} fn runs on the chain
-   * @returns {Timer}
-   */
-  #arm(ms, fn) {
-    /** @type {Timer} */
-    const timer = { id: null, cancelled: false };
-    timer.id = this.#clock.setTimeout(() => {
-      timer.id = null;
-      this.#enqueue(() => (timer.cancelled ? undefined : fn()));
-    }, ms);
-    return timer;
-  }
-
-  /**
-   * @param {Timer | null} timer
-   * @returns {null}
-   */
-  #disarm(timer) {
-    if (timer !== null) {
-      timer.cancelled = true;
-      if (timer.id !== null) this.#clock.clearTimeout(timer.id);
-    }
-    return null;
   }
 }
