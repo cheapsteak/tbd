@@ -673,7 +673,7 @@ Research: `phone-app-stack.md`.
   - **marked 18.1.x** – markdown, tokenizer only. The app maps tokens to React elements, so no HTML
     string is ever made, raw HTML in a transcript cannot run, and no sanitizer is needed.
   - **@tanstack/react-virtual 3.x** – the transcript list.
-- **Size.** React and the app shell alone measure 276 KB, or 85 KB gzipped. The transcript's
+- **Size.** React and the app shell alone measure 277 KB, or 85 KB gzipped. The transcript's
   libraries and the remaining screens add to that. A build test fails any bundle over 160 KB
   gzipped. It downloads once per TBD version, compressed, and the loader caches it by hash. The
   loader keeps the newest two bundles per laptop.
