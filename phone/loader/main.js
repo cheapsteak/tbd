@@ -42,8 +42,7 @@ import {
 /**
  * The strip's open laptop menu. `nodes` stays empty until the laptops are read and the menu
  * is drawn; from then on its nodes stay in the strip until it closes. `recheck` asks the relay
- * again for each laptop whose presence is not known (`checkPresence`), and `abort` cancels
- * what is still out.
+ * for every laptop's presence again (`checkPresence`), and `abort` cancels what is still out.
  * @typedef {{ abort(): void, recheck(): void, nodes: HTMLElement[] }} Menu
  */
 
@@ -178,7 +177,7 @@ class LoaderPage {
   #epoch = 0;
   /** @type {(() => void) | null} Undoes what the current screen started (scanner, presence). */
   #leaveScreen = null;
-  /** @type {(() => void) | null} While the Laptops screen shows: asks again for presence not known. */
+  /** @type {(() => void) | null} While the Laptops screen shows: asks for every row's presence again. */
   #recheckLaptops = null;
 
   /** @type {LaptopRecord | null} The laptop the strip names. */
@@ -445,8 +444,8 @@ class LoaderPage {
     // Presence comes from the relay's endpoint, never a socket, so listing the laptops never
     // knocks another tab off its room. Each answer changes only its row's status line, in
     // place, so a tap in progress and the scroll position survive it. A return to the page
-    // asks again (`#resume`) for the rows not known to be online or offline, so an answer cut
-    // short while the phone was locked does not stay.
+    // asks again for every row (`#resume`), so an answer from before the phone locked, or one
+    // cut short while it was locked, does not stay.
     const presence = checkPresence(list.laptops, {
       fetch: this.#fetch,
       visibility: this.#visibility,
@@ -1152,10 +1151,10 @@ class LoaderPage {
 
   /**
    * The page is visible again, or came back from the back-forward cache. Presence showing on
-   * the Laptops screen or in the strip's menu is asked for again where it is not known: a row
-   * that read "Can't reach the relay", perhaps because the phone locked with its request out,
-   * and a row whose request is still out. A row already online or offline keeps its answer,
-   * and a request just asked is left running, so the two events of one return ask once.
+   * the Laptops screen or in the strip's menu is asked for again, row by row: after a long
+   * lock a laptop that read online may be asleep, and a request the phone locked on may have
+   * failed. Each row keeps its last answer until the new one arrives, and a request just asked
+   * is left running, so the two events of one return ask once.
    */
   #resume() {
     this.#connection?.resume();

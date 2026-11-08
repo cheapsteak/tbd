@@ -186,36 +186,50 @@ test('an answer after abort is dropped', async () => {
   assert.deepEqual(results, []);
 });
 
-test('recheck asks again for a laptop that read relay and for one still out, and status keeps each answer', async () => {
+test('recheck asks every laptop again, online and offline included; status keeps each answer until the new one', async () => {
   const ROOM_C = 'I'.repeat(43);
   const ROOM_D = 'M'.repeat(43);
   /** @type {Map<string, Array<(value: { status: number, json(): Promise<unknown> }) => void>>} */
   const waiting = new Map();
+  /** @type {Map<string, unknown>} The next answer per room; a room without one waits for the test. */
+  const answers = new Map([[ROOM, { laptop: true }], [ROOM_B, { laptop: false }], [ROOM_C, null]]);
   const { fetch, calls } = fakeFetch((url) => {
-    if (url.includes(ROOM)) return reply(200, { laptop: true })();
-    if (url.includes(ROOM_B)) return reply(200, { laptop: false })();
-    if (url.includes(ROOM_C)) return reply(503, null)();
+    const room = [ROOM, ROOM_B, ROOM_C, ROOM_D].find((r) => url.includes(r)) ?? '';
+    if (answers.has(room)) {
+      const body = answers.get(room);
+      return body === null ? reply(503, null)() : reply(200, body)();
+    }
     return new Promise((resolve) => waiting.set(url, [...(waiting.get(url) ?? []), resolve]));
   });
   const clock = new FakeClock();
+  const visibility = fakeVisibility();
   /** @type {Array<[string, string]>} */
   const results = [];
   const checks = checkPresence([
     { id: 'a', relay: RELAY, room: ROOM }, { id: 'b', relay: RELAY, room: ROOM_B },
     { id: 'c', relay: RELAY, room: ROOM_C }, { id: 'd', relay: RELAY, room: ROOM_D },
-  ], { fetch, visibility: fakeVisibility(), clock, onResult: (id, status) => results.push([id, status]) });
+  ], { fetch, visibility, clock, onResult: (id, status) => results.push([id, status]) });
   await flush();
   assert.deepEqual([checks.status('a'), checks.status('b'), checks.status('c'), checks.status('d')], ['online', 'offline', 'relay', undefined]);
 
-  // Too soon after `d` was asked: only `c` is asked again.
+  // A long lock, with `d`'s request out: meanwhile `a` went to sleep and `b` came back. On the
+  // return every laptop is asked again, and `d`'s request is cancelled and asked again.
+  answers.set(ROOM, null);
+  answers.delete(ROOM_B);
+  visibility.hide();
+  await clock.advance(10 * 60_000);
+  visibility.show();
   checks.recheck();
-  await flush();
-  assert.deepEqual(calls.slice(4).map((call) => call.url.includes(ROOM_C)), [true]);
-  await clock.advance(RESUME_COALESCE_MS);
-  checks.recheck();
-  await flush();
-  assert.equal(calls.length, 7, '`c` and `d` asked again; `a` and `b` stand');
+  assert.equal(calls.length, 8, 'one new request per laptop');
   assert.ok(calls[3].init.signal?.aborted, '`d`\'s first request is cancelled');
+  await flush();
+  assert.equal(checks.status('a'), 'relay', '`a` takes its new answer');
+  assert.equal(checks.status('b'), 'offline', '`b` keeps its last answer while its new request is out');
+  const bAgain = waiting.get(calls[5].url) ?? [];
+  bAgain[0]({ status: 200, json: async () => ({ laptop: true }) });
+  await flush();
+  assert.equal(checks.status('b'), 'online');
+
   const [first, second] = waiting.get(calls[3].url) ?? [];
   first({ status: 200, json: async () => ({ laptop: true }) });
   await flush();
@@ -224,6 +238,37 @@ test('recheck asks again for a laptop that read relay and for one still out, and
   await flush();
   assert.equal(checks.status('d'), 'offline');
   assert.deepEqual(results.filter(([id]) => id === 'd'), [['d', 'offline']]);
+  assert.deepEqual(results.filter(([id]) => id === 'a'), [['a', 'online'], ['a', 'relay']]);
+  assert.deepEqual(results.filter(([id]) => id === 'b'), [['b', 'offline'], ['b', 'online']]);
+  checks.abort();
+});
+
+test('back-to-back rechecks ask once: a request asked less than RESUME_COALESCE_MS before is left running', async () => {
+  const { fetch, calls } = fakeFetch(never);
+  const clock = new FakeClock();
+  const laptops = [{ id: 'a', relay: RELAY, room: ROOM }, { id: 'b', relay: RELAY, room: ROOM_B }];
+  const checks = checkPresence(laptops, { fetch, visibility: fakeVisibility(), clock, onResult: () => {} });
+  await flush();
+  assert.equal(calls.length, 2);
+
+  // A return to the page right after the screen asked leaves those requests running.
+  checks.recheck();
+  assert.equal(calls.length, 2);
+
+  // A later return: visibilitychange and pageshow, back to back, ask once.
+  await clock.advance(RESUME_COALESCE_MS);
+  checks.recheck();
+  assert.equal(calls.length, 4);
+  assert.ok(calls[0].init.signal?.aborted && calls[1].init.signal?.aborted, 'the first requests are cancelled');
+  await clock.advance(RESUME_COALESCE_MS - 1);
+  checks.recheck();
+  assert.equal(calls.length, 4, 'the second event of the pair asks nothing');
+  assert.ok(!calls[2].init.signal?.aborted && !calls[3].init.signal?.aborted, 'and cancels nothing');
+
+  // The next return asks again.
+  await clock.advance(1);
+  checks.recheck();
+  assert.equal(calls.length, 6);
   checks.abort();
 });
 

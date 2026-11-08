@@ -646,7 +646,7 @@ test('a return to the page asks again for the presence the strip menu shows, and
   assert.equal(page.menuShown(), true);
 });
 
-test('a return to the page asks again only for rows not known: one that read Can\'t reach the relay, and one still out', async () => {
+test('a return to the page asks again for every row, online and offline included, and the rows update in place', async () => {
   const net = presenceFetch();
   const laptops = [
     await storedLaptop('acme-mbp'), await storedLaptop('acme-mini'), await storedLaptop('acme-studio'), await storedLaptop('acme-air'),
@@ -655,6 +655,7 @@ test('a return to the page asks again only for rows not known: one that read Can
   page.idb.plan.push('answer');
   page.idb.succeed();
   await until(() => page.screen() === 'laptops' && net.calls.length === 4, 'the Laptops screen asking for presence');
+  const drawn = /** @type {any} */ (page.doc.getElementById('screen')).children[0];
   /** @param {string} room */
   const callFor = (room) => net.calls.findIndex((call) => call.url.split('/').at(-2) === room);
   const [online, offline, relay, out] = laptops.map((laptop) => laptop.room);
@@ -667,18 +668,29 @@ test('a return to the page asks again only for rows not known: one that read Can
   );
   const stillOut = net.calls[callFor(out)];
 
-  await page.clock.advance(RESUME_COALESCE_MS);
+  // The phone locks for a long while. On its return, shown from the back-forward cache
+  // (visibilitychange and pageshow, back to back), each row is asked again, once.
   page.setVisibility('hidden');
+  await page.clock.advance(30 * 60_000);
   page.setVisibility('visible');
-  assert.deepEqual(net.roomsFrom(4).sort(), [relay, out].sort(), 'only the relay row and the row still out are asked again');
+  page.win.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+  assert.deepEqual(net.roomsFrom(4).sort(), [online, offline, relay, out].sort(), 'one new request per row');
   assert.equal(stillOut.signal?.aborted, true, 'the request still out is cancelled');
-  net.answer(4, true);
-  net.answer(5, true);
-  await until(() => !page.text().includes(MESSAGES.relay), 'the relay row updated');
-  assert.ok(page.text().includes(MESSAGES.offlineRow), 'the offline row keeps its answer');
+  assert.ok(page.text().includes(MESSAGES.online) && page.text().includes(MESSAGES.offlineRow), 'each row keeps its answer meanwhile');
+
+  // The laptop that read online went to sleep; the one that read offline is back.
+  /** @param {string} room */
+  const newCallFor = (room) => 4 + net.roomsFrom(4).indexOf(room);
+  net.answer(newCallFor(online), false);
+  net.answer(newCallFor(offline), true);
+  net.answer(newCallFor(relay), true);
+  net.answer(newCallFor(out), true);
+  await until(() => !page.text().includes(MESSAGES.relay) && page.text().split(MESSAGES.online).length === 4, 'every row updated');
+  assert.equal(page.text().split(MESSAGES.offlineRow).length, 2, 'one row reads offline: the one that read online');
+  assert.equal(/** @type {any} */ (page.doc.getElementById('screen')).children[0], drawn, 'the rows changed in place');
   stillOut.resolve({ status: 200, json: async () => ({ laptop: false }) });
   await flush();
-  assert.equal(page.text().split(MESSAGES.online).length, 4, 'the cancelled request\'s late answer is dropped');
+  assert.equal(page.text().split(MESSAGES.offlineRow).length, 2, 'the cancelled request\'s late answer is dropped');
 });
 
 test('the two events of one return to the page ask once; a later return asks again for a request still out', async () => {
@@ -710,19 +722,23 @@ test('the two events of one return to the page ask once; a later return asks aga
   assert.equal(net.calls[3].signal?.aborted, true);
 });
 
-test('a return to the page leaves a strip menu row that answered alone', async () => {
+test('a return to the page asks again for a strip menu row that answered, once for the two events of one return', async () => {
   const net = presenceFetch();
   const { page } = await bootOnOfflineLaptop({ fetch: net.fetch });
   page.idb.plan.push('answer');
   page.stripButton().dispatchEvent(new Event('click'));
   await until(() => page.menuShown() && net.calls.length === 1, 'the menu asking for presence');
-  net.answer(0, false);
-  await until(() => page.strip.textContent.includes(MESSAGES.offlineRow), 'the menu reading offline');
-  await page.clock.advance(RESUME_COALESCE_MS);
+  net.answer(0, true);
+  await until(() => page.strip.textContent.includes(MESSAGES.online), 'the menu reading online');
   page.setVisibility('hidden');
+  await page.clock.advance(RESUME_COALESCE_MS);
   page.setVisibility('visible');
-  assert.equal(net.calls.length, 1, 'no new request');
-  assert.ok(page.strip.textContent.includes(MESSAGES.offlineRow));
+  page.win.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+  assert.equal(net.calls.length, 2, 'one new request');
+  assert.ok(page.strip.textContent.includes(MESSAGES.online), 'the row keeps its answer meanwhile');
+  net.answer(1, false);
+  await until(() => page.strip.textContent.includes(MESSAGES.offlineRow), 'the menu reading offline');
+  assert.equal(page.menuShown(), true);
 });
 
 test('a return to the page asks for no presence once the menu has closed', async () => {

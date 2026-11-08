@@ -85,8 +85,8 @@ export async function fetchPresence({ fetch, relay, room, visibility, clock = sy
 }
 
 /**
- * A screen's presence checks: `status` is a laptop's last answer, and `recheck` asks again,
- * on a return to the page, for each laptop whose answer is not known to be good.
+ * A screen's presence checks: `status` is a laptop's last answer, and `recheck` asks every
+ * laptop again on a return to the page.
  * @typedef {object} PresenceChecks
  * @property {(id: string) => PresenceStatus | undefined} status
  * @property {() => void} recheck
@@ -96,10 +96,12 @@ export async function fetchPresence({ fetch, relay, room, visibility, clock = sy
 /**
  * Checks every laptop at once. Each answer goes to `onResult` as it arrives, until `abort()`.
  *
- * `recheck()` asks again only for a laptop whose last answer was `relay`, and for one whose
- * request is still out, perhaps frozen while the page was hidden, which it cancels. An answer
- * of online or offline stands. A request asked less than RESUME_COALESCE_MS before is left
- * running, so the two events one return to the page can fire ask once, not twice.
+ * `recheck()` asks every laptop again, whatever its last answer: after a long lock, a laptop
+ * that read online may have gone to sleep, and one that read offline may be back. A request
+ * still out, perhaps frozen while the page was hidden, is cancelled and asked again, except
+ * one asked less than RESUME_COALESCE_MS before, which is left running: the two events one
+ * return to the page can fire ask once, not twice. `status` keeps a laptop's last answer
+ * until the new one arrives.
  * @param {ReadonlyArray<{ id: string, relay: string, room: string }>} laptops
  * @param {{ fetch: FetchLike, visibility: Visibility, clock?: Clock,
  *   onResult: (id: string, status: PresenceStatus) => void }} options
@@ -133,8 +135,6 @@ export function checkPresence(laptops, { fetch, visibility, clock = systemClock,
         if (out !== undefined) {
           if (isSoonAfter(out.askedAt, now, RESUME_COALESCE_MS)) continue;
           out.controller.abort();
-        } else if (statuses.get(laptop.id) !== 'relay') {
-          continue;
         }
         ask(laptop);
       }
