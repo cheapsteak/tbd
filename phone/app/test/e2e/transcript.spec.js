@@ -746,6 +746,23 @@ test('within 30 px of the bottom new items keep the view there, and further up t
   expect(await fromBottom(tx)).toBeGreaterThan(30);
 });
 
+test('a scroll that a tap draws the rows again after, before its scroll event, stays where the reader put it', async ({ page, appHost }) => {
+  const tx = await openTall(page, appHost);
+  // The reader scrolls to the top, and in that frame a tap on a row draws the rows again before
+  // the scroll's event comes, as an update from the laptop can.
+  await tx.evaluate((el) => {
+    el.scrollTop = 0;
+    const tools = el.querySelectorAll('button.tool');
+    /** @type {HTMLElement} */ (tools[tools.length - 1]).click();
+  });
+  await frames(tx, 3);
+  expect((await metricsOf(tx)).scrollTop).toBe(0);
+  // The view no longer keeps to the bottom: a row that arrives shows the pill and leaves it there.
+  await appendToCheckout(page, bashRows('after', 1));
+  await expect(app(page).locator('.pill')).toBeVisible();
+  expect((await metricsOf(tx)).scrollTop).toBe(0);
+});
+
 test('scrolled up, an append shows the pill and does not move the view', async ({ page, appHost }) => {
   const tx = await openTall(page, appHost);
   const { first, pill } = await pillAfterScrollingUp(page, tx);

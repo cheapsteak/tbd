@@ -72,14 +72,18 @@
  * event the write fires reads as the list's own and not as a swipe (`takeScroll`). It notes the
  * virtualizer's writes the same way (`scrollToFn`): the virtualizer moves the view by as much as
  * a row above it grew when it measures that row, and that is not the reader's scroll, so it
- * neither asks for a page nor retries a failed one. A scroll event that moved the view a pixel or
- * less leaves the noted place as it was, so a slow drag adds up until it counts as the reader's,
- * and then asks for a page and retries a failed one as any scroll does. A write from a tap
- * or from a store change lands before the next frame, whose scroll event the virtualizer reads
- * first, so the rows at the new place are drawn before that frame paints. The list's scroll
- * listener is a capture listener on `.tx-wrap`: it runs before the virtualizer's own listener on
- * `.tx`, which may draw rows on the spot, and so runs the list's effects, which must see the
- * reader's scroll already.
+ * neither asks for a page nor retries a failed one. A layout that runs after the reader moved the
+ * view and before that scroll's event, as when an update or a tap draws the rows again in that
+ * frame, leaves the view where the reader put it (`pushedFromBottom` reads the noted place), and
+ * notes the place the browser brought a view at the bottom up to when `.tx`'s content got shorter
+ * (`clampedToBottom`), so rows that grow after it still put the view back. A scroll event that
+ * moved the view a pixel or less leaves the noted place as it was, so a slow drag adds up until
+ * it counts as the reader's, and then asks for a page and retries a failed one as any scroll
+ * does. A write from a tap or from a store change lands before the next frame, whose scroll
+ * event the virtualizer reads first, so the rows at the new place are drawn before that frame
+ * paints. The list's scroll listener is a capture listener on `.tx-wrap`: it runs before the
+ * virtualizer's own listener on `.tx`, which may draw rows on the spot, and so runs the list's
+ * effects, which must see the reader's scroll already.
  *
  * **The size of `.tx`** reaches the virtualizer one animation frame late, after the first
  * (`observeRect`). The virtualizer reads it from a resize observer of its own, and by default
@@ -103,8 +107,8 @@ import { useNow } from '../ui/now.ts';
 import { announcement, lastRows } from './announce.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
-  anchorAt, arrivedCount, atBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, takeScroll,
-  wantsOlder,
+  anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows,
+  takeScroll, wantsOlder,
 } from './scroll.ts';
 import type { Anchor, Metrics, Paging, SeenRows } from './scroll.ts';
 
@@ -257,7 +261,8 @@ function List(p: {
     const el = scrollRef.current;
     if (el === null) return;
     const m = metricsOf(el);
-    if (pushedFromBottom(view.stuck, view.seen, m)) toBottom(el);
+    if (clampedToBottom(view.top, m)) view.top = m.scrollTop;
+    if (pushedFromBottom(view.stuck, view.seen, view.top, m)) toBottom(el);
     else view.seen = fromBottom(m);
   }, [view, toBottom]);
 

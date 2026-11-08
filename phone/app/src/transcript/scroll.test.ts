@@ -8,7 +8,7 @@ import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../pr
 import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, clearTranscript, emptyTranscript, prependPage } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import {
-  anchorAt, arrivedCount, atBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
+  anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
   takeScroll, wantsOlder,
 } from './scroll.ts';
 import type { Metrics } from './scroll.ts';
@@ -149,17 +149,45 @@ test('a slow drag stops keeping to the bottom once the view is more than 30 px f
 
 test('a view that keeps to the bottom goes back to it when pushed more than a pixel further away', () => {
   // Rows grew 200 px below a view at the bottom.
-  assert.equal(pushedFromBottom(true, 0, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 800 }), true);
+  assert.equal(pushedFromBottom(true, 0, 1000, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 800 }), true);
   // The keyboard took 300 px off a view 10 px above the bottom.
-  assert.equal(pushedFromBottom(true, 10, { scrollTop: 990, scrollHeight: 1800, clientHeight: 500 }), true);
-  // Nothing moved, or a pixel only.
-  assert.equal(pushedFromBottom(true, 10, at(990)), false);
-  assert.equal(pushedFromBottom(true, 10, at(989)), false);
-  assert.equal(pushedFromBottom(true, 10, at(988)), true);
+  assert.equal(pushedFromBottom(true, 10, 990, { scrollTop: 990, scrollHeight: 1800, clientHeight: 500 }), true);
+  // Nothing moved, or a pixel only, and rows that grew 2 px below the view.
+  assert.equal(pushedFromBottom(true, 10, 990, at(990)), false);
+  assert.equal(pushedFromBottom(true, 10, 990, { scrollTop: 990, scrollHeight: 1801, clientHeight: 800 }), false);
+  assert.equal(pushedFromBottom(true, 10, 990, { scrollTop: 990, scrollHeight: 1802, clientHeight: 800 }), true);
+  // A read-back a pixel off where the list noted it is no move of the reader's.
+  assert.equal(pushedFromBottom(true, 0, 1000, { scrollTop: 999, scrollHeight: 2000, clientHeight: 800 }), true);
   // Rows got shorter.
-  assert.equal(pushedFromBottom(true, 200, at(1000)), false);
+  assert.equal(pushedFromBottom(true, 200, 1000, at(1000)), false);
   // A view that does not keep to the bottom stays where it is.
-  assert.equal(pushedFromBottom(false, 0, { scrollTop: 0, scrollHeight: 5000, clientHeight: 800 }), false);
+  assert.equal(pushedFromBottom(false, 0, 0, { scrollTop: 0, scrollHeight: 5000, clientHeight: 800 }), false);
+});
+
+test('a reader’s scroll that a layout sees before its scroll event is no push', () => {
+  // Measured in WebKit: the reader scrolled a view at the bottom to the top, and the rows were
+  // drawn again before that scroll's event came.
+  assert.equal(pushedFromBottom(true, 0, 561, { scrollTop: 0, scrollHeight: 1092, clientHeight: 531 }), false);
+  // Two pixels up, past the read-back rounding, is the reader's too.
+  assert.equal(pushedFromBottom(true, 10, 990, at(988)), false);
+});
+
+test('a view at the bottom that the browser brought up with a shorter scroll element is not the reader’s', () => {
+  // Measured in Chromium: the list noted 1,339 at the bottom of 2,050 px in a 711 px view; the
+  // rows got 48 px shorter, which brought the view up to 1,291, and then grew 272 px, both
+  // before the scroll event of the first change came.
+  const shorter: Metrics = { scrollTop: 1291, scrollHeight: 2002, clientHeight: 711 };
+  assert.equal(clampedToBottom(1339, shorter), true);
+  const grown: Metrics = { scrollTop: 1291, scrollHeight: 2274, clientHeight: 711 };
+  // Taken for the reader's, the move would leave the view 272 px up; noted, the view goes back.
+  assert.equal(pushedFromBottom(true, 0, 1339, grown), false);
+  assert.equal(pushedFromBottom(true, fromBottom(shorter), shorter.scrollTop, grown), true);
+  // A reader's scroll up leaves the view above its bottom, and one down moves it down.
+  assert.equal(clampedToBottom(1339, { ...shorter, scrollTop: 1000 }), false);
+  assert.equal(clampedToBottom(1000, { scrollTop: 1291, scrollHeight: 2002, clientHeight: 711 }), false);
+  // A view the list left where it was, or a pixel off it.
+  assert.equal(clampedToBottom(1291, shorter), false);
+  assert.equal(clampedToBottom(1292, shorter), false);
 });
 
 test('the event of the list’s own write, after the view got shorter, is not the reader’s and shows the push', () => {
@@ -168,7 +196,7 @@ test('the event of the list’s own write, after the view got shorter, is not th
   // back at the bottom, so it still keeps to it.
   const m: Metrics = { scrollTop: 1605, scrollHeight: 2066, clientHeight: 299 };
   assert.deepEqual(takeScroll(1605, m), { byReader: false, top: 1605 });
-  assert.equal(pushedFromBottom(true, 0, m), true);
+  assert.equal(pushedFromBottom(true, 0, 1605, m), true);
   assert.equal(atBottom({ ...m, scrollTop: m.scrollHeight - m.clientHeight }), true);
 });
 

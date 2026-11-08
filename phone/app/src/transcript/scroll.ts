@@ -6,10 +6,12 @@
  * - **Sticking to the bottom.** A view within `STICK_PX` of its bottom is at the bottom
  *   (`atBottom`). While the view keeps to the bottom, rows that arrive or grow below it, and a
  *   scroll element that gets shorter, as when the keyboard opens, put it back at the bottom
- *   (`pushedFromBottom`). After every scroll event, once the list has put back a view that was
- *   pushed, the view keeps to the bottom exactly when it is at the bottom, whatever moved it and
- *   by how little. Rows that arrive while it does not keep to the bottom show the "New messages"
- *   pill instead (`rowsChange`).
+ *   (`pushedFromBottom`). The reader's scroll never does, even when a layout comes between it and
+ *   its scroll event, and the browser bringing a view at its bottom up with a shorter scroll
+ *   element is not the reader's (`clampedToBottom`). After every scroll event, once the list has
+ *   put back a view that was pushed, the view keeps to the bottom exactly when it is at the
+ *   bottom, whatever moved it and by how little. Rows that arrive while it does not keep to the
+ *   bottom show the "New messages" pill instead (`rowsChange`).
  * - **The reader's scroll.** A scroll event is the reader's when it moved the view more than a
  *   pixel from where the list last wrote it or last took the reader's scroll (`takeScroll`), so
  *   the event of the list's own write never counts, and a slow drag adds up until it does.
@@ -114,15 +116,29 @@ export function takeScroll(top: number, m: Metrics): { byReader: boolean; top: n
 /**
  * Whether something pushed a view that keeps to the bottom away from it, so the list should
  * put it back: the view is now more than a pixel further above its bottom than `seen`, its
- * distance when the list last looked. Rows that arrived or grew below it do that, and so does
- * a shorter scroll element. The list looks after every layout, after every scroll event the
- * reader made, and after every one they did not (`takeScroll`), and puts it back then too, so a
- * swipe does not count as a push, and a push that came before the event of the list's own write
- * is not taken for a swipe. Rows that grew above the view do not push it, since the virtualizer
- * moves the view by as much as they grew.
+ * distance when the list last looked, and its `scrollTop` is still where the list last noted it
+ * (`top`, as for `moved`). Rows that arrived or grew below it do that, and so does a shorter
+ * scroll element: they move the bottom, not the view. The reader's scroll moves the view, so a
+ * layout that comes after it and before its scroll event, as when an update or a tap draws the
+ * rows again in that frame, does not take it for a push and pull the view back. The list looks
+ * after every layout, after every scroll event the reader made, and after every one they did not
+ * (`takeScroll`), and puts it back then too, so a push that came before the event of the list's
+ * own write is not taken for a swipe. Rows that grew above the view do not push it, since the
+ * virtualizer moves the view by as much as they grew.
  */
-export function pushedFromBottom(stuck: boolean, seen: number, m: Metrics): boolean {
-  return stuck && fromBottom(m) > seen + 1;
+export function pushedFromBottom(stuck: boolean, seen: number, top: number, m: Metrics): boolean {
+  return stuck && !moved(top, m) && fromBottom(m) > seen + 1;
+}
+
+/**
+ * Whether the browser, not the reader, moved the view from `top` (as for `moved`): the scroll
+ * element got shorter below a view at its bottom, so the browser brought the view up with it,
+ * and the view is still at its bottom. A reader's scroll up leaves the view above the bottom, and
+ * one down moves it down. The scroll event of that move comes only later, so a layout notes the
+ * new `scrollTop` as the list's, and the next layout, after rows that grew, still sees the push.
+ */
+export function clampedToBottom(top: number, m: Metrics): boolean {
+  return moved(top, m) && m.scrollTop < top && fromBottom(m) <= 1;
 }
 
 /**
