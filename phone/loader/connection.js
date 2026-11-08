@@ -22,6 +22,7 @@ import { TaskChain } from './chain.js';
 import { systemClock } from './clock.js';
 import { CACHE_READ_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, RESUME_COALESCE_MS, SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relaySocketURL } from './links.js';
+import { isObject, isPlainObject } from './objects.js';
 import {
   ProtocolError, checkCompat, decodeMessage, encodeMessage, makeHello, parseLaptopMessage, readLaptopName,
 } from './protocol.js';
@@ -260,7 +261,7 @@ export class LaptopConnection {
    *   (a cycle or a BigInt)
    */
   sendApp(body) {
-    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    if (!isPlainObject(body)) {
       throw new TypeError('an app body is a plain object');
     }
     const session = this.#session;
@@ -705,8 +706,8 @@ export class LaptopConnection {
  *   text is damaged (the fetch that follows replaces it)
  */
 async function verifiedText(row, sha256) {
-  if (row === null || typeof row !== 'object') return null;
-  const { text, sha256: name } = /** @type {Record<string, unknown>} */ (row);
+  if (!isObject(row)) return null;
+  const { text, sha256: name } = row;
   if (typeof text !== 'string' || name !== sha256) return null;
   try {
     return await sha256Hex(utf8Encoder.encode(text)) === sha256 ? text : null;

@@ -6,6 +6,7 @@
 import { startVisibleTimer, systemClock } from './clock.js';
 import { SIGNAL_TIMEOUT_MS } from './constants.js';
 import { relayPresenceURL } from './links.js';
+import { isPlainObject } from './objects.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
 /** @typedef {import('./clock.js').Visibility} Visibility */
@@ -27,8 +28,8 @@ import { relayPresenceURL } from './links.js';
  * @returns {PresenceStatus}
  */
 export function readPresenceBody(body) {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) return 'relay';
-  const laptop = /** @type {Record<string, unknown>} */ (body).laptop;
+  if (!isPlainObject(body)) return 'relay';
+  const { laptop } = body;
   if (typeof laptop !== 'boolean') return 'relay';
   return laptop ? 'online' : 'offline';
 }

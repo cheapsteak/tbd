@@ -31,6 +31,7 @@ import {
 } from './constants.js';
 import { IV_BYTES, KEY_BYTES, isWrapKey } from './keys.js';
 import { isRoomID, relaySocketURL } from './links.js';
+import { isObject, isPlainObject } from './objects.js';
 import { isSHA256 } from './protocol.js';
 
 /** @typedef {import('./types.js').LaptopRecord} LaptopRecord */
@@ -771,10 +772,10 @@ function isBundleKey(key, laptopID, sha256) {
  * @returns {string | null}
  */
 function storedLaptopName(value) {
-  if (typeof value !== 'object' || value === null) {
+  if (!isObject(value)) {
     return null;
   }
-  const { laptopName } = /** @type {{ laptopName?: unknown }} */ (value);
+  const { laptopName } = value;
   return typeof laptopName === 'string' ? laptopName : null;
 }
 
@@ -795,10 +796,10 @@ function compare(a, b) {
  * @returns {Record<string, unknown>}
  */
 function fields(obj, kind) {
-  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+  if (!isPlainObject(obj)) {
     throw new TypeError(`${kind}: not an object`);
   }
-  return /** @type {Record<string, unknown>} */ (obj);
+  return obj;
 }
 
 /**

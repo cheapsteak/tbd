@@ -6,6 +6,7 @@
 
 import { LAPTOP_NAME_MAX_BYTES, LOADER_PROTOCOLS, LOADER_VERSION, MAX_BUNDLE_COMPRESSED } from './constants.js';
 import { isRoomID } from './links.js';
+import { isPlainObject } from './objects.js';
 
 /**
  * @typedef {object} WelcomeMessage
@@ -216,14 +217,6 @@ export function checkCompat(welcome) {
     return 'loaderTooOld';
   }
   return 'ok';
-}
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**

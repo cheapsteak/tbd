@@ -5,6 +5,7 @@
 import { RUNNER_START_TIMEOUT_MS } from './constants.js';
 import { startVisibleTimer, systemClock } from './clock.js';
 import { base64urlEncode } from './channel/pairingLink.js';
+import { isObject, isPlainRecord } from './objects.js';
 
 /** @typedef {import('./clock.js').Clock} Clock */
 /** @typedef {import('./clock.js').Visibility} Visibility */
@@ -206,7 +207,7 @@ export class AppFrame {
   #handlePortMessage = (event) => {
     if (this.#destroyed) return;
     const data = event.data;
-    if (isRecord(data) && (data.t === 'started' || data.t === 'fault')) {
+    if (isObject(data) && (data.t === 'started' || data.t === 'fault')) {
       // The runner sends exactly one of these, before the app is told anything.
       if (this.#started) return;
       if (data.t === 'started') {
@@ -254,7 +255,7 @@ export function isRunnerReady(event, { frameWindow, nonce, loadCount, started })
   if (event.origin !== 'null') return false;
   if (loadCount > 1 || started) return false;
   const data = event.data;
-  if (!isRecord(data) || data.type !== 'ready') return false;
+  if (!isObject(data) || data.type !== 'ready') return false;
   return typeof nonce === 'string' && nonce !== '' && data.nonce === nonce;
 }
 
@@ -303,10 +304,10 @@ export function openableURL(value) {
  * @returns {{t: 'app', body: object} | {t: 'openLink', url: string} | null}
  */
 export function appPortMessage(data) {
-  if (!isRecord(data)) return null;
+  if (!isObject(data)) return null;
   if (data.t === 'app') {
     const body = data.body;
-    return isPlainObject(body) ? { t: 'app', body } : null;
+    return isPlainRecord(body) ? { t: 'app', body } : null;
   }
   if (data.t === 'openLink') {
     return typeof data.url === 'string' ? { t: 'openLink', url: data.url } : null;
@@ -359,24 +360,4 @@ export function readEnv(win, probeEl, frameEl) {
 function px(value) {
   const n = Number.parseFloat(value);
   return Number.isFinite(n) ? n : 0;
-}
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isRecord(value) {
-  return typeof value === 'object' && value !== null;
-}
-
-/**
- * An object literal or a null-prototype object; not an array, a Date, a Map or any other
- * built-in or class instance.
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  if (!isRecord(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
 }
