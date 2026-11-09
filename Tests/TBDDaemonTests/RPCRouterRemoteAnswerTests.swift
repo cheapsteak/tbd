@@ -157,6 +157,29 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(try actuationRows().isEmpty)
     }
 
+    /// A config row that cannot be read refuses the answer before anything
+    /// acts on it, on the app's path and a phone's alike. Each reads the row
+    /// once, for the remote backends gate, the cloud gate and the setting,
+    /// so the failed read is TBD's refusal, never an error from a gate. The
+    /// two are called directly, not through `handle`, which would turn a
+    /// throw into an error reply of its own.
+    @Test func refusedWhenTheConfigCannotBeRead() async throws {
+        try await enable()
+        let (invoker, r) = await primed([])
+        try await db.makeConfigUnreadable()
+        let params = RemoteAnswerParams(
+            provider: "agentbox", sessionID: "s-1", promptID: "p-1", answer: Self.allowAnswer)
+
+        let fromTheApp = try await r.handleRemoteAnswer(
+            JSONEncoder().encode(params), connection: SendHarness.AuthenticatedApp.connection)
+        let fromAPhone = try await r.phoneAnswerRemotePrompt(params, deviceID: UUID())
+
+        #expect(fromTheApp.error == RPCRouter.promptAnswerSettingUnreadRefusal)
+        #expect(fromAPhone.error == RPCRouter.promptAnswerSettingUnreadRefusal)
+        #expect(Self.answers(invoker).isEmpty)
+        #expect(try actuationRows().isEmpty)
+    }
+
     /// Only the TBD app may answer: another socket peer, a missing connection
     /// context, and raw bytes through `handleRaw` with no connection are all
     /// refused before the provider is asked or an actuation is recorded.

@@ -1564,10 +1564,27 @@ struct PhonePromptAnswerRouterTests {
         let peer: PhonePeer
     }
 
+    /// The remote provider `remoteProvider` stands for.
+    private static let provider = "acme-cloud"
+
+    /// `describe`, declaring `answer`.
+    private static let describeDeclaringAnswer = providerOK(
+        #"{"contract_versions": [1], "name": "\#(provider)", "capabilities": ["\#(RemoteCapability.answer)"]}"#)
+
+    /// `list`, naming session `s-1` blocked on permission prompt `p-1`.
+    private static let listingAPrompt = providerOK(#"""
+        {"sessions": [{"id": "s-1", "state": "running", "agent_state": "\#(RemoteAgentState.waitingInput.rawValue)", \#
+        "pending_prompt": {"id": "p-1", "kind": "permission", "tool_name": "Bash", \#
+        "tool_input": {"command": "touch x"}}}]}
+        """#)
+
     /// With `beforeTheCore`, the service reaches the router through
     /// `ChangingTheSettingBeforeTheCore`, which runs it on the database just
-    /// before the core of a local answer runs.
+    /// before the core of an answer runs. With `remoteProvider`, remote
+    /// backends are on and the router has a provider, `provider`, that runs
+    /// through it, has described itself and has mirrored its sessions once.
     private func makeFixture(
+        remoteProvider: FakeProviderInvoker? = nil,
         beforeTheCore: (@Sendable (TBDDatabase) async throws -> Void)? = nil
     ) async throws -> Fixture {
         let directory = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-prompt"), isDirectory: true)
@@ -1579,6 +1596,19 @@ struct PhonePromptAnswerRouterTests {
             id: peer.deviceID, name: peer.deviceName, publicKey: Data(repeating: 7, count: 32),
             roomID: UUID().uuidString, pairedAt: Date(timeIntervalSince1970: 1_800_000_000)))
         let subs = StateSubscriptionManager()
+        var remoteManager: RemoteProviderManager?
+        if let remoteProvider {
+            try await db.config.setRemoteBackendsEnabled(true)
+            let registryURL = directory.appendingPathComponent("agent-providers.json")
+            try #"[{"name": "\#(Self.provider)", "exec": "/nonexistent"}]"#
+                .write(to: registryURL, atomically: true, encoding: .utf8)
+            let manager = RemoteProviderManager(
+                db: db, subscriptions: subs, runner: remoteProvider, registryURL: registryURL,
+                actuationLog: ActuationLog(path: directory.appendingPathComponent("provider-actuations.jsonl").path))
+            await manager.loadRegistryAndDescribe()
+            await manager.pollOnce(provider: RemoteProviderConfig(name: Self.provider, exec: "/nonexistent"))
+            remoteManager = manager
+        }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -1587,6 +1617,7 @@ struct PhonePromptAnswerRouterTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
+            remoteManager: remoteManager,
             actuationLog: ActuationLog(path: directory.appendingPathComponent("actuations.jsonl").path))
         let actions: any PhoneSessionActions
         if let beforeTheCore {
@@ -1616,6 +1647,21 @@ struct PhonePromptAnswerRouterTests {
         await f.service.phoneConnected(f.peer, outbox: outbox)
         let params = PhonePromptAnswerParams(
             session: .local(terminalID: terminal.id), promptID: "toolu-1",
+            answer: .permission(decision: .allow, message: nil))
+
+        await f.service.handleAppMessage(
+            try PhoneTestRequests.body(.promptAnswer, id: "answer-1", params: params), from: f.peer)
+
+        return try await outbox.body(at: 0)
+    }
+
+    /// Answers remote session `s-1`'s permission prompt `p-1` on `provider`,
+    /// and returns the reply's bytes.
+    private func answerRemote(_ f: Fixture) async throws -> Data {
+        let outbox = CapturingOutbox()
+        await f.service.phoneConnected(f.peer, outbox: outbox)
+        let params = PhonePromptAnswerParams(
+            session: .remote(provider: Self.provider, sessionID: "s-1"), promptID: "p-1",
             answer: .permission(decision: .allow, message: nil))
 
         await f.service.handleAppMessage(
@@ -1677,13 +1723,34 @@ struct PhonePromptAnswerRouterTests {
         let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
         #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerSettingUnreadReason))
     }
+
+    /// A remote answer whose provider declares `answer` and whose setting is
+    /// on passes the phone's own check, then the config row is unreadable
+    /// when the core of `remote.answer` reads it once for its remote
+    /// backends gate, its cloud gate and the setting. The core refuses
+    /// before it calls the provider, and the phone gets that refusal in the
+    /// words its sessions list shows for a setting it cannot read.
+    @Test func theRemoteCoreRefusesWhenTheConfigCannotBeReadAfterThePhonesCheck() async throws {
+        let invoker = FakeProviderInvoker(script: [Self.describeDeclaringAnswer, Self.listingAPrompt])
+        let f = try await makeFixture(remoteProvider: invoker, beforeTheCore: { db in
+            try await db.makeConfigUnreadable()
+        })
+        try await f.db.config.setTranscriptPromptAnswerEnabled(true)
+
+        let bytes = try await answerRemote(f)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerSettingUnreadReason))
+        let answers = invoker.callsSnapshot().filter { $0.first == "answer" }
+        #expect(answers.isEmpty, "the provider is never asked to answer")
+    }
 }
 
-/// The router as the phone's session actions, except that a local answer
-/// first runs `change` on the database, as a user who turns the setting for
-/// answering prompts off between the phone's own check and the core's call
-/// does, or a read of it that starts failing there. Every other method goes
-/// straight to the router.
+/// The router as the phone's session actions, except that an answer, local
+/// or remote, first runs `change` on the database, as a user who turns the
+/// setting for answering prompts off between the phone's own check and the
+/// core's call does, or a read of the config row that starts failing there.
+/// Every other method goes straight to the router.
 private struct ChangingTheSettingBeforeTheCore: PhoneSessionActions {
     let router: RPCRouter
     let db: TBDDatabase
@@ -1699,7 +1766,8 @@ private struct ChangingTheSettingBeforeTheCore: PhoneSessionActions {
     }
 
     func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse {
-        try await router.phoneAnswerRemotePrompt(p, deviceID: deviceID)
+        try await change(db)
+        return try await router.phoneAnswerRemotePrompt(p, deviceID: deviceID)
     }
 
     func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse {

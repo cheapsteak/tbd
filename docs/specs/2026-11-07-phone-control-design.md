@@ -414,9 +414,12 @@ a TBD notification naming the phone, so a pairing the user did not make is visib
   - **Answer** – where the provider declares `answer` and the laptop's setting for answering
     prompts is on and readable. The setting works as it does for a local session (section 5,
     Answer): while it is off or unreadable, the capability is unavailable with the setting's
-    reason, and `prompt.answer` is refused `unsupported` before the core. If the setting is turned
-    off after the phone's check, the core of `remote.answer` refuses before it calls the
-    provider, and the phone gets `refused` in the sessions list's words.
+    reason, and `prompt.answer` is refused `unsupported` before the core. The core of
+    `remote.answer` reads the config row once, before it acts, and checks the remote backends
+    gate, the cloud gate and the setting against that one read. If the setting has been turned off
+    since the phone's check, or the row can no longer be read, the core refuses before it calls
+    the provider, and the phone gets `refused` in the sessions list's words. The laptop's prompt
+    card answers through the same core and is refused the same way.
   - **Model** – where the provider declares `send-submit`.
   - **Create** – from the "New" sheet. TBD fills `repo` and `prompt`. Any other required field is
     shown as a form built from the provider's `create_params`.

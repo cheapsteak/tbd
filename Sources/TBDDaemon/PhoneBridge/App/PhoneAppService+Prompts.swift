@@ -955,8 +955,10 @@ extension PhoneAppService {
     ///   `PromptAnswerRefusal.disabled`, the setting turned off after the
     ///   phone's own check read it on, and
     ///   `PhoneSessionStatus.answerSettingUnreadReason` for
-    ///   `PromptAnswerRefusal.settingUnread`, the core's own read of it
-    ///   failing after the phone's check passed.
+    ///   `PromptAnswerRefusal.settingUnread`, the core's own read of the
+    ///   config row failing after the phone's check passed. The local core
+    ///   reads the row for the setting; the remote core reads it once for its
+    ///   remote backends gate, its cloud gate and the setting.
     /// - **Any other local answer** (`remoteRefusals` nil) is refused by TBD
     ///   alone: no hook picked the answer up, or the answer does not fit the
     ///   prompt. Its reason reaches the phone as `refusal(_:)` sends it, or

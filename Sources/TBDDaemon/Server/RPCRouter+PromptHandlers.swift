@@ -66,23 +66,37 @@ extension RPCRouter {
     /// Nil while `config.transcriptPromptAnswerEnabled` is on, otherwise the
     /// refusal `method` returns before it acts on the answer:
     /// `promptAnswerDisabledRefusal` while the setting is off, and
-    /// `promptAnswerSettingUnreadRefusal`, logged, when it could not be read.
-    /// So a failed read refuses the answer, as the setting being off does,
-    /// rather than failing the call, which a caller cannot tell from a
-    /// failure after the answer went out. Only this read becomes a refusal,
-    /// and a cancelled read still throws.
+    /// `promptAnswerSettingUnreadRefusal` when the config row could not be
+    /// read (`configForAnswer(method:)`).
     func promptAnswerSettingRefusal(method: String) async throws -> RPCResponse? {
-        let enabled: Bool
+        guard let config = try await configForAnswer(method: method) else {
+            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+        }
+        return Self.promptAnswerSettingRefusal(config)
+    }
+
+    /// Nil while `config` has the setting for answering prompts on,
+    /// otherwise `promptAnswerDisabledRefusal`.
+    static func promptAnswerSettingRefusal(_ config: Config) -> RPCResponse? {
+        config.transcriptPromptAnswerEnabled ? nil : RPCResponse(error: promptAnswerDisabledRefusal)
+    }
+
+    /// The config row an answer's checks read, before the answer acts; nil,
+    /// logged, when the read failed, which the caller refuses with
+    /// `promptAnswerSettingUnreadRefusal`. So a failed read refuses the
+    /// answer, as the setting being off does, rather than failing the call,
+    /// which a caller cannot tell from a failure after the answer went out.
+    /// Only this read becomes a refusal, and a cancelled read still throws.
+    func configForAnswer(method: String) async throws -> Config? {
         do {
-            enabled = try await db.config.get().transcriptPromptAnswerEnabled
+            return try await db.config.get()
         } catch let cancelled as CancellationError {
             throw cancelled
         } catch {
             promptLog.error(
                 "\(method, privacy: .public) refused: could not read the setting for answering prompts: \(String(describing: type(of: error)), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+            return nil
         }
-        return enabled ? nil : RPCResponse(error: Self.promptAnswerDisabledRefusal)
     }
 
     /// Publishes each terminal whose prompt set changed.
