@@ -176,7 +176,8 @@ enum TranscriptDetailReader {
 
     /// Subagent `agentID`'s items, shaped with `showDetails` and chunked, or
     /// nil when the agent ID cannot name a file beside the session's
-    /// transcript, or the file is missing or unreadable.
+    /// transcript, or the file is missing or unreadable. File-edit paths
+    /// inside `worktreeRoot` go out relative to it.
     ///
     /// The read is bounded by `limit`. A file within it is read whole. A
     /// larger one is `tooLarge`, and only its first part is read: the whole
@@ -184,7 +185,7 @@ enum TranscriptDetailReader {
     /// and parsed up to the last `"\n"` in them. When those bytes hold no
     /// `"\n"`, the first line alone is over the limit and there are no items.
     static func subagent(
-        agentID: String, transcriptPath: String, showDetails: Bool,
+        agentID: String, transcriptPath: String, showDetails: Bool, worktreeRoot: String? = nil,
         limit: Int = PhoneAppConstants.subagentCountLimit,
         budget: Int = PhoneFrameBudget.detailChunkBytes
     ) -> SubagentDetailChunks? {
@@ -208,7 +209,8 @@ enum TranscriptDetailReader {
             filePath: path, endingBefore: end, messageLimit: .max, itemLimit: .max,
             includeSidechain: true, scanLimit: limit) else { return nil }
         let ctx = ShapingContext(
-            showDetails: showDetails, fileEdits: window.fileEdits, subagentAgentIDs: window.subagentAgentIDs)
+            showDetails: showDetails, fileEdits: window.fileEdits, subagentAgentIDs: window.subagentAgentIDs,
+            worktreeRoot: worktreeRoot, slashOutputs: window.localCommandOutputs, apiErrors: window.apiErrors)
         let items = window.entries.compactMap { TranscriptShaper.shape($0.item, ctx) }
         return SubagentDetailChunks(
             totalBytes: totalBytes, tooLarge: tooLarge,

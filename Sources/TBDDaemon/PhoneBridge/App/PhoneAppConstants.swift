@@ -17,6 +17,9 @@ enum PhoneAppConstants {
     /// Message text over 4 KB arrives cut, with the rest behind
     /// `transcript.detail`.
     static let messagePreviewBytes = 4_096
+    /// A slash command's output over 1 KB arrives cut, ending in `…`. The
+    /// phone shows it under the command, and the rest has no detail to open.
+    static let slashOutputBytes = 1_024
     /// A detail over 1 MB is too large for the phone.
     static let detailLimitBytes = 1_048_576
     /// How long a request ID and its result are kept, so a resend does nothing

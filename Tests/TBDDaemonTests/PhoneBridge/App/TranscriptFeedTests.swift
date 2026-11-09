@@ -84,6 +84,152 @@ struct TranscriptFeedTests {
         await d.feed.close()
     }
 
+    /// A call on the first page that fails after it was read reaches the
+    /// phone as an update that carries the exit code its result names.
+    @Test func aLateFailedResultSendsItsExitCode() async throws {
+        let fixture = try FeedFixture([
+            FeedLine.prompt("m1", "placeholder prompt 1"),
+            FeedLine.bash("a1", id: "toolu_1", command: "npm test"),
+        ])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+
+        _ = try await d.feed.open()
+        await d.feed.start()
+        try fixture.append([
+            FeedLine.toolResult("r1", toolUseID: "toolu_1", text: "Exit code 2\nnpm ERR! Test failed.", isError: true),
+        ])
+        await d.nudge()
+
+        let update = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.updated)
+        let row = try #require(update.items.first)
+        #expect(update.items.count == 1)
+        #expect(row.id == "toolu_1")
+        #expect(row.toolStatus == TranscriptShaper.errorStatus)
+        #expect(row.exitCode == 2)
+        await d.feed.close()
+    }
+
+    /// A slash command on the first page whose output is written after the
+    /// page was read reaches the phone as an update of the slash row that
+    /// carries the output. The output's own line adds no row.
+    @Test func aSlashOutputWrittenAfterThePageSendsAnUpdate() async throws {
+        let fixture = try FeedFixture([
+            FeedLine.prompt("m1", "placeholder prompt 1"),
+            FeedLine.slashCommand("c1", name: "model", args: "opus"),
+        ])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+
+        let page = try await d.feed.open()
+        let slash = try #require(page.items.first(where: { $0.id == "c1" }))
+        #expect(slash.kind == .slash)
+        #expect(slash.text == "/model opus")
+        #expect(slash.output == nil)
+
+        await d.feed.start()
+        try fixture.append([FeedLine.commandOutput("o1", parent: "c1", output: "Set model to opus")])
+        await d.nudge()
+
+        let update = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.updated)
+        let expected = PhoneItem(
+            id: slash.id, kind: slash.kind, at: slash.at, text: slash.text, truncated: slash.truncated,
+            toolName: nil, target: nil, toolStatus: nil, added: nil, removed: nil,
+            agentType: nil, itemCount: nil, sender: nil, output: "Set model to opus")
+        #expect(update.items == [expected])
+        #expect(d.events.values.count == 1)
+        await d.feed.close()
+    }
+
+    /// A slash command and its output read in one step arrive as one slash
+    /// row that already carries the output, with no update after it.
+    @Test func aSlashCommandAndItsOutputInOneReadArriveTogether() async throws {
+        let fixture = try FeedFixture([FeedLine.prompt("m1", "placeholder prompt 1")])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+        _ = try await d.feed.open()
+        await d.feed.start()
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+
+        try fixture.append([
+            FeedLine.slashCommand("c1", name: "model", args: "opus"),
+            FeedLine.commandOutput("o1", parent: "c1", output: "\u{1B}[1mSet model to opus\u{1B}[22m"),
+        ])
+        await d.nudge()
+
+        let appended = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.appended)
+        let ids = appended.items.map(\.id)
+        #expect(ids == ["c1"])
+        #expect(appended.items.first?.output == "Set model to opus")
+        #expect(d.events.values.count == 1)
+        await d.feed.close()
+    }
+
+    /// An API error Claude Code writes is an assistant row that carries the
+    /// error's class, on the first page and live alike.
+    @Test func anAPIErrorIsAnErrorRowOnThePageAndLive() async throws {
+        let fixture = try FeedFixture([
+            FeedLine.prompt("m1", "placeholder prompt 1"),
+            FeedLine.apiError("e1", error: "server_error", text: "API Error: 500 Internal server error"),
+        ])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+
+        let page = try await d.feed.open()
+        let onPage = try #require(page.items.first(where: { $0.id == "e1#0" }))
+        #expect(onPage.kind == .assistant)
+        #expect(onPage.apiError == "server_error")
+        #expect(page.items.first(where: { $0.id == "m1" })?.apiError == nil)
+
+        await d.feed.start()
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try fixture.append([
+            FeedLine.apiError("e2", error: "rate_limit", text: "You've hit your limit"),
+            FeedLine.assistant("a2", "Back to the redirect."),
+        ])
+        await d.nudge()
+
+        let appended = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.appended)
+        let ids = appended.items.map(\.id)
+        #expect(ids == ["e2#0", "a2#0"])
+        let errors = appended.items.map(\.apiError)
+        #expect(errors == ["rate_limit", nil])
+        await d.feed.close()
+    }
+
+    /// A file edit inside the session's worktree carries its path relative
+    /// to the worktree, on the first page and live alike, and one outside
+    /// it carries the path as the call wrote it.
+    @Test func aFileEditPathIsRelativeToTheWorktree() async throws {
+        let fixture = try FeedFixture([])
+        defer { fixture.remove() }
+        let root = fixture.sibling("repo")
+        try FeedFixture.write([
+            FeedLine.prompt("m1", "placeholder prompt 1"),
+            FeedLine.edit("a1", id: "toolu_e1", filePath: root + "/src/auth/redirect.ts"),
+        ], to: fixture.path)
+        let d = DirectFeed(path: fixture.path, worktreeRoot: root)
+
+        let page = try await d.feed.open()
+        let onPage = try #require(page.items.first(where: { $0.id == "toolu_e1" }))
+        #expect(onPage.kind == .fileEdit)
+        #expect(onPage.target == "redirect.ts")
+        #expect(onPage.path == "src/auth/redirect.ts")
+
+        await d.feed.start()
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try fixture.append([
+            FeedLine.edit("a2", id: "toolu_e2", filePath: root + "/README.md"),
+            FeedLine.edit("a3", id: "toolu_e3", filePath: "/Users/acme/notes/plan.md"),
+        ])
+        await d.nudge()
+
+        let appended = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.appended)
+        let paths = appended.items.map(\.path)
+        #expect(paths == ["README.md", "/Users/acme/notes/plan.md"])
+        await d.feed.close()
+    }
+
     /// A call on an older page whose result sits on the page after it, which
     /// is itself an older page, shows the result's status: the feed keeps
     /// every page's results to join into the pages before it.
@@ -1303,7 +1449,7 @@ private struct DirectFeed {
 
     var session: PhoneSessionRef { .local(terminalID: terminalID) }
 
-    init(path: String?, liveItemLimit: Int = TranscriptFeed.liveItemLimit) {
+    init(path: String?, worktreeRoot: String? = nil, liveItemLimit: Int = TranscriptFeed.liveItemLimit) {
         let terminalID = UUID()
         let events = FireRecorder<TranscriptFeedEvent>()
         let clock = EventDrivenTestClock()
@@ -1314,6 +1460,7 @@ private struct DirectFeed {
             session: .local(terminalID: terminalID), showDetails: false,
             source: .local(terminalID: terminalID, resolvePath: { path }),
             emit: { event in events.record(event) },
+            worktreeRoot: worktreeRoot,
             liveItemLimit: liveItemLimit,
             clock: clock)
     }
@@ -1372,10 +1519,54 @@ private enum FeedLine {
     }
 
     /// A user line returning `toolUseID`'s result.
-    static func toolResult(_ uuid: String, toolUseID: String, text: String) -> [String: Any] {
-        let block: [String: Any] = ["type": "tool_result", "tool_use_id": toolUseID, "content": text]
+    static func toolResult(_ uuid: String, toolUseID: String, text: String, isError: Bool = false) -> [String: Any] {
+        var block: [String: Any] = ["type": "tool_result", "tool_use_id": toolUseID, "content": text]
+        if isError { block["is_error"] = true }
         let message: [String: Any] = ["role": "user", "content": [block]]
         return ["type": "user", "uuid": uuid, "timestamp": timestamp, "message": message]
+    }
+
+    /// An assistant line holding one text block.
+    static func assistant(_ uuid: String, _ text: String) -> [String: Any] {
+        let message: [String: Any] = ["role": "assistant", "content": [["type": "text", "text": text]]]
+        return ["type": "assistant", "uuid": uuid, "timestamp": timestamp, "message": message]
+    }
+
+    /// An assistant line holding one Edit call on `filePath`.
+    static func edit(_ uuid: String, id: String, filePath: String) -> [String: Any] {
+        let input: [String: Any] = ["file_path": filePath, "old_string": "a", "new_string": "b"]
+        let block: [String: Any] = ["type": "tool_use", "id": id, "name": "Edit", "input": input]
+        let message: [String: Any] = ["role": "assistant", "content": [block]]
+        return ["type": "assistant", "uuid": uuid, "timestamp": timestamp, "message": message]
+    }
+
+    /// The line of a slash command typed as `/<name> <args>`.
+    static func slashCommand(_ uuid: String, name: String, args: String) -> [String: Any] {
+        let text = "<command-name>/\(name)</command-name>\n<command-message>\(name)</command-message>\n"
+            + "<command-args>\(args)</command-args>"
+        let message: [String: Any] = ["role": "user", "content": text]
+        return ["type": "user", "uuid": uuid, "timestamp": timestamp, "message": message]
+    }
+
+    /// The output of the slash command on line `parent`, as Claude Code
+    /// writes it on a user line of its own.
+    static func commandOutput(_ uuid: String, parent: String, output: String) -> [String: Any] {
+        let message: [String: Any] = [
+            "role": "user", "content": "<local-command-stdout>\(output)</local-command-stdout>",
+        ]
+        return ["type": "user", "uuid": uuid, "parentUuid": parent, "timestamp": timestamp, "message": message]
+    }
+
+    /// An API error, as Claude Code writes it: an assistant line marked
+    /// `isApiErrorMessage` whose text is the message shown.
+    static func apiError(_ uuid: String, error: String, text: String) -> [String: Any] {
+        let message: [String: Any] = [
+            "role": "assistant", "model": "<synthetic>", "content": [["type": "text", "text": text]],
+        ]
+        return [
+            "type": "assistant", "uuid": uuid, "timestamp": timestamp, "message": message,
+            "isApiErrorMessage": true, "error": error,
+        ]
     }
 
     /// Prompts `m1`…`m<messages>`, each followed by a Bash call `toolu_<n>` on

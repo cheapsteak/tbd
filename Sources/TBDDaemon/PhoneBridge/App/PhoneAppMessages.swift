@@ -239,6 +239,49 @@ struct PhoneItem: Codable, Equatable, Sendable {
     let agentType: String?
     let itemCount: Int?
     let sender: String?
+    /// A failed tool's exit code, from the first line of its result
+    /// (`TranscriptShaper.exitCode(of:)`). Absent when the result is not an
+    /// error or names no exit code.
+    let exitCode: Int?
+    /// A slash command's output, cut to `PhoneAppConstants.slashOutputBytes`.
+    /// Absent when the command wrote none, or none has been seen yet.
+    let output: String?
+    /// On an assistant row that is an API error, the error class, such as
+    /// `rate_limit` or `server_error`.
+    let apiError: String?
+    /// A system note's kind: a `SystemKind` raw value, such as `hookOutput`.
+    let noteKind: String?
+    /// A file edit's path: relative to the worktree when the file is inside
+    /// it, else absolute. Absent when it is longer than
+    /// `TranscriptShaper.targetLimit`.
+    let path: String?
+
+    init(
+        id: String, kind: PhoneItemKind, at: Int64?, text: String?, truncated: Bool,
+        toolName: String?, target: String?, toolStatus: String?, added: Int?, removed: Int?,
+        agentType: String?, itemCount: Int?, sender: String?,
+        exitCode: Int? = nil, output: String? = nil, apiError: String? = nil,
+        noteKind: String? = nil, path: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.at = at
+        self.text = text
+        self.truncated = truncated
+        self.toolName = toolName
+        self.target = target
+        self.toolStatus = toolStatus
+        self.added = added
+        self.removed = removed
+        self.agentType = agentType
+        self.itemCount = itemCount
+        self.sender = sender
+        self.exitCode = exitCode
+        self.output = output
+        self.apiError = apiError
+        self.noteKind = noteKind
+        self.path = path
+    }
 }
 
 struct TranscriptPage: Codable, Equatable, Sendable {

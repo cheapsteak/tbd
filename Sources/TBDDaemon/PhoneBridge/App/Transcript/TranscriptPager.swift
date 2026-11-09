@@ -27,6 +27,12 @@ struct PageBuild: Sendable {
     /// result is in the bytes the window read, so `transcript.detail` can
     /// find a subagent row's transcript.
     let subagentAgentIDs: [String: String]
+    /// A slash command's item ID → its output, for every output in the bytes
+    /// the window read, for joins into older pages.
+    let slashOutputs: [String: String]
+    /// The page's slash rows with no output, by item ID. The feed updates
+    /// them when an output arrives.
+    let waitingSlashes: [String: PhoneItem]
 }
 
 /// Builds transcript pages (spec section 7, "Pages"): the first page from the
@@ -95,7 +101,8 @@ enum TranscriptPager {
     /// The page before offset 0: no items, and the start reached.
     static let emptyBuild = PageBuild(
         page: TranscriptPage(items: [], cursor: nil, reachedStart: true, omittedItems: 0),
-        startOffset: 0, endOffset: 0, lineOffsets: [:], unresolvedCalls: [:], results: [:], subagentAgentIDs: [:])
+        startOffset: 0, endOffset: 0, lineOffsets: [:], unresolvedCalls: [:], results: [:], subagentAgentIDs: [:],
+        slashOutputs: [:], waitingSlashes: [:])
 
     // MARK: - Cursors
 
@@ -203,8 +210,9 @@ enum TranscriptPager {
 
     /// `window` shaped and fitted to `budget` bytes of encoded page JSON.
     ///
-    /// 1. Each item is shaped with `ctx` plus the window's file-edit stats and
-    ///    subagent IDs, encoded once, and its size noted.
+    /// 1. Each item is shaped with `ctx` plus the window's file-edit stats,
+    ///    subagent IDs, slash command outputs and API errors, encoded once,
+    ///    and its size noted.
     /// 2. A page's size is the empty page's encoded size, plus the item
     ///    sizes, plus one comma between each pair of items. The empty page is
     ///    measured with the longest cursor this generation can have and the
@@ -231,13 +239,12 @@ enum TranscriptPager {
             fileEdits: ctx.fileEdits.merging(window.fileEdits) { _, fromWindow in fromWindow },
             subagentAgentIDs: ctx.subagentAgentIDs.merging(window.subagentAgentIDs) { _, fromWindow in fromWindow },
             joinedResults: ctx.joinedResults,
-            subagentItemCount: ctx.subagentItemCount)
-        let measuring = ShapingContext(
-            showDetails: shaping.showDetails,
-            fileEdits: shaping.fileEdits,
-            subagentAgentIDs: shaping.subagentAgentIDs,
-            joinedResults: shaping.joinedResults,
-            subagentItemCount: { _ in PhoneAppConstants.subagentCountLimit })
+            subagentItemCount: ctx.subagentItemCount,
+            worktreeRoot: ctx.worktreeRoot,
+            slashOutputs: ctx.slashOutputs.merging(window.localCommandOutputs) { _, fromWindow in fromWindow },
+            apiErrors: ctx.apiErrors.merging(window.apiErrors) { _, fromWindow in fromWindow })
+        var measuring = shaping
+        measuring.subagentItemCount = { _ in PhoneAppConstants.subagentCountLimit }
         let encoder = PhoneAppCoding.makeEncoder()
 
         // Rows grouped by source line, oldest first.
@@ -286,10 +293,14 @@ enum TranscriptPager {
 
         var lineOffsets: [String: UInt64] = [:]
         var unresolvedCalls: [String: PhoneItem] = [:]
+        var waitingSlashes: [String: PhoneItem] = [:]
         for (row, item) in zip(kept, items) {
             lineOffsets[item.id] = row.lineOffset
             if item.toolStatus == TranscriptShaper.runningStatus {
                 unresolvedCalls[item.id] = item
+            }
+            if item.kind == .slash, item.output == nil {
+                waitingSlashes[item.id] = item
             }
         }
         return PageBuild(
@@ -299,7 +310,9 @@ enum TranscriptPager {
             lineOffsets: lineOffsets,
             unresolvedCalls: unresolvedCalls,
             results: window.toolResultsByID,
-            subagentAgentIDs: window.subagentAgentIDs)
+            subagentAgentIDs: window.subagentAgentIDs,
+            slashOutputs: window.localCommandOutputs,
+            waitingSlashes: waitingSlashes)
     }
 
     // MARK: - Reading

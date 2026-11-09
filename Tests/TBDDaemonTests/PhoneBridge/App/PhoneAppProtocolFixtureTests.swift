@@ -86,6 +86,25 @@ struct PhoneAppProtocolFixtureTests {
         #expect(itemKinds.count == PhoneItemKind.allCases.count)
     }
 
+    /// Between them, the transcript fixtures carry each optional row field a
+    /// newer laptop adds, so the phone's decoders read every one of them.
+    @Test func transcriptFixturesCarryEveryOptionalRowField() throws {
+        let append = try decodeFixture(PhoneEventEnvelope<TranscriptItemsData>.self, "transcript.append.event.json")
+        let page = try decodeFixture(PhoneReplyEnvelope<TranscriptPage>.self, "transcript.page.reply.json")
+        let items = append.data.items + page.result.items
+        let exitCodes = items.compactMap(\.exitCode)
+        let outputs = items.filter { $0.kind == .slash }.compactMap(\.output)
+        let apiErrors = items.filter { $0.kind == .assistant }.compactMap(\.apiError)
+        let noteKinds = items.filter { $0.kind == .systemNote }.compactMap(\.noteKind)
+        let paths = items.filter { $0.kind == .fileEdit }.compactMap(\.path)
+
+        #expect(!exitCodes.isEmpty)
+        #expect(!outputs.isEmpty)
+        #expect(!apiErrors.isEmpty)
+        #expect(!noteKinds.isEmpty)
+        #expect(!paths.isEmpty)
+    }
+
     /// Rows carry `statusChangedAt`, the newest change among their sessions,
     /// with a different value on each row, so the phone's newest-first sort
     /// is exercised.

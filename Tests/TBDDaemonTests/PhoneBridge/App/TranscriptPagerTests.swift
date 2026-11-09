@@ -301,6 +301,135 @@ struct TranscriptPagerTests {
         #expect(!build.page.reachedStart)
     }
 
+    /// Rows carrying a slash command's output and a file edit's path, each
+    /// at its cap, still leave every page within its budget and one frame.
+    @Test func pagesOfOutputsAndPathsAtTheirCapsFitOneFrame() throws {
+        let output = String(repeating: "\"", count: 3_000)
+        let directory = "/Users/acme/" + String(repeating: "d/", count: 240)
+        var objects: [[String: Any]] = []
+        for n in 0..<60 {
+            objects.append(PagerLine.slashCommand("c\(n)", name: "context", args: String(repeating: "\u{1}", count: 900)))
+            objects.append(PagerLine.commandOutput("o\(n)", parent: "c\(n)", output: output))
+            objects.append(PagerLine.edit("e\(n)", id: "toolu_e\(n)", filePath: directory + "f\(n).ts"))
+        }
+        let fixture = try PagerFixture(objects)
+        defer { fixture.remove() }
+
+        let first = try #require(TranscriptPager.firstPage(filePath: fixture.path, generation: 0, ctx: ShapingContext()))
+        let cursor = try #require(first.page.cursor)
+        let older = try TranscriptPager.olderPage(
+            filePath: fixture.path, cursor: cursor, generation: 0,
+            ctx: ShapingContext(slashOutputs: first.slashOutputs))
+        let firstBytes = try PhoneAppCoding.makeEncoder().encode(first.page).count
+        let olderBytes = try PhoneAppCoding.makeEncoder().encode(older.page).count
+        let outputs = older.page.items.compactMap(\.output)
+        let paths = older.page.items.compactMap(\.path)
+        let uncut = outputs.filter { !$0.hasSuffix(TranscriptShaper.cutMark) }
+
+        #expect(firstBytes <= 16_384)
+        #expect(olderBytes <= 61_440)
+        #expect(PhoneAppCoding.framedSize(try PhoneAppCoding.reply(requestID: UUID().uuidString, result: older.page)) <= 65_519)
+        #expect(!outputs.isEmpty, "the older page must hold slash rows with output")
+        #expect(uncut.isEmpty, "every output in the fixture is over the cap")
+        #expect(!paths.isEmpty, "the older page must hold file edits with paths")
+    }
+
+    // MARK: - New fields
+
+    @Test func aSlashRowTakesTheOutputInItsWindow() throws {
+        let fixture = try PagerFixture([
+            PagerLine.prompt("m1", "placeholder prompt 1"),
+            PagerLine.slashCommand("c1", name: "model", args: "opus"),
+            PagerLine.commandOutput("o1", parent: "c1", output: "Set model to opus"),
+        ])
+        defer { fixture.remove() }
+
+        let build = try #require(TranscriptPager.firstPage(filePath: fixture.path, generation: 0, ctx: ShapingContext()))
+        let slash = try #require(build.page.items.last)
+
+        #expect(slash.id == "c1")
+        #expect(slash.kind == .slash)
+        #expect(slash.output == "Set model to opus")
+        #expect(build.slashOutputs == ["c1": "Set model to opus"])
+        #expect(build.waitingSlashes.isEmpty)
+    }
+
+    @Test func aSlashRowWithNoOutputYetIsListedWaiting() throws {
+        let fixture = try PagerFixture([
+            PagerLine.prompt("m1", "placeholder prompt 1"),
+            PagerLine.slashCommand("c1", name: "model", args: "opus"),
+        ])
+        defer { fixture.remove() }
+
+        let build = try #require(TranscriptPager.firstPage(filePath: fixture.path, generation: 0, ctx: ShapingContext()))
+        let slash = try #require(build.page.items.last)
+
+        #expect(slash.output == nil)
+        #expect(build.waitingSlashes["c1"] == slash)
+        #expect(build.waitingSlashes.count == 1)
+    }
+
+    @Test func anOlderPageJoinsASlashOutputItDoesNotHold() throws {
+        let fixture = try PagerFixture([
+            PagerLine.slashCommand("c1", name: "model", args: "opus"),
+            PagerLine.prompt("m2", "placeholder prompt 2"),
+            PagerLine.prompt("m3", "placeholder prompt 3"),
+            PagerLine.prompt("m4", "placeholder prompt 4"),
+            PagerLine.prompt("m5", "placeholder prompt 5"),
+        ])
+        defer { fixture.remove() }
+
+        let first = try #require(TranscriptPager.firstPage(filePath: fixture.path, generation: 0, ctx: ShapingContext()))
+        let cursor = try #require(first.page.cursor)
+        let joined = try TranscriptPager.olderPage(
+            filePath: fixture.path, cursor: cursor, generation: 0,
+            ctx: ShapingContext(slashOutputs: ["c1": "Set model to opus"]))
+        let alone = try TranscriptPager.olderPage(
+            filePath: fixture.path, cursor: cursor, generation: 0, ctx: ShapingContext())
+        let joinedIDs = joined.page.items.map(\.id)
+
+        #expect(joinedIDs == ["c1"])
+        #expect(joined.page.items.first?.output == "Set model to opus")
+        #expect(joined.waitingSlashes.isEmpty)
+        #expect(alone.page.items.first?.output == nil)
+        #expect(alone.waitingSlashes["c1"] != nil)
+    }
+
+    @Test func anAPIErrorLineIsAnErrorRow() throws {
+        let fixture = try PagerFixture([
+            PagerLine.prompt("m1", "placeholder prompt 1"),
+            PagerLine.apiError("e1", error: "rate_limit", text: "You've hit your limit"),
+            PagerLine.apiError(nil, error: nil, text: "API Error: Connection error."),
+            PagerLine.assistant("a1", blocks: [PagerLine.text("Back to the redirect.")]),
+        ])
+        defer { fixture.remove() }
+
+        let build = try #require(TranscriptPager.firstPage(filePath: fixture.path, generation: 0, ctx: ShapingContext()))
+        let ids = build.page.items.map(\.id)
+        let errors = build.page.items.map(\.apiError)
+        let positional = "at-\(fixture.offsets[2])#0"
+
+        #expect(ids == ["m1", "e1#0", positional, "a1#0"])
+        #expect(errors == [nil, "rate_limit", "unknown", nil])
+    }
+
+    @Test func aFileEditOnAPageIsRelativeToTheWorktree() throws {
+        let fixture = try PagerFixture([
+            PagerLine.prompt("m1", "placeholder prompt 1"),
+            PagerLine.edit("e1", id: "toolu_e1", filePath: "/Users/acme/repo/src/auth/redirect.ts"),
+            PagerLine.edit("e2", id: "toolu_e2", filePath: "/Users/acme/other/README.md"),
+        ])
+        defer { fixture.remove() }
+
+        let build = try #require(TranscriptPager.firstPage(
+            filePath: fixture.path, generation: 0, ctx: ShapingContext(worktreeRoot: "/Users/acme/repo")))
+        let paths = build.page.items.map(\.path)
+        let targets = build.page.items.map(\.target)
+
+        #expect(paths == [nil, "src/auth/redirect.ts", "/Users/acme/other/README.md"])
+        #expect(targets == [nil, "redirect.ts", "README.md"])
+    }
+
     // MARK: - Subagents
 
     @Test func aPageCountsOnlyTheSubagentsItKeeps() throws {
@@ -472,6 +601,38 @@ private enum PagerLine {
             line["toolUseResult"] = toolUseResult
         }
         if sidechain { line["isSidechain"] = true }
+        return line
+    }
+
+    /// An assistant line holding one Edit call on `filePath`.
+    static func edit(_ uuid: String, id: String, filePath: String) -> [String: Any] {
+        assistant(uuid, blocks: [toolUse(
+            id, name: "Edit", input: ["file_path": filePath, "old_string": "a", "new_string": "b"])])
+    }
+
+    /// The line of a slash command typed as `/<name> <args>`.
+    static func slashCommand(_ uuid: String, name: String, args: String) -> [String: Any] {
+        let text = "<command-name>/\(name)</command-name>\n<command-message>\(name)</command-message>\n"
+            + "<command-args>\(args)</command-args>"
+        return prompt(uuid, text)
+    }
+
+    /// The output of the slash command on line `parent`, as Claude Code
+    /// writes it on a user line of its own.
+    static func commandOutput(_ uuid: String, parent: String, output: String) -> [String: Any] {
+        var line = prompt(uuid, "<local-command-stdout>\(output)</local-command-stdout>")
+        line["parentUuid"] = parent
+        return line
+    }
+
+    /// An API error, as Claude Code writes it: an assistant line marked
+    /// `isApiErrorMessage`, whose text is the message shown. A nil `uuid` or
+    /// `error` leaves the key out.
+    static func apiError(_ uuid: String?, error: String?, text: String) -> [String: Any] {
+        var line = assistant(uuid ?? "", blocks: [self.text(text)])
+        if uuid == nil { line.removeValue(forKey: "uuid") }
+        line["isApiErrorMessage"] = true
+        if let error { line["error"] = error }
         return line
     }
 
