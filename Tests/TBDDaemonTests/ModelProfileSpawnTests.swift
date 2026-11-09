@@ -2429,15 +2429,33 @@ struct ModelProfileSpawnTests {
 
     /// A FORK of a parked session is a fork, not a cold swap. It opens a new
     /// tab that resumes the parked conversation with `--fork-session` under
-    /// the requested profile, and leaves the parked session as it was: on its
+    /// the requested profile's config dir, with the parked transcript copied
+    /// into it, and leaves the parked session as it was: on its
     /// own profile, still parked, with the same session and backdrop. The
     /// cold re-home is `.inPlace`'s alone (`coldSwapParkedDoesNotRespawn`).
     /// Both kinds of parked row: hibernated, and legacy suspended.
     @Test("fork of a parked session: a new tab on the new profile, the parked session left on its own",
           arguments: [false, true])
     func forkOfParkedSessionForksAndLeavesItParked(legacySuspended: Bool) async throws {
-        let (router, db, recorder) = makeFixture()
+        // One config-dir manager for the router and the lifecycle, so the
+        // test can look inside profile B's config dir for the carried
+        // transcript (as `forkFindsTranscriptUnderSourceConfigDir` does).
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try TBDDatabase(inMemory: true)
         defer { Task { await cleanup(db) } }
+        let manager = isolatedConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: manager),
+            tmux: tmux,
+            startTime: Date(),
+            usageFetcher: StubClaudeUsageFetcher(),
+            configDirManager: manager,
+            actuationLog: makeTestActuationLog())
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
         let b = try await seedOAuthProfile(db, name: "B")
@@ -2453,7 +2471,9 @@ struct ModelProfileSpawnTests {
         }
         let parked = try #require(try await db.terminals.get(id: oldTerm.id))
         #expect(parked.isParked)
-        #expect(parked.transcriptPath != nil)
+        let transcriptPath = try #require(parked.transcriptPath)
+        let transcript = URL(fileURLWithPath: transcriptPath)
+        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
 
         let beforeSwap = recorder.calls.count
         let swapResp = await router.handle(try RPCRequest(
@@ -2481,6 +2501,28 @@ struct ModelProfileSpawnTests {
         #expect(joined.contains("--fork-session"), "got: \(joined)")
         #expect(!joined.contains("respawn-window"), "the fork respawned the parked pane; got: \(joined)")
         #expect(!joined.contains("C-c"), "the fork interrupted the parked pane; got: \(joined)")
+
+        // The new tab runs under B's config dir. The config dir path embeds
+        // the profile's lowercased UUID, so B's UUID in the spawn, and A's
+        // absent from it, shows the resume targets B and not the parked
+        // session's own profile.
+        #expect(joined.contains("CLAUDE_CONFIG_DIR="), "the fork injected no config dir; got: \(joined)")
+        #expect(joined.lowercased().contains(b.id.uuidString.lowercased()),
+                "the fork must run under B's config dir (B's UUID); got: \(joined)")
+        #expect(!joined.lowercased().contains(a.id.uuidString.lowercased()),
+                "the fork must not run under the parked session's own config dir (A's UUID); got: \(joined)")
+
+        // The parked transcript was carried into B's config dir, at the same
+        // project dir and file name, so the resume under B finds the
+        // conversation. It is a copy: the parked session's file stays.
+        let carried = manager.configDirectory(forProfileID: b.id)
+            .appendingPathComponent("projects", isDirectory: true)
+            .appendingPathComponent(transcript.deletingLastPathComponent().lastPathComponent, isDirectory: true)
+            .appendingPathComponent(transcript.lastPathComponent)
+        #expect(FileManager.default.fileExists(atPath: carried.path),
+                "the parked transcript was not carried into B's config dir at \(carried.path)")
+        #expect(FileManager.default.fileExists(atPath: transcript.path),
+                "the fork moved the parked transcript instead of copying it")
 
         // The parked session is as it was.
         let after = try #require(try await db.terminals.get(id: oldTerm.id))

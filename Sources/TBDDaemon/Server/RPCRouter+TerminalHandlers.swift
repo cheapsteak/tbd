@@ -2472,12 +2472,15 @@ extension RPCRouter {
         // A `.fork` of a parked session is not a re-home: it takes the fork arm
         // below like any other fork. Everything a fork reads is still on the
         // parked row — the session id, the transcript path, the profile, the
-        // spawn extras — and the transcript is on disk, complete, with no
-        // process writing to it. The fork opens a NEW tab that resumes the
-        // conversation with `--fork-session` under the requested profile, and
-        // leaves the parked row as it was: parked, on its own profile, with its
-        // backdrop. Re-homing here instead would open no tab and move the
-        // session itself to the other profile, the opposite of a fork.
+        // spawn extras. The fork copies the transcript as it stands when the
+        // fork reads it, the same as a fork of a running session: a row reads
+        // as parked from the moment the park records its intent, before the
+        // agent is stopped, so the last turn may still be landing on disk. The
+        // fork opens a NEW tab that resumes the conversation with
+        // `--fork-session` under the requested profile, and leaves the parked
+        // row as it was: parked, on its own profile, with its backdrop.
+        // Re-homing here instead would open no tab and move the session itself
+        // to the other profile, the opposite of a fork.
         if oldTerminal.isParked, mode == .inPlace {
             // A re-home with no transcript simply wakes fresh later — so
             // missing and blank are the same answer here.

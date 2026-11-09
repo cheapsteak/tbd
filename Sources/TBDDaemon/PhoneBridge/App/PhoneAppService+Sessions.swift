@@ -530,12 +530,11 @@ extension PhoneAppService {
     /// `prompt.answer`, `session.switchProfile` and `session.fork` read a
     /// local session through this, so each refuses what the list marks
     /// unavailable, in the list's words. Only `answer` follows the setting,
-    /// so switch and fork never read the config row. The capabilities
-    /// returned are the session's own, so every one but `answer` is the
-    /// list's; `answer` is what the session allows with the setting on.
+    /// so switch and fork never read the config row. It returns the
+    /// terminal row it checked.
     nonisolated func phoneCapableClaudeTerminal(
         _ terminalID: UUID, needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, notClaude: String
-    ) async throws -> (terminal: TBDShared.Terminal, ownCapabilities: PhoneCapabilities) {
+    ) async throws -> TBDShared.Terminal {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         let isRemoteWorktree = !worktree.location.isLocal
         // With the setting on, every capability is what the session allows.
@@ -549,6 +548,6 @@ extension PhoneAppService {
             terminal: terminal, isRemoteWorktree: isRemoteWorktree, promptAnswerEnabled: false)
         let capability = try await listedCapability(needed, settingOn: ownCapabilities, settingOff: settingOff)
         try Self.requireCapability(capability, orElse: notClaude)
-        return (terminal, ownCapabilities)
+        return terminal
     }
 }

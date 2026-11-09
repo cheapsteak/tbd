@@ -13,11 +13,15 @@ import TBDShared
 /// `ModelProfile` or reads `modelProfile.list`'s result. A field added to
 /// `ModelProfile` later stays off the phone until someone adds it here.
 ///
-/// **Switch and fork restart or copy a session under other credentials,**
-/// running or parked, so both act only on a session the phone can see and can do
-/// this to: a local Claude session in a local worktree, by the sessions
-/// list's own reading (`phoneVisibleTerminal`, `PhoneSnapshotBuilder.agent(of:)`
-/// and `PhoneSessionStatus.localCapabilities`). A remote session, a Codex
+/// **Switch and fork put a session under other credentials.** A switch
+/// restarts a running session under the profile, in its own tab, and moves a
+/// parked one to the profile, where it stays parked until its next wake. A
+/// fork copies the conversation, running or parked, into a new tab under the
+/// profile and leaves the session as it is. Both act only on a session the
+/// phone can see and can do this to: a local Claude session in a local
+/// worktree, by the sessions list's own reading (`phoneVisibleTerminal`,
+/// `PhoneSnapshotBuilder.agent(of:)` and
+/// `PhoneSessionStatus.localCapabilities`). A remote session, a Codex
 /// session, a shell and a tab in a remote lane are `unsupported`, with the
 /// reason the sessions list shows where it has one. A profile the phone
 /// names must exist, or the request is `not_found`, and so is a session the
@@ -139,7 +143,7 @@ extension PhoneAppService {
             throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.remoteOnlyReason)
         }
         return try await phoneCapableClaudeTerminal(
-            terminalID, needing: needed, notClaude: Self.notAClaudeSessionReason).terminal
+            terminalID, needing: needed, notClaude: Self.notAClaudeSessionReason)
     }
 
     /// `terminal.swapProfile` for `terminalID`, onto `profileID` (nil for the

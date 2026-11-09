@@ -453,7 +453,8 @@ struct PhoneSnapshotBuilderTests {
         let a = UUID()
         let repo = Repo(id: a, path: "/tmp/acme", displayName: "acme")
         let w = Self.worktree("fix-login", repo: a)
-        let claude = Self.terminal(in: w.id, kind: .claude)
+        var claude = Self.terminal(in: w.id, kind: .claude)
+        claude.hibernatedAt = Self.base
         let remoteRowID = "remote:acme/rs-1"
 
         let on = Self.answerSettingSnapshot(enabled: true, terminal: claude, worktree: w, repo: repo)
@@ -478,8 +479,8 @@ struct PhoneSnapshotBuilderTests {
             switchProfile: remoteOn.capabilities.switchProfile, fork: remoteOn.capabilities.fork,
             model: remoteOn.capabilities.model))
         // The capabilities left alone are the ones the session has: Send and
-        // Model on both, Switch and Fork on the local session, and no switch
-        // or fork for the remote one.
+        // Model on both, Switch and Fork on the parked local session, and no
+        // switch or fork for the remote one.
         #expect(localOff.capabilities.send == Self.available)
         #expect(localOff.capabilities.model == Self.available)
         #expect(localOff.capabilities.switchProfile == Self.available)
