@@ -3,17 +3,26 @@
  * `SheetHost()`, with no props; it reads the sheet and the open session from the store. It renders
  * `.scrim`, which closes the sheet when tapped, and `.sheet` (`role="dialog"`, `aria-modal="true"`,
  * named by the sheet's title), with `.grab`, then the sheet by name: `menu` (`MenuSheet`), `switch`,
- * `switch-confirm` and `fork` (`ProfileSheets`), and `model` (`ModelSheet`). Escape closes it too.
- * `new` belongs to the New sheet, which part 6d's last task adds; until then it renders nothing.
+ * `switch-confirm` and `fork` (`ProfileSheets`), `model` (`ModelSheet`), and `new` (`NewSheet`,
+ * as a tall sheet). Escape closes it too.
  *
  * Every sheet but `new` acts on the open session: the session the route shows, as the list shows
  * it. With no such session nothing renders; the shell closes every sheet when an event moves the
  * route or the list stops showing the session (`applySessions`), and each action acts only on the
- * session this render showed (`from`, in `actions/sheets.ts`).
+ * session this render showed (`from`, in `actions/sheets.ts`). `new` acts on the repo it opened
+ * for, and renders over whatever screen shows.
  *
  * **Focus.** When the sheet opens, focus moves into it (to `.sheet` itself), and again each time
- * it shows another sheet, since the button that opened that one is gone. When it closes, focus
+ * it shows another sheet, since the button that opened that one is gone, and each time the New
+ * sheet turns to "Creating…" and back. When it closes, focus
  * goes back to the element that had it before the sheet opened, if that is still on the page.
+ *
+ * **The keyboard.** `.sheet` pads by the safe area, and the keyboard covers the bottom of the
+ * screen, so the New sheet, the one with fields far down, ends above the keyboard instead: its
+ * bottom edge rises by `--dock-pad` less the bottom inset, which the keyboard covers when it is
+ * up. Whenever the sheet changes size, as while the keyboard moves, and whenever a field in it
+ * takes focus, the focused field's row is scrolled into the part of the sheet that shows
+ * (`useFieldInView`).
  *
  * **The tap guard.** The rows of the session menu sit where the sheets they open put their own
  * rows, and a profile picked in the Switch account sheet opens the question whose Restart sits
@@ -21,24 +30,38 @@
  * or loaded; the current profile changing, which reorders the Fork sheet; the restart note or the
  * model changing; a reason appearing; a failure showing, which moves what is below it), its acting
  * buttons are held for `TAP_GUARD_MS` (`useChangeHold`): Restart and "Fork into a new tab", the
- * Fork sheet's rows, and the Model sheet's Set.
+ * Fork sheet's rows, and the Model sheet's Set. The New sheet holds its own (`NewSheet`).
+ *
+ * Closing the New sheet uncovers the sessions list under the finger that closed it: Cancel and
+ * Create lie over its rows, and the scrim over a repo's "+". So for `TAP_GUARD_MS` after it
+ * closes (`useUncoverHold`), an invisible layer over the whole screen takes every tap and does
+ * nothing with it, and the second tap of a double tap on Cancel or the scrim opens no session and
+ * no second New sheet. It covers the session a create opens as well. The session sheets need no
+ * such layer: what they uncover is the dock, which holds its own (`dock/Dock.tsx`).
  *
  * **A failure** of an action made from a sheet shows in that sheet (`failed` in the sheet slice)
  * while it is the sheet `ui.sheet` holds; another sheet, or closing it, drops it.
  */
 
-import { useId, useLayoutEffect, useMemo, useRef } from 'react';
-import type { JSX, KeyboardEvent, RefObject } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef } from 'react';
+import type { CSSProperties, JSX, KeyboardEvent, RefObject } from 'react';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { findSession } from '../state/route.ts';
 import { currentProfileID, failureIn, restartNote, unavailableReason } from '../state/sheets.ts';
 import type { ActingKind, ProfilesLoad } from '../state/sheets.ts';
 import type { SheetState } from '../state/store.ts';
-import { useChangeHold } from '../ui/tapGuard.ts';
+import { useChangeHold, useUncoverHold } from '../ui/tapGuard.ts';
 import { MenuSheet } from './MenuSheet.tsx';
 import { ModelSheet } from './ModelSheet.tsx';
+import { NewSheet } from './NewSheet.tsx';
 import { ConfirmSheet, ForkSheet, SwitchSheet } from './ProfileSheets.tsx';
+
+/** The New sheet's bottom edge: above the keyboard while it is up, else at the screen's bottom, as every sheet's. */
+const NEW_SHEET_STYLE: CSSProperties = { bottom: 'calc(var(--dock-pad, 0px) - var(--safe-bottom, 0px))' };
+
+/** The layer that takes the taps for a moment after the New sheet closes: invisible, over the whole screen, under the toast. */
+const SHIELD_STYLE: CSSProperties = { position: 'absolute', inset: 0, zIndex: 20 };
 
 export function SheetHost(): JSX.Element | null {
   const actions = useActions();
@@ -47,32 +70,40 @@ export function SheetHost(): JSX.Element | null {
   const sessions = useAppState((s) => s.sessions);
   const load = useAppState((s) => s.sheets.profiles);
   const failure = useAppState((s) => failureIn(s.sheets, s.ui.sheet));
+  const creatingIn = useAppState((s) => s.sheets.creating?.repoID ?? null);
   const found = useMemo(() => (route.screen === 'session' ? findSession(sessions, route.ref) : null), [route, sessions]);
-  const shown = sheet !== null && sheet.name !== 'new' && found !== null ? sheet : null;
+  const fresh = sheet !== null && sheet.name === 'new' ? sheet : null;
+  const shown = sheet !== null && (fresh !== null || found !== null) ? sheet : null;
   const box = useRef<HTMLDivElement>(null);
   const titleID = useId();
-  useSheetFocus(box, shown === null ? null : sheetName(shown));
-  const held = useChangeHold(shown === null || found === null ? null : sheetView(shown, load, failure, found.session));
-  if (shown === null || found === null) return null;
-  const { row, session } = found;
+  useSheetFocus(box, shown === null ? null : sheetName(shown, creatingIn));
+  useFieldInView(box, fresh !== null);
+  const held = useChangeHold(shown === null || fresh !== null || found === null ? null : sheetView(shown, load, failure, found.session));
+  const shielded = useUncoverHold(fresh !== null);
+  if (shown === null) return shielded ? <div aria-hidden="true" style={SHIELD_STYLE} /> : null;
 
-  let body: JSX.Element;
-  switch (shown.name) {
-    case 'menu':
-      body = <MenuSheet row={row} session={session} titleID={titleID} />;
-      break;
-    case 'switch':
-      body = <SwitchSheet session={session} titleID={titleID} />;
-      break;
-    case 'switch-confirm':
-      body = <ConfirmSheet session={session} profileID={shown.profileID} titleID={titleID} held={held} failure={failure} />;
-      break;
-    case 'fork':
-      body = <ForkSheet session={session} titleID={titleID} held={held} failure={failure} />;
-      break;
-    case 'model':
-      body = <ModelSheet session={session} titleID={titleID} held={held} failure={failure} />;
-      break;
+  let body: JSX.Element | null = null;
+  if (fresh !== null) {
+    body = <NewSheet key={fresh.repoID} sheet={fresh} titleID={titleID} />;
+  } else if (found !== null) {
+    const { row, session } = found;
+    switch (shown.name) {
+      case 'menu':
+        body = <MenuSheet row={row} session={session} titleID={titleID} />;
+        break;
+      case 'switch':
+        body = <SwitchSheet session={session} titleID={titleID} />;
+        break;
+      case 'switch-confirm':
+        body = <ConfirmSheet session={session} profileID={shown.profileID} titleID={titleID} held={held} failure={failure} />;
+        break;
+      case 'fork':
+        body = <ForkSheet session={session} titleID={titleID} held={held} failure={failure} />;
+        break;
+      case 'model':
+        body = <ModelSheet session={session} titleID={titleID} held={held} failure={failure} />;
+        break;
+    }
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
@@ -83,7 +114,10 @@ export function SheetHost(): JSX.Element | null {
   return (
     <>
       <div className="scrim" onClick={() => actions.closeSheet()} />
-      <div ref={box} className="sheet" role="dialog" aria-modal="true" aria-labelledby={titleID} tabIndex={-1} onKeyDown={onKeyDown}>
+      <div
+        ref={box} className={fresh !== null ? 'sheet tall' : 'sheet'} style={fresh !== null ? NEW_SHEET_STYLE : undefined}
+        role="dialog" aria-modal="true" aria-labelledby={titleID} tabIndex={-1} onKeyDown={onKeyDown}
+      >
         <div className="grab" />
         {body}
       </div>
@@ -91,9 +125,16 @@ export function SheetHost(): JSX.Element | null {
   );
 }
 
-/** Which sheet `sheet` is, for focus: its name, and for `switch-confirm` the profile it asks about. */
-function sheetName(sheet: SheetState): string {
-  return sheet.name === 'switch-confirm' ? `switch-confirm ${sheet.profileID}` : sheet.name;
+/**
+ * Which sheet `sheet` is, for focus: its name, for `switch-confirm` the profile it asks about,
+ * and for `new` its repo and whether it shows "Creating…" (a create on its way from `creatingIn`,
+ * the repo of the create on its way, or null), which takes the place of Create, the button that
+ * had focus, and gives it back again on an error.
+ */
+function sheetName(sheet: SheetState, creatingIn: string | null = null): string {
+  if (sheet.name === 'switch-confirm') return `switch-confirm ${sheet.profileID}`;
+  if (sheet.name === 'new') return `new ${sheet.repoID}${creatingIn === sheet.repoID ? ' creating' : ''}`;
+  return sheet.name;
 }
 
 /**
@@ -138,4 +179,45 @@ function useSheetFocus(box: RefObject<HTMLDivElement | null>, name: string | nul
   useLayoutEffect(() => {
     if (name !== null) box.current?.focus({ preventScroll: true });
   }, [box, name]);
+}
+
+/**
+ * While `on`, keeps the field that has focus in `box` in the part of `box` that shows: each time
+ * a field in it takes focus, and each time `box` changes size, as the New sheet does while the
+ * keyboard moves (see the header). It scrolls `box` alone, by as little as it takes, to show the
+ * field's row (`.frow`, its label with it), or the field when the row is taller than what shows.
+ */
+function useFieldInView(box: RefObject<HTMLDivElement | null>, on: boolean): void {
+  useEffect(() => {
+    const el = box.current;
+    if (!on || el === null) return;
+    const reveal = (): void => {
+      const field = el.ownerDocument.activeElement;
+      if (field === null || !el.contains(field) || !FIELD_TAGS.has(field.tagName)) return;
+      revealIn(el, field);
+    };
+    const observer = new ResizeObserver(reveal);
+    observer.observe(el);
+    el.addEventListener('focusin', reveal);
+    return () => {
+      observer.disconnect();
+      el.removeEventListener('focusin', reveal);
+    };
+  }, [box, on]);
+}
+
+/** The elements that take typing, and so bring the keyboard up. */
+const FIELD_TAGS: ReadonlySet<string> = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
+
+/** Scrolls `box` by as little as it takes to show `field`'s row inside its padding, or `field` itself when the row does not fit. */
+function revealIn(box: HTMLElement, field: Element): void {
+  const style = box.ownerDocument.defaultView?.getComputedStyle(box);
+  const outer = box.getBoundingClientRect();
+  const top = outer.top + parseFloat(style?.paddingTop ?? '0');
+  const bottom = outer.bottom - parseFloat(style?.paddingBottom ?? '0');
+  const row = field.closest('.frow');
+  const rowBox = row?.getBoundingClientRect();
+  const target = rowBox !== undefined && rowBox.height <= bottom - top ? rowBox : field.getBoundingClientRect();
+  if (target.bottom > bottom) box.scrollTop += target.bottom - bottom;
+  else if (target.top < top) box.scrollTop -= top - target.top;
 }

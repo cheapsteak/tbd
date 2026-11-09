@@ -15,6 +15,9 @@
 // - `switch-ask`: the same with Personal picked, so the sheet asks about restarting under it.
 // - `fork`: the same tab with the Fork sheet open.
 // - `model`: the same tab with the Model sheet open, nothing picked yet, so Set waits.
+// - `new-local`: the sessions list with acme-web's New sheet open, its first message the mock's.
+// - `new-remote`: acme-api's New sheet on Remote session, acme-cloud picked, with the mock's
+//   message (mock 1356-1357).
 //
 // A state is captured once the tap guard lets its acting buttons go, since the mocks draw them
 // enabled. The Model sheet's Set is the exception: it waits for a pick, which the mock makes the
@@ -123,4 +126,44 @@ test('model', async ({ page, appHost }) => {
   const sheet = await openSheet(page, 'Now opus');
   await expect(sheet.locator('.sh-title')).toHaveText('Model');
   await capture(page, 'model', sheet.getByLabel('Other model name'));
+});
+
+/**
+ * Opens the New sheet of `repo` from its "+" on the sessions list.
+ * @param {Page} page
+ * @param {string} repo
+ */
+async function openNew(page, repo) {
+  await app(page).getByRole('button', { name: `New session in ${repo}` }).click();
+  const sheet = app(page).getByRole('dialog');
+  await expect(sheet.locator('.sh-title')).toHaveText(`New in ${repo}`);
+  return sheet;
+}
+
+test('new-local', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  const sheet = await openNew(page, 'acme-web');
+  const message = sheet.getByRole('textbox', { name: 'First message' });
+  await message.fill('Add a dark mode toggle to the settings screen.');
+  // The mock draws the field without focus.
+  await message.blur();
+  const create = sheet.getByRole('button', { name: 'Create', exact: true });
+  await expect(create).toBeEnabled();
+  await capture(page, 'new-local', create);
+});
+
+test('new-remote', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  const sheet = await openNew(page, 'acme-api');
+  await sheet.getByRole('button', { name: 'Remote session' }).click();
+  const cloud = sheet.locator('button.mi', { hasText: 'acme-cloud' });
+  await expect(cloud).toBeEnabled();
+  await cloud.click();
+  const message = sheet.getByRole('textbox', { name: 'First message' });
+  await message.fill('Profile the slow orders query and suggest an index.');
+  await message.blur();
+  const create = sheet.getByRole('button', { name: 'Create', exact: true });
+  await expect(create).toBeEnabled();
+  await expect(cloud).toBeEnabled();
+  await capture(page, 'new-remote', create);
 });
