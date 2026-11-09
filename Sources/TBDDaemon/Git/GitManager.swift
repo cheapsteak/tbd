@@ -60,10 +60,21 @@ public struct BranchRef: Sendable, Equatable {
 public struct GitError: Error, CustomStringConvertible {
     public let command: String
     public let exitCode: Int32
+    /// git's stderr as it arrived. Failure classification matches on this, so
+    /// it is never shortened; `description` shows a summary of it instead.
     public let stderr: String
 
+    /// How much of the stderr summary `description` carries. The unified log
+    /// cuts a message off at about 1 KB, and the daemon logs this description,
+    /// so the summary leaves room for the command in front of it.
+    static let descriptionStderrBudget = 700
+
+    /// The command, the exit status and `GitStderr.summary` of stderr: git's
+    /// last lines without its progress meters, so the verdict survives into a
+    /// log line or a message.
     public var description: String {
-        "Git command failed (\(exitCode)): \(command)\n\(stderr)"
+        let summary = GitStderr.summary(stderr, maxCharacters: Self.descriptionStderrBudget)
+        return "Git command failed (\(exitCode)): \(command)\n\(summary)"
     }
 }
 

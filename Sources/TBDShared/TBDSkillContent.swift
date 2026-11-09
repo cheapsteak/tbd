@@ -65,6 +65,8 @@ briefing here
 EOF
 ```
 
+**Wait for it to finish:** `tbd worktree create` blocks until git has checked the worktree out and its agent is starting — seconds, or minutes on a large repo, with a heartbeat line on stderr every 2 s. Run it so you see its exit status: in Claude Code, run it through Bash with `run_in_background: true` and wait for the completion notification; in Codex, if the command yields before it exits, keep polling that same session until it exits. Never start a second create for the same branch while the first is running, and never re-run with `--no-wait` to get unstuck: `--no-wait` returns before git runs, so it cannot report a failure. A non-zero exit means the creation failed and was rolled back, and the message carries git's reason (a full disk, for example): fix that before retrying.
+
 **Where the new branch starts:** `tbd worktree create` always bases the new branch on the repo's **default branch from origin**, never on the caller's branch. It best-effort `git fetch`es, then branches off `origin/<default>` (e.g. `origin/main`), falling back to the local `<default>` only if the remote ref is missing. `--position` (child/sibling/root) controls only where the worktree sits in the UI tree — never the git base. So a worker spawned from a feature branch still starts clean off `origin/main`; to build on unmerged work, land that work on the default branch first (then rebase the new worktree onto it).
 
 ### Spawn worker worktrees from an orchestrator (most common fan-out)

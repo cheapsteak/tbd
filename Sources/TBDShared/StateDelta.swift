@@ -452,22 +452,31 @@ public struct WorktreeIDDelta: Codable, Sendable {
     /// rollback could not read the row at all. Absent (older daemons) reads
     /// as false.
     public let unsentPromptLost: Bool
+    /// Why the creation failed, in words a person can act on: git's verdict
+    /// for a failed `git worktree add` (a full disk, a branch already checked
+    /// out elsewhere), with a hint where one applies. Set only alongside
+    /// `creationFailed`, and nil when the daemon had no error in hand (startup
+    /// recovery of a row a restart stranded). Optional so payloads from a
+    /// daemon that predates it still decode; absent reads as nil.
+    public let failureReason: String?
 
     public init(
         worktreeID: UUID, creationFailed: Bool = false,
-        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false
+        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false,
+        failureReason: String? = nil
     ) {
         self.worktreeID = worktreeID
         self.creationFailed = creationFailed
         self.unsentPromptPath = unsentPromptPath
         self.unsentPromptLost = unsentPromptLost
+        self.failureReason = failureReason
     }
 
     // Explicit decoding: a synthesized `init(from:)` ignores property defaults
     // and would throw `keyNotFound` against an older daemon that never sends
     // this key. Absent means "not a creation failure".
     private enum CodingKeys: String, CodingKey {
-        case worktreeID, creationFailed, unsentPromptPath, unsentPromptLost
+        case worktreeID, creationFailed, unsentPromptPath, unsentPromptLost, failureReason
     }
 
     public init(from decoder: any Decoder) throws {
@@ -476,6 +485,7 @@ public struct WorktreeIDDelta: Codable, Sendable {
         self.creationFailed = try c.decodeIfPresent(Bool.self, forKey: .creationFailed) ?? false
         self.unsentPromptPath = try c.decodeIfPresent(String.self, forKey: .unsentPromptPath)
         self.unsentPromptLost = try c.decodeIfPresent(Bool.self, forKey: .unsentPromptLost) ?? false
+        self.failureReason = try c.decodeIfPresent(String.self, forKey: .failureReason)
     }
 }
 

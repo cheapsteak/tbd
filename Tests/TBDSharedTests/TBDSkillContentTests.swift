@@ -36,6 +36,23 @@ import Foundation
     #expect(body.contains("--help"))
 }
 
+/// An agent once ran `tbd worktree create` on a full disk, re-ran it with
+/// `--no-wait` to get past the wait, and read the "created" that came back as
+/// success. The guidance that prevents that has to survive an edit: wait for
+/// the exit status in each harness this body is fed to, never fall back to
+/// `--no-wait`, and read a non-zero exit as a rolled-back failure with a reason.
+@Test func bodyTellsAgentsToWaitForWorktreeCreate() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("`tbd worktree create` blocks until git has checked the worktree out"))
+    #expect(body.contains("heartbeat line on stderr every 2 s"))
+    // Both harnesses: Claude Code's background Bash, Codex's yielding session.
+    #expect(body.contains("`run_in_background: true` and wait for the completion notification"))
+    #expect(body.contains("keep polling that same session until it exits"))
+    #expect(body.contains("Never start a second create for the same branch"))
+    #expect(body.contains("`--no-wait` returns before git runs, so it cannot report a failure"))
+    #expect(body.contains("the creation failed and was rolled back, and the message carries git's reason"))
+}
+
 /// The screen paragraph tells an agent which store answered its read, and all
 /// three sources have to survive an edit of it.
 ///

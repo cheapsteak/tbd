@@ -75,7 +75,7 @@ struct WorktreeCreate: AsyncParsableCommand {
     )
     var position: WorktreePosition = .child
 
-    @Flag(name: .long, help: "Return immediately without waiting for the worktree to become active")
+    @Flag(name: .long, help: "Return before git runs, without waiting for the worktree to become active. A creation that then fails is not reported here.")
     var noWait = false
 
     @Flag(name: .long, help: "Output JSON")
@@ -170,11 +170,59 @@ struct WorktreeCreate: AsyncParsableCommand {
         if json {
             printJSON(worktree)
         } else {
-            print("Created worktree: \(worktree.displayName)")
-            print("  ID:     \(worktree.id)")
-            print("  Branch: \(worktree.branch)")
-            print("  Path:   \(worktree.localPath)")
+            for line in Self.textOutput(worktree, waited: !noWait) {
+                print(line)
+            }
         }
+    }
+
+    /// The text `create` prints. After waiting, the worktree is active and
+    /// the first line says it was created. Under `--no-wait` the command
+    /// returned before git ran, so it says the worktree is being created and
+    /// that a failure will not be reported here: the creation can still fail
+    /// and be rolled back, and nothing would tell the caller.
+    static func textOutput(_ worktree: Worktree, waited: Bool) -> [String] {
+        var lines = [
+            "\(waited ? "Created" : "Creating") worktree: \(worktree.displayName)",
+            "  ID:     \(worktree.id)",
+            "  Branch: \(worktree.branch)",
+            "  Path:   \(worktree.localPath)",
+        ]
+        if !waited {
+            lines.append(
+                "--no-wait returned before git ran, so a failure will not be reported here. "
+                    + "Check `tbd worktree list`: a creation that fails is rolled back and drops out of it.")
+        }
+        return lines
+    }
+
+    /// The error `create` reports when the worktree's row disappears while it
+    /// waits: the daemon's background create failed and rolled it back.
+    ///
+    /// `reason` is what `worktree.createFailure` answered — git's verdict, with
+    /// a hint where one applies. It is nil when the daemon has none on record
+    /// or predates the method, and the message then names where the daemon
+    /// logged the reason instead.
+    static func rolledBackMessage(reason: String?) -> String {
+        if let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+            return "Worktree creation failed and was rolled back:\n\n\(reason)"
+        }
+        // The old "(see daemon logs)" named nothing, and the two obvious
+        // guesses are both wrong: ~/Library/Logs/TBD/exceptions.log is the
+        // app's crash log, and predicating on TBDApp searches the wrong
+        // process entirely.
+        //
+        // The absolute path is load-bearing: `log` is a zsh builtin that
+        // consumes the arguments and prints nothing, so a bare `log show`
+        // reads as "the daemon logged nothing".
+        return """
+            Worktree creation failed and was rolled back. The daemon logged why:
+
+              /usr/bin/log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
+
+            (Common cause: the branch already exists and is checked out in \
+            another worktree — git's error names that directory.)
+            """
     }
 
     private func waitForActive(pending: Worktree, client: SocketClient) throws -> Worktree {
@@ -193,27 +241,18 @@ struct WorktreeCreate: AsyncParsableCommand {
                 }
             } else {
                 // The row vanished, so the daemon's background create failed and
-                // rolled it back. The reason exists — the daemon logs it with
-                // git's stderr embedded — but it goes to os_log, not down this
-                // RPC, because `worktreeCreate` returns the pending row and does
-                // the work in a detached lane.
-                //
-                // So the message has to name WHERE. The old "(see daemon logs)"
-                // named nothing, and the two obvious guesses are both wrong:
-                // ~/Library/Logs/TBD/exceptions.log is the app's crash log, and
-                // predicating on TBDApp searches the wrong process entirely.
-                //
-                // The absolute path is load-bearing: `log` is a zsh builtin
-                // that consumes the arguments and prints nothing, so a bare
-                // `log show` reads as "the daemon logged nothing".
-                throw CLIError.invalidArgument("""
-                    Worktree creation failed and was rolled back. The daemon logged why:
-
-                      /usr/bin/log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
-
-                    (Common cause: the branch already exists and is checked out in \
-                    another worktree — git's error names that directory.)
-                    """)
+                // rolled it back. `worktree.create` returned the pending row and
+                // ran git in a detached lane, so the reason never came down that
+                // RPC; the daemon records it before deleting the row, and
+                // `worktree.createFailure` hands it over. `try?`: a daemon that
+                // predates the method answers "Unknown method", and the message
+                // then names where the daemon logged the reason instead.
+                let failure = try? client.call(
+                    method: RPCMethod.worktreeCreateFailure,
+                    params: WorktreeCreateFailureParams(worktreeID: pending.id),
+                    resultType: WorktreeCreateFailureResult.self
+                )
+                throw CLIError.invalidArgument(Self.rolledBackMessage(reason: failure?.reason))
             }
             let elapsed = Date().timeIntervalSince(start)
             if elapsed >= nextHeartbeat {

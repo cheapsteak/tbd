@@ -160,6 +160,10 @@ public enum RPCMethod {
     public static let repoList = "repo.list"
     public static let worktreeCreate = "worktree.create"
     public static let worktreeList = "worktree.list"
+    /// Why a recent `worktree.create` failed, for a client that saw its row
+    /// disappear. Read-only; answers from an in-memory record the daemon keeps
+    /// of its last few failures, so a restart forgets them.
+    public static let worktreeCreateFailure = "worktree.createFailure"
     public static let worktreeArchive = "worktree.archive"
     public static let worktreeRerunPreSession = "worktree.rerunPreSession"
     public static let worktreeRevive = "worktree.revive"
@@ -1664,6 +1668,21 @@ public struct WorktreeListParams: Codable, Sendable {
         self.includeSessionCounts = includeSessionCounts
         self.nameQuery = nameQuery
     }
+}
+
+/// Params for `worktree.createFailure`: the id `worktree.create` returned.
+public struct WorktreeCreateFailureParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+/// Result of `worktree.createFailure`. `reason` is the message the failed
+/// creation's alert carries, or nil when the daemon has no failure recorded
+/// for that id: it never failed, it is still running, it failed before the
+/// daemon last started, or enough later failures have pushed it out.
+public struct WorktreeCreateFailureResult: Codable, Sendable {
+    public let reason: String?
+    public init(reason: String?) { self.reason = reason }
 }
 
 public struct WorktreeArchiveParams: Codable, Sendable {

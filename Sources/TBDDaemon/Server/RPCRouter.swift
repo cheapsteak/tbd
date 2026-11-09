@@ -212,6 +212,8 @@ public final class RPCRouter: Sendable {
     let lastFullPrune = OSAllocatedUnfairLock<Date?>(initialState: nil)
     /// Coalesces fetch operations per repo using a TTL cache + singleflight.
     let fetchCache = FetchCache()
+    /// Why recent background creations failed, for `worktree.createFailure`.
+    let worktreeCreateFailures = WorktreeCreateFailureLog()
     /// Binding policy for the multi-PR-per-worktree bindings — repo validation,
     /// dedupe, tombstones, cap.
     let prBindingCoordinator: PRBindingCoordinator
@@ -770,6 +772,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeCreate(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeList:
                 return try await handleWorktreeList(request.paramsData)
+            case RPCMethod.worktreeCreateFailure:
+                return try await handleWorktreeCreateFailure(request.paramsData)
             case RPCMethod.worktreeArchive:
                 return try await handleWorktreeArchive(request.paramsData, actor: request.actor)
             case RPCMethod.worktreeRerunPreSession:
