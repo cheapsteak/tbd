@@ -11,7 +11,9 @@
 //   still needs the list loads again then (`useProfiles`), and so does the next opening.
 // - `switchProfile(profileID, from): Promise<void>` – `session.switchProfile` on the session the
 //   route shows, with `profileID`. On success it closes the menu or sheet the gesture was made on,
-//   if it still shows, and toasts "Restarted under <profile>".
+//   if it still shows, and toasts "Restarted under <profile>", or "Moved to <profile>" when the
+//   list showed the session parked at the tap, since the laptop moves a parked session and leaves
+//   it parked (`switchWords`).
 // - `fork(profileID, from): Promise<void>` – `session.fork` on the session the route shows, under
 //   `profileID`, or with no `profileID` at all when it is null, which the laptop reads as the
 //   session's own profile. It takes a mark (`navMark`) as it sends; on success it closes the menu
@@ -127,7 +129,7 @@ import { findSession } from '../state/route.ts';
 import {
   awaitOpen, beginAct, beginCreate, endAct, endCreate, failIn, isActing, keepLostCreate, loadedProfiles, loadedProviders,
   newSheetShown, profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading, remoteParamsReady, sameAccountName,
-  switchBlock, unavailableReason,
+  switchBlock, switchWords, unavailableReason,
 } from '../state/sheets.ts';
 import type { ActingKind, CreateInFlight, ProfilesLoad, ProvidersLoad, SheetsState } from '../state/sheets.ts';
 import { nextToast } from '../state/store.ts';
@@ -337,7 +339,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
     },
 
     async switchProfile(profileID: string, from: PhoneSessionRef): Promise<void> {
-      const sent: { to: ActTarget | null; name: string } = { to: null, name: '' };
+      const sent: { to: ActTarget | null; toast: string } = { to: null, toast: '' };
       store.update((s) => {
         const to = actTarget(s, from);
         if (to === null) return s;
@@ -349,7 +351,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         const block = switchBlock(to.session, profiles, profile);
         if (block !== null) return refused(s, to, block);
         sent.to = to;
-        sent.name = profile.name;
+        sent.toast = switchWords(to.session).toast(profile.name);
         return begun(s, to, 'switch');
       });
       const to = sent.to;
@@ -357,7 +359,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       let how: Settled;
       try {
         await client.request('session.switchProfile', { session: to.ref, profileID });
-        how = { taken: true, toast: `Restarted under ${sent.name}` };
+        how = { taken: true, toast: sent.toast };
       } catch (error) {
         how = { taken: false, text: errorText(error) };
       }

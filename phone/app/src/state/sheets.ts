@@ -327,8 +327,56 @@ export function switchBlock(session: PhoneSession, profiles: readonly PhoneProfi
   return profile.id === currentProfileID(session, profiles) ? `This session already runs under ${profile.name}.` : null;
 }
 
-/** The note under "Restart this session under X?": what a restart stops (mock `restartNote`). */
+/**
+ * Whether a switch of `session` moves it rather than restarting it: the list shows it parked. The
+ * laptop restarts a running session under the profile in its tab, and moves a parked one to the
+ * profile without waking it, so it stays parked and wakes under that profile later.
+ */
+export function switchMoves(session: PhoneSession): boolean {
+  return session.status.chip === 'parked';
+}
+
+/** What the switch says in each place it shows, for a session it restarts or one it moves. */
+export interface SwitchWords {
+  /** The Switch account sheet's line under its title. */
+  readonly sub: string;
+  /** The session menu's Switch account row, after "Now <account>." */
+  readonly row: string;
+  /** The ask's question about the profile named `name`. */
+  question(name: string): string;
+  /** The ask's button that switches. */
+  readonly button: string;
+  /** The toast once the switch to the profile named `name` went through. */
+  toast(name: string): string;
+}
+
+const RESTART_WORDS: SwitchWords = {
+  sub: 'Restarts this session under another profile, in the same tab. The conversation stays.',
+  row: 'Restarts in this tab.',
+  question: (name) => `Restart this session under ${name}?`,
+  button: 'Restart',
+  toast: (name) => `Restarted under ${name}`,
+};
+
+const MOVE_WORDS: SwitchWords = {
+  sub: 'Moves this parked session to another profile. It stays parked.',
+  row: 'Stays parked.',
+  question: (name) => `Move this session to ${name}?`,
+  button: 'Move',
+  toast: (name) => `Moved to ${name}`,
+};
+
+/** The switch's words for `session`: a move's while the list shows it parked (`switchMoves`), else a restart's. */
+export function switchWords(session: PhoneSession): SwitchWords {
+  return switchMoves(session) ? MOVE_WORDS : RESTART_WORDS;
+}
+
+/**
+ * The note under the ask's question: what a switch does to the session (mock `restartNote`). A
+ * restart stops the turn that is running, if one is; a move leaves a parked session parked.
+ */
 export function restartNote(session: PhoneSession): string {
+  if (switchMoves(session)) return 'The conversation stays. It stays parked, and wakes under the new profile.';
   return `The conversation stays. ${session.status.chip === 'working' ? 'The turn that is running now stops.' : 'Claude restarts in this tab.'}`;
 }
 

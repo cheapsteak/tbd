@@ -402,11 +402,11 @@ a TBD notification naming the phone, so a pairing the user did not make is visib
 ## 6. Sessions the phone can reach
 
 - **Local Claude sessions** – everything in this spec, parked ones included. A parked session
-  offers every action a running one does:
-  - **Send** – wakes it with the message.
-  - **Switch account** – moves it to the profile, where it stays parked until its next wake.
-  - **Fork** – copies its conversation into a new tab, which starts under the chosen profile. The
-    parked session stays parked, on its own profile.
+  offers every action a running one does. Send and Model go through the send path, which wakes it
+  with the message or `/model <name>`. Switch account moves it to the profile, where it stays
+  parked until its next wake. Fork copies its conversation into a new tab under the chosen
+  profile, and leaves the parked session parked on its own profile. Answer is offered too, but a
+  parked session has no open prompt, so there is nothing to answer.
 - **Codex sessions** – listed with their status, which comes from OSC 7501 like Claude's. Opening
   one shows "Codex transcripts arrive in a later TBD release". No actions.
 - **Remote-provider sessions** – listed, with status from the provider's session list and open
@@ -631,7 +631,13 @@ These come from the laptop's bundle.
 - **Switch account** – a profile list, then the question "Restart this session under
   <profile>?" with three answers: Restart, "Fork into a new tab" (the Fork action below, under
   that profile, which leaves this session as it is), and Cancel. The question says when a running
-  turn would stop.
+  turn would stop. A switch that goes through shows "Restarted under <profile>".
+  - **A parked session** is moved, not restarted, so the words say so. The menu's Switch account
+    row reads "Now <account>. Stays parked." The sheet's line reads "Moves this parked session to
+    another profile. It stays parked." The question reads "Move this session to <profile>?", with
+    the note "The conversation stays. It stays parked, and wakes under the new profile." The
+    answers are Move, "Fork into a new tab" and Cancel, and a move that goes through shows "Moved
+    to <profile>".
 - **Fork** – a profile list, with the current profile first. The fork opens as a new tab, and the
   phone switches to it. A parked session forks the same way, without a wake, and stays parked
   (section 6).

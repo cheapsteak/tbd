@@ -203,13 +203,29 @@ test('the account menu and the switch-confirm sheet ask the same and disable the
     assert.deepEqual(inMenu.buttons, inSheet.buttons, name);
     seen.add(JSON.stringify(inSheet.buttons));
   }
-  // The states cover every way the two buttons can be gated.
+  // The states cover every way the two buttons can be gated, and a parked session's Move.
   assert.deepEqual([...seen].sort(), [
+    '["Move","Fork into a new tab","Cancel"]',
     '["Restart (disabled)","Fork into a new tab (disabled)","Cancel"]',
     '["Restart (disabled)","Fork into a new tab","Cancel"]',
     '["Restart","Fork into a new tab (disabled)","Cancel"]',
     '["Restart","Fork into a new tab","Cancel"]',
   ]);
+});
+
+test('for a parked session the ask asks to move it, and says it stays parked; a running one is asked to restart', () => {
+  const parked: PhoneSession = { ...SESSION, status: { chip: 'parked', changedAt: 1 } };
+  for (const markup of [drawMenu(parked, PERSONAL.id), drawSheet(parked, PERSONAL.id)]) {
+    const { text, buttons } = asked(markup);
+    assert.ok(text.includes('Move this session to Personal? The conversation stays. It stays parked, and wakes under the new profile.'), text);
+    assert.equal(text.includes('Restart'), false, text);
+    assert.deepEqual(buttons, ['Move', 'Fork into a new tab', 'Cancel']);
+  }
+  for (const markup of [drawMenu(SESSION, PERSONAL.id), drawSheet(SESSION, PERSONAL.id)]) {
+    const { text, buttons } = asked(markup);
+    assert.ok(text.includes('Restart this session under Personal? The conversation stays. Claude restarts in this tab.'), text);
+    assert.deepEqual(buttons, ['Restart', 'Fork into a new tab', 'Cancel']);
+  }
 });
 
 test("a failure shows in the account menu's ask only while that very menu shows, as in the sheet", () => {
@@ -248,4 +264,10 @@ test("a row the session cannot use shows the laptop's reason, and no empty line 
   }
   // An available row keeps its line.
   assert.match(drawMenuSheet(SESSION), /<span>Fork<small>Copy this conversation into a new tab<\/small><\/span>/);
+});
+
+test("the Switch account row says a running session restarts in its tab and a parked one stays parked", () => {
+  assert.match(drawMenuSheet(SESSION), /<span>Switch account<small>Now acme-work\. Restarts in this tab\.<\/small><\/span>/);
+  const parked = drawMenuSheet({ ...SESSION, status: { chip: 'parked', changedAt: 1 } });
+  assert.match(parked, /<span>Switch account<small>Now acme-work\. Stays parked\.<\/small><\/span>/);
 });

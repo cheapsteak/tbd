@@ -31,7 +31,8 @@
  * asks about it in the menu: the ask the "Restart under X?" sheet shows too (`RestartAsk` in
  * `sheets/ProfileSheets.tsx`, as `.pd-ask`), "Restart this session under X?", what a restart
  * stops, that a fork keeps the session, then Restart (`switchProfile`), "Fork into a new tab"
- * (`fork` under X) and Cancel, which goes back to the list.
+ * (`fork` under X) and Cancel, which goes back to the list. For a parked session the ask says
+ * Move instead (`switchWords`): a switch moves it to X and leaves it parked.
  *
  * **The model menu** lists `MODEL_NAMES`, with the tick on an exact match with `session.model`
  * only. Picking one calls `setModel`; picking the current one closes the menu. Under them, the

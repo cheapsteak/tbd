@@ -15,8 +15,8 @@ import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import {
   beginCreate, currentProfileID, emptySheets, enumChoices, fieldOn, fieldProblem, fieldText, forkOrder, isActing, isWholeNumber,
-  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, sheetShows, WHOLE_NUMBER_TEXT,
-  withFieldBadInput, withFieldOn, withFieldText,
+  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, sheetShows, switchWords,
+  WHOLE_NUMBER_TEXT, withFieldBadInput, withFieldOn, withFieldText,
 } from '../state/sheets.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, SheetState } from '../state/store.ts';
@@ -413,7 +413,7 @@ test('an unavailable capability says why before any profile is looked up, so wit
   assert.equal(elsewhere.refusal(OTHER), undefined);
 });
 
-test("a parked session forks from switch-confirm as a running one does, and its switch goes out too", async () => {
+test("a parked session forks from switch-confirm as a running one does, and its switch goes out too, toasting a move", async () => {
   const made: PhoneSessionRef = { kind: 'local', terminalID: 'T-new' };
   const h = await harness({ sessions: [session(R, { status: { chip: 'parked', changedAt: 1 } })] });
   h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
@@ -425,12 +425,14 @@ test("a parked session forks from switch-confirm as a running one does, and its 
   assert.equal(h.state().sheets.failed, null);
   assert.equal(h.state().ui.toast?.text, 'Forked into a new tab, under Personal');
   assert.deepEqual(h.state().ui.pendingOpen, { ref: made });
-  // The switch goes out the same way.
+  // The switch goes out the same way, and its toast says the session moved, since the laptop
+  // leaves a parked session parked.
   h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
   pending = h.actions.switchProfile(PERSONAL.id, R);
   assert.deepEqual(h.of('session.switchProfile').map((r) => r.params), [{ session: R, profileID: PERSONAL.id }]);
   h.last('session.switchProfile').resolve({ session: R });
   await pending;
+  assert.equal(h.state().ui.toast?.text, 'Moved to Personal');
 });
 
 test('one acting request per session at a time, whichever of the three', async () => {
@@ -658,9 +660,28 @@ test('a sheet shows while the route shows a session the list holds, and New over
   for (const route of [listed, unlisted, list]) assert.equal(on(fresh, route), true, route.screen);
 });
 
-test('the restart note says when a running turn stops', () => {
+test('the restart note says when a running turn stops, and that a parked session stays parked', () => {
   assert.equal(restartNote(session(R, { status: { chip: 'working', changedAt: 1 } })), 'The conversation stays. The turn that is running now stops.');
   assert.equal(restartNote(session(R)), 'The conversation stays. Claude restarts in this tab.');
+  assert.equal(restartNote(session(R, { status: { chip: 'parked', changedAt: 1 } })), 'The conversation stays. It stays parked, and wakes under the new profile.');
+});
+
+test("a switch's words restart a session the list shows running and move one it shows parked", () => {
+  const running = switchWords(session(R));
+  assert.equal(running.sub, 'Restarts this session under another profile, in the same tab. The conversation stays.');
+  assert.equal(running.row, 'Restarts in this tab.');
+  assert.equal(running.question('Personal'), 'Restart this session under Personal?');
+  assert.equal(running.button, 'Restart');
+  assert.equal(running.toast('Personal'), 'Restarted under Personal');
+  for (const chip of ['working', 'waitingForYou', 'error'] as const) {
+    assert.equal(switchWords(session(R, { status: { chip, changedAt: 1 } })), running, chip);
+  }
+  const parked = switchWords(session(R, { status: { chip: 'parked', changedAt: 1 } }));
+  assert.equal(parked.sub, 'Moves this parked session to another profile. It stays parked.');
+  assert.equal(parked.row, 'Stays parked.');
+  assert.equal(parked.question('Personal'), 'Move this session to Personal?');
+  assert.equal(parked.button, 'Move');
+  assert.equal(parked.toast('Personal'), 'Moved to Personal');
 });
 
 

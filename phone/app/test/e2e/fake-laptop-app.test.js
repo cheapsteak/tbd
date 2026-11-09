@@ -297,6 +297,21 @@ test('a held reply or event goes out on release, and a held event is numbered th
   assert.throws(() => t.laptop.hold('sessions.typo'), RangeError);
 });
 
+test('a switch moves the session to the profile: a running one restarts idle, a parked one stays parked', () => {
+  for (const [chip, after] of [['working', 'idle'], ['parked', 'parked']]) {
+    const scenario = scenarioWith();
+    scenario.rows[0].sessions[0].status = { chip, agoMinutes: 4 };
+    const t = makeLaptop(scenario);
+    t.subscribe();
+    const switched = t.ask('session.switchProfile', { session: REF, profileID: PROFILES[1].id });
+    assert.deepEqual(t.replyTo(switched).result, { session: REF }, chip);
+    t.flush();
+    const session = t.laptop.state.rows[0].sessions[0];
+    assert.equal(session.status.chip, after, chip);
+    assert.equal(session.profileName, 'acme-work', chip);
+  }
+});
+
 test('setReply replaces a handler, and null brings it back', () => {
   const t = makeLaptop();
   t.subscribe();

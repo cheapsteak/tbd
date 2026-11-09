@@ -670,7 +670,9 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
       reply(request, { result: { session: found.session.ref } });
       defer(() => {
         setProfile(found.session, profile);
-        setChip(found, 'idle');
+        // A running session restarts under the profile; a parked one moves to it and stays
+        // parked, as the laptop does.
+        if (found.session.status?.chip !== 'parked') setChip(found, 'idle');
         announceRow(found.row);
       });
     },

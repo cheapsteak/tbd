@@ -3,20 +3,20 @@
  * Contract: `MenuSheet({ row, session, titleID })`, where `row` lists `session`, the open session.
  *
  * Its title is the row's name, with " · <tab name>" when the row has more than one session. Then
- * three rows, each opening its sheet: "Switch account" ("Now <account>. Restarts in this tab."),
+ * three rows, each opening its sheet: "Switch account" ("Now <account>. Restarts in this tab.", or
+ * "Now <account>. Stays parked." for a session the list shows parked, `switchWords`),
  * "Fork" ("Copy this conversation into a new tab") and "Model" ("Now <model>", left out when the
  * laptop does not know the model). A row whose capability (`switchProfile`, `fork`, `model`) is
  * unavailable is disabled and shows the capability's reason in place of its line, as a remote
  * session's Switch account and Fork do; with no line at all when the laptop gave no reason. Last
- * comes Cancel. Nothing
- * here acts on the session: each row only opens a sheet.
+ * comes Cancel. Nothing here acts on the session: each row only opens a sheet.
  */
 
 import type { JSX } from 'react';
 import { Reason } from '../dock/PromptCard.tsx';
 import type { PhoneCapability, PhoneRow, PhoneSession } from '../protocol/types.ts';
 import { useActions } from '../state/context.tsx';
-import { accountName } from '../state/sheets.ts';
+import { accountName, switchWords } from '../state/sheets.ts';
 import type { GlyphName } from '../ui/glyphs.ts';
 import { Icon } from '../ui/Icon.tsx';
 
@@ -32,7 +32,7 @@ export function MenuSheet({ row, session, titleID }: { row: PhoneRow; session: P
       <div className="group">
         <MenuRow
           icon="user" label="Switch account" capability={caps.switchProfile}
-          detail={`Now ${accountName(session)}. Restarts in this tab.`} onOpen={() => actions.openSheet({ name: 'switch' })}
+          detail={`Now ${accountName(session)}. ${switchWords(session).row}`} onOpen={() => actions.openSheet({ name: 'switch' })}
         />
         <MenuRow
           icon="fork" label="Fork" capability={caps.fork}
