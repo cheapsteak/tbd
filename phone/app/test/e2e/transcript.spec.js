@@ -437,6 +437,93 @@ test('Show more stays while its text loads, and a tap on it cancels the load', a
   expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 0]]);
 });
 
+/**
+ * A message of each kind the laptop cuts (4b `TranscriptShaper.message`), cut, with its whole
+ * text, and the box its row draws it in.
+ */
+const CUT_KINDS = [
+  { id: 'x-cut-me', kind: 'user', box: '.me', cut: 'Also check the redirect', whole: 'Also check the redirect after a logout from the settings page.' },
+  {
+    id: 'x-cut-peer', kind: 'peer', sender: 'Checkout v2 · Review', box: '.peer', cut: 'The saved-card list must',
+    whole: 'The saved-card list must stay above the new card form.',
+  },
+  { id: 'x-cut-think', kind: 'thinking', box: '.extra', cut: 'The callback reads next', whole: 'The callback reads next before it checks the session.' },
+  { id: 'x-cut-note', kind: 'systemNote', box: '.extra', cut: 'PostToolUse: lint found', whole: 'PostToolUse: lint found no problems in src/auth.' },
+  { id: 'x-cut-slash', kind: 'slash', box: '.slash', cut: '/review src/auth/redirect.ts', whole: '/review src/auth/redirect.ts src/auth/callback.ts' },
+];
+
+test('a cut message of every kind offers Show more on a line of its own, and loads, fails and cancels as Claude’s does', async ({ page, appHost }) => {
+  const scenario = structuredClone(MOCK);
+  for (const c of CUT_KINDS) scenario.details[c.id] = { text: c.whole };
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  // Once the transcript shows, its open has landed, so the rows below go in after its page.
+  await expect(tx.locator('.say', { hasText: 'Fixed. Here is what changed:' })).toBeVisible();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF,
+    items: CUT_KINDS.map((c) => ({ id: c.id, kind: c.kind, text: c.cut, truncated: true, ...(c.sender === undefined ? {} : { sender: c.sender }) })),
+  });
+  for (const [n, c] of CUT_KINDS.entries()) {
+    const box = tx.locator(c.box, { hasText: c.cut });
+    const key = await box.evaluate((el) => el.closest('[data-tx-row]')?.getAttribute('data-key'));
+    const row = tx.locator(`[data-tx-row][data-key="${key}"]`);
+    const more = box.locator('.morebtn');
+    await expect(more, c.kind).toHaveText('Show more');
+    // The button starts a line of its own, below the text, inside the box's padding.
+    const place = await more.evaluate((button) => {
+      const el = /** @type {HTMLElement} */ (button.parentElement);
+      const css = getComputedStyle(el);
+      const outer = el.getBoundingClientRect();
+      const inner = {
+        left: outer.left + parseFloat(css.borderLeftWidth) + parseFloat(css.paddingLeft),
+        right: outer.right - parseFloat(css.borderRightWidth) - parseFloat(css.paddingRight),
+        bottom: outer.bottom - parseFloat(css.borderBottomWidth) - parseFloat(css.paddingBottom),
+      };
+      const text = document.createRange();
+      text.setStart(el, 0);
+      text.setEndBefore(button);
+      const b = button.getBoundingClientRect();
+      return { left: b.left - inner.left, right: inner.right - b.right, bottom: inner.bottom - b.bottom, below: b.top - text.getBoundingClientRect().bottom };
+    });
+    expect(Math.abs(place.left), c.kind).toBeLessThanOrEqual(0.5);
+    expect(place.right, c.kind).toBeGreaterThan(0);
+    expect(place.bottom, c.kind).toBeGreaterThanOrEqual(-0.5);
+    expect(place.below, c.kind).toBeGreaterThanOrEqual(-0.5);
+
+    // A load that fails shows the laptop's message under the box, and keeps Show more.
+    await hostCall(page, 'setReply', 'transcript.detail', { error: { code: 'not_found', message: TEXT.detailNotFound } });
+    await more.click();
+    await expect(row.locator('.detail'), c.kind).toHaveText(TEXT.detailNotFound);
+    await expect(more, c.kind).toHaveText('Show more');
+    await expect(box, c.kind).not.toContainText(c.whole);
+
+    // A tap while the text loads cancels it, and its reply changes nothing.
+    await hostCall(page, 'setReply', 'transcript.detail', null);
+    await hostCall(page, 'hold', 'transcript.detail');
+    await more.click();
+    await expect(row.locator('.detail .loading'), c.kind).toHaveText('Loading from the laptop…');
+    await expect(more, c.kind).toHaveAttribute('aria-busy', 'true');
+    await more.click();
+    await expect(row.locator('.detail'), c.kind).toHaveCount(0);
+    await expect(more, c.kind).not.toHaveAttribute('aria-busy');
+    await hostCall(page, 'release', 'transcript.detail');
+    await hostCall(page, 'emit', 'transcript.append', {
+      session: LOGIN_REF, items: [{ id: `x-cut-after-${n}`, kind: 'assistant', text: `Here after the cancelled ${c.kind}.`, truncated: false }],
+    });
+    await expect(tx.locator('.say', { hasText: `Here after the cancelled ${c.kind}.` })).toBeVisible();
+    await expect(box, c.kind).not.toContainText(c.whole);
+    await expect(more, c.kind).toHaveText('Show more');
+
+    // The next tap puts the whole text in the box, and the button goes.
+    await more.click();
+    await expect(row.locator(c.box), c.kind).toContainText(c.whole);
+    await expect(row.locator('.morebtn'), c.kind).toHaveCount(0);
+    await expect(row.locator('.detail'), c.kind).toHaveCount(0);
+    expect((await detailRequests(page)).filter(([id]) => id === c.id), c.kind).toEqual([[c.id, 'text', 0], [c.id, 'text', 0], [c.id, 'text', 0]]);
+  }
+});
+
 test('collapsing while the chunks load asks for no more of them', async ({ page, appHost }) => {
   // About 150 KB of input: three chunks.
   const input = 'command: npm test -- auth --verbose '.repeat(4_200);
@@ -592,10 +679,12 @@ test('nested subagents and truncated messages draw, and never open or ask the la
   scenario.details['login-3'].subagent.push(
     { id: 'login-3-4', kind: 'subagent', truncated: false, agentType: 'Plan', target: 'redirect fix', itemCount: 1 },
     { id: 'login-3-5', kind: 'assistant', text: 'The redirect check needs a test for', truncated: true },
+    { id: 'login-3-6', kind: 'user', text: 'Check the logout', truncated: true },
   );
   // The laptop would answer both, so a nested row that asked would draw what it got.
   scenario.details['login-3-4'] = { subagent: [{ id: 'login-3-4-1', kind: 'assistant', text: 'Nested two deep.', truncated: false }] };
   scenario.details['login-3-5'] = { text: 'The redirect check needs a test for each rule it applies.' };
+  scenario.details['login-3-6'] = { text: 'Check the logout redirect as well.' };
   await openApp(page, appHost, { scenario });
   await openSessionByName(page, 'Login redirect fix');
   const tx = app(page).locator('.tx');
@@ -606,10 +695,12 @@ test('nested subagents and truncated messages draw, and never open or ask the la
   await expect(nest.locator('.say')).toHaveText([
     'finishLogin in src/auth/redirect.ts receives next but never uses it.', 'The redirect check needs a test for',
   ]);
+  await expect(nest.locator('.me')).toContainText('Check the logout');
   await expect(nest.locator('button, [aria-expanded], .morebtn, .tri, .nest, .detail')).toHaveCount(0);
 
   await nest.locator('.tool', { hasText: 'Plan agent' }).click();
   await nest.locator('.say').last().click();
+  await nest.locator('.me').click();
   await hostCall(page, 'emit', 'transcript.append', {
     session: LOGIN_REF, items: [{ id: 'x-nested', kind: 'assistant', text: 'Here after the nested taps.', truncated: false }],
   });
@@ -617,6 +708,7 @@ test('nested subagents and truncated messages draw, and never open or ask the la
   await expect(tx.locator('.nest .nest, .nest .detail')).toHaveCount(0);
   await expect(tx).not.toContainText('Nested two deep.');
   await expect(tx).not.toContainText('each rule it applies');
+  await expect(tx).not.toContainText('logout redirect as well');
   expect(await detailRequests(page)).toEqual([['login-3', 'subagent', 0]]);
 });
 

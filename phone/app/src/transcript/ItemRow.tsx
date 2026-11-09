@@ -17,16 +17,22 @@
  * open (it has a record) reads `aria-expanded="true"` and turns its triangle down.
  * - A tool row draws its box under the button: Input and Result, or the loading line. A tap
  *   collapses it, a failed one too, and the next tap starts over.
- * - "Show more" puts the message's whole text in place of the cut text, through `Markdown`,
- *   once all of it arrived, and the button goes, as in the mock. It draws at most
- *   `MAX_DETAIL_LINES` lines of it (`firstLines`), as a tool's parts do. Its box shows the
- *   loading line, the too-large line, after a text too large or cut at those lines, or the
- *   laptop's message. While the text loads, the button stays, marked busy (`aria-busy`), and a
- *   tap on it cancels the load (spec section 7, "Large details"): the detail goes, and the row
- *   shows its cut text and "Show more" again. Until the whole text has arrived the row keeps its
- *   cut text, so a load that fails partway shows the cut text, "Show more" and the laptop's
- *   message, never part of the text, and a tap starts over. So does a text that arrived no
- *   longer than the cut one: the row keeps the cut text and "Show more", with no box.
+ * - "Show more" ends every message the laptop cut (`truncated`): Claude's, yours, a peer's, a
+ *   slash command, thinking and a system note, since the laptop cuts each of their texts at
+ *   4 KB (4b `TranscriptShaper.message`). It puts the message's whole text in place of the cut
+ *   text once all of it arrived, drawn as the cut text is (through `Markdown` for Claude, you
+ *   and a peer, as plain text otherwise), and the button goes, as in the mock. It draws at most
+ *   `MAX_DETAIL_LINES` lines of it (`firstLines`), as a tool's parts do. Its box, under the
+ *   message, shows the loading line, the too-large line, after a text too large or cut at those
+ *   lines, or the laptop's message. While the text loads, the button stays, marked busy
+ *   (`aria-busy`), and a tap on it cancels the load (spec section 7, "Large details"): the
+ *   detail goes, and the row shows its cut text and "Show more" again. Until the whole text has
+ *   arrived the row keeps its cut text, so a load that fails partway shows the cut text, "Show
+ *   more" and the laptop's message, never part of the text, and a tap starts over. So does a
+ *   text that arrived no longer than the cut one: the row keeps the cut text and "Show more",
+ *   with no box. The mock draws the button only after Claude's blocks, where it starts a line
+ *   of its own; after the inline text of the other kinds it is a block, styled inline, since
+ *   app.css is not this file's, so it starts a line there too.
  * - A subagent row draws its items in `.nest`, each through this component as a nested row,
  *   under one budget for the whole nest (`nest.ts`): items past it are not drawn, and the row
  *   shows "Too large for the phone. Open on the laptop." under the nest. It collapses as a tool
@@ -41,7 +47,7 @@
  * row alone.
  */
 
-import { memo, useMemo, type JSX } from 'react';
+import { memo, useMemo, type CSSProperties, type JSX, type ReactNode } from 'react';
 import type { MdNode } from '../markdown/mdTree.ts';
 import type { PhoneItem } from '../protocol/types.ts';
 import { firstLines } from '../state/detail.ts';
@@ -87,34 +93,46 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
   const it: PhoneItem = row.item;
   const text = it.text ?? '';
   const name = it.toolName ?? '';
+  // The whole text takes the cut text's place only when it says more than the cut text does.
+  const full = wholeText !== undefined && wholeText.length > text.length ? whole : null;
+  // The text a message draws, and its markdown read ahead, which is of the cut text only.
+  const shown = full?.text ?? text;
+  const tree = full === null ? p.tree : null;
+  /**
+   * A message's row (this file's header): its box `cls`, holding `head`, then `body`, its text,
+   * then "Show more" while it offers it, on a line of its own after inline text; then the
+   * detail's box.
+   */
+  const message = (cls: string, head: ReactNode, body: ReactNode, inline: boolean): JSX.Element => {
+    const loading = detail?.phase === 'loading';
+    return (
+      <>
+        <div className={cls}>
+          {head}
+          {body}
+          {it.truncated && toggle !== null && full === null && (
+            <button
+              className="morebtn"
+              type="button"
+              style={inline ? OWN_LINE : undefined}
+              aria-busy={loading || undefined}
+              onClick={() => toggle('text')}
+            >
+              Show more
+            </button>
+          )}
+        </div>
+        {detail !== null && (full !== null || loading || detail.phase === 'failed') && (
+          <DetailPane detail={detail} parts={false} cut={full?.cut === true} />
+        )}
+      </>
+    );
+  };
   switch (it.kind) {
     case 'user':
-      return (
-        <div className="me">
-          <span className="who">You</span>
-          <Markdown inline text={text} nodes={p.tree} />
-        </div>
-      );
-    case 'assistant': {
-      const loading = detail?.phase === 'loading';
-      // The whole text takes the cut text's place only when it says more than the cut text does.
-      const full = wholeText !== undefined && wholeText.length > text.length ? whole : null;
-      return (
-        <>
-          <div className="say">
-            <Markdown text={full?.text ?? text} nodes={full === null ? p.tree : null} />
-            {it.truncated && toggle !== null && full === null && (
-              <button className="morebtn" type="button" aria-busy={loading || undefined} onClick={() => toggle('text')}>
-                Show more
-              </button>
-            )}
-          </div>
-          {detail !== null && (full !== null || loading || detail.phase === 'failed') && (
-            <DetailPane detail={detail} parts={false} cut={full?.cut === true} />
-          )}
-        </>
-      );
-    }
+      return message('me', <span className="who">You</span>, <Markdown inline text={shown} nodes={tree} />, true);
+    case 'assistant':
+      return message('say', null, <Markdown text={shown} nodes={tree} />, false);
     case 'tool': {
       const label = (
         <>
@@ -160,37 +178,28 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
       );
     }
     case 'slash':
-      return (
-        <div className="slash">
-          <code>{text}</code>
-        </div>
+      return message('slash', null, <code>{shown}</code>, true);
+    case 'peer': {
+      const head = (
+        <span className="who">
+          <Icon name="msg" />
+          From {it.sender ?? ''}
+        </span>
       );
-    case 'peer':
-      return (
-        <div className="peer">
-          <span className="who">
-            <Icon name="msg" />
-            From {it.sender ?? ''}
-          </span>
-          <Markdown inline text={text} nodes={p.tree} />
-        </div>
-      );
+      return message('peer', head, <Markdown inline text={shown} nodes={tree} />, true);
+    }
     case 'thinking':
-      return (
-        <div className="extra">
-          <span className="dl">Thinking</span>
-          {text}
-        </div>
-      );
+      return message('extra', <span className="dl">Thinking</span>, shown, true);
     case 'systemNote':
-      return (
-        <div className="extra">
-          <span className="dl">System</span>
-          {text}
-        </div>
-      );
+      return message('extra', <span className="dl">System</span>, shown, true);
   }
 });
+
+/**
+ * "Show more" after inline text, or in `.slash`'s column: a block, so it starts a line of its
+ * own, as after Claude's blocks, and only as wide as its words, so the tap goes to it alone.
+ */
+const OWN_LINE: CSSProperties = { display: 'block', alignSelf: 'flex-start' };
 
 /**
  * A tool, file edit or subagent row's line, `label` after the triangle: a button that opens the
