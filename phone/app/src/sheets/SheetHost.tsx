@@ -196,6 +196,8 @@ function useSheetFocus(box: RefObject<HTMLDivElement | null>, name: string | nul
  * a field in it takes focus, and each time `box` changes size, as the New and Model sheets do
  * while the keyboard moves (see the header). It scrolls `box` alone, by as little as it takes, to show the
  * field's row (`.frow`, its label with it), or the field when the row is taller than what shows.
+ * Where the browser has no `ResizeObserver`, it does so only as a field takes focus, and the sheet
+ * works all the same (the prompt card's `useEndInView` checks for it too).
  */
 function useFieldInView(box: RefObject<HTMLDivElement | null>, on: boolean): void {
   useEffect(() => {
@@ -206,11 +208,11 @@ function useFieldInView(box: RefObject<HTMLDivElement | null>, on: boolean): voi
       if (field === null || !el.contains(field) || !FIELD_TAGS.has(field.tagName)) return;
       revealIn(el, field);
     };
-    const observer = new ResizeObserver(reveal);
-    observer.observe(el);
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(reveal) : null;
+    observer?.observe(el);
     el.addEventListener('focusin', reveal);
     return () => {
-      observer.disconnect();
+      observer?.disconnect();
       el.removeEventListener('focusin', reveal);
     };
   }, [box, on]);

@@ -22,8 +22,11 @@
  * receipt, whatever the card showed, with two exceptions: an `elsewhere` card stays until
  * `dismissPrompt`, and a `sending` card stays until its reply settles, whatever happens to its
  * set. A sending card is the record of an answer in flight, so no second answer goes out for its
- * prompt. A card keeps the prompt it shows, so it can outlive its prompt's set. A prompt still in
- * the set whose card was taken down does not get a new one.
+ * prompt. Once its reply settles, the rule applies: a card whose prompt is no longer in its set
+ * goes then, unless it turned `elsewhere`, and `answeredHere` still records the answer when it
+ * landed or may have, so the prompt comes back `answered` (or `open`) if it enters the set again.
+ * A card keeps the prompt it shows, so it can outlive its prompt's set. A prompt still in the set
+ * whose card was taken down does not get a new one.
  *
  * **Answering.** `beginAnswer` turns an `open` card `sending`, and nothing else does, so one
  * gesture sends one answer. Its reply (`settleAnswer`):
@@ -209,7 +212,7 @@ export function applyPromptChanged(
 
   for (const k of Object.keys(cards.value)) {
     const card = cards.value[k]!;
-    if (card.phase === 'elsewhere' || card.phase === 'sending') continue;
+    if (!needsItsSet(card)) continue;
     const set = own(sets.value, refKey(card.session)) ?? [];
     if (!set.some((p) => p.id === card.prompt.id)) cards.delete(k);
   }
@@ -223,7 +226,9 @@ export function applyPromptChanged(
  * none. An `elsewhere` card comes first, so the user reads that their prompt was answered before
  * another prompt takes its place, then a `sending` card, then an `answered` one, then an `open`
  * one, so a second tap meant for the prompt just answered never lands on the next. Cards of one
- * phase go in the order of the session's set.
+ * phase go in the order of the session's set. An `answered` or `open` card shows only while its
+ * prompt is in the set: it says the prompt waits, or that it took this phone's answer and has not
+ * closed yet, which a prompt the set no longer holds does not.
  */
 export function cardFor(s: PromptsState, ref: PhoneSessionRef): { prompt: PhonePrompt; card: CardState } | null {
   const set = own(s.bySession, refKey(ref)) ?? [];
@@ -236,9 +241,15 @@ export function cardFor(s: PromptsState, ref: PhoneSessionRef): { prompt: PhoneP
   let best: CardState | null = null;
   for (const card of candidates) {
     if (!sameRef(card.session, ref)) continue;
+    if (needsItsSet(card) && !set.some((p) => p.id === card.prompt.id)) continue;
     if (best === null || PHASE_RANK[card.phase] < PHASE_RANK[best.phase]) best = card;
   }
   return best === null ? null : { prompt: best.prompt, card: best };
+}
+
+/** Whether `card` stands only while its prompt is in its session's set: an `open` or an `answered` one. */
+function needsItsSet(card: CardState): boolean {
+  return card.phase === 'open' || card.phase === 'answered';
 }
 
 const PHASE_RANK: Readonly<Record<CardPhase, number>> = { elsewhere: 0, sending: 1, answered: 2, open: 3 };
@@ -316,7 +327,11 @@ export function mayHaveLanded(code: string, fitsOneFrame: boolean): boolean {
  * in `ref`'s session, and the receipt due now, if any, for that session's transcript. Only a card
  * still `sending` that answer changes, so a reply that comes after a laptop resolution changes
  * nothing. A sending card leaves the slice only through its reply, or through a laptop resolution,
- * so a reply never finds its card gone otherwise.
+ * so a reply never finds its card gone otherwise. With no resolution held, a card whose prompt the
+ * session's set no longer holds goes as the reply settles it, unless it turns `elsewhere`
+ * (`withSettledCard`): its prompt left with no resolution, so nothing waits on it. What the reply
+ * records in `answeredHere` it records all the same, so the prompt, should it enter the set again,
+ * gets its card back `answered` or `open` (`newCard`); a refusal on it goes with the card.
  */
 export function settleAnswer(
   s: PromptsState,
@@ -344,17 +359,17 @@ export function settleAnswer(
     return { prompts: forget(after, k), receipt };
   }
   if (taken) {
-    const answered = withCard(s, k, { ...card, phase: 'answered', answerID: null });
+    const answered = withSettledCard(s, k, { ...card, phase: 'answered', answerID: null });
     return { prompts: { ...answered, answeredHere: remember(answered.answeredHere, k, { summary, taken: true }) }, receipt: null };
   }
   if (outcome === 'already_resolved') {
     const after: CardState = earlier === undefined
       ? { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }
       : { ...card, phase: 'answered', summary: earlier.summary, answerID: null };
-    return { prompts: withCard(s, k, after), receipt: null };
+    return { prompts: withSettledCard(s, k, after), receipt: null };
   }
   const refusal = 'error' in settled && settled.error !== 'superseded' ? settled.message : null;
-  const reopened = withCard(s, k, { ...card, phase: 'open', refusal, summary: null, answerID: null });
+  const reopened = withSettledCard(s, k, { ...card, phase: 'open', refusal, summary: null, answerID: null });
   if (!landed) return { prompts: reopened, receipt: null };
   return { prompts: { ...reopened, answeredHere: remember(reopened.answeredHere, k, { summary, taken: false }) }, receipt: null };
 }
@@ -414,6 +429,16 @@ function withCard(s: PromptsState, k: string, card: CardState): PromptsState {
 function withoutCard(s: PromptsState, k: string): PromptsState {
   const cards = withoutKey(s.cards, k);
   return cards === s.cards ? s : { ...s, cards };
+}
+
+/**
+ * `s` with `card`, which a reply just settled, under `k`; or without it when it is `open` or
+ * `answered` and its session's set no longer holds its prompt (`needsItsSet`), as
+ * `applyPromptChanged` takes such a card down.
+ */
+function withSettledCard(s: PromptsState, k: string, card: CardState): PromptsState {
+  const listed = (own(s.bySession, refKey(card.session)) ?? []).some((p) => p.id === card.prompt.id);
+  return needsItsSet(card) && !listed ? withoutCard(s, k) : withCard(s, k, card);
 }
 
 /** `s` without the `answeredHere` entry under `k`. */

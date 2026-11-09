@@ -42,8 +42,9 @@
 //   the new session once the list shows it (`openPending({ ref }, mark)`), unless the user has
 //   navigated since the mark; when the user moved on from it, it does neither.
 // - `newSheetShown(sheet): void` – the New sheet calls it as `sheet` shows: the words of a create
-//   in its repo that failed while no New sheet of it showed appear in it, and a create for another
-//   repo is one the user moved on from (below).
+//   in its repo that failed while no New sheet of it showed appear in it, a create on its way for
+//   another repo is one the user moved on from, and so is a create that settled, whatever its
+//   repo (below).
 //
 // **The repo.** A create goes only to the repo of the New sheet `ui.sheet` shows at the moment
 // of the gesture, read from the store in one read: `repoID` must be that sheet's, the repo whose
@@ -67,11 +68,13 @@
 // which shows them.
 //
 // **Moving on.** A closed sheet does not stop a create that succeeds from opening its session; a
-// navigation does, by the mark, and so does a New sheet that shows for another repo: the create's
-// mark is then null (`newSheetShown` in `state/sheets.ts`), so it opens nothing and toasts
-// nothing, and an open of its session still waiting for the list is dropped, so its session never
-// closes that sheet and the form in it. The new row just appears in the list. A New sheet that
-// shows for the create's own repo takes it back, so its session opens all the same.
+// navigation does, by the mark, and so does a New sheet that shows for another repo while the
+// create is on its way: the create's mark is then null (`newSheetShown` in `state/sheets.ts`), so
+// it opens nothing and toasts nothing. The new row just appears in the list. A New sheet that
+// shows for the create's own repo while it is on its way shows "Creating…" and takes it back, so
+// its session opens all the same. Once the create has settled and its session waits for the list,
+// a New sheet that shows for any repo, its own included, is a new form: the waiting open is
+// dropped, so the session's arrival never closes that sheet and the form in it.
 //
 // **The target.** `from` is the session the menu or sheet showed when the user tapped. Each of
 // the three acts only on the session the route shows at the moment of the gesture, read from the
@@ -99,7 +102,10 @@
 //
 // **Errors** show their message as they come, `not_confirmed` included; `superseded` is silent.
 // They show in the sheet the gesture was made on (`failed` in the slice) while that sheet still
-// shows over the session: the same sheet, and for `switch-confirm` the same profile. A refused
+// shows over the session: the very `ui.sheet` object of the tap. Every opening of a sheet makes a
+// new one (`openSheet`), and every other change of `ui` keeps it, so a sheet of the same name, or
+// a `switch-confirm` for the same profile, that the user opened since is another sheet and gets
+// none of it. A success closes only that object too (`settle`). A refused
 // switch or model change also goes to the session's `ui.refusal`, which the composer shows once
 // the sheet is gone. A fork's error goes to `ui.refusal` only when no sheet shows it: made from
 // the account menu, or the user moved to another sheet or closed it meanwhile. So an error never
@@ -180,15 +186,13 @@ export function errorText(error: unknown): string | null {
 }
 
 /**
- * The sheet `ui` holds when it is still the one `to`'s gesture was made on, over `to`'s session:
- * the same sheet, and for `switch-confirm` the same profile; else null.
+ * The sheet `ui` holds when it is still the one `to`'s gesture was made on, by identity, over
+ * `to`'s session; else null. A sheet opened since, though it has the same name and profile, is
+ * another object, and not the one the user tapped in.
  */
 function gestureSheet(ui: UIState, to: ActTarget): SheetState | null {
   const { route, sheet } = ui;
-  const made = to.sheet;
-  if (sheet === null || made === null || route.screen !== 'session' || !sameRef(route.ref, to.ref)) return null;
-  if (sheet.name !== made.name) return null;
-  if (sheet.name === 'switch-confirm' && made.name === 'switch-confirm' && sheet.profileID !== made.profileID) return null;
+  if (sheet === null || sheet !== to.sheet || route.screen !== 'session' || !sameRef(route.ref, to.ref)) return null;
   return sheet;
 }
 
@@ -295,14 +299,14 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
   };
 
   /**
-   * Opens `open`, the session create `c` made, once the list shows it (`openPending`), unless
+   * Opens `open`, the session a create made, once the list shows it (`openPending`), unless
    * `mark` is null or the user navigated since it; and, while it waits, keeps it as the create's
-   * (`awaitOpen`), so a New sheet that shows for another repo can drop it.
+   * (`awaitOpen`), so a New sheet that shows meanwhile can drop it.
    */
-  const openCreated = (c: CreateInFlight, open: PendingOpen, mark: number | null): void => {
+  const openCreated = (open: PendingOpen, mark: number | null): void => {
     if (mark === null) return;
     self().openPending(open, mark);
-    store.update((s) => (s.ui.pendingOpen === open ? { ...s, sheets: awaitOpen(s.sheets, c.repoID, open) } : s));
+    store.update((s) => (s.ui.pendingOpen === open ? { ...s, sheets: awaitOpen(s.sheets, open) } : s));
   };
 
   return {
@@ -444,7 +448,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         text = errorText(error);
       }
       const mark = settled(c, worktreeID === null ? { taken: false, text } : { taken: true, toast: null });
-      if (worktreeID !== null) openCreated(c, { worktreeID, toast: 'Created {name}' }, mark);
+      if (worktreeID !== null) openCreated({ worktreeID, toast: 'Created {name}' }, mark);
     },
 
     async createRemote(params: PhoneRemoteCreateParams): Promise<void> {
@@ -465,21 +469,22 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         text = errorText(error);
       }
       const mark = settled(c, made === null ? { taken: false, text } : { taken: true, toast: `Remote session started on ${params.provider}` });
-      if (made !== null) openCreated(c, { ref: made }, mark);
+      if (made !== null) openCreated({ ref: made }, mark);
     },
 
     /**
      * What a New sheet's showing does (`newSheetShown` in `state/sheets.ts`), while `sheet` is the
-     * sheet `ui.sheet` holds: the words kept for its repo show in it; a create for another repo is
-     * one the user moved on from, and an open of its session still waiting is dropped
-     * (`ui.pendingOpen`, when it is still that open); a create for its own repo is taken back.
-     * The New sheet calls it as it shows, before it is drawn.
+     * sheet `ui.sheet` holds: the words kept for its repo show in it; a create on its way for
+     * another repo is one the user moved on from, and one for its own repo is taken back; an open
+     * of a settled create's session still waiting for the list is dropped, whatever its repo
+     * (`ui.pendingOpen`, when it is still that open). The New sheet calls it as it shows, before
+     * it is drawn.
      */
     newSheetShown(sheet: SheetState): void {
       store.update((s) => {
         if (sheet.name !== 'new' || s.ui.sheet !== sheet) return s;
         const waiting = s.sheets.awaitingOpen;
-        const drop = waiting !== null && waiting.repoID !== sheet.repoID && s.ui.pendingOpen === waiting.open;
+        const drop = waiting !== null && s.ui.pendingOpen === waiting;
         const sheets = newSheetShown(s.sheets, sheet, s.ui.nav);
         if (sheets === s.sheets && !drop) return s;
         return { ...s, sheets, ui: drop ? { ...s.ui, pendingOpen: null } : s.ui };

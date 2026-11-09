@@ -226,6 +226,61 @@ test('a switch that succeeds closes the sheet it came from, but not one opened s
   assert.equal(h.state().ui.toast?.text, 'Restarted under Personal');
 });
 
+test('a failure or a success reaches only the sheet the tap was made in, never one of the same name and profile opened since', async () => {
+  /** Dismisses `sheet`, a switch-confirm for Personal, then opens Menu, Switch account and Personal again. */
+  const reopen = (h: Awaited<ReturnType<typeof harness>>, sheet: SheetState): SheetState => {
+    h.actions.closeSheet();
+    h.actions.openSheet({ name: 'menu' });
+    h.actions.openSheet({ name: 'switch' });
+    h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+    const again = h.state().ui.sheet!;
+    assert.notEqual(again, sheet);
+    assert.deepEqual(again, sheet);
+    return again;
+  };
+  // Restart in switch-confirm for Personal, the sheet dismissed, then Menu, Switch account, Personal again.
+  let h = await harness();
+  h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  let tapped = h.state().ui.sheet!;
+  let pending = h.actions.switchProfile(PERSONAL.id, R);
+  let since = reopen(h, tapped);
+  h.last('session.switchProfile').reject(new AppError('refused', REFUSED));
+  await pending;
+  assert.equal(h.state().sheets.failed, null);
+  assert.equal(h.refusal(), REFUSED);
+  assert.equal(h.state().ui.sheet, since);
+  // A fork's error from the sheet goes to the composer, as no sheet that asked shows.
+  h = await harness();
+  h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  tapped = h.state().ui.sheet!;
+  const fork = h.actions.fork(PERSONAL.id, R);
+  reopen(h, tapped);
+  h.last('session.fork').reject(new AppError('internal', 'TBD could not copy this conversation.'));
+  await fork;
+  assert.equal(h.state().sheets.failed, null);
+  assert.equal(h.refusal(), 'TBD could not copy this conversation.');
+  // A success closes nothing opened since.
+  h = await harness();
+  h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  tapped = h.state().ui.sheet!;
+  pending = h.actions.switchProfile(PERSONAL.id, R);
+  since = reopen(h, tapped);
+  h.last('session.switchProfile').resolve({ session: R });
+  await pending;
+  assert.equal(h.state().ui.sheet, since);
+  // The sheet the tap was made in still gets them while it shows, whatever else changes meanwhile.
+  h = await harness();
+  h.actions.openSheet({ name: 'model' });
+  tapped = h.state().ui.sheet!;
+  const model = h.actions.setModel('sonnet', R);
+  h.listed(snapshot().rows);
+  h.actions.toast('Something else');
+  assert.equal(h.state().ui.sheet, tapped);
+  h.last('session.setModel').reject(new AppError('refused', REFUSED));
+  await model;
+  assert.deepEqual(h.state().sheets.failed, { sheet: tapped, text: REFUSED });
+});
+
 // MARK: - The target
 
 test('nothing goes out for a session other than the one the route shows', async () => {
@@ -833,7 +888,7 @@ test('a New sheet shown for another repo drops the open of a created session sti
   assert.equal(h.state().ui.toast, null);
 });
 
-test("a New sheet shown again for the create's own repo keeps its open, before the reply or after it", async () => {
+test("a New sheet shown again for the create's own repo takes the create back while it is on its way, and is a new form once it settled", async () => {
   const made: PhoneSessionRef = { kind: 'local', terminalID: 'T-made' };
   // Before the reply, and after a sheet for another repo meanwhile: the sheet of its repo takes it back.
   let h = await newHarness();
@@ -848,15 +903,20 @@ test("a New sheet shown again for the create's own repo keeps its open, before t
   h.listRow('W-new', 'new-worktree-1', made);
   assert.deepEqual(h.state().ui.route, { screen: 'session', ref: made });
   assert.equal(h.state().ui.toast?.text, 'Created new-worktree-1');
-  // After the reply, while the session waits for the list.
+  // After the reply, while the session waits for the list: the user is starting a second create
+  // there, so the first one's arrival opens nothing and leaves that sheet and its form.
   h = await newHarness();
   pending = h.actions.createWorktree(REPO, MESSAGE);
   h.last('worktree.create').resolve({ worktreeID: 'W-new' });
   await pending;
-  h.showNew(REPO);
   assert.deepEqual(h.state().ui.pendingOpen, { worktreeID: 'W-new', toast: 'Created {name}' });
+  const again = h.showNew(REPO);
+  assert.equal(h.state().ui.pendingOpen, null);
+  assert.equal(h.state().sheets.awaitingOpen, null);
   h.listRow('W-new', 'new-worktree-1', made);
-  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: made });
+  assert.deepEqual(h.state().ui.route, { screen: 'sessions' });
+  assert.equal(h.sheet(), again);
+  assert.equal(h.state().ui.toast, null);
 });
 
 test('createRemote sends the params, toasts the provider after the reply, and opens the session once listed', async () => {

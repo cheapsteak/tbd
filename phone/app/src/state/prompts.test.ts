@@ -397,6 +397,51 @@ test('a sending card stays when its prompt leaves the set, and its reply still s
   assert.deepEqual(hereOf(settled, 'a'), { summary: 'Yes', taken: true });
 });
 
+test('a reply that settles a card whose prompt left the set with no resolution takes the card down, and records the answer', () => {
+  const left = changed(beginAnswer(withOpen('a', 'b'), R, 'a', 'Yes', 't1'), { prompts: [questionPrompt('b')] }).prompts;
+  assert.equal(cardOf(left, 'a')!.phase, 'sending');
+  // Delivered: no Answered card for a prompt the set no longer holds, and the open prompt shows.
+  const delivered = settleAnswer(left, R, 'a', 't1', { outcome: 'delivered' });
+  assert.equal(cardOf(delivered.prompts, 'a'), undefined);
+  assert.deepEqual(hereOf(delivered.prompts, 'a'), { summary: 'Yes', taken: true });
+  assert.equal(delivered.receipt, null);
+  assert.deepEqual(cardFor(delivered.prompts, R)?.prompt.id, 'b');
+  // The prompt coming back finds its answer taken.
+  const back = changed(delivered.prompts, { prompts: [questionPrompt('a'), questionPrompt('b')] }).prompts;
+  assert.equal(cardOf(back, 'a')!.phase, 'answered');
+  assert.equal(cardOf(back, 'a')!.summary, 'Yes');
+  // An answer that may have landed: the card goes, the answer is kept, not as taken.
+  const maybe = settleAnswer(left, R, 'a', 't1', MAYBE).prompts;
+  assert.equal(cardOf(maybe, 'a'), undefined);
+  assert.deepEqual(hereOf(maybe, 'a'), { summary: 'Yes', taken: false });
+  assert.equal(cardOf(changed(maybe, { prompts: [questionPrompt('a'), questionPrompt('b')] }).prompts, 'a')!.phase, 'open');
+  // A refusal: the card goes, and nothing is kept.
+  const refused = settleAnswer(left, R, 'a', 't1', { error: 'refused', message: 'No.', mayHaveLanded: false }).prompts;
+  assert.equal(cardOf(refused, 'a'), undefined);
+  assert.equal(hereOf(refused, 'a'), undefined);
+  // already_resolved: elsewhere, which stays until OK whatever its set.
+  const lost = settleAnswer(left, R, 'a', 't1', { outcome: 'already_resolved' }).prompts;
+  assert.equal(cardOf(lost, 'a')!.phase, 'elsewhere');
+  assert.equal(cardFor(lost, R)?.prompt.id, 'a');
+  // A prompt still in the set keeps its card, as before.
+  const kept = settleAnswer(beginAnswer(withOpen('a', 'b'), R, 'a', 'Yes', 't1'), R, 'a', 't1', { outcome: 'delivered' }).prompts;
+  assert.equal(cardOf(kept, 'a')!.phase, 'answered');
+});
+
+test('the dock shows no open or answered card whose prompt the set no longer holds', () => {
+  const answered = settleAnswer(beginAnswer(withOpen('a', 'b'), R, 'a', 'Yes', 't1'), R, 'a', 't1', { outcome: 'delivered' }).prompts;
+  assert.equal(cardFor(answered, R)?.card.phase, 'answered');
+  // The same cards with the set changed under them, as no reducer leaves them.
+  const [key] = Object.keys(answered.bySession);
+  const onlyB: PromptsState = { ...answered, bySession: { [key!]: [questionPrompt('b')] } };
+  assert.equal(cardFor(onlyB, R)?.prompt.id, 'b');
+  assert.equal(cardFor(onlyB, R)?.card.phase, 'open');
+  assert.equal(cardFor({ ...answered, bySession: {} }, R), null);
+  // An elsewhere card shows with no set at all.
+  const elsewhere = changed(withOpen('a'), { prompts: [], resolved: [{ promptID: 'a', answeredBy: 'laptop' }] }).prompts;
+  assert.equal(cardFor({ ...elsewhere, bySession: {} }, R)?.card.phase, 'elsewhere');
+});
+
 test("a set for another session drops the sets before it, and their cards but an elsewhere or a sending one", () => {
   let s = withOpen('a', 'b', 'c');
   s = changed(s, { prompts: [questionPrompt('b'), questionPrompt('c')], resolved: [{ promptID: 'a', answeredBy: 'laptop' }] }).prompts;
@@ -411,13 +456,14 @@ test("a set for another session drops the sets before it, and their cards but an
   assert.equal(cardOf(moved, 'o', OTHER)!.phase, 'open');
   assert.equal(cardFor(moved, R)?.card.phase, 'elsewhere');
   assert.equal(cardFor(moved, OTHER)?.prompt.id, 'o');
-  // The reply settles the card all the same, and records the answer for when the feed comes back.
+  // The reply settles the card all the same: its set is gone, so the card goes with the reply, and
+  // the answer is recorded for when the feed comes back.
   const settled = settleAnswer(moved, R, 'c', 't-c', { outcome: 'delivered' }).prompts;
-  assert.equal(cardOf(settled, 'c')!.phase, 'answered');
-  assert.deepEqual(hereOf(settled, 'c'), { summary: 'y', taken: true });
+  assert.equal(cardOf(settled, 'c'), undefined, 'an answered card outside the set goes as its reply settles it');
+  assert.deepEqual(hereOf(settled, 'c'), { summary: 'y', taken: true }, 'and its entry stays');
+  assert.equal(cardFor(settled, R)?.card.phase, 'elsewhere');
   const swept = applyPromptChanged(settled, { session: OTHER, prompts: [questionPrompt('o')] }).prompts;
-  assert.equal(cardOf(swept, 'c'), undefined, 'an answered card outside the set goes on the next event');
-  assert.deepEqual(hereOf(swept, 'c'), { summary: 'y', taken: true }, 'and its entry stays');
+  assert.deepEqual(hereOf(swept, 'c'), { summary: 'y', taken: true }, 'and stays after the next event');
 });
 
 test("a prompt that enters a set starts answered when this phone's answer to it was taken", () => {
@@ -471,7 +517,7 @@ test('a resolution for one session never touches a card of another with the same
   assert.equal(cardOf(resolved, 'a', OTHER), cardOf(both, 'a', OTHER));
   assert.equal(cardFor(resolved, OTHER)?.card.phase, 'sending');
   const settled = settleAnswer(resolved, OTHER, 'a', 't-o', { outcome: 'delivered' }).prompts;
-  assert.equal(cardOf(settled, 'a', OTHER)!.phase, 'answered');
+  assert.equal(cardOf(settled, 'a', OTHER), undefined, "OTHER's set is gone, so its card goes as the reply settles it");
   assert.equal(cardOf(settled, 'a'), cardOf(resolved, 'a'));
   assert.deepEqual(hereOf(settled, 'a', OTHER), { summary: 'x', taken: true });
   assert.equal(hereOf(settled, 'a'), undefined);

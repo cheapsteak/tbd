@@ -26,15 +26,17 @@
  *   `beginCreate` marks it, and nothing else does, so one gesture sends one create; `endCreate`
  *   clears it once the create settles, whatever the outcome. One create at a time, whatever the
  *   repo: while one is on its way none goes out.
- * - **Moving on** (`newSheetShown`): a New sheet that shows for another repo is the user moving on
- *   from the create, as a navigation is. The create's mark becomes null, so its session opens
- *   nowhere and its success toasts nothing: its row just appears in the list. A New sheet that
- *   shows for the create's own repo takes the create back, with the mark of that moment, as that
- *   sheet says the session opens when it is ready.
+ * - **Moving on** (`newSheetShown`): while a create is on its way, a New sheet that shows for
+ *   another repo is the user moving on from it, as a navigation is. The create's mark becomes
+ *   null, so its session opens nowhere and its success toasts nothing: its row just appears in the
+ *   list. A New sheet that shows for the create's own repo while it is on its way takes it back,
+ *   with the mark of that moment, as that sheet shows "Creating…" and says the session opens when
+ *   it is ready.
  * - **Waiting to open** (`awaitingOpen`): the open a create handed to `openPending`, by identity,
- *   and its repo, while it waits for the list to show the new session. A New sheet that shows for
- *   another repo drops that open (the action clears `ui.pendingOpen` when it is still that one), so
- *   the session's arrival never closes the sheet and the form in it.
+ *   while it waits for the list to show the new session. Only a create that settled
+ *   hands one over, so a New sheet that shows meanwhile, for any repo, its own included, is a new
+ *   form and the user moving on: it drops that open (the action clears `ui.pendingOpen` when it is
+ *   still that one), so the session's arrival never closes the sheet and the form in it.
  * - **A create's failure no sheet showed** (`lostCreates`): the words of each create that failed
  *   while no New sheet of its repo showed, by repo. The next New sheet that shows for that repo
  *   shows them (`newSheetShown` makes them its `failed`), so they are never lost unseen; a create
@@ -102,12 +104,6 @@ export interface CreateOnItsWay extends CreateInFlight {
   mark: number | null;
 }
 
-/** The open a create handed to `openPending`, by identity, and the create's repo. */
-export interface CreateAwaitingOpen {
-  repoID: string;
-  open: PendingOpen;
-}
-
 export interface SheetsState {
   profiles: ProfilesLoad;
   /** The sessions whose switch, fork or model change is on its way, by `refKey`. */
@@ -117,8 +113,8 @@ export interface SheetsState {
   providers: ProvidersLoad;
   /** The create on its way, or null. */
   creating: CreateOnItsWay | null;
-  /** The last open a create handed to `openPending`, or null. It may have opened since. */
-  awaitingOpen: CreateAwaitingOpen | null;
+  /** The last open a create that settled handed to `openPending`, by identity, or null. It may have opened since. */
+  awaitingOpen: PendingOpen | null;
   /** The words of each create that failed while no New sheet of its repo showed, by repo. */
   lostCreates: Readonly<Record<string, string>>;
 }
@@ -213,9 +209,9 @@ export function keepLostCreate(s: SheetsState, repoID: string, text: string): Sh
   return { ...s, lostCreates: withValue(s.lostCreates, repoID, text) };
 }
 
-/** `s` with `open`, which a create in `repoID` handed to `openPending`, waiting for the list. */
-export function awaitOpen(s: SheetsState, repoID: string, open: PendingOpen): SheetsState {
-  return { ...s, awaitingOpen: { repoID, open } };
+/** `s` with `open`, which a create that settled handed to `openPending`, waiting for the list. */
+export function awaitOpen(s: SheetsState, open: PendingOpen): SheetsState {
+  return { ...s, awaitingOpen: open };
 }
 
 /**
@@ -223,8 +219,9 @@ export function awaitOpen(s: SheetsState, repoID: string, open: PendingOpen): Sh
  * 1. The words kept for its repo (`keepLostCreate`) show in it (`failed`) and are kept no longer.
  * 2. The create on its way, when it is for another repo, is one the user moved on from: its mark
  *    becomes null. When it is for this repo, the user is back with it: its mark becomes `nav`.
- * 3. An open waiting for another repo's create (`awaitingOpen`) is dropped. The caller clears
- *    `ui.pendingOpen` too while it is that open.
+ * 3. An open waiting for a create that settled (`awaitingOpen`) is dropped, whatever its repo: the
+ *    sheet is a new form, not the create's. The caller clears `ui.pendingOpen` too while it is
+ *    that open.
  *
  * `s` itself when `sheet` is no New sheet, or none of these changes anything.
  */
@@ -239,7 +236,7 @@ export function newSheetShown(s: SheetsState, sheet: SheetState, nav: number): S
     const mark = c.repoID === repoID ? nav : null;
     if (c.mark !== mark) next = { ...next, creating: { ...c, mark } };
   }
-  if (next.awaitingOpen !== null && next.awaitingOpen.repoID !== repoID) next = { ...next, awaitingOpen: null };
+  if (next.awaitingOpen !== null) next = { ...next, awaitingOpen: null };
   return next;
 }
 

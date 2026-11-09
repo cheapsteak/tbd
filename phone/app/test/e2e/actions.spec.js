@@ -1191,6 +1191,44 @@ test("a New sheet for the create's own repo, opened again while it is on its way
   await expect(app(page).locator('.toast')).toHaveText('Created new-worktree-1');
 });
 
+test("a New sheet for the create's own repo, opened once the create has landed, keeps its form when the new session arrives", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  // The reply comes; the list that shows the new worktree waits.
+  await hostCall(page, 'hold', 'sessions.changed');
+  await openNew(page, 'acme-web');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect(sheet(page)).toHaveCount(0);
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  // A second worktree in the same repo: a new form, not the first create's.
+  await openNew(page, 'acme-web');
+  await expect(sheet(page).locator('.creating')).toHaveCount(0);
+  await firstMessage(page).fill(REMOTE_MESSAGE);
+  await hostCall(page, 'release', 'sessions.changed');
+  await expect(app(page).locator('.row', { hasText: 'new-worktree-1' })).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(screenName(page)).toHaveAttribute('data-screen', 'sessions');
+  await expect(sheet(page).locator('.sh-title')).toHaveText('New in acme-web');
+  await expect(firstMessage(page)).toHaveValue(REMOTE_MESSAGE);
+  await expect(app(page).locator('.toast')).toHaveCount(0);
+  expect(await creates(page)).toHaveLength(1);
+});
+
+test('the New sheet opens and takes typing in a browser with no ResizeObserver', async ({ page, appHost }) => {
+  await page.addInitScript(() => {
+    delete (/** @type {any} */ (globalThis)).ResizeObserver;
+  });
+  await openApp(page, appHost);
+  expect(await app(page).locator('#app').evaluate(() => typeof (/** @type {any} */ (globalThis)).ResizeObserver)).toBe('undefined');
+  await openNew(page, 'acme-web');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await expect(firstMessage(page)).toBeFocused();
+  await expect(firstMessage(page)).toHaveValue(LOCAL_MESSAGE);
+  await expect(createButton(page)).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await expect(sheet(page)).toHaveCount(0);
+});
+
 test('a double click on Create posts one worktree.create', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openNew(page, 'acme-web');
