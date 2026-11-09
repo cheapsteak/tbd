@@ -263,7 +263,7 @@ struct DrawableTrackerTests {
     @Test func aNilDrawableHoldsTheLimitUntilAReportArrives() {
         let tracker = DrawableTracker()
         let out = tracker.add(acquiredAt: .seconds(100))
-        tracker.noteNoDrawable()
+        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
         for now in [101.0, 101.5] {
             let awaiting = tracker.awaitingPresent(now: .seconds(now))
             #expect(awaiting == tracker.limit, "at \(now) s after a nil drawable the tracker counted \(awaiting)")
@@ -273,12 +273,24 @@ struct DrawableTrackerTests {
         #expect(afterReport == 0, "a report left the nil drawable's hold in place: \(afterReport) awaiting")
     }
 
+    /// A report that lands while `nextDrawable()` waits, or just after it returns nil, freed a
+    /// drawable. The nil then sets no hold: set, it would outlast the report meant to end it.
+    @Test func aReportDuringTheNilDrawablesWaitSetsNoHold() {
+        let tracker = DrawableTracker()
+        let out = tracker.add(acquiredAt: .seconds(100))
+        let reportsBefore = tracker.reportCount
+        tracker.reportPresented(out, presentedTime: 101)
+        tracker.noteNoDrawable(reportsBefore: reportsBefore)
+        let awaiting = tracker.awaitingPresent(now: .seconds(101.25))
+        #expect(awaiting == 0, "a nil drawable after a report set a hold: \(awaiting) awaiting")
+    }
+
     /// With no report, the hold lasts `presentReportTimeout` from the first check after the nil
     /// drawable. That frame's own `now` is a second old by the time `nextDrawable()` returns nil,
-    /// so it cannot start the hold; `noteNoDrawable()` does not take one.
+    /// so it cannot start the hold; `noteNoDrawable(reportsBefore:)` takes no time.
     @Test func aNilDrawableHoldsTheLimitForTheTimeoutFromTheNextCheck() {
         let tracker = DrawableTracker()
-        tracker.noteNoDrawable()
+        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
         let first = tracker.awaitingPresent(now: .seconds(101.25))
         #expect(first == tracker.limit, "the first check after a nil drawable counted \(first)")
         let within = tracker.awaitingPresent(now: .seconds(102.125))
@@ -311,7 +323,7 @@ struct DrawableTrackerTests {
         let afterReport = tracker.entryCount
         #expect(afterReport == 0, "reporting the newest drawable left \(afterReport)")
 
-        tracker.noteNoDrawable()
+        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
         tracker.reportNewestPresented()
         let held = tracker.awaitingPresent(now: .seconds(101))
         #expect(held == tracker.limit, "reporting the newest of no drawables ended a nil drawable's hold: \(held)")

@@ -271,9 +271,12 @@ final class TerminalRenderer {
             // The transaction must end with a present, so a live resize may not drop its frame.
             waitsForSlot: waitsForSlot || synchronous,
             acquire: { [weak self] in
+                // Read before the wait: a report that lands during it, or just after it returns
+                // nil, keeps the nil from setting a hold.
+                let reportsBefore = tracker.reportCount
                 guard let drawable = nextDrawable(layer) else {
                     // The pool is full, whatever the tracker counted.
-                    tracker.noteNoDrawable()
+                    tracker.noteNoDrawable(reportsBefore: reportsBefore)
                     return (nil, nil)
                 }
                 self?.stats.drawablesAcquired += 1
@@ -380,7 +383,7 @@ final class TerminalRenderer {
 
         // The command buffer is created *before* the drawable is acquired. A drawable that is
         // acquired and never presented is only returned to the layer's pool when it deallocates,
-        // and with `maximumDrawableCount = 2` a couple of those make `nextDrawable()` block for
+        // and with `maximumDrawableCount = 3` a few of those make `nextDrawable()` block for
         // about a second each — which looks exactly like a frozen window.
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             ring.release()

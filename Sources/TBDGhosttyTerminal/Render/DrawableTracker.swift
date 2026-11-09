@@ -161,8 +161,13 @@ final class DrawableTracker: Sendable {
     /// The layer gave the frame no drawable: the pool is full, whatever the entries say. Holds the
     /// limit until a report arrives, or until `presentReportTimeout` has passed from the next
     /// check.
-    func noteNoDrawable() {
+    ///
+    /// - Parameter reportsBefore: `reportCount` from before the frame asked for its drawable. A
+    ///   report since then freed a drawable, so the pool is no longer proven full and no hold is
+    ///   set. Set anyway, the hold would outlast the report that should have ended it.
+    func noteNoDrawable(reportsBefore: UInt64) {
         state.withLock { state in
+            guard state.reports == reportsBefore else { return }
             state.hold = .awaitingFirstCheck
         }
     }
@@ -197,6 +202,9 @@ final class DrawableTracker: Sendable {
 
     // MARK: - Diagnostics and test seams
 
+    /// Every report so far, whatever drawable it named. A frame reads it before it asks for a
+    /// drawable, for `noteNoDrawable(reportsBefore:)`.
+    var reportCount: UInt64 { state.withLock { $0.reports } }
     /// The entries, as they stand: no recovery is run.
     var entryCount: Int { state.withLock { $0.entries.count } }
     /// Drawables recorded since the tracker was made.
