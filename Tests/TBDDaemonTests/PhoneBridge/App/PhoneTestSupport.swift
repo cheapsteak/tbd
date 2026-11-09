@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import TBDShared
 import TestSupport
 
@@ -462,13 +463,17 @@ struct PhoneServiceHarness: Sendable {
 
     /// With `phoneControlRead`, the service reads the phone control flag
     /// through it, so a test can hold the first read still; with
-    /// `pairingRead`, it reads each request's pairing through it, likewise;
-    /// with `failingPairingRead`, each request's pairing read goes through
-    /// it, so a test can make the first reads fail; with `dates`, the
-    /// service's date seam (`now`) reads it, so a test can move the date.
+    /// `phoneControlAlwaysOn`, the flag reads on without a database read, so
+    /// a request still reaches its handler once a test has made the config
+    /// row unreadable (`makeConfigUnreadable()`); with `pairingRead`, it
+    /// reads each request's pairing through it, so a test can hold that
+    /// read still; with `failingPairingRead`, each request's pairing read goes
+    /// through it, so a test can make the first reads fail; with `dates`,
+    /// the service's date seam (`now`) reads it, so a test can move the date.
     static func make(
-        phoneControlRead: HeldPhoneControlRead? = nil, pairingRead: HeldPairingRead? = nil,
-        failingPairingRead: FailingPairingRead? = nil, dates: TestDateSource? = nil
+        phoneControlRead: HeldPhoneControlRead? = nil, phoneControlAlwaysOn: Bool = false,
+        pairingRead: HeldPairingRead? = nil, failingPairingRead: FailingPairingRead? = nil,
+        dates: TestDateSource? = nil
     ) async throws -> PhoneServiceHarness {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPhoneControlEnabled(true)
@@ -484,6 +489,8 @@ struct PhoneServiceHarness: Sendable {
         var readPhoneControl: (@Sendable () async throws -> Bool)?
         if let phoneControlRead {
             readPhoneControl = { try await phoneControlRead.read(db) }
+        } else if phoneControlAlwaysOn {
+            readPhoneControl = { true }
         }
         var readPairing: (@Sendable (UUID) async throws -> Bool)?
         if let pairingRead {
@@ -509,6 +516,15 @@ struct PhoneServiceHarness: Sendable {
         ClaudeTranscriptLocator.filePath(
             terminal: terminal, worktreePath: worktreePath,
             projectsBase: URL(fileURLWithPath: "/acme-no-projects", isDirectory: true))
+    }
+
+    /// Drops the config table, so every later read of the config row fails,
+    /// as a database read that fails does. A request then stops at the phone
+    /// control check unless the harness was made with `phoneControlAlwaysOn`.
+    func makeConfigUnreadable() async throws {
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE config")
+        }
     }
 
     /// Connects the phone through a fresh outbox and returns it.

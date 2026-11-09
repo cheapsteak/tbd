@@ -118,11 +118,11 @@ extension PhoneAppService {
     /// session that parks between this check and the swap's own read takes
     /// the swap's cold path, which `swapProfile` reports.
     nonisolated func sessionFork(_ params: SessionForkParams, _ context: DeviceContext) async throws -> SessionRefResult {
-        let (terminal, capabilities) = try await swappableTerminal(params.session)
+        let (terminal, ownCapabilities) = try await swappableTerminal(params.session)
         guard !terminal.isParked else {
             throw PhoneAppError(code: .refused, message: Self.parkedForkReason)
         }
-        try Self.requireCapability(capabilities.fork, orElse: Self.notAClaudeSessionReason)
+        try Self.requireCapability(ownCapabilities.fork, orElse: Self.notAClaudeSessionReason)
         if let profileID = params.profileID, try await db.modelProfiles.get(id: profileID) == nil {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProfileReason)
         }
@@ -132,10 +132,12 @@ extension PhoneAppService {
 
     // MARK: - Shared
 
-    /// The terminal row behind `session`, with its capabilities as the
-    /// sessions list shows them, when it is a session switch and fork may act
-    /// on: a local Claude session in a local worktree that the phone can see
-    /// (`phoneCapableClaudeTerminal`).
+    /// The terminal row behind `session`, with its own capabilities, when it
+    /// is a session switch and fork may act on: a local Claude session in a
+    /// local worktree that the phone can see (`phoneCapableClaudeTerminal`).
+    /// Neither `switchProfile` nor `fork` follows the setting for answering
+    /// prompts, so both are as the sessions list shows them, and neither
+    /// method reads the config row.
     ///
     /// A remote session is `unsupported` with the reason the sessions list
     /// gives; a session the phone cannot see (`phoneVisibleTerminal`) is
@@ -148,7 +150,7 @@ extension PhoneAppService {
     /// which `sessionFork` answers itself.
     private nonisolated func swappableTerminal(
         _ session: PhoneSessionRef
-    ) async throws -> (terminal: TBDShared.Terminal, capabilities: PhoneCapabilities) {
+    ) async throws -> (terminal: TBDShared.Terminal, ownCapabilities: PhoneCapabilities) {
         guard case .local(let terminalID) = session else {
             throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.remoteOnlyReason)
         }

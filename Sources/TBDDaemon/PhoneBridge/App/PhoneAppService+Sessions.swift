@@ -252,14 +252,33 @@ extension PhoneAppService {
 
     /// The laptop's setting for answering prompts,
     /// `config.transcriptPromptAnswerEnabled`, read from the database on
-    /// every call. The sessions list (`gatherSnapshot`) and every action's
-    /// capability check (`phoneCapableClaudeTerminal`,
-    /// `checkPhoneCapableRemoteSession`, `remoteCapabilities(ofProvider:)`)
-    /// read it here, so the list never offers an answer that `prompt.answer`
-    /// refuses, nor refuses one it offers, but for a change between the two
-    /// reads; the core of the answer reads it again. A failed read throws.
+    /// every call. The sessions list (`gatherSnapshot`) reads it here, and so
+    /// does an action's capability check whenever the capability it needs
+    /// follows the setting (`listedCapability`), so the list never offers an
+    /// answer that `prompt.answer` refuses, nor refuses one it offers, but
+    /// for a change between the two reads; the core of the answer reads it
+    /// again. A failed read throws.
     nonisolated func promptAnswerSetting() async throws -> Bool {
         try await db.config.get().transcriptPromptAnswerEnabled
+    }
+
+    /// The capability `needed` picks from a session's capabilities as the
+    /// sessions list shows them, given those capabilities with the setting
+    /// for answering prompts on, `settingOn`, and off, `settingOff`.
+    ///
+    /// The setting is read (`promptAnswerSetting()`) only when the two picks
+    /// differ, which is when the capability follows it: `answer`, on a
+    /// session that could otherwise answer. Any other pick is the same
+    /// either way, so an action that needs it never reads the config row,
+    /// and a read that would fail cannot stop it. A failed read throws.
+    nonisolated func listedCapability(
+        _ needed: @Sendable (PhoneCapabilities) -> PhoneCapability,
+        settingOn: PhoneCapabilities, settingOff: PhoneCapabilities
+    ) async throws -> PhoneCapability {
+        let on = needed(settingOn)
+        let off = needed(settingOff)
+        guard on != off else { return on }
+        return try await promptAnswerSetting() ? on : off
     }
 
     private nonisolated func gatheredSessionStates() async -> [UUID: SessionState] {
@@ -380,8 +399,9 @@ extension PhoneAppService {
     /// Checks that the phone may act on the remote session
     /// `provider`/`sessionID`, needing the capability `needed` picks from its
     /// capabilities as the sessions list shows them
-    /// (`PhoneSessionStatus.remoteCapabilities`, with the setting for
-    /// answering prompts read as the list reads it, `promptAnswerSetting()`):
+    /// (`PhoneSessionStatus.remoteCapabilities`, through `listedCapability`,
+    /// which reads the setting for answering prompts only when that
+    /// capability follows it):
     /// - a provider that is not registered is `not_found` with
     ///   `noSuchProviderReason`;
     /// - an unavailable capability is `unsupported` with its reason, as the
@@ -399,76 +419,80 @@ extension PhoneAppService {
     /// the laptop no longer shows it, as `phoneVisibleTerminal` holds a local
     /// session. So every action on a remote session checks it here, and
     /// nowhere else: `message.send` and `session.setModel` (`sendText`),
-    /// `prompt.answer` and `transcript.open`. Every one of them reads the
-    /// setting with the rest, since only `answer` follows it; for the others
-    /// it changes nothing.
+    /// `prompt.answer` and `transcript.open`. Only `answer` follows the
+    /// setting, so only `prompt.answer` reads it; the others never read the
+    /// config row.
     nonisolated func checkPhoneCapableRemoteSession(
         provider: String, sessionID: String,
         needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, orElse fallback: String
     ) async throws {
         let providers = try await providerStatuses()
-        let promptAnswerEnabled = try await promptAnswerSetting()
-        let capabilities = try Self.remoteCapabilities(
-            ofProvider: provider, in: providers, promptAnswerEnabled: promptAnswerEnabled)
-        try Self.requireCapability(needed(capabilities), orElse: fallback)
+        let settingOn = try Self.remoteCapabilities(ofProvider: provider, in: providers, promptAnswerEnabled: true)
+        let settingOff = try Self.remoteCapabilities(ofProvider: provider, in: providers, promptAnswerEnabled: false)
+        let capability = try await listedCapability(needed, settingOn: settingOn, settingOff: settingOff)
+        try Self.requireCapability(capability, orElse: fallback)
         let response = try await actions.phoneRemoteSessions()
         let sessions = try Self.succeeded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
         let repos = try await db.repos.list()
         let worktrees = try await db.worktrees.list(excludeArchived: true)
         let scratch = try await db.worktrees.listScratch().filter { $0.status != .archived }
-        // Placing a remote session reads none of the fields left empty here.
+        // Placing a remote session reads none of the fields left empty here,
+        // nor `promptAnswerEnabled` (`listsRemoteSession`).
         let input = PhoneSnapshotInput(
             repos: repos, worktrees: worktrees, scratch: scratch, terminals: [:],
             tabOrder: [:], tabLabels: [:], profiles: [], states: [:],
             openPrompts: [:], remoteSessions: sessions, providers: providers,
-            promptAnswerEnabled: promptAnswerEnabled)
+            promptAnswerEnabled: true)
         guard PhoneSnapshotBuilder.listsRemoteSession(provider: provider, sessionID: sessionID, in: input) else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
         }
     }
 
-    /// The terminal row behind a local session, with its capabilities as the
-    /// sessions list shows them (`PhoneSessionStatus.localCapabilities`),
-    /// when the phone can see it (`phoneVisibleTerminal`, else `not_found`),
-    /// it is a Claude session by the list's reading
-    /// (`PhoneSnapshotBuilder.agent(of:)`), and the capability `needed`
-    /// picks is available.
+    /// The terminal row behind a local session, with its own capabilities
+    /// (`PhoneSessionStatus.localCapabilities` with the setting for
+    /// answering prompts left out), when the phone can see it
+    /// (`phoneVisibleTerminal`, else `not_found`), it is a Claude session by
+    /// the list's reading (`PhoneSnapshotBuilder.agent(of:)`), and the
+    /// capability `needed` picks is available as the sessions list shows it.
     ///
     /// The refusals come in this order, each `unsupported`:
     /// 1. **What the session itself cannot do**, with the reason the list
     ///    shows: a Codex session, a tab in a remote lane. This check leaves
-    ///    the setting for answering prompts out, so a session that could
-    ///    never answer says why, whatever the setting.
+    ///    the setting out, so a session that could never answer says why,
+    ///    whatever the setting.
     /// 2. **Not Claude**, with `notClaude`: any other session the list does
     ///    not show as Claude, a shell or a row with no kind and no Claude
     ///    session. The list never shows such a row, so it gives no reason of
     ///    its own; `localCapabilities` reads any terminal that is neither
     ///    Codex nor in a remote lane as Claude, which is why this guard
     ///    comes before the setting's.
-    /// 3. **The setting**, read as the list reads it
-    ///    (`promptAnswerSetting()`): an `answer` while it is off, with
+    /// 3. **The setting**, read as the list reads it, and only when the
+    ///    capability `needed` picks follows it (`listedCapability`): an
+    ///    `answer` while it is off, with
     ///    `PhoneSessionStatus.answerTurnedOffReason`.
     ///
     /// `prompt.answer`, `session.switchProfile` and `session.fork` read a
     /// local session through this, so each refuses what the list marks
-    /// unavailable, in the list's words. Switch and fork read the setting
-    /// too, since the capabilities returned are the list's whole set; only
-    /// `answer` follows it, so it changes nothing for them.
+    /// unavailable, in the list's words. Only `answer` follows the setting,
+    /// so switch and fork never read the config row. The capabilities
+    /// returned are the session's own, so every one but `answer` is the
+    /// list's; `answer` is what the session allows with the setting on.
     nonisolated func phoneCapableClaudeTerminal(
         _ terminalID: UUID, needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, notClaude: String
-    ) async throws -> (terminal: TBDShared.Terminal, capabilities: PhoneCapabilities) {
+    ) async throws -> (terminal: TBDShared.Terminal, ownCapabilities: PhoneCapabilities) {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         let isRemoteWorktree = !worktree.location.isLocal
+        // With the setting on, every capability is what the session allows.
         let ownCapabilities = PhoneSessionStatus.localCapabilities(
             terminal: terminal, isRemoteWorktree: isRemoteWorktree, promptAnswerEnabled: true)
         try Self.requireCapability(needed(ownCapabilities), orElse: notClaude)
         guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
             throw PhoneAppError(code: .unsupported, message: notClaude)
         }
-        let promptAnswerEnabled = try await promptAnswerSetting()
-        let capabilities = PhoneSessionStatus.localCapabilities(
-            terminal: terminal, isRemoteWorktree: isRemoteWorktree, promptAnswerEnabled: promptAnswerEnabled)
-        try Self.requireCapability(needed(capabilities), orElse: notClaude)
-        return (terminal, capabilities)
+        let settingOff = PhoneSessionStatus.localCapabilities(
+            terminal: terminal, isRemoteWorktree: isRemoteWorktree, promptAnswerEnabled: false)
+        let capability = try await listedCapability(needed, settingOn: ownCapabilities, settingOff: settingOff)
+        try Self.requireCapability(capability, orElse: notClaude)
+        return (terminal, ownCapabilities)
     }
 }

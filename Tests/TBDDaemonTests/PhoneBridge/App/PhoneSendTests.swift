@@ -537,6 +537,38 @@ struct PhoneSendTests {
         #expect(sends == [["acme-cloud", "rs-1", "hi"]])
     }
 
+    /// A remote send and a remote model change never read the setting for
+    /// answering prompts, which gates neither (`listedCapability`), so a
+    /// config row that cannot be read does not stop them: both are sent. A
+    /// remote answer on the same session does read it, and fails, which
+    /// shows the row is unreadable.
+    @Test func aRemoteSendAndModelChangeDoNotReadTheAnswerSetting() async throws {
+        let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit, RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
+        h.actions.respond(to: .remoteSendMessage, with: try RPCResponse(result: RemoteSendMessageResult(outcome: .sent)))
+        let outbox = await h.connect()
+        try await h.makeConfigUnreadable()
+
+        let (sent, sentBytes) = try await h.request(
+            .messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
+        let (modelSet, _) = try await h.request(
+            .sessionSetModel, params: SessionSetModelParams(session: Self.remoteSession, model: "opus"), on: outbox)
+        let (answered, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(
+                session: Self.remoteSession, promptID: "rp-1", answer: .permission(decision: .allow, message: nil)),
+            on: outbox)
+
+        #expect(sent.error == nil)
+        #expect(try Self.outcome(sentBytes) == "sent")
+        #expect(modelSet.error == nil)
+        let sends = h.actions.remoteSends.map { [$0.provider, $0.sessionID, $0.text] }
+        #expect(sends == [["acme-cloud", "rs-1", "hi"], ["acme-cloud", "rs-1", "/model opus"]])
+        #expect(answered.error?.code == .internalError)
+        #expect(h.actions.remoteAnswers.isEmpty)
+    }
+
     /// The provider may have pressed Enter before its call ended: the phone
     /// hears `unknown`, never a failure it could resend.
     @Test func aRemoteSendWithNoExitStatusIsUnknown() async throws {
