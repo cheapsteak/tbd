@@ -18,12 +18,15 @@
  * - A tool row draws its box under the button: Input and Result, or the loading line. A tap
  *   collapses it, a failed one too, and the next tap starts over.
  * - "Show more" puts the message's whole text in place of the cut text, through `Markdown`,
- *   once it arrived, and the button goes, as in the mock. It draws at most `MAX_DETAIL_LINES`
- *   lines of it (`firstLines`), as a tool's parts do. Its box shows the loading line, the
- *   too-large line, after a text too large or cut at those lines, or the laptop's message. While the text loads, the button stays, marked
- *   busy (`aria-busy`), and a tap on it cancels the load (spec section 7, "Large details"): the
- *   detail goes, and the row shows its cut text and "Show more" again. After a failure the
- *   button comes back, and a tap starts over.
+ *   once all of it arrived, and the button goes, as in the mock. It draws at most
+ *   `MAX_DETAIL_LINES` lines of it (`firstLines`), as a tool's parts do. Its box shows the
+ *   loading line, the too-large line, after a text too large or cut at those lines, or the
+ *   laptop's message. While the text loads, the button stays, marked busy (`aria-busy`), and a
+ *   tap on it cancels the load (spec section 7, "Large details"): the detail goes, and the row
+ *   shows its cut text and "Show more" again. Until the whole text has arrived the row keeps its
+ *   cut text, so a load that fails partway shows the cut text, "Show more" and the laptop's
+ *   message, never part of the text, and a tap starts over. So does a text that arrived no
+ *   longer than the cut one: the row keeps the cut text and "Show more", with no box.
  * - A subagent row draws its items in `.nest`, each through this component as a nested row,
  *   under one budget for the whole nest (`nest.ts`): items past it are not drawn, and the row
  *   shows "Too large for the phone. Open on the laptop." under the nest. It collapses as a tool
@@ -70,8 +73,8 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
   const toggle = onToggle === null ? null : (part: RowPart): void => onToggle(row.key, part);
   const detail = toggle !== null ? (p.detail ?? null) : null;
   const expanded = detail !== null;
-  // A message's whole text once "Show more" brought it, cut to its first lines, read again only when it changes.
-  const wholeText = detail !== null && detail.phase !== 'loading' ? detail.text.text : undefined;
+  // A message's whole text once "Show more" brought all of it, cut to its first lines, read again only when it changes.
+  const wholeText = detail !== null && (detail.phase === 'open' || detail.phase === 'tooLarge') ? detail.text.text : undefined;
   const whole = useMemo(() => (wholeText === undefined ? null : firstLines(wholeText)), [wholeText]);
   if (row.kind === 'receipt') {
     return (
@@ -94,18 +97,21 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
       );
     case 'assistant': {
       const loading = detail?.phase === 'loading';
-      const full = whole?.text;
+      // The whole text takes the cut text's place only when it says more than the cut text does.
+      const full = wholeText !== undefined && wholeText.length > text.length ? whole : null;
       return (
         <>
           <div className="say">
-            <Markdown text={full ?? text} nodes={full === undefined ? p.tree : null} />
-            {it.truncated && toggle !== null && (detail === null || loading || detail.phase === 'failed') && (
+            <Markdown text={full?.text ?? text} nodes={full === null ? p.tree : null} />
+            {it.truncated && toggle !== null && full === null && (
               <button className="morebtn" type="button" aria-busy={loading || undefined} onClick={() => toggle('text')}>
                 Show more
               </button>
             )}
           </div>
-          {detail !== null && <DetailPane detail={detail} parts={false} cut={whole?.cut === true} />}
+          {detail !== null && (full !== null || loading || detail.phase === 'failed') && (
+            <DetailPane detail={detail} parts={false} cut={full?.cut === true} />
+          )}
         </>
       );
     }

@@ -464,11 +464,11 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
      * Opens or closes one part of the row with key `rowKey`, loading its chunks, and resolves
      * once they landed or failed. `part` is the part the row names (`detailParts`).
      * - **A tap on a row whose detail shows** (loading, loaded, too large, or failed for a tool or
-     *   a subagent) collapses it: the detail leaves the slice with what arrived of it, the reply
-     *   on its way is dropped, and nothing more is asked.
-     * - **Any other tap**, on a closed row or on a failed "Show more", which has no collapse,
-     *   starts the detail over from its first chunk, while the transcript is open and the row
-     *   holds an item.
+     *   a subagent, and loading for "Show more") collapses it: the detail leaves the slice with
+     *   what arrived of it, the reply on its way is dropped, and nothing more is asked.
+     * - **Any other tap**, on a closed row, or on a "Show more" that failed or brought a text no
+     *   longer than the cut one, which the row shows as closed (`ItemRow`), starts the detail
+     *   over from its first chunk, while the transcript is open and the row holds an item.
      *
      * The row's loop loads it (`drive`), and each reply counts only for the detail the slice
      * holds when it lands, while that detail still waits on just that request and the
@@ -495,7 +495,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     async toggleDetail(rowKey: number, part: TranscriptDetailPart): Promise<void> {
       const t = store.get().transcript;
       const shown = t.details[rowKey];
-      if (shown !== undefined && (shown.phase !== 'failed' || part !== 'text')) {
+      if (shown !== undefined && (part !== 'text' || shown.phase === 'loading')) {
         dropDetail(rowKey, shown);
         return;
       }

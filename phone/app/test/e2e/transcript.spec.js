@@ -339,6 +339,66 @@ test('a failed Show more brings its button back, and a tap on it starts over', a
   expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 0]]);
 });
 
+test('a Show more that fails partway keeps the cut text, Show more and the laptop’s message, and never shows part of the text', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const say = tx.locator('.say', { hasText: 'Fixed. Here is what changed:' });
+  const more = say.locator('.morebtn');
+  // The text in two chunks: the first, longer than the cut text, arrives, and the second fails.
+  const whole = MOCK.details['login-10'].text;
+  const first = whole.slice(0, whole.indexOf('The check also refuses'));
+  await page.evaluate(({ first, notFound }) => {
+    /** @type {any} */ (window).__host.setReply('transcript.detail', (/** @type {any} */ params) => (params.chunk === 0
+      ? { result: { itemID: params.itemID, part: params.part, chunk: 0, chunkCount: 2, totalBytes: 0, tooLarge: false, text: first } }
+      : { error: { code: 'not_found', message: notFound } }));
+  }, { first, notFound: TEXT.detailNotFound });
+  await more.click();
+  await expect(tx.locator('.detail')).toHaveText(TEXT.detailNotFound);
+  await expect(more).toHaveText('Show more');
+  await expect(say).toContainText('The auth tests pass, 9 of 9.');
+  await expect(say).not.toContainText('OWASP cheat sheet');
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 1]]);
+
+  // A tap starts over, and the whole text goes in.
+  await hostCall(page, 'setReply', 'transcript.detail', null);
+  await more.click();
+  await expect(say).toContainText('Both cases have a line in isLocalPath with a comment that says why.');
+  await expect(tx.locator('.morebtn')).toHaveCount(0);
+  await expect(tx.locator('.detail')).toHaveCount(0);
+});
+
+test('a Show more that brings a text no longer than the cut one keeps the cut text and Show more, and a tap starts over', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  const say = tx.locator('.say', { hasText: 'Fixed. Here is what changed:' });
+  const more = say.locator('.morebtn');
+  const cut = MOCK.transcripts['local:' + LOGIN_REF.terminalID].find((/** @type {{ id: string }} */ it) => it.id === 'login-10').text;
+  for (const [n, [what, text]] of [['an empty text', ''], ['the cut text', cut]].entries()) {
+    await hostCall(page, 'setReply', 'transcript.detail', {
+      result: { itemID: 'login-10', part: 'text', chunk: 0, chunkCount: 1, totalBytes: 0, tooLarge: false, text },
+    });
+    await more.click();
+    await expect.poll(async () => (await detailRequests(page)).length, { message: what }).toBe(n + 1);
+    // An event behind the reply on the same channel: once its row shows, the app has taken the reply.
+    await hostCall(page, 'emit', 'transcript.append', {
+      session: LOGIN_REF, items: [{ id: `x-after-${n}`, kind: 'assistant', text: `Here after reply ${n}.`, truncated: false }],
+    });
+    await expect(tx.locator('.say', { hasText: `Here after reply ${n}.` })).toBeVisible();
+    await expect(say, what).toContainText('The auth tests pass, 9 of 9.');
+    await expect(more, what).toHaveText('Show more');
+    await expect(more, what).not.toHaveAttribute('aria-busy');
+    await expect(tx.locator('.detail'), what).toHaveCount(0);
+  }
+
+  await hostCall(page, 'setReply', 'transcript.detail', null);
+  await more.click();
+  await expect(say).toContainText('Both cases have a line in isLocalPath with a comment that says why.');
+  await expect(tx.locator('.morebtn')).toHaveCount(0);
+  expect(await detailRequests(page)).toEqual([['login-10', 'text', 0], ['login-10', 'text', 0], ['login-10', 'text', 0]]);
+});
+
 test('Show more stays while its text loads, and a tap on it cancels the load', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Login redirect fix');
