@@ -5,8 +5,8 @@ TBD's opt-in libghostty engine
 display-link tick, so output that arrives between ticks waits for the next one. This design
 draws small output at once when the screen has had no output frame for a refresh interval,
 and keeps bulk output at one frame per refresh. It also reads DEC 2026 holds from
-libghostty's own callback, and it stops the main thread from blocking on the GPU. SwiftTerm
-does not change.
+libghostty's own callback, and it stops the main thread from blocking on the GPU, apart from
+one bounded wait when present reports go missing. SwiftTerm does not change.
 
 ## Goal
 
@@ -243,7 +243,8 @@ in the `vt-1.0.0` headers that ship inside the pinned xcframework). The header s
 Today a tick can block the main thread in two places. `FrameRing.acquire()` waits on a
 semaphore until the GPU frees a slot, and `nextDrawable()` can wait up to a second for a
 drawable. The design drops the frame instead, as termio does, and the next tick draws the
-newer screen.
+newer screen. One wait remains, and it is bounded: the recovery from lost present reports,
+below.
 
 - **The ring** – `FrameRing.tryAcquire()` returns nil rather than waiting
   (`wait(timeout: .now())`). The ring also keeps an atomic count of slots in use. The count
@@ -269,10 +270,24 @@ newer screen.
     - **Time** – only when no report has arrived for `presentReportTimeout`, one second by
       the frames' `now`, does the tracker clear its entries. No report for a second means
       either that Metal is not reporting this layer's presents or that nothing has reached
-      the screen for a second. In the second case `nextDrawable()` waits at most its own
-      one-second timeout and returns nil, which takes today's nil-drawable path. That is the
-      cost today's code already pays on every tick of such a stall. The first clear in a
-      run logs a `.notice`, so a soak shows whether reports go missing.
+      the screen for a second. The first clear in a run logs a `.notice`, so a soak shows
+      whether reports go missing.
+  - **The one wait left.** After a clear, the next frame calls `nextDrawable()` with no
+    proof that a drawable is free. This is the design's one exception to "never block", and
+    it is deliberate. Metal has no way to ask for a drawable without waiting, and a view that
+    never asked again would stop drawing for good once its reports were lost.
+    - If the pool really is full, the call waits up to its own one-second timeout and
+      returns nil. The frame takes today's nil-drawable path: it releases its ring slot and
+      counts `nilDrawables`. The surface stays dirty, so `needsUpdate` stays set and the link
+      keeps ticking.
+    - A nil drawable proves the pool is full, so the tracker holds the limit again until a
+      report arrives or another `presentReportTimeout` passes. While it holds, the count it
+      reports is the limit, so rule 6 and the tick both read it as full. That timeout starts
+      at the `now` of the next frame that checks the limit, not at the nil frame's own `now`,
+      which is a second old by the time the call returns. So the next wait cannot follow at
+      once.
+    - In a stall that never ends, main waits at most one second in every two. Today it waits
+      on every tick.
   - The handler also counts presents that report a `presentedTime` of 0, which the Metal
     header documents as a frame that "has not been presented or has been skipped". A count
     that rises while typing is the sign of the shared-vsync risk under "Risks".
@@ -282,7 +297,13 @@ newer screen.
   That last part is a change the tick needs. Today's `needsUpdate = surface.needsDisplay`
   would park the link, because output that was never built leaves the surface looking clean.
   `tryAcquire()` still guards the slot after the build. It cannot fail there, because only
-  main takes slots.
+  main takes slots. `renderNow(now:)` takes the frame's `now` for the tracker: a tick passes
+  its own, and the live-resize path reads the view's `now` seam.
+- **`drawFrameNow()` keeps today's behaviour.** Only tests call it, among them
+  `TerminalEngineInstrumentTests`, which draw in an offscreen window whose presents may never
+  be reported. With the limit, a few unreported frames would stop it drawing for a second,
+  longer than those tests wait. So it skips the drawable limit and waits on the ring, as the
+  live-resize path does. Its drawables still go into the tracker.
 - **Live resize keeps today's behaviour.** While `presentsWithTransaction` is set,
   `renderNow()` from `setFrameSize` skips both checks, blocks on the ring and always encodes.
   The flag promises Core Animation that the transaction will end with an explicit
@@ -318,7 +339,8 @@ frame path is less to maintain than two.
   after a feed change, and so does the fixture (see "Testing").
 - **A lost present report** – the next report clears it. If no report comes for a second,
   the tracker clears itself and logs a `.notice`. If that clear comes during a real stall,
-  one `nextDrawable()` call can wait up to its one-second timeout, as every tick does today.
+  one `nextDrawable()` call waits up to its one-second timeout and returns nil, and the
+  next such wait comes at least a second later. Today every tick of a stall waits.
 - **Present order** – recovery from a lost report assumes that a layer's presents reach the
   screen in the order they were made. If that stops being true, a report could clear an
   entry whose drawable is still queued, and one tick could wait in `nextDrawable()` for up to
@@ -330,7 +352,9 @@ Tests run under `scripts/test.sh`. View tests use the offscreen fixture in
 `GhosttyTerminalViewTests`, with `windowVisibility = { _ in true }` and the `now` seam. The
 fixture's window has no screen, so its refresh interval is `fallbackRefreshInterval`. Metal
 may never report its drawables presented, so the fixture reports each one through a test seam
-on `DrawableTracker`. The tests of the limits leave those reports out.
+on `DrawableTracker`. The tests of the limits leave those reports out. The renderer's call to
+`nextDrawable()` goes through a seam the fixture can replace, so a test can make it return
+nil without waiting.
 
 - **The policy** – one case per reason and one for `.drawNow`, plus the boundaries:
   - exactly 1,024 bytes coalesces, and 1,023 draws
@@ -355,6 +379,12 @@ on `DrawableTracker`. The tests of the limits leave those reports out.
   - With two drawables unreported and younger than `presentReportTimeout`, a tick makes no
     drawable request (`drawableRequests` does not move), and neither does the leading edge.
     A report for the newer drawable then clears both, and the next tick draws.
+  - With two drawables unreported, `now` past `presentReportTimeout` and the drawable seam
+    returning nil, a tick makes one drawable request. `nilDrawables` rises by one, nothing
+    commits, and `needsUpdate` stays set. Ticks within the next `presentReportTimeout` make
+    no request. A report then lets the next tick draw. So does the seam returning a drawable
+    once that timeout has passed.
+  - With two drawables unreported, `drawFrameNow()` still commits a frame.
 - **Hold edges, on a real `GhosttyTerminal`:**
   - setting mode 2026 opens one hold, and resetting it ends the hold
   - an in-band RIS (`ESC c`) and `reset()` each end a hold, and so does `resize`
@@ -373,6 +403,8 @@ on `DrawableTracker`. The tests of the limits leave those reports out.
   - a report for one drawable removes every older entry, and no newer one
   - entries younger than `presentReportTimeout` stay, however long reports are delayed
   - with no report for `presentReportTimeout`, the entries clear and the notice logs once
+  - a nil drawable holds the limit until a report arrives, or until `presentReportTimeout`
+    after the next check
 - **The engine contract suite** – no new case. Draw timing is not part of the
   `TerminalEngine` seam, and whether SwiftTerm draws at once offscreen was not checked, so
   such a case would hold for one engine only. The suite stays green, and so do
@@ -487,28 +519,29 @@ About 250 lines of code and 300 of tests:
 
 - **Drawables** – `Render/FrameRing.swift` and `Render/TerminalRenderer.swift`, plus the
   tracker in a new `Render/DrawableTracker.swift`: `tryAcquire()`, the slot count, the
-  always-installed handler, the drop path and lost-report recovery. Also the limit check and early
-  return in `GhosttyTerminalView.renderNow()`. About 70 lines.
+  always-installed handler, the drop path, lost-report recovery and the `nextDrawable()` seam.
+  Also the view's `now` seam, which the tracker needs, the limit check and early return in
+  `GhosttyTerminalView.renderNow(now:)`, and `drawFrameNow()`'s skip. About 85 lines.
 - **The terminal** – `GhosttyTerminal.swift`: the hold callback and its two values, the byte
   counter, and `RenderHint` in `Aftermath`. About 60 lines.
 - **The watchdog** – `Input/InputBinding.swift`: reading `holdOpen`, the force-off that
   clears it, the attach read and the notice. About 20 lines.
 - **The view** – `GhosttyTerminalView.swift` and `Render/FrameBuilder.swift`:
-  `LeadingEdgePolicy`, the `now` seam, the refresh interval, `lastOutputFrameAt`, the relay's
-  hint, the leading-edge draw, and reading the byte counter in the `begin_update` hold. About
-  100 lines.
+  `LeadingEdgePolicy`, the refresh interval, `lastOutputFrameAt`, the relay's hint, the
+  leading-edge draw, and reading the byte counter in the `begin_update` hold. About 85 lines.
 - **Tests** – about 300 lines.
 
 The work runs as three PRs, split by file territory:
 
-1. **Drawables** – the ring, the tracker, the renderer, and the limit check and early return
-   in `renderNow()`. It branches from `main`. The tick stops blocking main, and nothing else
-   changes. It also moves the view tests' helpers to report presents.
+1. **Drawables** – the ring, the tracker, the renderer, the `now` seam, and the limit check
+   and early return in `renderNow(now:)`. It branches from `main`. The tick stops blocking
+   main, apart from the bounded wait, and nothing else changes. It also moves the view tests'
+   helpers to report presents.
 2. **Hold edges** – `GhosttyTerminal.swift`'s callback and values, and `InputBinding.swift`.
    It branches from `main`, independent of the first. Frames skip as they do today, but from
    edges in place of the mode read.
 3. **The leading edge** – the byte counter, `RenderHint` through `Aftermath` and the relay,
-   `LeadingEdgePolicy`, the `now` seam, the interval and the delivery's draw. It needs both
+   `LeadingEdgePolicy`, the interval and the delivery's draw. It needs both
    others, so it starts once they merge, or stacks on them (see the `stacked-prs` skill). The
    done test runs after it merges.
 
