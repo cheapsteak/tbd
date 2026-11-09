@@ -313,6 +313,22 @@ struct DrawableTrackerTests {
         #expect(afterShown == 1, "a present with a time counted as skipped: \(afterShown)")
     }
 
+    /// The skipped count logs a notice each time it reaches a power of two: at 1, 2, 4 and 8 of
+    /// nine skipped presents, and never for a present with a time.
+    @Test func theSkippedCountLogsANoticeAtEachPowerOfTwo() {
+        let tracker = DrawableTracker()
+        var notices: [Int] = []
+        for skipped in 1...9 {
+            let id = tracker.add(acquiredAt: .seconds(100))
+            tracker.reportPresented(id, presentedTime: 0)
+            notices.append(tracker.skippedPresentNotices)
+            let shown = tracker.add(acquiredAt: .seconds(100))
+            tracker.reportPresented(shown, presentedTime: 100 + Double(skipped))
+        }
+        let expected = [1, 2, 2, 3, 3, 3, 3, 4, 4]
+        #expect(notices == expected, "the notices after each of nine skipped presents were \(notices)")
+    }
+
     /// The view tests' seam stands for the newest drawable's presented handler. With nothing
     /// tracked it reports nothing, so it cannot end a nil drawable's hold.
     @Test func reportNewestPresentedReportsTheNewestAndNothingWhenEmpty() {

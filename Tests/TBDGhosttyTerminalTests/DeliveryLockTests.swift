@@ -16,7 +16,7 @@ struct DeliveryLockTests {
             cols: 80, rows: 24, scrollbackLines: 100,
             callbacks: GhosttyTerminalCallbacks(writePty: { _ in gate.pass() }))
         // A view's frame request, so the feed below changes the screen with a signal installed.
-        terminal.setRenderSignal {}
+        terminal.setRenderSignal { _ in }
         // Mode 2048, so the resize below writes a size report. Enabling it writes one too, which
         // goes through: the gate is not armed yet.
         terminal.feed(text: "\u{1b}[?2048h")

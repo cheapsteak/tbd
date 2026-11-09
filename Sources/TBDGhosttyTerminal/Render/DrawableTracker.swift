@@ -80,6 +80,7 @@ final class DrawableTracker: Sendable {
         var timeoutClears = 0
         var lostReportNotices = 0
         var skippedPresents = 0
+        var skippedPresentNotices = 0
     }
 
     /// The count a full pool reports: `TerminalRenderer.maxDrawablesAwaitingPresent`.
@@ -181,22 +182,37 @@ final class DrawableTracker: Sendable {
     ///
     /// - Parameter presentedTime: the drawable's `presentedTime`, which dates the report. Zero is a
     ///   frame that "has not been presented or has been skipped": it is counted, and the next
-    ///   check dates the report instead.
+    ///   check dates the report instead. The count is logged at `.notice` each time it reaches a
+    ///   power of two, so a soak or an A/B log shows whether it rises without a line per present.
     func reportPresented(_ id: DrawableID, presentedTime: CFTimeInterval) {
-        state.withLock { state in
+        let skippedForNotice = state.withLock { state -> Int? in
             state.reports &+= 1
             state.noticeLoggedThisRun = false
             state.hold = nil
+            var countToLog: Int?
             if presentedTime > 0 {
                 let presentedAt = Duration.seconds(presentedTime)
                 state.lastReportAt = max(state.lastReportAt ?? presentedAt, presentedAt)
             } else {
                 state.skippedPresents += 1
                 state.undatedReportPending = true
+                if state.skippedPresents.nonzeroBitCount == 1 {
+                    state.skippedPresentNotices += 1
+                    countToLog = state.skippedPresents
+                }
             }
             if let index = state.entries.firstIndex(where: { $0.id == id }) {
                 state.entries.removeSubrange(...index)
             }
+            return countToLog
+        }
+        if let skippedForNotice {
+            // A count that rises while typing is the sign of a leading-edge frame sharing a vsync
+            // with the next tick's ("Risks" in docs/specs/2026-11-08-libghostty-frame-timing-design.md).
+            terminalEngineLog.notice("""
+                \(skippedForNotice, privacy: .public) presents of this view were reported skipped \
+                (presentedTime 0) so far
+                """)
         }
     }
 
@@ -216,6 +232,8 @@ final class DrawableTracker: Sendable {
     /// Reports whose `presentedTime` was 0. A count that rises while typing is the sign of a frame
     /// drawn just before a vsync landing on the same vsync as the next one.
     var skippedPresents: Int { state.withLock { $0.skippedPresents } }
+    /// How many notices that count logged: one each time it reached a power of two.
+    var skippedPresentNotices: Int { state.withLock { $0.skippedPresentNotices } }
 
     /// Reports the newest entry presented, as its presented handler would, at the time it was
     /// acquired. A test seam: an offscreen window's drawables may never be reported, so the view
