@@ -22,7 +22,8 @@
  * function returns a new object when it changes anything and `s` itself when it does not.
  *
  * Below the slice are the menus' and the sheets' shared rules: the model names, which profile is
- * the current one, the profiles in the Fork sheet's order, and the words they show.
+ * the current one, the profiles in the Fork sheet's order, what stops an acting request (the one
+ * check the buttons and the actions both make), and the words they show.
  */
 
 import type { PhoneProfile, PhoneSession, PhoneSessionRef } from '../protocol/types.ts';
@@ -152,6 +153,42 @@ export function profileDetail(p: PhoneProfile): string {
 /** The name the header shows for `session`'s account (`SessionHeader`). */
 export function accountName(session: PhoneSession): string {
   return session.profileName ?? 'Default account';
+}
+
+/**
+ * The name of the profile the Fork sheet's "Same account as now" row shows, which a fork with no
+ * profile runs under: the current profile's (`currentProfileID`) when `profiles`, the list last
+ * loaded, holds it, else the header's (`accountName`).
+ */
+export function sameAccountName(session: PhoneSession, profiles: readonly PhoneProfile[] | null): string {
+  if (profiles === null) return accountName(session);
+  const id = currentProfileID(session, profiles);
+  const current = id === null ? null : profileByID(profiles, id);
+  return current === null ? accountName(session) : current.name;
+}
+
+/** The session capability each acting request needs. */
+const CAPABILITY = { switch: 'switchProfile', fork: 'fork', model: 'model' } as const;
+
+/**
+ * Why a `kind` request cannot go out for `session` by its capability: the laptop's reason, `''`
+ * when it gave none, or null while the capability is available. The menus and the sheets disable
+ * the acting button and show the reason beside it; the actions refuse with it.
+ */
+export function unavailableReason(session: PhoneSession, kind: ActingKind): string | null {
+  const capability = session.capabilities[CAPABILITY[kind]];
+  return capability.available ? null : (capability.reason ?? '');
+}
+
+/**
+ * Why a switch of `session` to `profile`, picked from `profiles`, cannot go out: the capability's
+ * reason (`unavailableReason`), or that the session runs under `profile` already; null when it
+ * can.
+ */
+export function switchBlock(session: PhoneSession, profiles: readonly PhoneProfile[], profile: PhoneProfile): string | null {
+  const reason = unavailableReason(session, 'switch');
+  if (reason !== null) return reason;
+  return profile.id === currentProfileID(session, profiles) ? `This session already runs under ${profile.name}.` : null;
 }
 
 /** The note under "Restart this session under X?": what a restart stops (mock `restartNote`). */

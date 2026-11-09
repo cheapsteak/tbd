@@ -9,7 +9,9 @@
 // what each sends, one request per gesture, no double tap landing on an acting button, a sheet
 // closing when an event takes its session off the list, focus, and errors. Then what a closing
 // menu or sheet uncovers: no second tap of a double tap lands on Send or on a card's choice under
-// it.
+// it. And buttons that cannot act: a parked session's Fork, and Restart once the session runs
+// under that profile already, disabled with the reason, and the Fork sheet's rows waiting when
+// an event reorders them.
 //
 // Every test that acts checks the exact params the fake laptop got. Checkout v2's Review tab is
 // the mock's `s-co-rev`: acme-work, opus, idle. Its Claude tab is working, on Personal and
@@ -28,8 +30,11 @@ const MOCK = JSON.parse(readFileSync(new URL('scenarios/mock.json', import.meta.
 /** Checkout v2's tabs. */
 const REVIEW_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000104' };
 const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
+/** Docs refresh's session: parked, on Personal, so it cannot fork. */
+const DOCS_REF = MOCK.rows.find((/** @type {any} */ r) => r.name === 'Docs refresh').sessions[0].ref;
 /** mock.json's profiles. */
 const PERSONAL = '00000000-0000-4000-8000-0000000000F1';
+const WORK = '00000000-0000-4000-8000-0000000000F2';
 const BEDROCK = '00000000-0000-4000-8000-0000000000F3';
 /** `TAP_GUARD_MS` in `src/ui/tapGuard.ts`. */
 const TAP_GUARD_MS = 500;
@@ -791,4 +796,78 @@ test("closing a menu by Escape or by its own button holds Send for a moment", as
   await expect(send).toBeDisabled();
   await expect(send).toBeEnabled();
   expect(await sends(page)).toBe(0);
+});
+
+// MARK: - Buttons that cannot act
+
+const PARKED_FORK = 'This session is parked. Send it a message to wake it, then fork it.';
+
+test("a parked session's ask and switch-confirm disable Fork with the laptop's reason, and Restart still works", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  await accountButton(page, 'Personal').click();
+  const menu = accountMenu(page);
+  await row(menu, 'acme-work').click();
+  const fork = menu.getByRole('button', { name: 'Fork into a new tab' });
+  await expect(menu.getByRole('button', { name: 'Restart' })).toBeEnabled();
+  await expect(fork).toBeDisabled();
+  await expect(menu.locator('.pd-ask div span')).toHaveText(PARKED_FORK);
+  await page.keyboard.press('Escape');
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(0).click();
+  await sheet(page).locator('button.mi', { hasText: 'acme-work' }).click();
+  const dialog = sheet(page);
+  const restart = dialog.getByRole('button', { name: 'Restart' });
+  await expect(restart).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: 'Fork into a new tab' })).toBeDisabled();
+  await expect(dialog.locator('.confirm > p').last()).toHaveText(PARKED_FORK);
+  expect(await acting(page)).toEqual([]);
+  await restart.click();
+  await expect.poll(() => acting(page)).toEqual([
+    { method: 'session.switchProfile', params: { session: DOCS_REF, profileID: WORK } },
+  ]);
+});
+
+/**
+ * Checkout v2's row in mock.json with its Review tab moved to Personal, as a sessions.changed
+ * reports a switch made on the laptop.
+ */
+function reviewOnPersonal() {
+  const moved = structuredClone(MOCK.rows.find((/** @type {any} */ r) => r.name === 'Checkout v2'));
+  const review = moved.sessions.find((/** @type {any} */ s) => s.ref.terminalID === REVIEW_REF.terminalID);
+  review.profileID = PERSONAL;
+  review.profileName = 'Personal';
+  return moved;
+}
+
+test('switch-confirm disables Restart with a reason once an event says the session runs under that profile', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(0).click();
+  await sheet(page).locator('button.mi', { hasText: 'Personal' }).click();
+  const restart = sheet(page).getByRole('button', { name: 'Restart' });
+  await expect(restart).toBeEnabled();
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [reviewOnPersonal()], removedRowIDs: [] });
+  await expect(restart).toBeDisabled();
+  await expect(sheet(page).locator('.confirm > p').last()).toHaveText('This session already runs under Personal.');
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  await expect(restart).toBeDisabled();
+  expect(await acting(page)).toEqual([]);
+});
+
+test("the Fork sheet's rows wait when an event changes the current profile and reorders them", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(1).click();
+  const first = sheet(page).locator('button.mi').first();
+  await expect(first.locator('small')).toHaveText('Same account as now');
+  await expect(first).toContainText('acme-work');
+  await expect(first).toBeEnabled();
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [reviewOnPersonal()], removedRowIDs: [] });
+  await expect(first).toContainText('Personal');
+  await expect(first).toBeDisabled();
+  await expect(first).toBeEnabled();
+  expect(await acting(page)).toEqual([]);
 });

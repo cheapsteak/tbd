@@ -9,9 +9,10 @@
  * and shows on the current model until there is one. Typing a name hides the tick, as the typed
  * name is what Set sends. Set is enabled once there is a pick or a name that is more than white
  * space, and sends the typed name when there is one (`setModel` trims it), else the pick. It is
- * disabled while a switch, fork or model change for the session is on its way (`isActing`) and
- * while `held`. The session's status plays no part: the laptop takes a model change while a
- * session works and answers for itself.
+ * disabled while a switch, fork or model change for the session is on its way (`isActing`), while
+ * `held`, and while the session's model capability is unavailable, with its reason under the
+ * description (`unavailableReason`). The session's status plays no part: the laptop takes a
+ * model change while a session works and answers for itself.
  */
 
 import { useId, useState } from 'react';
@@ -20,7 +21,7 @@ import { Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { trimLikeLaptop } from '../state/prompts.ts';
-import { isActing, MODEL_NAMES } from '../state/sheets.ts';
+import { isActing, MODEL_NAMES, unavailableReason } from '../state/sheets.ts';
 import { Icon } from '../ui/Icon.tsx';
 import { SheetTop } from './SheetTop.tsx';
 
@@ -38,9 +39,10 @@ export function ModelSheet({ session, titleID, held, failure }: {
   const typed = trimLikeLaptop(other) !== '';
   const ticked = typed ? null : (pick ?? session.model ?? null);
   const chosen = typed ? other : pick;
+  const modelWhy = unavailableReason(session, 'model');
   const set = (
     <button
-      className="navbtn b" type="button" disabled={chosen === null || held || acting}
+      className="navbtn b" type="button" disabled={chosen === null || held || acting || modelWhy !== null}
       onClick={() => {
         if (chosen !== null) void actions.setModel(chosen, session.ref);
       }}
@@ -52,6 +54,7 @@ export function ModelSheet({ session, titleID, held, failure }: {
     <>
       <SheetTop title="Model" titleID={titleID} onBack={() => actions.openSheet({ name: 'menu' })} action={set} />
       <p className="sh-sub">Sends <code>/model</code> to the session.</p>
+      {modelWhy !== null && modelWhy !== '' && <p className="sh-sub">{modelWhy}</p>}
       {failure !== null && <Refusal text={failure} />}
       <div className="group">
         {MODEL_NAMES.map((m) => (

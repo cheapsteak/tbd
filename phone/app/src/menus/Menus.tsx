@@ -28,8 +28,12 @@
  * **Acting buttons** (Restart, "Fork into a new tab", the model rows and Set) are disabled while a
  * switch, fork or model change for the session is on its way (`isActing`), and for `TAP_GUARD_MS`
  * after the view that puts them under the finger shows (`useChangeHold`): the ask that replaces
- * the profile row just tapped, or the model menu as it opens. A menu closes only when its action
- * succeeds (`actions/sheets.ts`); a refused switch or model change shows in the composer.
+ * the profile row just tapped, or changes under it (its note, or a reason appearing), or the
+ * model menu as it opens. In the ask, Restart and "Fork into a new tab" are also disabled while
+ * their request cannot go out, with the reason under each (`switchBlock`, `unavailableReason`):
+ * a parked session cannot fork, and a session already under the profile asked about has nothing
+ * to restart. A menu closes only when its action succeeds (`actions/sheets.ts`); a refused switch
+ * or model change shows in the composer.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -38,7 +42,9 @@ import { Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneProfile, PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { trimLikeLaptop } from '../state/prompts.ts';
-import { currentProfileID, isActing, MODEL_NAMES, profileByID, profileDetail, restartNote } from '../state/sheets.ts';
+import {
+  currentProfileID, isActing, MODEL_NAMES, profileByID, profileDetail, restartNote, switchBlock, unavailableReason,
+} from '../state/sheets.ts';
 import { Icon } from '../ui/Icon.tsx';
 import { useChangeHold } from '../ui/tapGuard.ts';
 
@@ -98,7 +104,12 @@ function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | nu
   }, [actions]);
   const profiles = load.phase === 'loaded' ? load.profiles : null;
   const asked = ask === null || profiles === null ? null : profileByID(profiles, ask);
-  const held = useChangeHold(asked === null ? `list ${load.phase}` : `ask ${asked.id}`);
+  const restartWhy = asked === null || profiles === null ? null : switchBlock(session, profiles, asked);
+  const forkWhy = unavailableReason(session, 'fork');
+  // The ask's buttons move when the note above them or a reason beside them changes.
+  const held = useChangeHold(
+    asked === null ? `list ${load.phase}` : `ask ${asked.id} ${restartNote(session)} ${restartWhy ?? ''} ${forkWhy ?? ''}`,
+  );
 
   let body: JSX.Element | JSX.Element[];
   if (asked !== null) {
@@ -109,13 +120,21 @@ function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | nu
         <span>{restartNote(session)}</span>
         <span>To keep this session as it is, fork instead. A copy opens in a new tab under {asked.name}.</span>
         <div>
-          <button className="btn pri" type="button" disabled={locked} onClick={() => void actions.switchProfile(asked.id, session.ref)}>
+          <button
+            className="btn pri" type="button" disabled={locked || restartWhy !== null}
+            onClick={() => void actions.switchProfile(asked.id, session.ref)}
+          >
             Restart
           </button>
-          <button className="btn" type="button" disabled={locked} onClick={() => void actions.fork(asked.id, session.ref)}>
+          {restartWhy !== null && restartWhy !== '' && <span>{restartWhy}</span>}
+          <button
+            className="btn" type="button" disabled={locked || forkWhy !== null}
+            onClick={() => void actions.fork(asked.id, session.ref)}
+          >
             <Icon name="fork" />
             Fork into a new tab
           </button>
+          {forkWhy !== null && forkWhy !== '' && <span>{forkWhy}</span>}
           <button className="btn" type="button" onClick={() => actions.openMenu({ name: 'account', askProfileID: null })}>
             Cancel
           </button>

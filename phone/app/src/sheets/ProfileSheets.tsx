@@ -23,8 +23,11 @@
  *
  * Restart, "Fork into a new tab" and the Fork sheet's rows act on the session, so they are
  * disabled while a switch, fork or model change for it is on its way (`isActing`) and while
- * `held`. Every action reads its target from the store when tapped and acts only on the session
- * this sheet showed (`from`, in `actions/sheets.ts`).
+ * `held`. They are also disabled while their request cannot go out, by the rules the actions
+ * check (`switchBlock`, `unavailableReason`), with the reason under the button, or under the Fork
+ * sheet's description for its rows: a parked session cannot fork, and a session already under the
+ * profile asked about has nothing to restart. Every action reads its target from the store when
+ * tapped and acts only on the session this sheet showed (`from`, in `actions/sheets.ts`).
  */
 
 import { useLayoutEffect } from 'react';
@@ -32,7 +35,9 @@ import type { JSX } from 'react';
 import { Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneProfile, PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
-import { currentProfileID, forkOrder, isActing, kindWords, profileByID, profileDetail, restartNote } from '../state/sheets.ts';
+import {
+  currentProfileID, forkOrder, isActing, kindWords, profileByID, profileDetail, restartNote, switchBlock, unavailableReason,
+} from '../state/sheets.ts';
 import type { ProfilesLoad } from '../state/sheets.ts';
 import { Icon } from '../ui/Icon.tsx';
 import { SheetTop } from './SheetTop.tsx';
@@ -44,6 +49,11 @@ function useFreshProfiles(): ProfilesLoad {
     void actions.loadProfiles();
   }, [actions]);
   return useAppState((s) => s.sheets.profiles);
+}
+
+/** Why the acting button above cannot act (`switchBlock`, `unavailableReason`), under it; nothing for null or for no reason given. */
+function Why({ text }: { text: string | null }): JSX.Element | null {
+  return text === null || text === '' ? null : <p>{text}</p>;
 }
 
 /** What stands in for the profiles until they load: the spinner, or the failed load's message. */
@@ -105,6 +115,8 @@ export function ConfirmSheet({ session, profileID, titleID, held, failure }: {
   const load = useAppState((s) => s.sheets.profiles);
   const acting = useAppState((s) => isActing(s.sheets, session.ref));
   const profile = load.phase === 'loaded' ? profileByID(load.profiles, profileID) : null;
+  const restartWhy = profile === null || load.phase !== 'loaded' ? null : switchBlock(session, load.profiles, profile);
+  const forkWhy = unavailableReason(session, 'fork');
   const locked = held || acting;
   const cancel = (): void => actions.openSheet({ name: 'switch' });
   if (profile === null) {
@@ -123,13 +135,21 @@ export function ConfirmSheet({ session, profileID, titleID, held, failure }: {
       <p>{restartNote(session)}</p>
       <p>To keep this session as it is, fork instead. A copy opens in a new tab under {profile.name}.</p>
       {failure !== null && <Refusal text={failure} />}
-      <button className="btn pri wide" type="button" disabled={locked} onClick={() => void actions.switchProfile(profile.id, session.ref)}>
+      <button
+        className="btn pri wide" type="button" disabled={locked || restartWhy !== null}
+        onClick={() => void actions.switchProfile(profile.id, session.ref)}
+      >
         Restart
       </button>
-      <button className="btn wide" type="button" disabled={locked} onClick={() => void actions.fork(profile.id, session.ref)}>
+      <Why text={restartWhy} />
+      <button
+        className="btn wide" type="button" disabled={locked || forkWhy !== null}
+        onClick={() => void actions.fork(profile.id, session.ref)}
+      >
         <Icon name="fork" />
         Fork into a new tab
       </button>
+      <Why text={forkWhy} />
       <button className="btn wide" type="button" onClick={cancel}>Cancel</button>
     </div>
   );
@@ -144,6 +164,7 @@ export function ForkSheet({ session, titleID, held, failure }: {
   const actions = useActions();
   const load = useFreshProfiles();
   const acting = useAppState((s) => isActing(s.sheets, session.ref));
+  const forkWhy = unavailableReason(session, 'fork');
   let list: JSX.Element;
   if (load.phase !== 'loaded') {
     list = <NotLoaded load={load} />;
@@ -155,7 +176,7 @@ export function ForkSheet({ session, titleID, held, failure }: {
           const same = p.id === current;
           return (
             <button
-              key={p.id} className="mi" type="button" disabled={held || acting}
+              key={p.id} className="mi" type="button" disabled={held || acting || forkWhy !== null}
               onClick={() => void actions.fork(same ? null : p.id, session.ref)}
             >
               <Icon name="fork" />
@@ -174,6 +195,7 @@ export function ForkSheet({ session, titleID, held, failure }: {
     <>
       <SheetTop title="Fork" titleID={titleID} onBack={() => actions.openSheet({ name: 'menu' })} />
       <p className="sh-sub">Copies this conversation into a new tab, under the account you pick. The phone switches to the new tab.</p>
+      {forkWhy !== null && forkWhy !== '' && <p className="sh-sub">{forkWhy}</p>}
       {failure !== null && <Refusal text={failure} />}
       {list}
     </>

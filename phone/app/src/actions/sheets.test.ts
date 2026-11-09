@@ -152,14 +152,19 @@ test('a switch sends session.switchProfile once with the picked profile, and toa
   assert.equal(h.state().ui.menu, null);
 });
 
-test('a switch to the current profile, or to one the list did not show, sends nothing', async () => {
+test('a switch to the current profile sends nothing and says why; one to a profile the list did not show sends nothing', async () => {
   const h = await harness();
-  await h.actions.switchProfile(WORK.id, R);
   await h.actions.switchProfile('P-gone', R);
   assert.deepEqual(h.acting(), []);
+  assert.equal(h.refusal(), undefined);
+  await h.actions.switchProfile(WORK.id, R);
+  assert.deepEqual(h.acting(), []);
+  assert.equal(h.refusal(), 'This session already runs under acme-work.');
+  assert.equal(isActing(h.state().sheets, R), false);
   const noList = await harness({ profiles: null });
   await noList.actions.switchProfile(PERSONAL.id, R);
   assert.deepEqual(noList.acting(), []);
+  assert.equal(noList.refusal(), undefined);
 });
 
 test('a refused switch shows in the composer and keeps the menu open; a later one may go out', async () => {
@@ -217,13 +222,66 @@ test('nothing goes out for a session other than the one the route shows', async 
   assert.deepEqual(h.acting(), []);
 });
 
-test('nothing goes out for a session the list no longer shows, or whose capability is unavailable', async () => {
-  const off: PhoneCapability = { available: false, reason: 'Not available for remote sessions.' };
-  const h = await harness({ sessions: [session(R, { capabilities: { ...session(R).capabilities, switchProfile: off, fork: off, model: off } })] });
+test('nothing goes out for a session the list no longer shows, and nothing is said', async () => {
+  const h = await harness();
+  h.actions.onEvent({ event: 'sessions.changed', seq: 30, data: { rows: [], removedRowIDs: ['W1'] } });
   await h.actions.switchProfile(PERSONAL.id, R);
   await h.actions.fork(null, R);
+  await h.actions.fork(PERSONAL.id, R);
   await h.actions.setModel('sonnet', R);
   assert.deepEqual(h.acting(), []);
+  assert.equal(h.refusal(), undefined);
+  assert.equal(h.state().sheets.failed, null);
+});
+
+test('a fork under a profile the loaded list does not hold, or with no list loaded, sends nothing', async () => {
+  const h = await harness();
+  await h.actions.fork('P-gone', R);
+  assert.deepEqual(h.acting(), []);
+  const noList = await harness({ profiles: null });
+  await noList.actions.fork(PERSONAL.id, R);
+  assert.deepEqual(noList.acting(), []);
+  assert.equal(noList.refusal(), undefined);
+});
+
+test('a gesture whose capability is unavailable sends nothing, and the reason goes to the composer', async () => {
+  const off: PhoneCapability = { available: false, reason: 'Not available for remote sessions.' };
+  const caps = { ...session(R).capabilities, switchProfile: off, fork: off, model: off };
+  for (const act of [
+    (h: Awaited<ReturnType<typeof harness>>) => h.actions.switchProfile(PERSONAL.id, R),
+    (h: Awaited<ReturnType<typeof harness>>) => h.actions.fork(null, R),
+    (h: Awaited<ReturnType<typeof harness>>) => h.actions.fork(PERSONAL.id, R),
+    (h: Awaited<ReturnType<typeof harness>>) => h.actions.setModel('sonnet', R),
+  ]) {
+    const h = await harness({ sessions: [session(R, { capabilities: caps })] });
+    await act(h);
+    assert.deepEqual(h.acting(), []);
+    assert.equal(h.refusal(), 'Not available for remote sessions.');
+    assert.equal(isActing(h.state().sheets, R), false);
+  }
+  // No reason given: nothing to say.
+  const bare = await harness({ sessions: [session(R, { capabilities: { ...caps, fork: { available: false } } })] });
+  await bare.actions.fork(null, R);
+  assert.deepEqual(bare.acting(), []);
+  assert.equal(bare.refusal(), undefined);
+});
+
+test("a parked session's fork from switch-confirm sends nothing; the laptop's reason shows in the sheet and the composer", async () => {
+  const parked = 'This session is parked. Send it a message to wake it, then fork it.';
+  const h = await harness({
+    sessions: [session(R, { status: { chip: 'parked', changedAt: 1 }, capabilities: { ...session(R).capabilities, fork: { available: false, reason: parked } } })],
+  });
+  h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  const sheet = h.state().ui.sheet as SheetState;
+  await h.actions.fork(PERSONAL.id, R);
+  assert.deepEqual(h.acting(), []);
+  assert.equal(h.refusal(), parked);
+  assert.deepEqual(h.state().sheets.failed, { sheet, text: parked });
+  // The switch itself still goes out.
+  const pending = h.actions.switchProfile(PERSONAL.id, R);
+  assert.deepEqual(h.acting().map((r) => r.params), [{ session: R, profileID: PERSONAL.id }]);
+  h.last('session.switchProfile').resolve({ session: R });
+  await pending;
 });
 
 test('one acting request per session at a time, whichever of the three', async () => {
@@ -251,12 +309,18 @@ test('fork(null) sends no profileID, and toasts under the session\'s own account
   assert.equal(h.state().ui.toast?.text, 'Forked into a new tab, under acme-work');
 });
 
-test('fork(null) on a session with no profile toasts "Default account"', async () => {
-  const h = await harness({ sessions: [session(R, { profileID: undefined, profileName: undefined })] });
-  const pending = h.actions.fork(null, R);
+test('fork(null) on a session with no profile toasts the default profile the row showed, or "Default account" with no list', async () => {
+  const bare = session(R, { profileID: undefined, profileName: undefined });
+  const h = await harness({ sessions: [bare] });
+  let pending = h.actions.fork(null, R);
   h.last('session.fork').resolve({ session: { kind: 'local', terminalID: 'T-new' } });
   await pending;
-  assert.equal(h.state().ui.toast?.text, 'Forked into a new tab, under Default account');
+  assert.equal(h.state().ui.toast?.text, 'Forked into a new tab, under Personal');
+  const noList = await harness({ sessions: [bare], profiles: null });
+  pending = noList.actions.fork(null, R);
+  noList.last('session.fork').resolve({ session: { kind: 'local', terminalID: 'T-new' } });
+  await pending;
+  assert.equal(noList.state().ui.toast?.text, 'Forked into a new tab, under Default account');
 });
 
 test('a fork under a profile sends its ID, and the new tab opens only once the list shows it', async () => {
@@ -306,6 +370,52 @@ test("a fork's error shows in the sheet open over the session, else in the compo
   await pending;
   assert.equal(h.refusal(), NOT_CONFIRMED_TEXT);
   assert.equal(h.state().sheets.failed, null);
+});
+
+test("a fork's error never lands in a sheet the user moved to: it goes to the composer", async () => {
+  const forkSheet = async (move: (h: Awaited<ReturnType<typeof harness>>) => void) => {
+    const h = await harness();
+    h.actions.openSheet({ name: 'fork' });
+    const pending = h.actions.fork(PERSONAL.id, R);
+    move(h);
+    h.last('session.fork').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
+    await pending;
+    return h;
+  };
+  // Back to the session menu, which shows no failure.
+  let h = await forkSheet((x) => x.actions.openSheet({ name: 'menu' }));
+  assert.equal(h.refusal(), NOT_CONFIRMED_TEXT);
+  assert.equal(h.state().sheets.failed, null);
+  // On to the Model sheet, which does show failures, but did not ask.
+  h = await forkSheet((x) => {
+    x.actions.openSheet({ name: 'menu' });
+    x.actions.openSheet({ name: 'model' });
+  });
+  assert.equal(h.refusal(), NOT_CONFIRMED_TEXT);
+  assert.equal(h.state().sheets.failed, null);
+  // From the account menu, then the session menu sheet opened.
+  h = await harness();
+  h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
+  const pending = h.actions.fork(PERSONAL.id, R);
+  h.actions.closeMenu();
+  h.actions.openSheet({ name: 'menu' });
+  h.last('session.fork').reject(new AppError('internal', 'TBD could not copy this conversation.'));
+  await pending;
+  assert.equal(h.refusal(), 'TBD could not copy this conversation.');
+  assert.equal(h.state().sheets.failed, null);
+  assert.equal(isActing(h.state().sheets, R), false);
+});
+
+test('a switch error while switch-confirm asks about another profile goes to the composer only', async () => {
+  const h = await harness();
+  h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  const pending = h.actions.switchProfile(PERSONAL.id, R);
+  h.actions.openSheet({ name: 'switch-confirm', profileID: BEDROCK.id });
+  h.last('session.switchProfile').reject(new AppError('refused', REFUSED));
+  await pending;
+  assert.equal(h.refusal(), REFUSED);
+  assert.equal(h.state().sheets.failed, null);
+  assert.deepEqual(h.state().ui.sheet, { name: 'switch-confirm', profileID: BEDROCK.id });
 });
 
 test('a superseded failure shows nothing and clears the mark', async () => {

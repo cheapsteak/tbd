@@ -16,9 +16,9 @@
 //   `profileID`, or with no `profileID` at all when it is null, which the laptop reads as the
 //   session's own profile. It takes a mark (`navMark`) as it sends; on success it closes the menu
 //   or sheet the gesture was made on, if it still shows, toasts "Forked into a new tab, under
-//   <profile>" (for null, the session's profile name, or "Default account" when it has none), and
-//   opens the new tab once the list shows it (`openPending({ ref }, mark)`), unless the user has
-//   navigated since the mark.
+//   <profile>" (for null, the name the Fork sheet's "Same account as now" row showed,
+//   `sameAccountName`), and opens the new tab once the list shows it (`openPending({ ref },
+//   mark)`), unless the user has navigated since the mark.
 // - `setModel(model, from): Promise<void>` – `session.setModel` on the session the route shows,
 //   with `model` trimmed of the white space around it (the laptop's own trim, `trimLikeLaptop`).
 //   On success it closes the menu or sheet the gesture was made on, if it still shows, and toasts
@@ -29,23 +29,33 @@
 //
 // **The target.** `from` is the session the menu or sheet showed when the user tapped. Each of
 // the three acts only on the session the route shows at the moment of the gesture, read from the
-// store in one read, and only when that is `from`, the list shows it (`findSession`), and its
-// capability (`switchProfile`, `fork`, `model`) is available. So a menu or sheet still on screen
-// for a moment after an event moved the route acts on nothing, never on the session the route
-// moved to. `switchProfile` and a `fork` with a profile also need that profile in the profiles
-// last loaded, the list the user picked from, and a switch never goes to the current profile.
-// `setModel` needs a name that is not blank once trimmed.
+// store in one read, and only when that is `from` and the list shows it (`findSession`). So a
+// menu or sheet still on screen for a moment after an event moved the route acts on nothing,
+// never on the session the route moved to. `switchProfile` and a `fork` with a profile also need
+// that profile in the profiles last loaded, the list the user picked from. `setModel` needs a name
+// that is not blank once trimmed. Each of these sends nothing and says nothing: the menu or sheet
+// that asked is gone, or never offered what was asked.
+//
+// **Refused at the tap.** The menus and the sheets disable an acting button while its request
+// cannot go out, and show why beside it, by the same rules the actions check (`state/sheets.ts`):
+// the session's capability (`switchProfile`, `fork`, `model`, `unavailableReason`), and for a
+// switch, that the session runs under that profile already (`switchBlock`). A gesture that meets
+// one of these all the same, as when an event changed the session as the user tapped, sends
+// nothing and shows the reason in the session's `ui.refusal`, and in the sheet it was made on
+// while that shows (as an error does, below), unless the laptop gave none.
 //
 // **One request per gesture.** A session gets one of the three at a time: the action marks it
 // acting (`beginAct`) in the same store update that reads the target, before anything is sent,
 // and does nothing while the mark stands. The mark goes when the request settles, on every path.
 //
 // **Errors** show their message as they come, `not_confirmed` included; `superseded` is silent.
-// A refused switch or model change goes to the session's `ui.refusal`, which the composer shows,
-// and also to the sheet open over the session when it failed, if one is, since the sheet covers
-// the composer. A fork's error goes to that open sheet (`failed` in the slice) when there is one,
-// and to `ui.refusal` otherwise, as when it was made from the account menu or the sheet was closed
-// meanwhile. An error closes nothing: a menu or sheet closes only on success.
+// They show in the sheet the gesture was made on (`failed` in the slice) while that sheet still
+// shows over the session: the same sheet, and for `switch-confirm` the same profile. A refused
+// switch or model change also goes to the session's `ui.refusal`, which the composer shows once
+// the sheet is gone. A fork's error goes to `ui.refusal` only when no sheet shows it: made from
+// the account menu, or the user moved to another sheet or closed it meanwhile. So an error never
+// lands in a sheet that did not ask, and never goes unshown. An error closes nothing: a menu or
+// sheet closes only on success.
 //
 // **Never retry one of these automatically under a new request ID.** Each but the loads acts,
 // and one that failed with `not_confirmed`, `bad_reply`, `internal` or `too_large` may have
@@ -59,37 +69,39 @@ import { refKey, sameRef } from '../protocol/wire.ts';
 import { trimLikeLaptop, withText } from '../state/prompts.ts';
 import { findSession } from '../state/route.ts';
 import {
-  accountName, beginAct, currentProfileID, endAct, failIn, isActing, loadedProfiles, profileByID, profilesEnded, profilesLoading,
+  beginAct, endAct, failIn, isActing, loadedProfiles, profileByID, profilesEnded, profilesLoading, sameAccountName, switchBlock,
+  unavailableReason,
 } from '../state/sheets.ts';
-import type { ActingKind, ProfilesLoad, SheetsState } from '../state/sheets.ts';
+import type { ActingKind, ProfilesLoad } from '../state/sheets.ts';
 import { nextToast } from '../state/store.ts';
 import type { AppState, MenuState, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
 
-/** The capability each acting request needs. */
-const CAPABILITY = { switch: 'switchProfile', fork: 'fork', model: 'model' } as const;
-
-/** Where an acting request goes: the session, its `refKey`, the session as the list showed it, and the menu or sheet the gesture was made on. */
+/**
+ * Where an acting request goes: the session, its `refKey`, the session as the list showed it, and
+ * the sheet or the menu the gesture was made on (at most one shows at a time).
+ */
 interface ActTarget {
   ref: PhoneSessionRef;
   key: string;
   session: PhoneSession;
-  surface: SheetState | MenuState | null;
+  sheet: SheetState | null;
+  menu: MenuState | null;
 }
 
 /**
- * Where a `kind` request goes, read from `s` at the moment of the gesture: the session the route
- * shows, when it is `from`, the list shows it with the capability available, and nothing else is
- * on its way for it; or null when nothing must go out.
+ * Where a request goes, read from `s` at the moment of the gesture: the session the route shows,
+ * when it is `from`, the list shows it, and nothing else is on its way for it; or null when
+ * nothing must go out.
  */
-function actTarget(s: AppState, from: PhoneSessionRef | undefined, kind: ActingKind): ActTarget | null {
+function actTarget(s: AppState, from: PhoneSessionRef | undefined): ActTarget | null {
   const { route } = s.ui;
   if (from === undefined || route.screen !== 'session' || !sameRef(route.ref, from)) return null;
   const found = findSession(s.sessions, route.ref);
-  if (found === null || !found.session.capabilities[CAPABILITY[kind]].available) return null;
+  if (found === null) return null;
   const { ref } = found.session;
   if (isActing(s.sheets, ref)) return null;
-  return { ref, key: refKey(ref), session: found.session, surface: s.ui.sheet ?? s.ui.menu };
+  return { ref, key: refKey(ref), session: found.session, sheet: s.ui.sheet, menu: s.ui.menu };
 }
 
 /** `s` with `to`'s session marked acting as `kind`. */
@@ -97,11 +109,8 @@ function begun(s: AppState, to: ActTarget, kind: ActingKind): AppState {
   return { ...s, sheets: beginAct(s.sheets, to.ref, kind) };
 }
 
-/**
- * How an acting request ended: taken, with the toast to show, or failed, with the words to show
- * (null for none) and whether they go to the composer even while a sheet shows them.
- */
-type Settled = { taken: true; toast: string } | { taken: false; text: string | null; composerToo: boolean };
+/** How an acting request ended: taken, with the toast to show, or failed, with the words to show (null for none). */
+type Settled = { taken: true; toast: string } | { taken: false; text: string | null };
 
 /** The words for a failed request: the error's message, none for `superseded`, the client's words for a fault in its own setup. */
 function errorText(error: unknown): string | null {
@@ -109,36 +118,62 @@ function errorText(error: unknown): string | null {
   return error.code === 'superseded' ? null : error.message;
 }
 
-/** The sheet open over `ref`'s session in `ui`, or null: one the route's session shows, never New. */
-function sheetOver(ui: UIState, ref: PhoneSessionRef): SheetState | null {
+/**
+ * The sheet `ui` holds when it is still the one `to`'s gesture was made on, over `to`'s session:
+ * the same sheet, and for `switch-confirm` the same profile; else null.
+ */
+function gestureSheet(ui: UIState, to: ActTarget): SheetState | null {
   const { route, sheet } = ui;
-  if (sheet === null || sheet.name === 'new' || route.screen !== 'session' || !sameRef(route.ref, ref)) return null;
+  const made = to.sheet;
+  if (sheet === null || made === null || route.screen !== 'session' || !sameRef(route.ref, to.ref)) return null;
+  if (sheet.name !== made.name) return null;
+  if (sheet.name === 'switch-confirm' && made.name === 'switch-confirm' && sheet.profileID !== made.profileID) return null;
   return sheet;
 }
 
 /**
- * `s` once `to`'s request settled as `how`: the mark gone, and then
- * - when taken, the menu or sheet the gesture was made on closed, if it still shows, and the toast;
- * - when failed, the words in the sheet open over the session, if one is, and in the session's
- *   `ui.refusal` when `composerToo` is set or no sheet shows them.
+ * `s` with `text`, the words of `to`'s refused or failed request, where they show: in the sheet the
+ * gesture was made on while it still shows (`gestureSheet`), and in the session's `ui.refusal`
+ * when `composerToo` is set or no sheet shows them.
  */
-function settle(s: AppState, to: ActTarget, how: Settled): AppState {
-  let sheets: SheetsState = endAct(s.sheets, to.ref);
+function withWords(s: AppState, to: ActTarget, text: string, composerToo: boolean): AppState {
+  const sheet = gestureSheet(s.ui, to);
+  const sheets = sheet === null ? s.sheets : failIn(s.sheets, sheet, text);
   let ui = s.ui;
-  if (how.taken) {
-    if (to.surface !== null && ui.sheet === to.surface) ui = { ...ui, sheet: null };
-    if (to.surface !== null && ui.menu === to.surface) ui = { ...ui, menu: null };
-    ui = { ...ui, toast: nextToast(ui, how.toast) };
-  } else if (how.text !== null) {
-    const sheet = sheetOver(ui, to.ref);
-    if (sheet !== null) sheets = failIn(sheets, sheet, how.text);
-    if (how.composerToo || sheet === null) {
-      const refusal = withText(ui.refusal, to.key, how.text);
-      if (refusal !== ui.refusal) ui = { ...ui, refusal };
-    }
+  if (composerToo || sheet === null) {
+    const refusal = withText(ui.refusal, to.key, text);
+    if (refusal !== ui.refusal) ui = { ...ui, refusal };
   }
   if (sheets === s.sheets && ui === s.ui) return s;
   return { ...s, sheets, ui };
+}
+
+/**
+ * `s` once a gesture for `to` was refused at the tap with `reason`: the reason in the session's
+ * `ui.refusal`, and in the sheet the gesture was made on while it shows (`withWords`); nothing
+ * when the laptop gave no reason.
+ */
+function refused(s: AppState, to: ActTarget, reason: string): AppState {
+  return reason === '' ? s : withWords(s, to, reason, true);
+}
+
+/**
+ * `s` once `to`'s `kind` request settled as `how`: the mark gone, and then, when taken, the menu
+ * or sheet the gesture was made on closed, if it still shows, and the toast; when failed, the
+ * words shown (`withWords`), in the composer too for a switch or a model change.
+ */
+function settle(s: AppState, to: ActTarget, kind: ActingKind, how: Settled): AppState {
+  const sheets = endAct(s.sheets, to.ref);
+  let next: AppState = sheets === s.sheets ? s : { ...s, sheets };
+  if (how.taken) {
+    let ui = next.ui;
+    if (to.sheet !== null && ui.sheet === to.sheet) ui = { ...ui, sheet: null };
+    if (to.menu !== null && ui.menu === to.menu) ui = { ...ui, menu: null };
+    next = { ...next, ui: { ...ui, toast: nextToast(ui, how.toast) } };
+  } else if (how.text !== null) {
+    next = withWords(next, to, how.text, kind !== 'fork');
+  }
+  return next;
 }
 
 export function sheetActions(ctx: ActionContext, self: () => Actions) {
@@ -168,11 +203,13 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
     async switchProfile(profileID: string, from: PhoneSessionRef): Promise<void> {
       const sent: { to: ActTarget | null; name: string } = { to: null, name: '' };
       store.update((s) => {
-        const to = actTarget(s, from, 'switch');
+        const to = actTarget(s, from);
         const profiles = loadedProfiles(s.sheets);
         if (to === null || profiles === null) return s;
         const profile = profileByID(profiles, profileID);
-        if (profile === null || profile.id === currentProfileID(to.session, profiles)) return s;
+        if (profile === null) return s;
+        const block = switchBlock(to.session, profiles, profile);
+        if (block !== null) return refused(s, to, block);
         sent.to = to;
         sent.name = profile.name;
         return begun(s, to, 'switch');
@@ -184,25 +221,29 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         await client.request('session.switchProfile', { session: to.ref, profileID });
         how = { taken: true, toast: `Restarted under ${sent.name}` };
       } catch (error) {
-        how = { taken: false, text: errorText(error), composerToo: true };
+        how = { taken: false, text: errorText(error) };
       }
-      store.update((s) => settle(s, to, how));
+      store.update((s) => settle(s, to, 'switch', how));
     },
 
     async fork(profileID: string | null, from: PhoneSessionRef): Promise<void> {
       const sent: { to: ActTarget | null; name: string } = { to: null, name: '' };
       store.update((s) => {
-        const to = actTarget(s, from, 'fork');
+        const to = actTarget(s, from);
         if (to === null) return s;
+        const profiles = loadedProfiles(s.sheets);
+        let name: string;
         if (profileID === null) {
-          sent.name = accountName(to.session);
+          name = sameAccountName(to.session, profiles);
         } else {
-          const profiles = loadedProfiles(s.sheets);
           const profile = profiles === null ? null : profileByID(profiles, profileID);
           if (profile === null) return s;
-          sent.name = profile.name;
+          name = profile.name;
         }
+        const block = unavailableReason(to.session, 'fork');
+        if (block !== null) return refused(s, to, block);
         sent.to = to;
+        sent.name = name;
         return begun(s, to, 'fork');
       });
       const to = sent.to;
@@ -217,9 +258,9 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         made = result.session;
         how = { taken: true, toast: `Forked into a new tab, under ${sent.name}` };
       } catch (error) {
-        how = { taken: false, text: errorText(error), composerToo: false };
+        how = { taken: false, text: errorText(error) };
       }
-      store.update((s) => settle(s, to, how));
+      store.update((s) => settle(s, to, 'fork', how));
       if (made !== null) self().openPending({ ref: made }, mark);
     },
 
@@ -227,8 +268,10 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       const name = trimLikeLaptop(model);
       const sent: { to: ActTarget | null } = { to: null };
       store.update((s) => {
-        const to = name === '' ? null : actTarget(s, from, 'model');
+        const to = name === '' ? null : actTarget(s, from);
         if (to === null) return s;
+        const block = unavailableReason(to.session, 'model');
+        if (block !== null) return refused(s, to, block);
         sent.to = to;
         return begun(s, to, 'model');
       });
@@ -239,9 +282,9 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         await client.request('session.setModel', { session: to.ref, model: name });
         how = { taken: true, toast: `Model set to ${name}` };
       } catch (error) {
-        how = { taken: false, text: errorText(error), composerToo: true };
+        how = { taken: false, text: errorText(error) };
       }
-      store.update((s) => settle(s, to, how));
+      store.update((s) => settle(s, to, 'model', how));
     },
 
     async loadProviders(repoID: string): Promise<void> {},
