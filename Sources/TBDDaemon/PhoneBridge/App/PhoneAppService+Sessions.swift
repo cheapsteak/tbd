@@ -203,17 +203,18 @@ extension PhoneAppService {
     /// states, remote sessions and remote providers come through
     /// `PhoneSessionActions`; a call that fails, as the remote ones do while
     /// remote backends are off, counts as an empty list, and with no session
-    /// states every session reads `unknown`. A failed database read throws.
+    /// states every session reads `unknown`. A failed database read throws,
+    /// except the setting's (below).
     /// The providers re-read the registry at most once per
     /// `PhoneAppConstants.providerRefreshInterval`, or always with
     /// `forceProviderRefresh`, as a `sessions.subscribe` asks
     /// (`gatheredRemoteProviders(forceRefresh:)`).
     ///
     /// The setting for answering prompts is read on every gather
-    /// (`promptAnswerSetting()`), never kept. Turning it on or off reaches a
-    /// phone through the publisher like any other change: the setter,
-    /// `config.setTranscriptPromptAnswerEnabled`, broadcasts a state delta
-    /// once it has written the column, the delta opens the publisher's
+    /// (`gatheredPromptAnswerSetting()`), never kept. Turning it on or off
+    /// reaches a phone through the publisher like any other change: the
+    /// setter, `config.setTranscriptPromptAnswerEnabled`, broadcasts a state
+    /// delta once it has written the column, the delta opens the publisher's
     /// window, and the gather after it reads the new value.
     nonisolated func gatherSnapshot(forceProviderRefresh: Bool = false) async throws -> PhoneSnapshot {
         let repos = try await db.repos.list()
@@ -238,7 +239,7 @@ extension PhoneAppService {
             }
         }
         let profiles = try await db.modelProfiles.list()
-        let promptAnswerEnabled = try await promptAnswerSetting()
+        let promptAnswerEnabled = try await gatheredPromptAnswerSetting()
         let openPrompts = await pendingPrompts.oldestOpenPrompts()
         let states = await gatheredSessionStates()
         let remoteSessions = await gatheredRemoteSessions()
@@ -279,6 +280,25 @@ extension PhoneAppService {
         let off = needed(settingOff)
         guard on != off else { return on }
         return try await promptAnswerSetting() ? on : off
+    }
+
+    /// The setting for answering prompts as a gather reads it, or nil when
+    /// the read fails. Only `answer` depends on it, so a config row that
+    /// cannot be read does not take the whole list down: the list is built
+    /// with no session offering an answer
+    /// (`PhoneSessionStatus.answerSettingUnreadReason`), which is what
+    /// `prompt.answer` would do anyway, since it reads the setting again
+    /// (`listedCapability`). A cancelled read throws.
+    private nonisolated func gatheredPromptAnswerSetting() async throws -> Bool? {
+        do {
+            return try await promptAnswerSetting()
+        } catch let cancelled as CancellationError {
+            throw cancelled
+        } catch {
+            Self.logger.error(
+                "Phone sessions: could not read the setting for answering prompts, so no session offers an answer: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
     }
 
     private nonisolated func gatheredSessionStates() async -> [UUID: SessionState] {

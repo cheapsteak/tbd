@@ -396,16 +396,49 @@ struct PhoneSessionsPublisherTests {
     @Test func onlyTheGatherReReadsTheProviderRegistry() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
 
         _ = try await h.service.gatherSnapshot()
         let gathered = h.actions.calls.map(\.method)
         #expect(gathered.contains(.remoteProviders))
         #expect(!gathered.contains(.cachedRemoteProviders))
 
-        let capabilities = try await h.service.remoteCapabilities(ofProvider: "acme-cloud")
-        #expect(capabilities.send.available)
+        try await h.service.checkPhoneCapableRemoteSession(
+            provider: "acme-cloud", sessionID: "rs-1", needing: { $0.send },
+            orElse: PhoneAppService.cannotTakeMessagesReason)
         let checked = h.actions.calls.map(\.method).dropFirst(gathered.count)
-        #expect(Array(checked) == [.cachedRemoteProviders])
+        #expect(Array(checked) == [.cachedRemoteProviders, .remoteSessions])
+    }
+
+    /// A config row that cannot be read does not take the sessions list
+    /// down. Only `answer` depends on the setting it holds, so the list still
+    /// arrives, with no session offering an answer, for the reason
+    /// `answerSettingUnreadReason` gives, and every other capability as it
+    /// was. Phone control reads as on without the database, or the request
+    /// would stop at that check.
+    @Test func anUnreadableAnswerSettingLeavesTheListWithoutAnswers() async throws {
+        let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
+        let terminal = try await h.seedTerminal()
+        let rowID = terminal.worktreeID.uuidString
+        let outbox = await h.connect()
+        let readable = try await h.service.gatherSnapshot()
+        let readableRow = readable.rows.first { $0.id == rowID }
+        let before = try #require(readableRow?.sessions.first)
+        try await h.makeConfigUnreadable()
+
+        let (reply, bytes) = try await h.request(.sessionsSubscribe, params: Self.fresh, on: outbox)
+
+        #expect(reply.error == nil)
+        let result = try Self.result(bytes)
+        let subscribedRow = (result.rows ?? []).first { $0.id == rowID }
+        let after = try #require(subscribedRow?.sessions.first)
+        #expect(before.capabilities.answer == PhoneCapability(available: true, reason: nil))
+        #expect(after.capabilities == PhoneCapabilities(
+            transcript: before.capabilities.transcript, send: before.capabilities.send,
+            answer: PhoneCapability(available: false, reason: PhoneSessionStatus.answerSettingUnreadReason),
+            switchProfile: before.capabilities.switchProfile, fork: before.capabilities.fork,
+            model: before.capabilities.model))
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
     /// A gather re-reads the provider registry at most once per

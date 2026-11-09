@@ -25,7 +25,7 @@ struct PhoneSnapshotBuilderTests {
         profiles: [ModelProfile] = [], states: [UUID: SessionState] = [:],
         openPrompts: [UUID: PendingPromptPayload] = [:],
         remoteSessions: [RemoteSessionInfo] = [], providers: [RemoteProviderStatus] = [],
-        promptAnswerEnabled: Bool = true
+        promptAnswerEnabled: Bool? = true
     ) -> PhoneSnapshotInput {
         PhoneSnapshotInput(
             repos: repos, worktrees: worktrees, scratch: scratch,
@@ -436,11 +436,11 @@ struct PhoneSnapshotBuilderTests {
 
     // MARK: - The setting for answering prompts
 
-    /// One local Claude session, parked so its `fork` is unavailable, and one
-    /// remote session whose provider declares every capability, built with
-    /// the setting for answering prompts `enabled`.
+    /// `terminal`, a local session, and one remote session whose provider
+    /// declares every capability, built with the setting for answering
+    /// prompts `enabled`, nil for a setting that could not be read.
     private static func answerSettingSnapshot(
-        enabled: Bool, terminal: TBDShared.Terminal, worktree: Worktree, repo: Repo
+        enabled: Bool?, terminal: TBDShared.Terminal, worktree: Worktree, repo: Repo
     ) -> PhoneSnapshot {
         PhoneSnapshotBuilder.build(Self.input(
             repos: [repo], worktrees: [worktree], terminals: [terminal],
@@ -496,6 +496,38 @@ struct PhoneSnapshotBuilderTests {
         #expect(remoteOff.capabilities.transcript == Self.available)
         #expect(remoteOff.capabilities.fork
             == PhoneCapability(available: false, reason: PhoneSessionStatus.remoteOnlyReason))
+    }
+
+    /// A setting that could not be read turns off only `answer`, on a local
+    /// Claude session and on a remote session whose provider declares it,
+    /// with `answerSettingUnreadReason` rather than the reason for a setting
+    /// turned off. A session that cannot answer anyway keeps its own reason.
+    @Test func anUnreadAnswerSettingTurnsOffOnlyAnswerWithItsOwnReason() throws {
+        let a = UUID()
+        let repo = Repo(id: a, path: "/tmp/acme", displayName: "acme")
+        let w = Self.worktree("fix-login", repo: a)
+        let claude = Self.terminal(in: w.id, kind: .claude)
+
+        let on = Self.answerSettingSnapshot(enabled: true, terminal: claude, worktree: w, repo: repo)
+        let unread = Self.answerSettingSnapshot(enabled: nil, terminal: claude, worktree: w, repo: repo)
+
+        let unreadAnswer = PhoneCapability(available: false, reason: PhoneSessionStatus.answerSettingUnreadReason)
+        for rowID in [w.id.uuidString, "remote:acme/rs-1"] {
+            let shownOn = try #require(try Self.row(rowID, in: on).sessions.first)
+            let shownUnread = try #require(try Self.row(rowID, in: unread).sessions.first)
+            #expect(shownOn.capabilities.answer == Self.available, "row \(rowID)")
+            #expect(shownUnread.capabilities == PhoneCapabilities(
+                transcript: shownOn.capabilities.transcript, send: shownOn.capabilities.send, answer: unreadAnswer,
+                switchProfile: shownOn.capabilities.switchProfile, fork: shownOn.capabilities.fork,
+                model: shownOn.capabilities.model), "row \(rowID)")
+        }
+        let codex = PhoneSessionStatus.localCapabilities(
+            terminal: Self.terminal(in: w.id, kind: .codex, claudeSessionID: nil), isRemoteWorktree: false,
+            promptAnswerEnabled: nil)
+        #expect(codex.answer == PhoneCapability(available: false, reason: "Codex sessions show status only."))
+        let undeclared = PhoneSessionStatus.remoteCapabilities(declared: [], promptAnswerEnabled: nil)
+        #expect(undeclared.answer
+            == PhoneCapability(available: false, reason: "This provider does not support answering prompts."))
     }
 
     /// A session that cannot answer whatever the setting says keeps its own

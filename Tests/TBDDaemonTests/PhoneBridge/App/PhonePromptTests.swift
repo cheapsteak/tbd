@@ -199,11 +199,12 @@ struct PhonePromptTests {
         #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptHookDetachedRefusal))
     }
 
-    /// The core refuses while `transcript_prompt_answer_enabled` is off, and
-    /// the phone gets that refusal as it is. The phone's own check reads the
-    /// setting first, so this is the answer whose setting was turned off
-    /// between the two reads: the setting here is on, and the fake core
-    /// refuses as the real one would after the change.
+    /// The core refuses while `transcript_prompt_answer_enabled` is off, in
+    /// words written for a developer, and the phone gets the words its
+    /// sessions list shows for the same thing instead. The phone's own check
+    /// reads the setting first, so this is the answer whose setting was
+    /// turned off between the two reads: the setting here is on, and the
+    /// fake core refuses as the real one would after the change.
     /// `PhonePromptAnswerRouterTests` runs the setting through the real core.
     @Test func theSettingsRefusalReachesThePhone() async throws {
         let h = try await PhoneServiceHarness.make()
@@ -213,7 +214,7 @@ struct PhonePromptTests {
         let terminalID = try await h.seedTerminal().id
         let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
-        #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptAnswerDisabledRefusal))
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerTurnedOffReason))
     }
 
     @Test func aRefusalWithNoReasonIsRefusedWithAFixedLine() async throws {
@@ -421,7 +422,8 @@ struct PhonePromptTests {
     /// Off, the setting refuses a remote answer `unsupported` with the reason
     /// the sessions list shows, before the session list is read or the
     /// provider called, even where the provider declares `answer`. On, the
-    /// answer reaches the provider.
+    /// answer reaches the provider. Either way the sessions list shows the
+    /// session's `answer` as the refusal reads it.
     @Test(arguments: [false, true])
     func aRemoteAnswerFollowsTheAnswerSetting(enabled: Bool) async throws {
         let h = try await PhoneServiceHarness.make()
@@ -444,8 +446,10 @@ struct PhonePromptTests {
             #expect(h.actions.remoteAnswers.isEmpty)
             #expect(h.actions.calls == [FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil)])
         }
-        let capabilities = try await h.service.remoteCapabilities(ofProvider: "acme-cloud")
-        #expect(capabilities.answer.available == enabled)
+        let snapshot = try await h.service.gatherSnapshot()
+        let shown = snapshot.rows.flatMap(\.sessions).first { $0.ref == Self.remoteSession }
+        let session = try #require(shown)
+        #expect(session.capabilities.answer.available == enabled)
     }
 
     /// A provider that does not declare `answer` keeps its own reason while
@@ -482,8 +486,9 @@ struct PhonePromptTests {
     }
 
     /// A remote answer's refusal reaches the phone only in words TBD wrote:
-    /// the setting's, a session state's, the remote gates' and a validation
-    /// message about the phone's own answer pass as they are, and a
+    /// the setting's in the words the sessions list shows for it, and a
+    /// session state's, the remote gates' and a validation message about the
+    /// phone's own answer as they are, and a
     /// provider's own words, which can quote a token, become
     /// `remoteRefusedReason`, as does a validation message naming a question
     /// the answer did not name.
@@ -497,8 +502,8 @@ struct PhonePromptTests {
             (PhoneProviderSecret.error, Self.allow, PhoneAppService.remoteRefusedReason),
             ("invalid_params: \(PhoneProviderSecret.error)", Self.allow, PhoneAppService.remoteRefusedReason),
             ("", Self.allow, PhoneAppService.remoteRefusedReason),
-            (PromptAnswerRefusal.disabled, Self.allow, PromptAnswerRefusal.disabled),
-            (RPCRouter.promptAnswerDisabledRefusal, Self.allow, RPCRouter.promptAnswerDisabledRefusal),
+            (PromptAnswerRefusal.disabled, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (RPCRouter.promptAnswerDisabledRefusal, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
             (PromptAnswerRefusal.notMirrored, Self.allow, PromptAnswerRefusal.notMirrored),
             (RemoteSendMessageRefusal.exited, Self.allow, RemoteSendMessageRefusal.exited),
             (RemoteGateRefusal.backendsDisabled, Self.allow, RemoteGateRefusal.backendsDisabled),
@@ -1606,8 +1611,9 @@ struct PhonePromptAnswerRouterTests {
     }
 
     /// The setting turned off after the phone's own check read it on: the
-    /// core reads it again, refuses before it looks for the prompt, and the
-    /// phone gets the core's refusal as it is.
+    /// core reads it again and refuses before it looks for the prompt, and
+    /// the phone gets that refusal in the words its sessions list shows for
+    /// the setting, not the core's.
     @Test func theCoreRefusesWhenTheSettingIsTurnedOffAfterThePhonesCheck() async throws {
         let f = try await makeFixture(answeringTurnedOffBeforeTheCore: true)
         try await f.db.config.setTranscriptPromptAnswerEnabled(true)
@@ -1615,7 +1621,7 @@ struct PhonePromptAnswerRouterTests {
         let bytes = try await answer(f)
 
         let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
-        #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptAnswerDisabledRefusal))
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerTurnedOffReason))
         #expect(try await f.db.config.get().transcriptPromptAnswerEnabled == false)
     }
 }

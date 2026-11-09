@@ -262,24 +262,11 @@ extension PhoneAppService {
         }
     }
 
-    /// The capabilities of `provider`'s sessions, from what it declares and
-    /// the setting for answering prompts (`promptAnswerSetting()`), read the
-    /// way the sessions list reads them. A provider list the daemon refuses
-    /// to give is `refused` with its reason; one that does not decode is
-    /// `internal`; a provider missing from it is `not_found`. An action on a
-    /// remote session reads the capability it needs the same way, through
-    /// `checkPhoneCapableRemoteSession`, which reads the setting only when
-    /// that capability follows it.
-    nonisolated func remoteCapabilities(ofProvider provider: String) async throws -> PhoneCapabilities {
-        let providers = try await providerStatuses()
-        let promptAnswerEnabled = try await promptAnswerSetting()
-        return try Self.remoteCapabilities(ofProvider: provider, in: providers, promptAnswerEnabled: promptAnswerEnabled)
-    }
-
-    /// The capabilities of `provider`'s sessions among `providers`, under
-    /// the setting for answering prompts `promptAnswerEnabled`, as
-    /// `remoteCapabilities(ofProvider:)` reads them: `not_found` for a
-    /// provider missing from them.
+    /// The capabilities of `provider`'s sessions among `providers`, from
+    /// what it declares, under the setting for answering prompts
+    /// `promptAnswerEnabled`, as the sessions list reads them: `not_found`
+    /// for a provider missing from them. An action on a remote session reads
+    /// them through `checkPhoneCapableRemoteSession`.
     static func remoteCapabilities(
         ofProvider provider: String, in providers: [RemoteProviderStatus], promptAnswerEnabled: Bool
     ) throws -> PhoneCapabilities {

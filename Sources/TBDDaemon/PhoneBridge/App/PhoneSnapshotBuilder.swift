@@ -27,10 +27,11 @@ struct PhoneSnapshotInput: Sendable {
     let remoteSessions: [RemoteSessionInfo]
     let providers: [RemoteProviderStatus]
     /// The laptop's setting for answering prompts,
-    /// `config.transcriptPromptAnswerEnabled`, as the gather read it. While
-    /// it is off, no session's `answer` is available
-    /// (`PhoneSessionStatus.localCapabilities`, `remoteCapabilities`).
-    let promptAnswerEnabled: Bool
+    /// `config.transcriptPromptAnswerEnabled`, as the gather read it, or nil
+    /// when the read failed. While it is off or nil, no session's `answer`
+    /// is available (`PhoneSessionStatus.localCapabilities`,
+    /// `remoteCapabilities`).
+    let promptAnswerEnabled: Bool?
 }
 
 /// The sessions list at one moment: the groups with their rows' places, and
