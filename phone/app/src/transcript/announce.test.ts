@@ -1,8 +1,9 @@
 // Tests announce.ts: the transcript's live region says the rows that came in at the bottom, in
 // their own words, a few of them at most, each cut short.
 
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Lexer } from 'marked';
 import type { PhoneItem } from '../protocol/types.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 import { ANNOUNCE_CHARS, ANNOUNCE_ROWS, ANNOUNCE_SOURCE_CHARS, announcement, lastRows, spoken } from './announce.ts';
@@ -187,4 +188,39 @@ test('rows that arrive and a message changed in place above them share the ANNOU
   // Three rows that arrive fill the lines, and the changed row is no longer among the last three.
   const three = [rows[0]!, changed(said, { text: 'Done.' }), ...['A.', 'B.', 'C.'].map((text) => row({ kind: 'assistant', text }))];
   assert.deepEqual(announcement(three, 3, before), ['A.', 'B.', 'C.']);
+});
+
+test("a message's text is read as markdown once for announcing, however often its row changes after it comes in", () => {
+  // Claude's messages are read as blocks (`Lexer.lex`), the reader's and a peer's as one run (`Lexer.inlineTokens`).
+  const lex = mock.method(Lexer.prototype, 'lex');
+  const inline = mock.method(Lexer.prototype, 'inlineTokens');
+  try {
+    for (const [kind, spy] of [['assistant', lex], ['user', inline], ['peer', inline]] as const) {
+      /** How many times `fn` read a text as markdown. */
+      const reads = (fn: () => void): number => {
+        const was = spy.mock.callCount();
+        fn();
+        return spy.mock.callCount() - was;
+      };
+      let text = 'Working';
+      let shown = row({ kind, text });
+      assert.equal(reads(() => assert.deepEqual(announcement([shown], 1, []), ['Working'])), 1, kind);
+      for (const more of [' on', ' it', ' now.']) {
+        const before = lastRows([shown]);
+        text += more;
+        shown = changed(shown, { text });
+        // Only the new text is read: the old text's words were kept when it came in or last changed.
+        assert.equal(reads(() => assert.deepEqual(announcement([shown], 0, before), [more.trim()])), 1, `${kind}${more}`);
+      }
+      // A row whose words were read says them again without reading its text.
+      assert.equal(reads(() => assert.deepEqual(announcement([shown], 1, []), ['Working on it now.'])), 0, kind);
+      // A change other than growth reads only its new text, once.
+      const before = lastRows([shown]);
+      shown = changed(shown, { text: 'Done.' });
+      assert.equal(reads(() => assert.deepEqual(announcement([shown], 0, before), ['Done.'])), 1, kind);
+    }
+  } finally {
+    lex.mock.restore();
+    inline.mock.restore();
+  }
 });

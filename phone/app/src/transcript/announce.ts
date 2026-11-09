@@ -21,13 +21,16 @@
  *   only, read as markdown, since the list works out an announcement as it lays its rows out.
  *   Read whole, a message would cost up to `MAX_MARKDOWN_LENGTH` characters of markdown, whose
  *   time can grow with the square of a paragraph's length (`markdown/mdTree.ts`), to keep 500.
- *   A message whose text grew is read with its old text, at most `ANNOUNCE_SOURCE_CHARS`
- *   characters of it, so at most twice those characters in all.
+ *   A message whose text grew is read up to `ANNOUNCE_SOURCE_CHARS` characters past its old
+ *   text, which holds at most that many, so at most twice those characters. An item's words are
+ *   read once and kept with the item (`wordsOf`), so the old text, read when its row came in or
+ *   last changed, is not read again, and a row said again reads nothing.
  *
  * Everything here is pure.
  */
 
 import { mdInline, mdTree, pairSafeEnd, type MdNode } from '../markdown/mdTree.ts';
+import type { PhoneItem } from '../protocol/types.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 
 /** The most rows one announcement says. */
@@ -51,7 +54,7 @@ export function spoken(row: TranscriptRow): string | null {
     case 'assistant':
     case 'user':
     case 'peer':
-      return messageWords(it.kind, it.text ?? '');
+      return said(wordsOf(it, ANNOUNCE_SOURCE_CHARS));
     case 'tool':
       return said(`${it.toolName ?? ''} ${it.target ?? ''}`);
     default:
@@ -72,11 +75,40 @@ function messageWords(kind: MessageKind, text: string): string | null {
 }
 
 /**
- * The plain text of `text` read as markdown, as a message of `kind` draws it, with each run of
- * white space as one space, uncut.
+ * The plain text of `text` read as markdown, as a row of `kind` draws it (block markdown for
+ * Claude, one inline run otherwise), with each run of white space as one space, uncut.
  */
-function plainWords(kind: MessageKind, text: string): string {
+function plainWords(kind: PhoneItem['kind'], text: string): string {
   return plainText(kind === 'assistant' ? mdTree(text) : mdInline(text)).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The words read from each item's text so far, by how many characters of it were read
+ * (`wordsOf`). An item is never changed in place, since a change replaces it in its row, so its
+ * words stay right while it lives, and they go with it. Each holds about as many characters as
+ * were read, at most twice `ANNOUNCE_SOURCE_CHARS`, and an item has one for each length read:
+ * one, or two for a message past `ANNOUNCE_SOURCE_CHARS` characters that grew.
+ */
+const wordsRead = new WeakMap<PhoneItem, Map<number, string>>();
+
+/**
+ * The plain words of `item`'s text cut to `max` characters (`cut`), as `plainWords` reads them
+ * for the item's kind. Each length of an item's text is read once (`wordsRead`), so a message
+ * whose text changed reads only its new text: its old text was read when its row came in or
+ * last changed, and a row said again reads nothing.
+ */
+function wordsOf(item: PhoneItem, max: number): string {
+  const text = cut(item.text ?? '', max);
+  let read = wordsRead.get(item);
+  const known = read?.get(text.length);
+  if (known !== undefined) return known;
+  const words = plainWords(item.kind, text);
+  if (read === undefined) {
+    read = new Map();
+    wordsRead.set(item, read);
+  }
+  read.set(text.length, words);
+  return words;
 }
 
 /** `words` with each run of white space as one space, cut to `ANNOUNCE_CHARS`, or null when nothing is left. */
@@ -97,8 +129,8 @@ export function announcement(rows: readonly TranscriptRow[], arrived: number, be
   const lowest = rows.length - ANNOUNCE_ROWS;
   for (let i = rows.length - 1; i >= 0 && (i >= firstArrived || i >= lowest) && lines.length < ANNOUNCE_ROWS; i--) {
     const row = rows[i]!;
-    const said = i >= firstArrived ? spoken(row) : changedWords(row, before);
-    if (said !== null) lines.unshift(said);
+    const line = i >= firstArrived ? spoken(row) : changedWords(row, before);
+    if (line !== null) lines.unshift(line);
   }
   return lines;
 }
@@ -114,11 +146,12 @@ export function lastRows(rows: readonly TranscriptRow[]): readonly TranscriptRow
  * nothing.
  * - **Text that extends the old text**, as a message's does while it streams, says the words its
  *   row draws after the ones it drew before, cut to `ANNOUNCE_CHARS`. Both texts are read as
- *   markdown, the old one whole and the new one up to `ANNOUNCE_SOURCE_CHARS` characters past
- *   the old, so an addition reads as its row draws it: inside the code block, link or emphasis
- *   the old text left open. When the old words do not begin the new ones, as when an addition
- *   closes a link or emphasis the old text opened, it says the new text's start, as any other
- *   change does.
+ *   markdown, each as its own row draws it, the old one whole and the new one up to
+ *   `ANNOUNCE_SOURCE_CHARS` characters past the old, so an addition reads as its row draws it:
+ *   inside the code block, link or emphasis the old text left open. The old text's words were
+ *   kept when it was read before (`wordsOf`). When the old words do not begin the new ones, as
+ *   when an addition closes a link or emphasis the old text opened, it says the new text's start,
+ *   as any other change does.
  * - **Past `ANNOUNCE_SOURCE_CHARS` characters of old text**, the addition alone is read, as
  *   `spoken` reads a message, so a message past those characters still says each addition.
  * - **Any other change** says the new text's start, as `spoken` does, when its words are not
@@ -134,8 +167,8 @@ function changedWords(row: TranscriptRow, before: readonly TranscriptRow[]): str
   const now = row.item.text ?? '';
   if (now.startsWith(old)) {
     if (old.length > ANNOUNCE_SOURCE_CHARS) return messageWords(kind, now.slice(pairSafeEnd(now, old.length)));
-    const oldWords = plainWords(kind, old);
-    const newWords = plainWords(kind, cut(now, old.length + ANNOUNCE_SOURCE_CHARS));
+    const oldWords = wordsOf(was.item, ANNOUNCE_SOURCE_CHARS);
+    const newWords = wordsOf(row.item, old.length + ANNOUNCE_SOURCE_CHARS);
     if (newWords.startsWith(oldWords)) return said(newWords.slice(pairSafeEnd(newWords, oldWords.length)));
   }
   const words = spoken(row);
