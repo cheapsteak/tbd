@@ -1,6 +1,6 @@
 // Tests events.ts: each event reaches its slice, the route follows the list, pending opens
-// open with their toast, a new list clears the prompt refusals its answer setting outdates, and
-// prompt.changed receipts reach the transcript through addReceipt.
+// open with their toast, a new list clears the prompt refusals that answers turning back on
+// outdate, and prompt.changed receipts reach the transcript through addReceipt.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -204,22 +204,22 @@ test('a pending open the list already shows opens at once, and one it does not w
   assert.deepEqual(s2.ui.pendingOpen, { ref: R2 });
 });
 
-test("a new list clears a prompt card's refusal once its session's answer setting changes", () => {
+test("a new list clears a prompt card's refusal once its session's answers turn back on", () => {
   const off = { available: false, reason: 'Answering prompts is turned off on the laptop.' };
   const withAnswer = (answer: typeof off | typeof CAN): PhoneRow => {
     const r = row('W1', [R]);
     return { ...r, sessions: r.sessions.map((x) => ({ ...x, capabilities: { ...x.capabilities, answer } })) };
   };
-  const s0 = stateWith([withAnswer(CAN)], { route: { screen: 'session', ref: R } });
+  const s0 = stateWith([withAnswer(off)], { route: { screen: 'session', ref: R } });
   const opened = applyPromptChanged(s0.prompts, { session: R, prompts: [{ id: 'p1', kind: 'permission', toolName: 'Bash', targetTruncated: false, allowAlways: false }] }).prompts;
   const refused = { ...s0, prompts: refuseAnswer(opened, R, 'p1', 'Answering prompts is turned off.') };
   const refusal = (s: AppState) => s.prompts.cards[cardKey(R, 'p1')]!.refusal;
-  // A change that leaves the setting as it was keeps the refusal.
-  assert.equal(applyEvent(refused, changed([withAnswer(CAN)])).prompts, refused.prompts);
-  // `sessions.changed`, and a snapshot, each clear it once the setting changes.
-  assert.equal(refusal(applyEvent(refused, changed([withAnswer(off)]))), null);
+  // A list that leaves answering off keeps the refusal.
+  assert.equal(refusal(applyEvent(refused, changed([withAnswer(off)]))), 'Answering prompts is turned off.');
+  // `sessions.changed`, and a snapshot, each clear it once answering is back on.
+  assert.equal(refusal(applyEvent(refused, changed([withAnswer(CAN)]))), null);
   const snapshot = applySnapshot({
-    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: false, rows: [withAnswer(off)],
+    stream: 's2', seq: 1, replayed: false, omittedRows: 0, more: false, rows: [withAnswer(CAN)],
     layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: [{ id: 'W1', depth: 0 }] }],
   });
   assert.equal(refusal(applySessions(refused, snapshot)), null);

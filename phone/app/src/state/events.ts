@@ -65,8 +65,8 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * 2. Then a pending open that the list now shows opens, and is cleared. A `{ worktreeID }`
  *    open with a toast template shows it, `{name}` replaced by the row's name.
  *
- * A prompt card's refusal goes once its session's `answer` capability changes
- * (`clearStaleRefusals`).
+ * A prompt card's refusal goes once its session's `answer` capability turns from unavailable to
+ * available (`clearStaleRefusals`).
  *
  * A change of screen clears the menu and every sheet, since they act on the session the screen
  * showed. The one exception is `new`, which acts on a repo, not a session: it stays when the

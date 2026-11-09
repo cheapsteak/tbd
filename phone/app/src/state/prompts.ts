@@ -57,7 +57,12 @@
  *
  * A resolution's `answeredHere` entry goes once the resolution is applied, and the record keeps
  * at most `ANSWERED_HERE_LIMIT` entries, the oldest going first, for answers whose resolution
- * never comes (a feed that moved to another session sends none for the old one).
+ * never comes (a feed that moved to another session sends none for the old one). The `elsewhere`
+ * cards are held to `ELSEWHERE_LIMIT` the same way, for sessions nobody opens again to tap OK,
+ * except that the open session's never go (`withinElsewhereLimit`).
+ *
+ * **A new card is new.** Each card the slice makes has its own `serial`, so a prompt whose card
+ * went and came back is told from one whose card stayed, and the dock starts its card afresh.
  *
  * **Messages.** `sending` marks each session whose `message.send` is on its way, by `refKey`:
  * `beginSend` marks it, and nothing else does, so one gesture sends one message, and `endSend`
@@ -113,6 +118,17 @@ export interface CardState {
   answerID: string | null;
   /** A `phone` or `unknown` resolution that came while `sending`, held until the reply settles; null otherwise. */
   held: PhonePromptResolution | null;
+  /**
+   * Which card this is, one number for each card the slice makes (`made`). A prompt whose card
+   * went and that comes back gets a new card with a new number, so the dock gives it nothing the
+   * user did on the old one (`CardUI` in `dock/PromptCard.tsx`); a card that only changes keeps it.
+   */
+  serial: number;
+  /**
+   * Whether the last list that listed the card's session showed it taking answers (its `answer`
+   * capability available), or null until a list has since the card was made (`clearStaleRefusals`).
+   */
+  answerAvailable: boolean | null;
 }
 
 /**
@@ -133,10 +149,15 @@ export interface PromptsState {
   answeredHere: Readonly<Record<string, AnsweredHere>>;
   /** The sessions whose `message.send` from this phone is on its way, by `refKey`. */
   sending: Readonly<Record<string, true>>;
+  /** How many cards the slice has made, so the next one takes this as its `serial`. */
+  made: number;
 }
 
 /** The most entries `answeredHere` keeps. */
 export const ANSWERED_HERE_LIMIT = 64;
+
+/** The most `elsewhere` cards the slice keeps, for prompts answered elsewhere that nobody taps OK on. */
+export const ELSEWHERE_LIMIT = 64;
 
 /**
  * The key of `promptID` in `ref`'s session, for `cards` and `answeredHere`. It encodes the pair as
@@ -148,7 +169,7 @@ export function cardKey(ref: PhoneSessionRef, promptID: string): string {
 
 /** The slice with no prompts. */
 export function emptyPrompts(): PromptsState {
-  return { bySession: emptyRecord(), cards: emptyRecord(), answeredHere: emptyRecord(), sending: emptyRecord() };
+  return { bySession: emptyRecord(), cards: emptyRecord(), answeredHere: emptyRecord(), sending: emptyRecord(), made: 0 };
 }
 
 /**
@@ -168,6 +189,7 @@ export function applyPromptChanged(
   const here = editable(s.answeredHere);
   const sets = editable(s.bySession);
   const receipts: { id: string; text: string }[] = [];
+  let made = s.made;
 
   for (const r of d.resolved ?? []) {
     const id = r.promptID;
@@ -207,7 +229,7 @@ export function applyPromptChanged(
     if (card !== undefined) {
       if (card.prompt !== p && !samePrompt(card.prompt, p)) cards.set(k, { ...card, prompt: p });
     } else if (!before.some((b) => b.id === p.id)) {
-      cards.set(k, newCard(d.session, p, own(here.value, k)));
+      cards.set(k, newCard(d.session, p, own(here.value, k), made++));
     }
   }
   for (const other of Object.keys(s.bySession)) if (other !== key) sets.delete(other);
@@ -222,7 +244,8 @@ export function applyPromptChanged(
   }
 
   if (!cards.changed && !here.changed && !sets.changed) return { prompts: s, receipts };
-  return { prompts: { ...s, bySession: sets.value, cards: cards.value, answeredHere: here.value }, receipts };
+  const next = { ...s, bySession: sets.value, cards: cards.value, answeredHere: here.value, made };
+  return { prompts: withinElsewhereLimit(next, d.session), receipts };
 }
 
 /**
@@ -370,7 +393,7 @@ export function settleAnswer(
     const receipt = { session: card.session, id: promptID, text: receiptText(source, landed ? summary : (earlier?.summary ?? null)) };
     const after = source === 'thisPhone'
       ? withoutCard(s, k)
-      : withCard(s, k, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null });
+      : withinElsewhereLimit(withCard(s, k, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null }), ref);
     return { prompts: forget(after, k), receipt };
   }
   if (taken) {
@@ -381,7 +404,7 @@ export function settleAnswer(
     const after: CardState = earlier === undefined
       ? { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }
       : { ...card, phase: 'answered', summary: earlier.summary, answerID: null };
-    return { prompts: withSettledCard(s, k, after), receipt: null };
+    return { prompts: withinElsewhereLimit(withSettledCard(s, k, after), ref), receipt: null };
   }
   const refusal = 'error' in settled && settled.error !== 'superseded' ? settled.message : null;
   const reopened = withSettledCard(s, k, { ...card, phase: 'open', refusal, summary: null, answerID: null });
@@ -398,28 +421,34 @@ export function refuseAnswer(s: PromptsState, ref: PhoneSessionRef, promptID: st
 }
 
 /**
- * `s` with no refusal on a card whose session's `answer` capability is not the same in the list
- * `after` as in the list `before`, its availability or its reason, or `s` itself when no card's
- * is. A refusal speaks for the setting it came under, so it goes once the list says the setting
- * changed, and stays gone when the setting changes back. A session that no row lists counts as
- * one more value, so a change while its row is away is seen. `applySessions` calls it for each
- * new list.
+ * `s` with each card following its session's `answer` capability into the list `after`: the card
+ * records whether `after` shows the session taking answers (`answerAvailable`), and loses its
+ * refusal when that turns from unavailable to available, as when the laptop's setting for
+ * answering comes back on, so the choices come back with nothing said against them. Every other
+ * change keeps the refusal, which may say something else entirely, such as that the answer did
+ * not fit the prompt. A session that no row of `after` lists tells nothing: its card keeps what
+ * it recorded, and its refusal, so answers that come back on while its row is away still clear it
+ * once the row is back. Until a card records anything, the list `before` says what it was. `s`
+ * itself when no card changes. `applySessions` calls it for each new list.
  */
 export function clearStaleRefusals(s: PromptsState, before: SessionsData, after: SessionsData): PromptsState {
   if (before === after) return s;
   let cards: Readonly<Record<string, CardState>> | null = null;
   for (const k of Object.keys(s.cards)) {
     const card = s.cards[k]!;
-    if (card.refusal === null || answerSetting(before, card.session) === answerSetting(after, card.session)) continue;
-    cards = withKey(cards ?? s.cards, k, { ...card, refusal: null });
+    const now = answerAvailable(after, card.session);
+    if (now === null) continue;
+    const was = card.answerAvailable ?? answerAvailable(before, card.session);
+    const refusal = was === false && now ? null : card.refusal;
+    if (now === card.answerAvailable && refusal === card.refusal) continue;
+    cards = withKey(cards ?? s.cards, k, { ...card, answerAvailable: now, refusal });
   }
   return cards === null ? s : { ...s, cards };
 }
 
-/** `ref`'s `answer` capability in the list `d`, as one comparable string, or null when no row lists the session. */
-function answerSetting(d: SessionsData, ref: PhoneSessionRef): string | null {
-  const capability = findSession(d, ref)?.session.capabilities.answer;
-  return capability === undefined ? null : JSON.stringify([capability.available, capability.reason ?? null]);
+/** Whether the list `d` shows `ref`'s session taking answers, or null when no row lists the session. */
+function answerAvailable(d: SessionsData, ref: PhoneSessionRef): boolean | null {
+  return findSession(d, ref)?.session.capabilities.answer.available ?? null;
 }
 
 /**
@@ -450,10 +479,13 @@ export function endSend(s: PromptsState, ref: PhoneSessionRef): PromptsState {
   return sending === s.sending ? s : { ...s, sending };
 }
 
-/** The card a prompt entering `session`'s set gets: `answered` when `entry` is this phone's answer the laptop took, `open` otherwise. */
-function newCard(session: PhoneSessionRef, prompt: PhonePrompt, entry: AnsweredHere | undefined): CardState {
+/**
+ * The card a prompt entering `session`'s set gets, numbered `serial`: `answered` when `entry` is
+ * this phone's answer the laptop took, `open` otherwise.
+ */
+function newCard(session: PhoneSessionRef, prompt: PhonePrompt, entry: AnsweredHere | undefined, serial: number): CardState {
   const card: CardState = {
-    phase: 'open', refusal: null, summary: null, elsewhereBy: null, session, prompt, answerID: null, held: null,
+    phase: 'open', refusal: null, summary: null, elsewhereBy: null, session, prompt, answerID: null, held: null, serial, answerAvailable: null,
   };
   return entry?.taken === true ? { ...card, phase: 'answered', summary: entry.summary } : card;
 }
@@ -479,6 +511,27 @@ function withoutCard(s: PromptsState, k: string): PromptsState {
 function withSettledCard(s: PromptsState, k: string, card: CardState): PromptsState {
   const listed = (own(s.bySession, refKey(card.session)) ?? []).some((p) => p.id === card.prompt.id);
   return needsItsSet(card) && !listed ? withoutCard(s, k) : withCard(s, k, card);
+}
+
+/**
+ * `s` with at most `ELSEWHERE_LIMIT` `elsewhere` cards, the oldest going first, by when the slice
+ * made them, or `s` itself when it holds no more. No card of `keep`'s session goes, nor of the
+ * session whose set the slice holds: the open session's cards wait for OK whatever the others do.
+ */
+function withinElsewhereLimit(s: PromptsState, keep: PhoneSessionRef): PromptsState {
+  const elsewhere = Object.keys(s.cards).filter((k) => s.cards[k]!.phase === 'elsewhere');
+  let over = elsewhere.length - ELSEWHERE_LIMIT;
+  if (over <= 0) return s;
+  let cards: Record<string, CardState> | null = null;
+  for (const k of elsewhere) {
+    if (over === 0) break;
+    const { session } = s.cards[k]!;
+    if (sameRef(session, keep) || Object.hasOwn(s.bySession, refKey(session))) continue;
+    cards ??= copy(s.cards);
+    delete cards[k];
+    over--;
+  }
+  return cards === null ? s : { ...s, cards };
 }
 
 /** `s` without the `answeredHere` entry under `k`. */

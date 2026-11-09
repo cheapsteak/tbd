@@ -520,7 +520,7 @@ test("a refused answer shows the laptop's words and offers the choices again", a
   ]);
 });
 
-test('a refusal goes once the laptop changes the answer setting, though it changes back', async ({ page, appHost }) => {
+test('a refusal goes once the laptop turns answering back on', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Login redirect fix');
   // The list said the session takes answers, but the laptop's setting was off.
@@ -539,9 +539,38 @@ test('a refusal goes once the laptop changes the answer setting, though it chang
   await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
   await expect(c.getByRole('button', { name: 'No, this is enough' })).toBeVisible();
   await expect(c.locator('.dock-note')).toHaveCount(0);
-  // The choices show with no word from the earlier setting.
+  // The choices show with no word from while answering was off.
   await expect(refusal).toHaveCount(0);
   await hostCall(page, 'setReply', 'prompt.answer', null);
+});
+
+test('a prompt that leaves its set and comes back gets a card that starts afresh', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Friendly and short' }).click();
+  await expect(c.locator('.c-head')).toContainText('2 of 3');
+  await c.getByRole('button', { name: 'Hide' }).click();
+  const strip = app(page).locator('.dock button.card-strip');
+  await expect(strip).toHaveText('Question waitingShow');
+  // The laptop's set drops the prompt with no resolution, so its card goes; then the prompt is
+  // back, as after the transcript opens again: a new card, expanded, at its first question.
+  const prompt = MOCK.prompts[`local:${ONBOARDING_REF.terminalID}`][0];
+  await hostCall(page, 'emit', 'prompt.changed', { session: ONBOARDING_REF, prompts: [] });
+  await expect(c).toHaveCount(0);
+  await expect(strip).toHaveCount(0);
+  await hostCall(page, 'emit', 'prompt.changed', { session: ONBOARDING_REF, prompts: [prompt] });
+  await expect(c.locator('.c-head')).toContainText('1 of 3');
+  await expect(strip).toHaveCount(0);
+  await expect(c.locator('.q')).toHaveText(TONE);
+  await expect(c.getByRole('button', { name: 'Back' })).toHaveCount(0);
+  // Nothing picked carried over: the answer holds only the picks made on the new card.
+  for (const label of ['Plain and formal', '3 steps', 'Yes, show a Skip button']) await c.getByRole('button', { name: label }).click();
+  await c.getByRole('button', { name: 'Send answers' }).click();
+  await expect.poll(() => answers(page)).toEqual([{
+    session: ONBOARDING_REF, promptID: ONBOARDING_PROMPT,
+    answer: { kind: 'question', answers: { [TONE]: 'Plain and formal', [STEPS]: '3 steps', [SKIP]: 'Yes, show a Skip button' } },
+  }]);
 });
 
 test("a new prompt never inherits the last one's picks", async ({ page, appHost }) => {

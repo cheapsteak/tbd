@@ -1100,9 +1100,14 @@ test('a field of a type the app does not know goes in strings, trimmed, as a tex
   assert.equal(remoteParamsReady(remoteCreateParams(REPO, provider, MESSAGE, withFieldText(NO_EDITS, 'due', ' ')), provider), false);
 });
 
-test('a number field takes a whole number or nothing: Create waits on any other text, and the field says why', () => {
-  for (const whole of ['4', '0', '-2', '007', '9223372036854775807', '-9223372036854775808']) assert.equal(isWholeNumber(whole), true, whole);
-  for (const not of ['', '4.5', '4.0', '1e3', '+4', ' 4', 'abc', '9223372036854775808']) assert.equal(isWholeNumber(not), false, not);
+test('a number field takes a whole number, as the laptop reads one, or nothing: Create waits on any other text, and the field says why', () => {
+  // Swift's `Int(_:)`: a plus sign or a minus sign or none, then ASCII digits, in 64 bits.
+  for (const whole of ['4', '0', '-2', '007', '+4', '+0', '-0', '9223372036854775807', '+9223372036854775807', '-9223372036854775808']) {
+    assert.equal(isWholeNumber(whole), true, whole);
+  }
+  for (const not of ['', '4.5', '4.0', '1e3', ' 4', '4 ', '+', '-', '++4', '+-4', '-+4', '4+', '\u0664', 'abc', '9223372036854775808', '+9223372036854775808']) {
+    assert.equal(isWholeNumber(not), false, not);
+  }
   const ready = (edits: typeof NO_EDITS): boolean => remoteParamsReady(remoteCreateParams(REPO, CLOUD, MESSAGE, edits), CLOUD);
   assert.equal(ready(withFieldText(NO_EDITS, 'hours', '-2')), true);
   assert.equal(ready(withFieldText(NO_EDITS, 'hours', '')), true);
@@ -1120,6 +1125,16 @@ test('a number field takes a whole number or nothing: Create waits on any other 
   const odd: PhoneFormField = { ...HOURS, prefill: 'four' };
   assert.equal(fieldText(odd, NO_EDITS), '');
   assert.deepEqual(plain(remoteCreateParams(REPO, { ...SANDBOX, fields: [odd] }, MESSAGE, NO_EDITS).strings), { hours: '' });
+  // One the laptop reads as a whole number shows as one, trimmed and with no plus sign, which a
+  // number input would not show, and goes so.
+  for (const [prefill, shown] of [['+6', '6'], [' 6 ', '6'], ['\t+06\n', '06'], ['-6', '-6']]) {
+    const field: PhoneFormField = { ...HOURS, prefill };
+    assert.equal(fieldText(field, NO_EDITS), shown, prefill);
+    const provider = { ...SANDBOX, fields: [field] };
+    const params = remoteCreateParams(REPO, provider, MESSAGE, NO_EDITS);
+    assert.deepEqual(plain(params.strings), { hours: shown }, prefill);
+    assert.equal(remoteParamsReady(params, provider), true, prefill);
+  }
 });
 
 test('a field shows its prefill: an enum only one of its values, a switch on for "true"', () => {

@@ -784,6 +784,32 @@ test('the Model sheet sends the pick, or the typed name trimmed', async ({ page,
   await expect(app(page).locator('.toast')).toHaveText('Model set to claude-opus-5-5');
 });
 
+test("the Model sheet's Set stays off while the pick is the model the session runs", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(2).click();
+  const dialog = sheet(page);
+  await expect(dialog.locator('.sh-title')).toHaveText('Model');
+  const rows = dialog.locator('button.mi');
+  const set = dialog.getByRole('button', { name: 'Set' });
+  // "opus" is current: picking it changes nothing, so Set stays off, past any hold.
+  await rows.nth(1).click();
+  await expect(rows.nth(1).locator('.tick')).toHaveCount(1);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  await expect(set).toBeDisabled();
+  await rows.nth(2).click();
+  await expect(set).toBeEnabled();
+  await rows.nth(1).click();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  await expect(set).toBeDisabled();
+  // A typed name is sent whatever the pick.
+  await dialog.getByLabel('Other model name').fill('opus');
+  await expect(set).toBeEnabled();
+  await set.click();
+  await expect.poll(() => acting(page)).toEqual([{ method: 'session.setModel', params: { session: REVIEW_REF, model: 'opus' } }]);
+});
+
 test('a model change refused from the sheet shows there, and in the composer once the sheet closes', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openCheckout(page);

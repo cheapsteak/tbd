@@ -4,8 +4,8 @@
  * setUI })`, where `card` is the prompt's card in the prompt slice (`cardFor`), `live` says the
  * session's transcript is open, so its prompt set is the laptop's live one (`promptsLive`), `held`
  * says its choices wait (the dock's tap guard), and `ui` is what the user picked, typed or hid on
- * it (`CardUI`), which the dock keeps by prompt ID and `setUI` replaces. The dock keys the card by
- * the prompt's ID, so none of that ever carries over to another prompt.
+ * it (`CardUI`), which the dock keeps by prompt ID and card (`serial`) and `setUI` replaces. The
+ * dock keys the card by both, so none of that ever carries over to another prompt or card.
  *
  * **A question** (`QuestionCard`). The head (`.c-head`) holds the hand glyph, "Claude asks", and
  * " · i of n" with `.steps` under it when the prompt asks several questions, then Hide.

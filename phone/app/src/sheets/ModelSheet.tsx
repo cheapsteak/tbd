@@ -8,7 +8,9 @@
  * claude-opus-5-5"). A tap on a name picks it and empties the field; the tick follows the pick,
  * and shows on the current model until there is one. Typing a name hides the tick, as the typed
  * name is what Set sends. Set is enabled once there is a pick or a name that is more than white
- * space, and sends the typed name when there is one (`setModel` trims it), else the pick. It is
+ * space, and sends the typed name when there is one (`setModel` trims it), else the pick. A pick
+ * of the model the session runs already, with no name typed, changes nothing, so Set stays
+ * disabled for it, as the model menu only closes on that row. It is
  * disabled while a switch, fork or model change for the session is on its way (`isActing`), while
  * `held`, and while the session's model capability is unavailable, with its reason under the
  * description (`unavailableReason`). The session's status plays no part: the laptop takes a
@@ -38,7 +40,8 @@ export function ModelSheet({ session, titleID, held, failure }: {
   const fieldID = useId();
   const typed = trimLikeLaptop(other) !== '';
   const ticked = typed ? null : (pick ?? session.model ?? null);
-  const chosen = typed ? other : pick;
+  // The model the session runs already changes nothing, unless typed.
+  const chosen = typed ? other : pick === session.model ? null : pick;
   const modelWhy = unavailableReason(session, 'model');
   const set = (
     <button

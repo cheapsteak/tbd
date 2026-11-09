@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhoneCapability, PhonePrompt, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptChangedData } from '../protocol/types.ts';
 import {
-  ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, beginSend, cardFor, chooseOption, chooseOther, clearStaleRefusals, dismissCard,
+  ANSWERED_HERE_LIMIT, ELSEWHERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, beginSend, cardFor, chooseOption, chooseOther, clearStaleRefusals, dismissCard,
   emptyPrompts, emptyQuestionDraft, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt, permissionAnswer, questionAnswer,
   otherCounts, otherText, questionValue, receiptSource, receiptText, cardKey, refuseAnswer, selectedCount, setOtherText, settleAnswer, textAt,
   trimLikeLaptop, withText,
@@ -680,28 +680,116 @@ function listWith(answer: PhoneCapability | null): SessionsData {
   });
 }
 
-test("clearStaleRefusals clears a refusal once its session's answer setting changes, and only then", () => {
+test("clearStaleRefusals clears a refusal when its session's answers turn from off to on, and only then", () => {
   const on = listWith({ available: true });
   const off = listWith({ available: false, reason: 'Answering prompts is turned off on the laptop.' });
+  const refusal = (s: PromptsState): string | null | undefined => cardOf(s, 'a')?.refusal;
   const refused = refuseAnswer(withOpen('a', 'b'), R, 'a', 'Answering prompts is turned off.');
-  // The same setting in a new list keeps the refusal, and the slice itself.
-  assert.equal(clearStaleRefusals(refused, on, listWith({ available: true })), refused);
+  // The same list, or one with the same setting, keeps the refusal; the cards record the setting once.
   assert.equal(clearStaleRefusals(refused, on, on), refused);
-  // Turned off: the refusal goes, and so it stays gone when the setting comes back on.
-  const cleared = clearStaleRefusals(refused, on, off);
-  assert.equal(cardOf(cleared, 'a')!.refusal, null);
-  assert.equal(cardOf(cleared, 'b'), cardOf(refused, 'b'), 'a card with no refusal is left as it was');
-  assert.equal(clearStaleRefusals(cleared, off, on), cleared);
-  // A refusal set while the setting was off goes when it comes back on.
-  const refusedOff = refuseAnswer(withOpen('a'), R, 'a', 'Not now.');
-  assert.equal(cardOf(clearStaleRefusals(refusedOff, off, on), 'a')!.refusal, null);
-  // A change of reason alone is a change.
-  const otherReason = listWith({ available: false, reason: 'Answering is paused.' });
-  assert.equal(cardOf(clearStaleRefusals(refusedOff, off, otherReason), 'a')!.refusal, null);
-  // A row that goes away, or comes, is a change too.
-  assert.equal(cardOf(clearStaleRefusals(refused, on, listWith(null)), 'a')!.refusal, null);
-  assert.equal(cardOf(clearStaleRefusals(refused, listWith(null), on), 'a')!.refusal, null);
-  assert.equal(Object.getPrototypeOf(cleared.cards), null);
+  const seen = clearStaleRefusals(refused, on, listWith({ available: true }));
+  assert.equal(refusal(seen), 'Answering prompts is turned off.');
+  assert.equal(cardOf(seen, 'a')!.answerAvailable, true);
+  assert.equal(cardOf(seen, 'b')!.answerAvailable, true);
+  assert.equal(clearStaleRefusals(seen, on, listWith({ available: true })), seen);
+  // Turned off, it stays: a refusal may say something else than that answering is off.
+  const turnedOff = clearStaleRefusals(seen, on, off);
+  assert.equal(refusal(turnedOff), 'Answering prompts is turned off.');
+  assert.equal(cardOf(turnedOff, 'a')!.answerAvailable, false);
+  // Back on, it goes, and stays gone.
+  const back = clearStaleRefusals(turnedOff, off, on);
+  assert.equal(refusal(back), null);
+  assert.equal(clearStaleRefusals(back, on, listWith({ available: true })), back);
+  assert.equal(Object.getPrototypeOf(back.cards), null);
+  // Another reason while answering stays off is no change that clears it.
+  const refusedOff = refuseAnswer(turnedOff, R, 'a', 'Not now.');
+  assert.equal(refusal(clearStaleRefusals(refusedOff, off, listWith({ available: false, reason: 'Answering is paused.' }))), 'Not now.');
+  // A card that recorded nothing yet takes what it was from the earlier list.
+  const fresh = refuseAnswer(withOpen('a'), R, 'a', 'Not now.');
+  assert.equal(refusal(clearStaleRefusals(fresh, off, on)), null);
+  assert.equal(refusal(clearStaleRefusals(fresh, on, listWith({ available: true }))), 'Not now.');
+});
+
+test('a row the list does not hold tells clearStaleRefusals nothing: its card keeps its refusal and what it recorded', () => {
+  const on = listWith({ available: true });
+  const off = listWith({ available: false });
+  const away = listWith(null);
+  const refusal = (s: PromptsState): string | null | undefined => cardOf(s, 'a')?.refusal;
+  const refused = refuseAnswer(withOpen('a'), R, 'a', 'Claude Code did not take the answer.');
+  // Off, then the row is away for a list: nothing changes.
+  const wasOff = clearStaleRefusals(refused, on, off);
+  assert.equal(clearStaleRefusals(wasOff, off, away), wasOff);
+  // Back with answers on: they turned on while the row was away, so the refusal goes.
+  assert.equal(refusal(clearStaleRefusals(wasOff, away, on)), null);
+  // On, away, then on again: nothing turned on, so the refusal stays.
+  const wasOn = clearStaleRefusals(refused, on, listWith({ available: true }));
+  assert.equal(clearStaleRefusals(wasOn, on, away), wasOn);
+  assert.equal(refusal(clearStaleRefusals(wasOn, away, on)), 'Claude Code did not take the answer.');
+  // A card that recorded nothing, its row away in the earlier list too, keeps its refusal.
+  assert.equal(refusal(clearStaleRefusals(refused, away, on)), 'Claude Code did not take the answer.');
+});
+
+test('each card the slice makes has its own serial, which the card keeps while it stays', () => {
+  const s = withOpen('a', 'b');
+  const a = cardOf(s, 'a')!.serial;
+  const b = cardOf(s, 'b')!.serial;
+  assert.notEqual(a, b);
+  assert.equal(s.made, 2);
+  // A card that changes keeps it.
+  assert.equal(cardOf(refuseAnswer(s, R, 'a', 'No.'), 'a')!.serial, a);
+  assert.equal(cardOf(beginAnswer(s, R, 'a', 'x', 't'), 'a')!.serial, a);
+  assert.equal(cardOf(changed(s, { prompts: [questionPrompt('a', [QT]), questionPrompt('b')] }).prompts, 'a')!.serial, a);
+  // A prompt that leaves its set with no resolution and comes back gets a new card, numbered anew.
+  const gone = changed(s, { prompts: [questionPrompt('b')] }).prompts;
+  assert.equal(cardOf(gone, 'a'), undefined);
+  const back = changed(gone, { prompts: [questionPrompt('a'), questionPrompt('b')] }).prompts;
+  assert.equal(cardOf(back, 'a')!.serial, 2);
+  assert.equal(cardOf(back, 'b')!.serial, b);
+  assert.equal(back.made, 3);
+});
+
+/** The session numbered `i`, for the tests that fill the slice with cards. */
+function nth(i: number): PhoneSessionRef {
+  return { kind: 'local', terminalID: `T-${i}` };
+}
+
+/** `s` with prompt `id` opened in session `i`'s set and then answered on the laptop, so its card waits for OK. */
+function answeredOnLaptop(s: PromptsState, i: number, id = 'p'): PromptsState {
+  const opened = applyPromptChanged(s, { session: nth(i), prompts: [questionPrompt(id)] }).prompts;
+  return applyPromptChanged(opened, { session: nth(i), prompts: [], resolved: [{ promptID: id, answeredBy: 'laptop' }] }).prompts;
+}
+
+function elsewhereCount(s: PromptsState): number {
+  return Object.values(s.cards).filter((c) => c.phase === 'elsewhere').length;
+}
+
+test('the slice keeps at most ELSEWHERE_LIMIT elsewhere cards, the oldest going first', () => {
+  let s = emptyPrompts();
+  for (let i = 0; i < ELSEWHERE_LIMIT + 6; i++) s = answeredOnLaptop(s, i);
+  assert.equal(elsewhereCount(s), ELSEWHERE_LIMIT);
+  for (let i = 0; i < 6; i++) assert.equal(cardOf(s, 'p', nth(i)), undefined, `session ${i}`);
+  for (let i = 6; i < ELSEWHERE_LIMIT + 6; i++) assert.equal(cardOf(s, 'p', nth(i))?.phase, 'elsewhere', `session ${i}`);
+  assert.equal(Object.getPrototypeOf(s.cards), null);
+});
+
+test("the open session's elsewhere cards stay whatever the limit, and others go in their place", () => {
+  // Session 0's card is the oldest, then the others fill the slice to the limit.
+  let s = answeredOnLaptop(emptyPrompts(), 0, 'k1');
+  for (let i = 1; i < ELSEWHERE_LIMIT; i++) s = answeredOnLaptop(s, i);
+  assert.equal(elsewhereCount(s), ELSEWHERE_LIMIT);
+  // Session 0 is open again, and another of its prompts is answered on the laptop.
+  s = answeredOnLaptop(s, 0, 'k2');
+  assert.equal(elsewhereCount(s), ELSEWHERE_LIMIT);
+  assert.equal(cardOf(s, 'k1', nth(0))?.phase, 'elsewhere');
+  assert.equal(cardOf(s, 'k2', nth(0))?.phase, 'elsewhere');
+  assert.equal(cardOf(s, 'p', nth(1)), undefined);
+  // So in a reply: an answer that finds its prompt answered elsewhere keeps its card, and another goes.
+  const opened = applyPromptChanged(s, { session: nth(0), prompts: [questionPrompt('k3')] }).prompts;
+  const sending = beginAnswer(opened, nth(0), 'k3', 'x', 't');
+  const settled = settleAnswer(sending, nth(0), 'k3', 't', { outcome: 'already_resolved' }).prompts;
+  assert.equal(elsewhereCount(settled), ELSEWHERE_LIMIT);
+  for (const id of ['k1', 'k2', 'k3']) assert.equal(cardOf(settled, id, nth(0))?.phase, 'elsewhere', id);
+  assert.equal(cardOf(settled, 'p', nth(2)), undefined);
 });
 
 test('dismissCard takes down any card but a sending one', () => {

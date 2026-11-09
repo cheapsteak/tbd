@@ -359,11 +359,13 @@ export function withFieldBadInput(edits: FieldEdits, name: string, bad: boolean)
 }
 
 /**
- * Whether `text` is a whole number as the laptop reads one (Swift's `Int`, 64 bits): digits, with
- * a minus sign or none.
+ * Whether `text` is a whole number as the laptop reads one (Swift's `Int(_:)`, 64 bits): ASCII
+ * digits, with a plus or a minus sign or none, and nothing else. The laptop trims white space
+ * first (`buildParamsJSON` in `RemoteCreateFormLogic.swift`), and so does every caller here
+ * (`trimLikeLaptop`).
  */
 export function isWholeNumber(text: string): boolean {
-  if (!/^-?\d+$/.test(text)) return false;
+  if (!/^[+-]?[0-9]+$/.test(text)) return false;
   const n = BigInt(text);
   return n >= -(2n ** 63n) && n < 2n ** 63n;
 }
@@ -393,15 +395,19 @@ export function fieldLabel(f: PhoneFormField): string {
 /**
  * The text a field that is not a switch shows: what the user typed or picked, else its prefill.
  * An `enum` field's prefill counts only when it is one of its values, so its select never shows a
- * choice the form does not hold, and an `int` field's only when it is a whole number
- * (`isWholeNumber`), as a number input shows no other text it is given.
+ * choice the form does not hold, and an `int` field's only when it is a whole number as the
+ * laptop reads it (`isWholeNumber`), trimmed and with no plus sign, since a number input shows no
+ * other text it is given. The laptop reads the number the same either way.
  */
 export function fieldText(f: PhoneFormField, edits: FieldEdits): string {
   const typed = own(edits.strings, f.name);
   if (typed !== undefined) return typed;
   const prefill = f.prefill ?? '';
   if (f.type === 'enum') return (f.values ?? []).includes(prefill) ? prefill : '';
-  if (f.type === 'int') return isWholeNumber(prefill) ? prefill : '';
+  if (f.type === 'int') {
+    const whole = trimLikeLaptop(prefill);
+    return isWholeNumber(whole) ? whole.replace(/^\+/, '') : '';
+  }
   return prefill;
 }
 
