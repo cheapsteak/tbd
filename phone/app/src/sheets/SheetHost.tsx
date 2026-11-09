@@ -18,11 +18,13 @@
  * goes back to the element that had it before the sheet opened, if that is still on the page.
  *
  * **The keyboard.** `.sheet` pads by the safe area, and the keyboard covers the bottom of the
- * screen, so the New sheet, the one with fields far down, ends above the keyboard instead: its
- * bottom edge rises by `--dock-pad` less the bottom inset, which the keyboard covers when it is
- * up. Whenever the sheet changes size, as while the keyboard moves, and whenever a field in it
- * takes focus, the focused field's row is scrolled into the part of the sheet that shows
- * (`useFieldInView`).
+ * screen, so the sheets that take typing, New and Model, end above the keyboard instead: the
+ * bottom edge rises by `--dock-pad` less the bottom inset, which the keyboard covers when it is up
+ * (`LIFT`). The New sheet's top stays put, so it grows shorter; the Model sheet, which is only as
+ * tall as it needs, may then grow no taller than it could before less the lift, so its top stays
+ * on the screen. Whenever such a sheet changes size, as while the keyboard moves, and whenever a
+ * field in it takes focus, the focused field's row is scrolled into the part of the sheet that
+ * shows (`useFieldInView`).
  *
  * **The tap guard.** The rows of the session menu sit where the sheets they open put their own
  * rows, and a profile picked in the Switch account sheet opens the question whose Restart sits
@@ -57,8 +59,14 @@ import { ModelSheet } from './ModelSheet.tsx';
 import { NewSheet } from './NewSheet.tsx';
 import { ConfirmSheet, ForkSheet, SwitchSheet } from './ProfileSheets.tsx';
 
+/** How far a sheet that takes typing rises: above the keyboard while it is up, else not at all. */
+const LIFT = '(var(--dock-pad, 0px) - var(--safe-bottom, 0px))';
+
 /** The New sheet's bottom edge: above the keyboard while it is up, else at the screen's bottom, as every sheet's. */
-const NEW_SHEET_STYLE: CSSProperties = { bottom: 'calc(var(--dock-pad, 0px) - var(--safe-bottom, 0px))' };
+const NEW_SHEET_STYLE: CSSProperties = { bottom: `calc${LIFT}` };
+
+/** The Model sheet's: the same, and its most height (`.sheet`'s 90%) less the lift, so its top stays where it could be. */
+const MODEL_SHEET_STYLE: CSSProperties = { bottom: `calc${LIFT}`, maxHeight: `calc(90% - ${LIFT})` };
 
 /** The layer that takes the taps for a moment after the New sheet closes: invisible, over the whole screen, under the toast. */
 const SHIELD_STYLE: CSSProperties = { position: 'absolute', inset: 0, zIndex: 20 };
@@ -77,7 +85,8 @@ export function SheetHost(): JSX.Element | null {
   const box = useRef<HTMLDivElement>(null);
   const titleID = useId();
   useSheetFocus(box, shown === null ? null : sheetName(shown, creatingIn));
-  useFieldInView(box, fresh !== null);
+  const typing = fresh !== null || shown?.name === 'model';
+  useFieldInView(box, typing);
   const held = useChangeHold(shown === null || fresh !== null || found === null ? null : sheetView(shown, load, failure, found.session));
   const shielded = useUncoverHold(fresh !== null);
   if (shown === null) return shielded ? <div aria-hidden="true" style={SHIELD_STYLE} /> : null;
@@ -115,7 +124,8 @@ export function SheetHost(): JSX.Element | null {
     <>
       <div className="scrim" onClick={() => actions.closeSheet()} />
       <div
-        ref={box} className={fresh !== null ? 'sheet tall' : 'sheet'} style={fresh !== null ? NEW_SHEET_STYLE : undefined}
+        ref={box} className={fresh !== null ? 'sheet tall' : 'sheet'}
+        style={fresh !== null ? NEW_SHEET_STYLE : shown.name === 'model' ? MODEL_SHEET_STYLE : undefined}
         role="dialog" aria-modal="true" aria-labelledby={titleID} tabIndex={-1} onKeyDown={onKeyDown}
       >
         <div className="grab" />
@@ -183,8 +193,8 @@ function useSheetFocus(box: RefObject<HTMLDivElement | null>, name: string | nul
 
 /**
  * While `on`, keeps the field that has focus in `box` in the part of `box` that shows: each time
- * a field in it takes focus, and each time `box` changes size, as the New sheet does while the
- * keyboard moves (see the header). It scrolls `box` alone, by as little as it takes, to show the
+ * a field in it takes focus, and each time `box` changes size, as the New and Model sheets do
+ * while the keyboard moves (see the header). It scrolls `box` alone, by as little as it takes, to show the
  * field's row (`.frow`, its label with it), or the field when the row is taller than what shows.
  */
 function useFieldInView(box: RefObject<HTMLDivElement | null>, on: boolean): void {

@@ -961,6 +961,43 @@ function screenName(page) {
   return app(page).locator('#app');
 }
 
+/** How tall the keyboard is that `keyboardUp` brings up. */
+const KEYBOARD_PX = 336;
+
+/**
+ * Brings the keyboard up: the visual viewport `KEYBOARD_PX` shorter than the layout viewport.
+ * @param {Page} page
+ */
+async function keyboardUp(page) {
+  const { width, height } = /** @type {{ width: number, height: number }} */ (page.viewportSize());
+  await hostCall(page, 'sendEnv', {
+    safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+    viewport: { width, height: height - KEYBOARD_PX, offsetTop: 0, offsetLeft: 0, scale: 1 },
+    layout: { width, height },
+  });
+}
+
+/**
+ * Whether `el`'s bottom is above the top of the keyboard `keyboardUp` brings up, which covers the
+ * bottom `KEYBOARD_PX` of the app's frame.
+ * @param {Locator} el
+ */
+async function aboveKeyboard(el) {
+  return el.evaluate((node, px) => node.getBoundingClientRect().bottom <= window.innerHeight - px, KEYBOARD_PX);
+}
+
+/**
+ * Whether all of `el` shows inside the sheet that holds it.
+ * @param {Locator} el
+ */
+async function inSheetView(el) {
+  return el.evaluate((node) => {
+    const box = /** @type {Element} */ (node.closest('.sheet')).getBoundingClientRect();
+    const r = node.getBoundingClientRect();
+    return r.top >= box.top && r.bottom <= box.bottom;
+  });
+}
+
 test('"+" on acme-web opens "New in acme-web" and Create sends that repo\'s ID', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openNew(page, 'acme-web');
@@ -1467,31 +1504,43 @@ test('the focused field stays above the keyboard', async ({ page, appHost }) => 
   await openApp(page, appHost);
   await openNew(page, 'acme-api');
   await pickProvider(page, 'acme-cloud');
-  const { width, height } = /** @type {{ width: number, height: number }} */ (page.viewportSize());
-  const keyboardTop = height - 336;
-  const above = (/** @type {Locator} */ el) => el.evaluate((node, top) => node.getBoundingClientRect().bottom <= top, keyboardTop);
-  const inView = (/** @type {Locator} */ el) => el.evaluate((node) => {
-    const box = /** @type {Element} */ (node.closest('.sheet')).getBoundingClientRect();
-    const r = node.getBoundingClientRect();
-    return r.top >= box.top && r.bottom <= box.bottom;
-  });
   // The last field takes focus with the keyboard down, where the keyboard will cover it.
   const notes = sheet(page).getByLabel('Notes for the agent');
   await notes.focus();
-  expect(await above(notes)).toBe(false);
+  expect(await aboveKeyboard(notes)).toBe(false);
   // The keyboard comes up under it: the sheet moves it above.
-  await hostCall(page, 'sendEnv', {
-    safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
-    viewport: { width, height: keyboardTop, offsetTop: 0, offsetLeft: 0, scale: 1 },
-    layout: { width, height },
-  });
+  await keyboardUp(page);
   await expect(notes).toBeFocused();
-  await expect.poll(() => above(notes)).toBe(true);
-  await expect.poll(() => inView(notes)).toBe(true);
+  await expect.poll(() => aboveKeyboard(notes)).toBe(true);
+  await expect.poll(() => inSheetView(notes)).toBe(true);
   // So does a field further up, as it takes focus.
   const text = firstMessage(page);
   await text.focus();
-  await expect.poll(() => above(text)).toBe(true);
-  await expect.poll(() => inView(text)).toBe(true);
+  await expect.poll(() => aboveKeyboard(text)).toBe(true);
+  await expect.poll(() => inSheetView(text)).toBe(true);
+  await hostCall(page, 'sendEnv', null);
+});
+
+test("the Model sheet's name field stays above the keyboard, and the sheet's top on the screen", async ({ page, appHost }) => {
+  // A small phone, where the sheet no longer fits above the keyboard and scrolls.
+  await page.setViewportSize({ width: 375, height: 667 });
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(2).click();
+  await expect(sheet(page).locator('.sh-title')).toHaveText('Model');
+  const field = sheet(page).getByLabel('Other model name');
+  await field.focus();
+  expect(await aboveKeyboard(field)).toBe(false);
+  await keyboardUp(page);
+  await expect(field).toBeFocused();
+  await expect.poll(() => aboveKeyboard(field)).toBe(true);
+  await expect.poll(() => inSheetView(field)).toBe(true);
+  await expect.poll(() => sheet(page).evaluate((node) => node.getBoundingClientRect().top >= 0)).toBe(true);
+  expect(await sheet(page).evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+  // Typing in it still sets the model.
+  await field.fill('opus-9');
+  await sheet(page).getByRole('button', { name: 'Set' }).click();
+  await expect.poll(async () => (await acting(page)).at(-1)).toEqual({ method: 'session.setModel', params: { session: REVIEW_REF, model: 'opus-9' } });
   await hostCall(page, 'sendEnv', null);
 });
