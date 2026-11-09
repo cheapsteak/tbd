@@ -252,6 +252,14 @@ struct RenderSignalRelayTests {
         }
     }
 
+    /// Waits, bounded, until `relay`'s hop has run: it takes the pending hint, and delivers or
+    /// drops it, in one main-actor turn.
+    private func waitForTheHop(of relay: RenderSignalRelay) async throws {
+        try await waitFor("the relay's hop to run") {
+            await MainActor.run { !relay.hasPendingHint }
+        }
+    }
+
     @Test func signalsBeforeTheDeliveryFoldIntoOneHint() async throws {
         let delivered = DeliveredHints()
         let relay = RenderSignalRelay { delivered.hints.append($0) }
@@ -271,26 +279,23 @@ struct RenderSignalRelayTests {
         #expect(all == expectedAll, "a signal after the delivery delivered \(all)")
     }
 
-    /// A cancelled relay delivers nothing, not even a hop queued before the cancel. A second relay
-    /// is the control: its hop is queued on main after the cancelled one's, so once the control's
-    /// delivery has arrived, the cancelled relay's hop has had its turn.
+    /// A cancelled relay delivers nothing, not even a hop queued before the cancel. Each check
+    /// waits for the cancelled relay's own hop, so it does not depend on the order hops run in.
     @Test func aCancelledRelayDeliversNothingEvenWithAHopQueued() async throws {
-        let cancelledDeliveries = DeliveredHints()
-        let cancelled = RenderSignalRelay { cancelledDeliveries.hints.append($0) }
-        cancelled.signal(RenderHint(outputBytesSinceFrame: 20_000, holdEnded: true))
-        cancelled.cancel()
-        let controlDeliveries = DeliveredHints()
-        let control = RenderSignalRelay { controlDeliveries.hints.append($0) }
-        control.signal(RenderHint(outputBytesSinceFrame: 1))
-        try await waitForDeliveries(controlDeliveries, count: 1)
-        let queued = cancelledDeliveries.hints
-        #expect(queued.isEmpty, "a relay cancelled with a hop queued delivered \(queued)")
+        let delivered = DeliveredHints()
+        let relay = RenderSignalRelay { delivered.hints.append($0) }
+        relay.signal(RenderHint(outputBytesSinceFrame: 20_000, holdEnded: true))
+        relay.cancel()
+        let queued = relay.hasPendingHint
+        try #require(queued, "the signal's hop ran before the test cancelled the relay")
+        try await waitForTheHop(of: relay)
+        let afterQueuedHop = delivered.hints
+        #expect(afterQueuedHop.isEmpty, "a relay cancelled with a hop queued delivered \(afterQueuedHop)")
 
         // A signal after the cancel delivers nothing either.
-        cancelled.signal(RenderHint(outputBytesSinceFrame: 2))
-        control.signal(RenderHint(outputBytesSinceFrame: 3))
-        try await waitForDeliveries(controlDeliveries, count: 2)
-        let later = cancelledDeliveries.hints
-        #expect(later.isEmpty, "a cancelled relay delivered a later signal: \(later)")
+        relay.signal(RenderHint(outputBytesSinceFrame: 2))
+        try await waitForTheHop(of: relay)
+        let afterLaterHop = delivered.hints
+        #expect(afterLaterHop.isEmpty, "a cancelled relay delivered a later signal: \(afterLaterHop)")
     }
 }

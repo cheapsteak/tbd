@@ -81,6 +81,11 @@ final class RenderSignalRelay: Sendable {
         cancelled.withLock { $0 = true }
     }
 
+    /// Whether a signal still waits for its hop. A hop takes the hint and delivers it, or drops
+    /// it once cancelled, in one main-actor turn, so on main a false here means the hop has run.
+    /// A test seam.
+    var hasPendingHint: Bool { pending.withLock { $0 != nil } }
+
     /// Called from the feeding thread.
     func signal(_ hint: RenderHint) {
         let alreadyPending = pending.withLock { value -> Bool in
@@ -583,7 +588,9 @@ public final class GhosttyTerminalView: NSView {
     }
 
     private var grid: GridSize
-    private var relay: RenderSignalRelay?
+    /// The relay the render signal goes through while the surface is attached. Readable as a
+    /// test seam.
+    private(set) var relay: RenderSignalRelay?
     /// The render signal this view installed, so it only ever clears its own.
     private var renderSignalToken: RenderSignalToken?
     /// True from a failed attach until one succeeds. Only the first failure of a run is logged:

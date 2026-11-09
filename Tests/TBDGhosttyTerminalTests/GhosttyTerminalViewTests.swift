@@ -1353,12 +1353,6 @@ private final class ViewHandle {
     }
 }
 
-/// How many hints a test's own relay delivered.
-@MainActor
-private final class DeliveryCount {
-    var value = 0
-}
-
 /// Which GPU limit a test holds the view at.
 enum GPULimit: Sendable, CaseIterable {
     /// All three of the surface's ring slots in flight.
@@ -1731,8 +1725,8 @@ struct GhosttyTerminalViewLeadingEdgeTests {
 
     /// A delivery queued before the view detaches never reaches it, even when the view attaches
     /// again before the delivery runs: its hint, here a finished 2 KB hold, is from before the
-    /// attach. A relay of the test's own, signalled last, is the control: its hop runs on main
-    /// after every hop queued before it.
+    /// attach. The test waits for the hop of the relay the view detached from, so it does not
+    /// depend on the order hops run in.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func aDeliveryQueuedBeforeADetachDoesNotReachTheViewAttachedAgain() async throws {
         let fixture = try ViewFixture()
@@ -1745,6 +1739,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let now = ManualNow(.seconds(100))
         try placeWithAFirstFrame(fixture, in: window, now: now)
         let before = view.renderSignalDeliveries
+        let relayBeforeTheDetach = try #require(view.relay, "the attached view has no relay")
 
         // The feed queues its delivery; the view detaches and attaches again in the same turn.
         fixture.terminal.feed(text: "\u{1b}[?2026h" + String(repeating: "x", count: 2048) + "\u{1b}[?2026l")
@@ -1753,11 +1748,11 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let attached = view.surface.isAttached
         try #require(attached, "showing the view again left its surface detached")
 
-        let controlDeliveries = DeliveryCount()
-        let control = RenderSignalRelay { _ in controlDeliveries.value += 1 }
-        control.signal(.empty)
-        try await waitFor("the control relay's delivery") {
-            await MainActor.run { controlDeliveries.value > 0 }
+        let queued = relayBeforeTheDetach.hasPendingHint
+        try #require(queued, "the feed's delivery ran before the view detached")
+
+        try await waitFor("the hop queued before the detach to run") {
+            await MainActor.run { !relayBeforeTheDetach.hasPendingHint }
         }
         let delivered = view.renderSignalDeliveries - before
         #expect(delivered == 0, "a delivery queued before the detach reached the view \(delivered) times")
