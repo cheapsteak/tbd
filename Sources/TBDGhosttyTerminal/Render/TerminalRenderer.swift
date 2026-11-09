@@ -292,10 +292,11 @@ final class TerminalRenderer {
                     let reportedAt = timing.hostNow()
                     let presentedTime = presented.presentedTime
                     tracker.reportPresented(id, presentedTime: presentedTime)
+                    onPresented?()
+                    // Last, so the diagnostic delays nothing the report drives.
                     timing.notePresented(
                         acquiredAt: acquiredAt, reportedAt: reportedAt,
                         presentedTime: presentedTime, onMainThread: Thread.isMainThread)
-                    onPresented?()
                 }
                 acquired = drawable
                 acquiredID = id

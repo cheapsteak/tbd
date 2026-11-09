@@ -4,19 +4,33 @@ import Synchronization
 import TestSupport
 import Testing
 
-/// What a `PresentTimingLog` emitted, collected in place of the log.
+/// What a `PresentTimingLog` emitted, collected in place of the log, and the host time it reads,
+/// which stays where a test sets it.
 private final class PresentTimingRecorder: Sendable {
     private let emittedSummaries = Mutex<[PresentTimingSummary]>([])
     private let emittedDrops = Mutex<[GPUBehindSample]>([])
+    private let emittedViews = Mutex<Set<Int>>([])
+    private let hostTime = Mutex<Duration>(.zero)
 
     var summaries: [PresentTimingSummary] { emittedSummaries.withLock { $0 } }
     var drops: [GPUBehindSample] { emittedDrops.withLock { $0 } }
+    /// Every `view` number a line was emitted for.
+    var views: Set<Int> { emittedViews.withLock { $0 } }
+
+    /// Sets the host time a dropped tick is noted at.
+    func setHostNow(_ time: Duration) { hostTime.withLock { $0 = time } }
 
     func makeLog() -> PresentTimingLog {
         PresentTimingLog(
-            hostNow: { .zero },
-            emitSummary: { summary in self.emittedSummaries.withLock { $0.append(summary) } },
-            emitDrop: { sample in self.emittedDrops.withLock { $0.append(sample) } })
+            hostNow: { self.hostTime.withLock { $0 } },
+            emitSummary: { view, summary in
+                self.emittedViews.withLock { _ = $0.insert(view) }
+                self.emittedSummaries.withLock { $0.append(summary) }
+            },
+            emitDrop: { view, sample in
+                self.emittedViews.withLock { _ = $0.insert(view) }
+                self.emittedDrops.withLock { $0.append(sample) }
+            })
     }
 }
 
@@ -49,42 +63,82 @@ private func sample(
 /// that dropped its frame for the GPU found.
 @Suite(.fastPassBounded)
 struct PresentTimingLogTests {
-    /// Dropped ticks alone never make a `presents` line, and reports make one only once a report
-    /// comes a `summaryInterval` after the window's first. That report starts the next window.
-    @Test func aSummaryComesOnlyOnceReportsSpanTheInterval() throws {
+    /// Nothing is logged until a report or dropped tick comes a `summaryInterval` after the
+    /// window's first. That one ends the window and starts the next.
+    @Test func aSummaryComesOnlyOnceTheWindowSpansTheInterval() throws {
         let recorder = PresentTimingRecorder()
         let log = recorder.makeLog()
 
+        recorder.setHostNow(.seconds(100))
         log.noteGPUBehind(sample(ages: [.milliseconds(25)]))
         log.noteGPUBehind(sample(ages: [.milliseconds(17)]))
-        let afterDrops = recorder.summaries.count
-        #expect(afterDrops == 0, "dropped ticks with no report made \(afterDrops) summaries")
-
         for index in 0..<12 {
             report(log, acquiredAt: Duration.seconds(100) + .milliseconds(50 * index),
                    screenAfter: .milliseconds(16), reportAfter: .milliseconds(25))
         }
         let withinInterval = recorder.summaries.count
-        #expect(withinInterval == 0, "reports within the interval made \(withinInterval) summaries")
+        #expect(withinInterval == 0, "drops and reports within the interval made \(withinInterval) summaries")
 
-        // The first report was handled at 100.025 s.
+        // The window began with the drops at 100 s, and its last report was handled at 100.575 s.
         report(log, acquiredAt: .seconds(101), screenAfter: .milliseconds(16), reportAfter: .milliseconds(25))
         let summaries = recorder.summaries
-        try #require(summaries.count == 1, "a report an interval after the first made \(summaries.count) summaries")
+        try #require(summaries.count == 1, "a report an interval after the first drop made \(summaries.count) summaries")
         let summary = summaries[0]
         #expect(summary.presents == 12, "the summary counted \(summary.presents) reports, not the 12 before it")
         #expect(summary.drops == 2, "the summary counted \(summary.drops) dropped ticks, not 2")
         let span = ms(summary.span)
-        #expect(span == "550.000", "the summary spanned \(span) ms")
+        #expect(span == "575.000", "the summary spanned \(span) ms")
         let reportMax = ms(summary.report?.max)
         #expect(reportMax == "25.000", "acquire to handler peaked at \(reportMax) ms")
-        let line = summary.line
-        #expect(line.hasPrefix("presents n=12 dated=12 main=0 screenms=16.000/16.000/16.000 "),
-                "the summary line read \(line)")
+        let line = summary.line(view: log.viewID)
+        let expectedPrefix = "presents view=\(log.viewID) n=12 dated=12 main=0 screenms=16.000/16.000/16.000 "
+        #expect(line.hasPrefix(expectedPrefix), "the summary line read \(line)")
 
         let next = log.pendingSummary
         let none: PresentTimingSummary? = nil
         #expect(next == none, "the next window, one report and no drop, would log \(String(describing: next))")
+    }
+
+    /// A view whose reports stopped still drops ticks, and a drop a `summaryInterval` after the
+    /// window's first ends it, so the drops are logged with no report among them. That drop
+    /// starts the next window.
+    @Test func aDroppedTickEndsAWindowThatSpansTheInterval() throws {
+        let recorder = PresentTimingRecorder()
+        let log = recorder.makeLog()
+        for index in 0..<3 {
+            recorder.setHostNow(Duration.seconds(100) + .milliseconds(100 * index))
+            log.noteGPUBehind(sample(ringHasFreeSlot: false, ages: [.milliseconds(40)]))
+        }
+        let withinInterval = recorder.summaries.count
+        #expect(withinInterval == 0, "drops within the interval made \(withinInterval) summaries")
+
+        recorder.setHostNow(.seconds(101))
+        log.noteGPUBehind(sample(ages: [.milliseconds(900)]))
+        let summaries = recorder.summaries
+        try #require(summaries.count == 1, "a drop an interval after the first made \(summaries.count) summaries")
+        let summary = summaries[0]
+        #expect(summary.presents == 0, "the window of drops counted \(summary.presents) reports")
+        #expect(summary.drops == 3, "the window counted \(summary.drops) drops, not the 3 before the one that ended it")
+        #expect(summary.ringFullDrops == 3, "the window counted \(summary.ringFullDrops) ring-full drops, not 3")
+        let span = ms(summary.span)
+        #expect(span == "200.000", "the window of drops spanned \(span) ms")
+
+        let next = try #require(log.pendingSummary, "the drop that ended the window began no next one")
+        #expect(next.drops == 1, "the next window counted \(next.drops) drops, not 1")
+    }
+
+    /// Each log numbers its lines with a `view` of its own, so two panes' lines can be told apart.
+    @Test func eachLogNumbersItsLinesWithItsOwnView() {
+        let recorder = PresentTimingRecorder()
+        let first = recorder.makeLog()
+        let second = recorder.makeLog()
+        #expect(first.viewID != second.viewID, "two logs were both numbered \(first.viewID)")
+
+        first.noteGPUBehind(sample(ages: []))
+        second.noteGPUBehind(sample(ages: []))
+        let views = recorder.views
+        let expected: Set<Int> = [first.viewID, second.viewID]
+        #expect(views == expected, "the lines were emitted for the views \(views)")
     }
 
     /// A `presentedTime` of 0 is a skipped present: it counts as a report, and in acquire to
@@ -129,7 +183,7 @@ struct PresentTimingLogTests {
 
         let summaries = recorder.summaries
         try #require(summaries.count == 1, "the window made \(summaries.count) summaries")
-        let line = summaries[0].line
+        let line = summaries[0].line(view: log.viewID)
         #expect(line.contains(" screenms=- reportms=30.000/30.000/30.000 latems=- "),
                 "the summary line read \(line)")
     }
@@ -146,6 +200,8 @@ struct PresentTimingLogTests {
         let afterQuiet = recorder.summaries.count
         #expect(afterQuiet == 0, "a window of two reports made \(afterQuiet) summaries")
 
+        // The last report began a window at 101.275 s, so a drop at 101.5 s falls inside it.
+        recorder.setHostNow(.seconds(101.5))
         log.noteGPUBehind(sample(ages: [.milliseconds(25), .milliseconds(8)]))
         report(log, acquiredAt: .seconds(102.5), screenAfter: .milliseconds(16), reportAfter: .milliseconds(25))
         let summaries = recorder.summaries
@@ -186,11 +242,12 @@ struct PresentTimingLogTests {
         let emitted = recorder.drops
         let expectedDrops = [ringFull, drawables, held]
         #expect(emitted == expectedDrops, "the drops emitted were \(emitted)")
-        let lines = emitted.map(\.line)
+        let view = log.viewID
+        let lines = emitted.map { $0.line(view: view) }
         let expectedLines = [
-            "gpubehind ringfull=1 awaiting=1 entries=1 agesms=25.000 sincepresentms=-",
-            "gpubehind ringfull=0 awaiting=2 entries=2 agesms=33.000,17.000 sincepresentms=4.000",
-            "gpubehind ringfull=0 awaiting=2 entries=0 agesms=- sincepresentms=-",
+            "gpubehind view=\(view) ringfull=1 awaiting=1 entries=1 agesms=25.000 sincepresentms=-",
+            "gpubehind view=\(view) ringfull=0 awaiting=2 entries=2 agesms=33.000,17.000 sincepresentms=4.000",
+            "gpubehind view=\(view) ringfull=0 awaiting=2 entries=0 agesms=- sincepresentms=-",
         ]
         #expect(lines == expectedLines, "the drop lines read \(lines)")
 
@@ -203,8 +260,8 @@ struct PresentTimingLogTests {
         #expect(noted == 3, "the log noted \(noted) dropped ticks, not 3")
     }
 
-    /// Drops with no report to end the window are counted however many come, and their ages are
-    /// kept only up to `sampleCapacity`.
+    /// Drops that all fall in one window, as they do while the host time stands still, are counted
+    /// however many come, and their ages are kept only up to `sampleCapacity`.
     @Test func aWindowKeepsAtMostSampleCapacityAges() {
         let log = PresentTimingRecorder().makeLog()
         let count = PresentTimingLog.sampleCapacity + 5
@@ -237,13 +294,14 @@ struct PresentTimingLogTests {
 /// `DrawableTracker.noteGPUBehind`, which hands the diagnostic a dropped tick's entries.
 @Suite(.fastPassBounded)
 struct DrawableTrackerGPUBehindTests {
-    /// The ages are by the tick's `now`, oldest first, and the time since the newest reported
-    /// drawable reached the screen is by its `presentedTime`. Noting changes nothing.
+    /// The ages are by the tick's `now`, oldest first, and the time since the newest dated
+    /// present reached the screen is by its `presentedTime`: a skipped present, which a check
+    /// dates by its own `now`, does not move it. Noting changes nothing.
     @Test func theTrackerHandsADroppedTickItsEntriesAges() throws {
         let recorder = PresentTimingRecorder()
         let tracker = DrawableTracker(presentTiming: recorder.makeLog())
         let first = tracker.add(acquiredAt: .seconds(100))
-        _ = tracker.add(acquiredAt: .seconds(100.25))
+        let second = tracker.add(acquiredAt: .seconds(100.25))
         _ = tracker.add(acquiredAt: .seconds(100.375))
 
         tracker.noteGPUBehind(now: .seconds(100.5), ringHasFreeSlot: true, awaitingPresent: 3)
@@ -253,8 +311,13 @@ struct DrawableTrackerGPUBehindTests {
         tracker.reportPresented(first, presentedTime: 100.4375)
         tracker.noteGPUBehind(now: .seconds(100.5), ringHasFreeSlot: false, awaitingPresent: 2)
 
+        // Skipped, and dated 100.625 s by the check.
+        tracker.reportPresented(second, presentedTime: 0)
+        let awaitingAfterSkip = tracker.awaitingPresent(now: .seconds(100.625))
+        tracker.noteGPUBehind(now: .seconds(100.625), ringHasFreeSlot: true, awaitingPresent: awaitingAfterSkip)
+
         let drops = recorder.drops
-        try #require(drops.count == 2, "the tracker noted \(drops.count) dropped ticks")
+        try #require(drops.count == 3, "the tracker noted \(drops.count) dropped ticks")
         let firstAges = drops[0].entryAges.map(ms)
         #expect(firstAges == ["500.000", "250.000", "125.000"], "the first drop's ages read \(firstAges)")
         let firstSince = ms(drops[0].sinceLastPresent)
@@ -267,5 +330,9 @@ struct DrawableTrackerGPUBehindTests {
         #expect(!ring, "the second drop, with the ring full, read a free slot")
         let awaiting = drops[1].awaitingPresent
         #expect(awaiting == 2, "the second drop read \(awaiting) awaiting, not the 2 it was handed")
+        let thirdAges = drops[2].entryAges.map(ms)
+        #expect(thirdAges == ["250.000"], "the third drop's ages read \(thirdAges)")
+        let thirdSince = ms(drops[2].sinceLastPresent)
+        #expect(thirdSince == "187.500", "after a skipped present the third drop read \(thirdSince) ms since a present")
     }
 }

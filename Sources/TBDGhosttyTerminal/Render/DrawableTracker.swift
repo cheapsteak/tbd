@@ -71,6 +71,9 @@ final class DrawableTracker: Sendable {
         var lastReportAt: Duration?
         /// A report with no `presentedTime` came in, and no check has dated it yet.
         var undatedReportPending = false
+        /// The latest `presentedTime` reported, for `noteGPUBehind`: `lastReportAt` without the
+        /// dates a check gives undated reports.
+        var lastPresentedAt: Duration?
         /// Set by a nil drawable: the pool is full whatever the entries say.
         var hold: LimitHold?
         /// Whether this run of unreported presents has logged its notice. A report ends the run.
@@ -201,8 +204,8 @@ final class DrawableTracker: Sendable {
     }
 
     /// A display tick due at `now` dropped its frame for the GPU: hands `presentTiming` the age of
-    /// each entry, and how long ago the newest reported drawable reached the screen. Reads the
-    /// state and changes none of it, so it runs no recovery, as `entryCount` does not.
+    /// each entry, and how long ago the newest dated present reached the screen. Reads the state
+    /// and changes none of it, so it runs no recovery, as `entryCount` does not.
     ///
     /// - Parameters:
     ///   - ringHasFreeSlot: whether the surface's ring had a slot free.
@@ -212,7 +215,7 @@ final class DrawableTracker: Sendable {
             GPUBehindSample(
                 ringHasFreeSlot: ringHasFreeSlot, awaitingPresent: awaitingPresent,
                 entryAges: state.entries.map { now - $0.acquiredAt },
-                sinceLastPresent: state.lastReportAt.map { now - $0 })
+                sinceLastPresent: state.lastPresentedAt.map { now - $0 })
         }
         presentTiming.noteGPUBehind(sample)
     }
@@ -237,6 +240,7 @@ final class DrawableTracker: Sendable {
             if presentedTime > 0 {
                 let presentedAt = Duration.seconds(presentedTime)
                 state.lastReportAt = max(state.lastReportAt ?? presentedAt, presentedAt)
+                state.lastPresentedAt = max(state.lastPresentedAt ?? presentedAt, presentedAt)
             } else {
                 state.skippedPresents += 1
                 state.undatedReportPending = true

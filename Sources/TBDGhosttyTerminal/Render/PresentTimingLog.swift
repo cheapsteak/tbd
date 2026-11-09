@@ -10,28 +10,36 @@
 // Two lines, both on subsystem `com.tbd.app`, category `terminallatency`. Neither uses the
 // latency tap's verbs, so `scripts/diag/terminal-latency-report.py` skips them.
 //
-//     presents n=<n> dated=<n> main=<n> screenms=<s> reportms=<s> latems=<s> drops=<n> ringfull=<n> oldestagems=<s> spanms=<f>
-//     gpubehind ringfull=<0|1> awaiting=<n> entries=<n> agesms=<ms,…|-> sincepresentms=<f|->
+//     presents view=<n> n=<n> dated=<n> main=<n> screenms=<s> reportms=<s> latems=<s> drops=<n> ringfull=<n> oldestagems=<s> spanms=<f>
+//     gpubehind view=<n> ringfull=<0|1> awaiting=<n> entries=<n> agesms=<ms,…|-> sincepresentms=<f|->
 //
-// Each `<s>` is `p50/p90/max` in milliseconds, or `-` with no samples.
+// `view` numbers the views in the order they were made, so lines from two panes on screen at once
+// can be told apart. Each `<s>` is `p50/p90/max` in milliseconds, or `-` with no samples.
 //
-//   * **`presents`** is `.notice`, at most one a second while reports arrive. It covers the
-//     reports since the last one, and is left out when that window held fewer than
-//     `minimumPresents` reports and no dropped tick, so a blinking cursor logs nothing.
+//   * **`presents`** is `.info`, the latency tap's level, and comes at most once a second while
+//     reports arrive or ticks drop. A window ends at its first report or dropped tick
+//     `summaryInterval` or more after the window's first, so the last part-second before a view
+//     goes quiet is logged only when it next draws. A window with fewer than `minimumPresents`
+//     reports and no dropped tick is left out, so a blinking cursor logs nothing.
 //     - `n` reports, `dated` of them with a `presentedTime` above 0, and `main` of them whose
 //       handler ran on the main thread.
 //     - `screenms` is acquire to `presentedTime`, and `latems` is `presentedTime` to the handler.
 //       Both count dated reports only: a `presentedTime` of 0 is a skipped present.
 //     - `reportms` is acquire to the handler, for every report.
-//     - `drops` ticks dropped for the GPU since the last summary, `ringfull` of them with the
-//       ring full, and `oldestagems` the age of each drop's oldest unreported drawable.
-//     - `spanms` is the first report to the last.
+//     - `drops` ticks dropped for the GPU, `ringfull` of them with the ring full, and
+//       `oldestagems` the age of each drop's oldest unreported drawable.
+//     - `spanms` is the window's first report or drop to its last.
 //   * **`gpubehind`** is `.debug`, one per dropped tick: whether the ring was full, the count the
-//     tracker reported, its entries and each one's age oldest first, and how long before the
-//     tick the newest reported drawable reached the screen.
+//     tracker gave the tick, its entries and each one's age oldest first, and how long before the
+//     tick the newest dated present reached the screen.
+//     - The entries are read just after the tick decided, so a report landing in between can show
+//       fewer `entries` than `awaiting`.
+//     - A drawable a leading-edge frame acquired after a vsync, and before that vsync's tick ran,
+//       can show a negative age of under one refresh: the tick's `now` is its vsync.
 //
-// Acquire and handler times come off `hostNow`, host time, the clock of `presentedTime`. A dropped
-// tick's ages are by the frames' own `now`, the timebase the tracker's entries are kept in.
+// Acquire and handler times, and a window's bounds, come off `hostNow`, host time, the clock of
+// `presentedTime`. A dropped tick's ages are by the frames' own `now`, the timebase the tracker's
+// entries are kept in.
 
 import Foundation
 import QuartzCore
@@ -40,6 +48,9 @@ import os
 
 /// The latency tap's category, so one `log stream` predicate shows both.
 let terminalLatencyLog = Logger(subsystem: "com.tbd.app", category: "terminallatency")
+
+/// The last `view` number handed out.
+private let presentTimingViewIDs = Atomic<Int>(0)
 
 /// The 50th and 90th percentiles and the largest of a set of samples, nearest-rank.
 struct TimingSpread: Sendable, Equatable {
@@ -76,14 +87,14 @@ struct GPUBehindSample: Sendable, Equatable {
     var awaitingPresent: Int
     /// How old each unreported entry was, oldest first, by the frames' `now`.
     var entryAges: [Duration]
-    /// How long before the tick the newest reported drawable reached the screen. nil before the
-    /// first report.
+    /// How long before the tick the newest dated present reached the screen. nil before the first.
     var sinceLastPresent: Duration?
 
-    var line: String {
+    /// The `gpubehind` line, for the view numbered `view`.
+    func line(view: Int) -> String {
         let ages = entryAges.isEmpty ? "-" : entryAges.map(PresentTimingLog.milliseconds).joined(separator: ",")
         let since = sinceLastPresent.map(PresentTimingLog.milliseconds) ?? "-"
-        return "gpubehind ringfull=\(ringHasFreeSlot ? 0 : 1) awaiting=\(awaitingPresent) "
+        return "gpubehind view=\(view) ringfull=\(ringHasFreeSlot ? 0 : 1) awaiting=\(awaitingPresent) "
             + "entries=\(entryAges.count) agesms=\(ages) sincepresentms=\(since)"
     }
 }
@@ -103,17 +114,19 @@ struct PresentTimingSummary: Sendable, Equatable {
     var ringFullDrops: Int
     /// Each drop's oldest unreported drawable's age.
     var oldestAge: TimingSpread?
-    /// The first report to the last.
+    /// The window's first report or drop to its last.
     var span: Duration
 
-    var line: String {
+    /// The `presents` line, for the view numbered `view`.
+    func line(view: Int) -> String {
         func spread(_ value: TimingSpread?) -> String {
             guard let value else { return "-" }
             return [value.p50, value.p90, value.max].map(PresentTimingLog.milliseconds).joined(separator: "/")
         }
-        return "presents n=\(presents) dated=\(dated) main=\(onMainThread) screenms=\(spread(screen)) "
-            + "reportms=\(spread(report)) latems=\(spread(late)) drops=\(drops) ringfull=\(ringFullDrops) "
-            + "oldestagems=\(spread(oldestAge)) spanms=\(PresentTimingLog.milliseconds(span))"
+        return "presents view=\(view) n=\(presents) dated=\(dated) main=\(onMainThread) "
+            + "screenms=\(spread(screen)) reportms=\(spread(report)) latems=\(spread(late)) "
+            + "drops=\(drops) ringfull=\(ringFullDrops) oldestagems=\(spread(oldestAge)) "
+            + "spanms=\(PresentTimingLog.milliseconds(span))"
     }
 }
 
@@ -123,19 +136,19 @@ struct PresentTimingSummary: Sendable, Equatable {
 /// main, so the window sits behind a lock of its own: the tracker's lock is held no longer than
 /// before. Both lines are emitted outside it.
 final class PresentTimingLog: Sendable {
-    /// How often the `presents` line comes while reports arrive.
+    /// How often the `presents` line comes while reports arrive or ticks drop.
     static let summaryInterval: Duration = .seconds(1)
     /// A window with fewer reports than this and no dropped tick is left out. A blinking cursor
     /// draws two frames a second.
     static let minimumPresents = 10
-    /// The most samples of each kind one window keeps. A view whose reports stopped can drop
-    /// ticks with no report to end the window, so the drops are counted past this and their
-    /// ages are not kept.
+    /// The most samples of each kind one window keeps. Ticks that drop all within one window, as
+    /// they would with a stopped `hostNow`, are counted past this and their ages are not kept.
     static let sampleCapacity = 1024
 
     private struct Window {
-        var firstReportAt: Duration?
-        var lastReportAt: Duration?
+        /// The window's first report or dropped tick, and its latest, by `hostNow`.
+        var startedAt: Duration?
+        var lastEventAt: Duration?
         var presents = 0
         var dated = 0
         var onMainThread = 0
@@ -155,7 +168,7 @@ final class PresentTimingLog: Sendable {
         var summary: PresentTimingSummary? {
             guard presents >= PresentTimingLog.minimumPresents || drops > 0 else { return nil }
             var span = Duration.zero
-            if let firstReportAt, let lastReportAt { span = lastReportAt - firstReportAt }
+            if let startedAt, let lastEventAt { span = lastEventAt - startedAt }
             return PresentTimingSummary(
                 presents: presents, dated: dated, onMainThread: onMainThread,
                 screen: TimingSpread(screen), report: TimingSpread(report), late: TimingSpread(late),
@@ -170,43 +183,55 @@ final class PresentTimingLog: Sendable {
         /// kept past the end of a window.
         var gpuBehindNoted = 0
         var lastGPUBehind: GPUBehindSample?
+
+        /// Stretches the window's bounds to an event at `time`, first ending the window when `time`
+        /// is `summaryInterval` or more past its first event. Returns the ended window's summary.
+        mutating func advance(to time: Duration) -> PresentTimingSummary? {
+            var finished: PresentTimingSummary?
+            if let started = window.startedAt, time - started >= PresentTimingLog.summaryInterval {
+                finished = window.summary
+                window = Window()
+            }
+            window.startedAt = window.startedAt ?? time
+            // Reports and drops take the lock in whatever order their threads reach it, so a
+            // later event can carry an earlier time.
+            window.lastEventAt = Swift.max(window.lastEventAt ?? time, time)
+            return finished
+        }
     }
 
+    /// Numbers this view's lines.
+    let viewID: Int
     /// Host time, the clock of `presentedTime` and the display link. A seam the tests set.
     let hostNow: @Sendable () -> Duration
-    private let emitSummary: @Sendable (PresentTimingSummary) -> Void
-    private let emitDrop: @Sendable (GPUBehindSample) -> Void
+    private let emitSummary: @Sendable (_ view: Int, PresentTimingSummary) -> Void
+    private let emitDrop: @Sendable (_ view: Int, GPUBehindSample) -> Void
     private let state = Mutex(State())
 
+    // Each line is built inside its log call, so a level nobody streams costs no string.
     init(
+        viewID: Int = PresentTimingLog.nextViewID(),
         hostNow: @escaping @Sendable () -> Duration = { .seconds(CACurrentMediaTime()) },
-        emitSummary: @escaping @Sendable (PresentTimingSummary) -> Void = { summary in
-            terminalLatencyLog.notice("\(summary.line, privacy: .public)")
+        emitSummary: @escaping @Sendable (_ view: Int, PresentTimingSummary) -> Void = { view, summary in
+            terminalLatencyLog.info("\(summary.line(view: view), privacy: .public)")
         },
-        // `line` is built inside the log call, so a `.debug` line nobody streams costs no string.
-        emitDrop: @escaping @Sendable (GPUBehindSample) -> Void = { sample in
-            terminalLatencyLog.debug("\(sample.line, privacy: .public)")
+        emitDrop: @escaping @Sendable (_ view: Int, GPUBehindSample) -> Void = { view, sample in
+            terminalLatencyLog.debug("\(sample.line(view: view), privacy: .public)")
         }
     ) {
+        self.viewID = viewID
         self.hostNow = hostNow
         self.emitSummary = emitSummary
         self.emitDrop = emitDrop
     }
 
     /// A drawable acquired at `acquiredAt` was reported presented, by a handler that read
-    /// `reportedAt` as it began. Both are `hostNow` readings. A report `summaryInterval` or more
-    /// after the window's first ends that window, and starts the next.
+    /// `reportedAt` as it began. Both are `hostNow` readings.
     func notePresented(
         acquiredAt: Duration, reportedAt: Duration, presentedTime: CFTimeInterval, onMainThread: Bool
     ) {
         let finished = state.withLock { state -> PresentTimingSummary? in
-            var finished: PresentTimingSummary?
-            if let first = state.window.firstReportAt, reportedAt - first >= Self.summaryInterval {
-                finished = state.window.summary
-                state.window = Window()
-            }
-            state.window.firstReportAt = state.window.firstReportAt ?? reportedAt
-            state.window.lastReportAt = reportedAt
+            let finished = state.advance(to: reportedAt)
             state.window.presents += 1
             if onMainThread { state.window.onMainThread += 1 }
             state.window.append(reportedAt - acquiredAt, to: \.report)
@@ -220,19 +245,28 @@ final class PresentTimingLog: Sendable {
             }
             return finished
         }
-        if let finished { emitSummary(finished) }
+        if let finished { emitSummary(viewID, finished) }
     }
 
     /// A display tick dropped its frame for the GPU, and found `sample`.
     func noteGPUBehind(_ sample: GPUBehindSample) {
-        state.withLock { state in
+        let noticedAt = hostNow()
+        let finished = state.withLock { state -> PresentTimingSummary? in
+            let finished = state.advance(to: noticedAt)
             state.window.drops += 1
             if !sample.ringHasFreeSlot { state.window.ringFullDrops += 1 }
             if let oldest = sample.entryAges.first { state.window.append(oldest, to: \.oldestAges) }
             state.gpuBehindNoted += 1
             state.lastGPUBehind = sample
+            return finished
         }
-        emitDrop(sample)
+        if let finished { emitSummary(viewID, finished) }
+        emitDrop(viewID, sample)
+    }
+
+    /// The next `view` number.
+    static func nextViewID() -> Int {
+        presentTimingViewIDs.wrappingAdd(1, ordering: .relaxed).newValue
     }
 
     // MARK: - Test seams
