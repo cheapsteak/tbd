@@ -3,8 +3,9 @@
 //
 // The renderer's cost lives in this file. Per tick:
 //
-//   1. `ghostty_render_state_begin_update` **under the terminal lock** — and nothing else. The
-//      lock closure is one line.
+//   1. `ghostty_render_state_begin_update` **under the terminal lock** — and nothing else but
+//      the scroll poll and the byte counter, which the same hold reads and zeroes, so each
+//      update knows how much program output it consumed (`FrameUpdate.outputBytes`).
 //   2. `ghostty_render_state_end_update` and *all* row/cell iteration **unlocked**. render.h
 //      documents the split (lines 42–51) and spike result 2 verified it empirically: row data is
 //      stale-but-valid until the next update, so the IO thread runs free while we decode.
@@ -43,6 +44,10 @@ struct FrameUpdate: Sendable, Hashable {
     var rowsRebuilt: Int
     var glyphCount: Int
     var rectCount: Int
+    /// Program output this update consumed: the terminal's byte counter, read and zeroed in the
+    /// `begin_update` lock hold. A frame drawn from an update with output in it is an output frame,
+    /// the kind that stamps `GhosttyTerminalView.lastOutputFrameAt`.
+    var outputBytes = 0
 
     /// True when the surface has nothing new to draw and the renderer must return early.
     var isClean: Bool { dirty == .none }
@@ -95,23 +100,26 @@ final class FrameBuilder {
         }
         let rs = state.raw
 
-        // (1) The lock closure is `begin_update` plus the scroll poll — two amortized-O(1) calls.
-        // The poll rides along here because reading it separately would take the same lock a
-        // second time, once per frame, for 24 bytes.
+        // (1) The lock closure is `begin_update` plus the scroll poll — two amortized-O(1) calls —
+        // and the byte counter, which the same hold reads and zeroes. The poll rides along here
+        // because reading it separately would take the same lock a second time, once per frame,
+        // for 24 bytes. The counter has to ride along: read in a hold of its own, it could count
+        // output that landed after this update, or miss output this update drew.
         var scroll = TerminalScrollMetrics.empty
-        let began = terminal.withRaw { raw -> GhosttyResult in
+        let began = terminal.withRawTakingOutputBytes { raw -> GhosttyResult in
             let result = ghostty_render_state_begin_update(rs, raw)
             scroll = TerminalScrollMetrics.read(raw)
             return result
         }
-        guard let beginResult = began else {
+        guard let began else {
             // Closed: nothing new can arrive. The render state still holds the last frame, which
             // is what stays on screen.
             surface.finishUpdate(dirty: .none, rowsRebuilt: 0)
             return FrameUpdate(dirty: .none, rowsRebuilt: 0,
                                glyphCount: surface.glyphCount, rectCount: surface.rectCount)
         }
-        try renderCheck(beginResult, "ghostty_render_state_begin_update")
+        try renderCheck(began.value, "ghostty_render_state_begin_update")
+        let outputBytes = began.outputBytes
 
         // Stored before the dirty check below, not after. Scrolled into history, new child output
         // grows `total` and moves the thumb while every *visible* cell stays clean — a read behind
@@ -150,12 +158,14 @@ final class FrameBuilder {
             guard cursor != surface.cursor else {
                 surface.finishUpdate(dirty: .none, rowsRebuilt: 0)
                 return FrameUpdate(dirty: .none, rowsRebuilt: 0,
-                                   glyphCount: surface.glyphCount, rectCount: surface.rectCount)
+                                   glyphCount: surface.glyphCount, rectCount: surface.rectCount,
+                                   outputBytes: outputBytes)
             }
             surface.setCursor(cursor)
             surface.finishUpdate(dirty: .partial, rowsRebuilt: 0)
             return FrameUpdate(dirty: .partial, rowsRebuilt: 0,
-                               glyphCount: surface.glyphCount, rectCount: surface.rectCount)
+                               glyphCount: surface.glyphCount, rectCount: surface.rectCount,
+                               outputBytes: outputBytes)
         }
 
         if dirty == .full {
@@ -204,7 +214,8 @@ final class FrameBuilder {
 
         surface.finishUpdate(dirty: effectiveDirty, rowsRebuilt: rowsRebuilt)
         return FrameUpdate(dirty: effectiveDirty, rowsRebuilt: rowsRebuilt,
-                           glyphCount: surface.glyphCount, rectCount: surface.rectCount)
+                           glyphCount: surface.glyphCount, rectCount: surface.rectCount,
+                           outputBytes: outputBytes)
     }
 
     /// The pair of atlas rebuild generations. Any change means "every cached `atlasPos` is stale".

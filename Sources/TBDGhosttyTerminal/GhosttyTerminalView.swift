@@ -1,5 +1,6 @@
 // Adapted from tkzmux c961533 Sources/TkzTerminalView/TerminalMetalView.swift, TkzTerminalView.swift and DisplayLinkDriver.swift (MIT, see LICENSE-tkzmux.txt).
 // Dropping a frame at the GPU's limits, rather than blocking, adapted from termio 8196587 Shared/Sources/TermioStream/TermiodStreamRenderer.swift (MIT, see LICENSE-termio.txt).
+// `LeadingEdgePolicy`, drawing output at once after a quiet refresh interval, follows Alacritty's `FrameTimer::compute_timeout` (alacritty/src/display/mod.rs, Apache-2.0 or MIT) and SwiftTerm's `FrameDriver.tickAfterResumeIfDue` (Sources/SwiftTerm/Apple/FrameDriver.swift, MIT). Its small-output check is an idea from kitty and iTerm2 (GPL); no code comes from either.
 // GhosttyTerminalView — the NSView one libghostty terminal is drawn into.
 //
 // Responsibilities, and nothing else:
@@ -25,6 +26,14 @@
 // Everything here is main-thread. The terminal is fed on an IO thread; its render signal is the
 // only thing that crosses back, through `RenderSignalRelay`, which coalesces any number of signals
 // into at most one main-thread wake-up at a time.
+//
+// ## Output draws on the leading edge
+//
+// Each wake-up decides once, by `LeadingEdgePolicy`, whether to draw at once or leave the frame to
+// the display link. Small output into a screen that has had no output frame for a refresh
+// interval draws at once, inside the wake-up, so an echo does not wait for the next tick. Bulk
+// output, and output that comes within an interval of the last output frame, is drawn by the
+// tick, once per refresh.
 
 import AppKit
 import Foundation
@@ -49,27 +58,54 @@ final class WeakRef<Object: AnyObject> {
 /// Bridges a terminal's render signal (called on the feeding thread, `@Sendable`) to a single
 /// coalesced main-thread wake-up.
 ///
-/// A busy `cat` signals thousands of times a second; without the pending flag that would be
-/// thousands of main-queue hops per frame. With it, at most one hop is in flight at a time.
+/// A busy `cat` signals thousands of times a second; without the pending hint that would be
+/// thousands of main-queue hops per frame. With it, at most one hop is in flight at a time. A
+/// signal that finds a hint pending folds into it (`RenderHint.merged(with:)`), and the hop hands
+/// the folded hint to the view.
+///
+/// A view cancels its relay when it detaches. A queued hop holds the relay, and the view it reaches
+/// may have attached again since, with a relay of its own: a cancelled relay's hop delivers nothing,
+/// so a hint from before the detach, and any hold end in it, never reaches the attached view.
 final class RenderSignalRelay: Sendable {
-    private let pending = Mutex(false)
-    private let deliver: @MainActor @Sendable () -> Void
+    private let pending = Mutex<RenderHint?>(nil)
+    private let cancelled = Mutex(false)
+    private let deliver: @MainActor @Sendable (RenderHint) -> Void
 
-    init(deliver: @escaping @MainActor @Sendable () -> Void) {
+    init(deliver: @escaping @MainActor @Sendable (RenderHint) -> Void) {
         self.deliver = deliver
     }
 
+    /// Ends every delivery, including a hop already queued. Called on main, where the hop runs, so
+    /// a hop queued before the call finds it.
+    func cancel() {
+        cancelled.withLock { $0 = true }
+    }
+
+    /// Whether a signal still waits for its hop. A hop takes the hint and delivers it, or drops
+    /// it once cancelled, in one main-actor turn, so on main a false here means the hop has run.
+    /// A test seam.
+    var hasPendingHint: Bool { pending.withLock { $0 != nil } }
+
     /// Called from the feeding thread.
-    func signal() {
+    func signal(_ hint: RenderHint) {
         let alreadyPending = pending.withLock { value -> Bool in
-            if value { return true }
-            value = true
+            if let current = value {
+                value = current.merged(with: hint)
+                return true
+            }
+            value = hint
             return false
         }
         guard !alreadyPending else { return }
         Task { @MainActor in
-            self.pending.withLock { $0 = false }
-            self.deliver()
+            let hint = self.pending.withLock { value -> RenderHint in
+                let taken = value ?? .empty
+                value = nil
+                return taken
+            }
+            let isCancelled = self.cancelled.withLock { $0 }
+            guard !isCancelled else { return }
+            self.deliver(hint)
         }
     }
 }
@@ -85,7 +121,7 @@ final class DisplayLinkProxy: NSObject {
     }
 
     @objc func fired(_ link: CADisplayLink) {
-        view?.renderTick(now: .seconds(link.timestamp))
+        view?.displayLinkFired(timestamp: link.timestamp, targetTimestamp: link.targetTimestamp)
     }
 }
 
@@ -127,6 +163,116 @@ enum DisplayLinkPolicy {
     }
 }
 
+// MARK: - Leading-edge policy
+
+/// What a render signal's delivery knows when it decides whether to draw at once. A pure value,
+/// gathered on main.
+struct LeadingEdgeFacts: Sendable, Equatable {
+    /// The view can build frames: `canBuildFrames`, and a layer to draw into. The frame sizes its
+    /// drawable to at least one pixel each way, so the layer is all rule 1's size check needs.
+    var canBuildFrames: Bool
+    /// A live resize is in progress. `setFrameSize` draws each step inside its Core Animation
+    /// transaction.
+    var isLiveResizing: Bool
+    /// When the delivery runs, in the display link's timebase.
+    var now: Duration
+    /// When the last output frame was built, or nil before the first: the later of
+    /// `GhosttyTerminalView.lastOutputFrameAt` and `lastEmptyLeadingEdgeDrawAt`.
+    var lastOutputFrameAt: Duration?
+    /// How long one frame stays on screen: see `LeadingEdgePolicy.refreshInterval`.
+    var refreshInterval: Duration
+    /// Fewer than three of the surface's frames are in flight on the GPU.
+    var ringHasFreeSlot: Bool
+    /// The layer's drawables awaiting their present report, as the tracker counts them.
+    var drawablesAwaitingPresent: Int
+    /// From the render hint: output fed since a frame last read the terminal.
+    var outputBytesSinceFrame: Int
+    /// From the render hint: a DEC 2026 hold is open.
+    var holdOpen: Bool
+    /// From the render hint: a hold ended in the chunks this delivery covers.
+    var holdEnded: Bool
+}
+
+/// Whether a render signal's delivery draws at once or leaves the frame to the display link. A
+/// pure function of `LeadingEdgeFacts`: it reads no clock and no state.
+///
+/// It limits only the leading edge. A delivery draws at once only after a full refresh interval
+/// with no output frame, and only small output or a finished hold, so sustained output is still
+/// drawn by the tick, once per refresh. A delivery that covers no output at all, such as a
+/// resize's, a reset's or a change of colours with nothing fed since a frame last read the
+/// terminal, is left to the tick too: the leading edge is for output, and frames that no output
+/// causes keep going through the display link. With output still unread, such a delivery is
+/// decided as that output's own would be.
+enum LeadingEdgePolicy {
+    /// Output this size or larger goes to the tick, unless a hold just ended. An echo is a few
+    /// bytes and a prompt or status-line redraw usually a few hundred; a coloured full-screen
+    /// redraw is several KiB.
+    static let smallOutputLimit = 1024
+    /// The refresh interval of a window with no screen, as in the offscreen tests.
+    static let fallbackRefreshInterval = Duration.seconds(1) / 60
+
+    /// Why a delivery leaves its frame to the display link. One per rule, in rule order; the last
+    /// rule, that the output is small, has two: none at all, and too much.
+    enum Reason: Sendable, Equatable, CaseIterable {
+        /// The view cannot build a frame: detached, hidden, occluded, closed or sizeless.
+        case cannotBuildFrames
+        /// A live resize draws from `setFrameSize` instead.
+        case liveResize
+        /// A DEC 2026 hold is open, so the tick would skip the frame anyway.
+        case holdOpen
+        /// An output frame was built less than a refresh interval ago.
+        case withinRefreshInterval
+        /// The ring has no free slot.
+        case ringFull
+        /// `TerminalRenderer.maxDrawablesAwaitingPresent` drawables await their present report.
+        case drawablesBehind
+        /// No output had been fed since a frame last read the terminal when the call signalled:
+        /// it was a resize, a reset or new defaults, with any earlier output already read.
+        case noOutput
+        /// `smallOutputLimit` or more bytes have been fed since the last frame, and no hold ended.
+        case bulkOutput
+    }
+
+    enum Decision: Sendable, Equatable {
+        /// Draw now, with the tick's own `renderTick(now:)`.
+        case drawNow
+        /// Ask the display link for a frame, and leave the drawing to its next tick.
+        case coalesce(Reason)
+    }
+
+    /// The decision, checking the rules in order: the first that fails names the reason.
+    static func decide(_ facts: LeadingEdgeFacts) -> Decision {
+        guard facts.canBuildFrames else { return .coalesce(.cannotBuildFrames) }
+        guard !facts.isLiveResizing else { return .coalesce(.liveResize) }
+        guard !facts.holdOpen else { return .coalesce(.holdOpen) }
+        if let last = facts.lastOutputFrameAt, facts.now - last < facts.refreshInterval {
+            return .coalesce(.withinRefreshInterval)
+        }
+        guard facts.ringHasFreeSlot else { return .coalesce(.ringFull) }
+        guard facts.drawablesAwaitingPresent < TerminalRenderer.maxDrawablesAwaitingPresent else {
+            return .coalesce(.drawablesBehind)
+        }
+        // Frames that no output causes go through the display link. A hold's end the program
+        // writes is output (`ESC[?2026l`); a reset's or a resize's is not reported as one.
+        guard facts.outputBytesSinceFrame > 0 else { return .coalesce(.noOutput) }
+        // A finished hold is a complete frame, the program promised, so its size does not matter.
+        guard facts.holdEnded || facts.outputBytesSinceFrame < smallOutputLimit else {
+            return .coalesce(.bulkOutput)
+        }
+        return .drawNow
+    }
+
+    /// How long one frame stays on screen. While the link runs, its own interval
+    /// (`targetTimestamp - timestamp` from its last tick); while it is paused, and before its first
+    /// tick after a resume, the screen's `minimumRefreshInterval`; with no screen,
+    /// `fallbackRefreshInterval`.
+    static func refreshInterval(linkInterval: Duration?, screenMinimumRefreshInterval: TimeInterval?) -> Duration {
+        if let linkInterval, linkInterval > .zero { return linkInterval }
+        if let screen = screenMinimumRefreshInterval, screen > 0, screen.isFinite { return .seconds(screen) }
+        return fallbackRefreshInterval
+    }
+}
+
 /// What a frame does when the GPU is behind: all three of the surface's ring slots are in flight,
 /// or `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
 /// report.
@@ -151,6 +297,10 @@ final class DisplayLinkDriver {
     private(set) var isPaused = true
     private(set) var pauseCount = 0
     private(set) var resumeCount = 0
+    /// The running link's refresh interval, `targetTimestamp - timestamp` from its last tick. nil
+    /// while the link is paused, and from a resume until the link's first tick after it: the
+    /// interval a paused link last ran at says nothing about the screen it resumes on.
+    private(set) var linkInterval: Duration?
 
     private var link: CADisplayLink?
 
@@ -161,6 +311,7 @@ final class DisplayLinkDriver {
     /// when the view leaves its window.
     func adopt(_ link: CADisplayLink?) {
         if let existing = self.link, existing !== link { existing.invalidate() }
+        if self.link !== link { linkInterval = nil }
         self.link = link
         link?.preferredFrameRateRange = Self.frameRateRange
         link?.isPaused = isPaused
@@ -181,10 +332,20 @@ final class DisplayLinkDriver {
         update { $0.needsUpdate = true }
     }
 
+    /// A tick of the running link: `interval` is how long its frame stays on screen. Kept as
+    /// `linkInterval` until the link pauses. Ignored while paused, and when `interval` is not
+    /// positive.
+    func noteTick(interval: Duration) {
+        guard !isPaused, interval > .zero else { return }
+        linkInterval = interval
+    }
+
     private func apply() {
         let run = DisplayLinkPolicy.shouldRun(demand)
         guard run == isPaused else { return }
         isPaused = !run
+        // A pause ends the interval's run, and a resume waits for its first tick to learn it anew.
+        linkInterval = nil
         if run { resumeCount += 1 } else { pauseCount += 1 }
         link?.isPaused = isPaused
         terminalEngineLog.debug("""
@@ -354,13 +515,43 @@ public final class GhosttyTerminalView: NSView {
     }
 
     /// How many frames this view has built from its terminal. A frame is built when the view can be
-    /// seen and a display tick finds work: the terminal is read into the render state and, if it
-    /// changed, encoded. A hidden or windowless view builds none, and neither does a tick that finds
-    /// the GPU behind. A test seam.
+    /// seen and a display tick, or a render signal's delivery that draws at once, finds work: the
+    /// terminal is read into the render state and, if it changed, encoded. A hidden or windowless
+    /// view builds none, and neither does a tick that finds the GPU behind. A test seam, and how a
+    /// delivery that draws at once learns whether its draw built a frame.
     public private(set) var framesBuilt = 0
     /// How many of the built frames were encoded and committed to the GPU. A built frame with
-    /// nothing changed, or with no drawable to draw into, is not committed. A test seam.
+    /// nothing changed, or with no drawable to draw into, is not committed. A test seam, and how a
+    /// delivery that draws at once learns whether its draw committed one.
     public private(set) var framesCommitted = 0
+
+    /// The `now` of the last output frame: one that was encoded and whose build consumed program
+    /// output (`FrameUpdate.outputBytes`). nil before the first. The tick, the leading edge and
+    /// the live-resize path all stamp it. A frame with no output in it stamps nothing, so the
+    /// cursor frame a key press's blink reset asks for cannot hold back the echo that follows.
+    private(set) var lastOutputFrameAt: Duration?
+    /// The `now` of the last delivery that drew at once, built a frame that consumed its output,
+    /// and committed nothing, because that output changed nothing on screen: the view is scrolled
+    /// back into history, or the output only set a title or a mode. Rule 4 counts it as an output
+    /// frame. Uncounted, output that draws nothing would never stamp `lastOutputFrameAt`, and
+    /// every delivery would build a frame of its own, at the main-queue hop rate in place of once
+    /// per refresh. A build that found no output stamps nothing: a tick drew that output before
+    /// the delivery ran, and its frame stamped `lastOutputFrameAt` already.
+    private(set) var lastEmptyLeadingEdgeDrawAt: Duration?
+    /// Whether the last frame built found no program output to consume. False after a build that
+    /// threw, which may have consumed some.
+    private var lastBuildFoundNoOutput = false
+    /// What rule 4 measures from: the later of `lastOutputFrameAt` and
+    /// `lastEmptyLeadingEdgeDrawAt`, or nil before either.
+    private var lastFrameLimitingTheLeadingEdge: Duration? {
+        guard let empty = lastEmptyLeadingEdgeDrawAt else { return lastOutputFrameAt }
+        guard let output = lastOutputFrameAt else { return empty }
+        return max(output, empty)
+    }
+    /// How many render-signal deliveries have reached `LeadingEdgePolicy`, and what the last one
+    /// decided. Test seams.
+    private(set) var renderSignalDeliveries = 0
+    private(set) var lastLeadingEdgeDecision: LeadingEdgePolicy.Decision?
 
     // MARK: Collaborators
 
@@ -397,7 +588,9 @@ public final class GhosttyTerminalView: NSView {
     }
 
     private var grid: GridSize
-    private var relay: RenderSignalRelay?
+    /// The relay the render signal goes through while the surface is attached. Readable as a
+    /// test seam.
+    private(set) var relay: RenderSignalRelay?
     /// The render signal this view installed, so it only ever clears its own.
     private var renderSignalToken: RenderSignalToken?
     /// True from a failed attach until one succeeds. Only the first failure of a run is logged:
@@ -586,14 +779,16 @@ public final class GhosttyTerminalView: NSView {
         }
         surface.isFocused = isTerminalFocused
         surface.cursorBlinkOn = true
-        let target = selfRef
-        let relay = RenderSignalRelay { target.object?.renderSignalled() }
-        self.relay = relay
-        renderSignalToken = terminal.setRenderSignal { [weak relay] in relay?.signal() }
         // While detached the view took no frames, so the watchdog's record of when a hold was
         // first seen is stale. Kept, it would force off a hold the program began just now. The
-        // call also sets the hold from one read of mode 2026.
+        // call also sets the hold from one read of mode 2026, and drops a hold's end that no
+        // signal took. It comes before the signal is installed, so the end it drops cannot reach
+        // the view's first hint. An end raised after this read is a real one, and is handed on.
         terminal.resetSyncOutputWatchdog()
+        let target = selfRef
+        let relay = RenderSignalRelay { target.object?.renderSignalled($0) }
+        self.relay = relay
+        renderSignalToken = terminal.setRenderSignal { [weak relay] in relay?.signal($0) }
         frameDriver.update {
             $0.hasVisibleSurface = true
             $0.needsUpdate = true
@@ -608,6 +803,9 @@ public final class GhosttyTerminalView: NSView {
         guard surface.isAttached || renderSignalToken != nil else { return }
         if let renderSignalToken { terminal.clearRenderSignal(renderSignalToken) }
         renderSignalToken = nil
+        // A delivery already queued must not reach the view: it may attach again before the
+        // delivery runs, and the hint, with any hold end in it, is from before the attach.
+        relay?.cancel()
         relay = nil
         // Before the detach, which leaves a clean surface: stopping the blink marks it dirty.
         stopBlink()
@@ -662,15 +860,65 @@ public final class GhosttyTerminalView: NSView {
         frameDriver.requestFrame()
     }
 
-    /// The terminal's render signal, on the main thread. `close()` signals one last time, and the
-    /// view stops its cursor blink then and asks for no frame, so nothing keeps waking a view that
-    /// will never draw again.
-    private func renderSignalled() {
+    /// The terminal's render signal, on the main thread, with the hint the relay folded from every
+    /// signal since the last delivery. `close()` signals one last time, and the view stops its
+    /// cursor blink then and asks for no frame, so nothing keeps waking a view that will never draw
+    /// again.
+    ///
+    /// Otherwise the delivery decides once, by `LeadingEdgePolicy`, whether to draw now. It draws
+    /// with the tick's own `renderTick(now:)`, inside this delivery, so the leading edge adds no
+    /// main-queue hop. Anything else asks the display link for a frame.
+    private func renderSignalled(_ hint: RenderHint) {
         guard !terminal.isClosed else {
             stopBlink()
             return
         }
-        frameDriver.requestFrame()
+        let now = self.now()
+        let decision = LeadingEdgePolicy.decide(leadingEdgeFacts(hint, now: now))
+        renderSignalDeliveries += 1
+        lastLeadingEdgeDecision = decision
+        switch decision {
+        case .drawNow:
+            let built = framesBuilt
+            let committed = framesCommitted
+            renderTick(now: now)
+            if framesBuilt > built, framesCommitted == committed, !lastBuildFoundNoOutput {
+                lastEmptyLeadingEdgeDrawAt = now
+            }
+        case .coalesce:
+            frameDriver.requestFrame()
+        }
+    }
+
+    /// What `LeadingEdgePolicy` decides from, read on main. Main is the only thread that takes
+    /// ring slots and drawables, so the GPU facts stay true until this delivery acts on them.
+    ///
+    /// The drawables are read with `peekAwaitingPresent(now:)`, which changes nothing: a delivery
+    /// that coalesces must not clear the tracker or start a nil drawable's hold, as a view that
+    /// cannot draw would otherwise do on every chunk. A delivery that draws calls `renderTick`,
+    /// whose own check, at the same `now`, does both.
+    private func leadingEdgeFacts(_ hint: RenderHint, now: Duration) -> LeadingEdgeFacts {
+        // Rule 1's size check needs only the layer: `renderNow` sizes the drawable from
+        // `drawablePixelSize()`, which is never below one pixel each way.
+        LeadingEdgeFacts(
+            canBuildFrames: canBuildFrames && metalLayer != nil,
+            isLiveResizing: frameDriver.demand.isLiveResizing,
+            now: now,
+            lastOutputFrameAt: lastFrameLimitingTheLeadingEdge,
+            refreshInterval: refreshInterval,
+            ringHasFreeSlot: surface.frameRing?.hasFreeSlot ?? true,
+            drawablesAwaitingPresent: drawableTracker.peekAwaitingPresent(now: now),
+            outputBytesSinceFrame: hint.outputBytesSinceFrame,
+            holdOpen: hint.holdOpen,
+            holdEnded: hint.holdEnded)
+    }
+
+    /// How long one frame stays on screen: the running link's own interval, else the window's
+    /// screen's `minimumRefreshInterval`, else `LeadingEdgePolicy.fallbackRefreshInterval`.
+    var refreshInterval: Duration {
+        LeadingEdgePolicy.refreshInterval(
+            linkInterval: frameDriver.linkInterval,
+            screenMinimumRefreshInterval: window?.screen?.minimumRefreshInterval)
     }
 
     /// Sends user input on `onSend`.
@@ -927,7 +1175,15 @@ public final class GhosttyTerminalView: NSView {
         renderTick(backpressure: .wait)
     }
 
-    /// One display tick. Also the tests' entry point.
+    /// The display link's tick. Keeps the link's refresh interval for the leading edge, then draws
+    /// the frame due at `timestamp`.
+    func displayLinkFired(timestamp: CFTimeInterval, targetTimestamp: CFTimeInterval) {
+        frameDriver.noteTick(interval: .seconds(targetTimestamp - timestamp))
+        renderTick(now: .seconds(timestamp))
+    }
+
+    /// One display tick. A render signal's delivery that draws at once calls it too, and so do the
+    /// tests.
     ///
     /// - Parameters:
     ///   - now: when the frame is due, as a duration since any fixed origin; nil reads the `now`
@@ -987,6 +1243,7 @@ public final class GhosttyTerminalView: NSView {
             return
         }
         framesBuilt += 1
+        lastBuildFoundNoOutput = false
         let target = selfRef
         // A statement body, not a bare `Task {}`: as a single expression the closure would return
         // the Task and no longer be a `() -> Void`.
@@ -1002,8 +1259,14 @@ public final class GhosttyTerminalView: NSView {
                 waitsForSlot: waits, nextDrawable: nextDrawable,
                 willEncode: { self.onDrawStart?() },
                 onPresented: presented)
+            lastBuildFoundNoOutput = outcome.update.outputBytes == 0
             if outcome.didEncode {
                 framesCommitted += 1
+                // An output frame. One whose build consumed no output, such as a cursor-only frame,
+                // stamps nothing: it must not use up the interval the next echo draws at once in.
+                // The stamp never moves back. A tick's `now` is its link's timestamp, the vsync it
+                // fired for, which can be earlier than a delivery's `now` drawn just before it ran.
+                if outcome.update.outputBytes > 0 { lastOutputFrameAt = max(lastOutputFrameAt ?? now, now) }
                 onFrameEncoded?()
             }
         } catch {

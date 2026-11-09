@@ -384,10 +384,16 @@ extension GhosttyTerminal {
     /// the first frame a hold the program began only just now. The edges cover every write, reset
     /// and resize; the read keeps `holdOpen` right after a change that raised no edge, as
     /// `OPT_MODE` raises none.
+    ///
+    /// It also drops an end edge no render signal took (`holdEnded`). A hold that ended while no
+    /// view was attached is no news to the view: its first frame after the attach is a full
+    /// rebuild. Kept, the end would let the first chunk after the attach draw at once whatever its
+    /// size, as if it finished a hold.
     func resetSyncOutputWatchdog() {
         inputWithContext("resetting the synchronized-output watchdog", fallback: ()) { raw, binding, context in
             binding.watchdog.reset()
             context.holdOpen = GhosttyTerminalState(raw: raw).mode(SyncOutputWatchdog.mode)
+            context.holdEnded = false
         }
     }
 

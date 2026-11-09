@@ -33,9 +33,10 @@
 // replies have gone out by the time it returns, whichever thread ran them.
 //
 // A call that queued nothing does not touch the delivery lock, and neither does the render
-// signal, which runs straight after its call. So a key, a click, or a feed with no reply never
-// waits on a delivery running on another thread. A feed that does produce a reply waits for any
-// drain in progress, which is why `writePty` must not block: see `GhosttyTerminalCallbacks`.
+// signal, which runs straight after its call with a `RenderHint` built under the lock. So a key,
+// a click, or a feed with no reply never waits on a delivery running on another thread. A feed
+// that does produce a reply waits for any drain in progress, which is why `writePty` must not
+// block: see `GhosttyTerminalCallbacks`.
 //
 // The two query callbacks (`deviceAttributes`, `xtversion`) are the exception: their answer goes
 // into the reply being parsed, so they are asked under the lock. `GhosttyTerminalCallbacks` says
@@ -82,10 +83,15 @@ final class IOContext {
     /// Two places set it without an edge: the watchdog's force-off, which turns the mode off
     /// through `OPT_MODE` and so raises none, and an attach, which reads the mode once.
     var holdOpen = false
-    /// Set by every end edge and cleared only by the reader that takes it, so an end that comes
-    /// between two reads is not lost. Nothing in this module takes it; the `renderHold` test seam
-    /// reads it. It is for the render hint of `docs/specs/2026-11-08-libghostty-frame-timing-design.md`,
-    /// which takes it in the lock hold of a call that signals a render.
+    /// Set by every end edge. The next call that signals a render takes it into its `RenderHint`,
+    /// reading and clearing it in the same lock hold, so an end that comes between two signals is
+    /// not lost. A call that signals no render, as every call does while no view has a signal
+    /// installed, leaves it for the next one that does. An attach clears it too: the view's first
+    /// frame after an attach is a full rebuild, so an end from before it is no news to the view.
+    ///
+    /// `reset()` and `resize` end a hold that the program did not finish. When they signal, they
+    /// take the flag and report no end, so the half-written frame is not let past the size rule
+    /// as a finished one.
     var holdEnded = false
 
     /// XTVERSION must return a `GhosttyString` whose bytes outlive the callback body, so the answer
@@ -310,12 +316,18 @@ final class TerminalCore {
     var cellWidthPx: UInt32 = 0
     var cellHeightPx: UInt32 = 0
     /// Called after the lock drops whenever what is on screen may have changed. Set by the view.
-    var renderSignal: (@Sendable () -> Void)?
+    var renderSignal: (@Sendable (RenderHint) -> Void)?
     /// Which `setRenderSignal` call installed `renderSignal`. Every call takes the next number.
     var renderSignalID: UInt64 = 0
     var bound: (any TerminalBoundObject)?
     /// Deliveries produced under the lock and not yet run, oldest first.
     var outbox: [Delivery] = []
+    /// Program output fed since a frame last read the terminal. `feed` adds the bytes it writes;
+    /// `FrameBuilder.update` reads and zeroes it in the lock hold it takes for
+    /// `ghostty_render_state_begin_update`, so each frame's count is exactly the output it consumed.
+    /// There is one counter per terminal, so the count is exact only while one view draws the
+    /// terminal, as each engine has one view per terminal. Two attached views would split it.
+    var outputBytesSinceFrame = 0
 
     init(raw: VtTerminal, context: IOContext, cols: UInt16, rows: UInt16) {
         self.raw = raw
@@ -348,16 +360,59 @@ final class TerminalCore {
     }
 
     /// What a locked call leaves to do once the lock drops: whether to drain the outbox, and the
-    /// render signal to run, if the call changed the screen. Called under the lock.
-    func aftermath(signalsRender: Bool) -> Aftermath {
-        Aftermath(drain: harvest(), renderSignal: signalsRender ? renderSignal : nil)
+    /// render signal to run, with its hint, if the call changed the screen. Called under the lock.
+    ///
+    /// A call signals a render only when it changed the screen and a view has a signal installed.
+    /// Such a call takes `IOContext.holdEnded`, clearing it, and puts it in its hint unless
+    /// `reportsHoldEnd` is false: a reset or a resize ends a hold the program did not finish. Any
+    /// other call leaves it for the next call that signals.
+    func aftermath(signalsRender: Bool, reportsHoldEnd: Bool = true) -> Aftermath {
+        let drain = harvest()
+        guard signalsRender, let renderSignal else { return Aftermath(drain: drain, render: nil) }
+        let hint = RenderHint(
+            outputBytesSinceFrame: outputBytesSinceFrame,
+            holdOpen: context.holdOpen,
+            holdEnded: reportsHoldEnd && context.holdEnded)
+        context.holdEnded = false
+        return Aftermath(drain: drain, render: (signal: renderSignal, hint: hint))
     }
 }
 
-/// See `TerminalCore.aftermath(signalsRender:)`.
+/// See `TerminalCore.aftermath(signalsRender:reportsHoldEnd:)`.
 struct Aftermath {
     var drain: Bool
-    var renderSignal: (@Sendable () -> Void)?
+    /// The render signal to run and the hint to hand it, when the call changed the screen with a
+    /// signal installed. The hint is built under the lock, so it is the terminal as the call left
+    /// it.
+    var render: (signal: @Sendable (RenderHint) -> Void, hint: RenderHint)?
+}
+
+/// What a render signal tells the view about the call that raised it, so the view can decide
+/// whether to draw at once or leave the frame to the display link: see `LeadingEdgePolicy`, and
+/// "Where the facts come from" in `docs/specs/2026-11-08-libghostty-frame-timing-design.md`.
+struct RenderHint: Sendable, Equatable {
+    /// Program output fed since a frame last read the terminal, as the call left it:
+    /// `TerminalCore.outputBytesSinceFrame`.
+    var outputBytesSinceFrame = 0
+    /// Whether a DEC 2026 hold was open as the call left it: `IOContext.holdOpen`.
+    var holdOpen = false
+    /// Whether the program ended a hold since the last call that signalled a render:
+    /// `IOContext.holdEnded`, which this call took. A reset's or a resize's hint reports none,
+    /// though either ends a hold: the program finished no frame.
+    var holdEnded = false
+
+    /// What `close()` signals: no output and no hold.
+    static let empty = RenderHint()
+
+    /// This hint with a newer one folded in, for a relay that delivers several signals at once.
+    /// The byte count and the open hold are state that every call reads afresh, so the newer value
+    /// stands. An ended hold is an event that one call takes, so it stands if either hint saw one.
+    func merged(with newer: RenderHint) -> RenderHint {
+        RenderHint(
+            outputBytesSinceFrame: newer.outputBytesSinceFrame,
+            holdOpen: newer.holdOpen,
+            holdEnded: holdEnded || newer.holdEnded)
+    }
 }
 
 /// The DEC 2026 hold as the edges left it: `IOContext.holdOpen` and `IOContext.holdEnded`.
@@ -598,10 +653,27 @@ public final class GhosttyTerminal: @unchecked Sendable {
     }
 
     /// Finishes a locked call once its lock has dropped: drains if it queued a delivery, then
-    /// asks for a frame if it changed the screen.
+    /// asks for a frame, with its hint, if it changed the screen.
     private func finish(_ aftermath: Aftermath) {
         if aftermath.drain { drainOutbox() }
-        aftermath.renderSignal?()
+        if let render = aftermath.render { render.signal(render.hint) }
+    }
+
+    /// `withRaw`, plus the locked state, for the calls that keep a count in it: `feed` and a
+    /// frame's `begin_update`.
+    @discardableResult
+    private func withCore<T>(
+        signalsRender: Bool, changesModes: Bool, reportsHoldEnd: Bool = true,
+        _ body: (TerminalCore, VtTerminal) throws -> T
+    ) rethrows -> T? {
+        let (value, aftermath): (T?, Aftermath?) = try locked { core in
+            guard let raw = core.raw else { return (nil, nil) }
+            let value = try body(core, raw)
+            if changesModes { core.bound?.terminalModesMayHaveChanged(raw) }
+            return (value, core.aftermath(signalsRender: signalsRender, reportsHoldEnd: reportsHoldEnd))
+        }
+        if let aftermath { finish(aftermath) }
+        return value
     }
 
     /// Runs `body` with the live C terminal under the lock, then delivers whatever the terminal
@@ -612,14 +684,21 @@ public final class GhosttyTerminal: @unchecked Sendable {
     func withRaw<T>(
         signalsRender: Bool = false, changesModes: Bool = false, _ body: (VtTerminal) throws -> T
     ) rethrows -> T? {
-        let (value, aftermath): (T?, Aftermath?) = try locked { core in
-            guard let raw = core.raw else { return (nil, nil) }
+        try withCore(signalsRender: signalsRender, changesModes: changesModes) { _, raw in try body(raw) }
+    }
+
+    /// `withRaw` for a frame's `ghostty_render_state_begin_update`, which also takes the byte
+    /// counter: it reads `TerminalCore.outputBytesSinceFrame` and zeroes it in the same lock hold,
+    /// so the count returned is exactly the output this update consumed. Returns nil once closed.
+    func withRawTakingOutputBytes<T>(
+        _ body: (VtTerminal) throws -> T
+    ) rethrows -> (value: T, outputBytes: Int)? {
+        try withCore(signalsRender: false, changesModes: false) { core, raw -> (value: T, outputBytes: Int) in
             let value = try body(raw)
-            if changesModes { core.bound?.terminalModesMayHaveChanged(raw) }
-            return (value, core.aftermath(signalsRender: signalsRender))
+            let outputBytes = core.outputBytesSinceFrame
+            core.outputBytesSinceFrame = 0
+            return (value: value, outputBytes: outputBytes)
         }
-        if let aftermath { finish(aftermath) }
-        return value
     }
 
     /// `withRaw`, plus the object bound to this terminal, made by `make` on first use, and the
@@ -666,8 +745,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// whenever the screen may have changed, and once more by `close()`. Returns the token that
     /// takes it off again.
     @discardableResult
-    func setRenderSignal(_ signal: @escaping @Sendable () -> Void) -> RenderSignalToken {
-        let (token, previous) = locked { core -> (RenderSignalToken, (@Sendable () -> Void)?) in
+    func setRenderSignal(_ signal: @escaping @Sendable (RenderHint) -> Void) -> RenderSignalToken {
+        let (token, previous) = locked { core -> (RenderSignalToken, (@Sendable (RenderHint) -> Void)?) in
             let previous = core.renderSignal
             core.renderSignalID &+= 1
             core.renderSignal = signal
@@ -682,7 +761,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// the same terminal may have installed its own since; clearing that one would leave it
     /// drawing nothing.
     func clearRenderSignal(_ token: RenderSignalToken) {
-        let previous = locked { core -> (@Sendable () -> Void)? in
+        let previous = locked { core -> (@Sendable (RenderHint) -> Void)? in
             guard core.renderSignalID == token.id else { return nil }
             let previous = core.renderSignal
             core.renderSignal = nil
@@ -699,24 +778,36 @@ public final class GhosttyTerminal: @unchecked Sendable {
         locked { RenderHold(isOpen: $0.context.holdOpen, ended: $0.context.holdEnded) }
     }
 
+    /// The byte counter, read without zeroing it. A test seam.
+    var outputBytesSinceFrame: Int { locked { $0.outputBytesSinceFrame } }
+
     // MARK: Public API
 
     /// Feeds bytes from the program into the parser. Any thread. The callbacks for whatever the
     /// bytes caused run after the lock drops and before this returns. Does nothing once closed.
+    ///
+    /// The bytes count toward `TerminalCore.outputBytesSinceFrame`, muted or not: a replayed
+    /// preamble is output that the next frame draws too.
     public func feed(_ bytes: ArraySlice<UInt8>) {
         guard !bytes.isEmpty else { return }
-        withRaw(signalsRender: true, changesModes: true) { raw in
+        withCore(signalsRender: true, changesModes: true) { core, raw in
             bytes.withUnsafeBufferPointer { buffer in
                 ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
             }
+            core.outputBytesSinceFrame += bytes.count
         }
     }
 
     /// A full reset (RIS): screens, scrollback, modes and the cursor go back to their initial
     /// state. The size is kept. Use before replaying a snapshot into a terminal that was used
     /// before, so nothing from its earlier life (an alternate screen, a colour) survives.
+    ///
+    /// A reset ends any DEC 2026 hold, and its render signal reports no end: the program finished
+    /// no frame.
     public func reset() {
-        withRaw(signalsRender: true, changesModes: true) { raw in ghostty_terminal_reset(raw) }
+        withCore(signalsRender: true, changesModes: true, reportsHoldEnd: false) { _, raw in
+            ghostty_terminal_reset(raw)
+        }
     }
 
     /// Resizes the grid. The primary screen reflows; the alternate screen does not.
@@ -747,7 +838,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
                 core.context.reportedSize = previousSize
                 failure = result
             }
-            return core.aftermath(signalsRender: true)
+            // A resize ends any DEC 2026 hold, and the program finished no frame: no end reported.
+            return core.aftermath(signalsRender: true, reportsHoldEnd: false)
         }
         if let failure {
             let error = GhosttyCallError(result: failure, operation: "ghostty_terminal_resize")
@@ -802,11 +894,11 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// Frees the C terminal, under the lock, after what is bound to it. Idempotent. Every later
     /// call does nothing.
     ///
-    /// A close calls the installed render signal one last time, after the lock, and takes it off.
-    /// That is how a view over the terminal hears the close: it stops its cursor blink, and it
-    /// never draws again.
+    /// A close calls the installed render signal one last time, after the lock, with an empty
+    /// hint, and takes it off. That is how a view over the terminal hears the close: it stops its
+    /// cursor blink, and it never draws again.
     public func close() {
-        let released = locked { core -> (bound: (any TerminalBoundObject)?, signal: (@Sendable () -> Void)?) in
+        let released = locked { core -> (bound: (any TerminalBoundObject)?, signal: (@Sendable (RenderHint) -> Void)?) in
             let bound = core.bound
             let signal = core.renderSignal
             core.bound = nil
@@ -821,7 +913,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
             return (bound, signal)
         }
         // After the lock, as every render signal runs: a view reads `isClosed` from it.
-        released.signal?()
+        released.signal?(.empty)
         // Dropped here, after the lock, so no deinit they trigger can run under it.
         _ = released
     }

@@ -1331,3 +1331,604 @@ struct GhosttyTerminalViewBackpressureTests {
                 "a live resize's frame was committed \(committed) times (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
     }
 }
+
+/// A `now` the test moves by hand, for the view's `now` seam.
+@MainActor
+private final class ManualNow {
+    var value: Duration
+
+    init(_ value: Duration) {
+        self.value = value
+    }
+}
+
+/// The view, carried into a `@Sendable` wait condition. The view itself is not `Sendable`; a
+/// main-actor class that holds it is, and the condition reads it back on the main actor.
+@MainActor
+private final class ViewHandle {
+    let view: GhosttyTerminalView
+
+    init(_ view: GhosttyTerminalView) {
+        self.view = view
+    }
+}
+
+/// Which GPU limit a test holds the view at.
+enum GPULimit: Sendable, CaseIterable {
+    /// All three of the surface's ring slots in flight.
+    case ringFull
+    /// `TerminalRenderer.maxDrawablesAwaitingPresent` drawables awaiting their present report.
+    case drawablesBehind
+}
+
+/// Output draws on the leading edge: a render signal's delivery draws small output into an idle
+/// view at once, inside the delivery and without a display tick, and leaves everything else to
+/// the tick. Each test drives the view's `now` seam by hand. The fixture's window is offscreen, so
+/// its display link never ticks: a frame drawn with no `renderTick()` was drawn by the delivery.
+@Suite(.fastPassBounded)
+@MainActor
+struct GhosttyTerminalViewLeadingEdgeTests {
+    /// Puts the view in `window` with its time on `now`, and draws a first frame: the attach's
+    /// full rebuild, which consumed no output and so stamps no output frame.
+    private func placeWithAFirstFrame(_ fixture: ViewFixture, in window: NSWindow, now: ManualNow) throws {
+        let view = fixture.view
+        place(view, in: try #require(window.contentView))
+        view.now = { now.value }
+        view.renderTick()
+        let committed = view.framesCommitted
+        try #require(committed == 1,
+                     "the first frame was not committed (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+        let stamped = view.lastOutputFrameAt
+        let none: Duration? = nil
+        try #require(stamped == none, "a frame with no output stamped an output frame at \(String(describing: stamped))")
+    }
+
+    /// Feeds `text` and waits, bounded, for its render signal's delivery: one main-queue turn.
+    private func feedAndDeliver(_ text: String, to fixture: ViewFixture) async throws {
+        try await signalAndDeliver(to: fixture) { fixture.terminal.feed(text: text) }
+    }
+
+    /// Runs `call`, which must signal a render, and waits, bounded, for the delivery.
+    private func signalAndDeliver(to fixture: ViewFixture, _ call: () -> Void) async throws {
+        let handle = ViewHandle(fixture.view)
+        let before = handle.view.renderSignalDeliveries
+        call()
+        try await waitFor("the render signal's delivery") {
+            await MainActor.run { handle.view.renderSignalDeliveries > before }
+        }
+    }
+
+    /// Waits, bounded, until the GPU has handed back a ring slot. A test that has committed
+    /// several frames calls it before the next frame it needs drawn, so that frame is not left to
+    /// the tick for a frame the GPU is still finishing.
+    private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
+        let handle = ViewHandle(view)
+        try await waitFor("the GPU to hand back a ring slot") {
+            await MainActor.run { handle.view.surface.frameRing?.hasFreeSlot ?? true }
+        }
+    }
+
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aSmallFeedIntoAnIdleViewDrawsWithoutATick() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        try await feedAndDeliver("a", to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(decision == drawNow, "a 1-byte feed into an idle view answered \(String(describing: decision))")
+        let committed = view.framesCommitted
+        #expect(committed == 2, "the delivery committed \(committed - 1) frames, not 1")
+        let stamped = view.lastOutputFrameAt
+        let expectedStamp: Duration? = .seconds(100)
+        #expect(stamped == expectedStamp, "the frame that drew the feed stamped \(String(describing: stamped))")
+    }
+
+    /// Within a refresh interval of the last output frame, a feed waits for the tick. One interval
+    /// after it, a feed draws at once again.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aFeedWithinTheIntervalWaitsForTheTickAndOneIntervalLaterDrawsAtOnce() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        let interval = view.refreshInterval
+        try #require(interval > .milliseconds(2), "the refresh interval is \(interval), too short for this test")
+        try await feedAndDeliver("a", to: fixture)
+        let afterFirst = view.framesCommitted
+        try #require(afterFirst == 2, "the first feed was not drawn at once")
+
+        now.value = .seconds(100.002)
+        try await feedAndDeliver("b", to: fixture)
+        let waited = view.lastLeadingEdgeDecision
+        let within: LeadingEdgePolicy.Decision? = .coalesce(.withinRefreshInterval)
+        #expect(waited == within, "a feed 2 ms after an output frame answered \(String(describing: waited))")
+        let committedWaiting = view.framesCommitted
+        #expect(committedWaiting == afterFirst, "a feed 2 ms after an output frame was drawn before the tick")
+        let ticking = view.frameDriver.demand.needsUpdate
+        #expect(ticking, "the feed left to the tick asked the link for no frame")
+
+        view.renderTick()
+        let afterTick = view.framesCommitted
+        #expect(afterTick == afterFirst + 1, "the tick committed \(afterTick - afterFirst) frames, not 1")
+        let tickStamp = try #require(view.lastOutputFrameAt, "the tick's output frame stamped nothing")
+        let expectedTickStamp: Duration = .seconds(100.002)
+        #expect(tickStamp == expectedTickStamp, "the tick's output frame stamped \(tickStamp)")
+
+        now.value = tickStamp + interval
+        try await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("c", to: fixture)
+        let drew = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(drew == drawNow, "a feed one interval after the last output frame answered \(String(describing: drew))")
+        let afterLast = view.framesCommitted
+        #expect(afterLast == afterTick + 1, "a feed one interval after the last output frame committed \(afterLast - afterTick) frames")
+    }
+
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func twoKilobytesInOneChunkWaitForTheTick() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        try await feedAndDeliver(String(repeating: "x", count: 2048), to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        let bulk: LeadingEdgePolicy.Decision? = .coalesce(.bulkOutput)
+        #expect(decision == bulk, "2 KB in one chunk answered \(String(describing: decision))")
+        let committed = view.framesCommitted
+        #expect(committed == 1, "2 KB in one chunk was drawn before the tick")
+
+        view.renderTick()
+        let afterTick = view.framesCommitted
+        #expect(afterTick == 2, "the tick committed \(afterTick - 1) frames, not 1")
+    }
+
+    /// A hold hides its frame, and its end draws at once whatever its size: the program promised
+    /// a complete frame. A chunk that ends a hold and begins the next draws nothing at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aHoldDrawsNothingAndItsEndDrawsAtOnce() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        let begin = "\u{1b}[?2026h"
+        let end = "\u{1b}[?2026l"
+
+        // More than the small-output limit, so only the end of the hold can draw it at once.
+        try await feedAndDeliver(begin + String(repeating: "x", count: 2048), to: fixture)
+        let held = view.lastLeadingEdgeDecision
+        let holdOpen: LeadingEdgePolicy.Decision? = .coalesce(.holdOpen)
+        #expect(held == holdOpen, "a feed inside a hold answered \(String(describing: held))")
+        let committedInHold = view.framesCommitted
+        #expect(committedInHold == 1, "a feed inside a hold was drawn")
+
+        try await feedAndDeliver(end, to: fixture)
+        let released = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(released == drawNow, "the end of a 2 KB hold answered \(String(describing: released))")
+        let committedAtEnd = view.framesCommitted
+        #expect(committedAtEnd == 2, "the end of the hold committed \(committedAtEnd - 1) frames, not 1")
+
+        // A whole interval later, so only the hold can hold the frame back.
+        now.value = .seconds(100) + view.refreshInterval
+        try await feedAndDeliver(begin + "next", to: fixture)
+        try await feedAndDeliver(end + begin + "and the next", to: fixture)
+        let reopened = view.lastLeadingEdgeDecision
+        #expect(reopened == holdOpen, "a chunk that ended a hold and began the next answered \(String(describing: reopened))")
+        let committedReopened = view.framesCommitted
+        #expect(committedReopened == committedAtEnd, "a chunk that ended a hold and began the next was drawn at once")
+    }
+
+    /// A live resize draws from `setFrameSize`, so a delivery leaves it alone. That path's own
+    /// frame stamps the last output frame.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aLiveResizeDrawsNoLeadingEdgeFrame() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        view.viewWillStartLiveResize()
+        defer { view.viewDidEndLiveResize() }
+
+        try await feedAndDeliver("a", to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        let liveResize: LeadingEdgePolicy.Decision? = .coalesce(.liveResize)
+        #expect(decision == liveResize, "a feed during a live resize answered \(String(describing: decision))")
+        let committed = view.framesCommitted
+        #expect(committed == 1, "a feed during a live resize was drawn by the delivery")
+
+        // The frame `setFrameSize` draws, which reads the `now` seam.
+        now.value = .seconds(100.25)
+        view.renderNow()
+        let afterResizeFrame = view.framesCommitted
+        #expect(afterResizeFrame == 2, "the live resize's frame was not committed")
+        let stamped = view.lastOutputFrameAt
+        let expectedStamp: Duration? = .seconds(100.25)
+        #expect(stamped == expectedStamp, "the live resize's output frame stamped \(String(describing: stamped))")
+    }
+
+    /// A signal with no output behind it, as a reset's, is left to the tick: the leading edge is
+    /// for output. The output that follows it still draws at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aResetDrawsNothingAtOnceAndTheOutputAfterItDoes() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        try await signalAndDeliver(to: fixture) { fixture.terminal.reset() }
+        let reset = view.lastLeadingEdgeDecision
+        let noOutput: LeadingEdgePolicy.Decision? = .coalesce(.noOutput)
+        #expect(reset == noOutput, "a reset answered \(String(describing: reset))")
+        let committedAfterReset = view.framesCommitted
+        #expect(committedAfterReset == 1, "a reset was drawn by the delivery")
+        let ticking = view.frameDriver.demand.needsUpdate
+        #expect(ticking, "the reset left to the tick asked the link for no frame")
+
+        try await feedAndDeliver("$ ", to: fixture)
+        let prompt = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(prompt == drawNow, "the prompt after a reset answered \(String(describing: prompt))")
+        let committed = view.framesCommitted
+        #expect(committed == 2, "the prompt after a reset committed \(committed - 1) frames, not 1")
+    }
+
+    /// Output that changes nothing on screen builds a frame and commits none, so it stamps no
+    /// output frame. The delivery that drew it still counts for rule 4: output within an interval
+    /// of it goes to the tick, so such output is read once per refresh, not at every hop.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func outputThatDrawsNothingStillLimitsTheLeadingEdgeToOncePerInterval() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        // SGR 0 with the default rendition already set: output, and nothing to draw.
+        let built = view.framesBuilt
+        try await feedAndDeliver("\u{1b}[0m", to: fixture)
+        let invisible = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        try #require(invisible == drawNow, "output that draws nothing answered \(String(describing: invisible))")
+        let builtForIt = view.framesBuilt - built
+        try #require(builtForIt == 1, "the delivery built \(builtForIt) frames for output that draws nothing")
+        let committedForIt = view.framesCommitted
+        try #require(committedForIt == 1, "SGR 0 committed a frame, so this test's premise fails")
+        let stamped = view.lastOutputFrameAt
+        let none: Duration? = nil
+        #expect(stamped == none, "a frame that committed nothing stamped an output frame at \(String(describing: stamped))")
+
+        now.value = .seconds(100.002)
+        try await feedAndDeliver("a", to: fixture)
+        let next = view.lastLeadingEdgeDecision
+        let within: LeadingEdgePolicy.Decision? = .coalesce(.withinRefreshInterval)
+        #expect(next == within, "output 2 ms after a delivery that drew nothing answered \(String(describing: next))")
+
+        now.value = .seconds(100) + view.refreshInterval
+        try await feedAndDeliver("b", to: fixture)
+        let later = view.lastLeadingEdgeDecision
+        #expect(later == drawNow, "output one interval later answered \(String(describing: later))")
+    }
+
+    /// A tick can draw output before that output's delivery runs. The delivery's hint still counts
+    /// the output, so it draws, and its build finds none left to consume and commits nothing. That
+    /// is output a tick drew, not output that draws nothing, so it stamps no empty draw, and the
+    /// next output draws at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDeliveryWhoseOutputATickDrewFirstDoesNotHoldBackTheNext() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        let built = view.framesBuilt
+        let committed = view.framesCommitted
+        try await signalAndDeliver(to: fixture) {
+            fixture.terminal.feed(text: "a")
+            // The tick runs before the delivery and draws the output.
+            view.renderTick()
+            // The delivery runs past the refresh interval and the tracker's present-report
+            // timeout, so neither rule 4 nor the drawables keep it from drawing.
+            now.value = .seconds(102)
+        }
+        let stampedByTheTick = view.lastOutputFrameAt
+        let tickStamp: Duration? = .seconds(100)
+        try #require(stampedByTheTick == tickStamp, "the tick's frame stamped \(String(describing: stampedByTheTick))")
+        let decision = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        try #require(decision == drawNow, "the delivery after the tick answered \(String(describing: decision))")
+        let builtForBoth = view.framesBuilt - built
+        try #require(builtForBoth == 2, "the tick and the delivery built \(builtForBoth) frames, not 2")
+        let committedForBoth = view.framesCommitted - committed
+        try #require(committedForBoth == 1, "the tick and the delivery committed \(committedForBoth) frames, not the tick's 1")
+        let empty = view.lastEmptyLeadingEdgeDrawAt
+        let none: Duration? = nil
+        #expect(empty == none, "a delivery whose output a tick drew stamped an empty draw at \(String(describing: empty))")
+
+        now.value = .seconds(102.002)
+        try await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("b", to: fixture)
+        let next = view.lastLeadingEdgeDecision
+        #expect(next == drawNow, "output 2 ms after a delivery that found its output drawn answered \(String(describing: next))")
+    }
+
+    /// A delivery that coalesces only peeks at the tracker. Entries past the timeout stay for the
+    /// next frame's own check to clear, and no notice logs.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDeliveryThatCoalescesLeavesTheTrackerAlone() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        // A live resize, so the delivery coalesces before the GPU rules.
+        view.viewWillStartLiveResize()
+        defer { view.viewDidEndLiveResize() }
+        let tracker = view.drawableTracker
+        // Two drawables with no report since, acquired more than `presentReportTimeout` ago.
+        _ = tracker.add(acquiredAt: .seconds(98))
+        _ = tracker.add(acquiredAt: .seconds(98.5))
+
+        try await feedAndDeliver("a", to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        let liveResize: LeadingEdgePolicy.Decision? = .coalesce(.liveResize)
+        try #require(decision == liveResize, "a feed during a live resize answered \(String(describing: decision))")
+        let afterDelivery = [tracker.entryCount, tracker.timeoutClears, tracker.lostReportNotices]
+        #expect(afterDelivery == [2, 0, 0], "after a coalesced delivery, [entries, clears, notices] is \(afterDelivery)")
+    }
+
+    /// A delivery queued before the view detaches never reaches it, even when the view attaches
+    /// again before the delivery runs: its hint, here a finished 2 KB hold, is from before the
+    /// attach. The test waits for the hop of the relay the view detached from, so it does not
+    /// depend on the order hops run in.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDeliveryQueuedBeforeADetachDoesNotReachTheViewAttachedAgain() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        let before = view.renderSignalDeliveries
+        let relayBeforeTheDetach = try #require(view.relay, "the attached view has no relay")
+
+        // The feed queues its delivery; the view detaches and attaches again in the same turn.
+        fixture.terminal.feed(text: "\u{1b}[?2026h" + String(repeating: "x", count: 2048) + "\u{1b}[?2026l")
+        view.isHidden = true
+        view.isHidden = false
+        let attached = view.surface.isAttached
+        try #require(attached, "showing the view again left its surface detached")
+
+        let queued = relayBeforeTheDetach.hasPendingHint
+        try #require(queued, "the feed's delivery ran before the view detached")
+
+        try await waitFor("the hop queued before the detach to run") {
+            await MainActor.run { !relayBeforeTheDetach.hasPendingHint }
+        }
+        let delivered = view.renderSignalDeliveries - before
+        #expect(delivered == 0, "a delivery queued before the detach reached the view \(delivered) times")
+    }
+
+    /// A tick's `now` is the vsync it fired for, which can be earlier than the `now` of a frame a
+    /// delivery drew just before the tick ran. The tick's output frame keeps the later stamp.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aTickForAnEarlierVsyncDoesNotMoveTheStampBack() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100.005))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        try await feedAndDeliver("a", to: fixture)
+        let drawn = view.lastOutputFrameAt
+        let deliveryStamp: Duration? = .seconds(100.005)
+        try #require(drawn == deliveryStamp, "the delivery's frame stamped \(String(describing: drawn))")
+
+        // Output the delivery leaves to the tick, and the tick for the vsync at 100 s drawing it.
+        try await feedAndDeliver("b", to: fixture)
+        try await waitForAFreeRingSlot(view)
+        let beforeTick = view.framesCommitted
+        view.renderTick(now: .seconds(100))
+        let tickFrames = view.framesCommitted - beforeTick
+        try #require(tickFrames == 1, "the tick did not draw the output left to it")
+        let afterTick = view.lastOutputFrameAt
+        #expect(afterTick == deliveryStamp, "a tick for an earlier vsync moved the stamp to \(String(describing: afterTick))")
+    }
+
+    /// At either GPU limit the delivery builds nothing and asks for no drawable. Once the limit
+    /// clears, the next feed draws at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: GPULimit.allCases)
+    func theLeadingEdgeDrawsNothingAtAGPULimit(_ limit: GPULimit) async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        let tracker = view.drawableTracker
+        var held: HeldRingSlots?
+        defer { held?.releaseAll() }
+        var newer: DrawableTracker.DrawableID?
+        let expected: LeadingEdgePolicy.Decision?
+        switch limit {
+        case .ringFull:
+            let slots = HeldRingSlots(on: view.surface)
+            held = slots
+            try #require(slots.held == FrameRing.depth, "only \(slots.held) of the ring's slots could be taken")
+            expected = .coalesce(.ringFull)
+        case .drawablesBehind:
+            // Younger than `presentReportTimeout`, so the tracker clears neither.
+            _ = tracker.add(acquiredAt: .seconds(99.75))
+            newer = tracker.add(acquiredAt: .seconds(99.875))
+            expected = .coalesce(.drawablesBehind)
+        }
+        let built = view.framesBuilt
+        let acquired = tracker.acquiredCount
+
+        try await feedAndDeliver("a", to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        #expect(decision == expected, "a feed at the \(limit) limit answered \(String(describing: decision))")
+        let builtAtLimit = view.framesBuilt - built
+        #expect(builtAtLimit == 0, "the delivery built \(builtAtLimit) frames at the \(limit) limit")
+        let acquiredAtLimit = tracker.acquiredCount - acquired
+        #expect(acquiredAtLimit == 0, "the delivery took \(acquiredAtLimit) drawables at the \(limit) limit")
+        let ticking = view.frameDriver.demand.needsUpdate
+        #expect(ticking, "the delivery at the \(limit) limit asked the link for no frame")
+
+        switch limit {
+        case .ringFull:
+            held?.releaseOne()
+        case .drawablesBehind:
+            if let newer { tracker.reportPresented(newer, presentedTime: 100) }
+        }
+        try await feedAndDeliver("b", to: fixture)
+        let afterClear = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(afterClear == drawNow, "a feed once the \(limit) limit cleared answered \(String(describing: afterClear))")
+        let committed = view.framesCommitted
+        #expect(committed == 2, "once the \(limit) limit cleared the view committed \(committed) frames in all, not 2")
+    }
+
+    /// A key press's blink reset can draw a cursor-only frame just before the echo arrives. That
+    /// frame consumed no output, so it stamps nothing, and the echo still draws at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aBlinkResetsCursorFrameDoesNotHoldBackTheEcho() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        try await feedAndDeliver("$ ", to: fixture)
+        let prompt = view.lastOutputFrameAt
+        let promptStamp: Duration? = .seconds(100)
+        try #require(prompt == promptStamp, "the prompt was not drawn as an output frame: \(String(describing: prompt))")
+
+        // The cursor in its blink's off phase, drawn.
+        now.value = .seconds(101)
+        view.surface.cursorBlinkOn = false
+        try await waitForAFreeRingSlot(view)
+        view.renderTick()
+        // The key press: the reset turns the cursor back on, and a tick draws that frame.
+        now.value = .seconds(101.5)
+        view.resetCursorBlink()
+        try await waitForAFreeRingSlot(view)
+        let beforeCursorFrame = view.framesCommitted
+        view.renderTick()
+        let cursorFrames = view.framesCommitted - beforeCursorFrame
+        try #require(cursorFrames == 1, "the blink reset's cursor frame was not drawn")
+        let afterCursorFrame = view.lastOutputFrameAt
+        #expect(afterCursorFrame == promptStamp, "a cursor-only frame stamped an output frame at \(String(describing: afterCursorFrame))")
+
+        // The echo, 2 ms after the cursor frame.
+        now.value = .seconds(101.502)
+        try await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("l", to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(decision == drawNow, "the echo 2 ms after a cursor-only frame answered \(String(describing: decision))")
+        let committed = view.framesCommitted
+        #expect(committed == beforeCursorFrame + 2, "the echo was not drawn at once")
+    }
+
+    /// The fixture's link never ticks, so its interval is the screen's, or the fallback with no
+    /// screen. A tick of the running link sets the link's own, and the pause that ends its run
+    /// forgets it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theRefreshIntervalIsTheRunningLinksElseTheScreensElseTheFallback() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        // The fixture's window is offscreen, so it has no screen and the fallback stands in.
+        // Should AppKit give it one, the screen's own interval does.
+        let paused: Duration
+        if let screen = window.screen {
+            paused = .seconds(screen.minimumRefreshInterval)
+        } else {
+            paused = LeadingEdgePolicy.fallbackRefreshInterval
+        }
+        let atRest = view.refreshInterval
+        #expect(atRest == paused, "the paused link's interval is \(atRest), not the screen's or the fallback \(paused)")
+
+        // A drag keeps the link running through the tick.
+        view.isDragging = true
+        try #require(!view.frameDriver.isPaused, "a drag did not resume the link")
+        let tickInterval = Duration.seconds(1) / 120
+        view.displayLinkFired(timestamp: 200, targetTimestamp: 200 + 1.0 / 120)
+        let running = view.refreshInterval
+        // The tick's interval went through a `CFTimeInterval`, so allow for rounding.
+        let gap = running > tickInterval ? running - tickInterval : tickInterval - running
+        let tolerance: Duration = .microseconds(1)
+        #expect(gap < tolerance, "the running link's interval is \(running), not \(tickInterval)")
+
+        view.isDragging = false
+        try #require(view.frameDriver.isPaused, "the link kept running with nothing to draw")
+        let afterPause = view.refreshInterval
+        #expect(afterPause == paused, "after the pause the interval is \(afterPause), not \(paused)")
+    }
+}
