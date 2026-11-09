@@ -494,16 +494,22 @@ struct HolderLifecycleTests {
     /// wakes it, and the test decides what that is.
     private static let pollSliceOutlivingTheTest = Int32(TestDeadlines.outlivingChildSeconds) * 1000
 
-    /// Releases a holder's job only once the holder is parked in `poll`, and
-    /// returns once the job has exited and sat unreaped for two of the
-    /// holder's default poll slices.
+    /// Releases a holder's job only once no holder thread is running or in an
+    /// uninterruptible wait, and returns once the job has exited and sat
+    /// unreaped for two of the holder's default poll slices.
     ///
     /// The long slice alone does not order the release against the reap. The
     /// holder reaps at the top of every pass of its loop, so a pass that the
     /// test's last request or connect started can still be on its way to
     /// `poll` when the job exits, and then it reaps before the test wakes it.
-    /// Parked in `poll`, it has already looked at the job, found it alive, and
-    /// will not look again until the test wakes it.
+    /// A holder blocked interruptibly after that request or connect is almost
+    /// always parked in `poll`, having already looked at the job, found it
+    /// alive, and stopped looking until the test wakes it. It could instead be
+    /// blocked in a `send`, an `accept` or a log write, but the next step from
+    /// any of those is the non-blocking `waitpid` at the top of the loop. A
+    /// job released then is reaped before the test wakes the holder, and the
+    /// wait below reports that as `jobReapedBeforeTheTestWokeTheHolder`. The
+    /// leftover case fails loudly; it cannot let a broken holder pass.
     ///
     /// The two slices prove the holder is running the long slice: one running
     /// the default would have reaped the job inside them. A job reaped anyway

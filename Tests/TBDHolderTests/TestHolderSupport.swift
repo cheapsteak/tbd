@@ -195,12 +195,14 @@ func threadRunStates(_ pid: Int32) -> [Int32]? {
     return states
 }
 
-/// Whether every thread of `pid` is blocked in an interruptible wait.
+/// Whether every thread of `pid` is blocked in an interruptible wait: none is
+/// running, runnable, or in an uninterruptible wait such as a page fault or a
+/// kernel lock.
 ///
-/// For the holder that means parked in `poll`: it runs one thread, and `poll`
-/// is the only interruptible wait in its serving loop. Merely not running is
-/// a weaker fact, since a thread also waits uninterruptibly, on a page fault
-/// or a lock, anywhere in the loop.
+/// It does not say which system call a thread is blocked in. The holder runs
+/// one thread, and besides `poll` it can also block interruptibly in a `send`
+/// to a full socket, an `accept` or a log write. See
+/// `HolderLifecycleTests.releaseJobAndHoldItUnreaped` for why that is enough.
 func processIsWaitingInterruptibly(_ pid: Int32) -> Bool {
     guard let states = threadRunStates(pid), !states.isEmpty else { return false }
     return states.allSatisfy { $0 == Int32(TH_STATE_WAITING) }
