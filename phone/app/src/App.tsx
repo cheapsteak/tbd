@@ -1,7 +1,8 @@
 /**
  * The app's root. It keeps `#app`'s screen name and layout variables in step with the state,
  * shows a spinner until the first `sessions.subscribe` reply (or the refusal, with "Try again"),
- * and then the route's screen, the sheet and the toast.
+ * and then the route's screen, the sheet and the toast. The screen is drawn under the sheet
+ * (`UnderSheet`), which makes it inert while a sheet shows.
  *
  * `#app` is the element `main.tsx` made and mounted into. App writes to it directly: its
  * `data-screen` through `dataset`, and its variables through CSSOM, since the runner's policy
@@ -19,6 +20,7 @@ import { layoutVars } from './env.ts';
 import { SessionScreen } from './screens/SessionScreen.tsx';
 import { SessionsList } from './sessions/SessionsList.tsx';
 import { SheetHost } from './sheets/SheetHost.tsx';
+import { UnderSheet } from './sheets/UnderSheet.tsx';
 import { useActions, useAppState } from './state/context.tsx';
 import { Toast } from './ui/Toast.tsx';
 
@@ -51,7 +53,7 @@ export function App({ root }: { root: HTMLElement }): JSX.Element {
   } else {
     content = (
       <>
-        {screen === 'session' ? <SessionScreen /> : <SessionsList />}
+        <UnderSheet>{screen === 'session' ? <SessionScreen /> : <SessionsList />}</UnderSheet>
         <SheetHost />
         <Toast />
       </>

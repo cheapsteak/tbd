@@ -524,6 +524,102 @@ test('Escape, a tap outside and the menu\'s own button close a menu; the other b
   expect(await acting(page)).toEqual([]);
 });
 
+/**
+ * Starts recording each element that takes focus in the app, and returns a function that reads
+ * the record: a menu by its name, any other element by its role or tag and its text.
+ * @param {Page} page
+ * @returns {Promise<() => Promise<string[]>>}
+ */
+async function recordFocus(page) {
+  await app(page).locator('#app').evaluate((root) => {
+    /** @type {string[]} */
+    const log = [];
+    root.ownerDocument.addEventListener('focusin', (e) => {
+      const el = /** @type {Element} */ (e.target);
+      const role = el.getAttribute('role');
+      log.push(role === 'menu' ? `menu ${el.getAttribute('aria-label')}` : `${role ?? el.tagName.toLowerCase()} ${el.textContent?.trim() ?? ''}`);
+    });
+    /** @type {any} */ (root.ownerDocument.defaultView).__focusLog = log;
+  });
+  return () => app(page).locator('#app').evaluate((root) => [.../** @type {any} */ (root.ownerDocument.defaultView).__focusLog]);
+}
+
+test('focus moves into a menu as it opens, to its checked row, and back to its button as it closes', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  const account = accountButton(page, 'acme-work');
+  const menu = accountMenu(page);
+  await account.focus();
+  await page.keyboard.press('Enter');
+  await expect(row(menu, 'acme-work')).toBeFocused();
+  // Escape.
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(account).toBeFocused();
+  // A pick: the current profile closes the menu.
+  await page.keyboard.press('Enter');
+  await expect(row(menu, 'acme-work')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(menu).toHaveCount(0);
+  await expect(account).toBeFocused();
+  // A tap outside, even on a control that takes focus as it is pressed: the tap does nothing else.
+  await page.keyboard.press('Enter');
+  await expect(row(menu, 'acme-work')).toBeFocused();
+  const tool = app(page).locator('.tx button.tool').first();
+  await tool.click();
+  await expect(menu).toHaveCount(0);
+  await expect(tool).toHaveAttribute('aria-expanded', 'false');
+  await expect(account).toBeFocused();
+  expect(await acting(page)).toEqual([]);
+});
+
+test("focus waits on a menu while none of its rows can take it, and moves to the checked row once one can", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  // The account menu while its profiles load.
+  await hostCall(page, 'hold', 'profiles.list');
+  const account = accountButton(page, 'acme-work');
+  const menu = accountMenu(page);
+  await account.focus();
+  await page.keyboard.press('Enter');
+  await expect(menu.locator('[data-state="profiles-loading"] .spin')).toBeVisible();
+  await expect(menu).toBeFocused();
+  await hostCall(page, 'release', 'profiles.list');
+  await expect(row(menu, 'acme-work')).toBeFocused();
+  // The ask a pick opens takes it, on Cancel while Restart and Fork wait, and Cancel gives it back to the list.
+  await row(menu, 'Personal').click();
+  const cancel = menu.getByRole('button', { name: 'Cancel' });
+  await expect(cancel).toBeFocused();
+  await expect(menu.getByRole('button', { name: 'Restart' })).toBeEnabled();
+  await expect(cancel).toBeFocused();
+  await cancel.click();
+  await expect(row(menu, 'acme-work')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(account).toBeFocused();
+  // The model menu, whose rows wait as it opens: the menu itself has focus until they can take it.
+  const read = await recordFocus(page);
+  const model = modelButton(page, 'opus');
+  await model.focus();
+  await page.keyboard.press('Enter');
+  await expect(row(modelMenu(page), 'opus')).toBeFocused();
+  expect(await read()).toEqual(['button opus', 'menu Model for this session', 'menuitemradio opus']);
+});
+
+test('a menu that gives way to the other moves focus into that one, and Escape gives it to that menu\'s button', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  const model = modelButton(page, 'opus');
+  await model.focus();
+  await page.keyboard.press('Enter');
+  await expect(row(modelMenu(page), 'opus')).toBeFocused();
+  await accountButton(page, 'acme-work').click();
+  await expect(modelMenu(page)).toHaveCount(0);
+  await expect(row(accountMenu(page), 'acme-work')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(accountMenu(page)).toHaveCount(0);
+  await expect(accountButton(page, 'acme-work')).toBeFocused();
+});
+
 // MARK: - The session menu and its sheets
 
 /** @param {Page} page */
@@ -734,6 +830,55 @@ test('focus moves into the sheet when it opens and back to its opener when it cl
   await app(page).locator('.scrim').click({ position: { x: 20, y: 20 } });
   await expect(sheet(page)).toHaveCount(0);
   await expect(opener).toBeFocused();
+});
+
+/**
+ * Where focus is in the app: in the sheet, on nothing, or on the screen under the sheet.
+ * @param {Page} page
+ * @returns {Promise<'sheet' | 'nothing' | 'under'>}
+ */
+async function focusPlace(page) {
+  return app(page).locator('#app').evaluate((root) => {
+    const el = root.ownerDocument.activeElement;
+    if (el === null || el === root.ownerDocument.body) return 'nothing';
+    return el.closest('[role="dialog"]') !== null ? 'sheet' : 'under';
+  });
+}
+
+test('Tab and Shift+Tab never leave the sheet for the screen under it, which takes focus again once it closes', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(2).click();
+  await expect(sheet(page).locator('.sh-title')).toHaveText('Model');
+  await expect(sheet(page)).toBeFocused();
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await sheet(page).focus();
+    for (let i = 0; i < 20; i++) {
+      await page.keyboard.press(key);
+      expect(await focusPlace(page), `${key} ${i + 1}`).not.toBe('under');
+    }
+  }
+  // The New sheet, over the sessions list.
+  await sheet(page).focus();
+  await page.keyboard.press('Escape');
+  await expect(sheet(page)).toHaveCount(0);
+  await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+  await openNew(page, 'acme-web');
+  for (const key of ['Tab', 'Shift+Tab']) {
+    await sheet(page).focus();
+    for (let i = 0; i < 20; i++) {
+      await page.keyboard.press(key);
+      expect(await focusPlace(page), `New: ${key} ${i + 1}`).not.toBe('under');
+    }
+  }
+  await sheet(page).focus();
+  await page.keyboard.press('Escape');
+  await expect(sheet(page)).toHaveCount(0);
+  // The list takes focus again.
+  const plusButton = plus(page, 'acme-web');
+  await plusButton.focus();
+  await expect(plusButton).toBeFocused();
 });
 
 test("a fork's error shows in the sheet, which stays open", async ({ page, appHost }) => {

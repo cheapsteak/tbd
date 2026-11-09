@@ -56,9 +56,10 @@ import type {
 } from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
 import { isBlankMessage, own, trimLikeLaptop, withKey, withoutKey, withValue } from './prompts.ts';
+import { findSession } from './route.ts';
 import { PROFILE_KIND_WORDS } from './status.ts';
 import { emptyRecord } from './store.ts';
-import type { MenuState, PendingOpen, SheetState } from './store.ts';
+import type { AppState, MenuState, PendingOpen, SheetState } from './store.ts';
 
 // MARK: - The slice
 
@@ -149,6 +150,16 @@ export function endAct(s: SheetsState, ref: PhoneSessionRef): SheetsState {
 /** `s` with `text` showing in `on`, a sheet or a menu (`failed`). */
 export function failIn(s: SheetsState, on: SheetState | MenuState, text: string): SheetsState {
   return { ...s, failed: { on, text } };
+}
+
+/**
+ * Whether the sheet `ui.sheet` names shows (`SheetHost`): `new` over whatever screen shows, and
+ * every other sheet while the route shows a session the list holds, the session it acts on.
+ */
+export function sheetShows(s: Pick<AppState, 'ui' | 'sessions'>): boolean {
+  const { sheet, route } = s.ui;
+  if (sheet === null) return false;
+  return sheet.name === 'new' || (route.screen === 'session' && findSession(s.sessions, route.ref) !== null);
 }
 
 /** The failure to show in `on`, the sheet `ui.sheet` or the menu `ui.menu` holds now, or null. */

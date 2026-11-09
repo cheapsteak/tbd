@@ -242,6 +242,7 @@ button.tool:active{background:var(--box)}
 .dock-note{font-size:var(--small);color:var(--muted);text-align:center;padding:6px}
 
 /* ---------- sheets ---------- */
+.under{display:contents}
 .scrim{position:absolute;inset:0;background:var(--scrim);z-index:20}
 .sheet{position:absolute;left:0;right:0;bottom:0;z-index:21;background:var(--side);border-radius:14px 14px 0 0;padding:6px 12px calc(12px + var(--home));max-height:90%;overflow-y:auto;display:flex;flex-direction:column;gap:8px;box-shadow:0 -4px 20px var(--shadow)}
 .sheet.tall{top:7%}

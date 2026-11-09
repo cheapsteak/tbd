@@ -14,8 +14,10 @@
  *
  * **Focus.** When the sheet opens, focus moves into it (to `.sheet` itself), and again each time
  * it shows another sheet, since the button that opened that one is gone, and each time the New
- * sheet turns to "Creating…" and back. When it closes, focus
- * goes back to the element that had it before the sheet opened, if that is still on the page.
+ * sheet turns to "Creating…" and back. While it shows, the screen under it is inert
+ * (`UnderSheet`), so Tab and Shift+Tab, and a screen reader, stay in the sheet and never reach
+ * the header, the transcript or the dock behind the scrim. When it closes, focus goes back to the
+ * element that had it before the sheet opened, if that is still on the page.
  *
  * **The keyboard.** `.sheet` pads by the safe area, and the keyboard covers the bottom of the
  * screen, so the sheets that take typing, New and Model, end above the keyboard instead: the
@@ -50,7 +52,7 @@ import type { CSSProperties, JSX, KeyboardEvent, RefObject } from 'react';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { findSession } from '../state/route.ts';
-import { currentProfileID, failureIn, restartNote, unavailableReason } from '../state/sheets.ts';
+import { currentProfileID, failureIn, restartNote, sheetShows, unavailableReason } from '../state/sheets.ts';
 import type { ActingKind, ProfilesLoad } from '../state/sheets.ts';
 import type { SheetState } from '../state/store.ts';
 import { useChangeHold, useUncoverHold } from '../ui/tapGuard.ts';
@@ -81,7 +83,7 @@ export function SheetHost(): JSX.Element | null {
   const creatingIn = useAppState((s) => s.sheets.creating?.repoID ?? null);
   const found = useMemo(() => (route.screen === 'session' ? findSession(sessions, route.ref) : null), [route, sessions]);
   const fresh = sheet !== null && sheet.name === 'new' ? sheet : null;
-  const shown = sheet !== null && (fresh !== null || found !== null) ? sheet : null;
+  const shown = useAppState(sheetShows) ? sheet : null;
   const box = useRef<HTMLDivElement>(null);
   const titleID = useId();
   useSheetFocus(box, shown === null ? null : sheetName(shown, creatingIn));

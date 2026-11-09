@@ -13,6 +13,17 @@
  * other menu's button in the header, which opens that menu; a tap on the open menu's own button
  * closes it. Escape closes it too.
  *
+ * **Focus** (`useMenuFocus`). As a menu opens, and as one menu gives way to the other, focus
+ * moves into it: to the checked row, else the first button enabled, else the menu itself. A
+ * menu's buttons can all wait at first, as the model menu's rows do while they are held and the
+ * account menu's list does while the profiles load, and the account menu's view changes under the
+ * focus as it asks about a profile and goes back. So whenever the menu's content changes while
+ * focus is on the menu itself, on a button that turned disabled, or on nothing, focus moves again
+ * the same way. When the menu closes, by Escape, a tap outside or a pick, focus goes back to the
+ * header button that opened it, the one `aria-expanded` named while it showed, if that is still on
+ * the page: a tap outside does nothing else, so focus the tap gave to a control outside goes back
+ * too.
+ *
  * **The account menu** loads the profiles afresh as it opens (`loadProfiles`): a spinner while
  * they load, which always means a load on its way (`useProfiles`), the error's message if the
  * load fails (reopening the menu tries again), then one row per profile with its kind
@@ -69,13 +80,61 @@ export function Menus({ session }: { session: PhoneSession }): JSX.Element | nul
   const actions = useActions();
   const menu = useAppState((s) => s.ui.menu);
   const shows = menu !== null && canShow(menu, session);
+  const box = useRef<HTMLDivElement>(null);
   // A menu that can no longer show closes, so `ui.menu` never names a menu nobody sees.
   useLayoutEffect(() => {
     if (menu !== null && !shows) actions.closeMenu();
   }, [actions, menu, shows]);
+  useMenuFocus(box, menu !== null && shows ? menu.name : null);
   if (menu === null || !shows) return null;
-  if (menu.name === 'account') return <AccountMenu session={session} ask={menu.askProfileID} />;
-  return <ModelMenu session={session} />;
+  if (menu.name === 'account') return <AccountMenu box={box} session={session} ask={menu.askProfileID} />;
+  return <ModelMenu box={box} session={session} />;
+}
+
+/**
+ * Moves focus into the menu in `box` as `name` names it, and back to the header button that
+ * opened it as `name` turns null (see the header). Layout effects, so focus moves before the menu
+ * is drawn. The menu's content is watched for changes (`MutationObserver`), whose callback runs
+ * before the next paint too.
+ */
+function useMenuFocus(box: RefObject<HTMLDivElement | null>, name: MenuState['name'] | null): void {
+  const opener = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (name === null || el === null) return;
+    opener.current = el.ownerDocument.querySelector<HTMLElement>('button[aria-haspopup="menu"][aria-expanded="true"]');
+    focusIn(el);
+    const observer = new MutationObserver(() => {
+      if (focusLost(el)) focusIn(el);
+    });
+    observer.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+    return () => observer.disconnect();
+  }, [box, name]);
+  // Back as the menu closes, in the effect of the commit that closes it rather than in a cleanup:
+  // after a commit, React gives focus back to the element that had it before, when that is still
+  // on the page, such as a control outside the menu that a tap outside focused as it pressed.
+  const open = name !== null;
+  useLayoutEffect(() => {
+    if (open) return;
+    const back = opener.current;
+    opener.current = null;
+    if (back !== null && back.isConnected) back.focus({ preventScroll: true });
+  }, [open]);
+}
+
+/** Focuses the checked row of `menu` when it is enabled, else its first enabled button, else `menu` itself. */
+function focusIn(menu: HTMLElement): void {
+  const enabled = [...menu.querySelectorAll('button')].filter((b) => !b.disabled);
+  const target = enabled.find((b) => b.getAttribute('aria-checked') === 'true') ?? enabled[0] ?? menu;
+  target.focus({ preventScroll: true });
+}
+
+/** Whether focus is on `menu` itself, on a button in it that is disabled, or on nothing, so it may move into `menu` again. */
+function focusLost(menu: HTMLElement): boolean {
+  const doc = menu.ownerDocument;
+  const active = doc.activeElement;
+  if (active === null || active === doc.body || active === menu) return true;
+  return menu.contains(active) && active.tagName === 'BUTTON' && (active as HTMLButtonElement).disabled;
 }
 
 /**
@@ -113,9 +172,8 @@ function useDismiss(box: RefObject<HTMLDivElement | null>): void {
   }, [box, actions]);
 }
 
-function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | null }): JSX.Element {
+function AccountMenu({ box, session, ask }: { box: RefObject<HTMLDivElement | null>; session: PhoneSession; ask: string | null }): JSX.Element {
   const actions = useActions();
-  const box = useRef<HTMLDivElement>(null);
   useDismiss(box);
   const load = useProfiles(true);
   const failure = useAppState((s) => failureIn(s.sheets, s.ui.menu));
@@ -144,7 +202,7 @@ function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | nu
   }
 
   return (
-    <div ref={box} className="lapdrop profdrop" role="menu" aria-label="Account for this session">
+    <div ref={box} className="lapdrop profdrop" role="menu" aria-label="Account for this session" tabIndex={-1}>
       <div className="pd-lbl">Account for this session</div>
       {body}
     </div>
@@ -164,16 +222,15 @@ function ProfileRow({ profile, current, onPick }: { profile: PhoneProfile; curre
   );
 }
 
-function ModelMenu({ session }: { session: PhoneSession }): JSX.Element {
+function ModelMenu({ box, session }: { box: RefObject<HTMLDivElement | null>; session: PhoneSession }): JSX.Element {
   const actions = useActions();
-  const box = useRef<HTMLDivElement>(null);
   useDismiss(box);
   const acting = useAppState((s) => isActing(s.sheets, session.ref));
   const [other, setOther] = useState('');
   const held = useChangeHold('model');
   const locked = held || acting;
   return (
-    <div ref={box} className="lapdrop modeldrop" role="menu" aria-label="Model for this session">
+    <div ref={box} className="lapdrop modeldrop" role="menu" aria-label="Model for this session" tabIndex={-1}>
       <div className="pd-lbl">Model for this session</div>
       {MODEL_NAMES.map((m) => {
         const current = m === session.model;

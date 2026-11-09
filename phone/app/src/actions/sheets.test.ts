@@ -15,7 +15,7 @@ import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import {
   beginCreate, currentProfileID, emptySheets, enumChoices, fieldOn, fieldProblem, fieldText, forkOrder, isActing, isWholeNumber,
-  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, WHOLE_NUMBER_TEXT,
+  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, sheetShows, WHOLE_NUMBER_TEXT,
   withFieldBadInput, withFieldOn, withFieldText,
 } from '../state/sheets.ts';
 import { createStore, initialState } from '../state/store.ts';
@@ -638,6 +638,22 @@ test('kind words come from PROFILE_KIND_WORDS, and an unknown kind shows as sent
   assert.equal(profileDetail(BEDROCK), 'Amazon Bedrock');
   assert.equal(kindWords('vertex'), 'vertex');
   assert.equal(kindWords('constructor'), 'constructor');
+});
+
+test('a sheet shows while the route shows a session the list holds, and New over any screen', () => {
+  const base = { ...initialState(), sessions: applySnapshot(snapshot()) };
+  const on = (sheet: SheetState | null, route: AppState['ui']['route']): boolean => sheetShows({ ...base, ui: { ...base.ui, sheet, route } });
+  const listed = { screen: 'session', ref: R } as const;
+  const unlisted = { screen: 'session', ref: { kind: 'local', terminalID: 'T-gone' } } as const;
+  const list = { screen: 'sessions' } as const;
+  assert.equal(on(null, listed), false);
+  for (const sheet of [{ name: 'menu' }, { name: 'fork' }, { name: 'model' }] as const) {
+    assert.equal(on(sheet, listed), true, sheet.name);
+    assert.equal(on(sheet, unlisted), false, sheet.name);
+    assert.equal(on(sheet, list), false, sheet.name);
+  }
+  const fresh: SheetState = { name: 'new', repoID: 'R1', repoName: 'acme' };
+  for (const route of [listed, unlisted, list]) assert.equal(on(fresh, route), true, route.screen);
 });
 
 test('the restart note says when a running turn stops', () => {
