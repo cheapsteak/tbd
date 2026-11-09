@@ -1,11 +1,11 @@
 // The prompt card end to end (spec sections 4.4 and 8.3), in WebKit as an iPhone and in Chromium
 // as an Android phone: a question card's options, Other, steps and review, multi-select, Hide,
 // a session that cannot answer, a refused answer, and one send per gesture. Then the permission
-// card: Yes, the session rule, Deny with a message, the keyboard, and no tap landing on a
-// prompt that took another's place before the user could read it. Last, who answered: the
-// Answered card, the card that says someone else answered first, and the receipts the
-// transcript keeps ("Answered on this phone: …", "Answered on the laptop", "Answered on another
-// phone").
+// card: Yes, the session rule, Deny with a message, and the keyboard. Then no tap landing on
+// what the user has not seen: a card that appeared or changed holds its choices at first, and
+// what the user did on a card outlasts a card that took its place. Last, who answered: the Answered card, the card that says someone else answered first,
+// and the receipts the transcript keeps ("Answered on this phone: …", "Answered on the laptop",
+// "Answered on another phone").
 //
 // Every test that answers checks the exact `prompt.answer` params the fake laptop got: the
 // session the route shows, the prompt's ID, and the answer `questionAnswer` builds. mock.json
@@ -40,6 +40,17 @@ const SSE_KEY = `local:${SSE_REF.terminalID}`;
 const SSE_TARGET = 'npm run test:integration -- --grep "reconnects after 30 s idle" --reporter=dot && git diff --stat origin/main...HEAD';
 /** The daemon's reason while the laptop's "answer prompts" setting is off (`PhoneSessionStatus.answerTurnedOffReason`). */
 const ANSWERING_OFF = "Answering prompts is turned off in TBD's settings on the laptop.";
+/** Dock.tsx's `TAP_GUARD_MS` and `OPENING_MS`. */
+const TAP_GUARD_MS = 500;
+const OPENING_MS = 1000;
+/** Onboarding copy's three questions, by text, and the answer that gives each its first option. */
+const TONE = 'Which tone should the welcome screen use?';
+const STEPS = 'How many onboarding steps?';
+const SKIP = 'Can people skip onboarding?';
+const ONBOARDING_ANSWER = {
+  kind: 'question',
+  answers: { [TONE]: 'Friendly and short', [STEPS]: '3 steps', [SKIP]: 'Yes, show a Skip button' },
+};
 
 /**
  * The params of every `prompt.answer` that reached the fake laptop, in order.
@@ -80,6 +91,62 @@ function withSSEPrompts(...prompts) {
   const base = MOCK.prompts[SSE_KEY][0];
   scenario.prompts[SSE_KEY] = prompts.map((p) => ({ ...base, ...p }));
   return scenario;
+}
+
+/**
+ * mock.json with Onboarding copy's open prompts replaced by `prompts`, each laid over the mock's
+ * three-question prompt.
+ * @param {...object} prompts
+ */
+function withOnboardingPrompts(...prompts) {
+  const scenario = structuredClone(MOCK);
+  const key = `local:${ONBOARDING_REF.terminalID}`;
+  const base = MOCK.prompts[key][0];
+  scenario.prompts[key] = prompts.map((p) => structuredClone({ ...base, ...p }));
+  return scenario;
+}
+
+/**
+ * The centre of `locator`'s box.
+ * @param {import('@playwright/test').Locator} locator
+ */
+async function centre(locator) {
+  const box = await locator.boundingBox();
+  if (box === null) throw new Error('no box');
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+/**
+ * Whether the point `at` lies inside `locator`'s box.
+ * @param {import('@playwright/test').Locator} locator
+ * @param {{ x: number, y: number }} at
+ */
+async function covers(locator, at) {
+  const box = await locator.boundingBox();
+  return box !== null && at.x >= box.x && at.x <= box.x + box.width && at.y >= box.y && at.y <= box.y + box.height;
+}
+
+/**
+ * A tap at the centre of `locator` at once, as a finger gives it: no wait for it to be enabled,
+ * as Playwright's `click` makes.
+ * @param {Page} page
+ * @param {import('@playwright/test').Locator} locator
+ */
+async function tap(page, locator) {
+  const at = await centre(locator);
+  await page.mouse.click(at.x, at.y);
+  return at;
+}
+
+/**
+ * A double tap at the centre of `locator`, returning where it landed.
+ * @param {Page} page
+ * @param {import('@playwright/test').Locator} locator
+ */
+async function doubleTap(page, locator) {
+  const at = await centre(locator);
+  await page.mouse.dblclick(at.x, at.y);
+  return at;
 }
 
 test("one question: a tap sends the option's label under the question's text", async ({ page, appHost }) => {
@@ -321,6 +388,8 @@ test("a session that can answer again shows the choices once the list says so", 
   row.sessions[0].capabilities.answer = { available: true };
   await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
   await expect(c.locator('.dock-note')).toHaveCount(0);
+  // The choices came where the reason was, so they wait at first.
+  await expect(c.getByRole('button', { name: 'Yes, add the test' })).toBeDisabled();
   await c.getByRole('button', { name: 'Yes, add the test' }).click();
   await expect.poll(() => answers(page)).toHaveLength(1);
 });
@@ -333,6 +402,8 @@ test("a refused answer shows the laptop's words and offers the choices again", a
   await c.getByRole('button', { name: 'Yes, add the test' }).click();
   const refusal = c.locator('.refusal');
   await expect(refusal).toHaveText('The laptop refused the answer.');
+  // The refusal moved the choices down, so they wait at first.
+  await expect(c.getByRole('button', { name: 'No, this is enough' })).toBeDisabled();
   await expect(refusal).toHaveAttribute('role', 'alert');
   await expect(refusal.locator('svg')).toHaveCount(1);
   // Above the choices.
@@ -363,6 +434,24 @@ test("a new prompt never inherits the last one's picks", async ({ page, appHost 
   await expect(c.locator('.c-head')).toContainText('1 of 3');
   await expect(c.locator('.q')).toHaveText('Which tone should the welcome screen use?');
   await expect(c.getByRole('button', { name: 'Back' })).toHaveCount(0);
+});
+
+test('a new prompt shows expanded though the last one was hidden', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await card(page).getByRole('button', { name: 'Hide' }).click();
+  const strip = app(page).locator('.dock button.card-strip');
+  await expect(strip).toHaveText('Question waitingShow');
+  // The laptop's set now holds another prompt, and the hidden one closed with no resolution.
+  const next = { ...structuredClone(MOCK.prompts[`local:${LOGIN_REF.terminalID}`][0]), id: 'login-second' };
+  await hostCall(page, 'emit', 'prompt.changed', { session: LOGIN_REF, prompts: [next] });
+  const c = card(page);
+  await expect(c.locator('.q')).toHaveText(LOGIN_QUESTION);
+  await expect(strip).toHaveCount(0);
+  await c.getByRole('button', { name: 'No, this is enough' }).click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: 'login-second', answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'No, this is enough' } } },
+  ]);
 });
 
 test('a permission shows the tool, its summary and target, and Yes allows', async ({ page, appHost }) => {
@@ -497,26 +586,174 @@ test("no tap lands on the next permission before it has been on screen for 500 m
   await openSessionByName(page, 'SSE reconnect');
   const c = card(page);
   const yes = c.locator('button.opt.pri');
-  // The first card shown as the session opens takes a tap at once.
+  // The card there as the session opens is not held: a tap the moment it shows answers it.
   await expect(c.locator('pre.perm-target')).toHaveText(SSE_TARGET);
-  await yes.click();
+  expect(await yes.isEnabled()).toBe(true);
+  const at = await tap(page, yes);
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
+  ]);
   // Its answer takes it down, and the second takes its place: a tap there at once, as the
   // second half of a double tap, lands on a disabled button and sends nothing.
   await c.locator('pre.perm-target', { hasText: second.target }).waitFor();
-  const box = await yes.boundingBox();
-  if (box === null) throw new Error('Yes has no box');
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  expect(await covers(yes, at)).toBe(true);
+  await page.mouse.click(at.x, at.y);
   await expect(yes).toBeDisabled();
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
   expect(await answers(page)).toEqual([
     { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
   ]);
   // Once it has been on screen for 500 ms, a tap answers it.
   await expect(yes).toBeEnabled();
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.click(at.x, at.y);
   await expect.poll(() => answers(page)).toEqual([
     { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
     { session: SSE_REF, promptID: 'sse-second', answer: { kind: 'permission', decision: 'allow' } },
+  ]);
+});
+
+test('a card that comes a while after the session opened holds its choices at first', async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withSSEPrompts() });
+  await openSessionByName(page, 'SSE reconnect');
+  // The user reads the transcript; then a permission comes, and the dock grows over the rows.
+  await page.waitForTimeout(OPENING_MS + 500);
+  await expect(card(page)).toHaveCount(0);
+  await hostCall(page, 'emit', 'prompt.changed', { session: SSE_REF, prompts: [MOCK.prompts[SSE_KEY][0]] });
+  const yes = card(page).locator('button.opt.pri');
+  await yes.waitFor();
+  const at = await tap(page, yes);
+  await expect(yes).toBeDisabled();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await answers(page)).toEqual([]);
+  await expect(yes).toBeEnabled();
+  await page.mouse.click(at.x, at.y);
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
+  ]);
+});
+
+test('a double tap on Show sends nothing, though the review it expands has Send answers there', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  for (const label of ['Friendly and short', '3 steps', 'Yes, show a Skip button']) await c.getByRole('button', { name: label }).click();
+  await expect(c.locator('.q')).toHaveText('Send these answers?');
+  await c.getByRole('button', { name: 'Hide' }).click();
+  const at = await doubleTap(page, app(page).locator('.dock button.card-strip span'));
+  const send = c.getByRole('button', { name: 'Send answers' });
+  await expect(send).toBeVisible();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await answers(page)).toEqual([]);
+  // The second tap fell on Send answers, which waited.
+  expect(await covers(send, at)).toBe(true);
+  await send.click();
+  await expect.poll(() => answers(page)).toEqual([{ session: ONBOARDING_REF, promptID: ONBOARDING_PROMPT, answer: ONBOARDING_ANSWER }]);
+});
+
+test('a double tap on Show sends nothing, though the deny form it expands has Deny there', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await c.getByRole('button', { name: 'No' }).click();
+  await c.getByRole('button', { name: 'Hide' }).click();
+  const at = await doubleTap(page, app(page).locator('.dock button.card-strip span'));
+  const deny = c.getByRole('button', { name: 'Deny' });
+  await expect(deny).toBeVisible();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await answers(page)).toEqual([]);
+  expect(await covers(deny, at)).toBe(true);
+  await deny.click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'deny' } },
+  ]);
+});
+
+test('opening the deny form holds Deny at first', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  await tap(page, card(page).getByRole('button', { name: 'No' }));
+  const deny = card(page).getByRole('button', { name: 'Deny' });
+  await expect(deny).toBeDisabled();
+  await expect(deny).toBeEnabled();
+  expect(await answers(page)).toEqual([]);
+});
+
+test('opening the Other form holds its buttons at first', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await tap(page, card(page).getByRole('button', { name: 'Other answer…' }));
+  const cancel = card(page).getByRole('button', { name: 'Cancel' });
+  await expect(cancel).toBeDisabled();
+  await expect(cancel).toBeEnabled();
+  expect(await answers(page)).toEqual([]);
+});
+
+test("a double tap on a step's last send lands on the review, which waits", async ({ page, appHost }) => {
+  const multi = { header: 'Sections', text: 'Which sections?', multiSelect: true, options: [{ label: 'Account' }, { label: 'Billing' }] };
+  const base = MOCK.prompts[`local:${ONBOARDING_REF.terminalID}`][0];
+  await openApp(page, appHost, { scenario: withOnboardingPrompts({ questions: [base.questions[0], multi] }) });
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Friendly and short' }).click();
+  await c.getByRole('checkbox', { name: 'Account' }).check();
+  const at = await doubleTap(page, c.getByRole('button', { name: 'Send 1 selected' }));
+  const send = c.getByRole('button', { name: 'Send answers' });
+  await expect(send).toBeVisible();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await answers(page)).toEqual([]);
+  expect(await covers(send, at)).toBe(true);
+  await send.click();
+  await expect.poll(() => answers(page)).toEqual([
+    {
+      session: ONBOARDING_REF,
+      promptID: ONBOARDING_PROMPT,
+      answer: { kind: 'question', answers: { [TONE]: 'Friendly and short', 'Which sections?': 'Account' } },
+    },
+  ]);
+});
+
+test('a double tap on an option answers its question only, never the next one unread', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Friendly and short' }).click();
+  const three = c.getByRole('button', { name: '3 steps' });
+  await expect(three).toBeEnabled();
+  const at = await doubleTap(page, three);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  // The second tap fell on the next question's first option, which waited.
+  await expect(c.locator('.c-head')).toContainText('3 of 3');
+  await expect(c.locator('.q')).toHaveText(SKIP);
+  const skip = c.getByRole('button', { name: 'Yes, show a Skip button' });
+  expect(await covers(skip, at)).toBe(true);
+  await skip.click();
+  await c.getByRole('button', { name: 'Send answers' }).click();
+  await expect.poll(() => answers(page)).toEqual([{ session: ONBOARDING_REF, promptID: ONBOARDING_PROMPT, answer: ONBOARDING_ANSWER }]);
+});
+
+test("a double tap on Send answer in the last step's Other form lands on the review, which waits", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Friendly and short' }).click();
+  await c.getByRole('button', { name: '3 steps' }).click();
+  await c.getByRole('button', { name: 'Other answer…' }).click();
+  await c.getByRole('textbox', { name: 'Type your answer' }).fill('Only after the first run');
+  const sendOne = c.getByRole('button', { name: 'Send answer', exact: true });
+  await expect(sendOne).toBeEnabled();
+  const at = await doubleTap(page, sendOne);
+  const send = c.getByRole('button', { name: 'Send answers' });
+  await expect(send).toBeVisible();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await answers(page)).toEqual([]);
+  expect(await covers(send, at)).toBe(true);
+  await send.click();
+  await expect.poll(() => answers(page)).toEqual([
+    {
+      session: ONBOARDING_REF,
+      promptID: ONBOARDING_PROMPT,
+      answer: { kind: 'question', answers: { [TONE]: 'Friendly and short', [STEPS]: '3 steps', [SKIP]: 'Only after the first run' } },
+    },
   ]);
 });
 
@@ -570,6 +807,8 @@ test('a laptop answer shows the elsewhere card, and OK removes it', async ({ pag
   await hostCall(page, 'emit', 'prompt.changed', { session: LOGIN_REF, prompts: [], resolved: [{ promptID: LOGIN_PROMPT, answeredBy: 'laptop' }] });
   const done = app(page).locator('.dock .card.done');
   await expect(done).toHaveAttribute('role', 'status');
+  // OK came where the choices were, so it waits at first.
+  await expect(done.getByRole('button', { name: 'OK' })).toBeDisabled();
   await expect(done.locator('b')).toHaveText('Already answered on the laptop');
   await expect(done.locator('small')).toHaveText('Someone answered this question at the laptop first.');
   await expect(receipts(page)).toHaveText(['Answered on the laptop']);
@@ -632,5 +871,62 @@ test('after OK on an elsewhere card the next prompt shows, its choices held at f
   await c.locator('button.opt.pri').click();
   await expect.poll(() => answers(page)).toEqual([
     { session: SSE_REF, promptID: 'sse-second', answer: { kind: 'permission', decision: 'allow' } },
+  ]);
+});
+
+test("a card another prompt's elsewhere card displaced comes back as the user left it", async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withOnboardingPrompts({}, { id: 'onboarding-second' }) });
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Friendly and short' }).click();
+  await c.getByRole('button', { name: 'Other answer…' }).click();
+  await c.getByRole('textbox', { name: 'Type your answer' }).fill('Five, with a tour');
+  // The laptop answers the other prompt: its card waits for OK in this one's place.
+  await hostCall(page, 'emit', 'prompt.changed', {
+    session: ONBOARDING_REF,
+    prompts: [MOCK.prompts[`local:${ONBOARDING_REF.terminalID}`][0]],
+    resolved: [{ promptID: 'onboarding-second', answeredBy: 'laptop' }],
+  });
+  const done = app(page).locator('.dock .card.done');
+  await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+  const ok = done.getByRole('button', { name: 'OK' });
+  await expect(ok).toBeDisabled();
+  await ok.click();
+  await expect(c.locator('.c-head')).toContainText('2 of 3');
+  await expect(c.getByRole('textbox', { name: 'Type your answer' })).toHaveValue('Five, with a tour');
+  await c.getByRole('button', { name: 'Send answer' }).click();
+  await c.getByRole('button', { name: 'No, every step is required' }).click();
+  await c.getByRole('button', { name: 'Send answers' }).click();
+  await expect.poll(() => answers(page)).toEqual([
+    {
+      session: ONBOARDING_REF,
+      promptID: ONBOARDING_PROMPT,
+      answer: { kind: 'question', answers: { [TONE]: 'Friendly and short', [STEPS]: 'Five, with a tour', [SKIP]: 'No, every step is required' } },
+    },
+  ]);
+});
+
+test("a hidden permission another prompt's elsewhere card displaced comes back hidden, its deny text kept", async ({ page, appHost }) => {
+  const second = { id: 'sse-second', summary: 'Show the reconnect log', target: 'tail -n 50 logs/stream.log' };
+  await openApp(page, appHost, { scenario: withSSEPrompts({ id: SSE_PROMPT }, second) });
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await c.getByRole('button', { name: 'No' }).click();
+  await c.getByLabel('Tell Claude what to do instead (optional)').fill('Use the cached log');
+  await c.getByRole('button', { name: 'Hide' }).click();
+  await hostCall(page, 'emit', 'prompt.changed', {
+    session: SSE_REF, prompts: [MOCK.prompts[SSE_KEY][0]], resolved: [{ promptID: 'sse-second', answeredBy: 'phone' }],
+  });
+  const done = app(page).locator('.dock .card.done');
+  await expect(done.locator('b')).toHaveText('Already answered on another phone');
+  await done.getByRole('button', { name: 'OK' }).click();
+  const strip = app(page).locator('.dock button.card-strip');
+  await expect(strip).toHaveText('Permission waitingShow');
+  await strip.click();
+  await expect(c.locator('pre.perm-target')).toHaveText(SSE_TARGET);
+  await expect(c.getByLabel('Tell Claude what to do instead (optional)')).toHaveValue('Use the cached log');
+  await c.getByRole('button', { name: 'Deny' }).click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'deny', message: 'Use the cached log' } },
   ]);
 });

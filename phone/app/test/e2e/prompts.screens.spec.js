@@ -19,6 +19,9 @@
 // - `elsewhere`: Login redirect fix's question closed by the laptop (`answeredBy: laptop`). The
 //   transcript ends with its receipt, "Answered on the laptop", which the mock's state does not
 //   draw until its OK.
+//
+// A state reached by a change of the card's view is captured once the dock's tap guard lets its
+// buttons go, since the mocks draw them enabled.
 
 import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -62,6 +65,7 @@ test('q-other', async ({ page, appHost }) => {
   const text = card(page).getByRole('textbox', { name: 'Type your answer' });
   await text.fill('Only if it takes under ten minutes.');
   await text.blur();
+  await expect(card(page).getByRole('button', { name: 'Send answer' })).toBeEnabled();
   await capture(page, 'q-other', card(page).getByRole('button', { name: 'Send answer' }));
 });
 
@@ -83,6 +87,7 @@ test('q3-review', async ({ page, appHost }) => {
   for (const label of ['Friendly and short', '4 steps', 'Yes, show a Skip button']) {
     await card(page).getByRole('button', { name: label }).click();
   }
+  await expect(card(page).getByRole('button', { name: 'Send answers' })).toBeEnabled();
   await capture(page, 'q3-review', card(page).getByRole('button', { name: 'Send answers' }));
 });
 
@@ -106,6 +111,7 @@ test('deny-msg', async ({ page, appHost }) => {
   const text = card(page).getByLabel('Tell Claude what to do instead (optional)');
   await text.fill('Run only the unit tests for now.');
   await text.blur();
+  await expect(card(page).getByRole('button', { name: 'Deny' })).toBeEnabled();
   await capture(page, 'deny-msg', card(page).getByRole('button', { name: 'Deny' }));
 });
 
@@ -126,5 +132,6 @@ test('elsewhere', async ({ page, appHost }) => {
     resolved: [{ promptID: '00000000-0000-4000-8000-0000000000E1', answeredBy: 'laptop' }],
   });
   await expect(app(page).locator('.tx .receipt')).toHaveText('Answered on the laptop');
+  await expect(app(page).locator('.dock .card.done').getByRole('button', { name: 'OK' })).toBeEnabled();
   await capture(page, 'elsewhere', app(page).locator('.dock .card.done').getByRole('button', { name: 'OK' }));
 });

@@ -1,9 +1,10 @@
 /**
  * The card of one waiting prompt, in the dock above the composer (spec section 8.3; mock
- * `promptHTML`, mock 938-986). Contract: `PromptCard({ session, prompt, card, held })`, where
- * `card` is the prompt's card in the prompt slice (`cardFor`) and `held` says its choices wait
- * (the dock's tap guard). The dock keys it by the prompt's ID, so everything the user picked,
- * typed or hid on it belongs to that prompt alone.
+ * `promptHTML`, mock 938-986). Contract: `PromptCard({ session, prompt, card, held, ui, setUI })`,
+ * where `card` is the prompt's card in the prompt slice (`cardFor`), `held` says its choices wait
+ * (the dock's tap guard), and `ui` is what the user picked, typed or hid on it (`CardUI`), which
+ * the dock keeps by prompt ID and `setUI` replaces. The dock keys the card by the prompt's ID, so
+ * none of that ever carries over to another prompt.
  *
  * **A question** (`QuestionCard`). The head (`.c-head`) holds the hand glyph, "Claude asks", and
  * " · i of n" with `.steps` under it when the prompt asks several questions, then Hide.
@@ -34,8 +35,8 @@
  * **What is sent** is exactly `questionAnswer(prompt.questions, draft)` or
  * `permissionAnswer(decision, message)`, through `answerPrompt(prompt.id, answer)`, which
  * computes the summary and sends once per gesture: it sends nothing unless the card is `open`.
- * While the card is `sending`, and while `held`, every choice and send button is disabled, so a
- * second tap sends nothing either.
+ * While the card is `sending`, and while `held`, every choice and button but Hide is disabled, so
+ * a second tap sends nothing either.
  *
  * **No answer capability.** When the list shows the session's `answer` capability unavailable,
  * the card shows its head and the question or the permission's text, no choices, and the list's
@@ -56,14 +57,13 @@
  * (`dismissPrompt`): "Already answered on the laptop", "Someone answered this question at the
  * laptop first.", with "permission" for a permission, when the laptop answered or did not say
  * who; "Already answered on another phone", "Someone answered this question on another phone
- * first.", when another phone did.
+ * first.", when another phone did. Its OK waits while `held` too.
  *
  * **Hide** collapses the card to `.card-strip`, "Question waiting" or "Permission waiting", with
- * "Show". Hiding keeps what the user picked and typed; a new prompt, which mounts a new card,
- * starts expanded.
+ * "Show". Hiding keeps what the user picked and typed; a new prompt starts expanded.
  */
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import type { JSX, RefObject } from 'react';
 import type { PhonePrompt, PhoneQuestion, PhoneSession, PromptAnswer } from '../protocol/types.ts';
 import { useActions } from '../state/context.tsx';
@@ -85,24 +85,48 @@ interface QuestionUI {
   otherText: string;
 }
 
-function freshQuestionUI(): QuestionUI {
-  return { draft: emptyQuestionDraft(), step: 0, otherOpen: false, otherText: '' };
-}
-
 /** What the user has done on a permission card: whether the deny form is open, and its text. */
 interface PermissionUI {
   denyOpen: boolean;
   denyText: string;
 }
 
-const FRESH_PERMISSION_UI: PermissionUI = { denyOpen: false, denyText: '' };
+/** What the user has done on one prompt's card, whichever kind it is, and whether it is hidden to its strip. */
+export interface CardUI {
+  hidden: boolean;
+  question: QuestionUI;
+  permission: PermissionUI;
+}
 
-export function PromptCard(p: { session: PhoneSession; prompt: PhonePrompt; card: CardState; held: boolean }): JSX.Element {
-  const { session, prompt, card, held } = p;
+/** A card the user has done nothing on: expanded, at its first question, nothing picked or typed. */
+export const FRESH_CARD_UI: CardUI = {
+  hidden: false,
+  question: { draft: emptyQuestionDraft(), step: 0, otherOpen: false, otherText: '' },
+  permission: { denyOpen: false, denyText: '' },
+};
+
+/**
+ * What the card of `card` shows with `ui`, as a key that changes whenever what sits under the
+ * user's finger may change (the dock's tap guard): Answered, Answered elsewhere, the strip, or
+ * the choices of one question or of the review, with or without the Other or the deny form, a
+ * refusal, and the capability to answer. A pick that only changes a checkbox or a count keeps it.
+ */
+export function cardView(card: CardState, ui: CardUI, canAnswer: boolean): string {
+  if (card.phase === 'answered' || card.phase === 'elsewhere') return card.phase;
+  if (ui.hidden) return 'hidden';
+  return JSON.stringify([canAnswer, card.refusal !== null, ui.question.step, ui.question.otherOpen, ui.permission.denyOpen]);
+}
+
+export function PromptCard(p: {
+  session: PhoneSession;
+  prompt: PhonePrompt;
+  card: CardState;
+  held: boolean;
+  ui: CardUI;
+  setUI: (ui: CardUI) => void;
+}): JSX.Element {
+  const { session, prompt, card, held, ui, setUI } = p;
   const actions = useActions();
-  const [hidden, setHidden] = useState(false);
-  const [question, setQuestion] = useState(freshQuestionUI);
-  const [permission, setPermission] = useState(FRESH_PERMISSION_UI);
 
   const isPermission = prompt.kind === 'permission';
   if (card.phase === 'answered') {
@@ -130,13 +154,13 @@ export function PromptCard(p: { session: PhoneSession; prompt: PhonePrompt; card
           <b>{byPhone ? 'Already answered on another phone' : 'Already answered on the laptop'}</b>
           <small>{byPhone ? `Someone answered this ${what} on another phone first.` : `Someone answered this ${what} at the laptop first.`}</small>
         </div>
-        <button className="btn" type="button" onClick={() => actions.dismissPrompt(prompt.id)}>OK</button>
+        <button className="btn" type="button" disabled={held} onClick={() => { if (!held) actions.dismissPrompt(prompt.id); }}>OK</button>
       </div>
     );
   }
-  if (hidden) {
+  if (ui.hidden) {
     return (
-      <button className="card-strip" type="button" onClick={() => setHidden(false)}>
+      <button className="card-strip" type="button" onClick={() => setUI({ ...ui, hidden: false })}>
         <Icon name="hand" />
         {isPermission ? 'Permission waiting' : 'Question waiting'}
         <span>
@@ -152,13 +176,13 @@ export function PromptCard(p: { session: PhoneSession; prompt: PhonePrompt; card
     void actions.answerPrompt(prompt.id, answer);
   };
   const unavailable = capability.available ? null : (capability.reason ?? '');
-  const hide = <HideButton onHide={() => setHidden(true)} />;
+  const hide = <HideButton onHide={() => setUI({ ...ui, hidden: true })} />;
   if (isPermission) {
     return (
       <PermissionCard
         prompt={prompt}
-        ui={permission}
-        setUI={setPermission}
+        ui={ui.permission}
+        setUI={(permission) => setUI({ ...ui, permission })}
         locked={locked}
         refusal={card.refusal}
         unavailable={unavailable}
@@ -170,8 +194,8 @@ export function PromptCard(p: { session: PhoneSession; prompt: PhonePrompt; card
   return (
     <QuestionCard
       questions={prompt.questions ?? []}
-      ui={question}
-      setUI={setQuestion}
+      ui={ui.question}
+      setUI={(question) => setUI({ ...ui, question })}
       locked={locked}
       refusal={card.refusal}
       unavailable={unavailable}

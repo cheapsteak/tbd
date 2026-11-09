@@ -5,77 +5,131 @@
  *
  * **Which card.** One at a time, the one `cardFor` picks from the prompt slice: an `elsewhere`
  * card first, since it waits for OK, then one on its way or answered, then the first open prompt
- * in the order the laptop sent. The card is keyed by its prompt's ID, so a new prompt never
- * inherits another's picks, Other text, deny text or hidden state.
+ * in the order the laptop sent. The card is keyed by its prompt's ID.
  *
- * **No tap lands on a prompt the user has not seen.** Claude often asks for several permissions
- * at once. When one is answered and its resolution takes its card down, the next prompt's card
- * takes its place about one round trip later, so the second tap of a double tap would answer a
- * prompt the user never read. So when the dock replaces the card of one prompt with the card of
- * another, the new card's choices are disabled for `TAP_GUARD_MS` after it appears (`held`). A
- * real `disabled`, so a tap on them does nothing at all. The first card the dock shows, as the
- * session opens, is not held. The prompt shown last is kept across a moment with no card, so a
- * prompt that follows a gap is held too.
+ * **What the user did on a card** (`CardUI`: the picks, the question shown, the Other text, the
+ * deny text, and whether the card is hidden) is kept here by prompt ID rather than in the card.
+ * So a card that another prompt's card displaced for a while, as when another of the session's
+ * prompts was answered elsewhere and its card waits for OK, comes back as the user left it, and a
+ * new prompt starts afresh: expanded, with nothing picked or typed. Only the prompts that still
+ * have a card in the slice keep theirs.
+ *
+ * **No tap lands on what the user has not seen.** A card that appears, or that changes under the
+ * finger, can take the second tap of a double tap, or a tap meant for what was there a moment
+ * before, such as a transcript row when the dock grows over it. So for `TAP_GUARD_MS` the card's
+ * choices and buttons are disabled (`held`), with a real `disabled`, so a tap on them does
+ * nothing at all:
+ * - when the dock shows a card it did not show the moment before: from none, or in place of
+ *   another prompt's card, as when one of several prompts is answered and the next takes its
+ *   place about one round trip later. The one exception is a card that appears from none within
+ *   `OPENING_MS` of the dock mounting: it was there as the session opened, before the user could
+ *   aim a tap at anything else;
+ * - when the card's view changes (`cardView`): it expands from its strip, moves to another
+ *   question or to or from the review, opens or closes the Other or the deny form, shows a
+ *   refusal, gains or loses its choices as the session's answer capability changes, or turns
+ *   into Answered or Answered elsewhere.
+ * A change during a hold starts it again.
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useAppState } from '../state/context.tsx';
-import { cardFor } from '../state/prompts.ts';
+import { cardFor, cardKey } from '../state/prompts.ts';
 import { Composer } from './Composer.tsx';
-import { PromptCard } from './PromptCard.tsx';
+import { cardView, FRESH_CARD_UI, PromptCard } from './PromptCard.tsx';
+import type { CardUI } from './PromptCard.tsx';
 
-/** How long a card that took another prompt's place keeps its choices disabled, in milliseconds. */
+/** How long a card that appeared, or whose view changed, keeps its choices disabled, in milliseconds. */
 export const TAP_GUARD_MS = 500;
+
+/** How long after the dock mounts a card that appears is taken as there when the session opened, in milliseconds. */
+export const OPENING_MS = 1000;
 
 export function Dock({ session }: { session: PhoneSession }): JSX.Element {
   const prompts = useAppState((s) => s.prompts);
   const ref = session.ref;
   const shown = useMemo(() => cardFor(prompts, ref), [prompts, ref]);
+  const [drafts, setDrafts] = useState<ReadonlyMap<string, CardUI>>(() => new Map());
   const id = shown === null ? null : shown.prompt.id;
-  const held = useTapGuard(id);
+  const ui = id === null ? FRESH_CARD_UI : (drafts.get(id) ?? FRESH_CARD_UI);
+  const view = shown === null ? null : cardView(shown.card, ui, session.capabilities.answer.available);
+  const held = useTapGuard(id, view);
+  const setUI = (next: CardUI): void => {
+    if (id === null) return;
+    setDrafts((before) => {
+      const after = new Map<string, CardUI>();
+      for (const [promptID, kept] of before) if (Object.hasOwn(prompts.cards, cardKey(ref, promptID))) after.set(promptID, kept);
+      after.set(id, next);
+      return after;
+    });
+  };
   return (
     <div className="dock">
-      {shown !== null && <PromptCard key={shown.prompt.id} session={session} prompt={shown.prompt} card={shown.card} held={held} />}
+      {shown !== null && (
+        <PromptCard key={shown.prompt.id} session={session} prompt={shown.prompt} card={shown.card} held={held} ui={ui} setUI={setUI} />
+      )}
       <Composer session={session} />
     </div>
   );
 }
 
+/** The card the dock shows: its prompt's ID and its `cardView`, each null while it shows none. */
+interface Shown {
+  id: string | null;
+  view: string | null;
+}
+
 /**
- * Whether the card of prompt `id` keeps its choices disabled now: from the first render that
- * shows it in place of another prompt's card until `TAP_GUARD_MS` later. The first render is
- * covered by comparing with the prompt shown last before the effect records it, so no frame
- * ever draws the new card's choices enabled; the timer covers the rest.
+ * Whether the card of prompt `id`, in `view`, keeps its choices disabled now: from the first
+ * render that shows it after a change that holds (`holds`) until `TAP_GUARD_MS` later. The first
+ * render is covered by comparing with the card shown last before the effect records it, so no
+ * frame ever draws the choices enabled; the timer covers the rest.
  */
-function useTapGuard(id: string | null): boolean {
-  /** The prompt the dock showed last, kept while it shows none. */
-  const last = useRef<string | null>(null);
-  const [held, setHeld] = useState<string | null>(null);
+function useTapGuard(id: string | null, view: string | null): boolean {
+  const [opening, setOpening] = useState(true);
+  /** The card the dock showed last. */
+  const last = useRef<Shown>({ id: null, view: null });
+  const [held, setHeld] = useState<Shown | null>(null);
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
 
   useLayoutEffect(() => {
-    if (id === null || last.current === id) return;
     const before = last.current;
-    last.current = id;
-    if (before === null) return;
-    setHeld(id);
+    if (before.id === id && before.view === view) return;
+    const now: Shown = { id, view };
+    last.current = now;
+    if (!holds(before, now, opening)) return;
+    setHeld(now);
     const timer = setTimeout(() => {
       timers.current.delete(timer);
-      setHeld((h) => (h === id ? null : h));
+      setHeld((h) => (h === now ? null : h));
     }, TAP_GUARD_MS);
     timers.current.add(timer);
-  }, [id]);
+  }, [id, view, opening]);
 
   useEffect(() => {
+    const timer = setTimeout(() => setOpening(false), OPENING_MS);
     const pending = timers.current;
     return () => {
-      for (const timer of pending) clearTimeout(timer);
+      clearTimeout(timer);
+      for (const t of pending) clearTimeout(t);
       pending.clear();
     };
   }, []);
 
   if (id === null) return false;
-  return held === id || (last.current !== null && last.current !== id);
+  if (held !== null && held.id === id && held.view === view) return true;
+  const before = last.current;
+  return (before.id !== id || before.view !== view) && holds(before, { id, view }, opening);
+}
+
+/**
+ * Whether the dock's change from showing `before` to showing `after` holds the new card's
+ * choices: the same prompt's card in another view, another prompt's card, or a card after none
+ * unless the dock is still `opening`.
+ */
+function holds(before: Shown, after: Shown, opening: boolean): boolean {
+  if (after.id === null) return false;
+  if (before.id === after.id) return before.view !== after.view;
+  return before.id !== null || !opening;
 }
