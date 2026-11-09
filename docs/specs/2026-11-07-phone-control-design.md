@@ -327,8 +327,8 @@ section 7 says. The optional fields:
 - **Text** – the text of a message, thinking, a slash command or a system note, cut as section 7
   says.
 - **Tool calls and subagents** – the tool's name, a short target, and the status (running, ok or
-  error). A failed call adds its exit code (`exitCode`). A subagent adds its agent type and item
-  count.
+  error). A failed tool call adds its exit code (`exitCode`). A subagent adds its agent type and
+  item count, and never an exit code.
 - **File edits** – the tool's name, the file's name as the target, the file's path (`path`), and
   the lines added and removed.
 - **Slash commands** – the command's output (`output`).
@@ -484,22 +484,32 @@ the phone does not show it until tapped.
     "exit 2". A failed call whose result names no code, such as a refused permission, reads
     "failed".
 - **File edits** (Edit, Write, MultiEdit) – the file's path and the line counts, such as
-  `+12 −3`, counted on the laptop. Nothing more is shown on the phone.
+  `+12 −3`, counted on the laptop. Nothing more is shown on the phone, and a file edit carries no
+  exit code.
   - **The path** is relative to the worktree when the file is inside it, and as the tool wrote it
-    otherwise, so a file outside the worktree shows its absolute path. A path longer than 512
-    bytes as encoded is left out, and the row names the file instead.
+    otherwise, so a file outside the worktree shows its absolute path. Repeated slashes and `.`
+    segments are left out before the path is compared with the worktree's, and a path with a `..`
+    segment counts as outside. A remote session has no worktree on the laptop to compare with, so
+    its paths are always as the tool wrote them. A path longer than 512 bytes as encoded is left
+    out, and the row names the file instead.
+  - **The row dims the path's folders**, and when the path is too long for the row the folders
+    give way first, cut with an ellipsis, so the file's name shows whole unless it alone is wider
+    than the row.
 - **Subagents** – one row with the agent type and its item count. Its items arrive on tap.
 - **Thinking, system reminders and hook output** – sent only while "Show details" is on.
   - **Each system note carries its kind**, one of the kinds the laptop's transcript sorts system
     text into, and the phone labels the note by it: Hook, Reminder, Environment, Command, Skill,
     Background, File, Compacted or Info. A kind the phone does not know reads "System".
 - **Slash commands** – a small row with the command and its output, below it as plain text with
-  its line breaks kept.
+  its line breaks kept. A cut command's "Show more" sits with the command, above the output.
   - **The output** is what Claude Code records for a local command: the text of each
     `<local-command-stdout>` and `<local-command-stderr>` tag on the line whose `parentUuid` names
     the command's line, joined in order, with terminal escape codes removed, and cut to 1 KB as
     encoded, ending in an ellipsis.
-  - **Output written after the command's row** arrives as `transcript.update` of that row. An
+  - **Output written after the command's row** arrives as `transcript.update` of that row. Claude
+    Code writes a command's output on the line after the command's, so the daemon keeps only the
+    newest 16 slash rows with no output waiting for one, from the first page and live lines. A
+    skill or prompt command, which never gets output, drops out as newer slash rows arrive. An
     older page joins output that the newer range holds, from the index the daemon keeps for the
     open transcript.
   - **With "Show details" on,** the output's own lines also show, as Hook notes, since the
