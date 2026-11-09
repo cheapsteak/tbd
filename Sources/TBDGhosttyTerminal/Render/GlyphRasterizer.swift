@@ -4,10 +4,12 @@
 // Grayscale glyphs go into an 8-bit alpha bitmap, colour glyphs (Apple Color Emoji) into BGRA with
 // *premultiplied* alpha, matching the two atlas formats. Subpixel positioning is on with
 // quantization off, so a glyph drawn at a fractional pen position looks the same everywhere.
-// A face without a real bold gets synthetic bold (fill + stroke). A colour or wide glyph that does
-// not fit the grapheme's 1- or 2-cell box is uniformly scaled down until it does — Apple Color Emoji
-// at terminal sizes routinely overflows vertically. Narrow text may overhang its cell instead
-// (`narrowTextOverhang`), and a wide glyph is centred in its two cells.
+// Every glyph is filled, never stroked, as SwiftTerm draws it: bold is heavier only where the
+// family has a bold face, so a family without one draws bold at its regular weight (see
+// `FontSet`). A colour or wide glyph that does not fit the grapheme's 1- or 2-cell box is uniformly
+// scaled down until it does — Apple Color Emoji at terminal sizes routinely overflows vertically.
+// Narrow text may overhang its cell instead (`narrowTextOverhang`), and a wide glyph is centred in
+// its two cells.
 //
 // `thicken` turns on CoreText "font smoothing" for grayscale glyphs. On an alpha-only context that
 // is not LCD filtering but a stem-darkening pass (Ghostty's `font-thicken`): about 17 % more
@@ -75,17 +77,14 @@ final class GlyphRasterizer {
         self.padding = max(0, padding) + (thicken ? 1 : 0)
     }
 
-    /// Rasterizes a shaped grapheme. Returns `nil` for an empty cluster (space, control, no coverage).
-    func rasterize(_ shaped: ShapedGrapheme, style: FontStyle = .regular) -> RasterizedGlyph? {
+    /// Rasterizes a shaped grapheme in the face it was shaped with. Returns `nil` for an empty
+    /// cluster (space, control, no coverage).
+    func rasterize(_ shaped: ShapedGrapheme) -> RasterizedGlyph? {
         guard !shaped.glyphs.isEmpty else { return nil }
 
         let font = shaped.font
         let glyphIDs = shaped.glyphs.map(\.glyph)
         let positions = shaped.glyphs.map { CGPoint(x: $0.xOffset, y: $0.yOffset) }
-
-        // Synthetic bold only when the *family* has no bold face and bold was asked for.
-        let synthesizeBold = style.isBold && fontSet.needsSyntheticBold
-        let strokeWidth = synthesizeBold ? max(1, CTFontGetSize(font) * 0.03) : 0
 
         var bounds = [CGRect](repeating: .zero, count: glyphIDs.count)
         _ = CTFontGetBoundingRectsForGlyphs(font, .horizontal, glyphIDs, &bounds, glyphIDs.count)
@@ -95,7 +94,6 @@ final class GlyphRasterizer {
             union = union.union(rect.offsetBy(dx: positions[i].x, dy: positions[i].y))
         }
         guard !union.isNull, union.width > 0, union.height > 0 else { return nil }
-        if strokeWidth > 0 { union = union.insetBy(dx: -strokeWidth, dy: -strokeWidth) }
 
         // Fit into the grapheme's cell box. Narrow text gets a box `narrowTextOverhang` times the
         // cell instead, so in practice it is drawn at its natural size.
@@ -174,19 +172,10 @@ final class GlyphRasterizer {
 
             if isColor {
                 ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
-            } else {
-                let opaque = CGColor(colorSpace: grayColorSpace, components: [1, 1])
-                if let opaque {
-                    ctx.setFillColor(opaque)
-                    ctx.setStrokeColor(opaque)
-                }
+            } else if let opaque = CGColor(colorSpace: grayColorSpace, components: [1, 1]) {
+                ctx.setFillColor(opaque)
             }
-            if strokeWidth > 0 {
-                ctx.setLineWidth(strokeWidth)
-                ctx.setTextDrawingMode(.fillStroke)
-            } else {
-                ctx.setTextDrawingMode(.fill)
-            }
+            ctx.setTextDrawingMode(.fill)
 
             CTFontDrawGlyphs(font, glyphIDs, positions, glyphIDs.count, ctx)
             return true
@@ -211,11 +200,11 @@ final class GlyphRasterizer {
     /// natural size, as SwiftTerm draws it: SwiftTerm fits only multi-cell glyphs, and Ghostty too
     /// lets ordinary text overflow its rounded cell. With the cell width rounded to the nearest
     /// pixel, `%&@` in Monaco 12 pt and `#WX_w~` in Menlo 12 pt have ink up to 0.6 px wider than
-    /// their 14 px cell at 2x, a slanted italic or a synthetic bold reaches further, and fallback
-    /// symbols such as `●` and `⧉` are wider still. Scaling them down would make them smaller and
-    /// softer than SwiftTerm draws them. The overhang is not clipped: the background pass paints
-    /// every cell before any glyph is drawn. Only ink more than twice its cell, which takes a stack
-    /// of combining marks or an outsized icon, is scaled, to keep its bitmap bounded.
+    /// their 14 px cell at 2x, Menlo's italic `WX` reaches further, and fallback symbols such as `●`
+    /// and `⧉` are wider still. Scaling them down would make them smaller and softer than SwiftTerm
+    /// draws them. The overhang is not clipped: the background pass paints every cell before any
+    /// glyph is drawn. Only ink more than twice its cell, which takes a stack of combining marks or
+    /// an outsized icon, is scaled, to keep its bitmap bounded.
     ///
     /// The allowance holds vertically too, because SwiftTerm leaves every one-cell glyph as drawn: a
     /// narrow glyph taller than its row, such as stacked combining marks or a tall fallback symbol,
