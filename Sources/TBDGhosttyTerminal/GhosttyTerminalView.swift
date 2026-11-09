@@ -1294,10 +1294,18 @@ public final class GhosttyTerminalView: NSView {
     /// so a no here stays true until this frame takes them. The tracker is asked on every tick,
     /// full ring or not, so its timers run on every frame's `now`, whichever of the two holds the
     /// frame back.
+    ///
+    /// A frame it holds back is handed to the drawable tracker's `presentTiming`, the diagnostic
+    /// for the bulk-output frame cap, which records what the frame found and changes nothing.
     private func isGPUBehind(now: Duration) -> Bool {
         let ringHasFreeSlot = surface.frameRing?.hasFreeSlot ?? true
         let awaitingPresent = drawableTracker.awaitingPresent(now: now)
-        return !ringHasFreeSlot || awaitingPresent >= drawableTracker.limit
+        let behind = !ringHasFreeSlot || awaitingPresent >= drawableTracker.limit
+        if behind {
+            drawableTracker.noteGPUBehind(
+                now: now, ringHasFreeSlot: ringHasFreeSlot, awaitingPresent: awaitingPresent)
+        }
+        return behind
     }
 
     // MARK: - Cursor blink

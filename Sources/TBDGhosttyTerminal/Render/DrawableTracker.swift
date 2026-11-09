@@ -71,6 +71,9 @@ final class DrawableTracker: Sendable {
         var lastReportAt: Duration?
         /// A report with no `presentedTime` came in, and no check has dated it yet.
         var undatedReportPending = false
+        /// The latest `presentedTime` reported, for `noteGPUBehind`: `lastReportAt` without the
+        /// dates a check gives undated reports.
+        var lastPresentedAt: Duration?
         /// Set by a nil drawable: the pool is full whatever the entries say.
         var hold: LimitHold?
         /// Whether this run of unreported presents has logged its notice. A report ends the run.
@@ -85,10 +88,17 @@ final class DrawableTracker: Sendable {
 
     /// The count a full pool reports: `TerminalRenderer.maxDrawablesAwaitingPresent`.
     let limit: Int
+    /// The diagnostic for the bulk-output frame cap: how late this view's reports come, and what
+    /// each dropped tick found. It reads the tracker and changes nothing.
+    let presentTiming: PresentTimingLog
     private let state = Mutex(State())
 
-    init(limit: Int = TerminalRenderer.maxDrawablesAwaitingPresent) {
+    init(
+        limit: Int = TerminalRenderer.maxDrawablesAwaitingPresent,
+        presentTiming: PresentTimingLog = PresentTimingLog()
+    ) {
         self.limit = limit
+        self.presentTiming = presentTiming
     }
 
     // MARK: - The frame's side (main)
@@ -193,6 +203,23 @@ final class DrawableTracker: Sendable {
         }
     }
 
+    /// A display tick due at `now` dropped its frame for the GPU: hands `presentTiming` the age of
+    /// each entry, and how long ago the newest dated present reached the screen. Reads the state
+    /// and changes none of it, so it runs no recovery, as `entryCount` does not.
+    ///
+    /// - Parameters:
+    ///   - ringHasFreeSlot: whether the surface's ring had a slot free.
+    ///   - awaitingPresent: what `awaitingPresent(now:)` reported to the tick.
+    func noteGPUBehind(now: Duration, ringHasFreeSlot: Bool, awaitingPresent: Int) {
+        let sample = state.withLock { state in
+            GPUBehindSample(
+                ringHasFreeSlot: ringHasFreeSlot, awaitingPresent: awaitingPresent,
+                entryAges: state.entries.map { now - $0.acquiredAt },
+                sinceLastPresent: state.lastPresentedAt.map { now - $0 })
+        }
+        presentTiming.noteGPUBehind(sample)
+    }
+
     // MARK: - Metal's side (any thread)
 
     /// The drawable `id` was reported presented. Removes it and every older entry, since a layer's
@@ -213,6 +240,7 @@ final class DrawableTracker: Sendable {
             if presentedTime > 0 {
                 let presentedAt = Duration.seconds(presentedTime)
                 state.lastReportAt = max(state.lastReportAt ?? presentedAt, presentedAt)
+                state.lastPresentedAt = max(state.lastPresentedAt ?? presentedAt, presentedAt)
             } else {
                 state.skippedPresents += 1
                 state.undatedReportPending = true
