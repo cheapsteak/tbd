@@ -183,6 +183,7 @@ test('an error for an open that a later open replaced is ignored', async () => {
   assert.equal(h.t().phase, 'opening');
   assert.equal(h.t().error, null);
   assert.equal(h.count('transcript.open'), 2);
+  assert.equal(h.count('transcript.close'), 0);
 });
 
 test("an open that fails shows the laptop's message", async () => {
@@ -198,6 +199,76 @@ test("an open that fails shows the laptop's message", async () => {
   assert.equal(h.count('transcript.open'), 1);
 });
 
+const REFUSED_TEXT = 'The remote session did not load. Try again later.';
+
+test('an open the laptop refuses closes the transcript the laptop still sends, and its failure stays on screen', async () => {
+  const reopens: Array<[string, (h: ReturnType<typeof harness>) => void, PhoneSessionRef]> = [
+    ['another session', (h) => h.actions.openSession(OTHER), OTHER],
+    ['Show details', (h) => h.actions.setShowDetails(true), R],
+  ];
+  for (const [name, reopen, ref] of reopens) {
+    const h = await showing();
+    reopen(h);
+    assert.equal(h.count('transcript.close'), 0, name);
+    h.last('transcript.open').reject(new AppError('unavailable', REFUSED_TEXT));
+    await flush();
+    // A refused open leaves the laptop sending the transcript it opened before, so the phone closes it.
+    assert.deepEqual(h.requests().at(-1), ['transcript.close', {}], name);
+    assert.equal(h.t().pendingClose, true, name);
+    assert.equal(h.t().phase, 'failed', name);
+    assert.equal(h.t().error, REFUSED_TEXT, name);
+    assert.deepEqual(h.t().ref, ref, name);
+    h.last('transcript.close').resolve({});
+    await flush();
+    assert.equal(h.t().pendingClose, false, name);
+    assert.equal(h.t().phase, 'failed', name);
+    assert.equal(h.t().error, REFUSED_TEXT, name);
+    // Nothing tries again by itself, and the next up opens again with no second close.
+    assert.equal(h.count('transcript.open'), 2, name);
+    reconnect(h);
+    assert.deepEqual(h.requests().slice(-2), [
+      ['sessions.subscribe', {}],
+      ['transcript.open', { session: ref, showDetails: name === 'Show details', resume: false }],
+    ], name);
+    assert.equal(h.count('transcript.close'), 1, name);
+  }
+});
+
+test('the close a refused open sent, lost to a dropped channel, goes out again on the next up ahead of the fresh open, which then lands', async () => {
+  const h = await showing();
+  h.actions.openSession(OTHER);
+  h.last('transcript.open').reject(new AppError('unavailable', REFUSED_TEXT));
+  await flush();
+  const lost = h.last('transcript.close');
+  reconnect(h, [lost]);
+  // The close first, so the laptop takes it before the open, and it cannot close what the open opens.
+  assert.deepEqual(h.requests().slice(-3), [
+    ['sessions.subscribe', {}],
+    ['transcript.close', {}],
+    ['transcript.open', { session: OTHER, showDetails: false, resume: false }],
+  ]);
+  await flush();
+  assert.equal(h.t().phase, 'opening');
+  assert.deepEqual(h.t().ref, OTHER);
+  h.last('transcript.open').resolve({ resumed: false, seq: 30, page: page([item('o1')]) });
+  await flush();
+  h.last('transcript.close').resolve({});
+  await flush();
+  // The close's reply changes nothing of the open that came after it.
+  assert.equal(h.t().phase, 'open');
+  assert.deepEqual(h.t().ref, OTHER);
+  assert.deepEqual(ids(h.t()), ['o1']);
+  assert.equal(h.t().pendingClose, false);
+  assert.equal(h.t().error, null);
+  // The next up resumes it, and sends no close.
+  reconnect(h);
+  assert.deepEqual(h.requests().slice(-2), [
+    ['sessions.subscribe', {}],
+    ['transcript.open', { session: OTHER, showDetails: false, resume: true }],
+  ]);
+  assert.equal(h.count('transcript.close'), 2);
+});
+
 test('a superseded open is silent and leaves the slice opening', async () => {
   const h = harness();
   h.actions.openSession(R);
@@ -205,6 +276,7 @@ test('a superseded open is silent and leaves the slice opening', async () => {
   await flush();
   assert.equal(h.t().phase, 'opening');
   assert.equal(h.t().error, null);
+  assert.equal(h.count('transcript.close'), 0);
 });
 
 test('events that come while the transcript opens again are dropped, and its page replaces the rows', async () => {
@@ -295,10 +367,12 @@ test('a resume the laptop refuses opens again from the tail, once', async () => 
   await flush();
   assert.equal(h.count('transcript.open'), 3);
   assert.deepEqual(h.last('transcript.open').params, { session: R, showDetails: false, resume: false });
-  // The fresh open's own failure shows, and nothing more is sent.
+  assert.equal(h.count('transcript.close'), 0);
+  // The fresh open's own failure shows, and only the close of what the laptop still sends goes out.
   h.last('transcript.open').reject(new AppError('not_found', 'That session is not on the laptop.'));
   await flush();
   assert.equal(h.count('transcript.open'), 3);
+  assert.equal(h.count('transcript.close'), 1);
   assert.equal(h.t().phase, 'failed');
   assert.equal(h.t().error, 'That session is not on the laptop.');
 });
@@ -893,4 +967,25 @@ test('with the real client, a close the channel dropped goes out again under a n
   client.handle({ t: 'channel', up: true });
   assert.deepEqual(methods(posted), ['sessions.subscribe', 'transcript.close']);
   assert.notEqual(posted[1]!.requestID, lost.requestID);
+});
+
+test('with the real client, a refused open posts its close, and a channel up posts that close again ahead of the fresh open', async () => {
+  const { client, posted, store, actions } = wired();
+  client.handle({ t: 'channel', up: true });
+  replyTo(client, posted[0], snapshot());
+  await flush();
+  actions.openSession(R);
+  replyTo(client, posted[1], { resumed: false, seq: 10, page: page([item('u1')]) });
+  await flush();
+  actions.openSession(OTHER);
+  const refused = posted.at(-1)!;
+  client.handle({ t: 'app', body: { kind: 'reply', requestID: refused.requestID, error: { code: 'unavailable', message: REFUSED_TEXT } } });
+  await flush();
+  assert.deepEqual(methods(posted).slice(-2), ['transcript.open', 'transcript.close']);
+  assert.equal(store.get().transcript.error, REFUSED_TEXT);
+  client.handle({ t: 'channel', up: false });
+  posted.length = 0;
+  client.handle({ t: 'channel', up: true });
+  assert.deepEqual(methods(posted), ['sessions.subscribe', 'transcript.close', 'transcript.open']);
+  assert.deepEqual(posted[2]!.params, { session: OTHER, showDetails: false, resume: false });
 });

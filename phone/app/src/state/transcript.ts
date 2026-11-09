@@ -206,7 +206,8 @@ export function settleStalePage(s: TranscriptState, requestID: string): Transcri
  * Opening another starts with none. Either way, an older page still on its way is dropped
  * (`dropOlder`), since it belongs above rows the open replaces, and the new open may page at
  * once: a stale page holds no new open's turn. A close still unanswered no longer matters,
- * since the open replaces whatever the laptop had open.
+ * since the open replaces whatever the laptop had open, and an open the laptop refuses sends a
+ * close of its own (`actions/transcript.ts`).
  */
 export function beginOpen(s: TranscriptState, ref: PhoneSessionRef, showDetails: boolean, requestID: string): TranscriptState {
   const base = s.ref !== null && sameRef(s.ref, ref) ? s : clearTranscript(s);

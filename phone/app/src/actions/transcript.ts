@@ -27,8 +27,16 @@
  *   next up.
  * - **An open that never landed** (`opening`, or `failed`) goes out again as a fresh open,
  *   since the phone has no page of it to keep.
- * - **A close still unanswered**, with no transcript open since, goes out again: the laptop may
- *   still be sending that transcript.
+ * - **A close still unanswered**, with no transcript open since or after a refused open, goes
+ *   out again: the laptop may still be sending that transcript. It goes out ahead of the fresh
+ *   open of a failed one, so the laptop takes the close first. A close never stops a transcript
+ *   that an open sent after it opened (4b `closeTranscript`, `PhoneAppService+Transcript.swift`).
+ *
+ * **A refused open.** The laptop checks an open before it replaces anything, so an open it
+ * refuses leaves it sending the transcript it opened before: the previous session's, when
+ * another session's open is refused, or the same session's, when an open for a change of "Show
+ * details" is. So a refusal sends `transcript.close {}`, which the slice waits on (`pendingClose`)
+ * as it does on any close, while the slice keeps the failure on screen.
  *
  * **A session with no transcript.** No open goes out for a session the sessions list shows with
  * its transcript unavailable (`capabilities.transcript`), as a Codex session's is: not when it is
@@ -169,7 +177,8 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
    * - a refused resume opens again, fresh, once. The laptop refuses a resume it can no longer
    *   honour ("The transcript changed while it was opened. Try again.") and expects the phone
    *   to open again, and a fresh open meets the same checks a resume does;
-   * - any other error fails the open with the laptop's message.
+   * - any other error fails the open with the laptop's message, and closes the transcript the
+   *   laptop still sends (`sendClose`, this file's header).
    */
   function open(ref: PhoneSessionRef, showDetails: boolean, resume: boolean): void {
     const { sessions } = store.get();
@@ -191,7 +200,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
           open(ref, showDetails, false);
           return;
         }
-        setTranscript((t) => ({
+        sendClose((t) => ({
           ...clearTranscript(t), ref: t.ref, showDetails: t.showDetails, openRequestID: t.openRequestID, phase: 'failed',
           error: messageOf(error),
         }));
@@ -199,15 +208,21 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     );
   }
 
-  /**
-   * Empties the slice and sends `transcript.close {}`, which the slice waits on (`pendingClose`)
-   * until the laptop answers. A superseded close leaves the wait standing, so the next channel
-   * up sends a fresh one.
-   */
+  /** Empties the slice and sends `transcript.close {}` (`sendClose`). */
   function close(): void {
+    sendClose(clearTranscript);
+  }
+
+  /**
+   * Sends `transcript.close {}`, which the slice, as `fn` leaves it, waits on (`pendingClose`)
+   * until the laptop answers. A superseded close leaves the wait standing, so the next channel
+   * up sends a fresh one. Only the last close sent ends the wait (`closeToken`), and the answer
+   * changes nothing else in the slice.
+   */
+  function sendClose(fn: (t: TranscriptState) => TranscriptState): void {
     const token = newRequestID();
     closeToken = token;
-    setTranscript((t) => ({ ...clearTranscript(t), pendingClose: true }));
+    setTranscript((t) => ({ ...fn(t), pendingClose: true }));
     const answered = (): void => {
       if (closeToken !== token) return;
       closeToken = null;
@@ -420,8 +435,9 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     /** The channel came up: what this file's header lists, sent in `onUp`'s turn. */
     resumeTranscriptOnUp(): void {
       const t = store.get().transcript;
+      // The close first, so the laptop takes it before the open that follows.
+      if (t.pendingClose) sendClose((s) => s);
       if (t.ref !== null) open(t.ref, t.showDetails, t.phase === 'open');
-      else if (t.pendingClose) close();
     },
 
     /** "Show details" changed: the open transcript opens again with it. */
