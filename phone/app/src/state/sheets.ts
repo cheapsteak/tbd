@@ -328,15 +328,19 @@ export function switchBlock(session: PhoneSession, profiles: readonly PhoneProfi
 }
 
 /**
- * Whether a switch of `session` moves it rather than restarting it: the list shows it parked. The
- * laptop restarts a running session under the profile in its tab, and moves a parked one to the
- * profile without waking it, so it stays parked and wakes under that profile later.
+ * Whether a switch of `session` would move it rather than restart it, as far as the list knows: the
+ * list shows it parked. The laptop restarts a running session under the profile in its tab, and
+ * moves a parked one to the profile without waking it, so it stays parked and wakes under that
+ * profile later. The laptop decides from its own row, which the list can lag (a parked session can
+ * wake before the tap) or show otherwise (a parked session with an open prompt shows
+ * `waitingForYou`), so this sets only the words before the tap; the toast after it comes from the
+ * reply (`switchedToast`).
  */
 export function switchMoves(session: PhoneSession): boolean {
   return session.status.chip === 'parked';
 }
 
-/** What the switch says in each place it shows, for a session it restarts or one it moves. */
+/** What the switch says before the tap, in each place it shows, for a session it restarts or one it moves. */
 export interface SwitchWords {
   /** The Switch account sheet's line under its title. */
   readonly sub: string;
@@ -346,8 +350,6 @@ export interface SwitchWords {
   question(name: string): string;
   /** The ask's button that switches. */
   readonly button: string;
-  /** The toast once the switch to the profile named `name` went through. */
-  toast(name: string): string;
 }
 
 const RESTART_WORDS: SwitchWords = {
@@ -355,7 +357,6 @@ const RESTART_WORDS: SwitchWords = {
   row: 'Restarts in this tab.',
   question: (name) => `Restart this session under ${name}?`,
   button: 'Restart',
-  toast: (name) => `Restarted under ${name}`,
 };
 
 const MOVE_WORDS: SwitchWords = {
@@ -363,8 +364,17 @@ const MOVE_WORDS: SwitchWords = {
   row: 'Stays parked.',
   question: (name) => `Move this session to ${name}?`,
   button: 'Move',
-  toast: (name) => `Moved to ${name}`,
 };
+
+/**
+ * The toast once a switch to the profile named `name` went through, from what the laptop's reply
+ * says it did (`SessionSwitchProfileResult.parked`), never from the list read before the tap:
+ * "Moved to <name>" when the reply shows the session parked, since the laptop moved it and left it
+ * parked, else "Restarted under <name>".
+ */
+export function switchedToast(name: string, parked: boolean): string {
+  return parked ? `Moved to ${name}` : `Restarted under ${name}`;
+}
 
 /** The switch's words for `session`: a move's while the list shows it parked (`switchMoves`), else a restart's. */
 export function switchWords(session: PhoneSession): SwitchWords {

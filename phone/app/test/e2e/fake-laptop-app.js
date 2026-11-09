@@ -667,12 +667,13 @@ export function createFakeLaptop({ scenario = {}, emit, now = () => Date.now(), 
         reply(request, failure('not_found', TEXT.noSuchProfile));
         return;
       }
-      reply(request, { result: { session: found.session.ref } });
+      // A running session restarts under the profile; a parked one moves to it and stays parked,
+      // as the laptop does, and the reply says which.
+      const parked = found.session.status?.chip === 'parked';
+      reply(request, { result: { session: found.session.ref, parked } });
       defer(() => {
         setProfile(found.session, profile);
-        // A running session restarts under the profile; a parked one moves to it and stays
-        // parked, as the laptop does.
-        if (found.session.status?.chip !== 'parked') setChip(found, 'idle');
+        if (!parked) setChip(found, 'idle');
         announceRow(found.row);
       });
     },

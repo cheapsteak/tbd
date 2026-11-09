@@ -15,8 +15,8 @@ import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import {
   beginCreate, currentProfileID, emptySheets, enumChoices, fieldOn, fieldProblem, fieldText, forkOrder, isActing, isWholeNumber,
-  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, sheetShows, switchWords,
-  WHOLE_NUMBER_TEXT, withFieldBadInput, withFieldOn, withFieldText,
+  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, sheetShows, switchedToast,
+  switchWords, WHOLE_NUMBER_TEXT, withFieldBadInput, withFieldOn, withFieldText,
 } from '../state/sheets.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, SheetState } from '../state/store.ts';
@@ -164,7 +164,7 @@ test('a switch sends session.switchProfile once with the picked profile, and toa
   assert.equal(isActing(h.state().sheets, R), true);
   assert.equal(h.state().ui.toast, null);
   assert.notEqual(h.state().ui.menu, null);
-  h.last('session.switchProfile').resolve({ session: R });
+  h.last('session.switchProfile').resolve({ session: R, parked: false });
   await pending;
   assert.equal(isActing(h.state().sheets, R), false);
   assert.equal(h.state().ui.toast?.text, 'Restarted under Personal');
@@ -202,7 +202,7 @@ test("a refused switch shows in the account menu's ask and in the composer, and 
   // The next gesture clears the words.
   assert.equal(h.state().sheets.failed, null);
   assert.equal(h.of('session.switchProfile').length, 2);
-  h.last('session.switchProfile').resolve({ session: R });
+  h.last('session.switchProfile').resolve({ session: R, parked: false });
   await again;
 });
 
@@ -265,7 +265,7 @@ test('a switch that succeeds closes the sheet it came from, but not one opened s
   const pending = h.actions.switchProfile(PERSONAL.id, R);
   h.actions.openSheet({ name: 'switch' });
   const since = h.state().ui.sheet;
-  h.last('session.switchProfile').resolve({ session: R });
+  h.last('session.switchProfile').resolve({ session: R, parked: false });
   await pending;
   assert.equal(h.state().ui.sheet, since);
   assert.equal(h.state().ui.toast?.text, 'Restarted under Personal');
@@ -310,7 +310,7 @@ test('a failure or a success reaches only the sheet the tap was made in, never o
   tapped = h.state().ui.sheet!;
   pending = h.actions.switchProfile(PERSONAL.id, R);
   since = reopen(h, tapped);
-  h.last('session.switchProfile').resolve({ session: R });
+  h.last('session.switchProfile').resolve({ session: R, parked: false });
   await pending;
   assert.equal(h.state().ui.sheet, since);
   // The sheet the tap was made in still gets them while it shows, whatever else changes meanwhile.
@@ -425,12 +425,12 @@ test("a parked session forks from switch-confirm as a running one does, and its 
   assert.equal(h.state().sheets.failed, null);
   assert.equal(h.state().ui.toast?.text, 'Forked into a new tab, under Personal');
   assert.deepEqual(h.state().ui.pendingOpen, { ref: made });
-  // The switch goes out the same way, and its toast says the session moved, since the laptop
-  // leaves a parked session parked.
+  // The switch goes out the same way, and its toast says the session moved, since the laptop's
+  // reply says it left the session parked.
   h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
   pending = h.actions.switchProfile(PERSONAL.id, R);
   assert.deepEqual(h.of('session.switchProfile').map((r) => r.params), [{ session: R, profileID: PERSONAL.id }]);
-  h.last('session.switchProfile').resolve({ session: R });
+  h.last('session.switchProfile').resolve({ session: R, parked: true });
   await pending;
   assert.equal(h.state().ui.toast?.text, 'Moved to Personal');
 });
@@ -672,7 +672,6 @@ test("a switch's words restart a session the list shows running and move one it 
   assert.equal(running.row, 'Restarts in this tab.');
   assert.equal(running.question('Personal'), 'Restart this session under Personal?');
   assert.equal(running.button, 'Restart');
-  assert.equal(running.toast('Personal'), 'Restarted under Personal');
   for (const chip of ['working', 'waitingForYou', 'error'] as const) {
     assert.equal(switchWords(session(R, { status: { chip, changedAt: 1 } })), running, chip);
   }
@@ -681,7 +680,33 @@ test("a switch's words restart a session the list shows running and move one it 
   assert.equal(parked.row, 'Stays parked.');
   assert.equal(parked.question('Personal'), 'Move this session to Personal?');
   assert.equal(parked.button, 'Move');
-  assert.equal(parked.toast('Personal'), 'Moved to Personal');
+});
+
+test("a switch's toast moves for a reply that says parked and restarts for one that does not", () => {
+  assert.equal(switchedToast('Personal', true), 'Moved to Personal');
+  assert.equal(switchedToast('Personal', false), 'Restarted under Personal');
+});
+
+test("a switch's toast says what the laptop's reply says it did, not what the list showed at the tap", async () => {
+  const cases = [
+    // The list showed it parked, but it woke before the switch ran, so the laptop restarted it.
+    { chip: 'parked', parked: false, toast: 'Restarted under Personal' },
+    // The list showed it running, or an open prompt on it, but the laptop's row was parked, so the
+    // laptop moved it and left it parked.
+    { chip: 'idle', parked: true, toast: 'Moved to Personal' },
+    { chip: 'waitingForYou', parked: true, toast: 'Moved to Personal' },
+    // And where the two agree.
+    { chip: 'parked', parked: true, toast: 'Moved to Personal' },
+    { chip: 'working', parked: false, toast: 'Restarted under Personal' },
+  ] as const;
+  for (const c of cases) {
+    const h = await harness({ sessions: [session(R, { status: { chip: c.chip, changedAt: 1 } })] });
+    const pending = h.actions.switchProfile(PERSONAL.id, R);
+    assert.deepEqual(h.acting().map((r) => [r.method, r.params]), [['session.switchProfile', { session: R, profileID: PERSONAL.id }]]);
+    h.last('session.switchProfile').resolve({ session: R, parked: c.parked });
+    await pending;
+    assert.equal(h.state().ui.toast?.text, c.toast, `the list showed ${c.chip}, the reply said parked: ${c.parked}`);
+  }
 });
 
 

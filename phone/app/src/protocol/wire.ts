@@ -21,6 +21,7 @@ import type {
   PhoneSessionRef, PhoneStatus, PhoneStatusChip, PhoneWorktreeCreateParams, PhoneWorktreeCreateResult,
   ProfilesListResult, PromptAnswer, PromptAnswerOutcome, PromptAnswerResult, PromptChangedData, MessageSendParams,
   ResultOf, SessionForkParams, SessionRefResult, SessionSetModelParams, SessionSwitchProfileParams,
+  SessionSwitchProfileResult,
   SessionsChangedData, SessionsSubscribeParams, SessionsSubscribeResult, TranscriptDetailParams, TranscriptDetailPart,
   TranscriptDetailResult, TranscriptItemsData, TranscriptOpenParams, TranscriptOpenResult, TranscriptPage,
   TranscriptPageParams, TranscriptResetData,
@@ -341,6 +342,9 @@ export const decodeSessionForkParams = obj<SessionForkParams>({ session: decodeP
 
 export const decodeSessionRefResult = obj<SessionRefResult>({ session: decodePhoneSessionRef }, {});
 
+export const decodeSessionSwitchProfileResult = obj<SessionSwitchProfileResult>(
+  { session: decodePhoneSessionRef, parked: bool }, {});
+
 export const decodeSessionSetModelParams = obj<SessionSetModelParams>({ session: decodePhoneSessionRef, model: str }, {});
 
 export const decodePhoneWorktreeCreateParams = obj<PhoneWorktreeCreateParams>({ repoID: str, message: str }, {});
@@ -395,7 +399,7 @@ const RESULTS: { readonly [M in Method]: Decoder<ResultOf<M>> } = {
   'message.send': decodeActionOutcomeResult,
   'prompt.answer': decodePromptAnswerResult,
   'profiles.list': decodeProfilesListResult,
-  'session.switchProfile': decodeSessionRefResult,
+  'session.switchProfile': decodeSessionSwitchProfileResult,
   'session.fork': decodeSessionRefResult,
   'session.setModel': decodeActionOutcomeResult,
   'worktree.create': decodePhoneWorktreeCreateResult,

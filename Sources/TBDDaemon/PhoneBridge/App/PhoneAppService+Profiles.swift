@@ -83,17 +83,20 @@ extension PhoneAppService {
     /// Restarts a local Claude session under `params.profileID` in the same
     /// tab: `terminal.swapProfile` in `inPlace` mode. A parked session takes
     /// the swap's cold path, which moves the parked row to the profile and
-    /// does not wake it. The reply is the session's reference, read from the
-    /// row the swap returns.
+    /// does not wake it. The reply is the session's reference and whether it
+    /// is parked, both read from the row the swap returns, so the phone says
+    /// what the laptop did rather than what the phone's list showed before
+    /// the tap.
     nonisolated func sessionSwitchProfile(
         _ params: SessionSwitchProfileParams, _ context: DeviceContext
-    ) async throws -> SessionRefResult {
+    ) async throws -> SessionSwitchProfileResult {
         let terminal = try await swappableTerminal(params.session, needing: { $0.switchProfile })
         guard try await db.modelProfiles.get(id: params.profileID) != nil else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProfileReason)
         }
-        return try await swapProfile(
+        let row = try await swapProfile(
             terminal.id, to: params.profileID, mode: .inPlace, deviceID: context.peer.deviceID)
+        return SessionSwitchProfileResult(session: .local(terminalID: row.id), parked: row.isParked)
     }
 
     // MARK: - session.fork
@@ -115,8 +118,9 @@ extension PhoneAppService {
         if let profileID = params.profileID, try await db.modelProfiles.get(id: profileID) == nil {
             throw PhoneAppError(code: .notFound, message: Self.noSuchProfileReason)
         }
-        return try await swapProfile(
+        let row = try await swapProfile(
             terminal.id, to: params.profileID ?? terminal.profileID, mode: .fork, deviceID: context.peer.deviceID)
+        return SessionRefResult(session: .local(terminalID: row.id))
     }
 
     // MARK: - Shared
@@ -148,18 +152,17 @@ extension PhoneAppService {
 
     /// `terminal.swapProfile` for `terminalID`, onto `profileID` (nil for the
     /// laptop's own login), in `mode`, under the phone `deviceID`, and the
-    /// reference of the terminal row it returns: the session's own row for
-    /// `inPlace`, the new tab's for `fork`, parked or not. A refusal is
-    /// `refused` with the daemon's reason; a result that is not a terminal
-    /// row is `internal`. A revoke noticed before the swap stops it.
+    /// terminal row it returns: the session's own row for `inPlace`, the new
+    /// tab's for `fork`, parked or not. A refusal is `refused` with the
+    /// daemon's reason; a result that is not a terminal row is `internal`. A
+    /// revoke noticed before the swap stops it.
     private nonisolated func swapProfile(
         _ terminalID: UUID, to profileID: UUID?, mode: TerminalSwapMode, deviceID: UUID
-    ) async throws -> SessionRefResult {
+    ) async throws -> TBDShared.Terminal {
         try Task.checkCancellation()
         let response = try await actions.phoneSwapProfile(
             TerminalSwapProfileParams(terminalID: terminalID, newProfileID: profileID, mode: mode),
             deviceID: deviceID)
-        let row = try Self.succeeded(TBDShared.Terminal.self, from: response, method: "terminal.swapProfile")
-        return SessionRefResult(session: .local(terminalID: row.id))
+        return try Self.succeeded(TBDShared.Terminal.self, from: response, method: "terminal.swapProfile")
     }
 }

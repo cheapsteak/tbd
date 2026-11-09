@@ -301,7 +301,10 @@ Requests:
 - **`profiles.list`** – the user's model profiles: ID, name, kind, and which is the default. Never
   a token or other secret.
 - **`session.switchProfile`** – restarts a local Claude session under another profile in the same
-  tab.
+  tab, or, for a parked session, moves it to that profile and leaves it parked. The reply carries
+  the session's reference and `parked`, read from the laptop's row after the switch: true when it
+  moved a parked session, false when it restarted a running one. The phone's toast after the switch
+  follows `parked`, not the status its list showed before the tap.
 - **`session.fork`** – copies a local Claude session's conversation into a new tab, optionally
   under another profile. The reply carries the new session's reference.
 - **`session.setModel`** – sends `/model <name>` to the session through the send path.
@@ -631,13 +634,18 @@ These come from the laptop's bundle.
 - **Switch account** – a profile list, then the question "Restart this session under
   <profile>?" with three answers: Restart, "Fork into a new tab" (the Fork action below, under
   that profile, which leaves this session as it is), and Cancel. The question says when a running
-  turn would stop. A switch that goes through shows "Restarted under <profile>".
+  turn would stop.
   - **A parked session** is moved, not restarted, so the words say so. The menu's Switch account
     row reads "Now <account>. Stays parked." The sheet's line reads "Moves this parked session to
     another profile. It stays parked." The question reads "Move this session to <profile>?", with
     the note "The conversation stays. It stays parked, and wakes under the new profile." The
-    answers are Move, "Fork into a new tab" and Cancel, and a move that goes through shows "Moved
-    to <profile>".
+    answers are Move, "Fork into a new tab" and Cancel.
+  - **The toast** says what the laptop did, from the reply's `parked` (section 4.4): "Moved to
+    <profile>" for a session it moved, "Restarted under <profile>" for one it restarted. The words
+    before the tap follow the status the list shows, which can differ from the laptop's row: a
+    parked session can wake before the tap, and a parked session with an open prompt shows
+    Waiting for you. So the toast can say Restarted after a Move question, or Moved after a
+    Restart one.
 - **Fork** – a profile list, with the current profile first. The fork opens as a new tab, and the
   phone switches to it. A parked session forks the same way, without a wake, and stays parked
   (section 6).
