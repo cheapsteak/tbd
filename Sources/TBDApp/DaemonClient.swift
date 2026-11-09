@@ -314,6 +314,16 @@ actor DaemonClient {
         // read as an unrelated crash. Keep it.
         SocketSIGPIPE.suppress(on: fd)
 
+        // Bound every blocking recv() on this socket. Without this, a
+        // half-dead daemon (connection stays ESTABLISHED with no FIN — e.g.
+        // live tmux-server death) parks the reading thread in recv() forever,
+        // saturating the cooperative pool and freezing the app↔daemon loop.
+        // SO_RCVTIMEO makes recv() return -1/EAGAIN ~every second so callers
+        // can re-check Task cancellation and overall deadlines. Set before
+        // `connect` for the same reason as `SO_NOSIGPIPE` above.
+        var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString
@@ -339,15 +349,6 @@ actor DaemonClient {
             close(fd)
             throw DaemonClientError.daemonNotRunning
         }
-
-        // Bound every blocking recv() on this socket. Without this, a
-        // half-dead daemon (connection stays ESTABLISHED with no FIN — e.g.
-        // live tmux-server death) parks the reading thread in recv() forever,
-        // saturating the cooperative pool and freezing the app↔daemon loop.
-        // SO_RCVTIMEO makes recv() return -1/EAGAIN ~every second so callers
-        // can re-check Task cancellation and overall deadlines.
-        var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
 
         return fd
     }

@@ -321,6 +321,9 @@ actor HolderClient {
         // first.
         var on: Int32 = 1
         _ = setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        // The receive timeout, set before `connect` for the same reason.
+        var timeout = Self.timeval(from: receiveTimeout)
+        _ = setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -343,8 +346,6 @@ actor HolderClient {
             throw Error.cannotConnect(path: socketPath, errno: saved)
         }
 
-        var timeout = Self.timeval(from: receiveTimeout)
-        _ = setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         fd = socketFD
     }
 
