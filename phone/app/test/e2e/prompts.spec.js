@@ -194,7 +194,9 @@ test('while the answer is on its way every choice is disabled', async ({ page, a
   await c.locator('button.opt', { hasText: 'No, this is enough' }).dispatchEvent('click');
   await hostCall(page, 'release', 'prompt.answer');
   await expect(card(page)).toHaveCount(0);
-  expect(await answers(page)).toHaveLength(1);
+  expect(await answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'Yes, add the test' } } },
+  ]);
 });
 
 test('Other sends the typed text, and a blank Other is no answer', async ({ page, appHost }) => {
@@ -392,7 +394,9 @@ test("a session that can answer again shows the choices once the list says so", 
   // The choices came where the reason was, so they wait at first.
   await expect(c.getByRole('button', { name: 'Yes, add the test' })).toBeDisabled();
   await c.getByRole('button', { name: 'Yes, add the test' }).click();
-  await expect.poll(() => answers(page)).toHaveLength(1);
+  await expect.poll(() => answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'Yes, add the test' } } },
+  ]);
 });
 
 test("a refused answer shows the laptop's words and offers the choices again", async ({ page, appHost }) => {
@@ -415,10 +419,10 @@ test("a refused answer shows the laptop's words and offers the choices again", a
   })).toBe(true);
   await hostCall(page, 'setReply', 'prompt.answer', null);
   await c.getByRole('button', { name: 'No, this is enough' }).click();
-  await expect.poll(() => answers(page)).toHaveLength(2);
-  expect((await answers(page))[1]).toEqual(
+  await expect.poll(() => answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'Yes, add the test' } } },
     { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'No, this is enough' } } },
-  );
+  ]);
 });
 
 test("a new prompt never inherits the last one's picks", async ({ page, appHost }) => {
@@ -843,6 +847,9 @@ test('an answer the laptop took shows Answered with its summary until the prompt
   const done = app(page).locator('.dock .card.done');
   await expect(done).toHaveAttribute('role', 'status');
   await expect(done.locator('b')).toHaveText('Answered');
+  expect(await answers(page)).toEqual([
+    { session: SETTINGS_REF, promptID: SETTINGS_PROMPT, answer: { kind: 'question', answers: { [SETTINGS_QUESTION]: 'Notifications, Account' } } },
+  ]);
   await expect(done.locator('small')).toHaveText('Notifications, Account');
   await expect(done.locator('.ok svg')).toHaveCount(1);
   await expect(done.locator('button')).toHaveCount(0);
@@ -904,6 +911,9 @@ test("an answer that lost the race reads as the laptop's, never as this phone's"
   await hostCall(page, 'emit', 'prompt.changed', { session: LOGIN_REF, prompts: [], resolved: [{ promptID: LOGIN_PROMPT, answeredBy: 'laptop' }] });
   await expect(receipts(page)).toHaveText(['Answered on the laptop']);
   await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+  expect(await answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'Yes, add the test' } } },
+  ]);
 });
 
 test('after OK on an elsewhere card the next prompt shows, its choices held at first', async ({ page, appHost }) => {
