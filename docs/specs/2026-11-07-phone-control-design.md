@@ -360,13 +360,26 @@ handler's logic.
   `terminal.wake`. A refusal returns its reason.
 - **Answer** – the core of `prompt.answer`, with the answer shapes `PromptAnswer` supports, which
   are the choices the laptop's prompt card offers. A prompt that is no longer open returns "already
-  answered". The phone obeys the laptop's setting for answering prompts, as the prompt card does.
-  While the setting is off, every session's answer capability is unavailable, with the reason
-  "Answering prompts is turned off in TBD's settings on the laptop.", and `prompt.answer` is
-  refused with that reason before the core is called. A session that cannot answer anyway (a Codex
-  session, a tab in a remote lane, a provider that does not declare `answer`) keeps its own reason,
-  which stays true once the setting is on again. Turning the setting on or off updates every
-  connected phone's sessions list through `sessions.changed`.
+  answered". The phone obeys the laptop's setting for answering prompts, as the prompt card does:
+  - **Setting off** – every session's answer capability is unavailable, with the reason
+    "Answering prompts is turned off in TBD's settings on the laptop.", and `prompt.answer` is
+    refused `unsupported` with that reason before the core is called.
+  - **Setting unreadable** – when the config row cannot be read, the sessions list still arrives.
+    Only the answer capability is unavailable, with its own reason, "TBD could not read its
+    setting for answering prompts.", and `prompt.answer` is refused `unsupported` with that
+    reason before the core is called.
+  - **Changed after the phone's check** – the core of `prompt.answer` reads the setting again
+    before it acts. If the setting has been turned off since the phone's check, or can no longer
+    be read, the core refuses the answer before it does anything. The phone gets `refused`, with
+    the words its sessions list uses for that case. The core never fails the call with a raw
+    error here, which the phone would have to treat as an answer that may have gone through. The
+    laptop's prompt card answers through the same core and is refused the same way.
+  - **Sessions that cannot answer anyway** – a Codex session, a tab in a remote lane, or a
+    provider that does not declare `answer` keeps its own reason in every case, because that
+    reason stays true once the setting is on and readable again.
+
+  Turning the setting on or off updates every connected phone's sessions list through
+  `sessions.changed`.
 - **Switch profile and fork** – `terminal.swapProfile` in `inPlace` and `fork` modes.
 - **Model** – `/model <name>` through the send path.
 - **New worktree** – the core of `worktree.create`, with the first message and TBD's defaults for
@@ -399,7 +412,11 @@ a TBD notification naming the phone, so a pairing the user did not make is visib
     `remote.transcriptLoadEarlier`.
   - **Send** – where the provider declares `send` with `send-submit`.
   - **Answer** – where the provider declares `answer` and the laptop's setting for answering
-    prompts is on.
+    prompts is on and readable. The setting works as it does for a local session (section 5,
+    Answer): while it is off or unreadable, the capability is unavailable with the setting's
+    reason, and `prompt.answer` is refused `unsupported` before the core. If the setting is turned
+    off after the phone's check, the core of `remote.answer` refuses before it calls the
+    provider, and the phone gets `refused` in the sessions list's words.
   - **Model** – where the provider declares `send-submit`.
   - **Create** – from the "New" sheet. TBD fills `repo` and `prompt`. Any other required field is
     shown as a form built from the provider's `create_params`.

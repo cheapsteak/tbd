@@ -26,7 +26,8 @@ extension RPCRouter {
     /// Refused, without invoking anything:
     /// - when remote backends or the cloud gate are off, as every
     ///   provider-named verb is;
-    /// - while `config.transcriptPromptAnswerEnabled` is off;
+    /// - while `config.transcriptPromptAnswerEnabled` is off, or cannot be
+    ///   read (`promptAnswerSettingRefusal(method:)`);
     /// - unless the connection is the TBD app's own
     ///   (`promptAnswerPeerRefusal`), so HTTP and other socket peers are
     ///   refused;
@@ -93,8 +94,8 @@ extension RPCRouter {
         actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
-        guard try await db.config.get().transcriptPromptAnswerEnabled else {
-            return RPCResponse(error: Self.promptAnswerDisabledRefusal)
+        if let refusal = try await promptAnswerSettingRefusal(method: RPCMethod.remoteAnswer) {
+            return refusal
         }
         let recordedActor: ActuationActor?
         switch authority {

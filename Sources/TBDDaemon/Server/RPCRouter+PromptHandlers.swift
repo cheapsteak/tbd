@@ -33,6 +33,8 @@ extension RPCRouter {
     /// In `Base` (`PromptAnswerRefusal`), so the phone app service can let it
     /// through to a phone as TBD's own words.
     static let promptAnswerDisabledRefusal = PromptAnswerRefusal.disabled
+    /// The setting could not be read. In `Base` for the same reason.
+    static let promptAnswerSettingUnreadRefusal = PromptAnswerRefusal.settingUnread
     /// No wait request picked the decision up within the pickup window, as
     /// when the session's mod is reconnecting. The prompt stays open.
     static let promptHookDetachedRefusal = "the prompt's session is not picking up answers right now; try again"
@@ -61,8 +63,26 @@ extension RPCRouter {
         }
     }
 
-    private func promptAnswerEnabled() async throws -> Bool {
-        try await db.config.get().transcriptPromptAnswerEnabled
+    /// Nil while `config.transcriptPromptAnswerEnabled` is on, otherwise the
+    /// refusal `method` returns before it acts on the answer:
+    /// `promptAnswerDisabledRefusal` while the setting is off, and
+    /// `promptAnswerSettingUnreadRefusal`, logged, when it could not be read.
+    /// So a failed read refuses the answer, as the setting being off does,
+    /// rather than failing the call, which a caller cannot tell from a
+    /// failure after the answer went out. Only this read becomes a refusal,
+    /// and a cancelled read still throws.
+    func promptAnswerSettingRefusal(method: String) async throws -> RPCResponse? {
+        let enabled: Bool
+        do {
+            enabled = try await db.config.get().transcriptPromptAnswerEnabled
+        } catch let cancelled as CancellationError {
+            throw cancelled
+        } catch {
+            promptLog.error(
+                "\(method, privacy: .public) refused: could not read the setting for answering prompts: \(String(describing: type(of: error)), privacy: .public): \(error.localizedDescription, privacy: .private)")
+            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+        }
+        return enabled ? nil : RPCResponse(error: Self.promptAnswerDisabledRefusal)
     }
 
     /// Publishes each terminal whose prompt set changed.
@@ -81,8 +101,9 @@ extension RPCRouter {
     /// - `unknown` – no receipt within the store's ack timeout; the decision
     ///   may have reached Claude.
     ///
-    /// Errors: the flag is off (`promptAnswerDisabledRefusal`), the caller is
-    /// not the TBD app (`promptAnswerNotFromAppRefusal`), no wait request
+    /// Errors: the flag is off (`promptAnswerDisabledRefusal`), the flag
+    /// could not be read (`promptAnswerSettingUnreadRefusal`, retryable), the
+    /// caller is not the TBD app (`promptAnswerNotFromAppRefusal`), no wait request
     /// picked the decision up in time (`promptHookDetachedRefusal`,
     /// retryable), or the answer does not fit the prompt (`invalid_params: …`).
     func handlePromptAnswer(
@@ -103,8 +124,8 @@ extension RPCRouter {
     func answerPrompt(
         _ p: PromptAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
-        guard try await promptAnswerEnabled() else {
-            return RPCResponse(error: Self.promptAnswerDisabledRefusal)
+        if let refusal = try await promptAnswerSettingRefusal(method: RPCMethod.promptAnswer) {
+            return refusal
         }
         let recordedActor: ActuationActor?
         switch authority {

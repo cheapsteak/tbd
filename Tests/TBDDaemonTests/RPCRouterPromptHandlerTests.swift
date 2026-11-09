@@ -155,6 +155,29 @@ struct RPCRouterPromptHandlerTests {
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
     }
 
+    /// A flag that cannot be read refuses the answer before anything acts on
+    /// it, as the flag being off does, rather than failing the call: the app
+    /// gets TBD's refusal, which it may retry, the prompt stays open, and no
+    /// answer is recorded. The handler is called directly, not through
+    /// `handle`, which would turn a throw into an error reply of its own.
+    @Test func answerIsRefusedWhenTheFlagCannotBeRead() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = await openedPromptID(f)
+        try await f.db.makeConfigUnreadable()
+        let params = PromptAnswerParams(
+            terminalID: f.terminalID, promptID: id, answer: .permission(decision: .allow, message: nil))
+
+        let response = try await f.router.handlePromptAnswer(
+            JSONEncoder().encode(params), actor: nil, connection: SendHarness.AuthenticatedApp.connection)
+
+        #expect(response.success == false)
+        #expect(response.error == RPCRouter.promptAnswerSettingUnreadRefusal)
+        #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
+        let rows = ActuationRecordReader(activePath: f.logPath).readRows()
+        let recorded = rows.first { $0.method == RPCMethod.promptAnswer }
+        #expect(recorded == nil, "nothing acted on the answer, so nothing records it")
+    }
+
     @Test func answerDeliversThroughWaitAndReceipt() async throws {
         let f = try await makeFixture(flagOn: true)
         let id = await openedPromptID(f)

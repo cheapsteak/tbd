@@ -43,7 +43,8 @@ protocol PhoneSessionActions: Sendable {
 
     /// The `prompt.answer` core under the phone's pairing, with the terminal,
     /// the prompt and the answer: the `transcript_prompt_answer_enabled`
-    /// check, then no socket check.
+    /// check, which refuses while the setting is off or cannot be read, then
+    /// no socket check.
     func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse
 
     /// The `remote.answer` core under the phone's pairing, with the provider,

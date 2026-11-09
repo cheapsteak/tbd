@@ -8,6 +8,18 @@ import TestSupport
 // Fakes and helpers for the phone app service's tests. Tier 1: everything here
 // is in-process state, and nothing touches the disk or the network.
 
+// MARK: - An unreadable config row
+
+extension TBDDatabase {
+    /// Drops the config table, so every later read of the config row fails,
+    /// as a database read that fails does.
+    func makeConfigUnreadable() async throws {
+        try await writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE config")
+        }
+    }
+}
+
 // MARK: - FakeSessionActions
 
 /// A `PhoneSessionActions` that records every call and answers each method
@@ -522,9 +534,7 @@ struct PhoneServiceHarness: Sendable {
     /// as a database read that fails does. A request then stops at the phone
     /// control check unless the harness was made with `phoneControlAlwaysOn`.
     func makeConfigUnreadable() async throws {
-        try await db.writerForTests.write { conn in
-            try conn.execute(sql: "DROP TABLE config")
-        }
+        try await db.makeConfigUnreadable()
     }
 
     /// Connects the phone through a fresh outbox and returns it.

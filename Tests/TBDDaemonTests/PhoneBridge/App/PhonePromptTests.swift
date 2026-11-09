@@ -535,6 +535,7 @@ struct PhonePromptTests {
             ("", Self.allow, PhoneAppService.remoteRefusedReason),
             (PromptAnswerRefusal.disabled, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
             (RPCRouter.promptAnswerDisabledRefusal, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (PromptAnswerRefusal.settingUnread, Self.allow, PhoneSessionStatus.answerSettingUnreadReason),
             (PromptAnswerRefusal.notMirrored, Self.allow, PromptAnswerRefusal.notMirrored),
             (RemoteSendMessageRefusal.exited, Self.allow, RemoteSendMessageRefusal.exited),
             (RemoteGateRefusal.backendsDisabled, Self.allow, RemoteGateRefusal.backendsDisabled),
@@ -1551,7 +1552,7 @@ struct PhonePromptTests {
 /// `prompt.answer` through the real core, `RPCRouter.answerPrompt`, so the
 /// phone is shown to obey `transcript_prompt_answer_enabled` the way the
 /// laptop's prompt card does: by its own check, and by the core's when the
-/// setting changes between the two.
+/// setting changes, or stops being readable, between the two.
 ///
 /// Tier 2: in-memory GRDB, a dry-run tmux and an actuation log under the
 /// run's fenced scratch dir.
@@ -1563,10 +1564,12 @@ struct PhonePromptAnswerRouterTests {
         let peer: PhonePeer
     }
 
-    /// With `answeringTurnedOffBeforeTheCore`, the service reaches the
-    /// router through `AnsweringTurnedOffBeforeTheCore`, which turns the
-    /// setting off just before the core of a local answer runs.
-    private func makeFixture(answeringTurnedOffBeforeTheCore: Bool = false) async throws -> Fixture {
+    /// With `beforeTheCore`, the service reaches the router through
+    /// `ChangingTheSettingBeforeTheCore`, which runs it on the database just
+    /// before the core of a local answer runs.
+    private func makeFixture(
+        beforeTheCore: (@Sendable (TBDDatabase) async throws -> Void)? = nil
+    ) async throws -> Fixture {
         let directory = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-prompt"), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
@@ -1586,8 +1589,8 @@ struct PhonePromptAnswerRouterTests {
             subscriptions: subs,
             actuationLog: ActuationLog(path: directory.appendingPathComponent("actuations.jsonl").path))
         let actions: any PhoneSessionActions
-        if answeringTurnedOffBeforeTheCore {
-            actions = AnsweringTurnedOffBeforeTheCore(router: router, db: db)
+        if let beforeTheCore {
+            actions = ChangingTheSettingBeforeTheCore(router: router, db: db, change: beforeTheCore)
         } else {
             actions = router
         }
@@ -1646,7 +1649,9 @@ struct PhonePromptAnswerRouterTests {
     /// the phone gets that refusal in the words its sessions list shows for
     /// the setting, not the core's.
     @Test func theCoreRefusesWhenTheSettingIsTurnedOffAfterThePhonesCheck() async throws {
-        let f = try await makeFixture(answeringTurnedOffBeforeTheCore: true)
+        let f = try await makeFixture(beforeTheCore: { db in
+            try await db.config.setTranscriptPromptAnswerEnabled(false)
+        })
         try await f.db.config.setTranscriptPromptAnswerEnabled(true)
 
         let bytes = try await answer(f)
@@ -1655,18 +1660,37 @@ struct PhonePromptAnswerRouterTests {
         #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerTurnedOffReason))
         #expect(try await f.db.config.get().transcriptPromptAnswerEnabled == false)
     }
+
+    /// The setting read on by the phone's own check, then unreadable when the
+    /// core reads it again: the core refuses before it looks for the prompt,
+    /// rather than failing the call, which the phone would have to take for
+    /// an answer that may have gone out. The phone gets that refusal in the
+    /// words its sessions list shows for a setting it cannot read.
+    @Test func theCoreRefusesWhenTheSettingCannotBeReadAfterThePhonesCheck() async throws {
+        let f = try await makeFixture(beforeTheCore: { db in
+            try await db.makeConfigUnreadable()
+        })
+        try await f.db.config.setTranscriptPromptAnswerEnabled(true)
+
+        let bytes = try await answer(f)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerSettingUnreadReason))
+    }
 }
 
 /// The router as the phone's session actions, except that a local answer
-/// first turns the setting for answering prompts off, as a user who turns it
-/// off between the phone's own check and the core's call does. Every other
-/// method goes straight to the router.
-private struct AnsweringTurnedOffBeforeTheCore: PhoneSessionActions {
+/// first runs `change` on the database, as a user who turns the setting for
+/// answering prompts off between the phone's own check and the core's call
+/// does, or a read of it that starts failing there. Every other method goes
+/// straight to the router.
+private struct ChangingTheSettingBeforeTheCore: PhoneSessionActions {
     let router: RPCRouter
     let db: TBDDatabase
+    let change: @Sendable (TBDDatabase) async throws -> Void
 
     func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {
-        try await db.config.setTranscriptPromptAnswerEnabled(false)
+        try await change(db)
         return try await router.phoneAnswerPrompt(p, deviceID: deviceID)
     }
 
