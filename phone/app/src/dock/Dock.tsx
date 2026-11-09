@@ -30,13 +30,14 @@
  *   into Answered or Answered elsewhere.
  * A change during a hold starts it again.
  *
- * The composer's Send is held the same way (`useChangeHold`), from the first render that shows
- * it until `TAP_GUARD_MS` later: when the dock mounts, since a draft kept from before can leave
- * Send enabled the moment the session opens, under the second tap of a double tap on its row;
- * when the composer replaces the note that sending is unavailable; and when its label changes
- * between "Send" and "Send and wake", which moves its edge over the textarea. Nothing on the card
- * holds Send: the card sits above the composer, and the dock grows upward from the screen's
- * bottom, so the card never moves it.
+ * The composer's Send is held the same way (`useChangeHold` in `ui/tapGuard.ts`, which holds the
+ * menus' and the sheets' acting buttons too), from the first render that shows it until
+ * `TAP_GUARD_MS` later: when the dock mounts, since a draft kept from before can leave Send
+ * enabled the moment the session opens, under the second tap of a double tap on its row; when the
+ * composer replaces the note that sending is unavailable; and when its label changes between
+ * "Send" and "Send and wake", which moves its edge over the textarea. Nothing on the card holds
+ * Send: the card sits above the composer, and the dock grows upward from the screen's bottom, so
+ * the card never moves it.
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -44,12 +45,10 @@ import type { JSX } from 'react';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useAppState } from '../state/context.tsx';
 import { cardFor, cardKey } from '../state/prompts.ts';
+import { TAP_GUARD_MS, useChangeHold } from '../ui/tapGuard.ts';
 import { Composer, sendLabel } from './Composer.tsx';
 import { cardView, FRESH_CARD_UI, PromptCard } from './PromptCard.tsx';
 import type { CardUI } from './PromptCard.tsx';
-
-/** How long a card that appeared, or whose view changed, keeps its choices disabled, in milliseconds. */
-export const TAP_GUARD_MS = 500;
 
 /** How long after the dock mounts a card that appears is taken as there when the session opened, in milliseconds. */
 export const OPENING_MS = 1000;
@@ -81,26 +80,6 @@ export function Dock({ session }: { session: PhoneSession }): JSX.Element {
       <Composer session={session} held={sendHeld} />
     </div>
   );
-}
-
-/**
- * Whether what `view` names was first shown, or changed, less than `TAP_GUARD_MS` ago: true from
- * the first render that shows the dock's first `view` or a new one, so no frame draws it
- * enabled, until the time is up. Each change counts, even one back to a view shown before. A
- * null `view` shows nothing, and is never held.
- */
-function useChangeHold(view: string | null): boolean {
-  const [shown, setShown] = useState({ view, n: 0 });
-  // A new view is a new generation. Setting state while rendering makes React render again with
-  // it before anything is drawn.
-  if (shown.view !== view) setShown({ view, n: shown.n + 1 });
-  const n = shown.view === view ? shown.n : shown.n + 1;
-  const [released, setReleased] = useState(-1);
-  useEffect(() => {
-    const timer = setTimeout(() => setReleased(n), TAP_GUARD_MS);
-    return () => clearTimeout(timer);
-  }, [n]);
-  return view !== null && released !== n;
 }
 
 /** The card the dock shows: its prompt's ID and its `cardView`, each null while it shows none. */

@@ -45,7 +45,7 @@ const SSE_KEY = `local:${SSE_REF.terminalID}`;
 const SSE_TARGET = 'npm run test:integration -- --grep "reconnects after 30 s idle" --reporter=dot && git diff --stat origin/main...HEAD';
 /** The daemon's reason while the laptop's "answer prompts" setting is off (`PhoneSessionStatus.answerTurnedOffReason`). */
 const ANSWERING_OFF = "Answering prompts is turned off in TBD's settings on the laptop.";
-/** Dock.tsx's `TAP_GUARD_MS` and `OPENING_MS`. */
+/** `TAP_GUARD_MS` (src/ui/tapGuard.ts) and Dock.tsx's `OPENING_MS`. */
 const TAP_GUARD_MS = 500;
 const OPENING_MS = 1000;
 /** Onboarding copy's three questions, by text, and the answer that gives each its first option. */
