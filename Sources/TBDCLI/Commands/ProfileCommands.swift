@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import Security
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -15,12 +16,140 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileList.self,
             ProfileSetDefault.self,
             ProfileLogin.self,
+            ProfileKeychain.self,
             ProfileExec.self,
             ProfileBalancing.self,
             ProfilePool.self,
             ProfileRename.self,
         ]
     )
+}
+
+/// Attributes only: never ask Security for `kSecReturnData` and never invoke
+/// `security -w` from a diagnostic command.
+struct ProfileCredentialItem {
+    let account: String
+    let createdAt: Date?
+    let modifiedAt: Date?
+}
+
+func profileCredentialItems(service: String) throws -> [ProfileCredentialItem] {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecMatchLimit as String: kSecMatchLimitAll,
+        kSecReturnAttributes as String: true,
+    ]
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    if status == errSecItemNotFound { return [] }
+    guard status == errSecSuccess, let attributes = result as? [[String: Any]] else {
+        throw CLIError.invalidArgument("Could not inspect keychain item attributes (status \(status)).")
+    }
+    return try attributes.map { item in
+        guard let account = item[kSecAttrAccount as String] as? String else {
+            throw CLIError.invalidArgument("A keychain item has no readable account attribute; cannot certify duplicates.")
+        }
+        return ProfileCredentialItem(
+            account: account,
+            createdAt: item[kSecAttrCreationDate as String] as? Date,
+            modifiedAt: item[kSecAttrModificationDate as String] as? Date)
+    }
+}
+
+/// The read uses the current macOS account. A second item under another
+/// account is obsolete for this login, even if its date is newer. Multiple
+/// matches for the current account (possible across search-list keychains)
+/// are reported, including whether their modification dates identify a unique
+/// newest item. The usage reader also needs each item's keychain path to read
+/// that item; this check does not claim to know whether those paths resolve.
+struct ProfileCredentialCheck {
+    let selected: ProfileCredentialItem?
+    let staleAccounts: [ProfileCredentialItem]
+    let matchingAccountCount: Int
+
+    init(items: [ProfileCredentialItem], account: String) {
+        let matching = items.filter { $0.account == account }
+        if matching.count > 1 {
+            let dates = matching.compactMap(\.modifiedAt)
+            let newest = dates.max()
+            selected = dates.count == matching.count && dates.filter({ $0 == newest }).count == 1
+                ? matching.max { ($0.modifiedAt ?? .distantPast) < ($1.modifiedAt ?? .distantPast) }
+                : nil
+        } else {
+            selected = matching.first
+        }
+        matchingAccountCount = matching.count
+        staleAccounts = items.filter { $0.account != account }
+            .sorted { ($0.modifiedAt ?? .distantPast) < ($1.modifiedAt ?? .distantPast) }
+    }
+}
+
+struct ProfileKeychain: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "keychain",
+        abstract: "Check a profile's keychain items without reading credentials")
+
+    @Argument(help: "OAuth profile name or UUID")
+    var name: String
+
+    mutating func run() async throws {
+        let list = try SocketClient().call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self)
+        let entry = try resolveProfile(named: name, in: list.profiles)
+        guard entry.profile.kind == .oauth, let path = entry.configDirPath else {
+            throw CLIError.invalidArgument(
+                "This check needs an OAuth profile and a daemon that reports its config path.")
+        }
+        guard let account = ClaudeCredentialAccount.current() else {
+            throw CLIError.invalidArgument("macOS account unavailable; cannot select a credential item.")
+        }
+        let service = ClaudeCodeCredentialsKeychain.serviceName(forConfigDirPath: path)
+        let check = ProfileCredentialCheck(
+            items: try profileCredentialItems(service: service), account: account)
+        let iso = ISO8601DateFormatter()
+        func dateText(_ item: ProfileCredentialItem) -> String {
+            guard let date = item.modifiedAt ?? item.createdAt else { return "date unavailable" }
+            return iso.string(from: date)
+        }
+
+        print("Profile: \(entry.profile.name)")
+        print("Keychain service: \(service)")
+        if check.matchingAccountCount > 1 {
+            print("Login account: \(account) (\(check.matchingAccountCount) keychain items)")
+        } else if let selected = check.selected {
+            print("Login account: \(account) (last changed \(dateText(selected)))")
+        } else {
+            print("Login account: \(account) (no keychain item; the profile may use its credentials file)")
+        }
+        if check.matchingAccountCount > 1 {
+            if let selected = check.selected {
+                print("Warning: the newest matching item is dated \(dateText(selected)). With metadata available, the usage reader chooses it only when each keychain path is available; otherwise it reports an ambiguity.")
+            } else {
+                print("Warning: cannot determine a unique newest item because dates are missing or tied. With metadata available, the usage reader reports an ambiguity.")
+            }
+            print("Inspect the keychain items before trusting usage.")
+        }
+        if !check.staleAccounts.isEmpty {
+            print("Other account items for this service:")
+            for item in check.staleAccounts {
+                print("  \(item.account) — last changed \(dateText(item))")
+            }
+            if check.matchingAccountCount == 1,
+               check.staleAccounts.count == 1,
+               let stale = check.staleAccounts.first,
+               stale.account.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil {
+                print("After confirming that the \(stale.account) item is old, remove only it with:")
+                print("  security delete-generic-password -s '\(service)' -a '\(stale.account)'")
+            } else {
+                print("Inspect the accounts and dates in Keychain Access before removing an old item.")
+            }
+            print("Keep the \(account) item. This check changes nothing.")
+        } else if check.matchingAccountCount <= 1 {
+            print("No duplicate keychain items found.")
+        }
+    }
 }
 
 // MARK: - Pure helpers (internal so TBDCLITests can exercise them)

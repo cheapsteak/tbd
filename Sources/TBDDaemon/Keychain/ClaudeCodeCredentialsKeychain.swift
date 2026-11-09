@@ -1,41 +1,10 @@
-import CryptoKit
 import Foundation
 import Security
+import TBDShared
 
-/// Claude Code stores OAuth credentials in the login keychain as a generic
-/// password whose service name is derived from the `CLAUDE_CONFIG_DIR` path:
-///
-///     "Claude Code-credentials-<first 8 lowercase hex chars of sha256(path)>"
-///
-/// Known vector (verified empirically): sha256 of
-/// "/Users/me/.claude-profiles/acme" starts with `9c701bd6`, and the
-/// keychain item "Claude Code-credentials-9c701bd6" pairs with that dir.
-///
-/// The bare "Claude Code-credentials" item (no suffix) belongs to the user's
-/// default `~/.claude` and must NEVER be touched by TBD. Every service name
-/// produced here always carries a path-derived suffix, so deleting through
-/// this namespace can never target the bare item.
-public enum ClaudeCodeCredentialsKeychain {
-    /// Base service name used by Claude Code. The unsuffixed form belongs to
-    /// the user's default config dir — TBD only ever appends a suffix to it.
-    public static let baseServiceName = "Claude Code-credentials"
-
-    /// First 8 lowercase-hex characters of sha256 of the config dir path
-    /// string (the exact string, no normalization — matches how Claude Code
-    /// hashes `CLAUDE_CONFIG_DIR`).
-    public static func serviceSuffix(forConfigDirPath path: String) -> String {
-        let digest = SHA256.hash(data: Data(path.utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return String(hex.prefix(8))
-    }
-
-    /// Full keychain service name for the credentials item belonging to the
-    /// given config dir. Always suffixed — never returns the bare item name.
-    public static func serviceName(forConfigDirPath path: String) -> String {
-        "\(baseServiceName)-\(serviceSuffix(forConfigDirPath: path))"
-    }
-}
-
+/// Deletion support for an isolated Claude Code config dir. The shared
+/// `ClaudeCodeCredentialsKeychain` derives its service name; it always has a
+/// suffix and cannot target the user's default unsuffixed credential item.
 /// Injection seam for deleting Claude Code credential items, so tests can
 /// assert "delete was requested with the right service name" without touching
 /// the real login keychain.

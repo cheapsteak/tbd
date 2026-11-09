@@ -610,6 +610,176 @@ private final class ResponseScript: @unchecked Sendable {
 
 struct ProfileUsageKeychainDerivationTests {
 
+    /// A fake security command exposes the bug: a service-only lookup chooses
+    /// the older account, while an account-scoped lookup selects the login item.
+    @Test func duplicateServiceUsesLoginAccountForBothReaders() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-keychain-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let executable = dir.appendingPathComponent("security")
+        let script = """
+        #!/bin/sh
+        action="$1"
+        account=""
+        last=""
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = "-a" ]; then account="$2"; shift; fi
+          last="$1"
+          shift
+        done
+        if [ "$action" = "add-generic-password" ]; then
+          printf '%s\\n' "$account" > "$(dirname "$0")/written-account"
+          exit 0
+        fi
+        [ "$action" = "find-generic-password" ] || exit 2
+        if [ "$last" = "/synthetic/new.keychain" ]; then
+          printf '%s\\n' '{"claudeAiOauth":{"accessToken":"FAKE_NEW"}}'
+        elif [ "$last" = "/synthetic/old.keychain" ]; then
+          printf '%s\\n' '{"claudeAiOauth":{"accessToken":"FAKE_OLD"}}'
+        elif [ "$account" = "alice" ]; then
+          printf '%s\\n' '{"claudeAiOauth":{"accessToken":"FAKE_LIVE"}}'
+        elif [ -z "$account" ]; then
+          printf '%s\\n' '{"claudeAiOauth":{"accessToken":"FAKE_STALE"}}'
+        else
+          exit 44
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+        let configDir = dir.appendingPathComponent("profile").path
+        let reader = SecurityCLIOAuthTokenReader(
+            account: "alice", securityExecutable: executable)
+        #expect(try await reader.accessToken(forConfigDirPath: configDir) == "FAKE_LIVE")
+        let metadataUnavailable = SecurityCLIOAuthTokenReader(
+            account: "alice", securityExecutable: executable, metadataLookup: { _ in nil })
+        #expect(try await metadataUnavailable.accessToken(forConfigDirPath: configDir) == "FAKE_LIVE")
+
+        let store = SecurityCLIClaudeCredentialStore(
+            account: "alice", securityExecutable: executable)
+        let blob = try await store.readBlob(forConfigDirPath: configDir)
+        let blobToken = blob.flatMap(parseClaudeCredentialsAccessToken)
+        #expect(blobToken == "FAKE_LIVE")
+        #expect(await store.writeBlob(Data("synthetic".utf8), forConfigDirPath: configDir))
+        let writtenAccount = try String(contentsOf: dir.appendingPathComponent("written-account"), encoding: .utf8)
+        #expect(writtenAccount.trimmingCharacters(in: .whitespacesAndNewlines) == "alice")
+
+        let otherAccount = SecurityCLIOAuthTokenReader(
+            account: "bob", securityExecutable: executable)
+        #expect(try await otherAccount.accessToken(forConfigDirPath: configDir) == nil)
+
+        let old = Date(timeIntervalSince1970: 100)
+        let recent = Date(timeIntervalSince1970: 200)
+        let sameAccount = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+            service: "synthetic-service", account: "alice", executableURL: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        if case .found(let data) = sameAccount {
+            #expect(parseClaudeCredentialsAccessToken(data) == "FAKE_NEW")
+        } else {
+            Issue.record("expected the newest matching-account item")
+        }
+
+        let otherAccountNewer = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+            service: "synthetic-service", account: "alice", executableURL: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "unknown", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        if case .found(let data) = otherAccountNewer {
+            #expect(parseClaudeCredentialsAccessToken(data) == "FAKE_OLD")
+        } else {
+            Issue.record("expected the macOS account item")
+        }
+
+        let olderTie = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+            service: "synthetic-service", account: "alice", executableURL: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        if case .found(let data) = olderTie {
+            #expect(parseClaudeCredentialsAccessToken(data) == "FAKE_NEW")
+        } else {
+            Issue.record("a tie between older items must not hide the unique newest item")
+        }
+
+        await #expect(throws: ClaudeOAuthTokenReadError.self) {
+            try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+                service: "synthetic-service", account: "alice", executableURL: executable,
+                metadataLookup: { _ in [
+                    .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/old.keychain"),
+                    .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+                ] })
+        }
+        await #expect(throws: ClaudeOAuthTokenReadError.self) {
+            try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+                service: "synthetic-service", account: "alice", executableURL: executable,
+                metadataLookup: { _ in [
+                    .init(account: "alice", modifiedAt: old, keychainPath: nil),
+                    .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+                ] })
+        }
+    }
+
+    /// A refresh must land in the keychain the reader selected, and an ambiguous
+    /// pair of same-account items must refuse the write.
+    @Test func writeTargetsTheKeychainTheReaderSelected() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-keychain-write-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let executable = dir.appendingPathComponent("security")
+        let script = """
+        #!/bin/sh
+        [ "$1" = "add-generic-password" ] || exit 2
+        for last; do :; done
+        printf '%s\\n' "$last" > "$(dirname "$0")/written-last-operand"
+        exit 0
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let old = Date(timeIntervalSince1970: 100)
+        let recent = Date(timeIntervalSince1970: 200)
+        let marker = dir.appendingPathComponent("written-last-operand")
+
+        let store = SecurityCLIClaudeCredentialStore(
+            account: "alice", securityExecutable: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: old, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        #expect(await store.writeBlob(Data("synthetic".utf8), forConfigDirPath: "/synthetic/profile"))
+        let operand = try String(contentsOf: marker, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(operand == "/synthetic/new.keychain")
+
+        try FileManager.default.removeItem(at: marker)
+        let ambiguous = SecurityCLIClaudeCredentialStore(
+            account: "alice", securityExecutable: executable,
+            metadataLookup: { _ in [
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/old.keychain"),
+                .init(account: "alice", modifiedAt: recent, keychainPath: "/synthetic/new.keychain"),
+            ] })
+        #expect(await ambiguous.writeBlob(Data("synthetic".utf8), forConfigDirPath: "/synthetic/profile") == false)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @Test func unresolvedAccountCannotReadOrWriteKeychain() async throws {
+        let reader = SecurityCLIOAuthTokenReader(account: "unknown")
+        await #expect(throws: ClaudeOAuthTokenReadError.self) {
+            try await reader.accessToken(forConfigDirPath: "/synthetic/profile")
+        }
+        let store = SecurityCLIClaudeCredentialStore(account: "unknown")
+        #expect(await store.writeBlob(Data("synthetic".utf8), forConfigDirPath: "/synthetic/profile") == false)
+    }
+
     /// The token reader must target the config-dir-derived item, never the
     /// bare "Claude Code-credentials" item of the user's default ~/.claude.
     @Test func serviceNameIsAlwaysSuffixed() {

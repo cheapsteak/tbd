@@ -27,19 +27,37 @@ public protocol ClaudeCredentialStoring: Sendable {
 
 public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
     /// The keychain account attribute Claude Code stores (the macOS short user
-    /// name). Resolved once from the environment; `add-generic-password`
-    /// requires an account to target the right item.
-    private let account: String
+    /// name). Derived from the process UID, not environment variables.
+    private let account: String?
+    private let securityExecutable: URL
+    private let metadataLookup: (@Sendable (String) -> [SecurityCLIOAuthTokenReader.KeychainCredentialCandidate]?)?
 
-    public init(account: String = NSUserName()) {
+    public init(
+        account: String? = ClaudeCredentialAccount.current(),
+        securityExecutable: URL = URL(fileURLWithPath: "/usr/bin/security")
+    ) {
+        self.init(account: account, securityExecutable: securityExecutable, metadataLookup: nil)
+    }
+
+    init(
+        account: String?, securityExecutable: URL,
+        metadataLookup: (@Sendable (String) -> [SecurityCLIOAuthTokenReader.KeychainCredentialCandidate]?)?
+    ) {
         self.account = account
+        self.securityExecutable = securityExecutable
+        self.metadataLookup = metadataLookup
     }
 
     // MARK: Read
 
     public func readBlob(forConfigDirPath path: String) async throws -> Data? {
         let service = ClaudeCodeCredentialsKeychain.serviceName(forConfigDirPath: path)
-        let outcome = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(service: service)
+        guard let account, ClaudeCredentialAccount.valid(account) else {
+            throw ClaudeOAuthTokenReadError("macOS account unavailable; refusing an ambiguous keychain read")
+        }
+        let outcome = try await SecurityCLIOAuthTokenReader.runSecurityFindGenericPassword(
+            service: service, account: account, executableURL: securityExecutable,
+            metadataLookup: metadataLookup)
         switch outcome {
         case .found(let data):
             return data
@@ -57,8 +75,23 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
             logger.error("refreshed credential blob is not valid UTF-8; refusing to write")
             return false
         }
+        guard let account, ClaudeCredentialAccount.valid(account) else {
+            logger.error("macOS account unavailable; refusing a keychain write")
+            return false
+        }
+        // Write to the same keychain the reader selects, so a refresh never lands
+        // in a different item than the one later reads return.
+        let keychainPath: String?
+        do {
+            keychainPath = try SecurityCLIOAuthTokenReader.selectKeychainPath(
+                service: service, account: account, metadataLookup: metadataLookup)
+        } catch {
+            logger.error("ambiguous keychain items for this profile; refusing a keychain write")
+            return false
+        }
         let ok = await Self.runSecurityAddGenericPassword(
-            account: account, service: service, secret: secret)
+            account: account, service: service, secret: secret,
+            keychainPath: keychainPath, executableURL: securityExecutable)
         if !ok {
             logger.warning("keychain write-back denied/failed for service \(service, privacy: .public)")
             // Best-effort: also refresh the on-disk fallback file if it exists,
@@ -76,9 +109,14 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
     /// `-U` updates the item in place if it exists (preserving attributes),
     /// creating it otherwise. Passing the secret via `-w <value>` avoids a
     /// prompt. Never routes through a shell. Returns true on exit 0.
-    static func runSecurityAddGenericPassword(account: String, service: String, secret: String) async -> Bool {
+    static func runSecurityAddGenericPassword(
+        account: String, service: String, secret: String,
+        keychainPath: String? = nil,
+        executableURL: URL = URL(fileURLWithPath: "/usr/bin/security")
+    ) async -> Bool {
+        guard ClaudeCredentialAccount.valid(account) else { return false }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.executableURL = executableURL
         process.arguments = [
             "add-generic-password",
             "-a", account,
@@ -86,6 +124,7 @@ public struct SecurityCLIClaudeCredentialStore: ClaudeCredentialStoring {
             "-w", secret,
             "-U",
         ]
+        if let keychainPath { process.arguments?.append(keychainPath) }
         process.environment = [:]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
