@@ -305,7 +305,7 @@ public enum GhosttySnapshotWriter {
 
         // 3. No switch mode from the table: the active screen decides.
         tokens.removeAll { $0.decPrivate && [47, 1047, 1049].contains($0.value) }
-        guard let alternate else { return tokens.flatMap(\.bytes) + formatted[end...] + trailer }
+        guard let alternate else { return tokens.flatMap(\.bytes) + Array(formatted[end...]) + trailer }
 
         // 4. Origin mode for the alternate screen, after the primary's is saved. Autowrap is
         // already last, and the cursor, reverse wrap and DECLRMM follow the switch with the rest.
