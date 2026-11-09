@@ -1647,6 +1647,53 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         #expect(later == drawNow, "output one interval later answered \(String(describing: later))")
     }
 
+    /// A tick can draw output before that output's delivery runs. The delivery's hint still counts
+    /// the output, so it draws, and its build finds none left to consume and commits nothing. That
+    /// is output a tick drew, not output that draws nothing, so it stamps no empty draw, and the
+    /// next output draws at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDeliveryWhoseOutputATickDrewFirstDoesNotHoldBackTheNext() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        let built = view.framesBuilt
+        let committed = view.framesCommitted
+        try await signalAndDeliver(to: fixture) {
+            fixture.terminal.feed(text: "a")
+            // The tick runs before the delivery and draws the output.
+            view.renderTick()
+            // The delivery runs past the refresh interval and the tracker's present-report
+            // timeout, so neither rule 4 nor the drawables keep it from drawing.
+            now.value = .seconds(102)
+        }
+        let stampedByTheTick = view.lastOutputFrameAt
+        let tickStamp: Duration? = .seconds(100)
+        try #require(stampedByTheTick == tickStamp, "the tick's frame stamped \(String(describing: stampedByTheTick))")
+        let decision = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        try #require(decision == drawNow, "the delivery after the tick answered \(String(describing: decision))")
+        let builtForBoth = view.framesBuilt - built
+        try #require(builtForBoth == 2, "the tick and the delivery built \(builtForBoth) frames, not 2")
+        let committedForBoth = view.framesCommitted - committed
+        try #require(committedForBoth == 1, "the tick and the delivery committed \(committedForBoth) frames, not the tick's 1")
+        let empty = view.lastEmptyLeadingEdgeDrawAt
+        let none: Duration? = nil
+        #expect(empty == none, "a delivery whose output a tick drew stamped an empty draw at \(String(describing: empty))")
+
+        now.value = .seconds(102.002)
+        try await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("b", to: fixture)
+        let next = view.lastLeadingEdgeDecision
+        #expect(next == drawNow, "output 2 ms after a delivery that found its output drawn answered \(String(describing: next))")
+    }
+
     /// A delivery that coalesces only peeks at the tracker. Entries past the timeout stay for the
     /// next frame's own check to clear, and no notice logs.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

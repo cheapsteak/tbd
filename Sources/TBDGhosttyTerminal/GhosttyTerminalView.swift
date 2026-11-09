@@ -512,12 +512,17 @@ public final class GhosttyTerminalView: NSView {
     /// the live-resize path all stamp it. A frame with no output in it stamps nothing, so the
     /// cursor frame a key press's blink reset asks for cannot hold back the echo that follows.
     private(set) var lastOutputFrameAt: Duration?
-    /// The `now` of the last delivery that drew at once, built a frame, and committed nothing,
-    /// because its output changed nothing on screen: the view is scrolled back into history, or
-    /// the output only set a title or a mode. Rule 4 counts it as an output frame. Uncounted,
-    /// output that draws nothing would never stamp `lastOutputFrameAt`, and every delivery would
-    /// build a frame of its own, at the main-queue hop rate in place of once per refresh.
+    /// The `now` of the last delivery that drew at once, built a frame that consumed its output,
+    /// and committed nothing, because that output changed nothing on screen: the view is scrolled
+    /// back into history, or the output only set a title or a mode. Rule 4 counts it as an output
+    /// frame. Uncounted, output that draws nothing would never stamp `lastOutputFrameAt`, and
+    /// every delivery would build a frame of its own, at the main-queue hop rate in place of once
+    /// per refresh. A build that found no output stamps nothing: a tick drew that output before
+    /// the delivery ran, and its frame stamped `lastOutputFrameAt` already.
     private(set) var lastEmptyLeadingEdgeDrawAt: Duration?
+    /// Whether the last frame built found no program output to consume. False after a build that
+    /// threw, which may have consumed some.
+    private var lastBuildFoundNoOutput = false
     /// What rule 4 measures from: the later of `lastOutputFrameAt` and
     /// `lastEmptyLeadingEdgeDrawAt`, or nil before either.
     private var lastFrameLimitingTheLeadingEdge: Duration? {
@@ -854,7 +859,9 @@ public final class GhosttyTerminalView: NSView {
             let built = framesBuilt
             let committed = framesCommitted
             renderTick(now: now)
-            if framesBuilt > built, framesCommitted == committed { lastEmptyLeadingEdgeDrawAt = now }
+            if framesBuilt > built, framesCommitted == committed, !lastBuildFoundNoOutput {
+                lastEmptyLeadingEdgeDrawAt = now
+            }
         case .coalesce:
             frameDriver.requestFrame()
         }
@@ -1213,6 +1220,7 @@ public final class GhosttyTerminalView: NSView {
             return
         }
         framesBuilt += 1
+        lastBuildFoundNoOutput = false
         let target = selfRef
         // A statement body, not a bare `Task {}`: as a single expression the closure would return
         // the Task and no longer be a `() -> Void`.
@@ -1228,6 +1236,7 @@ public final class GhosttyTerminalView: NSView {
                 waitsForSlot: waits, nextDrawable: nextDrawable,
                 willEncode: { self.onDrawStart?() },
                 onPresented: presented)
+            lastBuildFoundNoOutput = outcome.update.outputBytes == 0
             if outcome.didEncode {
                 framesCommitted += 1
                 // An output frame. One whose build consumed no output, such as a cursor-only frame,
