@@ -439,7 +439,10 @@ export function providerDetail(p: PhoneProvider): string | null {
 /**
  * The `remote.create` params for `provider` in `repoID`, from the form as it shows: `strings`
  * holds every field that is not a switch, its text trimmed as the laptop trims it, `""` for one
- * left blank; `bools` holds every switch. A blank field goes as `""` and is not left out, because
+ * left blank; `bools` holds every switch. An `enum` field's choice goes exactly as the provider
+ * listed it, untrimmed, since the laptop takes only a value that equals one of the field's
+ * values as listed (`vettedFormStrings` in `PhoneAppService+Create.swift`), and a select offers
+ * nothing else. A blank field goes as `""` and is not left out, because
  * the laptop lays the phone's values over its own prefill: a field left out would keep its
  * prefill, so a user who cleared it would get it all the same. The laptop leaves a blank field out
  * of the session's params when it is optional, and refuses it when it is required. `message` goes
@@ -454,7 +457,8 @@ export function remoteCreateParams(repoID: string, provider: PhoneProvider, mess
       bools[f.name] = fieldOn(f, edits);
       continue;
     }
-    strings[f.name] = trimLikeLaptop(fieldText(f, edits));
+    const text = fieldText(f, edits);
+    strings[f.name] = f.type === 'enum' ? text : trimLikeLaptop(text);
   }
   return { provider: provider.name, repoID, message: provider.acceptsPrompt ? message : '', strings, bools };
 }
@@ -464,7 +468,8 @@ export function remoteCreateParams(repoID: string, provider: PhoneProvider, mess
  * the message is not blank (`isBlankMessage`) when it takes one, and is `""` when it does not;
  * every required field that is not a switch has a value; every switch is set; an `int` field holds
  * a whole number or is blank; and nothing names a field the form does not hold, a switch as text,
- * or a choice an `enum` field does not offer. The New sheet enables Create by it, and by
+ * or a choice an `enum` field does not offer, compared exactly with its values as listed, as the
+ * laptop compares them (`vettedFormStrings`). The New sheet enables Create by it, and by
  * `fieldProblem` for what the params cannot show, and `createRemote` checks it again at the tap.
  */
 export function remoteParamsReady(params: PhoneRemoteCreateParams, provider: PhoneProvider): boolean {

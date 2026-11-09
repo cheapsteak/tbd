@@ -15,7 +15,9 @@
  * - **switch-confirm** (`.confirm`): the menu's ask, "Restart this session under X?", what a
  *   restart stops (`restartNote`) and that a fork keeps the session, then Restart
  *   (`switchProfile`), "Fork into a new tab" (`fork` under X) and Cancel, which goes back to the
- *   Switch account sheet.
+ *   Switch account sheet. When the profiles the slice holds do not hold X, it asks nothing: its
+ *   title reads "Switch account", then the spinner or the failed load's message while no list is
+ *   loaded, then Cancel. Its title is there either way, since it names the dialog.
  * - **Fork**: Back, "Fork", what a fork does, then the profiles with the current one first
  *   (`forkOrder`), reading "Same account as now", the others their kind. A tap forks at once:
  *   under the session's own profile for the first (`fork(null)`, no `profileID` sent), else under
@@ -124,9 +126,11 @@ export function ConfirmSheet({ session, profileID, titleID, held, failure }: {
   const cancel = (): void => actions.openSheet({ name: 'switch' });
   if (profile === null) {
     // The list the profile was picked from is gone, or no longer holds it: there is nothing to ask
-    // about. The spinner shows only while a list is on its way.
+    // about. The spinner shows only while a list is on its way. The title still names the dialog
+    // (`aria-labelledby`): this is the step of Switch account that Cancel goes back from.
     return (
       <div className="confirm">
+        <h3 id={titleID}>Switch account</h3>
         {load.phase !== 'loaded' && <NotLoaded load={load} />}
         <button className="btn wide" type="button" onClick={cancel}>Cancel</button>
       </div>

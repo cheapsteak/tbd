@@ -129,12 +129,27 @@ test('a failed load shows its message, and only the newest load lands', async ()
   assert.deepEqual(h.state().sheets.profiles, { phase: 'failed', message: 'TBD could not read its profiles.' });
 });
 
-test('a superseded load changes nothing', async () => {
+test('a superseded load settles as idle, shows nothing, and the next load lands', async () => {
   const h = await harness({ profiles: null });
   const pending = h.actions.loadProfiles();
   h.last('profiles.list').reject(new AppError('superseded', SUPERSEDED_TEXT));
   await pending;
+  assert.deepEqual(h.state().sheets.profiles, { phase: 'idle' });
+  assert.equal(h.state().ui.toast, null);
+  const again = h.actions.loadProfiles();
+  h.last('profiles.list').resolve({ profiles: PROFILES });
+  await again;
+  assert.deepEqual(h.state().sheets.profiles, { phase: 'loaded', profiles: PROFILES });
+  // A superseded load that a later one replaced changes nothing.
+  const older = h.actions.loadProfiles();
+  const newer = h.actions.loadProfiles();
+  const [first, second] = h.of('profiles.list').slice(-2);
+  first!.reject(new AppError('superseded', SUPERSEDED_TEXT));
+  await older;
   assert.equal(h.state().sheets.profiles.phase, 'loading');
+  second!.resolve({ profiles: [PERSONAL] });
+  await newer;
+  assert.deepEqual(h.state().sheets.profiles, { phase: 'loaded', profiles: [PERSONAL] });
 });
 
 // MARK: - Switch
@@ -268,6 +283,34 @@ test('a gesture whose capability is unavailable sends nothing, and the reason go
   await bare.actions.fork(null, R);
   assert.deepEqual(bare.acting(), []);
   assert.equal(bare.refusal(), undefined);
+});
+
+test('an unavailable capability says why before any profile is looked up, so with no profiles loaded too', async () => {
+  const parked = 'This session is parked. Send it a message to wake it, then fork it.';
+  const remote = 'Not available for remote sessions.';
+  const caps = { ...session(R).capabilities, fork: { available: false, reason: parked }, switchProfile: { available: false, reason: remote } };
+  const forkUnderProfile = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
+  await forkUnderProfile.actions.fork(PERSONAL.id, R);
+  assert.deepEqual(forkUnderProfile.acting(), []);
+  assert.equal(forkUnderProfile.refusal(), parked);
+  const forkUnderGone = await harness({ sessions: [session(R, { capabilities: caps })] });
+  await forkUnderGone.actions.fork('P-gone', R);
+  assert.equal(forkUnderGone.refusal(), parked);
+  const switchWithNoList = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
+  await switchWithNoList.actions.switchProfile(PERSONAL.id, R);
+  assert.deepEqual(switchWithNoList.acting(), []);
+  assert.equal(switchWithNoList.refusal(), remote);
+  // Shown in the sheet the gesture was made on, too.
+  const fromSheet = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
+  fromSheet.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  const sheet = fromSheet.state().ui.sheet as SheetState;
+  await fromSheet.actions.fork(PERSONAL.id, R);
+  assert.deepEqual(fromSheet.state().sheets.failed, { sheet, text: parked });
+  // A session the route does not show still gets nothing, and nothing is said.
+  const elsewhere = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
+  await elsewhere.actions.fork(PERSONAL.id, OTHER);
+  assert.equal(elsewhere.refusal(), undefined);
+  assert.equal(elsewhere.refusal(OTHER), undefined);
 });
 
 test("a parked session's fork from switch-confirm sends nothing; the laptop's reason shows in the sheet and the composer", async () => {
@@ -577,6 +620,29 @@ test('loadProviders asks for the repo, shows loading at once, then the providers
   h.last('remote.providers').resolve({ providers: PROVIDERS });
   await third;
   assert.deepEqual(h.state().sheets.providers, { phase: 'loaded', repoID: REPO, providers: PROVIDERS });
+});
+
+test('a superseded providers load settles as idle, shows nothing, and the next load lands', async () => {
+  const h = await newHarness({ providers: null });
+  const pending = h.actions.loadProviders(REPO);
+  h.last('remote.providers').reject(new AppError('superseded', SUPERSEDED_TEXT));
+  await pending;
+  assert.deepEqual(h.state().sheets.providers, { phase: 'idle' });
+  assert.equal(h.state().sheets.failed, null);
+  const again = h.actions.loadProviders(REPO);
+  h.last('remote.providers').resolve({ providers: PROVIDERS });
+  await again;
+  assert.deepEqual(h.state().sheets.providers, { phase: 'loaded', repoID: REPO, providers: PROVIDERS });
+  // A superseded load that a later one replaced changes nothing.
+  const older = h.actions.loadProviders(REPO);
+  const newer = h.actions.loadProviders(REPO);
+  const [first, second] = h.of('remote.providers').slice(-2);
+  first!.reject(new AppError('superseded', SUPERSEDED_TEXT));
+  await older;
+  assert.equal(h.state().sheets.providers.phase, 'loading');
+  second!.resolve({ providers: [SANDBOX] });
+  await newer;
+  assert.deepEqual(h.state().sheets.providers, { phase: 'loaded', repoID: REPO, providers: [SANDBOX] });
 });
 
 test('createWorktree sends the repo of the New sheet, as the daemon wrote it, and the message as typed', async () => {
@@ -891,6 +957,21 @@ test('remote.create params: every field that is not a switch in strings, trimmed
   const oddParams = remoteCreateParams(REPO, odd, MESSAGE, NO_EDITS);
   assert.deepEqual(Object.keys(oddParams.strings), ['__proto__']);
   assert.equal(remoteParamsReady(oddParams, odd), true);
+});
+
+test("an enum choice goes exactly as the provider listed it, untrimmed, so Create sends it as the laptop compares it", () => {
+  const padded: PhoneFormField = { name: 'size', type: 'enum', label: 'Machine size', required: true, values: [' Small', 'Large '], prefill: 'Large ' };
+  const provider: PhoneProvider = { ...SANDBOX, fields: [padded, BRANCH] };
+  // The prefill, picked by nobody.
+  const prefilled = remoteCreateParams(REPO, provider, MESSAGE, NO_EDITS);
+  assert.deepEqual(plain(prefilled.strings), { size: 'Large ', branch: 'main' });
+  assert.equal(remoteParamsReady(prefilled, provider), true);
+  // A choice the user picked, beside a text field, which is still trimmed.
+  const picked = remoteCreateParams(REPO, provider, MESSAGE, withFieldText(withFieldText(NO_EDITS, 'size', ' Small'), 'branch', ' dev '));
+  assert.deepEqual(plain(picked.strings), { size: ' Small', branch: 'dev' });
+  assert.equal(remoteParamsReady(picked, provider), true);
+  // A value that is only trimmed like one of them is no choice the field offers.
+  assert.equal(remoteParamsReady({ ...picked, strings: { size: 'Small', branch: 'dev' } }, provider), false);
 });
 
 test('a cleared prefilled field goes as "", so the laptop does not fill its prefill back in', () => {

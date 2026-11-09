@@ -534,6 +534,28 @@ export function setOtherText(d: QuestionDraft, q: PhoneQuestion, text: string): 
 
 // MARK: - Answers
 
+/** The text typed into the "Other" of `q` in `d`, trimmed as the laptop trims it: `''` when there is none. */
+export function otherText(d: QuestionDraft, q: PhoneQuestion): string {
+  return trimLikeLaptop(own(d.other, q.text) ?? '');
+}
+
+/**
+ * Whether the "Other" of `q` gives `d` a value: it is chosen (the laptop's `Draft.isOtherChosen`)
+ * and its text is not blank.
+ */
+export function otherCounts(d: QuestionDraft, q: PhoneQuestion): boolean {
+  return own(d.otherChosen, q.text) === true && otherText(d, q) !== '';
+}
+
+/**
+ * How many values a multi-select question `q` has in `d`: its picked options, and its "Other"
+ * when it counts (`otherCounts`). The count "Send N selected" shows.
+ */
+export function selectedCount(q: PhoneQuestion, d: QuestionDraft): number {
+  const chosen = own(d.picks, q.text) ?? [];
+  return q.options.filter((o) => chosen.includes(o.label)).length + (otherCounts(d, q) ? 1 : 0);
+}
+
 /**
  * The value `d` gives question `q`, or null while it gives none (the laptop's `value(for:draft:)`).
  * - **Single-select:** the "Other" text, trimmed, when "Other" is chosen and the text is not
@@ -545,15 +567,14 @@ export function setOtherText(d: QuestionDraft, q: PhoneQuestion, text: string): 
  */
 export function questionValue(q: PhoneQuestion, d: QuestionDraft): string | null {
   const chosen = own(d.picks, q.text) ?? [];
-  const other = trimLikeLaptop(own(d.other, q.text) ?? '');
-  const otherCounts = own(d.otherChosen, q.text) === true && other !== '';
+  const other = otherCounts(d, q) ? otherText(d, q) : null;
   const labels = q.options.map((o) => o.label);
   if (q.multiSelect) {
     const parts = labels.filter((l) => chosen.includes(l));
-    if (otherCounts) parts.push(other);
+    if (other !== null) parts.push(other);
     return parts.length === 0 ? null : parts.join(', ');
   }
-  if (otherCounts) return other;
+  if (other !== null) return other;
   return labels.find((l) => chosen.includes(l)) ?? null;
 }
 

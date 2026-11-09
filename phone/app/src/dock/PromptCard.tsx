@@ -10,15 +10,26 @@
  * " · i of n" with `.steps` under it when the prompt asks several questions, then Hide.
  * - A single-select question's options are `.opt` buttons, each with its description as a
  *   `<small>`. A multi-select question's are `.chk` checkboxes, then "Send N selected", or "Send
- *   answer" while none is picked.
+ *   answer" while none is picked. N counts the Other value too while it counts (`selectedCount`).
  * - Every question offers "Other answer…" (the ghost `.opt`), multi-select included, since the
  *   laptop takes an Other value on every question. It opens a textarea ("Type your answer") with
- *   Cancel and "Send answer", which is disabled while the text is blank: a blank Other is no
- *   value. On a multi-select question the Other text joins the picked labels.
- * - **Steps.** With one question, a tap that gives it a value sends the answer at once. With
- *   several, it records the value and moves to the next question, and Back returns to the one
- *   before. After the last comes the review: "Send these answers?", one button per question with
- *   its header and value (a tap returns to that question), then Back and "Send answers".
+ *   Cancel and a button that depends on the question:
+ *   - single-select: "Send answer", disabled while the text is blank, since a blank Other is no
+ *     value. The text becomes the question's value, as a tapped option does (see Steps);
+ *   - multi-select: "Done", which only records the text (`setOtherText`) and returns to the
+ *     checkboxes, so the Other value goes out after the ticked labels, and only through "Send N
+ *     selected". The laptop has no such form: its Other row is a checkbox beside a text
+ *     field, and the card sends only through Submit. So, as there, a recorded Other text shows
+ *     as a `.chk` checkbox of its own after the options, ticked, labelled with the text.
+ *     Unticking it leaves the text out of the answer and ticking it puts it back (`chooseOther`,
+ *     which toggles Other on a multi-select question, as the laptop's marker does); clearing the
+ *     text and pressing Done removes the value and the checkbox, as clearing the laptop's field
+ *     leaves Other with no value. Done is enabled while the text is blank for that reason.
+ * - **Steps.** With one question, a tap that gives it a value sends the answer at once; for a
+ *   multi-select question that tap is "Send N selected". With several, it records the value and
+ *   moves to the next question, and Back returns to the one before. After the last comes the
+ *   review: "Send these answers?", one button per question with its header and value (a tap
+ *   returns to that question), then Back and "Send answers".
  * - **Focus.** A move to another question or to or from the review puts the focus on the
  *   question's text (`.q`, focusable by script only), not on whichever button now sits where the
  *   one tapped was, so a key press meant for the last question never answers the next.
@@ -73,7 +84,8 @@ import type { JSX, RefObject } from 'react';
 import type { PhonePrompt, PhoneQuestion, PhoneSession, PromptAnswer } from '../protocol/types.ts';
 import { useActions } from '../state/context.tsx';
 import {
-  chooseOption, emptyQuestionDraft, permissionAnswer, questionAnswer, questionValue, setOtherText, trimLikeLaptop,
+  chooseOption, chooseOther, emptyQuestionDraft, otherCounts, otherText, permissionAnswer, questionAnswer, questionValue, selectedCount,
+  setOtherText, trimLikeLaptop,
 } from '../state/prompts.ts';
 import type { CardState, QuestionDraft } from '../state/prompts.ts';
 import { toolGlyph } from '../state/status.ts';
@@ -86,7 +98,7 @@ interface QuestionUI {
   step: number;
   /** Whether the shown question's Other form is open. */
   otherOpen: boolean;
-  /** The text in the Other form. It becomes the question's value only through "Send answer". */
+  /** The text in the Other form. It goes into the draft only through the form's "Send answer" or "Done". */
   otherText: string;
 }
 
@@ -440,14 +452,18 @@ function QuestionCard(p: {
   const q = questions[step]!;
   const openOther = (): void => setUI({ ...ui, otherOpen: true, otherText: ui.draft.other[q.text] ?? '' });
   const cancelOther = (): void => setUI({ ...ui, otherOpen: false });
+  /** Single-select: the typed text is the question's value, sent or recorded as a tapped option is. */
   const sendOther = (): void => {
     if (trimLikeLaptop(ui.otherText) === '') return;
     advance(setOtherText(ui.draft, q, ui.otherText));
   };
+  /** Multi-select: the typed text is recorded beside the ticked labels, and the checkboxes show again; nothing is sent. */
+  const keepOther = (): void => setUI({ ...ui, draft: setOtherText(ui.draft, q, ui.otherText), otherOpen: false });
   const otherButton = ui.otherOpen ? null : (
     <button className="opt ghost" type="button" disabled={locked} onClick={openOther}>Other answer…</button>
   );
-  const otherForm = ui.otherOpen && (
+  /** The Other form, ending in `action`, while it is open; null otherwise. */
+  const otherForm = (action: JSX.Element): JSX.Element | null => !ui.otherOpen ? null : (
     <>
       <textarea
         ref={otherField}
@@ -461,9 +477,7 @@ function QuestionCard(p: {
       />
       <div className="c-actions">
         <button className="btn" type="button" disabled={locked} onClick={cancelOther}>Cancel</button>
-        <button className="btn pri" type="button" disabled={locked || trimLikeLaptop(ui.otherText) === ''} onClick={sendOther}>
-          Send answer
-        </button>
+        {action}
       </div>
     </>
   );
@@ -473,8 +487,10 @@ function QuestionCard(p: {
 
   if (q.multiSelect) {
     const picked = ui.draft.picks[q.text] ?? [];
-    const count = q.options.filter((o) => picked.includes(o.label)).length;
+    const other = otherText(ui.draft, q);
+    const count = selectedCount(q, ui.draft);
     const value = questionValue(q, ui.draft);
+    const form = otherForm(<button className="btn pri" type="button" disabled={locked} onClick={keepOther}>Done</button>);
     return (
       <div className="card" role="region" aria-label="Question">
         {head}
@@ -500,9 +516,20 @@ function QuestionCard(p: {
               </span>
             </label>
           ))}
+          {other !== '' && (
+            <label className="chk">
+              <input
+                type="checkbox"
+                checked={otherCounts(ui.draft, q)}
+                disabled={locked}
+                onChange={() => setUI({ ...ui, draft: chooseOther(ui.draft, q) })}
+              />
+              <span>{other}</span>
+            </label>
+          )}
           {otherButton}
         </div>
-        {otherForm || (
+        {form ?? (
           <div className="c-actions">
             {backButton}
             <button className="btn pri" type="button" disabled={locked || value === null} onClick={() => advance(ui.draft)}>
@@ -528,7 +555,11 @@ function QuestionCard(p: {
         ))}
         {otherButton}
       </div>
-      {otherForm}
+      {otherForm(
+        <button className="btn pri" type="button" disabled={locked || trimLikeLaptop(ui.otherText) === ''} onClick={sendOther}>
+          Send answer
+        </button>,
+      )}
       {!ui.otherOpen && backButton !== null && <div className="c-actions">{backButton}</div>}
     </div>
   );

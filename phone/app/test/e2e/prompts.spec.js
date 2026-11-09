@@ -335,7 +335,7 @@ test('multi-select sends the picked labels in option order', async ({ page, appH
   ]);
 });
 
-test('Other on a multi-select question follows the picked labels', async ({ page, appHost }) => {
+test('Done in a multi-select Other form records the text after the picked labels, and only Send N selected sends', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Settings screen');
   const c = card(page);
@@ -343,13 +343,64 @@ test('Other on a multi-select question follows the picked labels', async ({ page
   await c.getByRole('checkbox', { name: 'Notifications' }).check();
   await c.getByRole('button', { name: 'Other answer…' }).click();
   await c.getByRole('textbox', { name: 'Type your answer' }).fill('Billing');
-  await c.getByRole('button', { name: 'Send answer' }).click();
+  await expect(c.locator('.c-actions button')).toHaveText(['Cancel', 'Done']);
+  await c.getByRole('button', { name: 'Done' }).click();
+  // Back on the checkboxes, the Other value ticked after the options, and nothing sent.
+  await expect(c.getByRole('textbox', { name: 'Type your answer' })).toHaveCount(0);
+  await expect(c.locator('label.chk')).toHaveCount(6);
+  await expect(c.locator('label.chk').last()).toHaveText('Billing');
+  await expect(c.getByRole('checkbox', { name: 'Billing' })).toBeChecked();
+  await expect(c.getByRole('checkbox', { name: 'Privacy' })).toBeChecked();
+  await expect(c.getByRole('button', { name: 'Other answer…' })).toBeVisible();
+  const send = c.getByRole('button', { name: 'Send 3 selected' });
+  await expect(send).toBeEnabled();
+  expect(await answers(page)).toEqual([]);
+  await send.click();
   await expect.poll(() => answers(page)).toEqual([
     {
       session: SETTINGS_REF,
       promptID: SETTINGS_PROMPT,
       answer: { kind: 'question', answers: { [SETTINGS_QUESTION]: 'Notifications, Privacy, Billing' } },
     },
+  ]);
+});
+
+test('a multi-select Other leaves the answer when its box is unticked, or its text cleared', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Settings screen');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Other answer…' }).click();
+  await c.getByRole('textbox', { name: 'Type your answer' }).fill('  Billing ');
+  await c.getByRole('button', { name: 'Done' }).click();
+  const billing = c.getByRole('checkbox', { name: 'Billing' });
+  await expect(billing).toBeChecked();
+  const send = c.locator('.c-actions .btn.pri');
+  await expect(send).toHaveText('Send 1 selected');
+  await expect(send).toBeEnabled();
+  // Unticked, the Other value is no part of the answer; its box stays, to tick again.
+  await billing.uncheck();
+  await expect(billing).not.toBeChecked();
+  await expect(send).toHaveText('Send answer');
+  await expect(send).toBeDisabled();
+  await billing.check();
+  await expect(send).toHaveText('Send 1 selected');
+  await c.getByRole('checkbox', { name: 'Privacy' }).check();
+  await expect(send).toHaveText('Send 2 selected');
+  // Cleared, Done takes the value and its box away; Done takes blank text for that.
+  await c.getByRole('button', { name: 'Other answer…' }).click();
+  const text = c.getByRole('textbox', { name: 'Type your answer' });
+  await expect(text).toHaveValue('  Billing ');
+  await text.fill('');
+  const done = c.getByRole('button', { name: 'Done' });
+  await expect(done).toBeEnabled();
+  await done.click();
+  await expect(billing).toHaveCount(0);
+  await expect(c.locator('label.chk')).toHaveCount(5);
+  await expect(send).toHaveText('Send 1 selected');
+  expect(await answers(page)).toEqual([]);
+  await send.click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SETTINGS_REF, promptID: SETTINGS_PROMPT, answer: { kind: 'question', answers: { [SETTINGS_QUESTION]: 'Privacy' } } },
   ]);
 });
 
@@ -798,14 +849,19 @@ test('Cancel on a multi-select Other keeps the Other value recorded before', asy
   await c.getByRole('checkbox', { name: 'Account' }).check();
   await c.getByRole('button', { name: 'Other answer…' }).click();
   await c.getByRole('textbox', { name: 'Type your answer' }).fill('Privacy');
-  await c.getByRole('button', { name: 'Send answer' }).click();
+  await c.getByRole('button', { name: 'Done' }).click();
+  // Done stays on the question: only Send N selected moves on.
+  await expect(c.locator('.q')).toHaveText('Which sections?');
+  await expect(c.getByRole('checkbox', { name: 'Privacy' })).toBeChecked();
+  await c.getByRole('button', { name: 'Send 2 selected' }).click();
   await expect(c.locator('.q')).toHaveText(STEPS);
   await c.getByRole('button', { name: 'Back' }).click();
   // The form opens with the recorded text; Cancel closes it and the value stays.
   await c.getByRole('button', { name: 'Other answer…' }).click();
   await expect(c.getByRole('textbox', { name: 'Type your answer' })).toHaveValue('Privacy');
   await c.getByRole('button', { name: 'Cancel' }).click();
-  await c.getByRole('button', { name: 'Send 1 selected' }).click();
+  await expect(c.getByRole('checkbox', { name: 'Privacy' })).toBeChecked();
+  await c.getByRole('button', { name: 'Send 2 selected' }).click();
   await c.getByRole('button', { name: '3 steps' }).click();
   await expect(c.locator('.review button').nth(0)).toHaveText('SectionsAccount, Privacy');
   await c.getByRole('button', { name: 'Send answers' }).click();

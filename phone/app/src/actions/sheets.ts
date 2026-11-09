@@ -6,7 +6,9 @@
 //   and Fork sheets, which each load afresh when they open. The slice shows it `loading` at once,
 //   then `loaded` with the laptop's profiles, or `failed` with the error's message. A load that a
 //   later one replaced changes nothing when it ends. The client never supersedes a read (it is
-//   resent after a drop), so `superseded`, were it to come, changes nothing.
+//   resent after a drop), but a `superseded` that came all the same settles the load too, as
+//   `idle`, silently: the slice never shows a load on its way that is not, and the next opening
+//   loads again.
 // - `switchProfile(profileID, from): Promise<void>` – `session.switchProfile` on the session the
 //   route shows, with `profileID`. On success it closes the menu or sheet the gesture was made on,
 //   if it still shows, and toasts "Restarted under <profile>".
@@ -25,8 +27,9 @@
 // - `loadProviders(repoID): Promise<void>` – `remote.providers` with `repoID`, so the laptop
 //   prefills each provider's form for that repo, for the New sheet's remote form, which loads
 //   afresh each time it shows. The slice shows it `loading` at once, then `loaded` with the
-//   laptop's providers, or `failed` with the error's message, as `loadProfiles` does, and a load
-//   that a later one replaced changes nothing when it ends.
+//   laptop's providers, or `failed` with the error's message, as `loadProfiles` does, a load
+//   that a later one replaced changes nothing when it ends, and a `superseded` one settles as
+//   `idle`.
 // - `createWorktree(repoID, message): Promise<void>` – `worktree.create` in `repoID` with
 //   `message` as the new session's first message, sent as typed. It takes a mark (`navMark`) as it
 //   sends; on success it closes the New sheet of that repo, if one still shows, and opens the new
@@ -85,7 +88,10 @@
 // switch, that the session runs under that profile already (`switchBlock`). A gesture that meets
 // one of these all the same, as when an event changed the session as the user tapped, sends
 // nothing and shows the reason in the session's `ui.refusal`, and in the sheet it was made on
-// while that shows (as an error does, below), unless the laptop gave none.
+// while that shows (as an error does, below), unless the laptop gave none. The capability comes
+// right after the target, before the profile: a gesture whose capability is unavailable shows
+// its reason whether or not the profiles are loaded, and never ends silent on a profile it
+// could not have used anyway.
 //
 // **One request per gesture.** A session gets one of the three at a time: the action marks it
 // acting (`beginAct`) in the same store update that reads the target, before anything is sent,
@@ -309,8 +315,8 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         next = { phase: 'loaded', profiles: result.profiles };
       } catch (error) {
         const text = errorText(error);
-        if (text === null) return;
-        next = { phase: 'failed', message: text };
+        // Superseded: silent, and no longer on its way.
+        next = text === null ? { phase: 'idle' } : { phase: 'failed', message: text };
       }
       store.update((s) => withSheets(s, profilesEnded(s.sheets, id, next)));
     },
@@ -319,10 +325,12 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       const sent: { to: ActTarget | null; name: string } = { to: null, name: '' };
       store.update((s) => {
         const to = actTarget(s, from);
+        if (to === null) return s;
+        const reason = unavailableReason(to.session, 'switch');
+        if (reason !== null) return refused(s, to, reason);
         const profiles = loadedProfiles(s.sheets);
-        if (to === null || profiles === null) return s;
-        const profile = profileByID(profiles, profileID);
-        if (profile === null) return s;
+        const profile = profiles === null ? null : profileByID(profiles, profileID);
+        if (profiles === null || profile === null) return s;
         const block = switchBlock(to.session, profiles, profile);
         if (block !== null) return refused(s, to, block);
         sent.to = to;
@@ -346,6 +354,8 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       store.update((s) => {
         const to = actTarget(s, from);
         if (to === null) return s;
+        const block = unavailableReason(to.session, 'fork');
+        if (block !== null) return refused(s, to, block);
         const profiles = loadedProfiles(s.sheets);
         let name: string;
         if (profileID === null) {
@@ -355,8 +365,6 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
           if (profile === null) return s;
           name = profile.name;
         }
-        const block = unavailableReason(to.session, 'fork');
-        if (block !== null) return refused(s, to, block);
         sent.to = to;
         sent.name = name;
         return begun(s, to, 'fork');
@@ -411,8 +419,8 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         next = { phase: 'loaded', repoID, providers: result.providers };
       } catch (error) {
         const text = errorText(error);
-        if (text === null) return;
-        next = { phase: 'failed', repoID, message: text };
+        // Superseded: silent, and no longer on its way.
+        next = text === null ? { phase: 'idle' } : { phase: 'failed', repoID, message: text };
       }
       store.update((s) => withSheets(s, providersEnded(s.sheets, id, next)));
     },

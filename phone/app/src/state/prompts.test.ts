@@ -4,7 +4,8 @@ import type { PhonePrompt, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptC
 import {
   ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, beginSend, cardFor, chooseOption, chooseOther, dismissCard,
   emptyPrompts, emptyQuestionDraft, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt, permissionAnswer, questionAnswer,
-  questionValue, receiptSource, receiptText, cardKey, refuseAnswer, setOtherText, settleAnswer, textAt, trimLikeLaptop, withText,
+  otherCounts, otherText, questionValue, receiptSource, receiptText, cardKey, refuseAnswer, selectedCount, setOtherText, settleAnswer, textAt,
+  trimLikeLaptop, withText,
 } from './prompts.ts';
 import type { AnsweredHere, AnswerSettlement, CardState, PromptsState, QuestionDraft } from './prompts.ts';
 
@@ -223,6 +224,29 @@ test('Other: single-select chooses it in place of the options; multi-select togg
   assert.deepEqual([...(multi.picks[QM.text] ?? [])], ['Privacy']);
   assert.equal(multi.otherChosen[QM.text], true);
   assert.equal(Object.hasOwn(chooseOther(multi, QM).otherChosen, QM.text), false);
+});
+
+test('a multi-select Other leaves the answer by its marker or by blank text, and the count follows it', () => {
+  const typed = setOtherText(pick(QM, 'Privacy'), QM, '  Billing ');
+  assert.equal(otherText(typed, QM), 'Billing');
+  assert.equal(otherCounts(typed, QM), true);
+  assert.equal(selectedCount(QM, typed), 2);
+  // Unticked (the laptop's marker): the text stays, and counts for nothing.
+  const unticked = chooseOther(typed, QM);
+  assert.equal(otherText(unticked, QM), 'Billing');
+  assert.equal(otherCounts(unticked, QM), false);
+  assert.equal(selectedCount(QM, unticked), 1);
+  assert.equal(questionValue(QM, unticked), 'Privacy');
+  assert.equal(selectedCount(QM, chooseOther(unticked, QM)), 2);
+  // Cleared: chosen still, but blank text is no value.
+  const cleared = setOtherText(typed, QM, ' ');
+  assert.equal(otherText(cleared, QM), '');
+  assert.equal(otherCounts(cleared, QM), false);
+  assert.equal(selectedCount(QM, cleared), 1);
+  assert.equal(questionValue(QM, cleared), 'Privacy');
+  // A label that is not an option counts for nothing here either.
+  assert.equal(selectedCount(QM, pick(QM, 'Billing')), 0);
+  assert.equal(otherText(emptyQuestionDraft(), QM), '');
 });
 
 test('typing chooses Other unless the text is blank', () => {
