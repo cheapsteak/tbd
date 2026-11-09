@@ -228,15 +228,15 @@ test("a fork's error, or a gesture refused at the tap, shows in the account menu
   await pending;
   assert.equal(h.state().sheets.failed, null);
   assert.equal(h.refusal(), NOT_CONFIRMED_TEXT);
-  // Refused at the tap, as when an event parked the session as the user tapped: the ask and the composer show why.
-  const parked = 'This session is parked. Send it a message to wake it, then fork it.';
-  h = await harness({ sessions: [session(R, { capabilities: { ...session(R).capabilities, fork: { available: false, reason: parked } } })] });
+  // Refused at the tap, as when an event changed the session as the user tapped: the ask and the composer show why.
+  const noFork = 'The laptop cannot fork this session.';
+  h = await harness({ sessions: [session(R, { capabilities: { ...session(R).capabilities, fork: { available: false, reason: noFork } } })] });
   h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
   menu = h.state().ui.menu;
   await h.actions.fork(PERSONAL.id, R);
   assert.deepEqual(h.acting(), []);
-  assert.deepEqual(h.state().sheets.failed, { on: menu, text: parked });
-  assert.equal(h.refusal(), parked);
+  assert.deepEqual(h.state().sheets.failed, { on: menu, text: noFork });
+  assert.equal(h.refusal(), noFork);
   // The model menu has no place for words: a refused model change goes to the composer only.
   h = await harness();
   h.actions.openMenu({ name: 'model' });
@@ -386,16 +386,16 @@ test('a gesture whose capability is unavailable sends nothing, and the reason go
 });
 
 test('an unavailable capability says why before any profile is looked up, so with no profiles loaded too', async () => {
-  const parked = 'This session is parked. Send it a message to wake it, then fork it.';
+  const noFork = 'The laptop cannot fork this session.';
   const remote = 'Not available for remote sessions.';
-  const caps = { ...session(R).capabilities, fork: { available: false, reason: parked }, switchProfile: { available: false, reason: remote } };
+  const caps = { ...session(R).capabilities, fork: { available: false, reason: noFork }, switchProfile: { available: false, reason: remote } };
   const forkUnderProfile = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
   await forkUnderProfile.actions.fork(PERSONAL.id, R);
   assert.deepEqual(forkUnderProfile.acting(), []);
-  assert.equal(forkUnderProfile.refusal(), parked);
+  assert.equal(forkUnderProfile.refusal(), noFork);
   const forkUnderGone = await harness({ sessions: [session(R, { capabilities: caps })] });
   await forkUnderGone.actions.fork('P-gone', R);
-  assert.equal(forkUnderGone.refusal(), parked);
+  assert.equal(forkUnderGone.refusal(), noFork);
   const switchWithNoList = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
   await switchWithNoList.actions.switchProfile(PERSONAL.id, R);
   assert.deepEqual(switchWithNoList.acting(), []);
@@ -405,7 +405,7 @@ test('an unavailable capability says why before any profile is looked up, so wit
   fromSheet.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
   const sheet = fromSheet.state().ui.sheet as SheetState;
   await fromSheet.actions.fork(PERSONAL.id, R);
-  assert.deepEqual(fromSheet.state().sheets.failed, { on: sheet, text: parked });
+  assert.deepEqual(fromSheet.state().sheets.failed, { on: sheet, text: noFork });
   // A session the route does not show still gets nothing, and nothing is said.
   const elsewhere = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
   await elsewhere.actions.fork(PERSONAL.id, OTHER);
@@ -413,20 +413,22 @@ test('an unavailable capability says why before any profile is looked up, so wit
   assert.equal(elsewhere.refusal(OTHER), undefined);
 });
 
-test("a parked session's fork from switch-confirm sends nothing; the laptop's reason shows in the sheet and the composer", async () => {
-  const parked = 'This session is parked. Send it a message to wake it, then fork it.';
-  const h = await harness({
-    sessions: [session(R, { status: { chip: 'parked', changedAt: 1 }, capabilities: { ...session(R).capabilities, fork: { available: false, reason: parked } } })],
-  });
+test("a parked session forks from switch-confirm as a running one does, and its switch goes out too", async () => {
+  const made: PhoneSessionRef = { kind: 'local', terminalID: 'T-new' };
+  const h = await harness({ sessions: [session(R, { status: { chip: 'parked', changedAt: 1 } })] });
   h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
-  const sheet = h.state().ui.sheet as SheetState;
-  await h.actions.fork(PERSONAL.id, R);
-  assert.deepEqual(h.acting(), []);
-  assert.equal(h.refusal(), parked);
-  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: parked });
-  // The switch itself still goes out.
-  const pending = h.actions.switchProfile(PERSONAL.id, R);
-  assert.deepEqual(h.acting().map((r) => r.params), [{ session: R, profileID: PERSONAL.id }]);
+  let pending = h.actions.fork(PERSONAL.id, R);
+  assert.deepEqual(h.acting().map((r) => [r.method, r.params]), [['session.fork', { session: R, profileID: PERSONAL.id }]]);
+  h.last('session.fork').resolve({ session: made });
+  await pending;
+  assert.equal(h.refusal(), undefined);
+  assert.equal(h.state().sheets.failed, null);
+  assert.equal(h.state().ui.toast?.text, 'Forked into a new tab, under Personal');
+  assert.deepEqual(h.state().ui.pendingOpen, { ref: made });
+  // The switch goes out the same way.
+  h.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
+  pending = h.actions.switchProfile(PERSONAL.id, R);
+  assert.deepEqual(h.of('session.switchProfile').map((r) => r.params), [{ session: R, profileID: PERSONAL.id }]);
   h.last('session.switchProfile').resolve({ session: R });
   await pending;
 });
@@ -504,9 +506,9 @@ test("a fork's error shows in the sheet open over the session, else in the compo
   h.actions.openSheet({ name: 'fork' });
   const sheet = h.state().ui.sheet as SheetState;
   let pending = h.actions.fork(BEDROCK.id, R);
-  h.last('session.fork').reject(new AppError('refused', 'This session is parked. Send it a message to wake it, then fork it.'));
+  h.last('session.fork').reject(new AppError('refused', 'The laptop refused the fork.'));
   await pending;
-  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: 'This session is parked. Send it a message to wake it, then fork it.' });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: 'The laptop refused the fork.' });
   assert.equal(h.refusal(), undefined);
   assert.equal(h.state().ui.sheet, sheet);
   // The sheet closed meanwhile: the composer shows it.

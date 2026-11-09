@@ -401,7 +401,12 @@ a TBD notification naming the phone, so a pairing the user did not make is visib
 
 ## 6. Sessions the phone can reach
 
-- **Local Claude sessions** – everything in this spec.
+- **Local Claude sessions** – everything in this spec, parked ones included. A parked session
+  offers every action a running one does:
+  - **Send** – wakes it with the message.
+  - **Switch account** – moves it to the profile, where it stays parked until its next wake.
+  - **Fork** – copies its conversation into a new tab, which starts under the chosen profile. The
+    parked session stays parked, on its own profile.
 - **Codex sessions** – listed with their status, which comes from OSC 7501 like Claude's. Opening
   one shows "Codex transcripts arrive in a later TBD release". No actions.
 - **Remote-provider sessions** – listed, with status from the provider's session list and open
@@ -625,10 +630,11 @@ These come from the laptop's bundle.
     A refusal shows its reason. Text only.
 - **Switch account** – a profile list, then the question "Restart this session under
   <profile>?" with three answers: Restart, "Fork into a new tab" (the Fork action below, under
-  that profile, which leaves this session running), and Cancel. The question says when a running
+  that profile, which leaves this session as it is), and Cancel. The question says when a running
   turn would stop.
 - **Fork** – a profile list, with the current profile first. The fork opens as a new tab, and the
-  phone switches to it.
+  phone switches to it. A parked session forks the same way, without a wake, and stays parked
+  (section 6).
 - **Model** – `default`, `opus`, `sonnet` and `haiku`, plus a field for any other name. The list is a
   constant in the app bundle, so it updates with TBD releases.
 - **New sheet** – opened from a repo's "+", so the repo is already chosen and the sheet names it.

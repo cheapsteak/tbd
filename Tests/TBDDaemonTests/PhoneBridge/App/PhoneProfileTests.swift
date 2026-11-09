@@ -409,42 +409,28 @@ struct PhoneProfileTests {
         #expect(Self.swaps(h) == [[terminal.id.uuidString, "<none>", "fork"]])
     }
 
-    /// The swap moves a parked row in place whatever the mode, so a fork of a
-    /// parked session would move the session instead of copying it. It is
-    /// refused before anything is called.
-    @Test func forkOfAParkedSessionIsRefused() async throws {
+    /// A parked session forks as a running one does, without a wake first:
+    /// the same fork goes to the daemon, whose swap copies the conversation
+    /// into a new tab and leaves the parked session as it is, and the reply
+    /// names the new tab.
+    @Test func forkOfAParkedSessionForks() async throws {
         let h = try await PhoneServiceHarness.make()
         let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
         let terminal = try await h.seedTerminal()
         try await h.park(terminal.id)
+        let forkID = UUID()
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(forkID))
         let outbox = await h.connect()
 
-        let (reply, _) = try await h.request(
+        let (reply, bytes) = try await h.request(
             .sessionFork,
             params: SessionForkParams(session: .local(terminalID: terminal.id), profileID: profile.id), on: outbox)
 
-        #expect(reply.error == PhoneAppError(
-            code: .refused, message: "This session is parked. Send it a message to wake it, then fork it."))
-        #expect(h.actions.calls.isEmpty)
-    }
-
-    /// A session that parks after the fork checked it takes the swap's cold
-    /// path, which moves it to the profile in place and answers with the
-    /// session's own row. That is no fork, so the phone hears what happened
-    /// instead of a success naming the old session as the new one.
-    @Test func aForkThatMovedTheSessionIsRefused() async throws {
-        let h = try await PhoneServiceHarness.make()
-        let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
-        let terminal = try await h.seedTerminal()
-        h.actions.respond(to: .swapProfile, with: try Self.swapped(terminal.id))
-        let outbox = await h.connect()
-
-        let (reply, _) = try await h.request(
-            .sessionFork,
-            params: SessionForkParams(session: .local(terminalID: terminal.id), profileID: profile.id), on: outbox)
-
-        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneAppService.forkMovedReason))
+        #expect(reply.error == nil)
+        #expect(try Self.sessionRef(bytes) == .local(terminalID: forkID))
         #expect(Self.swaps(h) == [[terminal.id.uuidString, profile.id.uuidString, "fork"]])
+        // The swap is the only call: nothing wakes the parked session first.
+        #expect(h.actions.calls == [FakeSessionActions.Call(method: .swapProfile, deviceID: h.peer.deviceID)])
     }
 
     @Test func forkUnderAMissingProfileIsNotFound() async throws {

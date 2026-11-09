@@ -187,7 +187,8 @@ test('the account menu and the switch-confirm sheet ask the same and disable the
   const states: Array<[string, PhoneSession, string, Partial<SheetsState>]> = [
     ['idle', SESSION, PERSONAL.id, {}],
     ['working', { ...SESSION, status: { chip: 'working', changedAt: 1 } }, PERSONAL.id, {}],
-    ['parked', { ...SESSION, capabilities: { ...SESSION.capabilities, fork: OFF('This session is parked. Send it a message to wake it, then fork it.') } }, PERSONAL.id, {}],
+    ['parked', { ...SESSION, status: { chip: 'parked', changedAt: 1 } }, PERSONAL.id, {}],
+    ['no fork, with a reason', { ...SESSION, capabilities: { ...SESSION.capabilities, fork: OFF('The laptop cannot fork this session.') } }, PERSONAL.id, {}],
     ['no fork, no reason', { ...SESSION, capabilities: { ...SESSION.capabilities, fork: OFF() } }, PERSONAL.id, {}],
     ['moved to the profile asked about', { ...SESSION, profileID: PERSONAL.id, profileName: PERSONAL.name }, PERSONAL.id, {}],
     ['acting', SESSION, PERSONAL.id, { acting: Object.assign(emptyRecord<'fork'>(), { [refKey(SESSION.ref)]: 'fork' as const }) }],

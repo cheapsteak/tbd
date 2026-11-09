@@ -230,8 +230,7 @@
                 "available": true
               },
               "fork": {
-                "available": false,
-                "reason": "This session is parked. Send it a message to wake it, then fork it."
+                "available": true
               },
               "model": {
                 "available": true

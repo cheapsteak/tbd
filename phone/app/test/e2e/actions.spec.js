@@ -4,14 +4,15 @@
 // only once the list shows it, a fork the user moved away from, a refused switch, the profiles
 // loading and failing. The model menu: a pick, another name typed, a session that works. Both: one
 // request per gesture, no double tap landing on an acting button the user has not seen, and a tap
-// outside or Escape closing them. Then the session menu sheet, with a remote and a parked
-// session's unavailable rows, and its Switch account, "Restart under X?", Fork and Model sheets:
-// what each sends, one request per gesture, no double tap landing on an acting button, a sheet
-// closing when an event takes its session off the list, focus, and errors. Then what a closing
-// menu or sheet uncovers: no second tap of a double tap lands on Send or on a card's choice under
-// it. And buttons that cannot act: a parked session's Fork, and Restart once the session runs
-// under that profile already, disabled with the reason, and the Fork sheet's rows waiting when
-// an event reorders them. Then New, from a repo's "+": the repo it sends, the new session
+// outside or Escape closing them. Then the session menu sheet, with a remote session's
+// unavailable rows and a parked session's available ones, and its Switch account, "Restart under
+// X?", Fork and Model sheets: what each sends, one request per gesture, no double tap landing on
+// an acting button, a sheet closing when an event takes its session off the list, focus, and
+// errors. Then what a closing menu or sheet uncovers: no second tap of a double tap lands on Send
+// or on a card's choice under it. Then a parked session's Restart and Fork, which act as a running
+// session's do. And buttons that cannot act: Restart once the session runs under that profile
+// already, disabled with the reason, and the Fork sheet's rows waiting when an event reorders
+// them. Then New, from a repo's "+": the repo it sends, the new session
 // opening once its row appears, a create the user moved away from or closed, the providers and
 // their forms, what remote.create carries, refusals, one create per gesture, the tap guard, what
 // closing the sheet uncovers, and the keyboard.
@@ -33,7 +34,7 @@ const MOCK = JSON.parse(readFileSync(new URL('scenarios/mock.json', import.meta.
 /** Checkout v2's tabs. */
 const REVIEW_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000104' };
 const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
-/** Docs refresh's session: parked, on Personal, so it cannot fork. */
+/** Docs refresh's session: parked, on Personal. */
 const DOCS_REF = MOCK.rows.find((/** @type {any} */ r) => r.name === 'Docs refresh').sessions[0].ref;
 /** mock.json's profiles. */
 const PERSONAL = '00000000-0000-4000-8000-0000000000F1';
@@ -667,14 +668,14 @@ test("a remote session's Switch and Fork rows are disabled with the laptop's rea
   await expect(rows.nth(2)).toBeEnabled();
 });
 
-test("a parked session's Fork row is disabled with the laptop's reason", async ({ page, appHost }) => {
+test("a parked session's Switch account, Fork and Model rows are all enabled", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Docs refresh');
   await openMenuSheet(page);
   const rows = sheet(page).locator('button.mi');
-  await expect(rows.nth(1).locator('small')).toHaveText('This session is parked. Send it a message to wake it, then fork it.');
-  await expect(rows.nth(1)).toBeDisabled();
+  await expect(rows.nth(1).locator('small')).toHaveText('Copy this conversation into a new tab');
   await expect(rows.nth(0)).toBeEnabled();
+  await expect(rows.nth(1)).toBeEnabled();
   await expect(rows.nth(2)).toBeEnabled();
 });
 
@@ -1057,35 +1058,43 @@ test("closing a menu by Escape or by its own button holds Send for a moment", as
   expect(await sends(page)).toBe(0);
 });
 
-// MARK: - Buttons that cannot act
+// MARK: - A parked session's Restart and Fork
 
-const PARKED_FORK = 'This session is parked. Send it a message to wake it, then fork it.';
-
-test("a parked session's ask and switch-confirm disable Fork with the laptop's reason, and Restart still works", async ({ page, appHost }) => {
+test("a parked session's ask offers Restart and Fork, and Restart goes out", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Docs refresh');
   await accountButton(page, 'Personal').click();
   const menu = accountMenu(page);
   await row(menu, 'acme-work').click();
-  const fork = menu.getByRole('button', { name: 'Fork into a new tab' });
-  await expect(menu.getByRole('button', { name: 'Restart' })).toBeEnabled();
-  await expect(fork).toBeDisabled();
-  await expect(menu.locator('.pd-ask div span')).toHaveText(PARKED_FORK);
-  await page.keyboard.press('Escape');
-  await openMenuSheet(page);
-  await sheet(page).locator('button.mi').nth(0).click();
-  await sheet(page).locator('button.mi', { hasText: 'acme-work' }).click();
-  const dialog = sheet(page);
-  const restart = dialog.getByRole('button', { name: 'Restart' });
+  const restart = menu.getByRole('button', { name: 'Restart' });
   await expect(restart).toBeEnabled();
-  await expect(dialog.getByRole('button', { name: 'Fork into a new tab' })).toBeDisabled();
-  await expect(dialog.locator('.confirm > p').last()).toHaveText(PARKED_FORK);
+  await expect(menu.getByRole('button', { name: 'Fork into a new tab' })).toBeEnabled();
   expect(await acting(page)).toEqual([]);
   await restart.click();
   await expect.poll(() => acting(page)).toEqual([
     { method: 'session.switchProfile', params: { session: DOCS_REF, profileID: WORK } },
   ]);
 });
+
+test('a parked session forks from switch-confirm, and the parked session stays in the list', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(0).click();
+  await sheet(page).locator('button.mi', { hasText: 'acme-work' }).click();
+  const dialog = sheet(page);
+  await expect(dialog.getByRole('button', { name: 'Restart' })).toBeEnabled();
+  const fork = dialog.getByRole('button', { name: 'Fork into a new tab' });
+  await expect(fork).toBeEnabled();
+  expect(await acting(page)).toEqual([]);
+  await fork.click();
+  await expect(app(page).locator('.toast')).toHaveText('Forked into a new tab, under acme-work');
+  expect(await acting(page)).toEqual([{ method: 'session.fork', params: { session: DOCS_REF, profileID: WORK } }]);
+  // The new tab opens beside the parked one, which keeps its tab.
+  await expect(app(page).getByRole('tab')).toHaveCount(2);
+});
+
+// MARK: - Buttons that cannot act
 
 /**
  * Checkout v2's row in mock.json with its Review tab moved to Personal, as a sessions.changed

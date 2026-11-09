@@ -46,8 +46,8 @@
  * the profile row just tapped, or changes under it (its note, a reason or a failure appearing),
  * or the model menu as it opens. In the ask, Restart and "Fork into a new tab" are also disabled
  * while their request cannot go out, with the reason under each (`switchBlock`,
- * `unavailableReason`): a parked session cannot fork, and a session already under the profile
- * asked about has nothing to restart. The ask holds and gates them itself (`RestartAsk`).
+ * `unavailableReason`): a fork the laptop marks unavailable cannot go out, and a session already
+ * under the profile asked about has nothing to restart. The ask holds and gates them itself (`RestartAsk`).
  *
  * **Outcomes.** A menu closes only when its action succeeds (`actions/sheets.ts`). A switch or a
  * fork refused or failed from the ask shows in the ask (`.refusal`, above its buttons) while that

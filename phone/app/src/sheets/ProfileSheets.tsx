@@ -42,8 +42,8 @@
  * it, for `TAP_GUARD_MS` whenever the ask shows or changes (`useChangeHold`): its note, a reason,
  * or a failure appearing. They are also disabled while their request cannot go out, by the rules
  * the actions check (`switchBlock`, `unavailableReason`), with the reason under the button, or
- * under the Fork sheet's description for its rows: a parked session cannot fork, and a session
- * already under the profile asked about has nothing to restart. Every action reads its target
+ * under the Fork sheet's description for its rows: a fork the laptop marks unavailable cannot go
+ * out, and a session already under the profile asked about has nothing to restart. Every action reads its target
  * from the store when tapped and acts only on the session this sheet or menu showed (`from`, in
  * `actions/sheets.ts`).
  */

@@ -7,8 +7,8 @@
  * "Fork" ("Copy this conversation into a new tab") and "Model" ("Now <model>", left out when the
  * laptop does not know the model). A row whose capability (`switchProfile`, `fork`, `model`) is
  * unavailable is disabled and shows the capability's reason in place of its line, as a remote
- * session's Switch account and Fork do, or a parked session's Fork; with no line at all when the
- * laptop gave no reason. Last comes Cancel. Nothing
+ * session's Switch account and Fork do; with no line at all when the laptop gave no reason. Last
+ * comes Cancel. Nothing
  * here acts on the session: each row only opens a sheet.
  */
 
