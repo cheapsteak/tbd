@@ -150,6 +150,28 @@ func processIsAlive(_ pid: Int32) -> Bool {
     pid > 0 && kill(pid, 0) == 0
 }
 
+/// The kernel's run state (`p_stat`) for `pid`, or nil once the pid names
+/// nothing at all.
+///
+/// It tells apart what `processIsAlive` cannot: a zombie, which has exited but
+/// still answers `kill(pid, 0)` until its parent reaps it, and a process that
+/// is stopped.
+func processRunState(_ pid: Int32) -> Int32? {
+    guard pid > 0 else { return nil }
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+    return Int32(info.kp_proc.p_stat)
+}
+
+/// `SSTOP` and `SZOMB` from <sys/proc.h>, spelled as literals because the
+/// macros are not guaranteed to survive the importer.
+enum ProcessRunState {
+    static let stopped: Int32 = 4
+    static let zombie: Int32 = 5
+}
+
 /// Takes whatever is queued on a handed-over pty master, without blocking.
 ///
 /// **A test that holds the master must drain it, or the job cannot finish
@@ -580,6 +602,19 @@ final class TestHolderClient {
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw TestHolderError.connectFailed(path: socketPath, errno: errno) }
 
+        // A holder that has already reported an exit closes as soon as it has,
+        // so a write can legitimately land on a socket whose peer is gone.
+        // Without this that write raises SIGPIPE in the test host, a signal to
+        // the whole process that can interrupt another suite's system call.
+        //
+        // **Set before `connect`, never after.** XNU refuses every
+        // `setsockopt` with EINVAL once the peer has closed, so an option set
+        // after `connect` is lost exactly when a holder hangs up first, which
+        // is the case it is here for. The write then got EPIPE and raised the
+        // "caught SIGPIPE" line beside each `.sendFailed(32)` in CI.
+        var on: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let sunPathSize = MemoryLayout.size(ofValue: address.sun_path)
@@ -603,13 +638,6 @@ final class TestHolderClient {
         }
 
         setReceiveTimeout(receiveTimeout)
-        // A holder that has already reported an exit closes as soon as it has,
-        // so a write can legitimately land on a socket whose peer is gone.
-        // Without this that write raises SIGPIPE, whose default disposition
-        // would kill the TEST RUNNER — every suite in the process, with no
-        // failure attributed to anything.
-        var on: Int32 = 1
-        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
     /// Re-arms `SO_RCVTIMEO`, so one connection can wait out a short silence
@@ -625,11 +653,11 @@ final class TestHolderClient {
     /// Sends one `describe` and then reads until the holder reports a status
     /// that is not `.alive`.
     ///
-    /// Tolerates both orderings, which is not cosmetic: a job that exits
-    /// promptly may already be reaped by the time this client connects, in
-    /// which case the holder pushes the terminal status at accept time and
-    /// never reads the request. Bounded by `SO_RCVTIMEO` — a status that never
-    /// arrives throws rather than hanging.
+    /// Tolerates both orderings, which is not cosmetic: when the job exits
+    /// before the holder has read this request, the holder pushes the terminal
+    /// status at this already-connected client and closes, so the request is
+    /// never read and its write may land on a closed socket. Bounded by
+    /// `SO_RCVTIMEO` — a status that never arrives throws rather than hanging.
     func awaitTerminalStatus() throws -> HolderChildDescription {
         try? send(.describe)
         while true {

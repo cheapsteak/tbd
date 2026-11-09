@@ -523,6 +523,72 @@ struct HolderLifecycleTests {
         #expect(description.childPID == jobPID)
     }
 
+    /// The same client, arriving in the gap between the job's exit and the
+    /// holder noticing it.
+    ///
+    /// The exit wakes nothing the holder polls, so it learns of it only at its
+    /// next `waitpid`, up to a poll slice later. A client whose connect lands
+    /// in that gap wakes the poll and is accepted first. Admitted before the
+    /// reap, it was pushed at as though it had been connected when the job
+    /// exited, and disconnected with its request unread. That is the greeting
+    /// the test above rules out, reached by timing instead. A job that exits
+    /// at once can land a test in the gap: `theJobDoesNotStartWithSIGPIPEIgnored`
+    /// failed with `.sendFailed(32)` whenever it did and the holder's close
+    /// then beat that test's first write.
+    ///
+    /// Stopping the holder holds the gap open, so this needs no luck. The job
+    /// exits while the holder is stopped and stays a zombie, because nothing
+    /// else can reap it. A stopped holder's listener still completes the
+    /// connect, and the request waits in its buffer. The holder resumes in its
+    /// poll, which returns for the connect rather than failing with EINTR.
+    @Test func handsOverThePTYToAClientThatArrivesBeforeTheExitIsReaped() async throws {
+        let home = HolderFixture.scratchHome()
+        let fixture = try await HolderFixture.start(
+            launch: Self.jobThatExitsOnCue(home: home, code: 5), home: home)
+        defer { fixture.tearDown() }
+        await fixture.waitForSocket()
+
+        var jobPID: Int32 = 0
+        await waitUntil("the job to report its pid\n\(fixture.diagnostics())") {
+            guard let text = try? String(contentsOfFile: home + "/job.pid", encoding: .utf8) else { return false }
+            jobPID = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            return jobPID > 0
+        }
+        try #require(jobPID > 0)
+        fixture.trackChild(jobPID)
+
+        // Teardown SIGKILLs a holder that is still stopped, so a failure below
+        // cannot leave it frozen.
+        kill(fixture.holderPID, SIGSTOP)
+        await waitUntil("the holder to stop") {
+            processRunState(fixture.holderPID) == ProcessRunState.stopped
+        }
+        FileManager.default.createFile(atPath: home + "/go", contents: nil)
+        await waitUntil("the job to exit and stay unreaped while its holder is stopped") {
+            processRunState(jobPID) == ProcessRunState.zombie
+        }
+
+        let client = try await fixture.connect(receiveTimeout: 15.0)
+        defer { client.close() }
+        try client.send(.handOverPTY)
+        kill(fixture.holderPID, SIGCONT)
+
+        let (response, fds) = try client.receiveWithFDs()
+        defer { fds.forEach { close($0) } }
+        guard case .handedOverPTY(let description) = response else {
+            Issue.record(
+                """
+                expected .handedOverPTY, got \(response): the holder admitted the client \
+                before reaping the job, and pushed the exit at it in place of the answer
+                \(fixture.diagnostics())
+                """)
+            return
+        }
+        #expect(fds.count == 1, "the master must ride the hand-over")
+        #expect(description.status == .exited(code: 5))
+        #expect(description.childPID == jobPID)
+    }
+
     /// The same client, asking the cheaper question. Two claims, and the first
     /// is what the second rests on: the holder says **nothing** to a client
     /// that has asked for nothing, and then answers what it is asked.

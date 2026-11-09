@@ -358,7 +358,7 @@ final class Holder {
         /// `.described` frame is what a reader blocked on the pty needs to see
         /// to stop waiting.
         ///
-        /// It is called from the reaping branch alone, and that restriction is
+        /// It is called from `collectChildExit` alone, and that restriction is
         /// the whole contract: **the holder never speaks first to a client that
         /// arrives after the child is gone.** Greeting one at accept time put a
         /// frame nobody asked for where that client's first response belongs —
@@ -389,26 +389,32 @@ final class Holder {
             if status != .alive { exitCollected = true }
         }
 
-        while true {
-            if case .alive = status {
-                var raw: Int32 = 0
-                let reaped = waitpid(child.pid, &raw, WNOHANG)
-                if reaped == child.pid {
-                    status = Self.status(fromWaitpidStatus: raw)
-                    window.arm()
-                    Self.logger.info(
-                        "child \(child.pid, privacy: .public) exited: \(String(describing: status), privacy: .public)")
-                    pushExitToConnectedClient()
-                } else if reaped < 0 && errno != EINTR {
-                    // We can no longer observe the child at all. Say exactly
-                    // that — a fabricated exit code would be indistinguishable
-                    // from a real one to everything downstream.
-                    status = .exitedStatusUnknown
-                    window.arm()
-                    Self.logger.error("waitpid failed (errno \(errno, privacy: .public))")
-                    pushExitToConnectedClient()
-                }
+        /// Reaps the child if it has exited, and pushes the status at the
+        /// client connected at that moment, if any. A no-op once the status is
+        /// known.
+        func collectChildExit() {
+            guard case .alive = status else { return }
+            var raw: Int32 = 0
+            let reaped = waitpid(child.pid, &raw, WNOHANG)
+            if reaped == child.pid {
+                status = Self.status(fromWaitpidStatus: raw)
+                window.arm()
+                Self.logger.info(
+                    "child \(child.pid, privacy: .public) exited: \(String(describing: status), privacy: .public)")
+                pushExitToConnectedClient()
+            } else if reaped < 0 && errno != EINTR {
+                // We can no longer observe the child at all. Say exactly
+                // that — a fabricated exit code would be indistinguishable
+                // from a real one to everything downstream.
+                status = .exitedStatusUnknown
+                window.arm()
+                Self.logger.error("waitpid failed (errno \(errno, privacy: .public))")
+                pushExitToConnectedClient()
             }
+        }
+
+        while true {
+            collectChildExit()
 
             if forgotten { break }
             // Once the status has reached somebody the holder has nothing left
@@ -497,6 +503,20 @@ final class Holder {
                         // Nothing is sent here, even when the child is already
                         // gone. This client has asked nothing yet, and the next
                         // frame down this socket belongs to its first request.
+                        //
+                        // **Reap before admitting it.** The child's exit wakes
+                        // nothing this loop polls, so the holder learns of it
+                        // only at its next `waitpid`, up to a poll slice later.
+                        // A client that connects inside that gap wakes the
+                        // poll, and admitted first it would be reaped on as
+                        // though it had been connected when the child exited:
+                        // pushed at, marked as having collected the status,
+                        // and disconnected before its request was read. That
+                        // is the accept-time greeting `pushExitToConnectedClient`
+                        // forbids, reached by timing. Collecting the exit here,
+                        // while no client is connected, records the status and
+                        // pushes nothing, so this client is served.
+                        collectChildExit()
                         clientFD = incoming
                     }
                 }
