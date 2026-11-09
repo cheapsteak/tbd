@@ -293,11 +293,12 @@ export function applyTranscriptEvent(s: TranscriptState, e: AppEvent): Transcrip
  * slice shows `ref`'s transcript. A new receipt goes at the bottom, below the
  * items the answer came after, and stays there as later items arrive below it. A second
  * receipt for the same prompt replaces the first, in place. For another session, or the same
- * text again, it returns `s` itself.
+ * text again, it returns `s` itself. It looks for the prompt's receipt from the bottom
+ * (`receiptAt`).
  */
 export function addReceipt(s: TranscriptState, ref: PhoneSessionRef, id: string, text: string): TranscriptState {
   if (!holds(s, ref)) return s;
-  const at = s.rows.findIndex((row) => row.kind === 'receipt' && row.id === id);
+  const at = receiptAt(s.rows, id);
   if (at < 0) {
     const row: TranscriptRow = { key: s.nextKey, kind: 'receipt', id, text };
     return { ...s, rows: [...s.rows, row], nextKey: s.nextKey + 1, appendedSinceSeen: s.appendedSinceSeen + 1 };
@@ -307,6 +308,19 @@ export function addReceipt(s: TranscriptState, ref: PhoneSessionRef, id: string,
   const rows = [...s.rows];
   rows[at] = { ...row, text };
   return { ...s, rows };
+}
+
+/**
+ * The index of the receipt for prompt `id` in `rows`, or -1 when there is none. It looks up from
+ * the bottom, where receipts go, as the rest of the slice looks for rows, so a second receipt for
+ * a recent answer reads a few rows, however long the transcript.
+ */
+function receiptAt(rows: readonly TranscriptRow[], id: string): number {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
+    if (row.kind === 'receipt' && row.id === id) return i;
+  }
+  return -1;
 }
 
 /**

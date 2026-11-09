@@ -319,6 +319,33 @@ test('a second receipt for the same prompt replaces the first, in place', () => 
   assert.deepEqual(shown(s2).slice(-1), ['receipt:p2:Answered on the laptop']);
 });
 
+/** `s` with each row's `kind` read through a getter that counts each read in `reads`. */
+function kindCounted(s: TranscriptState, reads: { n: number }): TranscriptState {
+  const rows = s.rows.map((row): TranscriptRow => {
+    const { kind, ...rest } = row;
+    return Object.defineProperty({ ...rest }, 'kind', {
+      enumerable: true,
+      get: () => {
+        reads.n += 1;
+        return kind;
+      },
+    }) as TranscriptRow;
+  });
+  return { ...s, rows };
+}
+
+test('a second receipt for a recent answer reads the rows near the bottom only, however long the transcript', () => {
+  const n = 10_000;
+  const s0 = addReceipt(withRows(Array.from({ length: n }, (_, i) => item(`u${i}`))), R, 'p1', 'Answered on this phone: Allow');
+  const s1 = applyTranscriptEvent(s0, append([item('after')]));
+  const reads = { n: 0 };
+  const s2 = addReceipt(kindCounted(s1, reads), R, 'p1', 'Answered on the laptop');
+  assert.ok(reads.n <= 5, `a second receipt read ${reads.n} rows`);
+  assert.deepEqual(shown(s2).slice(-3), [`u${n - 1}:u${n - 1}`, 'receipt:p1:Answered on the laptop', 'after:after']);
+  assert.equal(s2.rows.length, n + 2);
+  assert.equal(keyOf(s2, n), keyOf(s1, n));
+});
+
 test("a receipt's prompt ID never matches an item's ID", () => {
   const s0 = addReceipt(withRows([item('p1')]), R, 'p1', 'Answered on the laptop');
   const s1 = applyTranscriptEvent(s0, update([item('p1', 'changed')]));
