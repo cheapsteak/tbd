@@ -90,7 +90,8 @@ final class IOContext {
     /// frame after an attach is a full rebuild, so an end from before it is no news to the view.
     ///
     /// `reset()` and `resize` end a hold that the program did not finish. When they signal, they
-    /// take the flag and report no end, so the half-written frame is not drawn as a finished one.
+    /// take the flag and report no end, so the half-written frame is not let past the size rule
+    /// as a finished one.
     var holdEnded = false
 
     /// XTVERSION must return a `GhosttyString` whose bytes outlive the callback body, so the answer

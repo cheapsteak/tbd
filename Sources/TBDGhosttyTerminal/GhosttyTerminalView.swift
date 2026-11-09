@@ -150,7 +150,8 @@ enum DisplayLinkPolicy {
 /// What a render signal's delivery knows when it decides whether to draw at once. A pure value,
 /// gathered on main.
 struct LeadingEdgeFacts: Sendable, Equatable {
-    /// The view can build frames: `canBuildFrames`, and a drawable at least one pixel each way.
+    /// The view can build frames: `canBuildFrames`, a layer, and a drawable size of at least one
+    /// pixel each way, as the frame would set it.
     var canBuildFrames: Bool
     /// A live resize is in progress. `setFrameSize` draws each step inside its Core Animation
     /// transaction.
@@ -180,8 +181,10 @@ struct LeadingEdgeFacts: Sendable, Equatable {
 /// It limits only the leading edge. A delivery draws at once only after a full refresh interval
 /// with no output frame, and only small output or a finished hold, so sustained output is still
 /// drawn by the tick, once per refresh. A delivery that covers no output at all, such as a
-/// resize's, a reset's or a change of colours, is left to the tick too: the leading edge is for
-/// output, and frames that no output causes keep going through the display link.
+/// resize's, a reset's or a change of colours with nothing fed since a frame last read the
+/// terminal, is left to the tick too: the leading edge is for output, and frames that no output
+/// causes keep going through the display link. With output still unread, such a delivery is
+/// decided as that output's own would be.
 enum LeadingEdgePolicy {
     /// Output this size or larger goes to the tick, unless a hold just ended. An echo is a few
     /// bytes and a prompt or status-line redraw usually a few hundred; a coloured full-screen
@@ -745,8 +748,8 @@ public final class GhosttyTerminalView: NSView {
         // While detached the view took no frames, so the watchdog's record of when a hold was
         // first seen is stale. Kept, it would force off a hold the program began just now. The
         // call also sets the hold from one read of mode 2026, and drops a hold's end that no
-        // signal took. It comes before the signal is installed, so no chunk fed in between can
-        // hand the view that stale end.
+        // signal took. It comes before the signal is installed, so the end it drops cannot reach
+        // the view's first hint. An end raised after this read is a real one, and is handed on.
         terminal.resetSyncOutputWatchdog()
         let target = selfRef
         let relay = RenderSignalRelay { target.object?.renderSignalled($0) }
@@ -834,8 +837,6 @@ public final class GhosttyTerminalView: NSView {
             return
         }
         let now = self.now()
-        // As `renderNow` does first, so rule 1 reads the drawable size a frame would draw at.
-        updateDrawableSize()
         let decision = LeadingEdgePolicy.decide(leadingEdgeFacts(hint, now: now))
         renderSignalDeliveries += 1
         lastLeadingEdgeDecision = decision
@@ -858,12 +859,15 @@ public final class GhosttyTerminalView: NSView {
     /// cannot draw would otherwise do on every chunk. A delivery that draws calls `renderTick`,
     /// whose own check, at the same `now`, does both.
     private func leadingEdgeFacts(_ hint: RenderHint, now: Duration) -> LeadingEdgeFacts {
-        let hasDrawable = metalLayer.map { $0.drawableSize.width >= 1 && $0.drawableSize.height >= 1 } ?? false
+        // The size `renderNow` would give the drawable before its own check, read without setting
+        // it: a delivery that coalesces changes nothing.
+        let size = drawablePixelSize()
+        let hasDrawable = metalLayer != nil && size.width >= 1 && size.height >= 1
         return LeadingEdgeFacts(
             canBuildFrames: canBuildFrames && hasDrawable,
             isLiveResizing: frameDriver.demand.isLiveResizing,
             now: now,
-            lastOutputFrameAt: [lastOutputFrameAt, lastEmptyLeadingEdgeDrawAt].compactMap { $0 }.max(),
+            lastOutputFrameAt: lastEmptyLeadingEdgeDrawAt.map { max($0, lastOutputFrameAt ?? $0) } ?? lastOutputFrameAt,
             refreshInterval: refreshInterval,
             ringHasFreeSlot: surface.frameRing?.hasFreeSlot ?? true,
             drawablesAwaitingPresent: drawableTracker.peekAwaitingPresent(now: now),
