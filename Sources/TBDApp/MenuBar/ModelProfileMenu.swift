@@ -9,7 +9,9 @@ import TBDShared
 /// resolved profile).
 ///
 /// Tab pre-selection in Settings is deferred — "Manage profiles…" simply
-/// opens the Settings window and the user clicks the Model Profiles tab.
+/// opens the Settings window (through `AppState.settingsWindowOpener`, the
+/// `\.openSettings` route; the `showSettingsWindow:` selector is ignored since
+/// macOS 14) and the user clicks the Model Profiles tab.
 struct ModelProfileMenu: Commands {
     var appState: AppState
 
@@ -60,11 +62,7 @@ private struct ModelProfileMenuContent: View {
         Divider()
 
         Button("Manage profiles…") {
-            NSApp.sendAction(
-                Selector(("showSettingsWindow:")),
-                to: nil,
-                from: nil
-            )
+            appState.settingsWindowOpener()
         }
     }
 
