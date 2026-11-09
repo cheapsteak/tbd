@@ -13,6 +13,7 @@
  */
 
 import type { JSX } from 'react';
+import { Reason } from '../dock/PromptCard.tsx';
 import type { PhoneCapability, PhoneRow, PhoneSession } from '../protocol/types.ts';
 import { useActions } from '../state/context.tsx';
 import { accountName } from '../state/sheets.ts';
@@ -49,8 +50,7 @@ export function MenuSheet({ row, session, titleID }: { row: PhoneRow; session: P
 
 /**
  * One row of the menu: `detail` under `label` while `capability` is available, else disabled with
- * its reason, or with nothing under the label when the laptop gave none (as `Why` in
- * `ProfileSheets.tsx` shows no empty line).
+ * its reason, or with nothing under the label when the laptop gave none (`Reason`).
  */
 function MenuRow({ icon, label, capability, detail, onOpen }: {
   icon: GlyphName;
@@ -65,7 +65,7 @@ function MenuRow({ icon, label, capability, detail, onOpen }: {
       <Icon name={icon} />
       <span>
         {label}
-        {line !== null && line !== '' && <small>{line}</small>}
+        <Reason text={line} tag="small" />
       </span>
       <Icon name="chev-r" cls="chev" />
     </button>

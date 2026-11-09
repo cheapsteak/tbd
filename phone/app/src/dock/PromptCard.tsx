@@ -130,12 +130,14 @@ export const FRESH_CARD_UI: CardUI = {
  * What the card of `card` shows with `ui`, as a key that changes whenever what sits under the
  * user's finger may change (the dock's tap guard): Answered, Answered elsewhere, the strip, or
  * the choices of one question or of the review, with or without the Other or the deny form, a
- * refusal, and the capability to answer. A pick that only changes a checkbox or a count keeps it.
+ * refusal, an answer on its way, and the capability to answer. So choices that come back as an
+ * answer settles wait like any others, with a refusal or without one. A pick that only changes a
+ * checkbox or a count keeps it.
  */
 export function cardView(card: CardState, ui: CardUI, canAnswer: boolean): string {
   if (card.phase === 'answered' || card.phase === 'elsewhere') return card.phase;
   if (ui.hidden) return 'hidden';
-  return JSON.stringify([canAnswer, card.refusal !== null, ui.question.step, ui.question.otherOpen, ui.permission.denyOpen]);
+  return JSON.stringify([canAnswer, card.phase, card.refusal !== null, ui.question.step, ui.question.otherOpen, ui.permission.denyOpen]);
 }
 
 export function PromptCard(p: {
@@ -246,6 +248,18 @@ export function Refusal(p: { text: string }): JSX.Element {
 }
 
 /**
+ * Why something cannot act, the laptop's reason or a rule's, as a `tag` element with `className`,
+ * or nothing for null or for an empty reason, since the laptop need not give one. Every such
+ * reason shows through it: the card's in place of its choices (`.dock-note`), the session menu's
+ * under a row, and the sheets' and the account menu's under what they cannot do.
+ */
+export function Reason(p: { text: string | null; tag: 'div' | 'p' | 'span' | 'small'; className?: string }): JSX.Element | null {
+  if (p.text === null || p.text === '') return null;
+  const Tag = p.tag;
+  return <Tag className={p.className}>{p.text}</Tag>;
+}
+
+/**
  * The ref for a form's textarea that keeps the end of the card holding it in view whenever the
  * card's size changes and the textarea has focus, as when the keyboard comes up and the card
  * shrinks to the room left above it (see the header). It watches from the moment the textarea
@@ -275,11 +289,6 @@ function useFocusOnStep(el: RefObject<HTMLElement | null>, step: number): void {
     last.current = step;
     el.current?.focus({ preventScroll: true });
   }, [el, step]);
-}
-
-/** The reason the session cannot answer, in place of the choices; nothing when the list gave none. */
-function Unavailable(p: { reason: string }): JSX.Element | null {
-  return p.reason === '' ? null : <div className="dock-note">{p.reason}</div>;
 }
 
 /** The permission card (see the header). */
@@ -316,7 +325,7 @@ function PermissionCard(p: {
   const refusal = p.refusal === null ? null : <Refusal text={p.refusal} />;
   let choices: JSX.Element;
   if (p.unavailable !== null) {
-    choices = <Unavailable reason={p.unavailable} />;
+    choices = <Reason text={p.unavailable} tag="div" className="dock-note" />;
   } else if (ui.denyOpen) {
     choices = (
       <>
@@ -413,7 +422,7 @@ function QuestionCard(p: {
       <div className="card" role="region" aria-label="Question">
         {head}
         {q !== undefined && <div ref={questionText} className="q" tabIndex={-1}>{q.text}</div>}
-        {p.unavailable !== null && <Unavailable reason={p.unavailable} />}
+        <Reason text={p.unavailable} tag="div" className="dock-note" />
       </div>
     );
   }

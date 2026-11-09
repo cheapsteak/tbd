@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { PhonePrompt, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptChangedData } from '../protocol/types.ts';
+import type { PhoneCapability, PhonePrompt, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptChangedData } from '../protocol/types.ts';
 import {
-  ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, beginSend, cardFor, chooseOption, chooseOther, dismissCard,
+  ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, beginSend, cardFor, chooseOption, chooseOther, clearStaleRefusals, dismissCard,
   emptyPrompts, emptyQuestionDraft, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt, permissionAnswer, questionAnswer,
   otherCounts, otherText, questionValue, receiptSource, receiptText, cardKey, refuseAnswer, selectedCount, setOtherText, settleAnswer, textAt,
   trimLikeLaptop, withText,
 } from './prompts.ts';
 import type { AnsweredHere, AnswerSettlement, CardState, PromptsState, QuestionDraft } from './prompts.ts';
+import { applySnapshot } from './sessionsData.ts';
+import type { SessionsData } from './store.ts';
 
 // The questions of `app/test/e2e/scenarios/mock.json`.
 const Q1: PhoneQuestion = {
@@ -660,6 +662,46 @@ test('refuseAnswer marks only an open card', () => {
   assert.equal(refuseAnswer(sending, R, 'a', 'No.'), sending);
   assert.equal(refuseAnswer(s, R, 'zzz', 'No.'), s);
   assert.equal(refuseAnswer(s, OTHER, 'a', 'No.'), s);
+});
+
+/** A list with one row holding `R`, its `answer` capability `answer`, or with no row at all for null. */
+function listWith(answer: PhoneCapability | null): SessionsData {
+  const can = { available: true };
+  const rows = answer === null ? [] : [{
+    id: 'W1', kind: 'worktree' as const, name: 'acme', remote: false, statusChangedAt: 1,
+    sessions: [{
+      ref: R, agent: 'claude' as const, tabName: 'claude', status: { chip: 'idle' as const, changedAt: 1 },
+      capabilities: { transcript: can, send: can, answer, switchProfile: can, fork: can, model: can },
+    }],
+  }];
+  return applySnapshot({
+    stream: 's1', seq: 1, replayed: false, omittedRows: 0, more: false, rows,
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: rows.map((r) => ({ id: r.id, depth: 0 })) }],
+  });
+}
+
+test("clearStaleRefusals clears a refusal once its session's answer setting changes, and only then", () => {
+  const on = listWith({ available: true });
+  const off = listWith({ available: false, reason: 'Answering prompts is turned off on the laptop.' });
+  const refused = refuseAnswer(withOpen('a', 'b'), R, 'a', 'Answering prompts is turned off.');
+  // The same setting in a new list keeps the refusal, and the slice itself.
+  assert.equal(clearStaleRefusals(refused, on, listWith({ available: true })), refused);
+  assert.equal(clearStaleRefusals(refused, on, on), refused);
+  // Turned off: the refusal goes, and so it stays gone when the setting comes back on.
+  const cleared = clearStaleRefusals(refused, on, off);
+  assert.equal(cardOf(cleared, 'a')!.refusal, null);
+  assert.equal(cardOf(cleared, 'b'), cardOf(refused, 'b'), 'a card with no refusal is left as it was');
+  assert.equal(clearStaleRefusals(cleared, off, on), cleared);
+  // A refusal set while the setting was off goes when it comes back on.
+  const refusedOff = refuseAnswer(withOpen('a'), R, 'a', 'Not now.');
+  assert.equal(cardOf(clearStaleRefusals(refusedOff, off, on), 'a')!.refusal, null);
+  // A change of reason alone is a change.
+  const otherReason = listWith({ available: false, reason: 'Answering is paused.' });
+  assert.equal(cardOf(clearStaleRefusals(refusedOff, off, otherReason), 'a')!.refusal, null);
+  // A row that goes away, or comes, is a change too.
+  assert.equal(cardOf(clearStaleRefusals(refused, on, listWith(null)), 'a')!.refusal, null);
+  assert.equal(cardOf(clearStaleRefusals(refused, listWith(null), on), 'a')!.refusal, null);
+  assert.equal(Object.getPrototypeOf(cleared.cards), null);
 });
 
 test('dismissCard takes down any card but a sending one', () => {

@@ -7,8 +7,8 @@
 //   then `loaded` with the laptop's profiles, or `failed` with the error's message. A load that a
 //   later one replaced changes nothing when it ends. The client never supersedes a read (it is
 //   resent after a drop), but a `superseded` that came all the same settles the load too, as
-//   `idle`, silently: the slice never shows a load on its way that is not, and the next opening
-//   loads again.
+//   `idle`, silently: the slice never shows a load on its way that is not. A sheet or menu that
+//   still needs the list loads again then (`useProfiles`), and so does the next opening.
 // - `switchProfile(profileID, from): Promise<void>` – `session.switchProfile` on the session the
 //   route shows, with `profileID`. On success it closes the menu or sheet the gesture was made on,
 //   if it still shows, and toasts "Restarted under <profile>".
@@ -29,7 +29,7 @@
 //   afresh each time it shows. The slice shows it `loading` at once, then `loaded` with the
 //   laptop's providers, or `failed` with the error's message, as `loadProfiles` does, a load
 //   that a later one replaced changes nothing when it ends, and a `superseded` one settles as
-//   `idle`.
+//   `idle`. The remote form, while it shows, then loads again.
 // - `createWorktree(repoID, message): Promise<void>` – `worktree.create` in `repoID` with
 //   `message` as the new session's first message, sent as typed. It takes a mark (`navMark`) as it
 //   sends; on success it closes the New sheet of that repo, if one still shows, and opens the new

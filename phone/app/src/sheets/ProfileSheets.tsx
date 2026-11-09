@@ -9,7 +9,9 @@
  *
  * The Switch account and Fork sheets load the profiles afresh as they open (`loadProfiles`): a
  * spinner while they load, the error's message if the load fails (reopening the sheet tries
- * again), then the list.
+ * again), then the list. The spinner always means a load on its way: a load that ends with
+ * nothing to show, as a superseded one does, starts another (`useProfiles`), in the
+ * "Restart under X?" sheet too.
  *
  * - **Switch account**: Back, "Switch account", what a switch does, then one row per profile with
  *   its kind (`profileDetail`). The current profile (`currentProfileID`) reads "Current" and is
@@ -46,9 +48,9 @@
  * `actions/sheets.ts`).
  */
 
-import { useLayoutEffect } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import type { JSX, ReactNode } from 'react';
-import { Refusal } from '../dock/PromptCard.tsx';
+import { Reason, Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneProfile, PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import {
@@ -60,24 +62,24 @@ import { useChangeHold } from '../ui/tapGuard.ts';
 import { SheetTop } from './SheetTop.tsx';
 
 /**
- * Loads the profiles afresh before the first paint of the sheet or menu that calls it, so a list an
- * earlier opening loaded never shows. The account menu loads by it too (`menus/Menus.tsx`).
+ * The profiles, for the sheet or menu that calls it. With `fresh`, it loads them afresh before its
+ * first paint, so a list an earlier opening loaded never shows; the account menu loads by it too
+ * (`menus/Menus.tsx`). Either way it loads them again before the paint whenever the slice turns
+ * `idle` while it shows, as a superseded load leaves it, so the spinner always means a load on
+ * its way. That is once each time the slice turns idle, never more: the load leaves `idle` at
+ * once (`loadProfiles`).
  */
-export function useFreshProfiles(): ProfilesLoad {
+export function useProfiles(fresh: boolean): ProfilesLoad {
   const actions = useActions();
+  const load = useAppState((s) => s.sheets.profiles);
+  const idle = load.phase === 'idle';
+  const mounted = useRef(false);
   useLayoutEffect(() => {
-    void actions.loadProfiles();
-  }, [actions]);
-  return useAppState((s) => s.sheets.profiles);
-}
-
-/**
- * Why the acting button above cannot act (`switchBlock`, `unavailableReason`), under it: a `<p>` in
- * a sheet, a `<span>` in the menu; nothing for null or for no reason given.
- */
-function Why({ text, inMenu }: { text: string | null; inMenu: boolean }): JSX.Element | null {
-  if (text === null || text === '') return null;
-  return inMenu ? <span>{text}</span> : <p>{text}</p>;
+    const first = !mounted.current;
+    mounted.current = true;
+    if ((first && fresh) || idle) void actions.loadProfiles();
+  }, [actions, fresh, idle]);
+  return load;
 }
 
 /** What stands in for the profiles until they load: the spinner, or the failed load's message. */
@@ -92,7 +94,7 @@ export function NotLoaded({ load }: { load: ProfilesLoad }): JSX.Element {
 
 export function SwitchSheet({ session, titleID }: { session: PhoneSession; titleID: string }): JSX.Element {
   const actions = useActions();
-  const load = useFreshProfiles();
+  const load = useProfiles(true);
   let list: JSX.Element;
   if (load.phase !== 'loaded') {
     list = <NotLoaded load={load} />;
@@ -136,7 +138,7 @@ export function ConfirmSheet({ session, profileID, titleID, held, failure }: {
   failure: string | null;
 }): JSX.Element {
   const actions = useActions();
-  const load = useAppState((s) => s.sheets.profiles);
+  const load = useProfiles(false);
   const profiles = load.phase === 'loaded' ? load.profiles : null;
   const profile = profiles === null ? null : profileByID(profiles, profileID);
   const cancel = (): void => actions.openSheet({ name: 'switch' });
@@ -189,6 +191,8 @@ export function RestartAsk({ session, profiles, profile, failure, look, onCancel
   const ownHeld = useChangeHold(inMenu ? view : null);
   const locked = acting || ownHeld || (look.in === 'sheet' && look.held);
   const wide = inMenu ? '' : ' wide';
+  // Why an acting button cannot act (`switchBlock`, `unavailableReason`), under it.
+  const why = inMenu ? 'span' : 'p';
   const question = `Restart this session under ${profile.name}?`;
   const forkNote = `To keep this session as it is, fork instead. A copy opens in a new tab under ${profile.name}.`;
   const refusal = failure === null ? null : <Refusal text={failure} />;
@@ -200,7 +204,7 @@ export function RestartAsk({ session, profiles, profile, failure, look, onCancel
       >
         Restart
       </button>
-      <Why text={restartWhy} inMenu={inMenu} />
+      <Reason text={restartWhy} tag={why} />
       <button
         className={`btn${wide}`} type="button" disabled={locked || forkWhy !== null}
         onClick={() => void actions.fork(profile.id, session.ref)}
@@ -208,7 +212,7 @@ export function RestartAsk({ session, profiles, profile, failure, look, onCancel
         <Icon name="fork" />
         Fork into a new tab
       </button>
-      <Why text={forkWhy} inMenu={inMenu} />
+      <Reason text={forkWhy} tag={why} />
       <button className={`btn${wide}`} type="button" onClick={onCancel}>Cancel</button>
     </>
   );
@@ -241,7 +245,7 @@ export function ForkSheet({ session, titleID, held, failure }: {
   failure: string | null;
 }): JSX.Element {
   const actions = useActions();
-  const load = useFreshProfiles();
+  const load = useProfiles(true);
   const acting = useAppState((s) => isActing(s.sheets, session.ref));
   const forkWhy = unavailableReason(session, 'fork');
   let list: JSX.Element;
@@ -274,7 +278,7 @@ export function ForkSheet({ session, titleID, held, failure }: {
     <>
       <SheetTop title="Fork" titleID={titleID} onBack={() => actions.openSheet({ name: 'menu' })} />
       <p className="sh-sub">Copies this conversation into a new tab, under the account you pick. The phone switches to the new tab.</p>
-      {forkWhy !== null && forkWhy !== '' && <p className="sh-sub">{forkWhy}</p>}
+      <Reason text={forkWhy} tag="p" className="sh-sub" />
       {failure !== null && <Refusal text={failure} />}
       {list}
     </>

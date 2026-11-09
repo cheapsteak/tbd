@@ -8,9 +8,10 @@
  *   choice of a "Local worktree" or a "Remote session", local first.
  * - **Remote** loads the providers afresh each time it shows (`loadProviders`, prefilled for the
  *   repo): a spinner while they load, the error's message if the load fails (choosing Local and
- *   Remote again tries again), then one row per provider under "Provider". An available provider
- *   reads how many fields its form adds, or "Needs nothing else"; an unavailable one is disabled
- *   and reads the laptop's reason (`providerDetail`). Only an available provider can be picked,
+ *   Remote again tries again), then one row per provider under "Provider". The spinner always
+ *   means a load on its way: a load that ends with nothing to show, as a superseded one does,
+ *   starts another. An available provider reads how many fields its form adds, or "Needs nothing
+ *   else"; an unavailable one is disabled and reads the laptop's reason (`providerDetail`). Only an available provider can be picked,
  *   and a list that loads again without the picked provider, or with it unavailable, unpicks it.
  *   Picking another provider starts its form afresh.
  * - **First message** ("What should Claude do?"), hidden when the picked provider takes none
@@ -52,7 +53,7 @@
  * form shows none of the remote form's changes, so they hold nothing there.
  */
 
-import { useId, useLayoutEffect, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneFormField, PhoneProvider } from '../protocol/types.ts';
@@ -89,12 +90,23 @@ export function NewSheet({ sheet, titleID }: { sheet: NewSheetState; titleID: st
   useLayoutEffect(() => {
     actions.newSheetShown(sheet);
   }, [actions, sheet]);
-  // Afresh each time the remote form shows, before it paints, so an earlier list never shows.
-  useLayoutEffect(() => {
-    if (mode === 'remote') void actions.loadProviders(repoID);
-  }, [actions, mode, repoID]);
-
   const mine: ProvidersLoad = load.phase !== 'idle' && load.repoID === repoID ? load : { phase: 'idle' };
+  const idle = mine.phase === 'idle';
+  // The repo the remote form loaded for as it showed, or null while it does not show.
+  const shownFor = useRef<string | null>(null);
+  // Afresh each time the remote form shows, before it paints, so an earlier list never shows. And
+  // again whenever its load turns idle while it shows, as a superseded load leaves it, so the
+  // spinner always means a load on its way: once each time, since the load leaves idle at once.
+  useLayoutEffect(() => {
+    if (mode !== 'remote') {
+      shownFor.current = null;
+      return;
+    }
+    const fresh = shownFor.current !== repoID;
+    shownFor.current = repoID;
+    if (fresh || idle) void actions.loadProviders(repoID);
+  }, [actions, mode, repoID, idle]);
+
   const providers = mine.phase === 'loaded' ? mine.providers : null;
   const picked = pick === null || providers === null ? null : (providers.find((p) => p.name === pick && p.available) ?? null);
   if (pick !== null && providers !== null && picked === null) {

@@ -520,6 +520,30 @@ test("a refused answer shows the laptop's words and offers the choices again", a
   ]);
 });
 
+test('a refusal goes once the laptop changes the answer setting, though it changes back', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  // The list said the session takes answers, but the laptop's setting was off.
+  await hostCall(page, 'setReply', 'prompt.answer', { error: { code: 'unsupported', message: ANSWERING_OFF } });
+  const c = card(page);
+  await c.getByRole('button', { name: 'Yes, add the test' }).click();
+  const refusal = c.locator('.refusal');
+  await expect(refusal).toHaveText(ANSWERING_OFF);
+  // The next list says so, and the one after says it is back on.
+  const row = structuredClone(MOCK.rows.find((/** @type {any} */ r) => r.name === 'Login redirect fix'));
+  row.sessions[0].capabilities.answer = { available: false, reason: ANSWERING_OFF };
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
+  await expect(c.locator('.dock-note')).toHaveText(ANSWERING_OFF);
+  await expect(refusal).toHaveCount(0);
+  row.sessions[0].capabilities.answer = { available: true };
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
+  await expect(c.getByRole('button', { name: 'No, this is enough' })).toBeVisible();
+  await expect(c.locator('.dock-note')).toHaveCount(0);
+  // The choices show with no word from the earlier setting.
+  await expect(refusal).toHaveCount(0);
+  await hostCall(page, 'setReply', 'prompt.answer', null);
+});
+
 test("a new prompt never inherits the last one's picks", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Onboarding copy');

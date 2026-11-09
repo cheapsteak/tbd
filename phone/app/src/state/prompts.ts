@@ -80,7 +80,9 @@ import type {
   PromptChangedData,
 } from '../protocol/types.ts';
 import { refKey, sameRef } from '../protocol/wire.ts';
+import { findSession } from './route.ts';
 import { emptyRecord } from './store.ts';
+import type { SessionsData } from './store.ts';
 import type { TranscriptState } from './transcript.ts';
 
 // MARK: - The slice
@@ -393,6 +395,31 @@ export function refuseAnswer(s: PromptsState, ref: PhoneSessionRef, promptID: st
   const card = own(s.cards, k);
   if (card === undefined || card.phase !== 'open' || card.refusal === refusal) return s;
   return withCard(s, k, { ...card, refusal });
+}
+
+/**
+ * `s` with no refusal on a card whose session's `answer` capability is not the same in the list
+ * `after` as in the list `before`, its availability or its reason, or `s` itself when no card's
+ * is. A refusal speaks for the setting it came under, so it goes once the list says the setting
+ * changed, and stays gone when the setting changes back. A session that no row lists counts as
+ * one more value, so a change while its row is away is seen. `applySessions` calls it for each
+ * new list.
+ */
+export function clearStaleRefusals(s: PromptsState, before: SessionsData, after: SessionsData): PromptsState {
+  if (before === after) return s;
+  let cards: Readonly<Record<string, CardState>> | null = null;
+  for (const k of Object.keys(s.cards)) {
+    const card = s.cards[k]!;
+    if (card.refusal === null || answerSetting(before, card.session) === answerSetting(after, card.session)) continue;
+    cards = withKey(cards ?? s.cards, k, { ...card, refusal: null });
+  }
+  return cards === null ? s : { ...s, cards };
+}
+
+/** `ref`'s `answer` capability in the list `d`, as one comparable string, or null when no row lists the session. */
+function answerSetting(d: SessionsData, ref: PhoneSessionRef): string | null {
+  const capability = findSession(d, ref)?.session.capabilities.answer;
+  return capability === undefined ? null : JSON.stringify([capability.available, capability.reason ?? null]);
 }
 
 /**

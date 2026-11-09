@@ -14,13 +14,13 @@
  * closes it. Escape closes it too.
  *
  * **The account menu** loads the profiles afresh as it opens (`loadProfiles`): a spinner while
- * they load, the error's message if the load fails (reopening the menu tries again), then one row
- * per profile with its kind (`profileDetail`) and a tick on the current one (`currentProfileID`).
- * Picking the current profile closes the menu. Picking another asks about it in the menu: the
- * ask the "Restart under X?" sheet shows too (`RestartAsk` in `sheets/ProfileSheets.tsx`, as
- * `.pd-ask`), "Restart this session under X?", what a restart stops, that a fork keeps the
- * session, then Restart (`switchProfile`), "Fork into a new tab" (`fork` under X) and Cancel,
- * which goes back to the list.
+ * they load, which always means a load on its way (`useProfiles`), the error's message if the
+ * load fails (reopening the menu tries again), then one row per profile with its kind
+ * (`profileDetail`) and a tick on the current one (`currentProfileID`). Picking the current profile closes the menu. Picking another
+ * asks about it in the menu: the ask the "Restart under X?" sheet shows too (`RestartAsk` in
+ * `sheets/ProfileSheets.tsx`, as `.pd-ask`), "Restart this session under X?", what a restart
+ * stops, that a fork keeps the session, then Restart (`switchProfile`), "Fork into a new tab"
+ * (`fork` under X) and Cancel, which goes back to the list.
  *
  * **The model menu** lists `MODEL_NAMES`, with the tick on an exact match with `session.model`
  * only. Picking one calls `setModel`; picking the current one closes the menu. Under them, the
@@ -48,7 +48,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { JSX, RefObject } from 'react';
 import type { PhoneProfile, PhoneSession } from '../protocol/types.ts';
-import { NotLoaded, RestartAsk, useFreshProfiles } from '../sheets/ProfileSheets.tsx';
+import { NotLoaded, RestartAsk, useProfiles } from '../sheets/ProfileSheets.tsx';
 import type { AskLook } from '../sheets/ProfileSheets.tsx';
 import { useActions, useAppState } from '../state/context.tsx';
 import { trimLikeLaptop } from '../state/prompts.ts';
@@ -117,7 +117,7 @@ function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | nu
   const actions = useActions();
   const box = useRef<HTMLDivElement>(null);
   useDismiss(box);
-  const load = useFreshProfiles();
+  const load = useProfiles(true);
   const failure = useAppState((s) => failureIn(s.sheets, s.ui.menu));
   const profiles = load.phase === 'loaded' ? load.profiles : null;
   const asked = ask === null || profiles === null ? null : profileByID(profiles, ask);

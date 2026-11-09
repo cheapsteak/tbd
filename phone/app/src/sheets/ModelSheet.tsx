@@ -17,7 +17,7 @@
 
 import { useId, useState } from 'react';
 import type { JSX } from 'react';
-import { Refusal } from '../dock/PromptCard.tsx';
+import { Reason, Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { trimLikeLaptop } from '../state/prompts.ts';
@@ -54,7 +54,7 @@ export function ModelSheet({ session, titleID, held, failure }: {
     <>
       <SheetTop title="Model" titleID={titleID} onBack={() => actions.openSheet({ name: 'menu' })} action={set} />
       <p className="sh-sub">Sends <code>/model</code> to the session.</p>
-      {modelWhy !== null && modelWhy !== '' && <p className="sh-sub">{modelWhy}</p>}
+      <Reason text={modelWhy} tag="p" className="sh-sub" />
       {failure !== null && <Refusal text={failure} />}
       <div className="group">
         {MODEL_NAMES.map((m) => (
