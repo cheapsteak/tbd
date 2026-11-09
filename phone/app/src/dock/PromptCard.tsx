@@ -218,7 +218,8 @@ function HideButton(p: { onHide: () => void }): JSX.Element {
   );
 }
 
-function Refusal(p: { text: string }): JSX.Element {
+/** The laptop's words for something it refused, as `.refusal` (`role="alert"`) with the warn glyph; the composer shows its refusal the same way. */
+export function Refusal(p: { text: string }): JSX.Element {
   return (
     <div className="refusal" role="alert">
       <Icon name="warn" />

@@ -1,4 +1,4 @@
-// Filled by plan 6 part 6d (`setDraft` and `sendMessage` come in task 6d-6)
+// Filled by plan 6 part 6d
 //
 // The prompt and composer actions: answering an open prompt, taking its card down, and sending
 // a message. The prompt slice they change is `state/prompts.ts`.
@@ -25,10 +25,28 @@
 //   shows down from the dock, such as once it shows "Answered" or that someone else answered. It
 //   leaves a `sending` card, whose reply still has to say who answered, changes only the prompt
 //   slice, and sends nothing.
-// - `setDraft(text): void` – keeps the open session's unsent text in `ui.drafts`.
-// - `sendMessage(): Promise<void>` – sends the open session's draft with `message.send`, never
-//   a blank or whitespace-only one, and resolves once the laptop replied or the request failed.
-//   A refusal goes in `ui.refusal`.
+// - `setDraft(text): void` – keeps `text` as the unsent text of the session the route shows, in
+//   `ui.drafts` by `refKey` of the session, and takes down that session's refusal in
+//   `ui.refusal`, as the mock's composer does once the user types (mock 1489-1493).
+// - `sendMessage(): Promise<void>` – sends the draft of the session the route shows with
+//   `message.send`, as typed, and resolves once the laptop replied or the request failed. Every
+//   part of it is read from the store at the moment of the gesture. It sends nothing, and
+//   changes nothing, unless every one of these holds:
+//   - the route shows a session, and the list shows that session (`findSession`) with its `send`
+//     capability available;
+//   - no `message.send` to that session is on its way (`isSending`), so a second tap while the
+//     first message is on its way sends nothing;
+//   - the draft is not blank (`isBlankMessage`), since the laptop refuses a blank message
+//     `bad_request` ("Write a message first.", 4b `PhoneAppService+Send.swift`).
+//   The session's status plays no part: the laptop takes a message while a session works and
+//   answers for itself, and the app shows its reply. When the send goes out it marks the session
+//   as sending (`beginSend`), takes down the session's refusal, and, when the list shows the
+//   session `parked`, toasts "Waking the session, then sending…". When the request settles the
+//   mark goes (`endSend`), and:
+//   - a reply (`sent`, `woken` or any other outcome) clears the draft, but only when it still
+//     holds the text sent: what the user typed meanwhile stays;
+//   - an error keeps the draft and puts the error's message in `ui.refusal` as it came,
+//     `not_confirmed` included; `superseded` leaves no refusal.
 // Like every action, none rejects (`actions/index.ts`); `superseded` is silent.
 //
 // **Never retry an answer or a send automatically under a new request ID.** An answer or a
@@ -39,22 +57,25 @@
 // answer as this phone's (`mayHaveLanded` in `state/prompts.ts`), so that if it did land, its
 // resolution reads "Answered on this phone". To tell the loader's `too_large`, which may come
 // after the answer was posted, from the client's, refused before posting, the action checks the
-// body against one frame itself, as the client does.
-//
-// The stubs until task 6d-6: `setDraft` does nothing, and `sendMessage` resolves at once.
+// body against one frame itself, as the client does. A send that failed keeps the draft and
+// shows the error, and only a new tap on Send sends again.
 
 import { AppError, BAD_PARAMS_TEXT, newRequestID } from '../client/client.ts';
 import { fitsFrame } from '../limits.ts';
 import type { PhonePrompt, PhonePromptAnswerParams, PhoneSessionRef, PromptAnswer } from '../protocol/types.ts';
-import { requestBody, sameRef } from '../protocol/wire.ts';
+import { refKey, requestBody, sameRef } from '../protocol/wire.ts';
 import {
-  answerFits, answerSummary, beginAnswer, dismissCard, mayHaveLanded, openPrompt, refuseAnswer, settleAnswer,
+  answerFits, answerSummary, beginAnswer, beginSend, dismissCard, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt,
+  refuseAnswer, settleAnswer, textAt, withText,
 } from '../state/prompts.ts';
 import type { AnswerSettlement, PromptsState } from '../state/prompts.ts';
 import { findSession } from '../state/route.ts';
-import type { AppState } from '../state/store.ts';
+import type { AppState, UIState } from '../state/store.ts';
 import { addReceipt } from '../state/transcript.ts';
 import type { ActionContext, Actions } from './index.ts';
+
+/** The toast when a message goes to a parked session (mock `send()`). */
+export const WAKING_TEXT = 'Waking the session, then sending…';
 
 /**
  * Where an answer to `promptID` goes, read from `s` at the moment of the gesture: the session the
@@ -91,6 +112,36 @@ function fitsOneFrame(params: PhonePromptAnswerParams): boolean {
 
 function withPrompts(s: AppState, prompts: PromptsState): AppState {
   return prompts === s.prompts ? s : { ...s, prompts };
+}
+
+/** Where a message goes and what it says: the session, its `refKey`, the draft as typed, and whether the list shows the session parked. */
+interface SendTarget {
+  ref: PhoneSessionRef;
+  key: string;
+  text: string;
+  parked: boolean;
+}
+
+/**
+ * Where a message goes, read from `s` at the moment of the gesture: the session the route shows,
+ * as the list shows it, with its draft; or null when nothing must go out (see `sendMessage`).
+ */
+function sendTarget(s: AppState): SendTarget | null {
+  const { route } = s.ui;
+  if (route.screen !== 'session') return null;
+  const found = findSession(s.sessions, route.ref);
+  if (found === null || !found.session.capabilities.send.available) return null;
+  const { ref } = found.session;
+  if (isSending(s.prompts, ref)) return null;
+  const key = refKey(ref);
+  const text = textAt(s.ui.drafts, key) ?? '';
+  if (isBlankMessage(text)) return null;
+  return { ref, key, text, parked: found.session.status.chip === 'parked' };
+}
+
+/** `ui` with `drafts` and `refusal` replaced, or `ui` itself when neither changed. */
+function withTexts(ui: UIState, drafts: UIState['drafts'], refusal: UIState['refusal']): UIState {
+  return drafts === ui.drafts && refusal === ui.refusal ? ui : { ...ui, drafts, refusal };
 }
 
 export function promptActions(ctx: ActionContext, self: () => Actions) {
@@ -141,8 +192,51 @@ export function promptActions(ctx: ActionContext, self: () => Actions) {
       });
     },
 
-    setDraft(text: string): void {},
+    setDraft(text: string): void {
+      store.update((s) => {
+        const { route } = s.ui;
+        if (route.screen !== 'session') return s;
+        const key = refKey(route.ref);
+        const ui = withTexts(s.ui, withText(s.ui.drafts, key, text), withText(s.ui.refusal, key, null));
+        return ui === s.ui ? s : { ...s, ui };
+      });
+    },
 
-    async sendMessage(): Promise<void> {},
+    async sendMessage(): Promise<void> {
+      const sent: { to: SendTarget | null } = { to: null };
+      store.update((s) => {
+        const to = sendTarget(s);
+        if (to === null) return s;
+        sent.to = to;
+        return { ...s, prompts: beginSend(s.prompts, to.ref), ui: withTexts(s.ui, s.ui.drafts, withText(s.ui.refusal, to.key, null)) };
+      });
+      const to = sent.to;
+      if (to === null) return;
+      if (to.parked) self().toast(WAKING_TEXT);
+      // How the request ended: taken, or failed with the words to show, null for none.
+      let settled: { taken: true } | { taken: false; refusal: string | null };
+      try {
+        await client.request('message.send', { session: to.ref, text: to.text });
+        settled = { taken: true };
+      } catch (error) {
+        // An error that is no `AppError` is a fault in the client's own setup, which posts
+        // nothing; its message is for the client's log, so the composer shows the client's words
+        // for a request it could not send as made.
+        if (!(error instanceof AppError)) settled = { taken: false, refusal: BAD_PARAMS_TEXT };
+        else settled = { taken: false, refusal: error.code === 'superseded' ? null : error.message };
+      }
+      store.update((s) => {
+        const prompts = endSend(s.prompts, to.ref);
+        let ui = s.ui;
+        if (settled.taken) {
+          // The draft goes only when it still holds the text sent: what the user typed meanwhile stays.
+          if (textAt(ui.drafts, to.key) === to.text) ui = withTexts(ui, withText(ui.drafts, to.key, null), ui.refusal);
+        } else if (settled.refusal !== null) {
+          ui = withTexts(ui, ui.drafts, withText(ui.refusal, to.key, settled.refusal));
+        }
+        if (prompts === s.prompts && ui === s.ui) return s;
+        return { ...s, prompts, ui };
+      });
+    },
   };
 }

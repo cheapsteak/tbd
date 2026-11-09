@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { PhonePrompt, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptChangedData } from '../protocol/types.ts';
 import {
-  ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, cardFor, chooseOption, chooseOther, dismissCard,
-  emptyPrompts, emptyQuestionDraft, mayHaveLanded, openPrompt, permissionAnswer, questionAnswer, questionValue, receiptSource, receiptText,
-  cardKey, refuseAnswer, setOtherText, settleAnswer, trimLikeLaptop,
+  ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, beginSend, cardFor, chooseOption, chooseOther, dismissCard,
+  emptyPrompts, emptyQuestionDraft, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt, permissionAnswer, questionAnswer,
+  questionValue, receiptSource, receiptText, cardKey, refuseAnswer, setOtherText, settleAnswer, textAt, trimLikeLaptop, withText,
 } from './prompts.ts';
 import type { AnsweredHere, AnswerSettlement, CardState, PromptsState, QuestionDraft } from './prompts.ts';
 
@@ -655,4 +655,47 @@ test('a permission answer fits its prompt', () => {
   assert.equal(answerFits(once, { kind: 'permission', decision: 'allow', message: 'Go.' }), false);
   assert.equal(answerFits(once, { kind: 'permission', decision: 'maybe' as 'allow' }), false);
   assert.equal(answerFits(once, { kind: 'question', answers: { [Q1.text]: 'Yes' } }), false);
+});
+
+// MARK: - Messages
+
+test("isBlankMessage is the laptop's blank rule: whitespace, format and default-ignorable scalars only", () => {
+  const blank = ['', ' ', '  \n ', '\t\r\n', String.fromCodePoint(0x85, 0xa0, 0x2028, 0x2029, 0x3000), String.fromCodePoint(0x200b, 0x2060, 0xfeff),
+    String.fromCodePoint(0x3164, 0x34f, 0xfe0f)];
+  for (const text of blank) assert.equal(isBlankMessage(text), true, JSON.stringify(text));
+  const visible = ['a', '  Run the unit tests.\n', String.fromCodePoint(0x1f44d, 0xfe0f), String.fromCodePoint(0x200b) + '.'];
+  for (const text of visible) assert.equal(isBlankMessage(text), false, JSON.stringify(text));
+});
+
+test('beginSend marks a session once, endSend clears it, and each returns its input when nothing changes', () => {
+  const s = emptyPrompts();
+  assert.equal(isSending(s, R), false);
+  const one = beginSend(s, R);
+  assert.equal(isSending(one, R), true);
+  assert.equal(isSending(one, OTHER), false);
+  assert.equal(beginSend(one, R), one);
+  assert.equal(Object.getPrototypeOf(one.sending), null);
+  const none = endSend(one, R);
+  assert.equal(isSending(none, R), false);
+  assert.equal(endSend(none, R), none);
+});
+
+test('a prompt.changed keeps the sessions marked as sending', () => {
+  const s = beginSend(emptyPrompts(), OTHER);
+  const after = applyPromptChanged(s, { session: R, prompts: [questionPrompt('a')] }).prompts;
+  assert.notEqual(after, s);
+  assert.equal(isSending(after, OTHER), true);
+});
+
+test('withText sets, replaces and removes a text by key, on a null prototype', () => {
+  const empty = Object.create(null) as Readonly<Record<string, string>>;
+  const one = withText(empty, 'k', 'Run');
+  assert.equal(textAt(one, 'k'), 'Run');
+  assert.equal(Object.getPrototypeOf(one), null);
+  assert.equal(withText(one, 'k', 'Run'), one);
+  assert.equal(textAt(withText(one, 'k', 'Run it'), 'k'), 'Run it');
+  assert.equal(Object.hasOwn(withText(one, 'k', ''), 'k'), false);
+  assert.equal(Object.hasOwn(withText(one, 'k', null), 'k'), false);
+  assert.equal(withText(empty, 'k', null), empty);
+  assert.equal(textAt(empty, 'constructor'), null);
 });

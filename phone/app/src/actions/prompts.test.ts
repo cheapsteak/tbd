@@ -1,21 +1,23 @@
-// Tests prompts.ts: answering a prompt and taking its card down. A fake client records each
-// request and hands back a promise the test settles; the store and every action are real, so the
-// transcript opens through `openSession` and `prompt.changed` events fold in through `onEvent`,
-// and each receipt lands in the transcript as it does in the app.
+// Tests prompts.ts: answering a prompt, taking its card down, and sending a message. A fake
+// client records each request and hands back a promise the test settles; the store and every
+// action are real, so the transcript opens through `openSession` and `prompt.changed` events fold
+// in through `onEvent`, and each receipt lands in the transcript as it does in the app.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError, BAD_PARAMS_TEXT, NOT_CONFIRMED_TEXT, SUPERSEDED_TEXT } from '../client/client.ts';
 import type {
-  Method, ParamsOf, PhoneAnsweredBy, PhonePrompt, PhoneRow, PhoneSession, PhoneSessionRef, PromptAnswer, PromptChangedData, ResultOf,
-  SessionsSubscribeResult,
+  Method, ParamsOf, PhoneAnsweredBy, PhonePrompt, PhoneRow, PhoneSession, PhoneSessionRef, PhoneStatusChip, PromptAnswer, PromptChangedData,
+  ResultOf, SessionsSubscribeResult,
 } from '../protocol/types.ts';
+import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
-import { cardKey } from '../state/prompts.ts';
+import { cardKey, isSending } from '../state/prompts.ts';
 import type { AnsweredHere, CardState } from '../state/prompts.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState } from '../state/store.ts';
 import { createActions } from './index.ts';
+import { WAKING_TEXT } from './prompts.ts';
 
 const CAN = { available: true };
 const OFF_REASON = "Answering prompts is turned off in TBD's settings on the laptop.";
@@ -822,4 +824,281 @@ test("a held receipt goes to its prompt's session, not to the transcript the pho
   await pending;
   assert.equal(h.card(Q.id), undefined);
   assert.deepEqual(h.receipts(), []);
+});
+
+// MARK: - Sending messages
+
+const WORKING_REFUSAL = 'Not sent. Claude is still working. Send again when it stops.';
+
+/**
+ * A store showing `R` on the session screen, whose list shows `R` with status `chip` and the
+ * `send` capability `send`, and `OTHER`. No channel or transcript is needed: a send asks for
+ * neither.
+ */
+function sendHarness(opts: { chip?: PhoneStatusChip; send?: { available: boolean; reason?: string } } = {}) {
+  const sent: Sent[] = [];
+  const client = {
+    stream: null as string | null,
+    lastSeq: null as number | null,
+    request<M extends Method>(method: M, params: ParamsOf<M>): Promise<ResultOf<M>> {
+      return new Promise<ResultOf<M>>((resolve, reject) => {
+        sent.push({ method, params, resolve: resolve as (result: unknown) => void, reject });
+      });
+    },
+  };
+  const r: PhoneSession = { ...session(R), status: { chip: opts.chip ?? 'idle', changedAt: 1 } };
+  r.capabilities = { ...r.capabilities, send: opts.send ?? CAN };
+  const rows: PhoneRow[] = [
+    { id: 'W1', kind: 'worktree', name: 'W1', remote: false, statusChangedAt: 1, sessions: [r] },
+    { id: 'W2', kind: 'worktree', name: 'W2', remote: false, statusChangedAt: 1, sessions: [{ ...session(OTHER), status: { chip: 'idle', changedAt: 1 } }] },
+  ];
+  const sessions = applySnapshot({
+    stream: 's1', seq: 10, replayed: false, omittedRows: 0, more: false, rows,
+    layout: [{ id: 'repo:R1', kind: 'repo', name: 'acme', rows: rows.map((row) => ({ id: row.id, depth: 0 })) }],
+  });
+  const initial = initialState();
+  const store = createStore({ ...initial, sessions, ui: { ...initial.ui, route: { screen: 'session', ref: R } } });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const state = (): AppState => store.get();
+  const sends = (): Sent[] => sent.filter((s) => s.method === 'message.send');
+  const own = (r: Readonly<Record<string, string>>, ref: PhoneSessionRef): string | undefined => {
+    const k = refKey(ref);
+    return Object.hasOwn(r, k) ? r[k] : undefined;
+  };
+  const draft = (ref: PhoneSessionRef = R): string | undefined => own(store.get().ui.drafts, ref);
+  const refusal = (ref: PhoneSessionRef = R): string | undefined => own(store.get().ui.refusal, ref);
+  const sending = (ref: PhoneSessionRef = R): boolean => isSending(store.get().prompts, ref);
+  /** Puts `text` in `ref`'s refusal slot, as a refused model change would. */
+  const refuse = (text: string, ref: PhoneSessionRef = R): void => {
+    store.update((s) => {
+      const r2 = Object.assign(Object.create(null) as Record<string, string>, s.ui.refusal);
+      r2[refKey(ref)] = text;
+      return { ...s, ui: { ...s.ui, refusal: r2 } };
+    });
+  };
+  /** Shows `ref`'s session, as a navigation would, without the transcript it opens. */
+  const show = (ref: PhoneSessionRef): void => store.update((s) => ({ ...s, ui: { ...s.ui, route: { screen: 'session', ref } } }));
+  return { sent, sends, store, actions, state, draft, refusal, sending, refuse, show };
+}
+
+test('a blank or whitespace-only draft sends nothing', async () => {
+  const invisible = String.fromCodePoint(0x200b, 0x3164, 0xfe0f, 0xfeff);
+  for (const text of ['', '  \n ', '\t\r\n', invisible]) {
+    const h = sendHarness();
+    h.actions.setDraft(text);
+    const before = h.state();
+    // Checked before awaiting, so a send that went out fails the test rather than waiting on its reply.
+    const pending = h.actions.sendMessage();
+    assert.deepEqual(h.sends(), [], JSON.stringify(text));
+    await pending;
+    assert.equal(h.state(), before, 'and nothing changes');
+  }
+});
+
+test('Send sends the draft as typed to the session the route shows', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('  Run the unit tests.\n');
+  const pending = h.actions.sendMessage();
+  assert.deepEqual(h.sends().map((s) => s.params), [{ session: R, text: '  Run the unit tests.\n' }]);
+  assert.equal(h.sending(), true);
+  h.sends()[0]!.resolve({ outcome: 'sent' });
+  await pending;
+  assert.equal(h.sending(), false);
+  assert.equal(h.draft(), undefined, 'the draft is cleared');
+});
+
+test('two sendMessage calls back to back post one message.send', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  const first = h.actions.sendMessage();
+  const second = h.actions.sendMessage();
+  assert.equal(h.sends().length, 1);
+  for (const s of h.sends()) s.resolve({ outcome: 'sent' });
+  await Promise.all([first, second]);
+  // Once the first settled, a new gesture sends again.
+  h.actions.setDraft('And the lint.');
+  const third = h.actions.sendMessage();
+  assert.deepEqual(h.sends().map((s) => s.params), [{ session: R, text: 'Run the unit tests.' }, { session: R, text: 'And the lint.' }]);
+  h.sends()[1]!.resolve({ outcome: 'sent' });
+  await third;
+});
+
+test('the app never refuses a message on status: the laptop decides', async () => {
+  for (const chip of ['working', 'waitingForYou', 'idle', 'rateLimited', 'error', 'exited', 'unknown'] as const) {
+    const h = sendHarness({ chip });
+    h.actions.setDraft('Also add a progress bar above the steps.');
+    const pending = h.actions.sendMessage();
+    assert.deepEqual(h.sends().map((s) => s.params), [{ session: R, text: 'Also add a progress bar above the steps.' }], chip);
+    assert.equal(h.state().ui.toast, null, `${chip}: no toast`);
+    h.sends()[0]!.resolve({ outcome: 'sent' });
+    await pending;
+  }
+});
+
+test('a parked session toasts "Waking the session, then sending…" as the message goes out', async () => {
+  const h = sendHarness({ chip: 'parked' });
+  h.actions.setDraft('Pick this up again.');
+  const pending = h.actions.sendMessage();
+  assert.equal(h.sends().length, 1);
+  assert.equal(WAKING_TEXT, 'Waking the session, then sending…');
+  assert.equal(h.state().ui.toast?.text, WAKING_TEXT, 'before the laptop replies');
+  h.sends()[0]!.resolve({ outcome: 'woken' });
+  await pending;
+  assert.equal(h.draft(), undefined);
+});
+
+test('a reply clears the draft and the refusal, whatever its outcome', async () => {
+  for (const outcome of ['sent', 'woken', 'unknown']) {
+    const h = sendHarness();
+    h.actions.setDraft('Run the unit tests.');
+    h.refuse(WORKING_REFUSAL);
+    const pending = h.actions.sendMessage();
+    h.sends()[0]!.resolve({ outcome });
+    await pending;
+    assert.equal(h.draft(), undefined, outcome);
+    assert.equal(h.refusal(), undefined, outcome);
+  }
+});
+
+test('what the user types while the message is on its way stays once the laptop takes it', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  const pending = h.actions.sendMessage();
+  h.actions.setDraft('Run the unit tests. Then the lint.');
+  h.sends()[0]!.resolve({ outcome: 'sent' });
+  await pending;
+  assert.equal(h.draft(), 'Run the unit tests. Then the lint.');
+  assert.equal(h.sends().length, 1);
+});
+
+test("an error keeps the draft and shows its message as it came, and nothing is sent again", async () => {
+  const errors: ReadonlyArray<readonly [string, string]> = [
+    ['refused', WORKING_REFUSAL], ['not_confirmed', NOT_CONFIRMED_TEXT], ['bad_reply', 'The laptop sent a reply this app cannot read.'],
+    ['internal', 'Something went wrong.'], ['too_large', TOO_LONG], ['bad_request', 'Write a message first.'],
+    ['not_found', 'That session is no longer on this laptop.'], ['unavailable', 'The remote provider refused this. Check the laptop.'],
+  ];
+  for (const [code, message] of errors) {
+    const h = sendHarness();
+    h.actions.setDraft('Also add a progress bar above the steps.');
+    const pending = h.actions.sendMessage();
+    h.sends()[0]!.reject(new AppError(code as 'internal', message));
+    await pending;
+    assert.equal(h.draft(), 'Also add a progress bar above the steps.', code);
+    assert.equal(h.refusal(), message, code);
+    assert.equal(h.sending(), false, `${code}: the mark goes`);
+    await flush();
+    assert.equal(h.sends().length, 1, `${code}: no resend`);
+  }
+});
+
+test('superseded is silent and keeps the draft', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  const pending = h.actions.sendMessage();
+  h.sends()[0]!.reject(new AppError('superseded', SUPERSEDED_TEXT));
+  await pending;
+  assert.equal(h.draft(), 'Run the unit tests.');
+  assert.equal(h.refusal(), undefined);
+  assert.equal(h.sending(), false);
+});
+
+test("an error that is no AppError shows the client's words", async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  const pending = h.actions.sendMessage();
+  h.sends()[0]!.reject(new TypeError('a fault in the client'));
+  await pending;
+  assert.equal(h.refusal(), BAD_PARAMS_TEXT);
+  assert.equal(h.draft(), 'Run the unit tests.');
+});
+
+test('a send takes down the refusal as it goes out, and a new refusal replaces it', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  h.refuse('The laptop refused the model change.');
+  const pending = h.actions.sendMessage();
+  assert.equal(h.refusal(), undefined);
+  h.sends()[0]!.reject(new AppError('refused', WORKING_REFUSAL));
+  await pending;
+  assert.equal(h.refusal(), WORKING_REFUSAL);
+});
+
+test('nothing goes out unless the list shows the session the route shows, with send available', async () => {
+  const unavailable = sendHarness({ send: { available: false, reason: 'This session cannot take messages.' } });
+  unavailable.actions.setDraft('Run the unit tests.');
+  const toUnavailable = unavailable.actions.sendMessage();
+  assert.deepEqual(unavailable.sends(), []);
+  await toUnavailable;
+  assert.equal(unavailable.refusal(), undefined, 'and shows no refusal: the composer shows the note');
+
+  const list = sendHarness();
+  list.actions.setDraft('Run the unit tests.');
+  list.store.update((s) => ({ ...s, ui: { ...s.ui, route: { screen: 'sessions' } } }));
+  const fromList = list.actions.sendMessage();
+  assert.deepEqual(list.sends(), []);
+  await fromList;
+
+  const gone = sendHarness();
+  const missing: PhoneSessionRef = { kind: 'local', terminalID: 'T-gone' };
+  gone.show(missing);
+  gone.actions.setDraft('Run the unit tests.');
+  const toGone = gone.actions.sendMessage();
+  assert.deepEqual(gone.sends(), []);
+  await toGone;
+  assert.equal(gone.sending(missing), false);
+});
+
+test('each session has its own draft, refusal and message on its way', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('For R.');
+  const toR = h.actions.sendMessage();
+  // The user moves to the other session while R's message is on its way, and sends there.
+  h.show(OTHER);
+  assert.equal(h.draft(OTHER), undefined);
+  h.actions.setDraft('For the other.');
+  const toOther = h.actions.sendMessage();
+  assert.deepEqual(h.sends().map((s) => s.params), [{ session: R, text: 'For R.' }, { session: OTHER, text: 'For the other.' }]);
+  h.sends()[0]!.reject(new AppError('refused', WORKING_REFUSAL));
+  await toR;
+  // R's refusal lands on R, though the route shows the other session.
+  assert.equal(h.refusal(R), WORKING_REFUSAL);
+  assert.equal(h.refusal(OTHER), undefined);
+  assert.equal(h.draft(R), 'For R.');
+  assert.equal(h.sending(OTHER), true);
+  h.sends()[1]!.resolve({ outcome: 'sent' });
+  await toOther;
+  assert.equal(h.draft(OTHER), undefined);
+  assert.equal(h.draft(R), 'For R.');
+});
+
+test('setDraft keeps the text by session and takes down its refusal; on the sessions list it does nothing', () => {
+  const h = sendHarness();
+  h.refuse(WORKING_REFUSAL);
+  h.refuse('Other refusal.', OTHER);
+  h.actions.setDraft('Run');
+  assert.equal(h.draft(), 'Run');
+  assert.equal(h.refusal(), undefined, "typing takes the session's refusal down (mock 1492)");
+  assert.equal(h.refusal(OTHER), 'Other refusal.');
+  h.actions.setDraft('');
+  assert.equal(Object.hasOwn(h.state().ui.drafts, refKey(R)), false, 'an empty draft leaves no entry');
+  for (const record of [h.state().ui.drafts, h.state().ui.refusal]) assert.equal(Object.getPrototypeOf(record), null);
+  h.store.update((s) => ({ ...s, ui: { ...s.ui, route: { screen: 'sessions' } } }));
+  const before = h.state();
+  h.actions.setDraft('Lost');
+  assert.equal(h.state(), before);
+});
+
+test('a prompt.changed while a message is on its way keeps the mark', async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  const pending = h.actions.sendMessage();
+  h.actions.onEvent({ event: 'prompt.changed', seq: 30, data: { session: R, prompts: [Q] } });
+  assert.equal(h.state().prompts.cards[cardKey(R, Q.id)]?.phase, 'open');
+  assert.equal(h.sending(), true);
+  const again = h.actions.sendMessage();
+  assert.equal(h.sends().length, 1, 'still one message on its way');
+  await again;
+  h.sends()[0]!.resolve({ outcome: 'sent' });
+  await pending;
+  assert.equal(h.sending(), false);
 });

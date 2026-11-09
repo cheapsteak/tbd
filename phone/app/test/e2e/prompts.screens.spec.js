@@ -19,9 +19,14 @@
 // - `elsewhere`: Login redirect fix's question closed by the laptop (`answeredBy: laptop`). The
 //   transcript ends with its receipt, "Answered on the laptop", which the mock's state does not
 //   draw until its OK.
+// - `parked`: Docs refresh, parked, so the composer's button reads "Send and wake" (mock's
+//   `s-docs`).
+// - `refused`: Checkout v2's Claude tab, working, after "Also add a progress bar above the
+//   steps." was sent and the laptop refused it with the mock's words (mock's `s-co`). The text
+//   stays, and the textarea is then left, as the mock draws it with no focus.
 //
 // A state reached by a change of the card's view is captured once the dock's tap guard lets its
-// buttons go, since the mocks draw them enabled.
+// buttons go, since the mocks draw them enabled; so is a state that shows Send enabled.
 
 import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -134,4 +139,32 @@ test('elsewhere', async ({ page, appHost }) => {
   await expect(app(page).locator('.tx .receipt')).toHaveText('Answered on the laptop');
   await expect(app(page).locator('.dock .card.done').getByRole('button', { name: 'OK' })).toBeEnabled();
   await capture(page, 'elsewhere', app(page).locator('.dock .card.done').getByRole('button', { name: 'OK' }));
+});
+
+test('parked', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('[data-tx-row]').first()).toBeVisible();
+  await expect.poll(() => tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThanOrEqual(1);
+  await capture(page, 'parked', app(page).locator('.dock button.send', { hasText: 'Send and wake' }));
+});
+
+test('refused', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('[data-tx-row]').first()).toBeVisible();
+  await hostCall(page, 'setReply', 'message.send', {
+    error: { code: 'refused', message: 'Not sent. Claude is still working. Send again when it stops.' },
+  });
+  const text = app(page).getByRole('textbox', { name: 'Message' });
+  await text.fill('Also add a progress bar above the steps.');
+  await text.blur();
+  const send = app(page).locator('.dock button.send');
+  await send.click();
+  await expect(app(page).locator('.dock > .refusal')).toHaveText('Not sent. Claude is still working. Send again when it stops.');
+  await expect(send).toBeEnabled();
+  await expect.poll(() => tx.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThanOrEqual(1);
+  await capture(page, 'refused', send);
 });

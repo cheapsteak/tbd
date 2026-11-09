@@ -55,6 +55,11 @@
  * at most `ANSWERED_HERE_LIMIT` entries, the oldest going first, for answers whose resolution
  * never comes (a feed that moved to another session sends none for the old one).
  *
+ * **Messages.** `sending` marks each session whose `message.send` is on its way, by `refKey`:
+ * `beginSend` marks it, and nothing else does, so one gesture sends one message, and `endSend`
+ * clears it once the request settles, whatever the outcome. A `prompt.changed` leaves it as it
+ * is. `isBlankMessage` is the laptop's rule for a message that types nothing, which it refuses.
+ *
  * Records are on a null prototype, so an ID such as `constructor` reads nothing inherited. Each
  * function returns a new object when it changes anything and `s` itself when it does not.
  *
@@ -119,6 +124,8 @@ export interface PromptsState {
   cards: Readonly<Record<string, CardState>>;
   /** This phone's answers that may have landed, by `cardKey`. */
   answeredHere: Readonly<Record<string, AnsweredHere>>;
+  /** The sessions whose `message.send` from this phone is on its way, by `refKey`. */
+  sending: Readonly<Record<string, true>>;
 }
 
 /** The most entries `answeredHere` keeps. */
@@ -134,7 +141,7 @@ export function cardKey(ref: PhoneSessionRef, promptID: string): string {
 
 /** The slice with no prompts. */
 export function emptyPrompts(): PromptsState {
-  return { bySession: emptyRecord(), cards: emptyRecord(), answeredHere: emptyRecord() };
+  return { bySession: emptyRecord(), cards: emptyRecord(), answeredHere: emptyRecord(), sending: emptyRecord() };
 }
 
 /**
@@ -208,7 +215,7 @@ export function applyPromptChanged(
   }
 
   if (!cards.changed && !here.changed && !sets.changed) return { prompts: s, receipts };
-  return { prompts: { bySession: sets.value, cards: cards.value, answeredHere: here.value }, receipts };
+  return { prompts: { ...s, bySession: sets.value, cards: cards.value, answeredHere: here.value }, receipts };
 }
 
 /**
@@ -369,6 +376,23 @@ export function dismissCard(s: PromptsState, ref: PhoneSessionRef, promptID: str
   const card = own(s.cards, k);
   if (card === undefined || card.phase === 'sending') return s;
   return withoutCard(s, k);
+}
+
+/** Whether a `message.send` from this phone to `ref`'s session is on its way. */
+export function isSending(s: PromptsState, ref: PhoneSessionRef): boolean {
+  return Object.hasOwn(s.sending, refKey(ref));
+}
+
+/** `s` with `ref`'s session marked as sending a message, or `s` itself when it already is. */
+export function beginSend(s: PromptsState, ref: PhoneSessionRef): PromptsState {
+  const k = refKey(ref);
+  return Object.hasOwn(s.sending, k) ? s : { ...s, sending: withKey(s.sending, k, true) };
+}
+
+/** `s` with `ref`'s session no longer marked as sending a message, or `s` itself when it was not. */
+export function endSend(s: PromptsState, ref: PhoneSessionRef): PromptsState {
+  const sending = withoutKey(s.sending, refKey(ref));
+  return sending === s.sending ? s : { ...s, sending };
 }
 
 /** The card a prompt entering `session`'s set gets: `answered` when `entry` is this phone's answer the laptop took, `open` otherwise. */
@@ -619,6 +643,40 @@ export function receiptText(source: ReceiptSource, summary: string | null): stri
     case 'unknown':
       return 'Answered elsewhere';
   }
+}
+
+// MARK: - Messages
+
+/**
+ * A scalar that types nothing a person could see: whitespace (`\p{White_Space}` is the set
+ * Swift's `.whitespacesAndNewlines` holds), a format character (`Cf`), or a default-ignorable
+ * code point.
+ */
+const INVISIBLE = /^[\p{White_Space}\p{Cf}\p{Default_Ignorable_Code_Point}]*$/u;
+
+/**
+ * Whether `text` is a message the laptop refuses as blank, "Write a message first."
+ * (`PhoneMessageText.isBlank` in `Sources/TBDDaemon/Base/PhoneMessageText.swift`): empty, or
+ * every scalar whitespace, a format character such as U+200B ZERO WIDTH SPACE, or a
+ * default-ignorable code point such as U+3164 HANGUL FILLER. One visible scalar makes it not
+ * blank.
+ */
+export function isBlankMessage(text: string): boolean {
+  return INVISIBLE.test(text);
+}
+
+/** The text under `key` in `r` (a session's draft or refusal, by `refKey`), or null when there is none. */
+export function textAt(r: Readonly<Record<string, string>>, key: string): string | null {
+  return own(r, key) ?? null;
+}
+
+/**
+ * `r` with `text` under `key`, or without `key` when `text` is null or empty; `r` itself when
+ * that changes nothing. The copy is on a null prototype.
+ */
+export function withText(r: Readonly<Record<string, string>>, key: string, text: string | null): Readonly<Record<string, string>> {
+  if (text === null || text === '') return withoutKey(r, key);
+  return own(r, key) === text ? r : withKey(r, key, text);
 }
 
 // MARK: - Helpers

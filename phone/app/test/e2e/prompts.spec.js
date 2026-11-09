@@ -6,7 +6,11 @@
 // focus leaves the button pressed, and what the user did on a card outlasts a card that took its
 // place. Last, who answered: the Answered card, the card that says someone else answered first,
 // and the receipts the transcript keeps ("Answered on this phone: …", "Answered on the laptop",
-// "Answered on another phone").
+// "Answered on another phone"). After the card, the composer: Send and its label, a refusal,
+// one send per gesture, the text kept while sending, the note when a session cannot take
+// messages, the card and the composer together, Send staying put under the card, the growing
+// textarea, the keyboard, and Send waiting when it first shows or changes its label. Every test
+// that sends checks the exact `message.send` params.
 //
 // Every test that answers checks the exact `prompt.answer` params the fake laptop got: the
 // session the route shows, the prompt's ID, and the answer `questionAnswer` builds. mock.json
@@ -992,4 +996,293 @@ test("a hidden permission another prompt's elsewhere card displaced comes back h
   await expect.poll(() => answers(page)).toEqual([
     { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'deny', message: 'Use the cached log' } },
   ]);
+});
+
+// MARK: - The composer
+
+/** main's Claude session (idle, no prompt), Checkout v2's Claude session (working), and Docs refresh's (parked). */
+const MAIN_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000101' };
+const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
+const DOCS_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000106' };
+/** The mock's refusal for a message sent while Claude works (mock 1265). */
+const WORKING_REFUSAL = 'Not sent. Claude is still working. Send again when it stops.';
+
+/**
+ * The params of every `message.send` that reached the fake laptop, in order.
+ * @param {Page} page
+ */
+async function messages(page) {
+  return (await hostRequests(page)).filter((r) => r.method === 'message.send').map((r) => r.params);
+}
+
+/**
+ * The composer's textarea.
+ * @param {Page} page
+ */
+function field(page) {
+  return app(page).locator('.dock .comp textarea.field');
+}
+
+/**
+ * The composer's Send.
+ * @param {Page} page
+ */
+function sendButton(page) {
+  return app(page).locator('.dock .comp button.send');
+}
+
+/**
+ * `locator`'s box, which must exist.
+ * @param {import('@playwright/test').Locator} locator
+ */
+async function box(locator) {
+  const b = await locator.boundingBox();
+  if (b === null) throw new Error('no box');
+  return b;
+}
+
+test('Send is disabled until there is text, and Enter is a new line', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  const text = field(page);
+  await expect(text).toHaveAttribute('rows', '1');
+  await expect(text).toHaveAttribute('placeholder', 'Message');
+  await expect(text).toHaveAttribute('aria-label', 'Message');
+  await expect(app(page).getByRole('textbox', { name: 'Message' })).toHaveCount(1);
+  const send = sendButton(page);
+  await expect(send).toHaveText('Send');
+  await expect(send).toBeDisabled();
+  for (const blank of ['   ', ' \n\n ']) {
+    await text.fill(blank);
+    await page.waitForTimeout(TAP_GUARD_MS);
+    await expect(send).toBeDisabled();
+  }
+  await text.fill('Run the unit tests.');
+  await expect(send).toBeEnabled();
+  await text.fill('');
+  await expect(send).toBeDisabled();
+  // Enter types a new line; only the button sends.
+  await text.fill('Run the unit tests.');
+  await text.press('Enter');
+  await text.press('Enter');
+  await expect(text).toHaveValue('Run the unit tests.\n\n');
+  await page.waitForTimeout(200);
+  expect(await messages(page)).toEqual([]);
+});
+
+test('sending clears the text once the laptop accepts it, and the message shows in the transcript', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  const text = field(page);
+  // Sent as typed: the leading spaces and the trailing new line go too.
+  await text.fill('  Run the unit tests.\n');
+  await sendButton(page).click();
+  await expect.poll(() => messages(page)).toEqual([{ session: MAIN_REF, text: '  Run the unit tests.\n' }]);
+  await expect(text).toHaveValue('');
+  await expect(sendButton(page)).toBeDisabled();
+  await expect(app(page).locator('.tx')).toContainText('Run the unit tests.');
+  await expect(app(page).locator('.dock .refusal')).toHaveCount(0);
+});
+
+test("a working session's Send is enabled and sends: the laptop decides", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  await expect(app(page).locator('.s-head .t2a')).toContainText('Working');
+  await field(page).fill('Also add a progress bar above the steps.');
+  await expect(sendButton(page)).toHaveText('Send');
+  await sendButton(page).click();
+  await expect.poll(() => messages(page)).toEqual([{ session: CHECKOUT_REF, text: 'Also add a progress bar above the steps.' }]);
+  await expect(field(page)).toHaveValue('');
+});
+
+test("a parked session's button reads Send and wake, and sending toasts that it wakes the session", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  const send = sendButton(page);
+  await expect(send).toHaveText('Send and wake');
+  await expect(send).toBeDisabled();
+  await field(page).fill('Add a troubleshooting section too.');
+  await send.click();
+  await expect(app(page).locator('.toast')).toHaveText('Waking the session, then sending…');
+  await expect.poll(() => messages(page)).toEqual([{ session: DOCS_REF, text: 'Add a troubleshooting section too.' }]);
+  await expect(field(page)).toHaveValue('');
+});
+
+test("a refusal shows the laptop's reason and keeps the text; typing takes it down", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  await hostCall(page, 'setReply', 'message.send', { error: { code: 'refused', message: WORKING_REFUSAL } });
+  const text = field(page);
+  await text.fill('Also add a progress bar above the steps.');
+  await sendButton(page).click();
+  const refusal = app(page).locator('.dock > .refusal');
+  await expect(refusal).toHaveText(WORKING_REFUSAL);
+  await expect(refusal).toHaveAttribute('role', 'alert');
+  await expect(refusal.locator('svg')).toHaveCount(1);
+  await expect(text).toHaveValue('Also add a progress bar above the steps.');
+  // Right above the composer.
+  expect(await refusal.evaluate((el) => el.nextElementSibling?.classList.contains('comp'))).toBe(true);
+  // Nothing was sent again.
+  await page.waitForTimeout(300);
+  expect(await messages(page)).toEqual([{ session: CHECKOUT_REF, text: 'Also add a progress bar above the steps.' }]);
+  await expect(sendButton(page)).toBeEnabled();
+  await text.press('End');
+  await text.pressSequentially(' Please.');
+  await expect(refusal).toHaveCount(0);
+  await expect(text).toHaveValue('Also add a progress bar above the steps. Please.');
+});
+
+test('a double click on Send posts one message.send, and the text stays editable while it is on its way', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  await hostCall(page, 'hold', 'message.send');
+  const text = field(page);
+  await text.fill('Run the unit tests.');
+  await expect(sendButton(page)).toBeEnabled();
+  await sendButton(page).dblclick();
+  await expect.poll(() => messages(page)).toHaveLength(1);
+  await expect(sendButton(page)).toBeDisabled();
+  // A tap on the disabled Send does nothing: dispatch the click past Playwright's check.
+  await sendButton(page).dispatchEvent('click');
+  await expect(text).toBeEditable();
+  await text.press('End');
+  await text.pressSequentially(' Then the lint.');
+  await hostCall(page, 'release', 'message.send');
+  // The laptop took the first text; what was typed meanwhile stays.
+  await expect(app(page).locator('.tx')).toContainText('Run the unit tests.');
+  await expect(text).toHaveValue('Run the unit tests. Then the lint.');
+  await page.waitForTimeout(300);
+  expect(await messages(page)).toEqual([{ session: MAIN_REF, text: 'Run the unit tests.' }]);
+});
+
+test('a session that cannot take messages shows the note in place of the composer', async ({ page, appHost }) => {
+  const reason = 'This session cannot take messages from a phone.';
+  await openApp(page, appHost, {
+    scenario: withSession(MAIN_REF.terminalID, (s) => { s.capabilities.send = { available: false, reason }; }),
+  });
+  await openSessionByName(page, 'main');
+  await expect(app(page).locator('.dock > .dock-note')).toHaveText('Sending is not available for this session.');
+  await expect(app(page).locator('.dock textarea, .dock button')).toHaveCount(0);
+  await expect(app(page).locator('.dock')).not.toContainText(reason);
+});
+
+test('the prompt card comes first, then the composer, each with its own refusal', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const dock = app(page).locator('.dock');
+  await expect(dock.locator(':scope > .card')).toBeVisible();
+  expect(await dock.evaluate((el) => [...el.children].map((c) => c.className))).toEqual(['card', 'comp']);
+  await hostCall(page, 'setReply', 'message.send', { error: { code: 'refused', message: WORKING_REFUSAL } });
+  await hostCall(page, 'setReply', 'prompt.answer', { error: { code: 'refused', message: 'The laptop refused the answer.' } });
+  await field(page).fill('Also add a progress bar above the steps.');
+  await sendButton(page).click();
+  await card(page).getByRole('button', { name: 'Yes, add the test' }).click();
+  await expect(card(page).locator('.refusal')).toHaveText('The laptop refused the answer.');
+  await expect(dock.locator(':scope > .refusal')).toHaveText(WORKING_REFUSAL);
+  expect(await dock.evaluate((el) => [...el.children].map((c) => c.className))).toEqual(['card', 'refusal', 'comp']);
+});
+
+test('a card that appears or grows above the composer, a refusal, and a growing text all leave Send where it was', async ({ page, appHost }) => {
+  await openApp(page, appHost, { scenario: withSSEPrompts() });
+  await openSessionByName(page, 'SSE reconnect');
+  await page.waitForTimeout(OPENING_MS + 200);
+  await expect(card(page)).toHaveCount(0);
+  const send = sendButton(page);
+  await field(page).fill('Run only the unit tests for now.');
+  await expect(send).toBeEnabled();
+  const before = await box(send);
+  // A permission comes, and the dock grows upward over the transcript.
+  await hostCall(page, 'emit', 'prompt.changed', { session: SSE_REF, prompts: [MOCK.prompts[SSE_KEY][0]] });
+  await expect(card(page).locator('button.opt.pri')).toBeVisible();
+  expect(await box(send)).toEqual(before);
+  // Its deny form opens, and the card grows.
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  await card(page).getByRole('button', { name: 'No' }).click();
+  await expect(card(page).getByRole('button', { name: 'Deny' })).toBeVisible();
+  expect(await box(send)).toEqual(before);
+  // The composer's refusal shows above it.
+  await hostCall(page, 'setReply', 'message.send', { error: { code: 'refused', message: WORKING_REFUSAL } });
+  await send.click();
+  await expect(app(page).locator('.dock > .refusal')).toHaveText(WORKING_REFUSAL);
+  expect(await box(send)).toEqual(before);
+  // The text grows to three lines.
+  await field(page).fill('Run only the unit tests for now.\nThen the lint.\nThen stop.');
+  await expect(send).toBeEnabled();
+  expect(await box(send)).toEqual(before);
+});
+
+test('the textarea grows with its text to at most 140 px', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  const text = field(page);
+  const height = () => text.evaluate((el) => el.getBoundingClientRect().height);
+  await text.fill('Run the unit tests.');
+  const one = await height();
+  expect(one).toBeGreaterThanOrEqual(44);
+  expect(one).toBeLessThan(50);
+  await text.fill('One.\nTwo.\nThree.');
+  await expect.poll(height).toBeGreaterThan(one + 30);
+  await text.fill(Array.from({ length: 20 }, (_, i) => `Line ${i + 1}.`).join('\n'));
+  await expect.poll(height).toBe(140);
+  await text.fill('Short again.');
+  await expect.poll(height).toBe(one);
+});
+
+test('the dock sits above the keyboard', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(card(page)).toBeVisible();
+  const text = field(page);
+  await text.fill('Run only the unit tests for now.');
+  await text.focus();
+  const { width, height } = /** @type {{ width: number, height: number }} */ (page.viewportSize());
+  await hostCall(page, 'sendEnv', {
+    safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+    viewport: { width, height: height - 336, offsetTop: 0, offsetLeft: 0, scale: 1 },
+    layout: { width, height },
+  });
+  const dock = app(page).locator('.dock');
+  await expect.poll(() => dock.evaluate((el) => getComputedStyle(el).paddingBottom)).toBe('346px');
+  await expect(text).toBeFocused();
+  // The textarea and Send end above the keyboard's top edge, and the card above them is still there.
+  for (const el of [text, sendButton(page)]) {
+    await expect.poll(() => el.evaluate((node) => node.getBoundingClientRect().bottom <= window.innerHeight - 336)).toBe(true);
+    await expect(el).toBeVisible();
+  }
+  await expect(card(page)).toBeAttached();
+  await hostCall(page, 'sendEnv', null);
+});
+
+test("Send waits when it first shows: a session opened with a kept draft holds it at first", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  await field(page).fill('Run the unit tests.');
+  await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+  await openSessionByName(page, 'main');
+  const send = sendButton(page);
+  await expect(field(page)).toHaveValue('Run the unit tests.');
+  // A tap the moment the session opens, as the second tap of a double tap on its row lands.
+  const at = await tap(page, send);
+  await expect(send).toBeDisabled();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await messages(page)).toEqual([]);
+  await expect(send).toBeEnabled();
+  await page.mouse.click(at.x, at.y);
+  await expect.poll(() => messages(page)).toEqual([{ session: MAIN_REF, text: 'Run the unit tests.' }]);
+});
+
+test('Send waits when its label changes, since the wider label moves its edge over the text', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'main');
+  await field(page).fill('Run the unit tests.');
+  const send = sendButton(page);
+  await expect(send).toBeEnabled();
+  const row = structuredClone(MOCK.rows.find((/** @type {any} */ r) => r.name === 'main'));
+  row.sessions[0].status = { ...row.sessions[0].status, chip: 'parked' };
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
+  await expect(send).toHaveText('Send and wake');
+  await expect(send).toBeDisabled();
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  await expect(send).toBeEnabled();
+  expect(await messages(page)).toEqual([]);
 });
