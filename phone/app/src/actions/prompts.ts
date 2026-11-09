@@ -75,6 +75,7 @@ import { findSession } from '../state/route.ts';
 import type { AppState, UIState } from '../state/store.ts';
 import { addReceipt } from '../state/transcript.ts';
 import type { ActionContext, Actions } from './index.ts';
+import { errorText } from './sheets.ts';
 
 /** The toast when a message goes to a parked session (mock `send()`). */
 export const WAKING_TEXT = 'Waking the session, then sending…';
@@ -226,11 +227,7 @@ export function promptActions(ctx: ActionContext, self: () => Actions) {
         await client.request('message.send', { session: to.ref, text: to.text });
         settled = { taken: true };
       } catch (error) {
-        // An error that is no `AppError` is a fault in the client's own setup, which posts
-        // nothing; its message is for the client's log, so the composer shows the client's words
-        // for a request it could not send as made.
-        if (!(error instanceof AppError)) settled = { taken: false, refusal: BAD_PARAMS_TEXT };
-        else settled = { taken: false, refusal: error.code === 'superseded' ? null : error.message };
+        settled = { taken: false, refusal: errorText(error) };
       }
       store.update((s) => {
         const prompts = endSend(s.prompts, to.ref);

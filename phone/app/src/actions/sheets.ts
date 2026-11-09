@@ -116,7 +116,7 @@ import {
   newSheetShown, profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading, remoteParamsReady, sameAccountName,
   switchBlock, unavailableReason,
 } from '../state/sheets.ts';
-import type { ActingKind, CreateInFlight, ProfilesLoad, ProvidersLoad } from '../state/sheets.ts';
+import type { ActingKind, CreateInFlight, ProfilesLoad, ProvidersLoad, SheetsState } from '../state/sheets.ts';
 import { nextToast } from '../state/store.ts';
 import type { AppState, MenuState, PendingOpen, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
@@ -148,16 +148,27 @@ function actTarget(s: AppState, from: PhoneSessionRef | undefined): ActTarget | 
   return { ref, key: refKey(ref), session: found.session, sheet: s.ui.sheet, menu: s.ui.menu };
 }
 
+function withSheets(s: AppState, sheets: SheetsState): AppState {
+  return sheets === s.sheets ? s : { ...s, sheets };
+}
+
 /** `s` with `to`'s session marked acting as `kind`. */
 function begun(s: AppState, to: ActTarget, kind: ActingKind): AppState {
-  return { ...s, sheets: beginAct(s.sheets, to.ref, kind) };
+  return withSheets(s, beginAct(s.sheets, to.ref, kind));
 }
 
 /** How an acting request ended: taken, with the toast to show, or failed, with the words to show (null for none). */
 type Settled = { taken: true; toast: string } | { taken: false; text: string | null };
 
-/** The words for a failed request: the error's message, none for `superseded`, the client's words for a fault in its own setup. */
-function errorText(error: unknown): string | null {
+/** How a create ended: taken, with the toast to show (null for none), or failed, with the words to show (null for none). */
+type CreateSettled = { taken: true; toast: string | null } | { taken: false; text: string | null };
+
+/**
+ * The words for a failed request: the error's message, none for `superseded`, and the client's
+ * words for a fault in its own setup (an error that is no `AppError`, which posts nothing; its
+ * message is for the client's log). The composer's send shows them too (`actions/prompts.ts`).
+ */
+export function errorText(error: unknown): string | null {
   if (!(error instanceof AppError)) return BAD_PARAMS_TEXT;
   return error.code === 'superseded' ? null : error.message;
 }
@@ -233,8 +244,7 @@ function newSheetFor(ui: UIState, repoID: string): SheetState | null {
  */
 function startedCreate(s: AppState, c: CreateInFlight, ready: boolean): AppState {
   if (!ready || newSheetFor(s.ui, c.repoID) === null) return s;
-  const sheets = beginCreate(s.sheets, c, s.ui.nav);
-  return sheets === s.sheets ? s : { ...s, sheets };
+  return withSheets(s, beginCreate(s.sheets, c, s.ui.nav));
 }
 
 /**
@@ -243,7 +253,7 @@ function startedCreate(s: AppState, c: CreateInFlight, ready: boolean): AppState
  * mark is null); when failed, the words in that sheet, or kept for the next one of its repo when
  * none shows (`keepLostCreate`). Nothing for `superseded`.
  */
-function settleCreate(s: AppState, c: CreateInFlight, how: { taken: true; toast: string | null } | { taken: false; text: string | null }): AppState {
+function settleCreate(s: AppState, c: CreateInFlight, how: CreateSettled): AppState {
   const movedOn = s.sheets.creating?.mark === null;
   let sheets = endCreate(s.sheets);
   let ui = s.ui;
@@ -269,7 +279,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
    * Settles create `c` as `how` (`settleCreate`), and gives back the mark its session opens by,
    * or null when the user moved on from it.
    */
-  const settled = (c: CreateInFlight, how: Parameters<typeof settleCreate>[2]): number | null => {
+  const settled = (c: CreateInFlight, how: CreateSettled): number | null => {
     const end: { mark: number | null } = { mark: null };
     store.update((s) => {
       end.mark = s.sheets.creating?.mark ?? null;
@@ -302,10 +312,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         if (text === null) return;
         next = { phase: 'failed', message: text };
       }
-      store.update((s) => {
-        const sheets = profilesEnded(s.sheets, id, next);
-        return sheets === s.sheets ? s : { ...s, sheets };
-      });
+      store.update((s) => withSheets(s, profilesEnded(s.sheets, id, next)));
     },
 
     async switchProfile(profileID: string, from: PhoneSessionRef): Promise<void> {
@@ -407,10 +414,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         if (text === null) return;
         next = { phase: 'failed', repoID, message: text };
       }
-      store.update((s) => {
-        const sheets = providersEnded(s.sheets, id, next);
-        return sheets === s.sheets ? s : { ...s, sheets };
-      });
+      store.update((s) => withSheets(s, providersEnded(s.sheets, id, next)));
     },
 
     async createWorktree(repoID: string, message: string): Promise<void> {

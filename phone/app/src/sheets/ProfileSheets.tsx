@@ -42,8 +42,11 @@ import type { ProfilesLoad } from '../state/sheets.ts';
 import { Icon } from '../ui/Icon.tsx';
 import { SheetTop } from './SheetTop.tsx';
 
-/** Loads the profiles afresh before the first paint of the sheet that calls it, so a list an earlier opening loaded never shows. */
-function useFreshProfiles(): ProfilesLoad {
+/**
+ * Loads the profiles afresh before the first paint of the sheet or menu that calls it, so a list an
+ * earlier opening loaded never shows. The account menu loads by it too (`menus/Menus.tsx`).
+ */
+export function useFreshProfiles(): ProfilesLoad {
   const actions = useActions();
   useLayoutEffect(() => {
     void actions.loadProfiles();
@@ -57,7 +60,7 @@ function Why({ text }: { text: string | null }): JSX.Element | null {
 }
 
 /** What stands in for the profiles until they load: the spinner, or the failed load's message. */
-function NotLoaded({ load }: { load: ProfilesLoad }): JSX.Element {
+export function NotLoaded({ load }: { load: ProfilesLoad }): JSX.Element {
   if (load.phase === 'failed') return <Refusal text={load.message} />;
   return (
     <div className="center" data-state="profiles-loading">

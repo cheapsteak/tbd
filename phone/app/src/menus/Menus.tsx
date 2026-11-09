@@ -36,10 +36,10 @@
  * or model change shows in the composer.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { JSX, RefObject } from 'react';
-import { Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneProfile, PhoneSession } from '../protocol/types.ts';
+import { NotLoaded, useFreshProfiles } from '../sheets/ProfileSheets.tsx';
 import { useActions, useAppState } from '../state/context.tsx';
 import { trimLikeLaptop } from '../state/prompts.ts';
 import {
@@ -96,12 +96,8 @@ function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | nu
   const actions = useActions();
   const box = useRef<HTMLDivElement>(null);
   useDismiss(box);
-  const load = useAppState((s) => s.sheets.profiles);
+  const load = useFreshProfiles();
   const acting = useAppState((s) => isActing(s.sheets, session.ref));
-  // Before the first paint, so the list a previous opening loaded never shows.
-  useLayoutEffect(() => {
-    void actions.loadProfiles();
-  }, [actions]);
   const profiles = load.phase === 'loaded' ? load.profiles : null;
   const asked = ask === null || profiles === null ? null : profileByID(profiles, ask);
   const restartWhy = asked === null || profiles === null ? null : switchBlock(session, profiles, asked);
@@ -149,14 +145,8 @@ function AccountMenu({ session, ask }: { session: PhoneSession; ask: string | nu
         onPick={() => (p.id === current ? actions.closeMenu() : actions.openMenu({ name: 'account', askProfileID: p.id }))}
       />
     ));
-  } else if (load.phase === 'failed') {
-    body = <Refusal text={load.message} />;
   } else {
-    body = (
-      <div className="center" data-state="profiles-loading">
-        <span className="spin" />
-      </div>
-    );
+    body = <NotLoaded load={load} />;
   }
 
   return (

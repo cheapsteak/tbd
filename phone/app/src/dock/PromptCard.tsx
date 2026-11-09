@@ -296,13 +296,14 @@ function PermissionCard(p: {
       {prompt.target !== undefined && <pre className="perm-target">{prompt.target + (prompt.targetTruncated ? '…' : '')}</pre>}
     </>
   );
+  const refusal = p.refusal === null ? null : <Refusal text={p.refusal} />;
   let choices: JSX.Element;
   if (p.unavailable !== null) {
     choices = <Unavailable reason={p.unavailable} />;
   } else if (ui.denyOpen) {
     choices = (
       <>
-        {p.refusal !== null && <Refusal text={p.refusal} />}
+        {refusal}
         <label className="perm-desc" htmlFor={denyID}>Tell Claude what to do instead (optional)</label>
         <textarea
           ref={denyField}
@@ -324,7 +325,7 @@ function PermissionCard(p: {
   } else {
     choices = (
       <>
-        {p.refusal !== null && <Refusal text={p.refusal} />}
+        {refusal}
         <div className="opts">
           <button className="opt pri" type="button" disabled={locked} onClick={() => send(permissionAnswer('allow'))}>Yes</button>
           {prompt.allowAlways && (

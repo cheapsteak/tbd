@@ -53,7 +53,7 @@ import type {
   PhoneFormField, PhoneProfile, PhoneProvider, PhoneRemoteCreateParams, PhoneSession, PhoneSessionRef,
 } from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
-import { isBlankMessage, trimLikeLaptop } from './prompts.ts';
+import { isBlankMessage, own, trimLikeLaptop, withKey, withoutKey, withValue } from './prompts.ts';
 import { PROFILE_KIND_WORDS } from './status.ts';
 import { emptyRecord } from './store.ts';
 import type { PendingOpen, SheetState } from './store.ts';
@@ -141,20 +141,13 @@ export function isActing(s: SheetsState, ref: PhoneSessionRef): boolean {
  */
 export function beginAct(s: SheetsState, ref: PhoneSessionRef, kind: ActingKind): SheetsState {
   const k = refKey(ref);
-  if (Object.hasOwn(s.acting, k)) return s;
-  const acting = emptyRecord<ActingKind>();
-  for (const key of Object.keys(s.acting)) acting[key] = s.acting[key]!;
-  acting[k] = kind;
-  return { ...s, acting, failed: null };
+  return Object.hasOwn(s.acting, k) ? s : { ...s, acting: withKey(s.acting, k, kind), failed: null };
 }
 
 /** `s` with `ref`'s session no longer marked as acting, or `s` itself when it was not. */
 export function endAct(s: SheetsState, ref: PhoneSessionRef): SheetsState {
-  const k = refKey(ref);
-  if (!Object.hasOwn(s.acting, k)) return s;
-  const acting = emptyRecord<ActingKind>();
-  for (const key of Object.keys(s.acting)) if (key !== k) acting[key] = s.acting[key]!;
-  return { ...s, acting };
+  const acting = withoutKey(s.acting, refKey(ref));
+  return acting === s.acting ? s : { ...s, acting };
 }
 
 /** `s` with `text` showing in `sheet` (`failed`). */
@@ -277,7 +270,7 @@ export function forkOrder(profiles: readonly PhoneProfile[], currentID: string |
 
 /** What a profile's kind is called (`PROFILE_KIND_WORDS`), or the kind as the laptop sent it when it has no name. */
 export function kindWords(kind: string): string {
-  return Object.hasOwn(PROFILE_KIND_WORDS, kind) ? PROFILE_KIND_WORDS[kind]! : kind;
+  return own(PROFILE_KIND_WORDS, kind) ?? kind;
 }
 
 /** The line under a profile's name in the account menu and the Switch account sheet: its kind, and " · default" for the default. */
@@ -500,26 +493,4 @@ export function remoteParamsReady(params: PhoneRemoteCreateParams, provider: Pho
     if (f.type === 'int' && !isWholeNumber(trimLikeLaptop(value))) return false;
   }
   return true;
-}
-
-/** `r[key]` when it is `r`'s own, or undefined: never an inherited member such as `constructor`. */
-function own<V>(r: Readonly<Record<string, V>>, key: string): V | undefined {
-  return Object.hasOwn(r, key) ? r[key] : undefined;
-}
-
-/** A copy of `r` on a null prototype without `key`, or `r` itself when it has no such key. */
-function withoutKey<V>(r: Readonly<Record<string, V>>, key: string): Readonly<Record<string, V>> {
-  if (!Object.hasOwn(r, key)) return r;
-  const next = emptyRecord<V>();
-  for (const k of Object.keys(r)) if (k !== key) next[k] = r[k]!;
-  return next;
-}
-
-/** A copy of `r` on a null prototype with `key` set to `value`, or `r` itself when it holds that already. */
-function withValue<V>(r: Readonly<Record<string, V>>, key: string, value: V): Readonly<Record<string, V>> {
-  if (own(r, key) === value) return r;
-  const next = emptyRecord<V>();
-  for (const k of Object.keys(r)) next[k] = r[k]!;
-  next[key] = value;
-  return next;
 }

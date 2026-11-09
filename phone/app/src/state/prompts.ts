@@ -675,11 +675,12 @@ export function textAt(r: Readonly<Record<string, string>>, key: string): string
  * that changes nothing. The copy is on a null prototype.
  */
 export function withText(r: Readonly<Record<string, string>>, key: string, text: string | null): Readonly<Record<string, string>> {
-  if (text === null || text === '') return withoutKey(r, key);
-  return own(r, key) === text ? r : withKey(r, key, text);
+  return text === null || text === '' ? withoutKey(r, key) : withValue(r, key, text);
 }
 
 // MARK: - Helpers
+//
+// `trimLikeLaptop` and the record helpers are shared with the sheet slice (`sheets.ts`).
 
 /**
  * A run of the characters Swift's `.whitespacesAndNewlines` holds, at either end: the space
@@ -697,19 +698,24 @@ export function trimLikeLaptop(text: string): string {
 }
 
 /** `r[key]` when it is `r`'s own, or undefined: never an inherited member such as `constructor`. */
-function own<V>(r: Readonly<Record<string, V>>, key: string): V | undefined {
+export function own<V>(r: Readonly<Record<string, V>>, key: string): V | undefined {
   return Object.hasOwn(r, key) ? r[key] : undefined;
 }
 
 /** A copy of `r` on a null prototype with `key` set to `value`. */
-function withKey<V>(r: Readonly<Record<string, V>>, key: string, value: V): Record<string, V> {
+export function withKey<V>(r: Readonly<Record<string, V>>, key: string, value: V): Record<string, V> {
   const next = copy(r);
   next[key] = value;
   return next;
 }
 
+/** A copy of `r` on a null prototype with `key` set to `value`, or `r` itself when it holds that already. */
+export function withValue<V>(r: Readonly<Record<string, V>>, key: string, value: V): Readonly<Record<string, V>> {
+  return own(r, key) === value ? r : withKey(r, key, value);
+}
+
 /** A copy of `r` on a null prototype without `key`, or `r` itself when it has no such key. */
-function withoutKey<V>(r: Readonly<Record<string, V>>, key: string): Readonly<Record<string, V>> {
+export function withoutKey<V>(r: Readonly<Record<string, V>>, key: string): Readonly<Record<string, V>> {
   if (!Object.hasOwn(r, key)) return r;
   const next = copy(r);
   delete next[key];
