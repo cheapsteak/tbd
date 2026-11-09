@@ -31,7 +31,8 @@
  * asks about it in the menu: the ask the "Restart under X?" sheet shows too (`RestartAsk` in
  * `sheets/ProfileSheets.tsx`, as `.pd-ask`), "Restart this session under X?", what a restart
  * stops, that a fork keeps the session, then Restart (`switchProfile`), "Fork into a new tab"
- * (`fork` under X) and Cancel, which goes back to the list.
+ * (`fork` under X) and Cancel, which goes back to the list. For a parked session the ask says
+ * Move instead (`switchWords`): a switch moves it to X and leaves it parked.
  *
  * **The model menu** lists `MODEL_NAMES`, with the tick on an exact match with `session.model`
  * only. Picking one calls `setModel`; picking the current one closes the menu. Under them, the
@@ -46,8 +47,8 @@
  * the profile row just tapped, or changes under it (its note, a reason or a failure appearing),
  * or the model menu as it opens. In the ask, Restart and "Fork into a new tab" are also disabled
  * while their request cannot go out, with the reason under each (`switchBlock`,
- * `unavailableReason`): a parked session cannot fork, and a session already under the profile
- * asked about has nothing to restart. The ask holds and gates them itself (`RestartAsk`).
+ * `unavailableReason`): a fork the laptop marks unavailable cannot go out, and a session already
+ * under the profile asked about has nothing to restart. The ask holds and gates them itself (`RestartAsk`).
  *
  * **Outcomes.** A menu closes only when its action succeeds (`actions/sheets.ts`). A switch or a
  * fork refused or failed from the ask shows in the ask (`.refusal`, above its buttons) while that

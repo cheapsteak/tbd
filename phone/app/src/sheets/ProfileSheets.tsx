@@ -30,7 +30,10 @@
  * says and when its buttons act are one rule: "Restart this session under X?", what a restart
  * stops (`restartNote`), that a fork keeps the session, the failure if one shows (`.refusal`),
  * then Restart (`switchProfile`), "Fork into a new tab" (`fork` under X) and Cancel (`onCancel`).
- * `look` says where it shows, and only the markup differs between the two:
+ * For a session the list shows parked, which a switch moves to X and leaves parked, the question
+ * reads "Move this session to X?", the note says it stays parked, and the button reads Move
+ * (`switchWords`); so does the Switch account sheet's line. `look` says where it shows, and only
+ * the markup differs between the two:
  * - `{ in: 'menu' }`: `.pd-ask` in the account menu (mock 1045-1047), the question in `<b>`, the
  *   lines and the reasons in `<span>`s, and the buttons in a `<div>`;
  * - `{ in: 'sheet', titleID, held }`: `.confirm` (mock 1093-1097), the question in the `<h3>` that
@@ -42,10 +45,10 @@
  * it, for `TAP_GUARD_MS` whenever the ask shows or changes (`useChangeHold`): its note, a reason,
  * or a failure appearing. They are also disabled while their request cannot go out, by the rules
  * the actions check (`switchBlock`, `unavailableReason`), with the reason under the button, or
- * under the Fork sheet's description for its rows: a parked session cannot fork, and a session
- * already under the profile asked about has nothing to restart. Every action reads its target
- * from the store when tapped and acts only on the session this sheet or menu showed (`from`, in
- * `actions/sheets.ts`).
+ * under the Fork sheet's description for its rows: a fork the laptop marks unavailable cannot go
+ * out, and a session already under the profile asked about has nothing to restart. Every action
+ * reads its target from the store when tapped and acts only on the session this sheet or menu
+ * showed (`from`, in `actions/sheets.ts`).
  */
 
 import { useLayoutEffect, useRef } from 'react';
@@ -54,7 +57,7 @@ import { Reason, Refusal } from '../dock/PromptCard.tsx';
 import type { PhoneProfile, PhoneSession } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import {
-  currentProfileID, forkOrder, isActing, kindWords, profileByID, profileDetail, restartNote, switchBlock, unavailableReason,
+  currentProfileID, forkOrder, isActing, kindWords, profileByID, profileDetail, restartNote, switchBlock, switchWords, unavailableReason,
 } from '../state/sheets.ts';
 import type { ProfilesLoad } from '../state/sheets.ts';
 import { Icon } from '../ui/Icon.tsx';
@@ -111,7 +114,7 @@ export function SwitchSheet({ session, titleID }: { session: PhoneSession; title
   return (
     <>
       <SheetTop title="Switch account" titleID={titleID} onBack={() => actions.openSheet({ name: 'menu' })} />
-      <p className="sh-sub">Restarts this session under another profile, in the same tab. The conversation stays.</p>
+      <p className="sh-sub">{switchWords(session).sub}</p>
       {list}
     </>
   );
@@ -193,7 +196,8 @@ export function RestartAsk({ session, profiles, profile, failure, look, onCancel
   const wide = inMenu ? '' : ' wide';
   // Why an acting button cannot act (`switchBlock`, `unavailableReason`), under it.
   const why = inMenu ? 'span' : 'p';
-  const question = `Restart this session under ${profile.name}?`;
+  const words = switchWords(session);
+  const question = words.question(profile.name);
   const forkNote = `To keep this session as it is, fork instead. A copy opens in a new tab under ${profile.name}.`;
   const refusal = failure === null ? null : <Refusal text={failure} />;
   const buttons: ReactNode = (
@@ -202,7 +206,7 @@ export function RestartAsk({ session, profiles, profile, failure, look, onCancel
         className={`btn pri${wide}`} type="button" disabled={locked || restartWhy !== null}
         onClick={() => void actions.switchProfile(profile.id, session.ref)}
       >
-        Restart
+        {words.button}
       </button>
       <Reason text={restartWhy} tag={why} />
       <button

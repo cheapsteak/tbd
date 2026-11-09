@@ -2451,11 +2451,13 @@ extension RPCRouter {
             resolved = nil
         }
 
-        // COLD SWAP: the target session is PARKED (hibernated or legacy
-        // suspended). Rebalancing a parked session onto a different account must
-        // NOT wake it — the whole point is to re-home ~dozens of parked sessions
-        // without re-inflating the memory hibernation just reclaimed. So we do
-        // everything EXCEPT any interrupt / respawn / spawn:
+        let mode = params.resolvedMode
+
+        // COLD SWAP: an `.inPlace` swap of a PARKED session (hibernated or
+        // legacy suspended). Rebalancing a parked session onto a different
+        // account must NOT wake it — the whole point is to re-home ~dozens of
+        // parked sessions without re-inflating the memory hibernation just
+        // reclaimed. So we do everything EXCEPT any interrupt / respawn / spawn:
         //   1. Carry the session transcript into the DESTINATION profile's config
         //      dir (best-effort) so the LATER wake's `claude --resume` finds the
         //      conversation under the new CLAUDE_CONFIG_DIR. Blank sessions have
@@ -2466,10 +2468,22 @@ extension RPCRouter {
         // parked state and its backdrop survive. Wake needs NO change: it already
         // loads the row's profile via loadByID and resolves that profile's config
         // dir, so a wake after this resumes under the new account automatically.
-        if oldTerminal.isParked {
-            // Parked rows are re-homed whatever the mode asks, and a re-home
-            // with no transcript simply wakes fresh later — so missing and
-            // blank are the same answer here.
+        //
+        // A `.fork` of a parked session is not a re-home: it takes the fork arm
+        // below like any other fork. Everything a fork reads is still on the
+        // parked row — the session id, the transcript path, the profile, the
+        // spawn extras. The fork copies the transcript as it stands when the
+        // fork reads it, the same as a fork of a running session: a row reads
+        // as parked from the moment the park records its intent, before the
+        // agent is stopped, so the last turn may still be landing on disk. The
+        // fork opens a NEW tab that resumes the conversation with
+        // `--fork-session` under the requested profile, and leaves the parked
+        // row as it was: parked, on its own profile, with its backdrop.
+        // Re-homing here instead would open no tab and move the session itself
+        // to the other profile, the opposite of a fork.
+        if oldTerminal.isParked, mode == .inPlace {
+            // A re-home with no transcript simply wakes fresh later — so
+            // missing and blank are the same answer here.
             let state = ClaudeSessionScanner.transcriptState(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
@@ -2516,18 +2530,17 @@ extension RPCRouter {
         //     in its own window and never stops painting, a holder row is
         //     parked and woken and blinks.
         //   .fork — explicit "Fork session": spawn a NEW window + terminal row,
-        //     leaving the source session untouched (the old behavior).
+        //     leaving the source session untouched, live or parked.
         //
         // In both modes, if the existing session has conversation content we
         // `claude --resume` it. `--resume` REUSES the original session ID;
         // `.fork` mode additionally passes `--fork-session` so the fork gets a
-        // genuinely new ID (the source session stays live — same-ID resume
-        // would have both processes writing the same session JSONL), and the
-        // recapture below picks up that new ID. `.inPlace` keeps the same ID:
-        // the original process is killed, so same-ID resume is correct. If the
-        // session is blank, resuming would produce "no conversation found",
-        // so we spawn a brand-new session instead.
-        let mode = params.resolvedMode
+        // genuinely new ID (the source session stays live, or wakes later —
+        // same-ID resume would have both processes writing the same session
+        // JSONL), and the recapture below picks up that new ID. `.inPlace`
+        // keeps the same ID: the original process is killed, so same-ID resume
+        // is correct. If the session is blank, resuming would produce "no
+        // conversation found", so we spawn a brand-new session instead.
 
         // `.inPlace` on a holder row is a holder arm, not a refusal: park the
         // session, re-home its profile, wake it under the new account. See

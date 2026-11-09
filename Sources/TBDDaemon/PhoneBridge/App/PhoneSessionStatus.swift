@@ -137,7 +137,6 @@ enum PhoneSessionStatus {
     static let remoteLaneTabReason = "This tab belongs to a remote lane. Use its remote session."
     static let remoteOnlyReason = "Not available for remote sessions."
     static let cannotTakeMessagesReason = "This session cannot take messages."
-    static let parkedForkReason = "This session is parked. Send it a message to wake it, then fork it."
     static let answerTurnedOffReason = "Answering prompts is turned off in TBD's settings on the laptop."
     static let answerSettingUnreadReason = "TBD could not read its setting for answering prompts."
 
@@ -151,10 +150,10 @@ enum PhoneSessionStatus {
     /// terminals recorded their kind, say), both are unavailable, so the list
     /// never offers what every send would refuse.
     ///
-    /// `fork` is unavailable on a parked session, with `parkedForkReason`:
-    /// the profile swap moves a parked row in place whatever its mode, so
-    /// `session.fork` refuses one. Parking is the only reason `fork` and
-    /// `switchProfile` differ.
+    /// `switchProfile` and `fork` are available on a parked session as on a
+    /// running one, and neither wakes it: the switch moves the parked session
+    /// to the profile, to resume there at its next wake, and the fork copies
+    /// its conversation into a new tab and leaves it parked.
     ///
     /// `answer` also follows the laptop's setting for answering prompts,
     /// `promptAnswerEnabled`, nil when it could not be read
@@ -191,8 +190,7 @@ enum PhoneSessionStatus {
         return PhoneCapabilities(
             transcript: available, send: messages,
             answer: answerCapability(available, promptAnswerEnabled: promptAnswerEnabled),
-            switchProfile: available, fork: terminal.isParked ? unavailable(parkedForkReason) : available,
-            model: messages)
+            switchProfile: available, fork: available, model: messages)
     }
 
     /// A session's `answer` under the laptop's setting for answering prompts

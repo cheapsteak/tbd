@@ -5,6 +5,7 @@
     "session": {
       "kind": "local",
       "terminalID": "9CE4DD2A-2C1B-5EE0-8D72-D53584AC9D48"
-    }
+    },
+    "parked": false
   }
 }

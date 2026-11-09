@@ -677,10 +677,12 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
 ///   business: a tmux row is respawned inside its own window and the attached
 ///   viewer keeps painting throughout, while a holder row is parked and woken
 ///   — a visible blink for the second or two its polite shutdown takes,
-///   because a holder's pty dies with its child.
+///   because a holder's pty dies with its child. A PARKED row is not woken:
+///   its profile is moved and it stays parked, to resume under the new
+///   profile at its next wake.
 /// - `fork`: duplicate the conversation into a NEW tab/terminal row (the old
-///   fork-into-new-tab behavior), leaving the source session untouched. This
-///   is the explicit "Fork session" action.
+///   fork-into-new-tab behavior), leaving the source session untouched, live
+///   or parked. This is the explicit "Fork session" action.
 public enum TerminalSwapMode: String, Codable, Sendable, Equatable {
     case inPlace
     case fork

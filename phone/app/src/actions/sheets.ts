@@ -11,7 +11,10 @@
 //   still needs the list loads again then (`useProfiles`), and so does the next opening.
 // - `switchProfile(profileID, from): Promise<void>` – `session.switchProfile` on the session the
 //   route shows, with `profileID`. On success it closes the menu or sheet the gesture was made on,
-//   if it still shows, and toasts "Restarted under <profile>".
+//   if it still shows, and toasts "Moved to <profile>" when the reply says the session is parked,
+//   since the laptop moved it and left it parked, or "Restarted under <profile>" when it says it
+//   is not (`switchedToast`). The toast follows the reply, not the list read at the tap, which can
+//   lag the laptop's row.
 // - `fork(profileID, from): Promise<void>` – `session.fork` on the session the route shows, under
 //   `profileID`, or with no `profileID` at all when it is null, which the laptop reads as the
 //   session's own profile. It takes a mark (`navMark`) as it sends; on success it closes the menu
@@ -127,7 +130,7 @@ import { findSession } from '../state/route.ts';
 import {
   awaitOpen, beginAct, beginCreate, endAct, endCreate, failIn, isActing, keepLostCreate, loadedProfiles, loadedProviders,
   newSheetShown, profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading, remoteParamsReady, sameAccountName,
-  switchBlock, unavailableReason,
+  switchBlock, switchedToast, unavailableReason,
 } from '../state/sheets.ts';
 import type { ActingKind, CreateInFlight, ProfilesLoad, ProvidersLoad, SheetsState } from '../state/sheets.ts';
 import { nextToast } from '../state/store.ts';
@@ -356,8 +359,8 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       if (to === null) return;
       let how: Settled;
       try {
-        await client.request('session.switchProfile', { session: to.ref, profileID });
-        how = { taken: true, toast: `Restarted under ${sent.name}` };
+        const result = await client.request('session.switchProfile', { session: to.ref, profileID });
+        how = { taken: true, toast: switchedToast(sent.name, result.parked) };
       } catch (error) {
         how = { taken: false, text: errorText(error) };
       }

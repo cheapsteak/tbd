@@ -14,7 +14,7 @@ import TBDShared
 // - `message.send` – MessageSendParams, ActionOutcomeResult
 // - `prompt.answer` – PhonePromptAnswerParams, PromptAnswerResult
 // - `profiles.list` – PhoneEmpty, ProfilesListResult
-// - `session.switchProfile` – SessionSwitchProfileParams, SessionRefResult
+// - `session.switchProfile` – SessionSwitchProfileParams, SessionSwitchProfileResult
 // - `session.fork` – SessionForkParams, SessionRefResult
 // - `session.setModel` – SessionSetModelParams, ActionOutcomeResult
 // - `worktree.create` – PhoneWorktreeCreateParams, PhoneWorktreeCreateResult
@@ -416,9 +416,20 @@ struct SessionForkParams: Codable, Equatable, Sendable {
     let profileID: UUID?
 }
 
-/// The session an action produced or restarted.
+/// The session an action produced.
 struct SessionRefResult: Codable, Equatable, Sendable {
     let session: PhoneSessionRef
+}
+
+/// The session a switch acted on, and whether the switch left it parked. A
+/// switch restarts a running session under the profile, and moves a parked
+/// one to the profile without waking it, so `parked` tells the phone which
+/// of the two happened.
+struct SessionSwitchProfileResult: Codable, Equatable, Sendable {
+    let session: PhoneSessionRef
+    /// `Terminal.isParked` of the row the swap returned: true when the
+    /// switch moved a parked session, false when it restarted a running one.
+    let parked: Bool
 }
 
 struct SessionSetModelParams: Codable, Equatable, Sendable {

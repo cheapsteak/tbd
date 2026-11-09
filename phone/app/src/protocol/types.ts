@@ -314,8 +314,15 @@ export type SessionForkParams = {
   profileID?: string;
 };
 
-/** The session an action produced or restarted. */
+/** The session an action produced. */
 export type SessionRefResult = { session: PhoneSessionRef };
+
+/**
+ * The session a switch acted on, and whether the switch left it parked: true when it moved a parked
+ * session to the profile, false when it restarted a running one. Read from the row the laptop's swap
+ * returned, so it says what the laptop did, whatever the list showed before the tap.
+ */
+export type SessionSwitchProfileResult = { session: PhoneSessionRef; parked: boolean };
 
 export type SessionSetModelParams = { session: PhoneSessionRef; model: string };
 
@@ -368,7 +375,7 @@ export interface MethodShapes {
   'message.send': { params: MessageSendParams; result: ActionOutcomeResult };
   'prompt.answer': { params: PhonePromptAnswerParams; result: PromptAnswerResult };
   'profiles.list': { params: PhoneEmpty; result: ProfilesListResult };
-  'session.switchProfile': { params: SessionSwitchProfileParams; result: SessionRefResult };
+  'session.switchProfile': { params: SessionSwitchProfileParams; result: SessionSwitchProfileResult };
   'session.fork': { params: SessionForkParams; result: SessionRefResult };
   'session.setModel': { params: SessionSetModelParams; result: ActionOutcomeResult };
   'worktree.create': { params: PhoneWorktreeCreateParams; result: PhoneWorktreeCreateResult };
