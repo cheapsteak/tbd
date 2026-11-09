@@ -5,13 +5,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AppError, NOT_CONFIRMED_TEXT, SUPERSEDED_TEXT } from '../client/client.ts';
+import { AppError, BAD_PARAMS_TEXT, NOT_CONFIRMED_TEXT, SUPERSEDED_TEXT } from '../client/client.ts';
 import type {
   Method, ParamsOf, PhoneAnsweredBy, PhonePrompt, PhoneRow, PhoneSession, PhoneSessionRef, PromptAnswer, PromptChangedData, ResultOf,
   SessionsSubscribeResult,
 } from '../protocol/types.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
-import type { CardState } from '../state/prompts.ts';
+import { cardKey } from '../state/prompts.ts';
+import type { AnsweredHere, CardState } from '../state/prompts.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState } from '../state/store.ts';
 import { createActions } from './index.ts';
@@ -85,16 +86,23 @@ function harness(answer?: { available: boolean; reason?: string }) {
   };
   const answers = (): Sent[] => sent.filter((s) => s.method === 'prompt.answer');
   const state = (): AppState => store.get();
-  const card = (id: string): CardState | undefined => {
+  const card = (id: string, ref: PhoneSessionRef = R): CardState | undefined => {
     const cards = store.get().prompts.cards;
-    return Object.hasOwn(cards, id) ? cards[id] : undefined;
+    const k = cardKey(ref, id);
+    return Object.hasOwn(cards, k) ? cards[k] : undefined;
+  };
+  /** This phone's recorded answer to `id` in `ref`'s session. */
+  const here = (id: string, ref: PhoneSessionRef = R): AnsweredHere | undefined => {
+    const r = store.get().prompts.answeredHere;
+    const k = cardKey(ref, id);
+    return Object.hasOwn(r, k) ? r[k] : undefined;
   };
   const receipts = (): string[] => store.get().transcript.rows.flatMap((r) => (r.kind === 'receipt' ? [r.text] : []));
   let seq = 20;
   const changed = (data: Omit<PromptChangedData, 'session'> & { session?: PhoneSessionRef }): void => {
     actions.onEvent({ event: 'prompt.changed', seq: seq++, data: { session: R, ...data } });
   };
-  return { sent, last, answers, store, actions, state, card, receipts, changed };
+  return { sent, last, answers, store, actions, state, card, here, receipts, changed };
 }
 
 /** Lets the promise handlers run. */
@@ -124,7 +132,7 @@ function resolved(promptID: string, answeredBy: PhoneAnsweredBy) {
 
 test('an answer goes to the open session once, with the prompt and the answer as given', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   assert.deepEqual(h.answers().map((s) => s.params), [{ session: R, promptID: Q.id, answer: YES }]);
   assert.equal(h.card(Q.id)?.phase, 'sending');
   assert.equal(h.card(Q.id)?.summary, 'Yes, add the test');
@@ -136,29 +144,29 @@ test('an answer goes to the open session once, with the prompt and the answer as
 test('a delivered answer shows Answered, and its resolution leaves "Answered on this phone: …"', async () => {
   for (const [outcome, by] of [['delivered', 'phone'], ['delivered', 'unknown'], ['unknown', 'phone'], ['unknown', 'unknown']] as const) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+    const pending = h.actions.answerPrompt(Q.id, YES);
     h.last('prompt.answer').resolve({ outcome });
     await pending;
     assert.equal(h.card(Q.id)?.phase, 'answered', outcome);
     assert.equal(h.card(Q.id)?.summary, 'Yes, add the test');
-    assert.equal(h.state().prompts.answeredHere[Q.id], 'Yes, add the test');
+    assert.equal(h.here(Q.id)?.summary, 'Yes, add the test');
     assert.deepEqual(h.receipts(), [], 'no receipt before the resolution');
     h.changed({ prompts: [P], resolved: resolved(Q.id, by) });
     assert.equal(h.card(Q.id), undefined, `${outcome}, ${by}: the card is taken down`);
     assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test'], `${outcome}, ${by}`);
-    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false, 'the entry goes once its resolution is applied');
+    assert.equal((h.here(Q.id) !== undefined), false, 'the entry goes once its resolution is applied');
     assert.equal(h.card(P.id)?.phase, 'open', 'the other prompt stays');
   }
 });
 
 test("already_resolved and a laptop resolution never read 'Answered on this phone'", async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.last('prompt.answer').resolve({ outcome: 'already_resolved' });
   await pending;
   assert.equal(h.card(Q.id)?.phase, 'elsewhere');
   assert.equal(h.card(Q.id)?.elsewhereBy, null);
-  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
+  assert.equal((h.here(Q.id) !== undefined), false);
   h.changed({ prompts: [], resolved: resolved(Q.id, 'laptop') });
   const card = h.card(Q.id);
   assert.equal(card?.phase, 'elsewhere');
@@ -168,7 +176,7 @@ test("already_resolved and a laptop resolution never read 'Answered on this phon
 
 test('a delivered answer that the laptop says it answered reads "Answered on the laptop"', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.last('prompt.answer').resolve({ outcome: 'delivered' });
   await pending;
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'laptop') });
@@ -179,7 +187,7 @@ test('a delivered answer that the laptop says it answered reads "Answered on the
 test('already_resolved, then a resolution by a phone or by no one known, reads as another phone or elsewhere', async () => {
   for (const [by, text, elsewhereBy] of [['phone', 'Answered on another phone', 'phone'], ['unknown', 'Answered elsewhere', null]] as const) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+    const pending = h.actions.answerPrompt(Q.id, YES);
     h.last('prompt.answer').resolve({ outcome: 'already_resolved' });
     await pending;
     h.changed({ prompts: [P], resolved: resolved(Q.id, by) });
@@ -213,16 +221,16 @@ test('a resolution while the card is open shows the elsewhere card until OK', as
 
 test("a refused answer keeps the card open with the daemon's message", async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  const pending = h.actions.answerPrompt(P.id, ALLOW);
   h.last('prompt.answer').reject(new AppError('refused', REFUSED_TEXT));
   await pending;
   assert.equal(h.card(P.id)?.phase, 'open');
   assert.equal(h.card(P.id)?.refusal, REFUSED_TEXT);
   assert.equal(h.card(P.id)?.summary, null);
-  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false);
+  assert.equal((h.here(P.id) !== undefined), false);
   assert.equal(h.answers().length, 1, 'nothing is sent again by itself');
   // A new tap is a new answer, and its sending clears the refusal.
-  void h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  void h.actions.answerPrompt(P.id, ALLOW);
   assert.equal(h.answers().length, 2);
   assert.equal(h.card(P.id)?.phase, 'sending');
   assert.equal(h.card(P.id)?.refusal, null);
@@ -230,7 +238,7 @@ test("a refused answer keeps the card open with the daemon's message", async () 
 
 test('the unsupported reply of a setting turned off shows its reason', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  const pending = h.actions.answerPrompt(P.id, ALLOW);
   h.last('prompt.answer').reject(new AppError('unsupported', OFF_REASON));
   await pending;
   assert.equal(h.card(P.id)?.phase, 'open');
@@ -239,7 +247,7 @@ test('the unsupported reply of a setting turned off shows its reason', async () 
 
 test('a superseded answer turns the card back open with no refusal', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  const pending = h.actions.answerPrompt(P.id, ALLOW);
   h.last('prompt.answer').reject(new AppError('superseded', SUPERSEDED_TEXT));
   await pending;
   assert.equal(h.card(P.id)?.phase, 'open');
@@ -252,30 +260,30 @@ test('an answer that may have happened shows its error and is not sent again', a
     ['internal', 'Something went wrong.'], ['too_large', 'That message is too long to send from a phone.'],
   ] as const) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+    const pending = h.actions.answerPrompt(P.id, ALLOW);
     h.last('prompt.answer').reject(new AppError(code, message));
     await pending;
     await flush();
     assert.equal(h.card(P.id)?.phase, 'open', code);
     assert.equal(h.card(P.id)?.refusal, message, code);
     assert.equal(h.answers().length, 1, `${code}: nothing is sent again`);
-    assert.equal(h.state().prompts.answeredHere[P.id], 'Allowed', `${code}: recorded as this phone's`);
+    assert.equal(h.here(P.id)?.summary, 'Allowed', `${code}: recorded as this phone's`);
   }
 });
 
-test('a rejection that is no AppError still settles the card, with its message', async () => {
+test("a rejection that is no AppError still settles the card, with the client's words for a request it could not send", async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
-  h.last('prompt.answer').reject(new Error('boom'));
+  const pending = h.actions.answerPrompt(P.id, ALLOW);
+  h.last('prompt.answer').reject(new Error('AppClient: request ID 1 is already in use'));
   await pending;
   assert.equal(h.card(P.id)?.phase, 'open');
-  assert.equal(h.card(P.id)?.refusal, 'boom');
-  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false, 'the client posted nothing');
+  assert.equal(h.card(P.id)?.refusal, BAD_PARAMS_TEXT, "the client's own words, not its log line");
+  assert.equal(h.here(P.id), undefined, 'the client posted nothing');
 });
 
 test('a prompt that closes with no resolution leaves no receipt', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  const pending = h.actions.answerPrompt(P.id, ALLOW);
   h.last('prompt.answer').resolve({ outcome: 'delivered' });
   await pending;
   h.changed({ prompts: [] });
@@ -289,8 +297,8 @@ test('a prompt that closes with no resolution leaves no receipt', async () => {
 
 test('two answers back to back post one prompt.answer', async () => {
   const h = await showing();
-  const first = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
-  const second = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const first = h.actions.answerPrompt(Q.id, YES);
+  const second = h.actions.answerPrompt(Q.id, YES);
   assert.equal(h.answers().length, 1);
   await second;
   assert.equal(h.answers().length, 1, 'the second resolves at once, having sent nothing');
@@ -301,17 +309,17 @@ test('two answers back to back post one prompt.answer', async () => {
 
 test('an answered or elsewhere card sends nothing', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.last('prompt.answer').resolve({ outcome: 'delivered' });
   await pending;
-  void h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  void h.actions.answerPrompt(Q.id, YES);
   h.changed({ prompts: [Q, P], resolved: [] });
-  void h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  void h.actions.answerPrompt(Q.id, YES);
   assert.equal(h.answers().length, 1, 'answered');
   h.changed({ prompts: [], resolved: resolved(P.id, 'laptop') });
   assert.equal(h.card(P.id)?.phase, 'elsewhere');
   const before = h.state();
-  void h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  void h.actions.answerPrompt(P.id, ALLOW);
   assert.equal(h.answers().length, 1, 'elsewhere');
   assert.equal(h.state(), before, 'and nothing changes');
 });
@@ -321,8 +329,8 @@ test('an answered or elsewhere card sends nothing', async () => {
 test('a prompt ID the open session does not hold sends nothing', async () => {
   const h = await showing();
   const before = h.state();
-  void h.actions.answerPrompt('00000000-0000-4000-8000-0000000000FF', YES, 'Yes');
-  void h.actions.answerPrompt('constructor', YES, 'Yes');
+  void h.actions.answerPrompt('00000000-0000-4000-8000-0000000000FF', YES);
+  void h.actions.answerPrompt('constructor', YES);
   assert.equal(h.answers().length, 0);
   assert.equal(h.state(), before);
 });
@@ -331,17 +339,17 @@ test("a prompt of another session sends nothing, even while the slice holds it",
   const h = await showing();
   // The laptop's feed moved to OTHER while the route still shows R, as after a refused open.
   h.changed({ session: OTHER, prompts: [QO] });
-  assert.equal(h.card(QO.id)?.phase, 'open');
-  void h.actions.answerPrompt(QO.id, YES, 'Yes, add the test');
+  assert.equal(h.card(QO.id, OTHER)?.phase, 'open');
+  void h.actions.answerPrompt(QO.id, YES);
   assert.equal(h.answers().length, 0);
 });
 
 test('an answer after the route moved sends nothing', async () => {
   const h = await showing();
   h.actions.back();
-  void h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  void h.actions.answerPrompt(Q.id, YES);
   h.actions.openSession(OTHER);
-  void h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  void h.actions.answerPrompt(Q.id, YES);
   assert.equal(h.answers().length, 0);
 });
 
@@ -353,7 +361,7 @@ test('an answer for a session the list does not show sends nothing', async () =>
     sessions: { layout: s.sessions.layout, rows: Object.assign(Object.create(null) as Record<string, PhoneRow>, { W2: s.sessions.rows['W2']! }) },
   }));
   assert.equal(h.state().ui.route.screen, 'session');
-  void h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  void h.actions.answerPrompt(Q.id, YES);
   assert.equal(h.answers().length, 0);
 });
 
@@ -361,24 +369,24 @@ test('an answer for a session the list does not show sends nothing', async () =>
 
 test("an answer of the wrong kind, or that misses or adds a question, sends nothing", async () => {
   const h = await showing([Q, P, P_ONCE]);
-  void h.actions.answerPrompt(Q.id, ALLOW, 'Allowed');
-  void h.actions.answerPrompt(P.id, YES, 'Yes, add the test');
-  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: {} }, '');
-  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: '  ' } }, '');
-  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: 'Yes', 'Another question?': 'No' } }, 'Yes; No');
-  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: { 'Another question?': 'Yes' } }, 'Yes');
-  void h.actions.answerPrompt(P_ONCE.id, { kind: 'permission', decision: 'allow_always' }, 'Allowed for this session');
-  void h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'allow', message: 'Go ahead.' }, 'Allowed');
-  void h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'deny', message: '  ' }, 'Denied');
+  void h.actions.answerPrompt(Q.id, ALLOW);
+  void h.actions.answerPrompt(P.id, YES);
+  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: {} });
+  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: '  ' } });
+  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: 'Yes', 'Another question?': 'No' } });
+  void h.actions.answerPrompt(Q.id, { kind: 'question', answers: { 'Another question?': 'Yes' } });
+  void h.actions.answerPrompt(P_ONCE.id, { kind: 'permission', decision: 'allow_always' });
+  void h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'allow', message: 'Go ahead.' });
+  void h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'deny', message: '  ' });
   assert.equal(h.answers().length, 0);
   for (const p of [Q, P, P_ONCE]) assert.equal(h.card(p.id)?.phase, 'open', p.id);
 });
 
 test('allow_always goes where the prompt offers it, and a deny carries its message', async () => {
   const h = await showing([P, P_ONCE]);
-  void h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'allow_always' }, 'Allowed for this session');
+  void h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'allow_always' });
   const deny: PromptAnswer = { kind: 'permission', decision: 'deny', message: 'Run only the unit tests for now.' };
-  void h.actions.answerPrompt(P_ONCE.id, deny, 'Denied');
+  void h.actions.answerPrompt(P_ONCE.id, deny);
   assert.deepEqual(h.answers().map((s) => s.params), [
     { session: R, promptID: P.id, answer: { kind: 'permission', decision: 'allow_always' } },
     { session: R, promptID: P_ONCE.id, answer: deny },
@@ -389,14 +397,14 @@ test('allow_always goes where the prompt offers it, and a deny carries its messa
 
 test('with the answer capability off, nothing is sent and the card shows the reason', async () => {
   const h = await showing([Q, P], { available: false, reason: OFF_REASON });
-  void h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  void h.actions.answerPrompt(P.id, ALLOW);
   assert.equal(h.answers().length, 0);
   assert.equal(h.card(P.id)?.phase, 'open');
   assert.equal(h.card(P.id)?.refusal, OFF_REASON);
   // With no reason given, nothing changes at all.
   const quiet = await showing([Q, P], { available: false });
   const before = quiet.state();
-  void quiet.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+  void quiet.actions.answerPrompt(P.id, ALLOW);
   assert.equal(quiet.answers().length, 0);
   assert.equal(quiet.state(), before);
 });
@@ -406,7 +414,7 @@ test('with the answer capability off, nothing is sent and the card shows the rea
 test('a laptop resolution while sending reads "Answered on the laptop" at once, and the reply changes nothing', async () => {
   for (const outcome of ['delivered', 'unknown', 'already_resolved'] as const) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+    const pending = h.actions.answerPrompt(Q.id, YES);
     h.changed({ prompts: [P], resolved: resolved(Q.id, 'laptop') });
     assert.deepEqual(h.receipts(), ['Answered on the laptop'], outcome);
     assert.equal(h.card(Q.id)?.phase, 'elsewhere');
@@ -415,13 +423,13 @@ test('a laptop resolution while sending reads "Answered on the laptop" at once, 
     h.last('prompt.answer').resolve({ outcome });
     await pending;
     assert.equal(h.state(), before, `${outcome}: the reply changes nothing`);
-    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
+    assert.equal((h.here(Q.id) !== undefined), false);
   }
 });
 
 test('a laptop resolution while sending stands over an error reply too', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'laptop') });
   h.last('prompt.answer').reject(new AppError('refused', REFUSED_TEXT));
   await pending;
@@ -434,7 +442,7 @@ test('a phone or unknown resolution while sending waits for the reply, which del
   for (const by of ['phone', 'unknown'] as const) {
     for (const outcome of ['delivered', 'unknown'] as const) {
       const h = await showing();
-      const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+      const pending = h.actions.answerPrompt(Q.id, YES);
       h.changed({ prompts: [P], resolved: resolved(Q.id, by) });
       assert.deepEqual(h.receipts(), [], `${by}: no receipt while the reply is on its way`);
       assert.equal(h.card(Q.id)?.phase, 'sending', 'the card stays though its prompt left the set');
@@ -444,7 +452,7 @@ test('a phone or unknown resolution while sending waits for the reply, which del
       await pending;
       assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test'], `${by}, ${outcome}`);
       assert.equal(h.card(Q.id), undefined);
-      assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
+      assert.equal((h.here(Q.id) !== undefined), false);
     }
   }
 });
@@ -460,7 +468,7 @@ test('a phone or unknown resolution while sending reads as if this phone had not
   ] as const;
   for (const [by, reply, text, elsewhereBy] of cases) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+    const pending = h.actions.answerPrompt(Q.id, YES);
     h.changed({ prompts: [P], resolved: resolved(Q.id, by) });
     if (reply instanceof AppError) h.last('prompt.answer').reject(reply);
     else h.last('prompt.answer').resolve({ outcome: reply });
@@ -475,18 +483,158 @@ test('a phone or unknown resolution while sending reads as if this phone had not
   }
 });
 
-test('the reply to an answer whose prompt left the set unresolved changes nothing, even when the prompt comes back', async () => {
+test('a sending card stays when its prompt leaves the set unresolved, and its reply still settles it', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.changed({ prompts: [P] });
-  assert.equal(h.card(Q.id), undefined, 'the card goes with its prompt');
+  assert.equal(h.card(Q.id)?.phase, 'sending', 'the card stays until its reply');
   h.changed({ prompts: [Q, P] });
-  assert.equal(h.card(Q.id)?.phase, 'open', 'the prompt back is a new card');
+  assert.equal(h.card(Q.id)?.phase, 'sending', 'the prompt back gets no new card');
+  void h.actions.answerPrompt(Q.id, YES);
+  assert.equal(h.answers().length, 1, 'so no second answer goes out');
   h.last('prompt.answer').resolve({ outcome: 'delivered' });
   await pending;
-  assert.equal(h.card(Q.id)?.phase, 'open', "the old answer's reply does not settle the new card");
-  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
-  assert.deepEqual(h.receipts(), []);
+  assert.equal(h.card(Q.id)?.phase, 'answered');
+  assert.deepEqual(h.here(Q.id), { summary: 'Yes, add the test', taken: true });
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+});
+
+/** `h` showing OTHER and then R again, each transcript opened afresh, with the feed sending `others` for OTHER and `back` for R. */
+async function roundTrip(h: Awaited<ReturnType<typeof showing>>, others: PhonePrompt[], back: PhonePrompt[]): Promise<void> {
+  h.actions.openSession(OTHER);
+  h.last('transcript.open').resolve({ resumed: false, seq: 11, page: { items: [], reachedStart: true, omittedItems: 0 } });
+  await flush();
+  h.changed({ session: OTHER, prompts: others });
+  h.actions.openSession(R);
+  h.last('transcript.open').resolve({ resumed: false, seq: 12, page: { items: [], reachedStart: true, omittedItems: 0 } });
+  await flush();
+  h.changed({ prompts: back });
+}
+
+test('an answer in flight while the feed moves away and back keeps its card, and no second answer goes out', async () => {
+  const h = await showing([Q]);
+  const pending = h.actions.answerPrompt(Q.id, YES);
+  await roundTrip(h, [{ ...P, id: '00000000-0000-4000-8000-0000000000F7' }], [Q]);
+  assert.equal(h.card(Q.id)?.phase, 'sending');
+  void h.actions.answerPrompt(Q.id, YES);
+  assert.equal(h.answers().length, 1);
+  h.answers()[0]!.resolve({ outcome: 'delivered' });
+  await pending;
+  assert.equal(h.card(Q.id)?.phase, 'answered');
+  assert.deepEqual(h.here(Q.id), { summary: 'Yes, add the test', taken: true });
+  h.changed({ prompts: [], resolved: resolved(Q.id, 'phone') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+  assert.equal(h.card(Q.id), undefined);
+});
+
+test('an answer delivered after the feed moved away and back reads as this phone\'s', async () => {
+  const h = await showing([Q]);
+  const pending = h.actions.answerPrompt(Q.id, YES);
+  await roundTrip(h, [], [Q]);
+  h.answers()[0]!.resolve({ outcome: 'delivered' });
+  await pending;
+  h.changed({ prompts: [], resolved: resolved(Q.id, 'phone') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+  assert.equal(h.card(Q.id), undefined);
+});
+
+test('a delivered answer whose prompt is still open after a round trip comes back answered, not open', async () => {
+  const h = await showing([Q]);
+  const pending = h.actions.answerPrompt(Q.id, YES);
+  h.answers()[0]!.resolve({ outcome: 'delivered' });
+  await pending;
+  await roundTrip(h, [], [Q]);
+  assert.equal(h.card(Q.id)?.phase, 'answered');
+  assert.equal(h.card(Q.id)?.summary, 'Yes, add the test');
+  void h.actions.answerPrompt(Q.id, YES);
+  assert.equal(h.answers().length, 1);
+  h.changed({ prompts: [], resolved: resolved(Q.id, 'unknown') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+});
+
+test('an answer that may have landed comes back open after a round trip, still read as this phone\'s', async () => {
+  const h = await showing([Q]);
+  const pending = h.actions.answerPrompt(Q.id, YES);
+  h.answers()[0]!.reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
+  await pending;
+  await roundTrip(h, [], [Q]);
+  assert.equal(h.card(Q.id)?.phase, 'open', 'the laptop never took it, so it can be answered again');
+  h.changed({ prompts: [], resolved: resolved(Q.id, 'phone') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+});
+
+test('a laptop resolution while sending drops an earlier answer that may have landed', async () => {
+  const h = await showing();
+  const first = h.actions.answerPrompt(Q.id, YES);
+  h.last('prompt.answer').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
+  await first;
+  assert.notEqual(h.here(Q.id), undefined);
+  const second = h.actions.answerPrompt(Q.id, YES);
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'laptop') });
+  assert.equal(h.here(Q.id), undefined);
+  assert.deepEqual(h.receipts(), ['Answered on the laptop']);
+  h.last('prompt.answer').resolve({ outcome: 'delivered' });
+  await second;
+  assert.equal(h.here(Q.id), undefined);
+  assert.equal(h.card(Q.id)?.phase, 'elsewhere');
+});
+
+test("another session's prompt with the same ID gets its own card, and leaves this one's as it was", async () => {
+  const h = await showing([Q]);
+  h.changed({ prompts: [], resolved: resolved(Q.id, 'laptop') });
+  assert.equal(h.card(Q.id)?.phase, 'elsewhere');
+  h.changed({ session: OTHER, prompts: [Q] });
+  assert.equal(h.card(Q.id, OTHER)?.phase, 'open');
+  assert.equal(h.card(Q.id)?.phase, 'elsewhere');
+  assert.equal(h.card(Q.id)?.elsewhereBy, 'laptop');
+});
+
+// MARK: - The transcript holds the session
+
+test('an answer goes out only while the transcript shows the session open', async () => {
+  // Opening again: the same session, its transcript on its way.
+  const reopening = await showing();
+  reopening.actions.setShowDetails(true);
+  assert.equal(reopening.state().transcript.phase, 'opening');
+  void reopening.actions.answerPrompt(P.id, ALLOW);
+  assert.equal(reopening.answers().length, 0, 'opening');
+  reopening.last('transcript.open').resolve({ resumed: false, seq: 11, page: { items: [], reachedStart: true, omittedItems: 0 } });
+  await flush();
+  void reopening.actions.answerPrompt(P.id, ALLOW);
+  assert.equal(reopening.answers().length, 1, 'open again');
+  // A failed open: the laptop's feed stayed where it was, and the set may be stale.
+  const failed = await showing();
+  failed.actions.setShowDetails(true);
+  failed.last('transcript.open').reject(new AppError('refused', 'No.'));
+  await flush();
+  assert.equal(failed.state().transcript.phase, 'failed');
+  void failed.actions.answerPrompt(P.id, ALLOW);
+  assert.equal(failed.answers().length, 0, 'failed');
+  // A transcript open for another session than the route shows.
+  const elsewhere = await showing();
+  elsewhere.store.update((s) => ({ ...s, transcript: { ...s.transcript, ref: OTHER } }));
+  assert.equal(elsewhere.state().transcript.phase, 'open');
+  void elsewhere.actions.answerPrompt(P.id, ALLOW);
+  assert.equal(elsewhere.answers().length, 0, "another session's transcript");
+});
+
+test('dismissPrompt acts on the session the route shows', async () => {
+  const h = await showing();
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'laptop') });
+  h.actions.back();
+  h.actions.dismissPrompt(Q.id);
+  assert.equal(h.card(Q.id)?.phase, 'elsewhere', 'on the list, nothing is dismissed');
+});
+
+test('the summary comes from the answer and the prompt, not from the caller', async () => {
+  const h = await showing([P]);
+  const pending = h.actions.answerPrompt(P.id, { kind: 'permission', decision: 'deny', message: 'Run only the unit tests for now.' });
+  assert.equal(h.card(P.id)?.summary, 'Denied');
+  h.last('prompt.answer').resolve({ outcome: 'delivered' });
+  await pending;
+  h.changed({ prompts: [], resolved: resolved(P.id, 'phone') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Denied']);
 });
 
 // MARK: - An answer that may have landed
@@ -504,16 +652,16 @@ test("an answer that may have landed reads as this phone's when its prompt resol
   for (const [code, message] of MAYBE) {
     for (const by of ['phone', 'unknown'] as const) {
       const h = await showing();
-      const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+      const pending = h.actions.answerPrompt(P.id, ALLOW);
       h.last('prompt.answer').reject(new AppError(code as 'internal', message));
       await pending;
       h.changed({ prompts: [Q], resolved: resolved(P.id, by) });
       assert.deepEqual(h.receipts(), ['Answered on this phone: Allowed'], `${code}, ${by}`);
       assert.equal(h.card(P.id), undefined, `${code}, ${by}: no elsewhere card`);
-      assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false);
+      assert.equal((h.here(P.id) !== undefined), false);
     }
     const h = await showing();
-    const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+    const pending = h.actions.answerPrompt(P.id, ALLOW);
     h.last('prompt.answer').reject(new AppError(code as 'internal', message));
     await pending;
     h.changed({ prompts: [Q], resolved: resolved(P.id, 'laptop') });
@@ -526,10 +674,10 @@ test("an answer that may have landed reads as this phone's when its prompt resol
 test('an answer the laptop refused records nothing, so its resolution reads as someone else\'s', async () => {
   for (const [code, message] of NOT_LANDED) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+    const pending = h.actions.answerPrompt(P.id, ALLOW);
     h.last('prompt.answer').reject(new AppError(code as 'refused', message));
     await pending;
-    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false, code);
+    assert.equal((h.here(P.id) !== undefined), false, code);
     h.changed({ prompts: [Q], resolved: resolved(P.id, 'phone') });
     assert.deepEqual(h.receipts(), ['Answered on another phone'], code);
     assert.equal(h.card(P.id)?.phase, 'elsewhere', code);
@@ -540,12 +688,12 @@ test('an answer the laptop refused records nothing, so its resolution reads as s
 test('a too_large answer that does not fit one frame was never posted, and records nothing', async () => {
   const h = await showing();
   const huge: PromptAnswer = { kind: 'question', answers: { [QUESTION]: 'x'.repeat(70_000) } };
-  const pending = h.actions.answerPrompt(Q.id, huge, 'x');
+  const pending = h.actions.answerPrompt(Q.id, huge);
   h.last('prompt.answer').reject(new AppError('too_large', TOO_LONG));
   await pending;
   assert.equal(h.card(Q.id)?.phase, 'open');
   assert.equal(h.card(Q.id)?.refusal, TOO_LONG);
-  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
+  assert.equal((h.here(Q.id) !== undefined), false);
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'unknown') });
   assert.deepEqual(h.receipts(), ['Answered elsewhere']);
 });
@@ -553,11 +701,11 @@ test('a too_large answer that does not fit one frame was never posted, and recor
 /** A harness whose first answer to `Q`, "Yes, add the test", failed `not_confirmed`, and whose second, "No, this is enough", is on its way. */
 async function answeredTwice() {
   const h = await showing();
-  const first = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const first = h.actions.answerPrompt(Q.id, YES);
   h.last('prompt.answer').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
   await first;
   assert.equal(h.card(Q.id)?.phase, 'open');
-  const second = h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: 'No, this is enough' } }, 'No, this is enough');
+  const second = h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: 'No, this is enough' } });
   assert.equal(h.answers().length, 2);
   return { h, second };
 }
@@ -568,7 +716,7 @@ test('a second answer after one that may have landed: already_resolved keeps the
   await second;
   assert.equal(h.card(Q.id)?.phase, 'answered', 'not "Already answered on the laptop"');
   assert.equal(h.card(Q.id)?.summary, 'Yes, add the test');
-  assert.equal(h.state().prompts.answeredHere[Q.id], 'Yes, add the test');
+  assert.equal(h.here(Q.id)?.summary, 'Yes, add the test');
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
   assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
   assert.equal(h.card(Q.id), undefined);
@@ -587,7 +735,7 @@ test('a second answer after one that may have landed: delivered makes the second
   const { h, second } = await answeredTwice();
   h.last('prompt.answer').resolve({ outcome: 'delivered' });
   await second;
-  assert.equal(h.state().prompts.answeredHere[Q.id], 'No, this is enough');
+  assert.equal(h.here(Q.id)?.summary, 'No, this is enough');
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'unknown') });
   assert.deepEqual(h.receipts(), ['Answered on this phone: No, this is enough']);
 });
@@ -598,7 +746,7 @@ test('a second answer after one that may have landed: a refusal keeps the first,
   await second;
   assert.equal(h.card(Q.id)?.phase, 'open');
   assert.equal(h.card(Q.id)?.refusal, REFUSED_TEXT);
-  assert.equal(h.state().prompts.answeredHere[Q.id], 'Yes, add the test');
+  assert.equal(h.here(Q.id)?.summary, 'Yes, add the test');
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'unknown') });
   assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
   assert.equal(h.card(Q.id), undefined);
@@ -607,13 +755,13 @@ test('a second answer after one that may have landed: a refusal keeps the first,
 test('a held resolution with a reply that may have landed reads as this phone\'s', async () => {
   for (const [code, message] of MAYBE) {
     const h = await showing();
-    const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+    const pending = h.actions.answerPrompt(Q.id, YES);
     h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
     h.last('prompt.answer').reject(new AppError(code as 'internal', message));
     await pending;
     assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test'], code);
     assert.equal(h.card(Q.id), undefined, code);
-    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false, code);
+    assert.equal((h.here(Q.id) !== undefined), false, code);
   }
 });
 
@@ -627,7 +775,7 @@ test('a held resolution after an earlier answer that may have landed reads as th
     const label = reply instanceof AppError ? reply.code : reply;
     assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test'], label);
     assert.equal(h.card(Q.id), undefined, label);
-    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false, label);
+    assert.equal((h.here(Q.id) !== undefined), false, label);
   }
 });
 
@@ -635,7 +783,7 @@ test('a held resolution after an earlier answer that may have landed reads as th
 
 test('dismissPrompt takes down an answered card and sends nothing; a sending card stays', async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.actions.dismissPrompt(Q.id);
   assert.equal(h.card(Q.id)?.phase, 'sending');
   h.last('prompt.answer').resolve({ outcome: 'delivered' });
@@ -663,7 +811,7 @@ test('dismissing a prompt with no card changes nothing', async () => {
 
 test("a held receipt goes to its prompt's session, not to the transcript the phone shows by then", async () => {
   const h = await showing();
-  const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  const pending = h.actions.answerPrompt(Q.id, YES);
   h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
   h.actions.openSession(OTHER);
   h.last('transcript.open').resolve({ resumed: false, seq: 11, page: { items: [], reachedStart: true, omittedItems: 0 } });

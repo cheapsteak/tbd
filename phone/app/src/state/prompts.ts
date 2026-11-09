@@ -9,26 +9,33 @@
  * transcript is open on this phone: the session's whole open set, after the transcript opens and
  * on every change, with a resolution for each prompt that closed since the last event, saying who
  * answered it (`answeredBy`). So the slice holds one session's set at a time: a set for another
- * session means the laptop's feed moved there, and the sets it held before are dropped.
+ * session means the laptop's feed moved there, and the sets it held before are dropped. The feed
+ * says nothing when it stops, so the slice can hold a set the laptop no longer sends; the prompt
+ * actions answer only while the transcript slice shows the session open.
  *
- * **Cards.** A prompt that enters a set gets a card, `open`. A prompt that leaves a set with no
- * resolution loses its card and leaves no receipt, whatever the card showed, with two
- * exceptions: an `elsewhere` card stays until `dismissPrompt`, and a `sending` card that holds
- * its prompt's resolution stays until its reply settles. A card keeps the prompt it shows, so it
- * can outlive its prompt's set. A prompt still in the set whose card was taken down does not get
- * a new one.
+ * **Keys.** Cards and `answeredHere` are keyed by session and prompt ID together (`cardKey`), so
+ * a prompt of another session with the same ID never takes a card's place.
+ *
+ * **Cards.** A prompt that enters a set gets a card: `answered`, with the summary, when
+ * `answeredHere` holds this phone's answer to it and the laptop took that answer (`taken`), and
+ * `open` otherwise. A prompt that leaves a set with no resolution loses its card and leaves no
+ * receipt, whatever the card showed, with two exceptions: an `elsewhere` card stays until
+ * `dismissPrompt`, and a `sending` card stays until its reply settles, whatever happens to its
+ * set. A sending card is the record of an answer in flight, so no second answer goes out for its
+ * prompt. A card keeps the prompt it shows, so it can outlive its prompt's set. A prompt still in
+ * the set whose card was taken down does not get a new one.
  *
  * **Answering.** `beginAnswer` turns an `open` card `sending`, and nothing else does, so one
  * gesture sends one answer. Its reply (`settleAnswer`):
  * - `delivered` or `unknown` turns the card `answered`, and records the answer's summary in
- *   `answeredHere`;
+ *   `answeredHere`, as taken;
  * - `already_resolved` turns it `elsewhere`, unless `answeredHere` holds an earlier answer of
  *   this phone's to the prompt, which may have landed: that is the likely winner, so the card
  *   turns `answered` with the earlier summary, and the entry stays;
  * - an error turns it back `open`, with the laptop's message as its `refusal`, except
  *   `superseded`, which leaves no refusal. An error that may mean the answer landed all the same
- *   (`mayHaveLanded`) records it in `answeredHere` too, as `unknown` does, so its resolution reads
- *   as this phone's; any other records nothing.
+ *   (`mayHaveLanded`) records it in `answeredHere` too, not as taken, so its resolution reads as
+ *   this phone's while its card stays answerable; any other records nothing.
  *
  * **A resolution** (`applyPromptChanged`) leaves a receipt, `receiptText(receiptSource(…))`,
  * and then:
@@ -96,17 +103,34 @@ export interface CardState {
   held: PhonePromptResolution | null;
 }
 
+/**
+ * This phone's answer to a prompt that may have landed: its summary, and whether the laptop took
+ * it (`delivered` or `unknown`) rather than failing in a way that may mean it landed all the same.
+ */
+export interface AnsweredHere {
+  summary: string;
+  taken: boolean;
+}
+
 export interface PromptsState {
   /** The open prompts, by `refKey` of their session, in the laptop's order. Only the open session's set is held. */
   bySession: Readonly<Record<string, readonly PhonePrompt[]>>;
-  /** Each card, by prompt ID. */
+  /** Each card, by `cardKey` of its session and prompt. */
   cards: Readonly<Record<string, CardState>>;
-  /** The summary of this phone's answer to each prompt the laptop took it for, by prompt ID. */
-  answeredHere: Readonly<Record<string, string>>;
+  /** This phone's answers that may have landed, by `cardKey`. */
+  answeredHere: Readonly<Record<string, AnsweredHere>>;
 }
 
 /** The most entries `answeredHere` keeps. */
 export const ANSWERED_HERE_LIMIT = 64;
+
+/**
+ * The key of `promptID` in `ref`'s session, for `cards` and `answeredHere`. It encodes the pair as
+ * JSON, so no session's key and prompt ID run together into another pair's.
+ */
+export function cardKey(ref: PhoneSessionRef, promptID: string): string {
+  return JSON.stringify([refKey(ref), promptID]);
+}
 
 /** The slice with no prompts. */
 export function emptyPrompts(): PromptsState {
@@ -133,52 +157,54 @@ export function applyPromptChanged(
 
   for (const r of d.resolved ?? []) {
     const id = r.promptID;
-    const found = own(cards.value, id);
-    const card = found !== undefined && sameRef(found.session, d.session) ? found : undefined;
+    const k = cardKey(d.session, id);
+    const card = own(cards.value, k);
     if (card?.phase === 'sending') {
       if (r.answeredBy === 'laptop') {
-        cards.set(id, { ...card, phase: 'elsewhere', elsewhereBy: 'laptop', refusal: null, held: null });
+        cards.set(k, { ...card, phase: 'elsewhere', elsewhereBy: 'laptop', refusal: null, answerID: null, held: null });
         receipts.push({ id, text: receiptText('laptop', null) });
+        here.delete(k);
       } else {
-        cards.set(id, { ...card, held: r });
+        cards.set(k, { ...card, held: r });
       }
       continue;
     }
-    const answered = Object.hasOwn(here.value, id) || card?.phase === 'answered';
-    const source = receiptSource(r, answered);
-    receipts.push({ id, text: receiptText(source, own(here.value, id) ?? card?.summary ?? null) });
-    here.delete(id);
+    const entry = own(here.value, k);
+    const source = receiptSource(r, entry !== undefined || card?.phase === 'answered');
+    receipts.push({ id, text: receiptText(source, entry?.summary ?? card?.summary ?? null) });
+    here.delete(k);
     if (card === undefined) continue;
     const by = elsewhereBy(r);
     if (card.phase === 'answered') {
-      cards.delete(id);
+      cards.delete(k);
     } else if (card.phase === 'open') {
-      if (source === 'thisPhone') cards.delete(id);
-      else cards.set(id, { ...card, phase: 'elsewhere', elsewhereBy: by, refusal: null });
+      if (source === 'thisPhone') cards.delete(k);
+      else cards.set(k, { ...card, phase: 'elsewhere', elsewhereBy: by, refusal: null });
     } else if (by !== null && by !== card.elsewhereBy && source !== 'thisPhone') {
-      cards.set(id, { ...card, elsewhereBy: by });
+      cards.set(k, { ...card, elsewhereBy: by });
     }
   }
 
   const before = own(s.bySession, key) ?? [];
   const kept = samePrompts(before, d.prompts) ? before : d.prompts;
   for (const p of kept) {
-    const card = own(cards.value, p.id);
-    if (card !== undefined && sameRef(card.session, d.session)) {
-      if (card.prompt !== p && !samePrompt(card.prompt, p)) cards.set(p.id, { ...card, prompt: p });
+    const k = cardKey(d.session, p.id);
+    const card = own(cards.value, k);
+    if (card !== undefined) {
+      if (card.prompt !== p && !samePrompt(card.prompt, p)) cards.set(k, { ...card, prompt: p });
     } else if (!before.some((b) => b.id === p.id)) {
-      cards.set(p.id, openCard(d.session, p));
+      cards.set(k, newCard(d.session, p, own(here.value, k)));
     }
   }
   for (const other of Object.keys(s.bySession)) if (other !== key) sets.delete(other);
   if (kept.length === 0) sets.delete(key);
   else if (kept !== before) sets.set(key, kept);
 
-  for (const id of Object.keys(cards.value)) {
-    const card = cards.value[id]!;
-    if (card.phase === 'elsewhere' || (card.phase === 'sending' && card.held !== null)) continue;
+  for (const k of Object.keys(cards.value)) {
+    const card = cards.value[k]!;
+    if (card.phase === 'elsewhere' || card.phase === 'sending') continue;
     const set = own(sets.value, refKey(card.session)) ?? [];
-    if (!set.some((p) => p.id === id)) cards.delete(id);
+    if (!set.some((p) => p.id === card.prompt.id)) cards.delete(k);
   }
 
   if (!cards.changed && !here.changed && !sets.changed) return { prompts: s, receipts };
@@ -196,10 +222,10 @@ export function cardFor(s: PromptsState, ref: PhoneSessionRef): { prompt: PhoneP
   const set = own(s.bySession, refKey(ref)) ?? [];
   const candidates: CardState[] = [];
   for (const p of set) {
-    const card = own(s.cards, p.id);
+    const card = own(s.cards, cardKey(ref, p.id));
     if (card !== undefined) candidates.push(card);
   }
-  for (const id of Object.keys(s.cards)) candidates.push(s.cards[id]!);
+  for (const k of Object.keys(s.cards)) candidates.push(s.cards[k]!);
   let best: CardState | null = null;
   for (const card of candidates) {
     if (!sameRef(card.session, ref)) continue;
@@ -216,8 +242,8 @@ const PHASE_RANK: Readonly<Record<CardPhase, number>> = { elsewhere: 0, sending:
  */
 export function openPrompt(s: PromptsState, ref: PhoneSessionRef, promptID: string): PhonePrompt | null {
   const prompt = (own(s.bySession, refKey(ref)) ?? []).find((p) => p.id === promptID);
-  const card = own(s.cards, promptID);
-  if (prompt === undefined || card === undefined || card.phase !== 'open' || !sameRef(card.session, ref)) return null;
+  const card = own(s.cards, cardKey(ref, promptID));
+  if (prompt === undefined || card === undefined || card.phase !== 'open') return null;
   return prompt;
 }
 
@@ -244,13 +270,15 @@ export function answerFits(prompt: PhonePrompt, answer: PromptAnswer): boolean {
 }
 
 /**
- * `s` with `promptID`'s card turned `sending`, for this phone's answer, whose summary is
- * `summary` and whose token is `answerID`. Only an `open` card turns; otherwise it returns `s`.
+ * `s` with the card of `promptID` in `ref`'s session turned `sending`, for this phone's answer,
+ * whose summary is `summary` and whose token is `answerID`. Only an `open` card turns; otherwise
+ * it returns `s`.
  */
-export function beginAnswer(s: PromptsState, promptID: string, summary: string, answerID: string): PromptsState {
-  const card = own(s.cards, promptID);
+export function beginAnswer(s: PromptsState, ref: PhoneSessionRef, promptID: string, summary: string, answerID: string): PromptsState {
+  const k = cardKey(ref, promptID);
+  const card = own(s.cards, k);
   if (card === undefined || card.phase !== 'open') return s;
-  return withCard(s, promptID, { ...card, phase: 'sending', refusal: null, summary, answerID, held: null });
+  return withCard(s, k, { ...card, phase: 'sending', refusal: null, summary, answerID, held: null });
 }
 
 /**
@@ -277,92 +305,104 @@ export function mayHaveLanded(code: string, fitsOneFrame: boolean): boolean {
 }
 
 /**
- * `s` with the reply to the answer whose token is `answerID` folded into `promptID`'s card, and
- * the receipt due now, if any, for the transcript of `session`. Only a card still `sending` that
- * answer changes, so a reply that comes after a laptop resolution, or after the card was taken
- * down, changes nothing.
+ * `s` with the reply to the answer whose token is `answerID` folded into the card of `promptID`
+ * in `ref`'s session, and the receipt due now, if any, for that session's transcript. Only a card
+ * still `sending` that answer changes, so a reply that comes after a laptop resolution changes
+ * nothing. A sending card leaves the slice only through its reply, or through a laptop resolution,
+ * so a reply never finds its card gone otherwise.
  */
 export function settleAnswer(
   s: PromptsState,
+  ref: PhoneSessionRef,
   promptID: string,
   answerID: string,
   settled: AnswerSettlement,
 ): { prompts: PromptsState; receipt: { session: PhoneSessionRef; id: string; text: string } | null } {
-  const card = own(s.cards, promptID);
+  const k = cardKey(ref, promptID);
+  const card = own(s.cards, k);
   if (card === undefined || card.phase !== 'sending' || card.answerID !== answerID) return { prompts: s, receipt: null };
-  const landed = 'outcome' in settled ? settled.outcome !== 'already_resolved' : settled.mayHaveLanded;
-  /** The summary of an earlier answer of this phone's to the prompt, which may have landed. */
-  const earlier = own(s.answeredHere, promptID);
+  const outcome = 'outcome' in settled ? settled.outcome : null;
+  const taken = outcome === 'delivered' || outcome === 'unknown';
+  const landed = taken || ('error' in settled && settled.mayHaveLanded);
+  /** An earlier answer of this phone's to the prompt, which may have landed. */
+  const earlier = own(s.answeredHere, k);
+  const summary = card.summary ?? '';
   if (card.held !== null) {
     const held = card.held;
     const source = landed ? 'thisPhone' : receiptSource(held, earlier !== undefined);
-    const receipt = { session: card.session, id: promptID, text: receiptText(source, landed ? card.summary : (earlier ?? null)) };
+    const receipt = { session: card.session, id: promptID, text: receiptText(source, landed ? summary : (earlier?.summary ?? null)) };
     const after = source === 'thisPhone'
-      ? withoutCard(s, promptID)
-      : withCard(s, promptID, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null });
-    return { prompts: forget(after, promptID), receipt };
+      ? withoutCard(s, k)
+      : withCard(s, k, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null });
+    return { prompts: forget(after, k), receipt };
   }
-  if ('outcome' in settled) {
-    if (landed) {
-      const answered = withCard(s, promptID, { ...card, phase: 'answered', answerID: null });
-      return { prompts: { ...answered, answeredHere: remember(answered.answeredHere, promptID, card.summary ?? '') }, receipt: null };
-    }
+  if (taken) {
+    const answered = withCard(s, k, { ...card, phase: 'answered', answerID: null });
+    return { prompts: { ...answered, answeredHere: remember(answered.answeredHere, k, { summary, taken: true }) }, receipt: null };
+  }
+  if (outcome === 'already_resolved') {
     const after: CardState = earlier === undefined
       ? { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }
-      : { ...card, phase: 'answered', summary: earlier, answerID: null };
-    return { prompts: withCard(s, promptID, after), receipt: null };
+      : { ...card, phase: 'answered', summary: earlier.summary, answerID: null };
+    return { prompts: withCard(s, k, after), receipt: null };
   }
-  const refusal = settled.error === 'superseded' ? null : settled.message;
-  const reopened = withCard(s, promptID, { ...card, phase: 'open', refusal, summary: null, answerID: null });
+  const refusal = 'error' in settled && settled.error !== 'superseded' ? settled.message : null;
+  const reopened = withCard(s, k, { ...card, phase: 'open', refusal, summary: null, answerID: null });
   if (!landed) return { prompts: reopened, receipt: null };
-  return { prompts: { ...reopened, answeredHere: remember(reopened.answeredHere, promptID, card.summary ?? '') }, receipt: null };
+  return { prompts: { ...reopened, answeredHere: remember(reopened.answeredHere, k, { summary, taken: false }) }, receipt: null };
 }
 
-/** `s` with `promptID`'s `open` card showing `refusal`, or `s` itself when it has no `open` card. */
-export function refuseAnswer(s: PromptsState, promptID: string, refusal: string): PromptsState {
-  const card = own(s.cards, promptID);
+/** `s` with the `open` card of `promptID` in `ref`'s session showing `refusal`, or `s` itself when it has no such card. */
+export function refuseAnswer(s: PromptsState, ref: PhoneSessionRef, promptID: string, refusal: string): PromptsState {
+  const k = cardKey(ref, promptID);
+  const card = own(s.cards, k);
   if (card === undefined || card.phase !== 'open' || card.refusal === refusal) return s;
-  return withCard(s, promptID, { ...card, refusal });
+  return withCard(s, k, { ...card, refusal });
 }
 
 /**
- * `s` without `promptID`'s card. A `sending` card stays, since its reply still has to say who
- * answered; so does `s` when there is no such card.
+ * `s` without the card of `promptID` in `ref`'s session. A `sending` card stays, since its reply
+ * still has to say who answered; so does `s` when there is no such card.
  */
-export function dismissCard(s: PromptsState, promptID: string): PromptsState {
-  const card = own(s.cards, promptID);
+export function dismissCard(s: PromptsState, ref: PhoneSessionRef, promptID: string): PromptsState {
+  const k = cardKey(ref, promptID);
+  const card = own(s.cards, k);
   if (card === undefined || card.phase === 'sending') return s;
-  return withoutCard(s, promptID);
+  return withoutCard(s, k);
 }
 
-function openCard(session: PhoneSessionRef, prompt: PhonePrompt): CardState {
-  return { phase: 'open', refusal: null, summary: null, elsewhereBy: null, session, prompt, answerID: null, held: null };
+/** The card a prompt entering `session`'s set gets: `answered` when `entry` is this phone's answer the laptop took, `open` otherwise. */
+function newCard(session: PhoneSessionRef, prompt: PhonePrompt, entry: AnsweredHere | undefined): CardState {
+  const card: CardState = {
+    phase: 'open', refusal: null, summary: null, elsewhereBy: null, session, prompt, answerID: null, held: null,
+  };
+  return entry?.taken === true ? { ...card, phase: 'answered', summary: entry.summary } : card;
 }
 
 function elsewhereBy(r: PhonePromptResolution): 'laptop' | 'phone' | null {
   return r.answeredBy === 'unknown' ? null : r.answeredBy;
 }
 
-function withCard(s: PromptsState, id: string, card: CardState): PromptsState {
-  return { ...s, cards: withKey(s.cards, id, card) };
+function withCard(s: PromptsState, k: string, card: CardState): PromptsState {
+  return { ...s, cards: withKey(s.cards, k, card) };
 }
 
-function withoutCard(s: PromptsState, id: string): PromptsState {
-  const cards = withoutKey(s.cards, id);
+function withoutCard(s: PromptsState, k: string): PromptsState {
+  const cards = withoutKey(s.cards, k);
   return cards === s.cards ? s : { ...s, cards };
 }
 
-/** `s` without `id`'s `answeredHere` entry. */
-function forget(s: PromptsState, id: string): PromptsState {
-  const answeredHere = withoutKey(s.answeredHere, id);
+/** `s` without the `answeredHere` entry under `k`. */
+function forget(s: PromptsState, k: string): PromptsState {
+  const answeredHere = withoutKey(s.answeredHere, k);
   return answeredHere === s.answeredHere ? s : { ...s, answeredHere };
 }
 
-/** `r` with `id` recorded last as `summary`, and only the newest `ANSWERED_HERE_LIMIT` entries kept. */
-function remember(r: Readonly<Record<string, string>>, id: string, summary: string): Record<string, string> {
+/** `r` with `entry` recorded last under `k`, and only the newest `ANSWERED_HERE_LIMIT` entries kept. */
+function remember(r: Readonly<Record<string, AnsweredHere>>, k: string, entry: AnsweredHere): Record<string, AnsweredHere> {
   const next = copy(r);
-  delete next[id];
-  next[id] = summary;
+  delete next[k];
+  next[k] = entry;
   const keys = Object.keys(next);
   for (let i = 0; i < keys.length - ANSWERED_HERE_LIMIT; i++) delete next[keys[i]!];
   return next;
