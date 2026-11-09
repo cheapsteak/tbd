@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   // Serve on the free <name>.<subdomain>.workers.dev address; no domain is needed.
   "workers_dev": true,
-  // The workerd that Wrangler 4.152.0 bundles. Any date after 2026-04-07 turns on
+  // The workerd that Wrangler 4.157.0 bundles (1.20261103.1). Any date after 2026-04-07 turns on
   // web_socket_auto_reply_to_close, so the runtime answers Close frames itself.
   "compatibility_date": "2026-10-19",
   // The relay keeps no logs.
