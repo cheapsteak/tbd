@@ -11,9 +11,8 @@ import Testing
 /// with this reason; it never passes without having drawn.
 let noMetalDevice: Comment = "no Metal device on this runner"
 
-/// Main actor, because a `FontSet` is built there.
+/// The tests that build a `FontSet` run on the main actor, because one is built there.
 @Suite(.fastPassBounded)
-@MainActor
 struct RendererTests {
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func shaderSourceCompiles() throws {
@@ -31,6 +30,7 @@ struct RendererTests {
     }
 
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    @MainActor
     func offscreenFrameDrawsText() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -136,6 +136,7 @@ struct RendererTests {
     /// one. Its next frame, here a cursor blink, must rebuild every row against the new atlas, not
     /// draw the old positions over whatever was packed there since.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    @MainActor
     func anIdleSurfaceRebuildsItsRowsWhenAnotherSurfaceClearsTheSharedAtlas() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -220,6 +221,7 @@ struct RendererTests {
     ///   - wideText: what is fed to put one wide cell in columns 0 and 1.
     ///   - cursorColumn: the 1-based column CHA moves the cursor to: 1 is the lead, 2 the tail.
     @Test(arguments: ["中", "\u{3000}", "\u{1b}[8m中"], [1, 2])
+    @MainActor
     func aBlockCursorOnEitherHalfOfAWideCellCoversBothCells(wideText: String, cursorColumn: Int) throws {
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let builder = FrameBuilder(glyphCache: GlyphCache(fontSet: FontSet(font: font, scale: 2), device: nil))

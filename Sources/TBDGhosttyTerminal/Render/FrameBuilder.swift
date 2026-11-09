@@ -439,7 +439,7 @@ final class FrameBuilder {
         if graphemeBuffer.count < Int(graphemesLen) {
             graphemeBuffer = [UInt32](repeating: 0, count: Int(graphemesLen))
         }
-        let fontStyle = hasStyling ? FontStyle(bold: style.has(.bold), italic: style.has(.italic)) : .regular
+        let fontStyle = FontStyle(bold: isBold, italic: hasStyling && style.has(.italic))
         // libghostty's WIDE is authoritative; the shaper's Unicode heuristic is only the fallback.
         let cellSpan = wide == GHOSTTY_CELL_WIDE_WIDE ? 2 : 1
 

@@ -61,6 +61,12 @@ struct BoldAndItalicTests {
         let menloFaces: [String] = FontStyle.allCases.map { menlo.postScriptName(for: $0) }
         #expect(menloFaces == ["Menlo-Regular", "Menlo-Bold", "Menlo-Italic", "Menlo-BoldItalic"],
                 "Menlo's faces are \(menloFaces)")
+        if let ptMonoFont = NSFont(name: "PTMono-Regular", size: 12) {
+            let ptMono = FontSet(font: ptMonoFont, scale: 2)
+            let ptMonoFaces: [String] = FontStyle.allCases.map { ptMono.postScriptName(for: $0) }
+            #expect(ptMonoFaces == ["PTMono-Regular", "PTMono-Bold", "PTMono-Regular", "PTMono-Regular"],
+                    "PT Mono's faces are \(ptMonoFaces)")
+        }
     }
 
     /// Monaco has only a regular face, and SwiftTerm draws its bold, italic and bold italic in it:
