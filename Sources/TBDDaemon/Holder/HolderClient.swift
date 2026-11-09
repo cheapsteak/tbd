@@ -93,12 +93,12 @@ actor HolderClient {
     /// The most recent description the holder sent **without being asked**.
     ///
     /// The holder pushes a `.described` frame carrying the terminal status when
-    /// the child exits while a client is connected, and the kernel routinely
-    /// delivers that push in the same read as the answer it trails. Such a
-    /// frame answers nobody's request, so it is retired from the queue rather
-    /// than handed to whoever asks next — and kept here, because it is the one
-    /// place a child's exit status arrives unsolicited and throwing it away
-    /// silently would lose the fact entirely.
+    /// the child exits while a client it has already answered is connected,
+    /// and the kernel routinely delivers that push in the same read as the
+    /// answer it trails. Such a frame answers nobody's request, so it is
+    /// retired from the queue rather than handed to whoever asks next — and
+    /// kept here, because it is the one place a child's exit status arrives
+    /// unsolicited and throwing it away silently would lose the fact entirely.
     ///
     /// Deliberately survives `close()`: it is an observation about the child,
     /// not connection state.

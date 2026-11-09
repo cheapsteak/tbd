@@ -111,6 +111,30 @@ struct HolderInvocationTests {
         }
     }
 
+    /// Spawners never pass `--poll-slice-ms`, so its absence must leave the
+    /// production slice in place; the live tests pass a long one.
+    @Test func thePollSliceDefaultsUnlessOneIsGiven() throws {
+        let session = UUID()
+        let parsedWithout = try HolderArguments.parse(try Self.commandLine(session: session))
+        #expect(parsedWithout.pollSliceMilliseconds == HolderArguments.defaultPollSliceMilliseconds)
+        #expect(HolderArguments.defaultPollSliceMilliseconds == 50)
+
+        let parsedWith = try HolderArguments.parse(
+            try Self.commandLine(session: session) + ["--poll-slice-ms", "600000"])
+        #expect(parsedWith.pollSliceMilliseconds == 600_000)
+    }
+
+    /// A slice of zero would spin the serving loop, and a negative one would
+    /// make every `poll` wait forever.
+    @Test func refusesAPollSliceThatIsNotAPositiveNumber() throws {
+        for text in ["0", "-1", "soon"] {
+            let arguments = try Self.commandLine(session: UUID()) + ["--poll-slice-ms", text]
+            #expect(throws: HolderStartupError.invalidPollSlice(text)) {
+                _ = try HolderArguments.parse(arguments)
+            }
+        }
+    }
+
     @Test func refusesAnIncompleteInvocation() throws {
         #expect(throws: HolderStartupError.missingArgument("session")) {
             _ = try HolderArguments.parse(["--socket", "/tmp/x.sock"])
@@ -299,6 +323,7 @@ struct HolderInvocationTests {
             .unreadableLaunchPayload(descriptor: 10, errno: EBADF),
             .invalidLockDescriptorArgument("/tmp/holders/session.lock"),
             .invalidLockDescriptor(1),
+            .invalidPollSlice("0"),
             .socketPathTooLong(path: "/tmp/holders/session.sock", limit: 104),
         ]
         for error in badInvocations {

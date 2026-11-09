@@ -329,13 +329,17 @@ final class Holder {
         var inbox = Data()
         var forgotten = false
         /// The terminal status has actually **reached** a client — either
-        /// pushed at one that was already connected when the child exited, or
-        /// carried back as the answer to that client's own request. It is what
-        /// ends the holder's life, so it is set only after a successful send: a
-        /// send that failed collected nothing, and the window must stay open
-        /// for whoever connects next.
+        /// pushed at one the holder had already answered, or carried back as
+        /// the answer to that client's own request. It is what ends the
+        /// holder's life, so it is set only after a successful send: a send
+        /// that failed collected nothing, and the window must stay open for
+        /// whoever connects next.
         var exitCollected = false
+        /// The connected client has had at least one answer from this holder.
+        /// Only such a client is ever pushed at; see `pushExitToConnectedClient`.
+        var clientHasBeenAnswered = false
         var window = ExitReportWindow(limit: exitReportTimeout, clock: clock)
+        let pollSlice = arguments.pollSliceMilliseconds
 
         func describe() -> HolderChildDescription {
             HolderChildDescription(
@@ -350,27 +354,52 @@ final class Holder {
             if clientFD >= 0 { close(clientFD) }
             clientFD = -1
             inbox = Data()
+            clientHasBeenAnswered = false
         }
 
-        /// Push the terminal status at a client that was **already connected**
-        /// when the child exited. There is no separate "exited" verb on the
-        /// wire: the description already carries the status, and an unsolicited
-        /// `.described` frame is what a reader blocked on the pty needs to see
-        /// to stop waiting.
+        /// Whether the client has sent something this holder has not yet
+        /// read. Probed without waiting.
+        func clientHasUnreadInput() -> Bool {
+            var probe = pollfd(fd: clientFD, events: Int16(POLLIN), revents: 0)
+            return poll(&probe, 1, 0) > 0
+        }
+
+        /// Push the terminal status at the connected client, once the holder
+        /// has **already answered** it. There is no separate "exited" verb on
+        /// the wire: the description already carries the status, and an
+        /// unsolicited `.described` frame is what a reader blocked on the pty
+        /// needs to see to stop waiting. The holder winds down once it has
+        /// pushed.
         ///
-        /// It is called from `collectChildExit` alone, and that restriction is
-        /// the whole contract: **the holder never speaks first to a client that
-        /// arrives after the child is gone.** Greeting one at accept time put a
-        /// frame nobody asked for where that client's first response belongs —
-        /// its `handOverPTY` came back as a bare `.described` with no
-        /// descriptor — and the collection that frame recorded then tore the
-        /// connection down before the request was ever read. That is exactly
-        /// the shape of a daemon reconnecting after a restart to collect a
-        /// finished job's status, so it silently broke the primary
-        /// re-adoption path. Such a client is served instead; see the request
-        /// loop below.
+        /// It is called from the reaping branch alone, and two rules decide
+        /// whether it speaks at all. Both exist because the frames on this
+        /// socket carry no request identifier: a client can only take the next
+        /// frame as the answer to what it last asked, so an unsolicited frame
+        /// is safe only where no answer is owed.
+        ///
+        ///   - **Never at a client that has not been answered yet.** Its first
+        ///     frame must be the answer to its first request. Greeting one put a
+        ///     frame nobody asked for where that answer belongs — its
+        ///     `handOverPTY` came back as a bare `.described` with no
+        ///     descriptor — and the collection that frame recorded then tore
+        ///     the connection down before the request was ever read, or before
+        ///     it was even written. That is exactly the shape of a daemon
+        ///     reconnecting to collect a finished job's status, so it broke the
+        ///     primary re-adoption path. When the client connected is
+        ///     immaterial: the holder notices an exit only at the next poll
+        ///     slice, so "connected before the exit" and "connected before the
+        ///     holder noticed" differ by luck. Such a client is served instead,
+        ///     and its answer carries the status.
+        ///   - **Never over a request that is already on its way.** Bytes the
+        ///     holder has buffered or not yet read are a request whose answer
+        ///     belongs next on the socket; it is served, and its answer carries
+        ///     the status. The check and the send are not one step, so a
+        ///     request written in the instant between them still meets the
+        ///     push in place of its answer: a window of a few instructions,
+        ///     where the first rule closes one of a whole poll slice.
         func pushExitToConnectedClient() {
             guard status != .alive, clientFD >= 0, !exitCollected else { return }
+            guard clientHasBeenAnswered, inbox.isEmpty, !clientHasUnreadInput() else { return }
             guard let frame = try? HolderFraming.frame(.described(describe())) else { return }
             do {
                 try FDChannel.sendData(frame, over: clientFD)
@@ -382,39 +411,35 @@ final class Holder {
             }
         }
 
-        /// Records that an answer we just sent carried the terminal status, so
-        /// the loop can wind the holder down. A response about a live child
-        /// collects nothing and leaves the holder serving.
-        func noteAnswerCarriedTheStatus() {
+        /// Records that the client has been answered, and whether that answer
+        /// carried the terminal status, so the loop can wind the holder down. A
+        /// response about a live child collects nothing and leaves the holder
+        /// serving.
+        func noteAnswerSent() {
+            clientHasBeenAnswered = true
             if status != .alive { exitCollected = true }
         }
 
-        /// Reaps the child if it has exited, and pushes the status at the
-        /// client connected at that moment, if any. A no-op once the status is
-        /// known.
-        func collectChildExit() {
-            guard case .alive = status else { return }
-            var raw: Int32 = 0
-            let reaped = waitpid(child.pid, &raw, WNOHANG)
-            if reaped == child.pid {
-                status = Self.status(fromWaitpidStatus: raw)
-                window.arm()
-                Self.logger.info(
-                    "child \(child.pid, privacy: .public) exited: \(String(describing: status), privacy: .public)")
-                pushExitToConnectedClient()
-            } else if reaped < 0 && errno != EINTR {
-                // We can no longer observe the child at all. Say exactly
-                // that — a fabricated exit code would be indistinguishable
-                // from a real one to everything downstream.
-                status = .exitedStatusUnknown
-                window.arm()
-                Self.logger.error("waitpid failed (errno \(errno, privacy: .public))")
-                pushExitToConnectedClient()
-            }
-        }
-
         while true {
-            collectChildExit()
+            if case .alive = status {
+                var raw: Int32 = 0
+                let reaped = waitpid(child.pid, &raw, WNOHANG)
+                if reaped == child.pid {
+                    status = Self.status(fromWaitpidStatus: raw)
+                    window.arm()
+                    Self.logger.info(
+                        "child \(child.pid, privacy: .public) exited: \(String(describing: status), privacy: .public)")
+                    pushExitToConnectedClient()
+                } else if reaped < 0 && errno != EINTR {
+                    // We can no longer observe the child at all. Say exactly
+                    // that — a fabricated exit code would be indistinguishable
+                    // from a real one to everything downstream.
+                    status = .exitedStatusUnknown
+                    window.arm()
+                    Self.logger.error("waitpid failed (errno \(errno, privacy: .public))")
+                    pushExitToConnectedClient()
+                }
+            }
 
             if forgotten { break }
             // Once the status has reached somebody the holder has nothing left
@@ -433,7 +458,7 @@ final class Holder {
             // serving loop runs untimed and a holder whose child has exited
             // starts burning its grace period from that moment.
             window.charging {
-                ready = poll(&watched, nfds_t(watched.count), Self.pollSliceMilliseconds)
+                ready = poll(&watched, nfds_t(watched.count), pollSlice)
             }
             if ready < 0 && errno != EINTR {
                 Self.logger.error("poll failed (errno \(errno, privacy: .public))")
@@ -449,7 +474,7 @@ final class Holder {
                         switch request {
                         case .describe:
                             if send(.described(describe()), to: clientFD) {
-                                noteAnswerCarriedTheStatus()
+                                noteAnswerSent()
                             } else {
                                 dropClient()
                             }
@@ -471,7 +496,7 @@ final class Holder {
                                 ? handOver(ptyFD, description: describe(), to: clientFD)
                                 : send(.described(describe()), to: clientFD)
                             if delivered {
-                                noteAnswerCarriedTheStatus()
+                                noteAnswerSent()
                             } else {
                                 dropClient()
                             }
@@ -503,20 +528,6 @@ final class Holder {
                         // Nothing is sent here, even when the child is already
                         // gone. This client has asked nothing yet, and the next
                         // frame down this socket belongs to its first request.
-                        //
-                        // **Reap before admitting it.** The child's exit wakes
-                        // nothing this loop polls, so the holder learns of it
-                        // only at its next `waitpid`, up to a poll slice later.
-                        // A client that connects inside that gap wakes the
-                        // poll, and admitted first it would be reaped on as
-                        // though it had been connected when the child exited:
-                        // pushed at, marked as having collected the status,
-                        // and disconnected before its request was read. That
-                        // is the accept-time greeting `pushExitToConnectedClient`
-                        // forbids, reached by timing. Collecting the exit here,
-                        // while no client is connected, records the status and
-                        // pushes nothing, so this client is served.
-                        collectChildExit()
                         clientFD = incoming
                     }
                 }
@@ -621,7 +632,6 @@ final class Holder {
     private static let descriptorSweepCap: Int32 = 65_536
     private static let ttyNameCapacity = 1024
     private static let readChunkSize = 4096
-    private static let pollSliceMilliseconds: Int32 = 50
     private static let chdirFailureExitCode: Int32 = 126
     private static let execFailureExitCode: Int32 = 127
 
@@ -672,10 +682,22 @@ struct HolderArguments: Equatable {
     /// reclamation can tell one of ours from a healthy stranger's. Optional on
     /// the command line so a holder launched by hand for diagnosis still runs.
     var owner: HolderOwnerToken
+    /// How long one `poll` of the serving loop may wait, in milliseconds. The
+    /// holder notices its child's exit only between polls, since the exit
+    /// wakes nothing it polls, so this bounds how late it notices.
+    ///
+    /// Spawners never pass `--poll-slice-ms`. The holder's live tests do,
+    /// with a slice longer than the test, to hold open the gap between a
+    /// job's exit and the holder noticing it: what a client connects or
+    /// writes inside that gap is what wakes the holder, so it is ordered
+    /// against the reap rather than racing it.
+    var pollSliceMilliseconds: Int32 = HolderArguments.defaultPollSliceMilliseconds
+
+    static let defaultPollSliceMilliseconds: Int32 = 50
 
     static let usage = """
         usage: TBDHolder --session <uuid> --socket <path> --lock-fd <n> \
-        --launch-fd <n> [--owner <token>]
+        --launch-fd <n> [--owner <token>] [--poll-slice-ms <n>]
         """
 
     /// The most a launch request may be. A descriptor is not argv: nothing
@@ -733,12 +755,21 @@ struct HolderArguments: Equatable {
         // already has, and the descriptor is spent the moment it is read.
         let launch = try readLaunchRequest(fromDescriptor: launchFD)
 
+        var pollSlice = defaultPollSliceMilliseconds
+        if let pollSliceText = values["poll-slice-ms"] {
+            guard let parsed = Int32(pollSliceText), parsed > 0 else {
+                throw HolderStartupError.invalidPollSlice(pollSliceText)
+            }
+            pollSlice = parsed
+        }
+
         return HolderArguments(
             sessionID: sessionID,
             socketPath: try required("socket"),
             lockFD: lockFD,
             launch: launch,
-            owner: HolderOwnerToken(rawValue: values["owner"] ?? ""))
+            owner: HolderOwnerToken(rawValue: values["owner"] ?? ""),
+            pollSliceMilliseconds: pollSlice)
     }
 
     /// Drains the launch request from the descriptor the spawner placed it on,
@@ -824,6 +855,7 @@ enum HolderStartupError: LocalizedError, Equatable {
     case unreadableLaunchPayload(descriptor: Int32, errno: Int32)
     case invalidLockDescriptorArgument(String)
     case invalidLockDescriptor(Int32)
+    case invalidPollSlice(String)
     case socketPathTooLong(path: String, limit: Int)
     case socketDirectoryUnavailable(path: String, errno: Int32)
     case cannotBind(path: String, errno: Int32)
@@ -838,7 +870,7 @@ enum HolderStartupError: LocalizedError, Equatable {
         switch self {
         case .unknownArgument, .missingValue, .missingArgument, .invalidSessionID,
              .invalidLaunchPayload, .invalidLaunchDescriptorArgument, .unreadableLaunchPayload,
-             .invalidLockDescriptorArgument, .invalidLockDescriptor,
+             .invalidLockDescriptorArgument, .invalidLockDescriptor, .invalidPollSlice,
              .socketPathTooLong:
             return HolderExitCode.badInvocation
         case .socketDirectoryUnavailable, .cannotBind, .cannotListen, .forkFailed:
@@ -869,6 +901,8 @@ enum HolderStartupError: LocalizedError, Equatable {
         case .invalidLockDescriptor(let fd):
             return "--lock-fd \(fd) is not an open descriptor above stdio; the "
                 + "spawner must dup2 the held creation lock into place"
+        case .invalidPollSlice(let text):
+            return "--poll-slice-ms must be a positive number of milliseconds, got \"\(text)\""
         case .socketPathTooLong(let path, let limit):
             return "holder socket path is \(path.utf8.count) bytes, over the "
                 + "\(limit)-byte sun_path limit: \(path)"

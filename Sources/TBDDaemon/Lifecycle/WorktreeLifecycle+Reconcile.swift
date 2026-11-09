@@ -1057,11 +1057,12 @@ extension WorktreeLifecycle {
     /// wrote and nobody read with it — the rule
     /// `HolderRegistry.confirmChildExit` states, and the reason adoption asks
     /// for the hand-over rather than a description. Connecting asks for nothing
-    /// that could be an answer, so it cannot collect the exit it is looking
-    /// for — near-absolutely rather than absolutely: `Holder.run`'s reaping
-    /// branch speaks first to whatever client is connected, so a child that
-    /// exits inside the few milliseconds this probe is attached can still be
-    /// collected by it. That window is a race with the child's own exit, not a
+    /// that could be an answer, and the holder's reaping branch pushes only at
+    /// a client it has already answered, so this probe cannot collect the exit
+    /// it is looking for. A holder whose serve loop pushes at whichever client
+    /// is connected, which a daemon update can leave running, can still hand
+    /// it the exit of a child that ends inside the few milliseconds it is
+    /// attached. That window is a race with the child's own exit, not a
     /// question this daemon asked, and it is narrower than a `describe` by the
     /// whole life of the session.
     ///

@@ -42,14 +42,15 @@ struct HolderReclaimTests {
     /// one.
     ///
     /// The job exits on a cue, and the cue is given only once the handshake
-    /// connection is closed. A holder pushes the exit at whichever client is
-    /// connected when it reaps, and once that push is delivered it winds down
-    /// and unlinks its rendezvous — so an exit pushed down a live handshake
-    /// connection would leave nothing to adopt. The holder need not have
-    /// noticed the hang-up by the time it reaps: once `close()` has returned
-    /// the kernel has disconnected that socket, so a push still aimed at it
-    /// fails with `EPIPE`, the holder drops the client, and nothing counts as
-    /// collected. Ordering the cue after the close makes the bad case
+    /// connection is closed. A holder pushes the exit at a connected client
+    /// it has already answered, as it has the handshake connection, and once
+    /// that push is delivered it winds down and unlinks its rendezvous — so an
+    /// exit pushed down a live handshake connection would leave nothing to
+    /// adopt. The holder need not have noticed the hang-up by the time it
+    /// reaps: once `close()` has returned, the hang-up is waiting to be read
+    /// on the holder's end, so the holder pushes nothing down it, drops the
+    /// client when it reads the hang-up, and nothing counts as collected.
+    /// Ordering the cue after the close makes the bad case
     /// impossible rather than unlikely, where a fixed sleep only made it a race
     /// the sleep usually won. The wait for the cue is counted, so a job this
     /// test can no longer reach ends on its own.
@@ -358,23 +359,26 @@ struct HolderReclaimTests {
     /// answered, and the reclaimer must record what it said.
     ///
     /// This is the interleaving that put `exitedStatusUnknown` in the record
-    /// for a job that exited 7. The holder pushes the terminal status at
-    /// whichever client is connected when it reaps, and the *next* thing it
-    /// does is break its loop, close its listener and unlink its rendezvous —
-    /// so a probe that connected a moment before the reap is handed the status
-    /// and then finds nothing underneath it. The push answers no request, so
-    /// `HolderClient`'s barrier retires it rather than serving it, and the verb
-    /// fails; a reclaimer that read only the failure would ask again at a path
-    /// that is now `ENOENT`, read that as absence, and record a status nobody
-    /// collected — while holding the real one.
+    /// for a job that exited 7. The holder pushes the terminal status when it
+    /// reaps, and the *next* thing it does is break its loop, close its
+    /// listener and unlink its rendezvous — so a client handed the status
+    /// finds nothing underneath it when it asks again. The push answers no
+    /// request, so `HolderClient`'s barrier retires it rather than serving it,
+    /// and the verb fails; a reclaimer that read only the failure would ask
+    /// again at a path that is now `ENOENT`, read that as absence, and record
+    /// a status nobody collected — while holding the real one.
     ///
-    /// Driven by hand rather than through `adopt`, because which side of the
-    /// push the probe's request lands on is decided by microseconds: the
-    /// scenario is reproducible end to end (once in 120 runs of
-    /// `drainsAFinishedJobsOutputBeforeReleasingIt` under a loaded machine) but
-    /// not schedulable. Here the connection that receives the push is the
-    /// fixture's own, so every link is deterministic — the stranding, the
-    /// unlinked rendezvous, and the classification that has to survive both.
+    /// Driven by hand rather than through `adopt`. A holder pushes only at a
+    /// client it has already answered, so the reclaimer's one-verb probe meets
+    /// this only from a holder whose serve loop pushes at whichever client is
+    /// connected, which a daemon update can leave running; and even then which
+    /// side of the push the probe's request lands on is decided by
+    /// microseconds: the scenario is reproducible end to end that way (once
+    /// in 120 runs of `drainsAFinishedJobsOutputBeforeReleasingIt` under a
+    /// loaded machine) but not schedulable. Here the connection that receives
+    /// the push is the fixture's own, answered by its hand-over as the holder
+    /// requires, so every link is deterministic — the stranding, the unlinked
+    /// rendezvous, and the classification that has to survive both.
     @Test func recordsAnExitTheHolderPushedRatherThanAnswered() async throws {
         let fixture = try await HolderProcessFixture.start(command: "printf 'LAST\\n'; exit 7")
         defer { fixture.tearDown() }

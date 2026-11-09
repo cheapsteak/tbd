@@ -726,13 +726,14 @@ struct HolderClientTests {
     /// A pushed exit must be observable **without** anybody calling `close()`.
     ///
     /// This is the shape a real holder produces: it pushes the terminal status
-    /// at its connected client and then winds itself down, so the push and the
-    /// EOF behind it are both waiting when the next verb runs. The barrier
-    /// decodes the push, the read after it fails on the EOF, and the verb
-    /// rightly throws — but the exit it just decoded is a fact about the child,
-    /// not about the connection, and it has to survive the throw. A poller that
-    /// calls `describe()` and reads `lastPushedDescription` is the whole reason:
-    /// it never closes, so a status only retired at `close()` reaches it never.
+    /// at a connected client it has already answered and then winds itself
+    /// down, so the push and the EOF behind it are both waiting when the next
+    /// verb runs. The barrier decodes the push, the read after it fails on the
+    /// EOF, and the verb rightly throws — but the exit it just decoded is a
+    /// fact about the child, not about the connection, and it has to survive
+    /// the throw. A poller that calls `describe()` and reads
+    /// `lastPushedDescription` is the whole reason: it never closes, so a
+    /// status only retired at `close()` reaches it never.
     ///
     /// `close()` is deliberately not called before the assertion — calling it
     /// would retire the queue by the other path and turn the test green with

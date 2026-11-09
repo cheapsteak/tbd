@@ -3717,11 +3717,15 @@ actor HolderRegistry {
     /// the same budget and then kept. See `exitProbeOutcome`.
     ///
     /// **A push is an answer, even when the round trip that carried it failed.**
-    /// The holder pushes the exit at whichever client is connected and winds
-    /// down in the same breath, so a probe that connected a moment before the
-    /// child was reaped is handed the status and then finds the socket gone
-    /// underneath it. That push answers no request, so `HolderClient`'s barrier
-    /// retires it — into `lastPushedDescription`, which exists for exactly this
+    /// A holder pushes the exit and winds down in the same breath, so a probe
+    /// can be handed the status and then find the socket gone underneath it.
+    /// A holder pushes only at a client it has already answered, so a push at
+    /// this one-verb probe trails its answer (the `.alive` case below) and
+    /// strands nothing. But a holder outlives the daemon build that spawned
+    /// it, and one whose serve loop pushes at whichever client is connected
+    /// hands the status to a probe that connected a moment before the reap,
+    /// then hangs up before reading its request. That push answers no
+    /// request, so `HolderClient`'s barrier retires it — into `lastPushedDescription`, which exists for exactly this
     /// and is what is read here. Without it the reclaimer discards the very
     /// fact it asked for, asks again at a rendezvous the holder has already
     /// unlinked, reads the `ENOENT` as absence, and records
