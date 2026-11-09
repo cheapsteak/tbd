@@ -14,8 +14,13 @@
 // - `perm`: SSE reconnect's permission.
 // - `deny-msg`: the same with No tapped and "Run only the unit tests for now." typed, the
 //   textarea then left, as the mock draws it with no focus.
+// - `answered`: Login redirect fix's question answered 'Yes, add the test', the laptop replying
+//   `delivered` with no resolution after it, so the card stays "Answered".
+// - `elsewhere`: Login redirect fix's question closed by the laptop (`answeredBy: laptop`). The
+//   transcript ends with its receipt, "Answered on the laptop", which the mock's state does not
+//   draw until its OK.
 
-import { app, capture, expect, openApp, openSessionByName, test } from './fixtures.js';
+import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
 /** @typedef {import('@playwright/test').Page} Page */
 
@@ -102,4 +107,24 @@ test('deny-msg', async ({ page, appHost }) => {
   await text.fill('Run only the unit tests for now.');
   await text.blur();
   await capture(page, 'deny-msg', card(page).getByRole('button', { name: 'Deny' }));
+});
+
+test('answered', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Login redirect fix');
+  await hostCall(page, 'setReply', 'prompt.answer', { result: { outcome: 'delivered' } });
+  await card(page).getByRole('button', { name: 'Yes, add the test' }).click();
+  await capture(page, 'answered', app(page).locator('.dock .card.done', { hasText: 'Answered' }));
+});
+
+test('elsewhere', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Login redirect fix');
+  await hostCall(page, 'emit', 'prompt.changed', {
+    session: { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000102' },
+    prompts: [],
+    resolved: [{ promptID: '00000000-0000-4000-8000-0000000000E1', answeredBy: 'laptop' }],
+  });
+  await expect(app(page).locator('.tx .receipt')).toHaveText('Answered on the laptop');
+  await capture(page, 'elsewhere', app(page).locator('.dock .card.done').getByRole('button', { name: 'OK' }));
 });

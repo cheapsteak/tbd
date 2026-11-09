@@ -2,7 +2,10 @@
 // as an Android phone: a question card's options, Other, steps and review, multi-select, Hide,
 // a session that cannot answer, a refused answer, and one send per gesture. Then the permission
 // card: Yes, the session rule, Deny with a message, the keyboard, and no tap landing on a
-// prompt that took another's place before the user could read it.
+// prompt that took another's place before the user could read it. Last, who answered: the
+// Answered card, the card that says someone else answered first, and the receipts the
+// transcript keeps ("Answered on this phone: …", "Answered on the laptop", "Answered on another
+// phone").
 //
 // Every test that answers checks the exact `prompt.answer` params the fake laptop got: the
 // session the route shows, the prompt's ID, and the answer `questionAnswer` builds. mock.json
@@ -456,9 +459,10 @@ test('the deny form sits above the keyboard', async ({ page, appHost }) => {
   const dock = app(page).locator('.dock');
   await expect.poll(() => dock.evaluate((el) => getComputedStyle(el).paddingBottom)).toBe('346px');
   await expect(text).toBeFocused();
-  // The textarea and Deny end above the keyboard's top edge.
+  // The textarea and Deny end above the keyboard's top edge, once the card has scrolled to its
+  // end after the layout the keyboard brought.
   for (const el of [text, c.getByRole('button', { name: 'Deny' })]) {
-    expect(await el.evaluate((node) => node.getBoundingClientRect().bottom <= window.innerHeight - 336)).toBe(true);
+    await expect.poll(() => el.evaluate((node) => node.getBoundingClientRect().bottom <= window.innerHeight - 336)).toBe(true);
   }
   await hostCall(page, 'sendEnv', null);
 });
@@ -512,6 +516,121 @@ test("no tap lands on the next permission before it has been on screen for 500 m
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect.poll(() => answers(page)).toEqual([
     { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
+    { session: SSE_REF, promptID: 'sse-second', answer: { kind: 'permission', decision: 'allow' } },
+  ]);
+});
+
+/**
+ * The transcript's receipt rows' texts.
+ * @param {Page} page
+ */
+function receipts(page) {
+  return app(page).locator('.tx .receipt');
+}
+
+test("answering leaves 'Answered on this phone: Yes, add the test' in the transcript", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(receipts(page)).toHaveCount(0);
+  await card(page).getByRole('button', { name: 'Yes, add the test' }).click();
+  // The fake laptop resolves it as a phone's answer right after it replies delivered.
+  await expect(receipts(page)).toHaveText(['Answered on this phone: Yes, add the test']);
+  await expect(receipts(page).locator('svg')).toHaveCount(1);
+  await expect(card(page)).toHaveCount(0);
+  expect(await answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'Yes, add the test' } } },
+  ]);
+});
+
+test('an answer the laptop took shows Answered with its summary until the prompt closes', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Settings screen');
+  await hostCall(page, 'setReply', 'prompt.answer', { result: { outcome: 'delivered' } });
+  const c = card(page);
+  await c.getByRole('checkbox', { name: 'Account' }).check();
+  await c.getByRole('checkbox', { name: 'Notifications' }).check();
+  await c.getByRole('button', { name: 'Send 2 selected' }).click();
+  const done = app(page).locator('.dock .card.done');
+  await expect(done).toHaveAttribute('role', 'status');
+  await expect(done.locator('b')).toHaveText('Answered');
+  await expect(done.locator('small')).toHaveText('Notifications, Account');
+  await expect(done.locator('.ok svg')).toHaveCount(1);
+  await expect(done.locator('button')).toHaveCount(0);
+  await expect(receipts(page)).toHaveCount(0);
+  // The laptop closes it, naming no one: the receipt is this phone's, from its own answer.
+  await hostCall(page, 'emit', 'prompt.changed', { session: SETTINGS_REF, prompts: [], resolved: [{ promptID: SETTINGS_PROMPT, answeredBy: 'unknown' }] });
+  await expect(receipts(page)).toHaveText(['Answered on this phone: Notifications, Account']);
+  await expect(done).toHaveCount(0);
+});
+
+test('a laptop answer shows the elsewhere card, and OK removes it', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(card(page).locator('.q')).toHaveText(LOGIN_QUESTION);
+  await hostCall(page, 'emit', 'prompt.changed', { session: LOGIN_REF, prompts: [], resolved: [{ promptID: LOGIN_PROMPT, answeredBy: 'laptop' }] });
+  const done = app(page).locator('.dock .card.done');
+  await expect(done).toHaveAttribute('role', 'status');
+  await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+  await expect(done.locator('small')).toHaveText('Someone answered this question at the laptop first.');
+  await expect(receipts(page)).toHaveText(['Answered on the laptop']);
+  await done.getByRole('button', { name: 'OK' }).click();
+  await expect(app(page).locator('.dock .card, .dock .card-strip')).toHaveCount(0);
+  await expect(receipts(page)).toHaveText(['Answered on the laptop']);
+  expect(await answers(page)).toEqual([]);
+});
+
+test('a laptop answer to a permission says "permission"', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  await expect(card(page).locator('.perm-tool')).toHaveText('Bash');
+  await hostCall(page, 'emit', 'prompt.changed', { session: SSE_REF, prompts: [], resolved: [{ promptID: SSE_PROMPT, answeredBy: 'laptop' }] });
+  const done = app(page).locator('.dock .card.done');
+  await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+  await expect(done.locator('small')).toHaveText('Someone answered this permission at the laptop first.');
+});
+
+test("another phone's answer reads 'Already answered on another phone' and 'Answered on another phone'", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(card(page).locator('.q')).toHaveText(LOGIN_QUESTION);
+  await hostCall(page, 'emit', 'prompt.changed', { session: LOGIN_REF, prompts: [], resolved: [{ promptID: LOGIN_PROMPT, answeredBy: 'phone' }] });
+  const done = app(page).locator('.dock .card.done');
+  await expect(done.locator('b')).toHaveText('Already answered on another phone');
+  await expect(done.locator('small')).toHaveText('Someone answered this question on another phone first.');
+  await expect(receipts(page)).toHaveText(['Answered on another phone']);
+  await done.getByRole('button', { name: 'OK' }).click();
+  await expect(done).toHaveCount(0);
+});
+
+test("an answer that lost the race reads as the laptop's, never as this phone's", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await hostCall(page, 'setReply', 'prompt.answer', { result: { outcome: 'already_resolved' } });
+  await card(page).getByRole('button', { name: 'Yes, add the test' }).click();
+  const done = app(page).locator('.dock .card.done');
+  await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+  await hostCall(page, 'emit', 'prompt.changed', { session: LOGIN_REF, prompts: [], resolved: [{ promptID: LOGIN_PROMPT, answeredBy: 'laptop' }] });
+  await expect(receipts(page)).toHaveText(['Answered on the laptop']);
+  await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+});
+
+test('after OK on an elsewhere card the next prompt shows, its choices held at first', async ({ page, appHost }) => {
+  const second = { id: 'sse-second', summary: 'Show the reconnect log', target: 'tail -n 50 logs/stream.log' };
+  await openApp(page, appHost, { scenario: withSSEPrompts({ id: SSE_PROMPT }, second) });
+  await openSessionByName(page, 'SSE reconnect');
+  await expect(card(page).locator('pre.perm-target')).toHaveText(SSE_TARGET);
+  await hostCall(page, 'emit', 'prompt.changed', {
+    session: SSE_REF, prompts: [{ ...MOCK.prompts[SSE_KEY][0], ...second }], resolved: [{ promptID: SSE_PROMPT, answeredBy: 'laptop' }],
+  });
+  const done = app(page).locator('.dock .card.done');
+  await expect(done.locator('b')).toHaveText('Already answered on the laptop');
+  await done.getByRole('button', { name: 'OK' }).click();
+  const c = card(page);
+  await expect(c.locator('pre.perm-target')).toHaveText(second.target);
+  await expect(c.locator('button.opt.pri')).toBeDisabled();
+  await expect(c.locator('button.opt.pri')).toBeEnabled();
+  await c.locator('button.opt.pri').click();
+  await expect.poll(() => answers(page)).toEqual([
     { session: SSE_REF, promptID: 'sse-second', answer: { kind: 'permission', decision: 'allow' } },
   ]);
 });

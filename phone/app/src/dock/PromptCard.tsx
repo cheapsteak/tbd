@@ -49,6 +49,15 @@
  * textarea has focus, the card keeps its end in view whenever its size changes (`useEndInView`):
  * the field and the buttons after it stay above the keyboard.
  *
+ * **Answered** (mock 941). Once the laptop took this phone's answer, and until the prompt closes,
+ * the card is `.card.done` with the check glyph, "Answered" and the answer's summary.
+ *
+ * **Answered elsewhere** (mock 942). When someone else answered first, the card says so until OK
+ * (`dismissPrompt`): "Already answered on the laptop", "Someone answered this question at the
+ * laptop first.", with "permission" for a permission, when the laptop answered or did not say
+ * who; "Already answered on another phone", "Someone answered this question on another phone
+ * first.", when another phone did.
+ *
  * **Hide** collapses the card to `.card-strip`, "Question waiting" or "Permission waiting", with
  * "Show". Hiding keeps what the user picked and typed; a new prompt, which mounts a new card,
  * starts expanded.
@@ -61,8 +70,8 @@ import { useActions } from '../state/context.tsx';
 import {
   chooseOption, chooseOther, emptyQuestionDraft, permissionAnswer, questionAnswer, questionValue, setOtherText, trimLikeLaptop,
 } from '../state/prompts.ts';
-import { toolGlyph } from '../state/status.ts';
 import type { CardState, QuestionDraft } from '../state/prompts.ts';
+import { toolGlyph } from '../state/status.ts';
 import { Icon } from '../ui/Icon.tsx';
 
 /** What the user has done on a question card: the draft, the question shown (the review once past the last), and the Other form. */
@@ -88,15 +97,43 @@ interface PermissionUI {
 
 const FRESH_PERMISSION_UI: PermissionUI = { denyOpen: false, denyText: '' };
 
-export function PromptCard(p: { session: PhoneSession; prompt: PhonePrompt; card: CardState; held: boolean }): JSX.Element | null {
+export function PromptCard(p: { session: PhoneSession; prompt: PhonePrompt; card: CardState; held: boolean }): JSX.Element {
   const { session, prompt, card, held } = p;
   const actions = useActions();
   const [hidden, setHidden] = useState(false);
   const [question, setQuestion] = useState(freshQuestionUI);
   const [permission, setPermission] = useState(FRESH_PERMISSION_UI);
 
-  if (card.phase !== 'open' && card.phase !== 'sending') return null;
   const isPermission = prompt.kind === 'permission';
+  if (card.phase === 'answered') {
+    return (
+      <div className="card done" role="status">
+        <span className="ok">
+          <Icon name="check" />
+        </span>
+        <div>
+          <b>Answered</b>
+          <small>{card.summary ?? ''}</small>
+        </div>
+      </div>
+    );
+  }
+  if (card.phase === 'elsewhere') {
+    const what = isPermission ? 'permission' : 'question';
+    const byPhone = card.elsewhereBy === 'phone';
+    return (
+      <div className="card done" role="status">
+        <span className="ok">
+          <Icon name={byPhone ? 'check' : 'laptop'} />
+        </span>
+        <div>
+          <b>{byPhone ? 'Already answered on another phone' : 'Already answered on the laptop'}</b>
+          <small>{byPhone ? `Someone answered this ${what} on another phone first.` : `Someone answered this ${what} at the laptop first.`}</small>
+        </div>
+        <button className="btn" type="button" onClick={() => actions.dismissPrompt(prompt.id)}>OK</button>
+      </div>
+    );
+  }
   if (hidden) {
     return (
       <button className="card-strip" type="button" onClick={() => setHidden(false)}>
