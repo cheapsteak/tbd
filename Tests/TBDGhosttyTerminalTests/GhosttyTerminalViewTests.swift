@@ -28,9 +28,17 @@ private struct ViewFixture {
     let view: GhosttyTerminalView
     let appearance: GhosttyAppearance
 
-    /// - Parameter thinStrokes: the appearance's stroke weight; `nil` keeps `GhosttyAppearance`'s
-    ///   own default.
-    init(clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13, thinStrokes: Bool? = nil) throws {
+    /// - Parameters:
+    ///   - thinStrokes: the appearance's stroke weight; `nil` keeps `GhosttyAppearance`'s own
+    ///     default.
+    ///   - reportsPresents: report each committed frame's drawable presented, through the
+    ///     tracker's test seam, as Metal would. An offscreen window's drawables may never be
+    ///     reported, and two unreported ones stop a tick drawing. A test that leaves its frames'
+    ///     drawables unreported passes `false`.
+    init(
+        clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13, thinStrokes: Bool? = nil,
+        reportsPresents: Bool = true
+    ) throws {
         terminal = try GhosttyTerminal(cols: 80, rows: 24, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
         var appearance = GhosttyAppearance(
             font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
@@ -40,6 +48,10 @@ private struct ViewFixture {
         if let thinStrokes { appearance.thinStrokes = thinStrokes }
         self.appearance = appearance
         view = try GhosttyTerminalView(terminal: terminal, appearance: appearance, clock: clock)
+        if reportsPresents {
+            let tracker = view.drawableTracker
+            view.onFrameEncoded = { tracker.reportNewestPresented() }
+        }
     }
 }
 
@@ -1048,5 +1060,274 @@ struct GhosttyShellQuotingTests {
         let quoted = GhosttyTerminalView.shellQuoted("/tmp/x'\(mark); echo injected; '.png")
         let expected = "'/tmp/x'\\''\(mark); echo injected; '\\''.png'"
         #expect(Array(quoted.utf8) == Array(expected.utf8))
+    }
+}
+
+/// How a nil drawable's hold on the drawable limit ends.
+enum NilDrawableHoldEnd: Sendable, CaseIterable {
+    /// A present report arrives.
+    case report
+    /// `presentReportTimeout` passes from the first check after the nil drawable.
+    case timeout
+}
+
+/// A display tick never blocks main on the GPU: at either limit, a full ring or the layer's
+/// drawables all awaiting their present report, it drops the frame before building it and keeps
+/// the link ticking. `drawFrameNow()` and a live resize wait instead.
+///
+/// The unreported drawables are entries put into the view's tracker by hand. Real ones would do,
+/// but Metal may report them at any moment, and a report would end the state under test.
+@Suite(.fastPassBounded)
+@MainActor
+struct GhosttyTerminalViewBackpressureTests {
+    /// Puts the view in `window` and draws and reports a first frame at 100 s, so the surface is
+    /// clean and the link parked: a tick that then handed the surface's `needsDisplay` to the link
+    /// would show as `needsUpdate` false.
+    private func placeWithAFirstFrame(_ fixture: ViewFixture, in window: NSWindow) throws {
+        let view = fixture.view
+        place(view, in: try #require(window.contentView))
+        view.now = { .seconds(100) }
+        view.renderTick()
+        let committed = view.framesCommitted
+        try #require(committed == 1,
+                     "the first frame was not committed (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+        let parked = !view.frameDriver.demand.needsUpdate
+        try #require(parked, "the link kept ticking after the first frame")
+    }
+
+    /// With all three ring slots in flight, a tick builds nothing, asks for no drawable and keeps
+    /// `needsUpdate` set. Once the GPU gives a slot back, the view draws.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aTickWithTheRingFullBuildsNothingUntilASlotIsFree() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        try placeWithAFirstFrame(fixture, in: window)
+
+        let held = HeldRingSlots(on: view.surface)
+        defer { held.releaseAll() }
+        try #require(held.held == FrameRing.depth, "only \(held.held) of the ring's slots could be taken")
+        fixture.terminal.feed(text: "behind the GPU")
+        // The render signal's delivery would ask for this frame. A synchronous test never lets it run.
+        view.requestFrame()
+        let built = view.framesBuilt
+        let requests = view.renderContext.renderer.stats.drawableRequests
+
+        view.renderTick(now: .seconds(100.25))
+        let builtAtLimit = view.framesBuilt - built
+        #expect(builtAtLimit == 0, "a tick with the ring full built \(builtAtLimit) frames")
+        let askedAtLimit = view.renderContext.renderer.stats.drawableRequests - requests
+        #expect(askedAtLimit == 0, "a tick with the ring full asked for \(askedAtLimit) drawables")
+        let ticking = view.frameDriver.demand.needsUpdate
+        #expect(ticking, "a tick with the ring full let the link park")
+
+        held.releaseOne()
+        view.renderTick(now: .seconds(100.5))
+        let committed = view.framesCommitted
+        #expect(committed == 2, "with a slot free again the view committed \(committed) frames in all, not 2")
+    }
+
+    /// Two drawables unreported and younger than `presentReportTimeout`: a tick asks for no
+    /// drawable and keeps `needsUpdate` set. A report for the newer one clears both, and the next
+    /// tick draws.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func twoDrawablesUnreportedStopATickUntilTheNewerIsReported() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        try placeWithAFirstFrame(fixture, in: window)
+
+        let tracker = view.drawableTracker
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+        let newer = tracker.add(acquiredAt: .seconds(100.5))
+        fixture.terminal.feed(text: "waiting on the screen")
+        view.requestFrame()
+        let built = view.framesBuilt
+        let requests = view.renderContext.renderer.stats.drawableRequests
+
+        // 0.75 s after the older drawable: younger than the timeout, so nothing is cleared.
+        view.renderTick(now: .seconds(101))
+        let builtAtLimit = view.framesBuilt - built
+        #expect(builtAtLimit == 0, "a tick with two drawables unreported built \(builtAtLimit) frames")
+        let askedAtLimit = view.renderContext.renderer.stats.drawableRequests - requests
+        #expect(askedAtLimit == 0, "a tick with two drawables unreported asked for \(askedAtLimit) drawables")
+        let ticking = view.frameDriver.demand.needsUpdate
+        #expect(ticking, "a tick with two drawables unreported let the link park")
+
+        tracker.reportPresented(newer, presentedTime: 101)
+        let left = tracker.entryCount
+        #expect(left == 0, "a report for the newer drawable left \(left) entries")
+        view.renderTick(now: .seconds(101.25))
+        let committed = view.framesCommitted
+        #expect(committed == 2, "after the report the view committed \(committed) frames in all, not 2")
+    }
+
+    /// Two drawables unreported for `presentReportTimeout`: the tracker clears them, and the tick
+    /// makes the one bounded drawable request. The seam returns nil, as a full pool would after a
+    /// second's wait: `nilDrawables` rises by one, nothing commits, and `needsUpdate` stays set.
+    /// The ticks within the next `presentReportTimeout` make no request. Then a report, or the
+    /// end of that timeout with the seam handing out drawables again, lets the next tick draw.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice),
+          arguments: NilDrawableHoldEnd.allCases)
+    func aNilDrawableAfterTheTimeoutHoldsTheLimit(end: NilDrawableHoldEnd) throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        // No frame before this one: a real drawable's report could arrive at any moment and would
+        // count as the report this test waits for.
+        place(view, in: try #require(window.contentView))
+        let tracker = view.drawableTracker
+        _ = tracker.add(acquiredAt: .seconds(100))
+        let newer = tracker.add(acquiredAt: .seconds(100.25))
+        fixture.terminal.feed(text: "a stalled screen")
+        view.nextDrawable = { _ in nil }
+
+        let before = view.renderContext.renderer.stats
+        view.renderTick(now: .seconds(101))
+        let afterNil = view.renderContext.renderer.stats
+        let asked = afterNil.drawableRequests - before.drawableRequests
+        #expect(asked == 1, "the tick a timeout after the last report asked for \(asked) drawables")
+        let nils = afterNil.nilDrawables - before.nilDrawables
+        #expect(nils == 1, "the full pool's nil drawable counted \(nils) times")
+        let clears = tracker.timeoutClears
+        #expect(clears == 1, "the tracker cleared its entries \(clears) times")
+        let committedAtNil = view.framesCommitted
+        #expect(committedAtNil == 0, "a frame with no drawable was committed")
+        let tickingAtNil = view.frameDriver.demand.needsUpdate
+        #expect(tickingAtNil, "a frame with no drawable let the link park")
+
+        // The hold is timed from the next check, at 101.25 s.
+        view.renderTick(now: .seconds(101.25))
+        view.renderTick(now: .seconds(102))
+        let askedInHold = view.renderContext.renderer.stats.drawableRequests - afterNil.drawableRequests
+        #expect(askedInHold == 0, "ticks within a timeout of the nil drawable asked for \(askedInHold) drawables")
+        let tickingInHold = view.frameDriver.demand.needsUpdate
+        #expect(tickingInHold, "a tick held at the limit let the link park")
+
+        view.nextDrawable = { $0.nextDrawable() }
+        switch end {
+        case .report:
+            // A late report for a drawable the clear removed: a present freed one. The tick is
+            // still within the hold's timeout, so only the report can end it.
+            tracker.reportPresented(newer, presentedTime: 101.5)
+            view.renderTick(now: .seconds(102))
+        case .timeout:
+            view.renderTick(now: .seconds(102.25))
+        }
+        let askedAfter = view.renderContext.renderer.stats.drawableRequests - afterNil.drawableRequests
+        #expect(askedAfter == 1, "after the hold ended (\(end)) the tick asked for \(askedAfter) drawables")
+        let committed = view.framesCommitted
+        #expect(committed == 1,
+                "after the hold ended (\(end)) the view committed \(committed) frames (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+    }
+
+    /// A frame whose render encoder cannot be made drops its acquired drawable unpresented. The
+    /// drop path removes that drawable's entry by id, since no report may ever come for it and an
+    /// entry left behind would count against the limit until the timeout.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDrawableDroppedForWantOfAnEncoderLeavesTheTracker() throws {
+        // A font size no other test uses, so a renderer no other view shares: the seam below
+        // changes it for every view drawn with it.
+        let fixture = try ViewFixture(fontSize: 12.25, reportsPresents: false)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        view.now = { .seconds(100) }
+        let renderer = view.renderContext.renderer
+        let makeRenderEncoder = renderer.makeRenderEncoder
+        renderer.makeRenderEncoder = { _, _ in nil }
+        defer { renderer.makeRenderEncoder = makeRenderEncoder }
+        let tracker = view.drawableTracker
+        let acquiredBefore = tracker.acquiredCount
+        fixture.terminal.feed(text: "no encoder")
+
+        view.renderTick()
+        let built = view.framesBuilt
+        #expect(built == 1, "the tick built \(built) frames")
+        let acquired = tracker.acquiredCount - acquiredBefore
+        try #require(acquired == 1,
+                     "the frame acquired \(acquired) drawables (nil drawables so far: \(renderer.stats.nilDrawables))")
+        let committed = view.framesCommitted
+        #expect(committed == 0, "a frame with no encoder was committed \(committed) times")
+        let left = tracker.entryCount
+        #expect(left == 0, "the drawable dropped unpresented left \(left) entries")
+    }
+
+    /// `drawFrameNow()` skips the drawable limit, because the instruments that call it draw in
+    /// offscreen windows whose presents may never be reported. Its drawable is still tracked.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func drawFrameNowDrawsWithTwoDrawablesUnreported() throws {
+        let fixture = try ViewFixture(reportsPresents: false)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        view.now = { .seconds(100.5) }
+        let tracker = view.drawableTracker
+        _ = tracker.add(acquiredAt: .seconds(100))
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+        fixture.terminal.feed(text: "an instrumented frame")
+
+        // Control, first, while no real drawable is out to be reported: a tick at the limit drops.
+        view.renderTick()
+        let builtByTick = view.framesBuilt
+        #expect(builtByTick == 0, "control: a tick with two drawables unreported built \(builtByTick) frames")
+
+        let acquired = tracker.acquiredCount
+        view.drawFrameNow()
+        let committed = view.framesCommitted
+        #expect(committed == 1,
+                "drawFrameNow committed \(committed) frames with two drawables unreported (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+        let tracked = tracker.acquiredCount - acquired
+        #expect(tracked == 1, "drawFrameNow's drawable went into the tracker \(tracked) times")
+    }
+
+    /// A live resize promised Core Animation a present in its transaction, so its frame skips the
+    /// limits and is drawn.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aLiveResizeFrameDrawsWithTwoDrawablesUnreported() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        view.now = { .seconds(100.5) }
+        let tracker = view.drawableTracker
+        _ = tracker.add(acquiredAt: .seconds(100))
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+
+        // Control: outside the resize the same frame is dropped.
+        view.renderNow()
+        let builtOutside = view.framesBuilt
+        #expect(builtOutside == 0, "control: outside a live resize the frame was built \(builtOutside) times")
+
+        view.viewWillStartLiveResize()
+        defer { view.viewDidEndLiveResize() }
+        view.renderNow()
+        let committed = view.framesCommitted
+        #expect(committed == 1,
+                "a live resize's frame was committed \(committed) times (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
     }
 }

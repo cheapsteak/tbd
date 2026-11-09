@@ -176,7 +176,7 @@ let package = Package(
         // A terminal engine over libghostty-vt: the locked terminal wrapper,
         // a Metal renderer and an AppKit view. Standalone on purpose: it knows
         // nothing of TBDApp and exposes its own API. Adapted in part from
-        // tkzmux, whose MIT licence ships in the target directory.
+        // tkzmux and termio, whose MIT licences ship in the target directory.
         .target(
             name: "TBDGhosttyTerminal",
             dependencies: [

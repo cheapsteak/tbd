@@ -1,4 +1,5 @@
 // Adapted from tkzmux c961533 Sources/TkzTerminalView/TerminalMetalView.swift, TkzTerminalView.swift and DisplayLinkDriver.swift (MIT, see LICENSE-tkzmux.txt).
+// Dropping a frame at the GPU's limits, rather than blocking, adapted from termio 8196587 Shared/Sources/TermioStream/TermiodStreamRenderer.swift (MIT, see LICENSE-termio.txt).
 // GhosttyTerminalView — the NSView one libghostty terminal is drawn into.
 //
 // Responsibilities, and nothing else:
@@ -124,6 +125,18 @@ enum DisplayLinkPolicy {
         guard !demand.isLiveResizing else { return false }
         return demand.needsUpdate || demand.isDragging || demand.hasSyncDeadline
     }
+}
+
+/// What a frame does when the GPU is behind: all three of the surface's ring slots are in flight,
+/// or `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
+/// report.
+enum GPUBackpressure {
+    /// Drop the frame before building it, and keep the link ticking until the GPU catches up. What
+    /// a display tick does, so main never blocks on the GPU.
+    case drop
+    /// Build it anyway: wait on the ring for a slot, and ask for a drawable whatever the tracker
+    /// counts. What `drawFrameNow()` and a live resize do.
+    case wait
 }
 
 /// Owns a `CADisplayLink` and keeps it paused unless `DisplayLinkPolicy` says otherwise.
@@ -342,7 +355,8 @@ public final class GhosttyTerminalView: NSView {
 
     /// How many frames this view has built from its terminal. A frame is built when the view can be
     /// seen and a display tick finds work: the terminal is read into the render state and, if it
-    /// changed, encoded. A hidden or windowless view builds none. A test seam.
+    /// changed, encoded. A hidden or windowless view builds none, and neither does a tick that finds
+    /// the GPU behind. A test seam.
     public private(set) var framesBuilt = 0
     /// How many of the built frames were encoded and committed to the GPU. A built frame with
     /// nothing changed, or with no drawable to draw into, is not committed. A test seam.
@@ -351,6 +365,9 @@ public final class GhosttyTerminalView: NSView {
     // MARK: Collaborators
 
     let surface = TerminalSurface()
+    /// The layer's drawables awaiting their present report. The view's, not the surface's: the
+    /// drawables belong to the layer and outlive a detach.
+    let drawableTracker = DrawableTracker()
     let frameDriver = DisplayLinkDriver()
     let inputController = TerminalInputController()
     let mouseController: MouseController
@@ -360,6 +377,14 @@ public final class GhosttyTerminalView: NSView {
     /// replace this to separate "hidden" from "occluded". Set it before the view joins a window;
     /// the view reads it when it moves to one and when the window's occlusion changes.
     public var windowVisibility: @MainActor (NSWindow) -> Bool = { $0.occlusionState.contains(.visible) }
+
+    /// Now, as a duration since a fixed origin. A seam the tests set. Compared with the display
+    /// link's timestamps, which are host time, so it is the same clock and not the wall clock.
+    var now: @MainActor () -> Duration = { .seconds(CACurrentMediaTime()) }
+
+    /// The layer's `nextDrawable()`, as the renderer calls it. A seam: a test returns nil to stand
+    /// for a full pool, which the real call would wait a second to report.
+    var nextDrawable: (CAMetalLayer) -> (any CAMetalDrawable)? = { $0.nextDrawable() }
 
     // MARK: Private state
 
@@ -894,15 +919,23 @@ public final class GhosttyTerminalView: NSView {
     /// Draws one frame now, outside the display link, if the view can be seen and anything
     /// changed. For a host's instruments and tests, which cannot wait on a display link that an
     /// offscreen window never runs.
+    ///
+    /// It waits for the GPU rather than drop the frame, as a live resize does. Those callers draw
+    /// in offscreen windows, whose presents may never be reported, and the drawable limit would
+    /// stop them drawing for longer than they wait. Its drawables still go into the tracker.
     public func drawFrameNow() {
-        renderTick()
+        renderTick(backpressure: .wait)
     }
 
     /// One display tick. Also the tests' entry point.
     ///
-    /// - Parameter now: when the frame is due, as a duration since any fixed origin. The display
-    ///   link passes its own timestamp; the DEC 2026 watchdog only compares these.
-    func renderTick(now: Duration = .seconds(CACurrentMediaTime())) {
+    /// - Parameters:
+    ///   - now: when the frame is due, as a duration since any fixed origin; nil reads the `now`
+    ///     seam. The display link passes its own timestamp. The DEC 2026 watchdog and the drawable
+    ///     tracker only compare these.
+    ///   - backpressure: what the frame does if the GPU is behind.
+    func renderTick(now: Duration? = nil, backpressure: GPUBackpressure = .drop) {
+        let now = now ?? self.now()
         applyPendingGridResize()
         guard canBuildFrames else {
             // Nothing can be drawn, so there is no DEC 2026 deadline to wait out either. A kept
@@ -924,18 +957,33 @@ public final class GhosttyTerminalView: NSView {
         case .render, .forceOffAndRender:
             frameDriver.update { $0.hasSyncDeadline = false }
         }
-        renderNow()
+        renderNow(now: now, backpressure: backpressure)
     }
 
     /// Builds and, when something changed, draws one frame. The renderer honours
     /// `layer.presentsWithTransaction` itself, so the live-resize path and the display-link path
     /// share this.
-    func renderNow() {
+    ///
+    /// - Parameters:
+    ///   - now: when the frame is due; nil reads the `now` seam, as the live-resize path does.
+    ///   - backpressure: what the frame does if the GPU is behind. A live resize always waits.
+    func renderNow(now: Duration? = nil, backpressure: GPUBackpressure = .drop) {
+        let now = now ?? self.now()
         // The layer may have been made after the last resize, so its drawable size is set here too.
         updateDrawableSize()
         guard canBuildFrames, let layer = metalLayer,
               layer.drawableSize.width >= 1, layer.drawableSize.height >= 1 else {
             frameDriver.update { $0.needsUpdate = false }
+            return
+        }
+        // A live resize promised Core Animation a present in this transaction, so it never drops.
+        let waits = backpressure == .wait || layer.presentsWithTransaction
+        if !waits, isGPUBehind(now: now) {
+            // Dropped before the build: no lock taken and no dirty state consumed. `needsUpdate`
+            // stays set so the link keeps ticking until the GPU catches up. Handed
+            // `surface.needsDisplay` instead, the link would park: output nobody built leaves the
+            // surface looking clean.
+            frameDriver.update { $0.needsUpdate = true }
             return
         }
         framesBuilt += 1
@@ -950,7 +998,8 @@ public final class GhosttyTerminalView: NSView {
         }
         do {
             let outcome = try renderContext.renderer.render(
-                surface: surface, layer: layer,
+                surface: surface, layer: layer, tracker: drawableTracker, now: now,
+                waitsForSlot: waits, nextDrawable: nextDrawable,
                 willEncode: { self.onDrawStart?() },
                 onPresented: presented)
             if outcome.didEncode {
@@ -975,6 +1024,17 @@ public final class GhosttyTerminalView: NSView {
         // Program output can move the cursor under a composition.
         refreshPreeditOverlay()
         frameDriver.update { $0.needsUpdate = surface.needsDisplay }
+    }
+
+    /// Whether a frame due at `now` would find the GPU behind: the ring has no free slot, or the
+    /// tracker counts the drawable limit. Main is the only thread that takes slots and drawables,
+    /// so a no here stays true until this frame takes them. The tracker is asked on every tick,
+    /// full ring or not, so its timers run on every frame's `now`, whichever of the two holds the
+    /// frame back.
+    private func isGPUBehind(now: Duration) -> Bool {
+        let ringHasFreeSlot = surface.frameRing?.hasFreeSlot ?? true
+        let awaitingPresent = drawableTracker.awaitingPresent(now: now)
+        return !ringHasFreeSlot || awaitingPresent >= drawableTracker.limit
     }
 
     // MARK: - Cursor blink

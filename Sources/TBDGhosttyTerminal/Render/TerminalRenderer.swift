@@ -1,4 +1,5 @@
 // Adapted from tkzmux c961533 Sources/TkzTerminalRender/TerminalRenderer.swift (MIT, see LICENSE-tkzmux.txt). PORT comments mark vt-1.0.0 changes.
+// Dropping a frame the GPU cannot take, rather than waiting for it, adapted from termio 8196587 Shared/Sources/TermioStream/TermiodStreamRenderer.swift (MIT, see LICENSE-termio.txt).
 // TerminalRenderer — the three-pass Metal renderer.
 // See TBDGhosttyShaderTypes.h for the contract.
 //
@@ -19,6 +20,14 @@
 // instance buffer, and `render` returns early**. It is instrumented rather than asserted: `stats`
 // counts bytes written, drawables acquired, frames encoded and frames skipped, and the tests read
 // those counters.
+//
+// ## Drop, never block
+//
+// A display tick never waits on the GPU. The view checks the ring and its `DrawableTracker` before
+// it builds a frame, and this file takes the ring's slot with `tryAcquire()`, so a frame the GPU
+// cannot take yet is dropped and the next tick draws the newer screen. Only a live resize and
+// `drawFrameNow()` pass `waitsForSlot` and block on the ring. Every drawable acquired goes into the
+// tracker, and its presented handler, always installed, takes it out.
 
 import CoreGraphics
 import Foundation
@@ -32,7 +41,8 @@ import TBDGhosttyShaderTypes
 struct RenderStats: Sendable, Hashable {
     /// Frames actually encoded and committed.
     var framesEncoded = 0
-    /// Frames that returned early because nothing changed (or nothing was attached).
+    /// Frames that returned without encoding: nothing changed or nothing was attached, or the frame
+    /// was dropped for want of a ring slot, a drawable or a render encoder.
     var framesSkipped = 0
     /// Frames that got as far as asking for a render target (`nextDrawable()` on the layer path).
     /// The idle guarantee is `drawableRequests == 0` for a skipped frame.
@@ -65,6 +75,11 @@ struct RenderOutcome {
 // MARK: - TerminalRenderer
 
 final class TerminalRenderer {
+    /// How many of a view's drawables may await their present report before a display tick stops
+    /// asking for another. The layer has three (`maximumDrawableCount`): with two waiting and one
+    /// on screen, `nextDrawable()` would block.
+    static let maxDrawablesAwaitingPresent = 2
+
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     let glyphCache: GlyphCache
@@ -81,6 +96,12 @@ final class TerminalRenderer {
     var minimumContrast: Float = 1
 
     private(set) var stats = RenderStats()
+
+    /// Makes the frame's render encoder. A seam: a test returns nil to take the path that drops an
+    /// acquired drawable unpresented, which Metal gives no way to force.
+    var makeRenderEncoder: (any MTLCommandBuffer, MTLRenderPassDescriptor) -> (any MTLRenderCommandEncoder)? = {
+        $0.makeRenderCommandEncoder(descriptor: $1)
+    }
 
     private let bgPipeline: MTLRenderPipelineState
     private let rectPipeline: MTLRenderPipelineState
@@ -190,6 +211,7 @@ final class TerminalRenderer {
             presentViaCommandBuffer: true,
             willEncode: {},
             forceEncode: false,
+            waitsForSlot: true,
             acquire: { (texture, nil) })
     }
 
@@ -207,20 +229,33 @@ final class TerminalRenderer {
     /// `drawablesAcquired` accounting).
     ///
     /// - Parameters:
+    ///   - tracker: the view's drawables awaiting their present report. A drawable this frame
+    ///     acquires goes into it, and its presented handler takes it out. A nil drawable makes it
+    ///     hold the limit.
+    ///   - now: when the frame is due, in the display link's timebase. The tracker's time.
+    ///   - waitsForSlot: block on the ring until the GPU frees a slot, rather than drop the frame.
+    ///     A live resize always waits, whatever this says.
+    ///   - nextDrawable: the layer's `nextDrawable()`. A seam, so a test can stand for a full pool
+    ///     without waiting a second for it.
     ///   - willEncode: called once the frame is known to be drawn, before anything is encoded.
     ///     The view's draw-start hook.
-    ///   - onPresented: given to the drawable's `addPresentedHandler`, so it runs on whatever
+    ///   - onPresented: called from the drawable's presented handler, so it runs on whatever
     ///     thread Metal reports the present on. Not called for a skipped frame.
     @discardableResult
     func render(
         surface: TerminalSurface,
         layer: CAMetalLayer,
+        tracker: DrawableTracker,
+        now: Duration,
+        waitsForSlot: Bool = false,
+        nextDrawable: (CAMetalLayer) -> (any CAMetalDrawable)? = { $0.nextDrawable() },
         willEncode: () -> Void = {},
         onPresented: (@Sendable () -> Void)? = nil
     ) throws -> RenderOutcome {
         let size = layer.drawableSize
         let synchronous = layer.presentsWithTransaction
         var acquired: (any CAMetalDrawable)?
+        var acquiredID: DrawableTracker.DrawableID?
         let outcome = try renderFrame(
             surface: surface,
             width: Int(size.width),
@@ -233,13 +268,35 @@ final class TerminalRenderer {
             // back off on mouse-up. So while it is set, the idle guarantee is suspended and every
             // frame is encoded. It is only ever set during a live resize, so idle cost is unchanged.
             forceEncode: synchronous,
+            // The transaction must end with a present, so a live resize may not drop its frame.
+            waitsForSlot: waitsForSlot || synchronous,
             acquire: { [weak self] in
-                guard let drawable = layer.nextDrawable() else { return (nil, nil) }
+                // Read before the wait: a report that lands during it, or just after it returns
+                // nil, keeps the nil from setting a hold.
+                let reportsBefore = tracker.reportCount
+                guard let drawable = nextDrawable(layer) else {
+                    // The pool is full, whatever the tracker counted.
+                    tracker.noteNoDrawable(reportsBefore: reportsBefore)
+                    return (nil, nil)
+                }
                 self?.stats.drawablesAcquired += 1
-                if let onPresented { drawable.addPresentedHandler { _ in onPresented() } }
+                let id = tracker.add(acquiredAt: now)
+                // Always installed: the tracker needs every report, whether or not the view
+                // wants to hear of them.
+                drawable.addPresentedHandler { presented in
+                    tracker.reportPresented(id, presentedTime: presented.presentedTime)
+                    onPresented?()
+                }
                 acquired = drawable
+                acquiredID = id
                 return (drawable.texture, drawable)
             })
+        if !outcome.didEncode, let acquiredID {
+            // The one way an acquired drawable is dropped unpresented: its render encoder could
+            // not be made. Removed by id, so a presented handler that runs for it anyway finds
+            // nothing to remove.
+            tracker.remove(acquiredID)
+        }
         if synchronous, let drawable = acquired, let buffer = outcome.commandBuffer {
             buffer.waitUntilScheduled()
             drawable.present()
@@ -270,6 +327,7 @@ final class TerminalRenderer {
         presentViaCommandBuffer: Bool,
         willEncode: () -> Void,
         forceEncode: Bool,
+        waitsForSlot: Bool,
         acquire: () -> (MTLTexture?, CAMetalDrawable?)
     ) throws -> RenderOutcome {
         // ---- The idle guarantee. Everything below this point is skipped when nothing changed. ---
@@ -287,6 +345,19 @@ final class TerminalRenderer {
                                  glyphCount: surface.glyphCount, rectCount: surface.rectCount)
         }
 
+        // Lazily, because a `TerminalSurface` has no `MTLDevice` of its own: it holds the ring,
+        // the renderer creates it on first encode.
+        let ring = surface.frameRing ?? { let fresh = FrameRing(); surface.frameRing = fresh; return fresh }()
+        // A display tick drops the frame rather than wait for the GPU. The view checked
+        // `hasFreeSlot` before the build and only main takes slots, so this cannot fail on that
+        // path; it still guards the slot. Before `willEncode`, so a dropped frame starts no draw.
+        // The surface stays dirty, so the next frame draws.
+        guard let slot = waitsForSlot ? ring.acquire() : ring.tryAcquire() else {
+            stats.framesSkipped += 1
+            return RenderOutcome(didEncode: false, commandBuffer: nil, update: update,
+                                 glyphCount: surface.glyphCount, rectCount: surface.rectCount)
+        }
+
         willEncode()
         let metrics = glyphCache.metrics
         let geometry = GridGeometry(metrics: metrics, viewportWidth: width, viewportHeight: height)
@@ -294,11 +365,6 @@ final class TerminalRenderer {
 
         // One `replace(region:)` per atlas per frame, before anything is encoded.
         glyphCache.flushUploads()
-
-        // Lazily, because a `TerminalSurface` has no `MTLDevice` of its own: it holds the ring,
-        // the renderer creates it on first encode.
-        let ring = surface.frameRing ?? { let fresh = FrameRing(); surface.frameRing = fresh; return fresh }()
-        let slot = ring.acquire()
 
         let backgroundBuffer = upload(surface.backgroundCells, into: &slot.background)
         // Borrowed, not returned: the surface flattens into a buffer it keeps and we upload
@@ -317,7 +383,7 @@ final class TerminalRenderer {
 
         // The command buffer is created *before* the drawable is acquired. A drawable that is
         // acquired and never presented is only returned to the layer's pool when it deallocates,
-        // and with `maximumDrawableCount = 2` a couple of those make `nextDrawable()` block for
+        // and with `maximumDrawableCount = 3` a few of those make `nextDrawable()` block for
         // about a second each — which looks exactly like a frozen window.
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             ring.release()
@@ -345,7 +411,7 @@ final class TerminalRenderer {
         pass.colorAttachments[0].clearColor = clearColor(surface.colors.background)
         pass.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let encoder = makeRenderEncoder(commandBuffer, pass) else {
             ring.release()
             stats.framesSkipped += 1
             return RenderOutcome(didEncode: false, commandBuffer: nil, update: update,
