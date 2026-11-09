@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import TBDShared
 
 /// Menu bar "Model Profile" submenu. Shows the keychain login fallback as

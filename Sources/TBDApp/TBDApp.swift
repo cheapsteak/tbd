@@ -529,7 +529,8 @@ private struct InstallSettingsOpener: ViewModifier {
 
     func body(content: Content) -> some View {
         content.onAppear {
-            appState.settingsWindowOpener = { openSettings() }
+            let open = openSettings
+            appState.settingsWindowOpener = { open() }
         }
     }
 }

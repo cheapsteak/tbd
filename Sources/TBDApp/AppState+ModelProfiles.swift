@@ -8,7 +8,13 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "modelProfiles")
 extension AppState {
     /// Opens Settings on the Model Profiles tab.
     func openModelProfilesSettings() {
-        settingsTab = .modelProfiles
+        openSettings(on: .modelProfiles)
+    }
+
+    /// Selects `tab`, then opens Settings. The tab is set first so the window
+    /// appears already on it.
+    func openSettings(on tab: SettingsTab) {
+        settingsTab = tab
         settingsWindowOpener()
     }
 

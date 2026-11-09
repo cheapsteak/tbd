@@ -2642,12 +2642,12 @@ final class AppState {
     /// a daemon.
     @ObservationIgnored lazy var phoneClient: any PhoneControlClient = daemonClient
     /// Opens the Settings window. The main window's root view replaces this
-    /// with the `\.openSettings` action on appear. The selector below is only
-    /// the fallback until then: since macOS 14 SwiftUI ignores
-    /// `showSettingsWindow:` for a `Settings` scene and opens nothing. In unit
-    /// runs `NSApp` is nil, and tests replace this to see that it was asked.
+    /// with the `\.openSettings` action on appear. Until then it only logs:
+    /// since macOS 14 SwiftUI ignores the `showSettingsWindow:` selector for a
+    /// `Settings` scene, so sending it could never open anything. Tests
+    /// replace this to see that it was asked.
     @ObservationIgnored var settingsWindowOpener: @MainActor () -> Void = {
-        _ = NSApp?.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        logger.notice("Settings opener not installed yet; ignoring request to open Settings")
     }
     @ObservationIgnored lazy var devServerActionSender: @MainActor (DevServerAction, UUID, [String]) async throws -> DevServerActionResult =
         { [daemonClient] action, id, names in

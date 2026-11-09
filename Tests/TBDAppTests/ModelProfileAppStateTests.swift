@@ -175,10 +175,9 @@ import TestSupport
 @Test func appState_openModelProfilesSettingsSelectsTheTabAndOpens() {
     withTestDefaults("TBDAppTests.ModelProfileSettings") { defaults in
         let state = AppState(userDefaults: defaults)
-        var opened = 0
-        state.settingsWindowOpener = { opened += 1 }
+        var tabsAtOpen: [SettingsTab] = []
+        state.settingsWindowOpener = { tabsAtOpen.append(state.settingsTab) }
         state.openModelProfilesSettings()
-        #expect(state.settingsTab == .modelProfiles)
-        #expect(opened == 1)
+        #expect(tabsAtOpen == [.modelProfiles])
     }
 }
