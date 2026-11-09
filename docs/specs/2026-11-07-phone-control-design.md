@@ -317,6 +317,26 @@ Requests:
 its kind (question or permission), the tool name, a summary of the input, and the questions with
 their options, or the permission's suggested rules.
 
+**Transcript items.** Pages and transcript events carry items. Every item has an ID, a kind (your
+message, assistant text, thinking, tool call, file edit, subagent, slash command, system note or
+peer message), and whether its text was cut. Every other field is optional: the laptop leaves a
+field out when the transcript does not carry it, and the app draws the row without it, as
+section 7 says. The optional fields:
+
+- **Any item** – the time its line was written.
+- **Text** – the text of a message, thinking, a slash command or a system note, cut as section 7
+  says.
+- **Tool calls and subagents** – the tool's name, a short target, and the status (running, ok or
+  error). A failed call adds its exit code (`exitCode`). A subagent adds its agent type and item
+  count.
+- **File edits** – the tool's name, the file's name as the target, the file's path (`path`), and
+  the lines added and removed.
+- **Slash commands** – the command's output (`output`).
+- **Assistant text** – the class of an API error (`apiError`), on text that is Claude Code's record
+  of one.
+- **System notes** – the note's kind (`noteKind`).
+- **Peer messages** – the sender.
+
 **No double actions.** The daemon keeps each request ID and its result for 10 minutes, in memory.
 A repeat of a known request ID returns the stored result and does nothing again. The phone resends
 an action after a reconnect only within 9 minutes of first sending it, and only once the new
@@ -459,12 +479,41 @@ the phone does not show it until tapped.
   which fetches the rest through `transcript.detail`.
 - **Tool calls** – one summary row: the tool name, a short target such as a command or a file
   name, and the status. The input and result arrive only on tap.
-- **File edits** (Edit, Write, MultiEdit) – the file name and line counts, such as `+12 −3`,
-  counted on the laptop. Nothing more is shown on the phone.
+  - **A failed call's exit code** comes from its result, when the result's first line is exactly
+    `Exit code <n>`, as Claude Code writes it for a failed Bash call. The row's mark reads
+    "exit 2". A failed call whose result names no code, such as a refused permission, reads
+    "failed".
+- **File edits** (Edit, Write, MultiEdit) – the file's path and the line counts, such as
+  `+12 −3`, counted on the laptop. Nothing more is shown on the phone.
+  - **The path** is relative to the worktree when the file is inside it, and as the tool wrote it
+    otherwise, so a file outside the worktree shows its absolute path. A path longer than 512
+    bytes as encoded is left out, and the row names the file instead.
 - **Subagents** – one row with the agent type and its item count. Its items arrive on tap.
 - **Thinking, system reminders and hook output** – sent only while "Show details" is on.
-- **Slash commands** – a small row. **Messages from other sessions** – a bubble labeled with the
-  sender.
+  - **Each system note carries its kind**, one of the kinds the laptop's transcript sorts system
+    text into, and the phone labels the note by it: Hook, Reminder, Environment, Command, Skill,
+    Background, File, Compacted or Info. A kind the phone does not know reads "System".
+- **Slash commands** – a small row with the command and its output, below it as plain text with
+  its line breaks kept.
+  - **The output** is what Claude Code records for a local command: the text of each
+    `<local-command-stdout>` and `<local-command-stderr>` tag on the line whose `parentUuid` names
+    the command's line, joined in order, with terminal escape codes removed, and cut to 1 KB as
+    encoded, ending in an ellipsis.
+  - **Output written after the command's row** arrives as `transcript.update` of that row. An
+    older page joins output that the newer range holds, from the index the daemon keeps for the
+    open transcript.
+  - **With "Show details" on,** the output's own lines also show, as Hook notes, since the
+    laptop's transcript sorts them as hook output.
+- **API errors** – a line Claude Code marks as an API error (`isApiErrorMessage`) is assistant
+  text with its error class: the line's `error`, such as `rate_limit` or `server_error`, or
+  `unknown` when it names none, cut to 256 bytes as encoded. The phone draws it as an error row,
+  with its text as plain text, never markdown: in the rate-limit tone for `rate_limit`, and in the
+  error tone for any other class.
+- **Messages from other sessions** – a bubble labeled with the sender.
+
+**Every text field has a cap**, and the daemon measures each row as encoded, field names and
+escapes included, before it puts the row on a page or in a chunk. So the optional fields cannot
+push a page or a chunk past its frame.
 
 **Pages.**
 
