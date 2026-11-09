@@ -113,8 +113,8 @@ import { useNow } from '../ui/now.ts';
 import { announcement, lastRows } from './announce.ts';
 import { ItemRow, type RowPart } from './ItemRow.tsx';
 import {
-  anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows,
-  takeScroll, wantsOlder,
+  anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, itemKeys, prepended, pushedFromBottom, restoreTop, rowsChange,
+  seenRows, takeScroll, wantsOlder,
 } from './scroll.ts';
 import type { Anchor, Metrics, Paging, SeenRows } from './scroll.ts';
 
@@ -236,8 +236,10 @@ function List(p: {
   }).current;
   const [pill, setPill] = useState(false);
   const [said, setSaid] = useState<Said>({ n: 0, lines: [] });
-  // A new function only when the rows change, so the virtualizer lays the rows out again then.
-  const getItemKey = useCallback((index: number) => rows[index]!.key, [rows]);
+  // One key function until a page replaces the rows, so a row changed in place does not lay
+  // every row out again (`itemKeys`).
+  const [keysFor] = useState(itemKeys);
+  const getItemKey = keysFor(rows, replacements);
   // The virtualizer's own writes, as when it corrects for a row measured above the view, are
   // noted as the list's, so their scroll events never read as the reader's.
   const scrollToFn = useCallback<typeof elementScroll<HTMLDivElement>>(

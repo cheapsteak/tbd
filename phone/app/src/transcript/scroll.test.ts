@@ -4,12 +4,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Virtualizer } from '@tanstack/react-virtual';
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
 import { addReceipt, applyPage, applyTranscriptEvent, beginOpen, clearTranscript, emptyTranscript, MAX_STALE_PAGES, prependPage } from '../state/transcript.ts';
-import type { TranscriptState } from '../state/transcript.ts';
+import type { TranscriptRow, TranscriptState } from '../state/transcript.ts';
 import {
-  anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows, STICK_PX,
-  takeScroll, wantsOlder,
+  anchorAt, arrivedCount, atBottom, clampedToBottom, fitsView, fromBottom, itemKeys, moved, prepended, pushedFromBottom, restoreTop, rowsChange, seenRows,
+  STICK_PX, takeScroll, wantsOlder,
 } from './scroll.ts';
 import type { Metrics } from './scroll.ts';
 
@@ -336,4 +337,99 @@ test('an append, an update, a reset, a reopen and a first page do not read as pr
   const none = beginOpen(emptyTranscript(), R, false, 'open-1');
   assert.equal(above(none, { ...applyPage(none, page(['a'])), phase: 'open' }), false);
   assert.equal(above(s, clearTranscript(s)), false);
+});
+
+// --- the rows' keys, laid out by the virtualizer the list uses -------------------------------
+
+/** The height the virtualizer below gives a row it has not measured. */
+const ROW_PX = 50;
+
+/**
+ * The list's virtualizer, with no scroll element, over the rows of each slice it is given, with
+ * the key function `itemKeys` makes for them, as the list renders it. `render` lays a slice's rows
+ * out as a render does and says what came of it: the key function, how many rows the layout read
+ * through it, and each row's key and start.
+ */
+function virtualList() {
+  const keysFor = itemKeys();
+  let reads = 0;
+  // The rows, counting each row read.
+  const counted = (rows: readonly TranscriptRow[]): readonly TranscriptRow[] =>
+    new Proxy(rows, {
+      get(target, prop, receiver) {
+        if (typeof prop === 'string' && /^\d+$/.test(prop)) reads++;
+        return Reflect.get(target, prop, receiver) as unknown;
+      },
+    });
+  const options = {
+    getScrollElement: () => null,
+    estimateSize: () => ROW_PX,
+    scrollToFn: () => {},
+    observeElementRect: () => {},
+    observeElementOffset: () => {},
+  };
+  const v = new Virtualizer<HTMLDivElement, HTMLDivElement>({ ...options, count: 0 });
+  return {
+    v,
+    render(s: TranscriptState) {
+      const getItemKey = keysFor(counted(s.rows), s.replacements);
+      v.setOptions({ ...options, count: s.rows.length, getItemKey });
+      reads = 0;
+      const m = v.getMeasurements();
+      const laidOut = Array.from({ length: m.length }, (_, i) => [m[i]!.key, m[i]!.start]);
+      return { getItemKey, reads, laidOut };
+    },
+  };
+}
+
+test("the rows' key function stays one object until a page replaces the rows, and the rows are laid out anew whenever their keys moved", () => {
+  const list = virtualList();
+  const s0 = opened(['a', 'b', 'c', 'd']);
+  const tall = s0.rows[1]!.key;
+  // Each row's key and start, with the row `tall` measured at 120 px and the others unmeasured.
+  const placed = (s: TranscriptState, tallPx = 120): Array<[number, number]> => {
+    let start = 0;
+    return s.rows.map((r): [number, number] => {
+      const at: [number, number] = [r.key, start];
+      start += r.key === tall ? tallPx : ROW_PX;
+      return at;
+    });
+  };
+  const first = list.render(s0);
+  assert.deepEqual(first.laidOut, placed(s0, ROW_PX));
+
+  // A row changed in place keeps the key function, and the layout reads no row.
+  const s1 = applyTranscriptEvent(s0, event('transcript.update', ['b'], 'b, longer'));
+  assert.notEqual(s1.rows, s0.rows);
+  const inPlace = list.render(s1);
+  assert.equal(inPlace.getItemKey, first.getItemKey);
+  assert.equal(inPlace.reads, 0);
+  // Measured anew, it lays out the rows from it on, and the row above stays put.
+  list.v.resizeItem(1, 120);
+  const measured = list.render(s1);
+  assert.equal(measured.reads, 3);
+  assert.deepEqual(measured.laidOut, placed(s1));
+
+  // Rows that come in below, and an older page above, are laid out with their own keys, and the
+  // measured row keeps its height under its key.
+  const s2 = applyTranscriptEvent(s1, event('transcript.append', ['e']));
+  const below = list.render(s2);
+  assert.equal(below.getItemKey, first.getItemKey);
+  assert.deepEqual(below.laidOut, placed(s2));
+  const s3 = prependPage({ ...s2, olderRequestID: 'page-1' }, page(['y', 'z']));
+  const above = list.render(s3);
+  assert.equal(above.getItemKey, first.getItemKey);
+  assert.deepEqual(above.laidOut, placed(s3));
+
+  // A reset to as many rows takes a new key function, and the new rows are laid out under their own keys.
+  const reset: AppEvent = { event: 'transcript.reset', seq: 2, data: { session: R, reason: 'rollover', page: page(['p', 'q', 'r', 's', 't', 'u', 'v']) } };
+  const s4 = applyTranscriptEvent(s3, reset);
+  assert.equal(s4.rows.length, s3.rows.length);
+  const replaced = list.render(s4);
+  assert.notEqual(replaced.getItemKey, first.getItemKey);
+  assert.deepEqual(replaced.laidOut, placed(s4));
+  // So does a clear, which leaves no row to lay out.
+  const cleared = list.render(clearTranscript(s4));
+  assert.notEqual(cleared.getItemKey, replaced.getItemKey);
+  assert.deepEqual(cleared.laidOut, []);
 });

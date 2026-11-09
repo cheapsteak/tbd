@@ -22,6 +22,10 @@
  *   records an anchor: the row at the top of the view, and how far its top sits below the top
  *   of the view (`anchorAt`). Once the page is in (`prepended`), it scrolls so that row sits
  *   there again (`restoreTop`).
+ * - **The rows' keys.** The virtualizer lays every row out again from the first whenever its
+ *   key function or its row count changes. The list's key function stays one object until a
+ *   page replaces the rows (`itemKeys`), so a row changed in place lays out only the rows from
+ *   it on, once it is measured anew.
  *
  * Every number is in CSS pixels, as the scroll element reports them.
  */
@@ -188,4 +192,28 @@ export function arrivedCount(seen: SeenRows, now: SeenRows): number {
  */
 export function prepended(seen: SeenRows, now: SeenRows): boolean {
   return now.replacements === seen.replacements && now.count - seen.count > now.appended - seen.appended;
+}
+
+/**
+ * A maker of the virtualizer's `getItemKey` for one list, kept for the list's life
+ * (`useState(itemKeys)`). Each render calls it with its rows and the slice's `replacements` for
+ * them, and gets a key function that reads the rows of the latest call: the same function object
+ * as the last call's, unless `replacements` changed. The virtualizer lays every row out again
+ * from the first whenever the key function or the row count changes, so:
+ * - **a change in place**, which keeps every row's key, lays nothing out again by itself, and a
+ *   row whose height changed lays out the rows from it on once it is measured, as any does;
+ * - **rows that come in** below or above change the count, and **a page in place of the rows**,
+ *   or a clear, changes `replacements`, so the rows are laid out from the first with their keys.
+ *
+ * No other change moves a row's key: rows come in only at the bottom or above, and only a page
+ * takes any away (`arrivedCount`).
+ */
+export function itemKeys(): (rows: readonly TranscriptRow[], replacements: number) => (index: number) => number {
+  let latest: readonly TranscriptRow[] = [];
+  let made: { replacements: number; keyOf: (index: number) => number } | null = null;
+  return (rows, replacements) => {
+    latest = rows;
+    if (made === null || made.replacements !== replacements) made = { replacements, keyOf: (index) => latest[index]!.key };
+    return made.keyOf;
+  };
 }
