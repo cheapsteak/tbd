@@ -25,7 +25,7 @@ struct TranscriptPagerTests {
         #expect(!build.page.reachedStart)
         #expect(build.page.omittedItems == 0)
         #expect(build.unresolvedCalls.isEmpty)
-        #expect(build.results["toolu_10"] == ToolResult(text: "output 10", truncatedTo: nil, isError: false))
+        #expect(build.results["toolu_10"] == ToolOutcome(isError: false, exitCode: nil))
     }
 
     @Test func theFirstPageIsAtMost16KB() throws {
