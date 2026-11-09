@@ -149,12 +149,13 @@ actor HolderClient {
     /// same errno rules and those rules still live in one place.
     ///
     /// Bounded by the kernel, and genuinely bounded. `SO_RCVTIMEO` is set
-    /// after `connect` returns and so does not cover it — but on Darwin a
-    /// `connect(2)` to an `AF_UNIX` path cannot wait for a listener either:
-    /// `sonewconn` refuses once the accept queue is at its limit, so a
-    /// saturated rendezvous comes back `ECONNREFUSED` in microseconds rather
-    /// than sleeping until the queue drains, which is what the same call would
-    /// do on Linux. `HolderClientTests`
+    /// before `connect` but bounds reads, not the connect: XNU's `AF_UNIX`
+    /// connect never sleeps on the receive timeout. It does not need to, since
+    /// on Darwin a `connect(2)` to an `AF_UNIX` path cannot wait for a
+    /// listener either: `sonewconn` refuses once the accept queue is at its
+    /// limit, so a saturated rendezvous comes back `ECONNREFUSED` in
+    /// microseconds rather than sleeping until the queue drains, which is what
+    /// the same call would do on Linux. `HolderClientTests`
     /// `.aSaturatedRendezvousIsRefusedImmediatelyRatherThanBlocking` measures
     /// both halves, because a platform property is exactly the kind of premise
     /// that rots silently.

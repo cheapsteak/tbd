@@ -3719,16 +3719,24 @@ actor HolderRegistry {
     /// **A push is an answer, even when the round trip that carried it failed.**
     /// A holder pushes the exit and winds down in the same breath, so a probe
     /// can be handed the status and then find the socket gone underneath it.
+    ///
     /// A holder pushes only at a client it has already answered, so a push at
-    /// this one-verb probe trails its answer (the `.alive` case below) and
-    /// strands nothing. But a holder outlives the daemon build that spawned
-    /// it, and one whose serve loop pushes at whichever client is connected
-    /// hands the status to a probe that connected a moment before the reap,
-    /// then hangs up before reading its request. That push answers no
-    /// request, so `HolderClient`'s barrier retires it — into `lastPushedDescription`, which exists for exactly this
-    /// and is what is read here. Without it the reclaimer discards the very
-    /// fact it asked for, asks again at a rendezvous the holder has already
-    /// unlinked, reads the `ENOENT` as absence, and records
+    /// this one-verb probe trails its `.alive` answer, and it is read here only
+    /// if it was decoded by the time `close()` ran. `close()` retires the
+    /// frames already decoded from the socket; a push still unread in the
+    /// kernel's receive buffer is lost with the descriptor. The holder counts
+    /// that push as delivered and winds down, so the next probe finds the
+    /// rendezvous gone and records `exitedStatusUnknown` for a child whose
+    /// status was sent.
+    ///
+    /// A holder also outlives the daemon build that spawned it, and one whose
+    /// serve loop pushes at whichever client is connected hands the status to
+    /// a probe that connected a moment before the reap, then hangs up before
+    /// reading its request. That push answers no request, so `HolderClient`'s
+    /// barrier retires it — into `lastPushedDescription`, which exists for
+    /// exactly this and is what is read here. Without it the reclaimer
+    /// discards the very fact it asked for, asks again at a rendezvous the
+    /// holder has already unlinked, reads the `ENOENT` as absence, and records
     /// `exitedStatusUnknown` for a child that exited perfectly ordinarily.
     private static func confirmChildExit(
         socketPath: String,
@@ -3749,8 +3757,10 @@ actor HolderRegistry {
                 case .alive:
                     // An exit can be pushed in the same breath as an answer
                     // that was already on the wire; the `close()` above retires
-                    // it. It is about the same child and it is newer than the
-                    // answer it trailed, so it supersedes it.
+                    // it when it was decoded with the answer, and loses it when
+                    // it was still unread (see above). It is about the same
+                    // child and it is newer than the answer it trailed, so it
+                    // supersedes it.
                     if let pushed = pushedTerminalStatus(
                         await client.lastPushedDescription, expecting: owner) {
                         return pushed
