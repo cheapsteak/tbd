@@ -1342,6 +1342,17 @@ private final class ManualNow {
     }
 }
 
+/// The view, carried into a `@Sendable` wait condition. The view itself is not `Sendable`; a
+/// main-actor class that holds it is, and the condition reads it back on the main actor.
+@MainActor
+private final class ViewHandle {
+    let view: GhosttyTerminalView
+
+    init(_ view: GhosttyTerminalView) {
+        self.view = view
+    }
+}
+
 /// Which GPU limit a test holds the view at.
 enum GPULimit: Sendable, CaseIterable {
     /// All three of the surface's ring slots in flight.
@@ -1379,11 +1390,11 @@ struct GhosttyTerminalViewLeadingEdgeTests {
 
     /// Runs `call`, which must signal a render, and waits, bounded, for the delivery.
     private func signalAndDeliver(to fixture: ViewFixture, _ call: () -> Void) async throws {
-        let view = fixture.view
-        let before = view.renderSignalDeliveries
+        let handle = ViewHandle(fixture.view)
+        let before = handle.view.renderSignalDeliveries
         call()
         try await waitFor("the render signal's delivery") {
-            await MainActor.run { view.renderSignalDeliveries > before }
+            await MainActor.run { handle.view.renderSignalDeliveries > before }
         }
     }
 
@@ -1391,8 +1402,9 @@ struct GhosttyTerminalViewLeadingEdgeTests {
     /// several frames calls it before the next frame it needs drawn, so that frame is not left to
     /// the tick for a frame the GPU is still finishing.
     private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
+        let handle = ViewHandle(view)
         try await waitFor("the GPU to hand back a ring slot") {
-            await MainActor.run { view.surface.frameRing?.hasFreeSlot ?? true }
+            await MainActor.run { handle.view.surface.frameRing?.hasFreeSlot ?? true }
         }
     }
 
