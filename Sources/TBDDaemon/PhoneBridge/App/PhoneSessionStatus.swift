@@ -168,17 +168,17 @@ enum PhoneSessionStatus {
     static func localCapabilities(
         terminal: TBDShared.Terminal, isRemoteWorktree: Bool, promptAnswerEnabled: Bool?
     ) -> PhoneCapabilities {
+        // A remote lane's tab and a Codex session never answer, so the
+        // setting cannot change their `answer`, and each keeps its own reason.
         if isRemoteWorktree {
             let none = unavailable(remoteLaneTabReason)
             return PhoneCapabilities(
-                transcript: none, send: none, answer: answerCapability(none, promptAnswerEnabled: promptAnswerEnabled),
-                switchProfile: none, fork: none, model: none)
+                transcript: none, send: none, answer: none, switchProfile: none, fork: none, model: none)
         }
         if terminal.isCodexTerminal {
             let statusOnly = unavailable(codexStatusOnlyReason)
             return PhoneCapabilities(
-                transcript: unavailable(codexTranscriptReason), send: statusOnly,
-                answer: answerCapability(statusOnly, promptAnswerEnabled: promptAnswerEnabled),
+                transcript: unavailable(codexTranscriptReason), send: statusOnly, answer: statusOnly,
                 switchProfile: statusOnly, fork: statusOnly, model: statusOnly)
         }
         let messages: PhoneCapability

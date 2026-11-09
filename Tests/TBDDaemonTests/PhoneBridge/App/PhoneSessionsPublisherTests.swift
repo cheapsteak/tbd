@@ -441,6 +441,29 @@ struct PhoneSessionsPublisherTests {
         await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
+    /// Every gather reads the setting for answering prompts, so the service
+    /// records whether the last read failed and `promptAnswerSetting()` logs
+    /// only where that changes: a run of failed reads changes it once, at
+    /// the first, and the first good read after them changes it back once.
+    @Test func aRunOfFailedSettingReadsChangesTheReadStateOnce() async throws {
+        let h = try await PhoneServiceHarness.make()
+        #expect(try await h.service.promptAnswerSetting() != nil)
+        #expect(await h.service.promptAnswerSettingUnreadable == false)
+        try await h.makeConfigUnreadable()
+
+        #expect(try await h.service.promptAnswerSetting() == nil)
+        #expect(await h.service.promptAnswerSettingUnreadable)
+        #expect(try await h.service.promptAnswerSetting() == nil)
+        #expect(await h.service.promptAnswerSettingUnreadable)
+
+        // The dropped table cannot be read again, so the recovery is
+        // recorded as `promptAnswerSetting()` records a good read.
+        #expect(await h.service.recordPromptAnswerSettingRead(failed: true) == false)
+        #expect(await h.service.recordPromptAnswerSettingRead(failed: false))
+        #expect(await h.service.recordPromptAnswerSettingRead(failed: false) == false)
+        #expect(await h.service.promptAnswerSettingUnreadable == false)
+    }
+
     /// A gather re-reads the provider registry at most once per
     /// `providerRefreshInterval` on the service's date seam, and reads the
     /// providers as last read in between; a `sessions.subscribe` re-reads it

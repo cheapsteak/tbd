@@ -266,16 +266,40 @@ extension PhoneAppService {
     /// offering an answer, and `prompt.answer` is refused before the core is
     /// called, both with `PhoneSessionStatus.answerSettingUnreadReason`. A
     /// cancelled read throws.
+    ///
+    /// Every gather reads the setting, so a row that stays unreadable would
+    /// log on every sessions refresh. The log says `error` once, at the
+    /// first failure after a good read, and `notice` once when reads
+    /// recover; every failure between is `debug`.
     nonisolated func promptAnswerSetting() async throws -> Bool? {
         do {
-            return try await db.config.get().transcriptPromptAnswerEnabled
+            let enabled = try await db.config.get().transcriptPromptAnswerEnabled
+            if await recordPromptAnswerSettingRead(failed: false) {
+                Self.logger.notice("Phone: the setting for answering prompts can be read again")
+            }
+            return enabled
         } catch let cancelled as CancellationError {
             throw cancelled
         } catch {
-            Self.logger.error(
-                "Phone: could not read the setting for answering prompts, so answering is unavailable: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
+            let message = "Phone: could not read the setting for answering prompts, so answering is unavailable"
+            if await recordPromptAnswerSettingRead(failed: true) {
+                Self.logger.error(
+                    "\(message, privacy: .public): \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
+            } else {
+                Self.logger.debug(
+                    "\(message, privacy: .public): \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
+            }
             return nil
         }
+    }
+
+    /// Records whether a read of the setting for answering prompts `failed`,
+    /// and says whether that changed the state, so `promptAnswerSetting()`
+    /// logs a failure, and a recovery, once each.
+    func recordPromptAnswerSettingRead(failed: Bool) -> Bool {
+        guard promptAnswerSettingUnreadable != failed else { return false }
+        promptAnswerSettingUnreadable = failed
+        return true
     }
 
     /// The capability `needed` picks from a session's capabilities as the
