@@ -19,6 +19,7 @@ import { createActions } from './index.ts';
 const CAN = { available: true };
 const OFF_REASON = "Answering prompts is turned off in TBD's settings on the laptop.";
 const REFUSED_TEXT = 'The laptop refused the answer.';
+const TOO_LONG = 'That message is too long to send from a phone.';
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
 const OTHER: PhoneSessionRef = { kind: 'local', terminalID: 'T-other' };
 
@@ -258,6 +259,7 @@ test('an answer that may have happened shows its error and is not sent again', a
     assert.equal(h.card(P.id)?.phase, 'open', code);
     assert.equal(h.card(P.id)?.refusal, message, code);
     assert.equal(h.answers().length, 1, `${code}: nothing is sent again`);
+    assert.equal(h.state().prompts.answeredHere[P.id], 'Allowed', `${code}: recorded as this phone's`);
   }
 });
 
@@ -268,6 +270,7 @@ test('a rejection that is no AppError still settles the card, with its message',
   await pending;
   assert.equal(h.card(P.id)?.phase, 'open');
   assert.equal(h.card(P.id)?.refusal, 'boom');
+  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false, 'the client posted nothing');
 });
 
 test('a prompt that closes with no resolution leaves no receipt', async () => {
@@ -452,7 +455,7 @@ test('a phone or unknown resolution while sending reads as if this phone had not
     ['unknown', 'already_resolved', 'Answered elsewhere', null],
     ['phone', new AppError('refused', REFUSED_TEXT), 'Answered on another phone', 'phone'],
     ['unknown', new AppError('unsupported', OFF_REASON), 'Answered elsewhere', null],
-    ['phone', new AppError('not_confirmed', NOT_CONFIRMED_TEXT), 'Answered on another phone', 'phone'],
+    ['phone', new AppError('not_found', 'That session is not on the laptop.'), 'Answered on another phone', 'phone'],
     ['unknown', new AppError('superseded', SUPERSEDED_TEXT), 'Answered elsewhere', null],
   ] as const;
   for (const [by, reply, text, elsewhereBy] of cases) {
@@ -484,6 +487,148 @@ test('the reply to an answer whose prompt left the set unresolved changes nothin
   assert.equal(h.card(Q.id)?.phase, 'open', "the old answer's reply does not settle the new card");
   assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
   assert.deepEqual(h.receipts(), []);
+});
+
+// MARK: - An answer that may have landed
+
+const MAYBE: ReadonlyArray<readonly [string, string]> = [
+  ['not_confirmed', NOT_CONFIRMED_TEXT], ['bad_reply', 'The laptop sent a reply this app cannot read.'],
+  ['internal', 'Something went wrong.'], ['too_large', TOO_LONG],
+];
+const NOT_LANDED: ReadonlyArray<readonly [string, string]> = [
+  ['refused', REFUSED_TEXT], ['not_found', 'That session is not on the laptop.'], ['bad_request', 'That reason is too long to send from a phone.'],
+  ['unsupported', OFF_REASON], ['superseded', SUPERSEDED_TEXT],
+];
+
+test("an answer that may have landed reads as this phone's when its prompt resolves, and its card goes", async () => {
+  for (const [code, message] of MAYBE) {
+    for (const by of ['phone', 'unknown'] as const) {
+      const h = await showing();
+      const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+      h.last('prompt.answer').reject(new AppError(code as 'internal', message));
+      await pending;
+      h.changed({ prompts: [Q], resolved: resolved(P.id, by) });
+      assert.deepEqual(h.receipts(), ['Answered on this phone: Allowed'], `${code}, ${by}`);
+      assert.equal(h.card(P.id), undefined, `${code}, ${by}: no elsewhere card`);
+      assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false);
+    }
+    const h = await showing();
+    const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+    h.last('prompt.answer').reject(new AppError(code as 'internal', message));
+    await pending;
+    h.changed({ prompts: [Q], resolved: resolved(P.id, 'laptop') });
+    assert.deepEqual(h.receipts(), ['Answered on the laptop'], `${code}, laptop`);
+    assert.equal(h.card(P.id)?.phase, 'elsewhere');
+    assert.equal(h.card(P.id)?.elsewhereBy, 'laptop');
+  }
+});
+
+test('an answer the laptop refused records nothing, so its resolution reads as someone else\'s', async () => {
+  for (const [code, message] of NOT_LANDED) {
+    const h = await showing();
+    const pending = h.actions.answerPrompt(P.id, ALLOW, 'Allowed');
+    h.last('prompt.answer').reject(new AppError(code as 'refused', message));
+    await pending;
+    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, P.id), false, code);
+    h.changed({ prompts: [Q], resolved: resolved(P.id, 'phone') });
+    assert.deepEqual(h.receipts(), ['Answered on another phone'], code);
+    assert.equal(h.card(P.id)?.phase, 'elsewhere', code);
+    assert.equal(h.card(P.id)?.elsewhereBy, 'phone', code);
+  }
+});
+
+test('a too_large answer that does not fit one frame was never posted, and records nothing', async () => {
+  const h = await showing();
+  const huge: PromptAnswer = { kind: 'question', answers: { [QUESTION]: 'x'.repeat(70_000) } };
+  const pending = h.actions.answerPrompt(Q.id, huge, 'x');
+  h.last('prompt.answer').reject(new AppError('too_large', TOO_LONG));
+  await pending;
+  assert.equal(h.card(Q.id)?.phase, 'open');
+  assert.equal(h.card(Q.id)?.refusal, TOO_LONG);
+  assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false);
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'unknown') });
+  assert.deepEqual(h.receipts(), ['Answered elsewhere']);
+});
+
+/** A harness whose first answer to `Q`, "Yes, add the test", failed `not_confirmed`, and whose second, "No, this is enough", is on its way. */
+async function answeredTwice() {
+  const h = await showing();
+  const first = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+  h.last('prompt.answer').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
+  await first;
+  assert.equal(h.card(Q.id)?.phase, 'open');
+  const second = h.actions.answerPrompt(Q.id, { kind: 'question', answers: { [QUESTION]: 'No, this is enough' } }, 'No, this is enough');
+  assert.equal(h.answers().length, 2);
+  return { h, second };
+}
+
+test('a second answer after one that may have landed: already_resolved keeps the first as the likely winner', async () => {
+  const { h, second } = await answeredTwice();
+  h.last('prompt.answer').resolve({ outcome: 'already_resolved' });
+  await second;
+  assert.equal(h.card(Q.id)?.phase, 'answered', 'not "Already answered on the laptop"');
+  assert.equal(h.card(Q.id)?.summary, 'Yes, add the test');
+  assert.equal(h.state().prompts.answeredHere[Q.id], 'Yes, add the test');
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+  assert.equal(h.card(Q.id), undefined);
+});
+
+test('a second answer after one that may have landed: a laptop resolution still reads "Answered on the laptop"', async () => {
+  const { h, second } = await answeredTwice();
+  h.last('prompt.answer').resolve({ outcome: 'already_resolved' });
+  await second;
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'laptop') });
+  assert.deepEqual(h.receipts(), ['Answered on the laptop']);
+  assert.equal(h.card(Q.id), undefined);
+});
+
+test('a second answer after one that may have landed: delivered makes the second the one recorded', async () => {
+  const { h, second } = await answeredTwice();
+  h.last('prompt.answer').resolve({ outcome: 'delivered' });
+  await second;
+  assert.equal(h.state().prompts.answeredHere[Q.id], 'No, this is enough');
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'unknown') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: No, this is enough']);
+});
+
+test('a second answer after one that may have landed: a refusal keeps the first, and the card open', async () => {
+  const { h, second } = await answeredTwice();
+  h.last('prompt.answer').reject(new AppError('refused', REFUSED_TEXT));
+  await second;
+  assert.equal(h.card(Q.id)?.phase, 'open');
+  assert.equal(h.card(Q.id)?.refusal, REFUSED_TEXT);
+  assert.equal(h.state().prompts.answeredHere[Q.id], 'Yes, add the test');
+  h.changed({ prompts: [P], resolved: resolved(Q.id, 'unknown') });
+  assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test']);
+  assert.equal(h.card(Q.id), undefined);
+});
+
+test('a held resolution with a reply that may have landed reads as this phone\'s', async () => {
+  for (const [code, message] of MAYBE) {
+    const h = await showing();
+    const pending = h.actions.answerPrompt(Q.id, YES, 'Yes, add the test');
+    h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
+    h.last('prompt.answer').reject(new AppError(code as 'internal', message));
+    await pending;
+    assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test'], code);
+    assert.equal(h.card(Q.id), undefined, code);
+    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false, code);
+  }
+});
+
+test('a held resolution after an earlier answer that may have landed reads as that answer, however the second ends', async () => {
+  for (const reply of ['already_resolved', new AppError('refused', REFUSED_TEXT)] as const) {
+    const { h, second } = await answeredTwice();
+    h.changed({ prompts: [P], resolved: resolved(Q.id, 'phone') });
+    if (reply instanceof AppError) h.last('prompt.answer').reject(reply);
+    else h.last('prompt.answer').resolve({ outcome: reply });
+    await second;
+    const label = reply instanceof AppError ? reply.code : reply;
+    assert.deepEqual(h.receipts(), ['Answered on this phone: Yes, add the test'], label);
+    assert.equal(h.card(Q.id), undefined, label);
+    assert.equal(Object.hasOwn(h.state().prompts.answeredHere, Q.id), false, label);
+  }
 });
 
 // MARK: - Dismissing

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { PhonePrompt, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptChangedData } from '../protocol/types.ts';
 import {
   ANSWERED_HERE_LIMIT, answerFits, answerSummary, applyPromptChanged, beginAnswer, cardFor, chooseOption, chooseOther, dismissCard,
-  emptyPrompts, emptyQuestionDraft, openPrompt, permissionAnswer, questionAnswer, questionValue, receiptSource, receiptText,
+  emptyPrompts, emptyQuestionDraft, mayHaveLanded, openPrompt, permissionAnswer, questionAnswer, questionValue, receiptSource, receiptText,
   refuseAnswer, setOtherText, settleAnswer, trimLikeLaptop,
 } from './prompts.ts';
 import type { PromptsState, QuestionDraft } from './prompts.ts';
@@ -413,7 +413,7 @@ test('a held resolution gives its receipt for the session the card is in', () =>
 });
 
 test("a held resolution's reply drops the prompt's answeredHere entry, however it ends", () => {
-  for (const settled of [{ outcome: 'delivered' }, { outcome: 'already_resolved' }, { error: 'refused', message: 'No.' }] as const) {
+  for (const settled of [{ outcome: 'delivered' }, { outcome: 'already_resolved' }, { error: 'refused', message: 'No.', mayHaveLanded: false }] as const) {
     // An answer delivered, then its prompt gone with no resolution and back: its entry stays.
     let s = beginAnswer(withOpen('a'), 'a', 'First', 't1');
     s = settleAnswer(s, 'a', 't1', { outcome: 'delivered' }).prompts;
@@ -460,6 +460,28 @@ test('dismissCard takes down any card but a sending one', () => {
   const sending = beginAnswer(s, 'a', 'x', 't');
   assert.equal(dismissCard(sending, 'a'), sending);
   assert.equal(dismissCard(s, 'zzz'), s);
+});
+
+test('which failures may mean the answer landed', () => {
+  for (const code of ['not_confirmed', 'bad_reply', 'internal']) {
+    assert.equal(mayHaveLanded(code, true), true, code);
+    assert.equal(mayHaveLanded(code, false), true, code);
+  }
+  assert.equal(mayHaveLanded('too_large', true), true, "the loader's, after posting");
+  assert.equal(mayHaveLanded('too_large', false), false, "the client's, before posting");
+  for (const code of ['refused', 'not_found', 'bad_request', 'unsupported', 'unavailable', 'phone_control_off', 'not_open', 'superseded', 'constructor']) {
+    assert.equal(mayHaveLanded(code, true), false, code);
+  }
+});
+
+test('an error that may have landed records the answer, and the card goes back open', () => {
+  const s = beginAnswer(withOpen('a'), 'a', 'Yes', 't1');
+  const after = settleAnswer(s, 'a', 't1', { error: 'not_confirmed', message: 'Check.', mayHaveLanded: true }).prompts;
+  assert.equal(after.cards['a']!.phase, 'open');
+  assert.equal(after.cards['a']!.refusal, 'Check.');
+  assert.equal(after.answeredHere['a'], 'Yes');
+  const refused = settleAnswer(s, 'a', 't1', { error: 'refused', message: 'No.', mayHaveLanded: false }).prompts;
+  assert.equal(Object.hasOwn(refused.answeredHere, 'a'), false);
 });
 
 // MARK: - answerFits

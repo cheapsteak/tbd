@@ -22,21 +22,27 @@
  * gesture sends one answer. Its reply (`settleAnswer`):
  * - `delivered` or `unknown` turns the card `answered`, and records the answer's summary in
  *   `answeredHere`;
- * - `already_resolved` turns it `elsewhere`;
+ * - `already_resolved` turns it `elsewhere`, unless `answeredHere` holds an earlier answer of
+ *   this phone's to the prompt, which may have landed: that is the likely winner, so the card
+ *   turns `answered` with the earlier summary, and the entry stays;
  * - an error turns it back `open`, with the laptop's message as its `refusal`, except
- *   `superseded`, which leaves no refusal.
+ *   `superseded`, which leaves no refusal. An error that may mean the answer landed all the same
+ *   (`mayHaveLanded`) records it in `answeredHere` too, as `unknown` does, so its resolution reads
+ *   as this phone's; any other records nothing.
  *
  * **A resolution** (`applyPromptChanged`) leaves a receipt, `receiptText(receiptSource(…))`,
  * and then:
  * - an `answered` card is taken down;
- * - an `open` card turns `elsewhere`, `elsewhereBy` saying who answered;
+ * - an `open` card is taken down when the receipt is this phone's (an answer that may have
+ *   landed), and otherwise turns `elsewhere`, `elsewhereBy` saying who answered;
  * - an `elsewhere` card stays, and takes `elsewhereBy` from the resolution when it names one;
  * - a `sending` card with a laptop resolution turns `elsewhere` (`laptop`) with the receipt "Answered
  *   on the laptop" at once, and its reply then changes nothing. With a `phone` or `unknown`
  *   resolution the card holds it (`held`), with no receipt yet, since the laptop may be naming this
- *   phone's own answer: `settleAnswer` writes the receipt once the reply comes, "Answered on this
- *   phone: <summary>" and the card taken down for `delivered` or `unknown`, or the receipt as if
- *   this phone had not answered, and the card `elsewhere`, for `already_resolved` or an error.
+ *   phone's own answer: `settleAnswer` writes the receipt once the reply comes. It reads "Answered
+ *   on this phone: <summary>", and the card is taken down, when the reply says the answer landed
+ *   or may have, or when an earlier answer of this phone's may have; otherwise the receipt reads
+ *   as if this phone had not answered, and the card turns `elsewhere`.
  *
  * A resolution's `answeredHere` entry goes once the resolution is applied, and the record keeps
  * at most `ANSWERED_HERE_LIMIT` entries, the oldest going first, for answers whose resolution
@@ -147,7 +153,8 @@ export function applyPromptChanged(
     if (card.phase === 'answered') {
       cards.delete(id);
     } else if (card.phase === 'open') {
-      cards.set(id, { ...card, phase: 'elsewhere', elsewhereBy: by, refusal: null });
+      if (source === 'thisPhone') cards.delete(id);
+      else cards.set(id, { ...card, phase: 'elsewhere', elsewhereBy: by, refusal: null });
     } else if (by !== null && by !== card.elsewhereBy && source !== 'thisPhone') {
       cards.set(id, { ...card, elsewhereBy: by });
     }
@@ -246,8 +253,28 @@ export function beginAnswer(s: PromptsState, promptID: string, summary: string, 
   return withCard(s, promptID, { ...card, phase: 'sending', refusal: null, summary, answerID, held: null });
 }
 
-/** How a `prompt.answer` ended: the laptop's outcome, or the error it failed with. */
-export type AnswerSettlement = { outcome: PromptAnswerOutcome } | { error: string; message: string };
+/**
+ * How a `prompt.answer` ended: the laptop's outcome, or the error it failed with, `mayHaveLanded`
+ * saying whether the answer may have reached the prompt all the same (`mayHaveLanded`).
+ */
+export type AnswerSettlement = { outcome: PromptAnswerOutcome } | { error: string; message: string; mayHaveLanded: boolean };
+
+/**
+ * Whether an answer that failed with `code` may have reached the prompt all the same
+ * (`ACTING_METHODS` in `client/client.ts`):
+ * - `not_confirmed`: the channel dropped before the laptop answered;
+ * - `bad_reply`: the laptop answered, in a reply this app cannot read;
+ * - `internal`: the laptop failed after it may have acted, such as on a result that does not
+ *   decode;
+ * - `too_large` when `fitsOneFrame`: the loader refused a body all the same, and the client
+ *   fails the largest one posted, which need not be the one it refused. A body that does not fit
+ *   one frame is refused before it is posted, with the same code, and never lands.
+ *
+ * Every other code is a refusal: the laptop did not act on it.
+ */
+export function mayHaveLanded(code: string, fitsOneFrame: boolean): boolean {
+  return code === 'not_confirmed' || code === 'bad_reply' || code === 'internal' || (code === 'too_large' && fitsOneFrame);
+}
 
 /**
  * `s` with the reply to the answer whose token is `answerID` folded into `promptID`'s card, and
@@ -263,25 +290,32 @@ export function settleAnswer(
 ): { prompts: PromptsState; receipt: { session: PhoneSessionRef; id: string; text: string } | null } {
   const card = own(s.cards, promptID);
   if (card === undefined || card.phase !== 'sending' || card.answerID !== answerID) return { prompts: s, receipt: null };
-  const landed = 'outcome' in settled && settled.outcome !== 'already_resolved';
+  const landed = 'outcome' in settled ? settled.outcome !== 'already_resolved' : settled.mayHaveLanded;
+  /** The summary of an earlier answer of this phone's to the prompt, which may have landed. */
+  const earlier = own(s.answeredHere, promptID);
   if (card.held !== null) {
     const held = card.held;
-    const text = landed ? receiptText('thisPhone', card.summary) : receiptText(receiptSource(held, false), null);
-    const receipt = { session: card.session, id: promptID, text };
-    const after = landed
+    const source = landed ? 'thisPhone' : receiptSource(held, earlier !== undefined);
+    const receipt = { session: card.session, id: promptID, text: receiptText(source, landed ? card.summary : (earlier ?? null)) };
+    const after = source === 'thisPhone'
       ? withoutCard(s, promptID)
       : withCard(s, promptID, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null });
     return { prompts: forget(after, promptID), receipt };
   }
-  if (landed) {
-    const answered = withCard(s, promptID, { ...card, phase: 'answered', answerID: null });
-    return { prompts: { ...answered, answeredHere: remember(answered.answeredHere, promptID, card.summary ?? '') }, receipt: null };
-  }
   if ('outcome' in settled) {
-    return { prompts: withCard(s, promptID, { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }), receipt: null };
+    if (landed) {
+      const answered = withCard(s, promptID, { ...card, phase: 'answered', answerID: null });
+      return { prompts: { ...answered, answeredHere: remember(answered.answeredHere, promptID, card.summary ?? '') }, receipt: null };
+    }
+    const after: CardState = earlier === undefined
+      ? { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }
+      : { ...card, phase: 'answered', summary: earlier, answerID: null };
+    return { prompts: withCard(s, promptID, after), receipt: null };
   }
   const refusal = settled.error === 'superseded' ? null : settled.message;
-  return { prompts: withCard(s, promptID, { ...card, phase: 'open', refusal, summary: null, answerID: null }), receipt: null };
+  const reopened = withCard(s, promptID, { ...card, phase: 'open', refusal, summary: null, answerID: null });
+  if (!landed) return { prompts: reopened, receipt: null };
+  return { prompts: { ...reopened, answeredHere: remember(reopened.answeredHere, promptID, card.summary ?? '') }, receipt: null };
 }
 
 /** `s` with `promptID`'s `open` card showing `refusal`, or `s` itself when it has no `open` card. */

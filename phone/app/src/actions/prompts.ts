@@ -30,13 +30,19 @@
 // send that failed with `not_confirmed`, `bad_reply`, `internal` or `too_large` may have
 // happened all the same (`ACTING_METHODS` in `client/client.ts`), and a new ID is a new action
 // to the laptop. Show the error, and leave the choice to the user: such a failure turns the card
-// back `open` with the error's message, and only a new tap sends again.
+// back `open` with the error's message, and only a new tap sends again. It also records the
+// answer as this phone's (`mayHaveLanded` in `state/prompts.ts`), so that if it did land, its
+// resolution reads "Answered on this phone". To tell the loader's `too_large`, which may come
+// after the answer was posted, from the client's, refused before posting, the action checks the
+// body against one frame itself, as the client does.
 //
 // The stubs until task 6d-6: `setDraft` does nothing, and `sendMessage` resolves at once.
 
 import { AppError, newRequestID } from '../client/client.ts';
-import type { PhoneSessionRef, PromptAnswer } from '../protocol/types.ts';
-import { answerFits, beginAnswer, dismissCard, openPrompt, refuseAnswer, settleAnswer } from '../state/prompts.ts';
+import { fitsFrame } from '../limits.ts';
+import type { PhonePromptAnswerParams, PhoneSessionRef, PromptAnswer } from '../protocol/types.ts';
+import { requestBody } from '../protocol/wire.ts';
+import { answerFits, beginAnswer, dismissCard, mayHaveLanded, openPrompt, refuseAnswer, settleAnswer } from '../state/prompts.ts';
 import type { AnswerSettlement, PromptsState } from '../state/prompts.ts';
 import { findSession } from '../state/route.ts';
 import type { AppState } from '../state/store.ts';
@@ -60,6 +66,19 @@ function answerTarget(s: AppState, promptID: string, answer: PromptAnswer): { re
   return { ref: found.session.ref };
 }
 
+/**
+ * Whether `params` make a `prompt.answer` body that fits one frame, measured as the client
+ * measures it before posting (`request` in `client/client.ts`), with an ID of the length the
+ * client gives. One that does not is refused `too_large` before it is posted.
+ */
+function fitsOneFrame(params: PhonePromptAnswerParams): boolean {
+  try {
+    return fitsFrame(requestBody(newRequestID(), 'prompt.answer', params));
+  } catch {
+    return false;
+  }
+}
+
 function withPrompts(s: AppState, prompts: PromptsState): AppState {
   return prompts === s.prompts ? s : { ...s, prompts };
 }
@@ -79,14 +98,17 @@ export function promptActions(ctx: ActionContext, self: () => Actions) {
         return withPrompts(s, beginAnswer(s.prompts, promptID, summary, answerID));
       });
       if (target.ref === null) return;
+      const params: PhonePromptAnswerParams = { session: target.ref, promptID, answer };
+      const fits = fitsOneFrame(params);
       let settled: AnswerSettlement;
       try {
-        const result = await client.request('prompt.answer', { session: target.ref, promptID, answer });
+        const result = await client.request('prompt.answer', params);
         settled = { outcome: result.outcome };
       } catch (error) {
+        // An error that is no `AppError` is a fault in the client's own setup, which posts nothing.
         settled = error instanceof AppError
-          ? { error: error.code, message: error.message }
-          : { error: 'internal', message: error instanceof Error ? error.message : String(error) };
+          ? { error: error.code, message: error.message, mayHaveLanded: mayHaveLanded(error.code, fits) }
+          : { error: 'internal', message: error instanceof Error ? error.message : String(error), mayHaveLanded: false };
       }
       store.update((s) => {
         const { prompts, receipt } = settleAnswer(s.prompts, promptID, answerID, settled);
