@@ -1028,11 +1028,13 @@ public final class GhosttyTerminalView: NSView {
 
     /// Whether a frame due at `now` would find the GPU behind: the ring has no free slot, or the
     /// tracker counts the drawable limit. Main is the only thread that takes slots and drawables,
-    /// so a no here stays true until this frame takes them.
+    /// so a no here stays true until this frame takes them. The tracker is asked on every tick,
+    /// full ring or not, so its timers run on every frame's `now`, whichever of the two holds the
+    /// frame back.
     private func isGPUBehind(now: Duration) -> Bool {
         let ringHasFreeSlot = surface.frameRing?.hasFreeSlot ?? true
-        return !ringHasFreeSlot
-            || drawableTracker.awaitingPresent(now: now) >= drawableTracker.limit
+        let awaitingPresent = drawableTracker.awaitingPresent(now: now)
+        return !ringHasFreeSlot || awaitingPresent >= drawableTracker.limit
     }
 
     // MARK: - Cursor blink

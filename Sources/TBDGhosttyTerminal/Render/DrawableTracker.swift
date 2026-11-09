@@ -65,11 +65,12 @@ final class DrawableTracker: Sendable {
         var lastID: UInt64 = 0
         /// Every report, whatever drawable it names.
         var reports: UInt64 = 0
-        /// `reports` as the last check saw it.
-        var reportsSeen: UInt64 = 0
-        /// The `now` of the check that first saw the latest report. Reports carry no `now` of
-        /// their own, so the check that notices one stamps it: late, never early.
+        /// When the latest report arrived, in the frames' timebase. Dated by its `presentedTime`,
+        /// which is host time, as the display link's timestamps are. A report with none is dated
+        /// by the `now` of the check that first sees it: late, never early.
         var lastReportAt: Duration?
+        /// A report with no `presentedTime` came in, and no check has dated it yet.
+        var undatedReportPending = false
         /// Set by a nil drawable: the pool is full whatever the entries say.
         var hold: LimitHold?
         /// Whether this run of unreported presents has logged its notice. A report ends the run.
@@ -96,9 +97,9 @@ final class DrawableTracker: Sendable {
     /// anything. Clears the entries when no report has arrived for `presentReportTimeout`.
     func awaitingPresent(now: Duration) -> Int {
         let (count, clearedForNotice) = state.withLock { state -> (Int, Int?) in
-            if state.reports != state.reportsSeen {
-                state.reportsSeen = state.reports
-                state.lastReportAt = now
+            if state.undatedReportPending {
+                state.undatedReportPending = false
+                state.lastReportAt = max(state.lastReportAt ?? now, now)
             }
             switch state.hold {
             case nil:
@@ -173,14 +174,21 @@ final class DrawableTracker: Sendable {
     /// removed it, removes nothing, but still counts as a report: Metal is reporting this layer's
     /// presents, and a present frees a drawable.
     ///
-    /// - Parameter presentedTime: the drawable's `presentedTime`. Zero is a frame that "has not
-    ///   been presented or has been skipped", which is counted.
+    /// - Parameter presentedTime: the drawable's `presentedTime`, which dates the report. Zero is a
+    ///   frame that "has not been presented or has been skipped": it is counted, and the next
+    ///   check dates the report instead.
     func reportPresented(_ id: DrawableID, presentedTime: CFTimeInterval) {
         state.withLock { state in
             state.reports &+= 1
             state.noticeLoggedThisRun = false
             state.hold = nil
-            if presentedTime == 0 { state.skippedPresents += 1 }
+            if presentedTime > 0 {
+                let presentedAt = Duration.seconds(presentedTime)
+                state.lastReportAt = max(state.lastReportAt ?? presentedAt, presentedAt)
+            } else {
+                state.skippedPresents += 1
+                state.undatedReportPending = true
+            }
             if let index = state.entries.firstIndex(where: { $0.id == id }) {
                 state.entries.removeSubrange(...index)
             }
@@ -201,11 +209,11 @@ final class DrawableTracker: Sendable {
     /// drawn just before a vsync landing on the same vsync as the next one.
     var skippedPresents: Int { state.withLock { $0.skippedPresents } }
 
-    /// Reports the newest entry presented, as its presented handler would. A test seam: an
-    /// offscreen window's drawables may never be reported, so the view tests report each frame's
-    /// drawable this way. Does nothing with no entries.
+    /// Reports the newest entry presented, as its presented handler would, at the time it was
+    /// acquired. A test seam: an offscreen window's drawables may never be reported, so the view
+    /// tests report each frame's drawable this way. Does nothing with no entries.
     func reportNewestPresented() {
-        guard let newest = state.withLock({ $0.entries.last?.id }) else { return }
-        reportPresented(newest, presentedTime: 1)
+        guard let newest = state.withLock({ $0.entries.last }) else { return }
+        reportPresented(newest.id, presentedTime: newest.acquiredAt / .seconds(1))
     }
 }

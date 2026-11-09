@@ -1233,6 +1233,42 @@ struct GhosttyTerminalViewBackpressureTests {
                 "after the hold ended (\(end)) the view committed \(committed) frames (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
     }
 
+    /// A frame whose render encoder cannot be made drops its acquired drawable unpresented. The
+    /// drop path removes that drawable's entry by id, since no report may ever come for it and an
+    /// entry left behind would count against the limit until the timeout.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDrawableDroppedForWantOfAnEncoderLeavesTheTracker() throws {
+        // A font size no other test uses, so a renderer no other view shares: the seam below
+        // changes it for every view drawn with it.
+        let fixture = try ViewFixture(fontSize: 12.25, reportsPresents: false)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        view.now = { .seconds(100) }
+        let renderer = view.renderContext.renderer
+        let makeRenderEncoder = renderer.makeRenderEncoder
+        renderer.makeRenderEncoder = { _, _ in nil }
+        defer { renderer.makeRenderEncoder = makeRenderEncoder }
+        let tracker = view.drawableTracker
+        let acquiredBefore = tracker.acquiredCount
+        fixture.terminal.feed(text: "no encoder")
+
+        view.renderTick()
+        let built = view.framesBuilt
+        #expect(built == 1, "the tick built \(built) frames")
+        let acquired = tracker.acquiredCount - acquiredBefore
+        try #require(acquired == 1,
+                     "the frame acquired \(acquired) drawables (nil drawables so far: \(renderer.stats.nilDrawables))")
+        let committed = view.framesCommitted
+        #expect(committed == 0, "a frame with no encoder was committed \(committed) times")
+        let left = tracker.entryCount
+        #expect(left == 0, "the drawable dropped unpresented left \(left) entries")
+    }
+
     /// `drawFrameNow()` skips the drawable limit, because the instruments that call it draw in
     /// offscreen windows whose presents may never be reported. Its drawable is still tracked.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

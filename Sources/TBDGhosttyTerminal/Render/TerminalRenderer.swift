@@ -41,7 +41,8 @@ import TBDGhosttyShaderTypes
 struct RenderStats: Sendable, Hashable {
     /// Frames actually encoded and committed.
     var framesEncoded = 0
-    /// Frames that returned early because nothing changed (or nothing was attached).
+    /// Frames that returned without encoding: nothing changed or nothing was attached, or the frame
+    /// was dropped for want of a ring slot, a drawable or a render encoder.
     var framesSkipped = 0
     /// Frames that got as far as asking for a render target (`nextDrawable()` on the layer path).
     /// The idle guarantee is `drawableRequests == 0` for a skipped frame.
@@ -95,6 +96,12 @@ final class TerminalRenderer {
     var minimumContrast: Float = 1
 
     private(set) var stats = RenderStats()
+
+    /// Makes the frame's render encoder. A seam: a test returns nil to take the path that drops an
+    /// acquired drawable unpresented, which Metal gives no way to force.
+    var makeRenderEncoder: (any MTLCommandBuffer, MTLRenderPassDescriptor) -> (any MTLRenderCommandEncoder)? = {
+        $0.makeRenderCommandEncoder(descriptor: $1)
+    }
 
     private let bgPipeline: MTLRenderPipelineState
     private let rectPipeline: MTLRenderPipelineState
@@ -335,6 +342,19 @@ final class TerminalRenderer {
                                  glyphCount: surface.glyphCount, rectCount: surface.rectCount)
         }
 
+        // Lazily, because a `TerminalSurface` has no `MTLDevice` of its own: it holds the ring,
+        // the renderer creates it on first encode.
+        let ring = surface.frameRing ?? { let fresh = FrameRing(); surface.frameRing = fresh; return fresh }()
+        // A display tick drops the frame rather than wait for the GPU. The view checked
+        // `hasFreeSlot` before the build and only main takes slots, so this cannot fail on that
+        // path; it still guards the slot. Before `willEncode`, so a dropped frame starts no draw.
+        // The surface stays dirty, so the next frame draws.
+        guard let slot = waitsForSlot ? ring.acquire() : ring.tryAcquire() else {
+            stats.framesSkipped += 1
+            return RenderOutcome(didEncode: false, commandBuffer: nil, update: update,
+                                 glyphCount: surface.glyphCount, rectCount: surface.rectCount)
+        }
+
         willEncode()
         let metrics = glyphCache.metrics
         let geometry = GridGeometry(metrics: metrics, viewportWidth: width, viewportHeight: height)
@@ -342,18 +362,6 @@ final class TerminalRenderer {
 
         // One `replace(region:)` per atlas per frame, before anything is encoded.
         glyphCache.flushUploads()
-
-        // Lazily, because a `TerminalSurface` has no `MTLDevice` of its own: it holds the ring,
-        // the renderer creates it on first encode.
-        let ring = surface.frameRing ?? { let fresh = FrameRing(); surface.frameRing = fresh; return fresh }()
-        // A display tick drops the frame rather than wait for the GPU. The view checked
-        // `hasFreeSlot` before the build and only main takes slots, so this cannot fail on that
-        // path; it still guards the slot. The surface stays dirty, so the next frame draws.
-        guard let slot = waitsForSlot ? ring.acquire() : ring.tryAcquire() else {
-            stats.framesSkipped += 1
-            return RenderOutcome(didEncode: false, commandBuffer: nil, update: update,
-                                 glyphCount: surface.glyphCount, rectCount: surface.rectCount)
-        }
 
         let backgroundBuffer = upload(surface.backgroundCells, into: &slot.background)
         // Borrowed, not returned: the surface flattens into a buffer it keeps and we upload
@@ -400,7 +408,7 @@ final class TerminalRenderer {
         pass.colorAttachments[0].clearColor = clearColor(surface.colors.background)
         pass.colorAttachments[0].storeAction = .store
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let encoder = makeRenderEncoder(commandBuffer, pass) else {
             ring.release()
             stats.framesSkipped += 1
             return RenderOutcome(didEncode: false, commandBuffer: nil, update: update,

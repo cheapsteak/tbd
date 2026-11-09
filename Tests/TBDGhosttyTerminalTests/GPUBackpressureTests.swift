@@ -170,8 +170,7 @@ struct DrawableTrackerTests {
         let late = tracker.add(acquiredAt: .seconds(99.75))
         _ = tracker.add(acquiredAt: .seconds(100))
         _ = tracker.add(acquiredAt: .seconds(100.25))
-        // The first drawable's report arrives after the other two were acquired. The check at
-        // 100.5 s is the first to see it.
+        // The first drawable is reported presented at 100.5 s, after the other two were acquired.
         tracker.reportPresented(late, presentedTime: 100.5)
         let seen = tracker.awaitingPresent(now: .seconds(100.5))
         #expect(seen == 2, "the late report left \(seen) awaiting")
@@ -193,6 +192,40 @@ struct DrawableTrackerTests {
 
         let awaiting = tracker.awaitingPresent(now: .seconds(101))
         #expect(awaiting == 0, "a report from before the entries held off their clear: \(awaiting) awaiting")
+    }
+
+    /// A report is dated by its `presentedTime`, not by the check that first sees it. After a
+    /// pause with no frames, the first check finds the last report long past and clears at once:
+    /// dated by that check, it would hold the entries, and the ticks, for another timeout.
+    @Test func aReportIsDatedByItsPresentedTimeNotByTheCheckThatSeesIt() {
+        let tracker = DrawableTracker()
+        let reported = tracker.add(acquiredAt: .seconds(100))
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+        _ = tracker.add(acquiredAt: .seconds(100.5))
+        tracker.reportPresented(reported, presentedTime: 100.75)
+
+        // The first check after the pause.
+        let afterPause = tracker.awaitingPresent(now: .seconds(130))
+        #expect(afterPause == 0, "a report 29 s old held off the clear: \(afterPause) awaiting")
+    }
+
+    /// A report with no `presentedTime` is dated by the `now` of the check that first sees it:
+    /// late, never early. It still holds off the clear, for a timeout from that check.
+    @Test func aReportWithNoPresentedTimeIsDatedByTheCheckThatFirstSeesIt() {
+        let tracker = DrawableTracker()
+        let skipped = tracker.add(acquiredAt: .seconds(100))
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+        _ = tracker.add(acquiredAt: .seconds(100.5))
+        tracker.reportPresented(skipped, presentedTime: 0)
+
+        let seen = tracker.awaitingPresent(now: .seconds(100.5))
+        #expect(seen == 2, "the undated report left \(seen) awaiting")
+        // A timeout after the oldest entry left, 0.75 s after the check that dated the report.
+        let soonAfter = tracker.awaitingPresent(now: .seconds(101.25))
+        #expect(soonAfter == 2, "0.75 s after an undated report was seen the entries were cleared: \(soonAfter) awaiting")
+        // A later check does not date the report again.
+        let aTimeoutAfter = tracker.awaitingPresent(now: .seconds(101.5))
+        #expect(aTimeoutAfter == 0, "a timeout after the undated report was seen the entries stayed: \(aTimeoutAfter) awaiting")
     }
 
     /// With no report for `presentReportTimeout` the entries clear, and the first clear of a run
