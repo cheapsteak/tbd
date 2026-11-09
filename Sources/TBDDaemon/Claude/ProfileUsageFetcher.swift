@@ -168,7 +168,7 @@ public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
                 }
             }
             do {
-                try process.run()
+                try process.runDisarmingHandlerOnFailure()
             } catch {
                 continuation.resume(throwing: ClaudeOAuthTokenReadError(
                     "failed to launch /usr/bin/security: \(error.localizedDescription)"))

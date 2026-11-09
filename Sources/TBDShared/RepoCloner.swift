@@ -145,7 +145,7 @@ public final class RepoCloner: RepoCloning {
                                                stdout: String(bytes: data, encoding: .utf8) ?? ""))
             }
             do {
-                try process.run()
+                try process.runDisarmingHandlerOnFailure()
             } catch {
                 continuation.resume(returning: nil)
             }

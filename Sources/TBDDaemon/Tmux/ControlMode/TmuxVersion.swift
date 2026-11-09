@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// A parsed tmux version, comparable so callers can gate features on a minimum.
 ///
@@ -64,7 +65,7 @@ extension TmuxVersion {
                 continuation.resume(returning: TmuxVersion.parse(String(bytes: data, encoding: .utf8) ?? ""))
             }
             do {
-                try process.run()
+                try process.runDisarmingHandlerOnFailure()
             } catch {
                 continuation.resume(returning: nil)
             }
