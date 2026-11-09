@@ -6,6 +6,12 @@ import os
 private let logger = Logger(subsystem: "com.tbd.app", category: "modelProfiles")
 
 extension AppState {
+    /// Opens Settings on the Model Profiles tab.
+    func openModelProfilesSettings() {
+        settingsTab = .modelProfiles
+        settingsWindowOpener()
+    }
+
     // MARK: - Model Profile Actions
     //
     // IMPORTANT: never include the raw token string in any logger / alert
