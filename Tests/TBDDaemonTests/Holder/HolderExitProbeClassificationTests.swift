@@ -145,14 +145,13 @@ import TBDKernel
     /// A holder that pushed its exit has answered, whatever the connection did
     /// afterwards.
     ///
-    /// This is the shape the reclaimer actually meets, and the one that
-    /// recorded a wrong status: the holder pushes at whichever client is
-    /// connected and winds down in the same breath, so the probe is handed
-    /// `.exited(code: 7)` and *then* finds the socket hung up under it. The
-    /// push is retired as unsolicited — correctly, it answers no request — and
-    /// reading only the failure retries at a rendezvous the holder has already
-    /// unlinked, where `ENOENT` reads as absence and `exitedStatusUnknown` goes
-    /// into the record for a child that exited ordinarily.
+    /// This is the shape that recorded a wrong status: the holder pushes and
+    /// winds down in the same breath, so the probe is handed `.exited(code: 7)`
+    /// and *then* finds the socket hung up under it. The push is retired as
+    /// unsolicited — correctly, it answers no request — and reading only the
+    /// failure retries at a rendezvous the holder has already unlinked, where
+    /// `ENOENT` reads as absence and `exitedStatusUnknown` goes into the record
+    /// for a child that exited ordinarily.
     @Test func aPushedExitOutranksTheFailureThatFollowedIt() {
         for failure: HolderClient.Error in [
             .peerClosed,

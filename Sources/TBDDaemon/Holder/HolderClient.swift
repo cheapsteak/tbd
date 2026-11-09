@@ -93,12 +93,12 @@ actor HolderClient {
     /// The most recent description the holder sent **without being asked**.
     ///
     /// The holder pushes a `.described` frame carrying the terminal status when
-    /// the child exits while a client is connected, and the kernel routinely
-    /// delivers that push in the same read as the answer it trails. Such a
-    /// frame answers nobody's request, so it is retired from the queue rather
-    /// than handed to whoever asks next — and kept here, because it is the one
-    /// place a child's exit status arrives unsolicited and throwing it away
-    /// silently would lose the fact entirely.
+    /// the child exits while a client it has already answered is connected,
+    /// and the kernel routinely delivers that push in the same read as the
+    /// answer it trails. Such a frame answers nobody's request, so it is
+    /// retired from the queue rather than handed to whoever asks next — and
+    /// kept here, because it is the one place a child's exit status arrives
+    /// unsolicited and throwing it away silently would lose the fact entirely.
     ///
     /// Deliberately survives `close()`: it is an observation about the child,
     /// not connection state.
@@ -149,12 +149,13 @@ actor HolderClient {
     /// same errno rules and those rules still live in one place.
     ///
     /// Bounded by the kernel, and genuinely bounded. `SO_RCVTIMEO` is set
-    /// after `connect` returns and so does not cover it — but on Darwin a
-    /// `connect(2)` to an `AF_UNIX` path cannot wait for a listener either:
-    /// `sonewconn` refuses once the accept queue is at its limit, so a
-    /// saturated rendezvous comes back `ECONNREFUSED` in microseconds rather
-    /// than sleeping until the queue drains, which is what the same call would
-    /// do on Linux. `HolderClientTests`
+    /// before `connect` but bounds reads, not the connect: XNU's `AF_UNIX`
+    /// connect never sleeps on the receive timeout. It does not need to, since
+    /// on Darwin a `connect(2)` to an `AF_UNIX` path cannot wait for a
+    /// listener either: `sonewconn` refuses once the accept queue is at its
+    /// limit, so a saturated rendezvous comes back `ECONNREFUSED` in
+    /// microseconds rather than sleeping until the queue drains, which is what
+    /// the same call would do on Linux. `HolderClientTests`
     /// `.aSaturatedRendezvousIsRefusedImmediatelyRatherThanBlocking` measures
     /// both halves, because a platform property is exactly the kind of premise
     /// that rots silently.
@@ -312,6 +313,18 @@ actor HolderClient {
         // holder would be answered with the busy sentinel by a holder whose
         // real client let go minutes earlier.
         _ = fcntl(socketFD, F_SETFD, FD_CLOEXEC)
+        // A holder that has already reported an exit closes as soon as it has,
+        // so a write can legitimately land on a socket whose peer is gone.
+        // Without this that write raises SIGPIPE, whose default disposition
+        // would take the whole daemon down over one dead holder. Set before
+        // `connect`: XNU refuses `setsockopt` with EINVAL once the peer has
+        // closed, so set afterwards it is lost exactly when a holder hangs up
+        // first.
+        var on: Int32 = 1
+        _ = setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        // The receive timeout, set before `connect` for the same reason.
+        var timeout = Self.timeval(from: receiveTimeout)
+        _ = setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -334,14 +347,6 @@ actor HolderClient {
             throw Error.cannotConnect(path: socketPath, errno: saved)
         }
 
-        var timeout = Self.timeval(from: receiveTimeout)
-        _ = setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        // A holder that has already reported an exit closes as soon as it has,
-        // so a write can legitimately land on a socket whose peer is gone.
-        // Without this that write raises SIGPIPE, whose default disposition
-        // would take the whole daemon down over one dead holder.
-        var on: Int32 = 1
-        _ = setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         fd = socketFD
     }
 

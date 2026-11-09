@@ -291,6 +291,39 @@ actor DaemonClient {
         // daemon's end of this connection; this is the app's end of it.
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
+        // A daemon that dies (or is restarted) between this `connect` and the
+        // `Darwin.send` every caller does next leaves the write landing on a
+        // closed peer, which raises a process-killing SIGPIPE instead of the
+        // `EPIPE`/short-send that `sendRaw` and `subscribe` already report as
+        // `sendFailed`. Per-socket, not the daemon's process-wide
+        // `signal(SIGPIPE, SIG_IGN)`: see `SocketSIGPIPE` for why the app in
+        // particular must not set that disposition (SwiftTerm's `forkpty`
+        // children would inherit it).
+        //
+        // Set before `connect`, never after: XNU refuses `setsockopt` with
+        // EINVAL once the peer has closed, so set afterwards it would be lost
+        // in exactly that case — a daemon gone before this line ran.
+        //
+        // Covered by `AppSocketInheritanceTests.connectedSocketSuppressesSIGPIPE`,
+        // which stands up a listener on a socket path of its own and reads the
+        // option back off the descriptor this returns. Deleting this line
+        // reddens that row.
+        //
+        // So if you are refactoring this function: the symptom of losing this
+        // line is TBDApp vanishing on every `scripts/restart.sh`, which will
+        // read as an unrelated crash. Keep it.
+        SocketSIGPIPE.suppress(on: fd)
+
+        // Bound every blocking recv() on this socket. Without this, a
+        // half-dead daemon (connection stays ESTABLISHED with no FIN — e.g.
+        // live tmux-server death) parks the reading thread in recv() forever,
+        // saturating the cooperative pool and freezing the app↔daemon loop.
+        // SO_RCVTIMEO makes recv() return -1/EAGAIN ~every second so callers
+        // can re-check Task cancellation and overall deadlines. Set before
+        // `connect` for the same reason as `SO_NOSIGPIPE` above.
+        var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString
@@ -316,34 +349,6 @@ actor DaemonClient {
             close(fd)
             throw DaemonClientError.daemonNotRunning
         }
-
-        // Bound every blocking recv() on this socket. Without this, a
-        // half-dead daemon (connection stays ESTABLISHED with no FIN — e.g.
-        // live tmux-server death) parks the reading thread in recv() forever,
-        // saturating the cooperative pool and freezing the app↔daemon loop.
-        // SO_RCVTIMEO makes recv() return -1/EAGAIN ~every second so callers
-        // can re-check Task cancellation and overall deadlines.
-        var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
-
-        // A daemon that dies (or is restarted) between this `connect` and the
-        // `Darwin.send` every caller does next leaves the write landing on a
-        // closed peer, which raises a process-killing SIGPIPE instead of the
-        // `EPIPE`/short-send that `sendRaw` and `subscribe` already report as
-        // `sendFailed`. Per-socket, not the daemon's process-wide
-        // `signal(SIGPIPE, SIG_IGN)`: see `SocketSIGPIPE` for why the app in
-        // particular must not set that disposition (SwiftTerm's `forkpty`
-        // children would inherit it).
-        //
-        // Covered by `AppSocketInheritanceTests.connectedSocketSuppressesSIGPIPE`,
-        // which stands up a listener on a socket path of its own and reads the
-        // option back off the descriptor this returns. Deleting this line
-        // reddens that row.
-        //
-        // So if you are refactoring this function: the symptom of losing this
-        // line is TBDApp vanishing on every `scripts/restart.sh`, which will
-        // read as an unrelated crash. Keep it.
-        SocketSIGPIPE.suppress(on: fd)
 
         return fd
     }

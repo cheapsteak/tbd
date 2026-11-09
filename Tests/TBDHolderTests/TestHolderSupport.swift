@@ -40,6 +40,12 @@ enum TestHolderError: LocalizedError, CustomStringConvertible {
     /// stayed alive, until the shared deadline ran out.
     case connectRefusedUntilDeadline(path: String, refusedAttempts: Int, elapsed: Duration, diagnostics: String)
     case noResponse
+    /// The holder sent `observed` where the test needed `expected`; `meaning`
+    /// says what that reveals about the holder.
+    case unexpectedResponse(expected: String, observed: String, meaning: String, diagnostics: String)
+    /// A test that needed its job to exit and stay unreaped found it reaped:
+    /// the holder noticed the exit before the test woke it.
+    case jobReapedBeforeTheTestWokeTheHolder(jobPID: Int32, diagnostics: String)
 
     var description: String {
         switch self {
@@ -62,6 +68,12 @@ enum TestHolderError: LocalizedError, CustomStringConvertible {
                 + "\n\(diagnostics)"
         case .noResponse:
             return "the holder closed the connection without answering"
+        case .unexpectedResponse(let expected, let observed, let meaning, let diagnostics):
+            return "expected \(expected), got \(observed): \(meaning)\n\(diagnostics)"
+        case .jobReapedBeforeTheTestWokeTheHolder(let jobPID, let diagnostics):
+            return "the holder reaped job \(jobPID) before the test woke it, so the gap between the job's "
+                + "exit and the reap never held open; a holder that ignores --poll-slice-ms reaps within "
+                + "its default \(HolderArguments.defaultPollSliceMilliseconds) ms slice\n\(diagnostics)"
         }
     }
 
@@ -148,6 +160,52 @@ struct HolderWaitTimedOut: Error, CustomStringConvertible {
 
 func processIsAlive(_ pid: Int32) -> Bool {
     pid > 0 && kill(pid, 0) == 0
+}
+
+/// Whether `pid` has exited and is waiting for its parent to reap it.
+///
+/// `processIsAlive` cannot tell: a zombie still answers `kill(pid, 0)` until
+/// it is reaped. The kernel's run state can, and it reports a reaped pid as
+/// nothing at all.
+func processIsZombie(_ pid: Int32) -> Bool {
+    guard pid > 0 else { return false }
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return false }
+    return Int32(info.kp_proc.p_stat) == SZOMB
+}
+
+/// The run state (`TH_STATE_*`) of each of `pid`'s threads, or nil when the
+/// kernel will not list them.
+func threadRunStates(_ pid: Int32) -> [Int32]? {
+    guard pid > 0 else { return nil }
+    var threadIDs = [UInt64](repeating: 0, count: 64)
+    let listed = threadIDs.withUnsafeMutableBytes { buffer in
+        proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, buffer.baseAddress, Int32(buffer.count))
+    }
+    guard listed > 0 else { return nil }
+    var states: [Int32] = []
+    for threadID in threadIDs.prefix(Int(listed) / MemoryLayout<UInt64>.stride) {
+        var info = proc_threadinfo()
+        let size = Int32(MemoryLayout<proc_threadinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTHREADINFO, threadID, &info, size) == size else { return nil }
+        states.append(info.pth_run_state)
+    }
+    return states
+}
+
+/// Whether every thread of `pid` is blocked in an interruptible wait: none is
+/// running, runnable, or in an uninterruptible wait such as a page fault or a
+/// kernel lock.
+///
+/// It does not say which system call a thread is blocked in. The holder runs
+/// one thread, and besides `poll` it can also block interruptibly in a `send`
+/// to a full socket, an `accept` or a log write. See
+/// `HolderLifecycleTests.releaseJobAndHoldItUnreaped` for why that is enough.
+func processIsWaitingInterruptibly(_ pid: Int32) -> Bool {
+    guard let states = threadRunStates(pid), !states.isEmpty else { return false }
+    return states.allSatisfy { $0 == Int32(TH_STATE_WAITING) }
 }
 
 /// Takes whatever is queued on a handed-over pty master, without blocking.
@@ -245,7 +303,10 @@ final class HolderFixture {
         strayDescriptorProbe: Bool = false,
         /// Must match the root any marker paths inside `launch` were built
         /// from; defaults to a fresh one.
-        home: String = HolderFixture.scratchHome()
+        home: String = HolderFixture.scratchHome(),
+        /// Passed as `--poll-slice-ms` when set. See
+        /// `HolderArguments.pollSliceMilliseconds`.
+        pollSliceMilliseconds: Int32? = nil
     ) async throws -> HolderFixture {
         let executable = try #require(locateExecutable(), "TBDHolder must be built beside the test bundle")
         let environment = ["TBD_HOME": home]
@@ -273,17 +334,19 @@ final class HolderFixture {
         // `teardown` removes with the rest of it.
         let launchPath = home + "/launch.json"
         try JSONEncoder().encode(launch).write(to: URL(fileURLWithPath: launchPath))
-        let command = [
+        let pollSliceArguments = pollSliceMilliseconds.map { ["--poll-slice-ms", String($0)] } ?? []
+        let command = ([
             shellQuoted(executable.path),
             "--session", shellQuoted(session.uuidString),
             "--socket", shellQuoted(socketPath),
             "--lock-fd", "9",
             "--launch-fd", "3",
             "--owner", shellQuoted(owner),
+        ] + pollSliceArguments + [
             "3<", shellQuoted(launchPath),
             "&",
             "echo $! >", shellQuoted(pidPath),
-        ].joined(separator: " ")
+        ]).joined(separator: " ")
 
         // O_CLOEXEC on both: they are dup2'd onto the child's stdio, and the
         // originals must then vanish at exec rather than leaking down into the
@@ -580,6 +643,20 @@ final class TestHolderClient {
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw TestHolderError.connectFailed(path: socketPath, errno: errno) }
 
+        // **Socket options are set before `connect`, never after.** XNU
+        // refuses every `setsockopt` with EINVAL once the peer has closed, so
+        // an option set after `connect` is lost whenever a holder hangs up
+        // first.
+        //
+        // A holder that has already reported an exit closes as soon as it has,
+        // so a write can legitimately land on a socket whose peer is gone.
+        // Without `SO_NOSIGPIPE` that write raises SIGPIPE in the test host, a
+        // signal to the whole process that can interrupt another suite's
+        // system call.
+        var on: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        setReceiveTimeout(receiveTimeout)
+
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let sunPathSize = MemoryLayout.size(ofValue: address.sun_path)
@@ -601,15 +678,6 @@ final class TestHolderClient {
             fd = -1
             throw TestHolderError.connectFailed(path: socketPath, errno: saved)
         }
-
-        setReceiveTimeout(receiveTimeout)
-        // A holder that has already reported an exit closes as soon as it has,
-        // so a write can legitimately land on a socket whose peer is gone.
-        // Without this that write raises SIGPIPE, whose default disposition
-        // would kill the TEST RUNNER — every suite in the process, with no
-        // failure attributed to anything.
-        var on: Int32 = 1
-        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
     /// Re-arms `SO_RCVTIMEO`, so one connection can wait out a short silence
@@ -625,11 +693,14 @@ final class TestHolderClient {
     /// Sends one `describe` and then reads until the holder reports a status
     /// that is not `.alive`.
     ///
-    /// Tolerates both orderings, which is not cosmetic: a job that exits
-    /// promptly may already be reaped by the time this client connects, in
-    /// which case the holder pushes the terminal status at accept time and
-    /// never reads the request. Bounded by `SO_RCVTIMEO` — a status that never
-    /// arrives throws rather than hanging.
+    /// Tolerates both orderings, which is not cosmetic. The holder pushes the
+    /// terminal status at a client it has already answered, and its callers
+    /// have each been answered once, so when the holder reaps the job before
+    /// this request reaches it, the status arrives as a push and the holder
+    /// closes: the request is never read, and its write may land on a closed
+    /// socket. A request that arrives first is answered, as `.alive` or with
+    /// the status. Bounded by `SO_RCVTIMEO` — a status that never arrives
+    /// throws rather than hanging.
     func awaitTerminalStatus() throws -> HolderChildDescription {
         try? send(.describe)
         while true {
@@ -640,6 +711,12 @@ final class TestHolderClient {
 
     func send(_ request: HolderRequest) throws {
         try FDChannel.sendData(HolderFraming.frame(request), over: fd)
+    }
+
+    /// Writes raw bytes, for a test that delivers one request's frame in
+    /// pieces.
+    func sendBytes(_ bytes: Data) throws {
+        try FDChannel.sendData(bytes, over: fd)
     }
 
     /// Waits out the connection's receive timeout and reports whatever the

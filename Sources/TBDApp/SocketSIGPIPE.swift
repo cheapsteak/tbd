@@ -40,10 +40,20 @@ enum SocketSIGPIPE {
     private static let refusalLogged = OSAllocatedUnfairLock<Bool>(initialState: false)
 
     /// Set `SO_NOSIGPIPE` on `fd`. Call immediately after the socket is created
-    /// or adopted, before any write can reach it. Returns whether the option
-    /// was accepted; tests read the option back with `getsockopt`.
+    /// or adopted, before any write can reach it — and for a socket this
+    /// process connects, before `connect`: XNU refuses `setsockopt` with
+    /// EINVAL once the peer has closed, so a call made after a peer has hung
+    /// up fails in exactly the case it is for. Returns whether the socket is
+    /// protected; tests read the option back with `getsockopt`.
     ///
-    /// Both production call sites discard the result, because there is nothing
+    /// **A socket that already has the option is left alone.** It is read
+    /// first, because `getsockopt` still answers after the peer has closed
+    /// where `setsockopt` does not, and `FDSidecarClient.adopt` calls this on
+    /// every socket, including one `connect(path:)` protected before
+    /// connecting. Setting it again there would be refused whenever the daemon
+    /// had already hung up, and report a protected socket as unprotected.
+    ///
+    /// Every production call site discards the result, because there is nothing
     /// useful for them to do about a refusal — the socket is still the only one
     /// they have. But a refusal must not be *silent*: it leaves the socket
     /// unprotected, and the next write to a vanished peer kills the process,
@@ -51,6 +61,7 @@ enum SocketSIGPIPE {
     /// lives in here, once, rather than at each call site.
     @discardableResult
     static func suppress(on fd: Int32) -> Bool {
+        if isSuppressed(on: fd) { return true }
         var on: Int32 = 1
         guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
             let failureCode = errno
@@ -73,5 +84,12 @@ enum SocketSIGPIPE {
             return false
         }
         return true
+    }
+
+    /// Whether `SO_NOSIGPIPE` is already set on `fd`.
+    private static func isSuppressed(on fd: Int32) -> Bool {
+        var value: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        return getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, &length) == 0 && value != 0
     }
 }
