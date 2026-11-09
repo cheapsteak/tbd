@@ -1373,40 +1373,26 @@ struct GhosttyTerminalViewLeadingEdgeTests {
     }
 
     /// Feeds `text` and waits, bounded, for its render signal's delivery: one main-queue turn.
-    private func feedAndDeliver(_ text: String, to fixture: ViewFixture) async {
-        await signalAndDeliver(to: fixture) { fixture.terminal.feed(text: text) }
+    private func feedAndDeliver(_ text: String, to fixture: ViewFixture) async throws {
+        try await signalAndDeliver(to: fixture) { fixture.terminal.feed(text: text) }
     }
 
     /// Runs `call`, which must signal a render, and waits, bounded, for the delivery.
-    private func signalAndDeliver(to fixture: ViewFixture, _ call: () -> Void) async {
+    private func signalAndDeliver(to fixture: ViewFixture, _ call: () -> Void) async throws {
         let view = fixture.view
         let before = view.renderSignalDeliveries
         call()
-        let start = ContinuousClock.now
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+        try await waitFor("the render signal's delivery") {
             await MainActor.run { view.renderSignalDeliveries > before }
-        }
-        if outcome == .timedOut {
-            Issue.record(BoundedWaitTimeout(
-                what: "the render signal's delivery",
-                observed: "no delivery \(ContinuousClock.now - start) after the call",
-                deadline: TestDeadlines.saturatedPass))
         }
     }
 
     /// Waits, bounded, until the GPU has handed back a ring slot. A test that has committed
     /// several frames calls it before the next frame it needs drawn, so that frame is not left to
     /// the tick for a frame the GPU is still finishing.
-    private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async {
-        let start = ContinuousClock.now
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+    private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
+        try await waitFor("the GPU to hand back a ring slot") {
             await MainActor.run { view.surface.frameRing?.hasFreeSlot ?? true }
-        }
-        if outcome == .timedOut {
-            Issue.record(BoundedWaitTimeout(
-                what: "the GPU to hand back a ring slot",
-                observed: "every slot still in flight \(ContinuousClock.now - start) later",
-                deadline: TestDeadlines.saturatedPass))
         }
     }
 
@@ -1422,7 +1408,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let now = ManualNow(.seconds(100))
         try placeWithAFirstFrame(fixture, in: window, now: now)
 
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let decision = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         #expect(decision == drawNow, "a 1-byte feed into an idle view answered \(String(describing: decision))")
@@ -1448,12 +1434,12 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         try placeWithAFirstFrame(fixture, in: window, now: now)
         let interval = view.refreshInterval
         try #require(interval > .milliseconds(2), "the refresh interval is \(interval), too short for this test")
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let afterFirst = view.framesCommitted
         try #require(afterFirst == 2, "the first feed was not drawn at once")
 
         now.value = .seconds(100.002)
-        await feedAndDeliver("b", to: fixture)
+        try await feedAndDeliver("b", to: fixture)
         let waited = view.lastLeadingEdgeDecision
         let within: LeadingEdgePolicy.Decision? = .coalesce(.withinRefreshInterval)
         #expect(waited == within, "a feed 2 ms after an output frame answered \(String(describing: waited))")
@@ -1470,8 +1456,8 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         #expect(tickStamp == expectedTickStamp, "the tick's output frame stamped \(tickStamp)")
 
         now.value = tickStamp + interval
-        await waitForAFreeRingSlot(view)
-        await feedAndDeliver("c", to: fixture)
+        try await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("c", to: fixture)
         let drew = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         #expect(drew == drawNow, "a feed one interval after the last output frame answered \(String(describing: drew))")
@@ -1491,7 +1477,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let now = ManualNow(.seconds(100))
         try placeWithAFirstFrame(fixture, in: window, now: now)
 
-        await feedAndDeliver(String(repeating: "x", count: 2048), to: fixture)
+        try await feedAndDeliver(String(repeating: "x", count: 2048), to: fixture)
         let decision = view.lastLeadingEdgeDecision
         let bulk: LeadingEdgePolicy.Decision? = .coalesce(.bulkOutput)
         #expect(decision == bulk, "2 KB in one chunk answered \(String(describing: decision))")
@@ -1520,14 +1506,14 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let end = "\u{1b}[?2026l"
 
         // More than the small-output limit, so only the end of the hold can draw it at once.
-        await feedAndDeliver(begin + String(repeating: "x", count: 2048), to: fixture)
+        try await feedAndDeliver(begin + String(repeating: "x", count: 2048), to: fixture)
         let held = view.lastLeadingEdgeDecision
         let holdOpen: LeadingEdgePolicy.Decision? = .coalesce(.holdOpen)
         #expect(held == holdOpen, "a feed inside a hold answered \(String(describing: held))")
         let committedInHold = view.framesCommitted
         #expect(committedInHold == 1, "a feed inside a hold was drawn")
 
-        await feedAndDeliver(end, to: fixture)
+        try await feedAndDeliver(end, to: fixture)
         let released = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         #expect(released == drawNow, "the end of a 2 KB hold answered \(String(describing: released))")
@@ -1536,8 +1522,8 @@ struct GhosttyTerminalViewLeadingEdgeTests {
 
         // A whole interval later, so only the hold can hold the frame back.
         now.value = .seconds(100) + view.refreshInterval
-        await feedAndDeliver(begin + "next", to: fixture)
-        await feedAndDeliver(end + begin + "and the next", to: fixture)
+        try await feedAndDeliver(begin + "next", to: fixture)
+        try await feedAndDeliver(end + begin + "and the next", to: fixture)
         let reopened = view.lastLeadingEdgeDecision
         #expect(reopened == holdOpen, "a chunk that ended a hold and began the next answered \(String(describing: reopened))")
         let committedReopened = view.framesCommitted
@@ -1560,7 +1546,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         view.viewWillStartLiveResize()
         defer { view.viewDidEndLiveResize() }
 
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let decision = view.lastLeadingEdgeDecision
         let liveResize: LeadingEdgePolicy.Decision? = .coalesce(.liveResize)
         #expect(decision == liveResize, "a feed during a live resize answered \(String(describing: decision))")
@@ -1591,7 +1577,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let now = ManualNow(.seconds(100))
         try placeWithAFirstFrame(fixture, in: window, now: now)
 
-        await signalAndDeliver(to: fixture) { fixture.terminal.reset() }
+        try await signalAndDeliver(to: fixture) { fixture.terminal.reset() }
         let reset = view.lastLeadingEdgeDecision
         let noOutput: LeadingEdgePolicy.Decision? = .coalesce(.noOutput)
         #expect(reset == noOutput, "a reset answered \(String(describing: reset))")
@@ -1600,7 +1586,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let ticking = view.frameDriver.demand.needsUpdate
         #expect(ticking, "the reset left to the tick asked the link for no frame")
 
-        await feedAndDeliver("$ ", to: fixture)
+        try await feedAndDeliver("$ ", to: fixture)
         let prompt = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         #expect(prompt == drawNow, "the prompt after a reset answered \(String(describing: prompt))")
@@ -1625,7 +1611,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
 
         // SGR 0 with the default rendition already set: output, and nothing to draw.
         let built = view.framesBuilt
-        await feedAndDeliver("\u{1b}[0m", to: fixture)
+        try await feedAndDeliver("\u{1b}[0m", to: fixture)
         let invisible = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         try #require(invisible == drawNow, "output that draws nothing answered \(String(describing: invisible))")
@@ -1638,13 +1624,13 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         #expect(stamped == none, "a frame that committed nothing stamped an output frame at \(String(describing: stamped))")
 
         now.value = .seconds(100.002)
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let next = view.lastLeadingEdgeDecision
         let within: LeadingEdgePolicy.Decision? = .coalesce(.withinRefreshInterval)
         #expect(next == within, "output 2 ms after a delivery that drew nothing answered \(String(describing: next))")
 
         now.value = .seconds(100) + view.refreshInterval
-        await feedAndDeliver("b", to: fixture)
+        try await feedAndDeliver("b", to: fixture)
         let later = view.lastLeadingEdgeDecision
         #expect(later == drawNow, "output one interval later answered \(String(describing: later))")
     }
@@ -1670,7 +1656,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         _ = tracker.add(acquiredAt: .seconds(98))
         _ = tracker.add(acquiredAt: .seconds(98.5))
 
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let decision = view.lastLeadingEdgeDecision
         let liveResize: LeadingEdgePolicy.Decision? = .coalesce(.liveResize)
         try #require(decision == liveResize, "a feed during a live resize answered \(String(describing: decision))")
@@ -1691,14 +1677,14 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         }
         let now = ManualNow(.seconds(100.005))
         try placeWithAFirstFrame(fixture, in: window, now: now)
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let drawn = view.lastOutputFrameAt
         let deliveryStamp: Duration? = .seconds(100.005)
         try #require(drawn == deliveryStamp, "the delivery's frame stamped \(String(describing: drawn))")
 
         // Output the delivery leaves to the tick, and the tick for the vsync at 100 s drawing it.
-        await feedAndDeliver("b", to: fixture)
-        await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("b", to: fixture)
+        try await waitForAFreeRingSlot(view)
         let beforeTick = view.framesCommitted
         view.renderTick(now: .seconds(100))
         let tickFrames = view.framesCommitted - beforeTick
@@ -1741,7 +1727,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let built = view.framesBuilt
         let acquired = tracker.acquiredCount
 
-        await feedAndDeliver("a", to: fixture)
+        try await feedAndDeliver("a", to: fixture)
         let decision = view.lastLeadingEdgeDecision
         #expect(decision == expected, "a feed at the \(limit) limit answered \(String(describing: decision))")
         let builtAtLimit = view.framesBuilt - built
@@ -1757,7 +1743,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         case .drawablesBehind:
             if let newer { tracker.reportPresented(newer, presentedTime: 100) }
         }
-        await feedAndDeliver("b", to: fixture)
+        try await feedAndDeliver("b", to: fixture)
         let afterClear = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         #expect(afterClear == drawNow, "a feed once the \(limit) limit cleared answered \(String(describing: afterClear))")
@@ -1778,7 +1764,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         }
         let now = ManualNow(.seconds(100))
         try placeWithAFirstFrame(fixture, in: window, now: now)
-        await feedAndDeliver("$ ", to: fixture)
+        try await feedAndDeliver("$ ", to: fixture)
         let prompt = view.lastOutputFrameAt
         let promptStamp: Duration? = .seconds(100)
         try #require(prompt == promptStamp, "the prompt was not drawn as an output frame: \(String(describing: prompt))")
@@ -1786,12 +1772,12 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         // The cursor in its blink's off phase, drawn.
         now.value = .seconds(101)
         view.surface.cursorBlinkOn = false
-        await waitForAFreeRingSlot(view)
+        try await waitForAFreeRingSlot(view)
         view.renderTick()
         // The key press: the reset turns the cursor back on, and a tick draws that frame.
         now.value = .seconds(101.5)
         view.resetCursorBlink()
-        await waitForAFreeRingSlot(view)
+        try await waitForAFreeRingSlot(view)
         let beforeCursorFrame = view.framesCommitted
         view.renderTick()
         let cursorFrames = view.framesCommitted - beforeCursorFrame
@@ -1801,8 +1787,8 @@ struct GhosttyTerminalViewLeadingEdgeTests {
 
         // The echo, 2 ms after the cursor frame.
         now.value = .seconds(101.502)
-        await waitForAFreeRingSlot(view)
-        await feedAndDeliver("l", to: fixture)
+        try await waitForAFreeRingSlot(view)
+        try await feedAndDeliver("l", to: fixture)
         let decision = view.lastLeadingEdgeDecision
         let drawNow: LeadingEdgePolicy.Decision? = .drawNow
         #expect(decision == drawNow, "the echo 2 ms after a cursor-only frame answered \(String(describing: decision))")
@@ -1824,8 +1810,14 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         }
         let now = ManualNow(.seconds(100))
         try placeWithAFirstFrame(fixture, in: window, now: now)
-        let paused = LeadingEdgePolicy.refreshInterval(
-            linkInterval: nil, screenMinimumRefreshInterval: window.screen?.minimumRefreshInterval)
+        // The fixture's window is offscreen, so it has no screen and the fallback stands in.
+        // Should AppKit give it one, the screen's own interval does.
+        let paused: Duration
+        if let screen = window.screen {
+            paused = .seconds(screen.minimumRefreshInterval)
+        } else {
+            paused = LeadingEdgePolicy.fallbackRefreshInterval
+        }
         let atRest = view.refreshInterval
         #expect(atRest == paused, "the paused link's interval is \(atRest), not the screen's or the fallback \(paused)")
 

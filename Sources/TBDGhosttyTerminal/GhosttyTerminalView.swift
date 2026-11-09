@@ -150,8 +150,8 @@ enum DisplayLinkPolicy {
 /// What a render signal's delivery knows when it decides whether to draw at once. A pure value,
 /// gathered on main.
 struct LeadingEdgeFacts: Sendable, Equatable {
-    /// The view can build frames: `canBuildFrames`, a layer, and a drawable size of at least one
-    /// pixel each way, as the frame would set it.
+    /// The view can build frames: `canBuildFrames`, and a layer to draw into. The frame sizes its
+    /// drawable to at least one pixel each way, so the layer is all rule 1's size check needs.
     var canBuildFrames: Bool
     /// A live resize is in progress. `setFrameSize` draws each step inside its Core Animation
     /// transaction.
@@ -208,8 +208,8 @@ enum LeadingEdgePolicy {
         case ringFull
         /// `TerminalRenderer.maxDrawablesAwaitingPresent` drawables await their present report.
         case drawablesBehind
-        /// No output has been fed since the last frame read the terminal: the signal came from a
-        /// resize, a reset or new defaults, or a frame has already drawn the output it covers.
+        /// No output had been fed since a frame last read the terminal when the call signalled:
+        /// it was a resize, a reset or new defaults, with any earlier output already read.
         case noOutput
         /// `smallOutputLimit` or more bytes have been fed since the last frame, and no hold ended.
         case bulkOutput
@@ -499,10 +499,12 @@ public final class GhosttyTerminalView: NSView {
     /// How many frames this view has built from its terminal. A frame is built when the view can be
     /// seen and a display tick, or a render signal's delivery that draws at once, finds work: the
     /// terminal is read into the render state and, if it changed, encoded. A hidden or windowless
-    /// view builds none, and neither does a tick that finds the GPU behind. A test seam.
+    /// view builds none, and neither does a tick that finds the GPU behind. A test seam, and how a
+    /// delivery that draws at once learns whether its draw built a frame.
     public private(set) var framesBuilt = 0
     /// How many of the built frames were encoded and committed to the GPU. A built frame with
-    /// nothing changed, or with no drawable to draw into, is not committed. A test seam.
+    /// nothing changed, or with no drawable to draw into, is not committed. A test seam, and how a
+    /// delivery that draws at once learns whether its draw committed one.
     public private(set) var framesCommitted = 0
 
     /// The `now` of the last output frame: one that was encoded and whose build consumed program
@@ -516,6 +518,13 @@ public final class GhosttyTerminalView: NSView {
     /// output that draws nothing would never stamp `lastOutputFrameAt`, and every delivery would
     /// build a frame of its own, at the main-queue hop rate in place of once per refresh.
     private(set) var lastEmptyLeadingEdgeDrawAt: Duration?
+    /// What rule 4 measures from: the later of `lastOutputFrameAt` and
+    /// `lastEmptyLeadingEdgeDrawAt`, or nil before either.
+    private var lastFrameLimitingTheLeadingEdge: Duration? {
+        guard let empty = lastEmptyLeadingEdgeDrawAt else { return lastOutputFrameAt }
+        guard let output = lastOutputFrameAt else { return empty }
+        return max(output, empty)
+    }
     /// How many render-signal deliveries have reached `LeadingEdgePolicy`, and what the last one
     /// decided. Test seams.
     private(set) var renderSignalDeliveries = 0
@@ -859,15 +868,13 @@ public final class GhosttyTerminalView: NSView {
     /// cannot draw would otherwise do on every chunk. A delivery that draws calls `renderTick`,
     /// whose own check, at the same `now`, does both.
     private func leadingEdgeFacts(_ hint: RenderHint, now: Duration) -> LeadingEdgeFacts {
-        // The size `renderNow` would give the drawable before its own check, read without setting
-        // it: a delivery that coalesces changes nothing.
-        let size = drawablePixelSize()
-        let hasDrawable = metalLayer != nil && size.width >= 1 && size.height >= 1
-        return LeadingEdgeFacts(
-            canBuildFrames: canBuildFrames && hasDrawable,
+        // Rule 1's size check needs only the layer: `renderNow` sizes the drawable from
+        // `drawablePixelSize()`, which is never below one pixel each way.
+        LeadingEdgeFacts(
+            canBuildFrames: canBuildFrames && metalLayer != nil,
             isLiveResizing: frameDriver.demand.isLiveResizing,
             now: now,
-            lastOutputFrameAt: lastEmptyLeadingEdgeDrawAt.map { max($0, lastOutputFrameAt ?? $0) } ?? lastOutputFrameAt,
+            lastOutputFrameAt: lastFrameLimitingTheLeadingEdge,
             refreshInterval: refreshInterval,
             ringHasFreeSlot: surface.frameRing?.hasFreeSlot ?? true,
             drawablesAwaitingPresent: drawableTracker.peekAwaitingPresent(now: now),

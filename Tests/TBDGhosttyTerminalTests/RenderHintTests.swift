@@ -244,33 +244,28 @@ private final class DeliveredHints {
 struct RenderSignalRelayTests {
     /// Waits, bounded, until `delivered` holds `count` hints. The deliveries are main-actor tasks
     /// already enqueued, so suspending is all they need.
-    private func waitForDeliveries(_ delivered: DeliveredHints, count: Int) async {
-        let start = ContinuousClock.now
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+    private func waitForDeliveries(_ delivered: DeliveredHints, count: Int) async throws {
+        try await waitFor("the relay to deliver \(count) hints", observed: {
+            await MainActor.run { "\(delivered.hints.count) delivered" }
+        }) {
             await MainActor.run { delivered.hints.count >= count }
-        }
-        if outcome == .timedOut {
-            Issue.record(BoundedWaitTimeout(
-                what: "the relay to deliver \(count) hints",
-                observed: "\(delivered.hints.count) delivered after \(ContinuousClock.now - start)",
-                deadline: TestDeadlines.saturatedPass))
         }
     }
 
-    @Test func signalsBeforeTheDeliveryFoldIntoOneHint() async {
+    @Test func signalsBeforeTheDeliveryFoldIntoOneHint() async throws {
         let delivered = DeliveredHints()
         let relay = RenderSignalRelay { delivered.hints.append($0) }
         relay.signal(RenderHint(outputBytesSinceFrame: 10, holdOpen: true, holdEnded: true))
         relay.signal(RenderHint(outputBytesSinceFrame: 20, holdOpen: false, holdEnded: false))
         relay.signal(RenderHint(outputBytesSinceFrame: 30, holdOpen: true, holdEnded: false))
-        await waitForDeliveries(delivered, count: 1)
+        try await waitForDeliveries(delivered, count: 1)
         let folded = delivered.hints
         let expected = [RenderHint(outputBytesSinceFrame: 30, holdOpen: true, holdEnded: true)]
         #expect(folded == expected, "three signals before one delivery delivered \(folded)")
 
         // The delivery cleared the pending hint: the next signal starts afresh, with no end.
         relay.signal(RenderHint(outputBytesSinceFrame: 5))
-        await waitForDeliveries(delivered, count: 2)
+        try await waitForDeliveries(delivered, count: 2)
         let all = delivered.hints
         let expectedAll = expected + [RenderHint(outputBytesSinceFrame: 5)]
         #expect(all == expectedAll, "a signal after the delivery delivered \(all)")
