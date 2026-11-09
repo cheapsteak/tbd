@@ -113,9 +113,9 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 /// full (`TranscriptFeedIndex`):
 /// - **results** – `resultLimit` tool results from every page read and from
 ///   live lines, joined into older pages as `ShapingContext.joinedResults`.
-///   Only each result's `isError` and exit code are kept, the parts shaping
-///   reads. A call on an older page whose result has been dropped shows
-///   `running`;
+///   Only each result's `ToolOutcome` is kept, its `isError` and exit code,
+///   the parts shaping reads. A call on an older page whose result has been
+///   dropped shows `running`;
 /// - **line offsets** – `lineOffsetLimit` item IDs, for detail lookups;
 /// - **calls waiting** – `waitingCallLimit` rows still `running`, from pages
 ///   and from live transcripts set aside, kept to update when their result
@@ -126,8 +126,14 @@ enum TranscriptFeedEvent: Sendable, Equatable {
 ///   page read and from live lines, each already cut to
 ///   `PhoneAppConstants.slashOutputBytes`, joined into older pages and live
 ///   rows as `ShapingContext.slashOutputs`;
-/// - **slashes waiting** – `waitingCallLimit` slash rows the phone holds with
-///   no output, kept to update when their output arrives;
+/// - **slashes waiting** – the newest `waitingSlashLimit` slash rows the
+///   phone holds with no output, from the first page and from live lines,
+///   kept to update when their output arrives. Claude Code writes a local
+///   command's output on the line after the command's, so only the newest
+///   rows can still get one; a skill or prompt command, which never does,
+///   drops out as newer slash rows arrive. An older page's rows wait for
+///   nothing: the output of each was written before the newer lines, and
+///   joins it from the slash outputs;
 /// - **page subagent IDs** – `liveFactLimit` subagent IDs from the pages read,
 ///   so `transcript.detail` can find a page row's subagent;
 /// - **subagent counts** – `SubagentCountCache.limit` counts, each read once
@@ -163,6 +169,9 @@ actor TranscriptFeed {
     static let resultLimit = 4_096
     static let lineOffsetLimit = 8_192
     static let waitingCallLimit = 1_024
+    /// The most slash rows kept waiting for their output. Each is a row as the
+    /// phone holds it, its text at most `PhoneAppConstants.messagePreviewBytes`.
+    static let waitingSlashLimit = 16
     static let liveFactLimit = 1_024
     /// The most items the live transcript holds before it starts over.
     static let liveItemLimit = 2_000
@@ -205,14 +214,14 @@ actor TranscriptFeed {
     /// The non-empty live lines ingested since the last reset, across live
     /// transcripts, for the `line-<n>` IDs.
     private var liveLineCount = 0
-    private var results = TranscriptFeedIndex<ToolResult>(limit: TranscriptFeed.resultLimit)
+    private var results = TranscriptFeedIndex<ToolOutcome>(limit: TranscriptFeed.resultLimit)
     private var lineOffsets = TranscriptFeedIndex<UInt64>(limit: TranscriptFeed.lineOffsetLimit)
     private var waitingCalls = TranscriptFeedIndex<PhoneItem>(limit: TranscriptFeed.waitingCallLimit)
     private var liveFileEdits = TranscriptFeedIndex<FileEditStats>(limit: TranscriptFeed.liveFactLimit)
     private var liveAgentIDs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
     private var pageAgentIDs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
     private var slashOutputs = TranscriptFeedIndex<String>(limit: TranscriptFeed.liveFactLimit)
-    private var waitingSlashes = TranscriptFeedIndex<PhoneItem>(limit: TranscriptFeed.waitingCallLimit)
+    private var waitingSlashes = TranscriptFeedIndex<PhoneItem>(limit: TranscriptFeed.waitingSlashLimit)
     private let subagentCounts = SubagentCountCache()
     /// The details kept for `transcript.detail`, the one used most recently
     /// last.
@@ -270,7 +279,7 @@ actor TranscriptFeed {
     /// A waiting row whose result arrived live, with what reshaping it needs.
     private struct WaitingResolution: Sendable {
         let row: PhoneItem
-        let result: ToolResult
+        let outcome: ToolOutcome
         /// The subagent's ID, for a subagent row whose ID the feed kept.
         let agentID: String?
     }
@@ -729,6 +738,9 @@ actor TranscriptFeed {
         recentDetails.removeAll()
         guard let read else { return nil }
         keepIndexes(of: read.build)
+        for row in read.build.waitingSlashes {
+            waitingSlashes.set(row, for: row.id)
+        }
         heldLines = read.held
         cursor = read.cursor
         return read.page
@@ -826,11 +838,11 @@ actor TranscriptFeed {
             worktreeRoot: worktreeRoot, slashOutputs: slashOutputs.dictionary, apiErrors: apiErrors)
         var resolutions: [WaitingResolution] = []
         for id in resolved {
-            guard let result = transcript.toolResult(for: id).map(Self.statusOnly) else { continue }
-            results.set(result, for: id)
+            guard let outcome = transcript.toolResult(for: id).map({ ToolOutcome($0) }) else { continue }
+            results.set(outcome, for: id)
             if let row = waitingCalls.remove(id) {
                 let agentID = row.kind == .subagent ? liveAgentIDs[row.id] : nil
-                resolutions.append(WaitingResolution(row: row, result: result, agentID: agentID))
+                resolutions.append(WaitingResolution(row: row, outcome: outcome, agentID: agentID))
             }
         }
         let waiting = resolutions
@@ -877,43 +889,30 @@ actor TranscriptFeed {
         transcript = IncrementalTranscript()
     }
 
-    /// `result` with only what shaping reads, its `isError` and its exit code
-    /// line (`TranscriptShaper.exitCode(of:)`), so the results index holds no
-    /// tool output.
-    private static func statusOnly(_ result: ToolResult) -> ToolResult {
-        let exitLine = TranscriptShaper.exitCode(of: result).map { "Exit code \($0)" } ?? ""
-        return ToolResult(text: exitLine, truncatedTo: nil, isError: result.isError)
-    }
-
-    /// `row`, a slash row, with `output`, already cut to size.
+    /// `row`, a slash row, with `output`, already cut to size, and every other
+    /// field as it was.
     private static func withOutput(_ row: PhoneItem, _ output: String) -> PhoneItem {
-        PhoneItem(
-            id: row.id, kind: row.kind, at: row.at, text: row.text, truncated: row.truncated,
-            toolName: row.toolName, target: row.target, toolStatus: row.toolStatus,
-            added: row.added, removed: row.removed, agentType: row.agentType, itemCount: row.itemCount,
-            sender: row.sender, exitCode: row.exitCode, output: output, apiError: row.apiError,
-            noteKind: row.noteKind, path: row.path)
+        var row = row
+        row.output = output
+        return row
     }
 
-    /// A waiting row that was `running`, with its result's status and exit
-    /// code and, for a subagent whose ID the feed kept, its item count, which
-    /// `subagentItemCount` can read from disk.
+    /// A waiting row that was `running`, with its result's status, its exit
+    /// code on a `tool` row, the one kind that carries it, and, for a
+    /// subagent whose ID the feed kept, its item count, which
+    /// `subagentItemCount` can read from disk. Every other field is as it was.
     private static func resolvedRow(
         _ resolution: WaitingResolution, subagentItemCount: @Sendable (String) -> Int?
     ) -> PhoneItem {
-        let row = resolution.row
-        let result = resolution.result
-        var itemCount = row.itemCount
-        if let agentID = resolution.agentID {
-            itemCount = subagentItemCount(agentID).map(TranscriptShaper.boundedItemCount)
+        var row = resolution.row
+        row.toolStatus = resolution.outcome.isError ? TranscriptShaper.errorStatus : TranscriptShaper.okStatus
+        if row.kind == .tool {
+            row.exitCode = resolution.outcome.exitCode
         }
-        return PhoneItem(
-            id: row.id, kind: row.kind, at: row.at, text: row.text, truncated: row.truncated,
-            toolName: row.toolName, target: row.target,
-            toolStatus: result.isError ? TranscriptShaper.errorStatus : TranscriptShaper.okStatus,
-            added: row.added, removed: row.removed, agentType: row.agentType, itemCount: itemCount,
-            sender: row.sender, exitCode: TranscriptShaper.exitCode(of: result), output: row.output,
-            apiError: row.apiError, noteKind: row.noteKind, path: row.path)
+        if let agentID = resolution.agentID {
+            row.itemCount = subagentItemCount(agentID).map(TranscriptShaper.boundedItemCount)
+        }
+        return row
     }
 
     /// `json` with `"uuid": id`, as an object and encoded again, or nil when
@@ -1126,11 +1125,11 @@ actor TranscriptFeed {
     }
 
     /// Keeps a page's results, its rows' offsets, its calls still `running`,
-    /// its subagent IDs, the slash command outputs it read and its slash rows
-    /// with none.
+    /// its subagent IDs and the slash command outputs it read. The first page
+    /// also keeps its slash rows with no output waiting (`loadFirstPage`).
     private func keepIndexes(of build: PageBuild) {
-        for (id, result) in build.results {
-            results.set(Self.statusOnly(result), for: id)
+        for (id, outcome) in build.results {
+            results.set(outcome, for: id)
         }
         for (id, offset) in build.lineOffsets {
             lineOffsets.set(offset, for: id)
@@ -1143,9 +1142,6 @@ actor TranscriptFeed {
         }
         for (id, output) in build.slashOutputs {
             slashOutputs.set(TranscriptShaper.slashOutput(output), for: id)
-        }
-        for (id, row) in build.waitingSlashes {
-            waitingSlashes.set(row, for: id)
         }
     }
 

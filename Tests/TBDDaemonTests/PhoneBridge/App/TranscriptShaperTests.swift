@@ -135,12 +135,6 @@ struct TranscriptShaperTests {
         #expect(TranscriptShaper.shape(other, ctx) == row("a2#0", .assistant, text: "Back to the redirect."))
     }
 
-    @Test func aLineIDIsTheItemIDBeforeItsLastHash() {
-        #expect(TranscriptShaper.lineID(ofItem: "a1#0") == "a1")
-        #expect(TranscriptShaper.lineID(ofItem: "at-120#3") == "at-120")
-        #expect(TranscriptShaper.lineID(ofItem: "u1") == "u1")
-    }
-
     @Test func anItemWithNoTimestampHasNoAt() {
         let item = TranscriptItem.userPrompt(id: "u1", text: "hello", timestamp: nil)
 
@@ -215,6 +209,19 @@ struct TranscriptShaperTests {
         #expect(TranscriptShaper.relativePath("/Users/acme/repo/a.ts", root: nil) == nil)
         #expect(TranscriptShaper.relativePath("/Users/acme/repo/a.ts", root: "") == nil)
         #expect(TranscriptShaper.relativePath("/Users/acme/repo/a.ts", root: "/") == nil)
+    }
+
+    @Test func repeatedSlashesAndDotsAreLeftOutBeforeAPathIsMadeRelative() {
+        let root = "/Users/acme/repo"
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo//src/a.ts", root: root) == "src/a.ts")
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo/./src//./a.ts", root: root) == "src/a.ts")
+        #expect(TranscriptShaper.relativePath("//Users/acme//repo/a.ts", root: root) == "a.ts")
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo/src/a.ts", root: "/Users//acme/./repo//") == "src/a.ts")
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo/.//", root: root) == nil)
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo/src/../../x/a.ts", root: root) == nil)
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo/a.ts", root: "/Users/acme/x/../repo") == nil)
+        #expect(TranscriptShaper.relativePath("Users/acme/repo/a.ts", root: root) == nil)
+        #expect(TranscriptShaper.relativePath("/Users/acme/repo/a.ts", root: "Users/acme/repo") == nil)
     }
 
     @Test func aFileEditPathTooLongToSendIsLeftOut() throws {
@@ -301,9 +308,29 @@ struct TranscriptShaperTests {
     @Test func aJoinedResultCarriesItsExitCode() {
         let item = call("toolu_b", "Bash", #"{"command":"npm test -- login"}"#)
 
-        let shaped = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": exit2Result]))
+        let shaped = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": ToolOutcome(exit2Result)]))
 
         #expect(shaped?.exitCode == 2)
+    }
+
+    @Test func aFileEditOrASubagentNeverCarriesAnExitCode() {
+        let edit = call("toolu_e", "Edit", #"{"file_path":"/repo/a.ts"}"#, result: exit2Result)
+        let agent = call("toolu_s", "Agent", #"{"description":"Survey the tests"}"#, result: exit2Result)
+        let joinedEdit = call("toolu_f", "Write", #"{"file_path":"/repo/b.ts"}"#)
+        let ctx = ShapingContext(joinedResults: ["toolu_f": ToolOutcome(exit2Result)])
+
+        let shaped = [edit, agent, joinedEdit].map { TranscriptShaper.shape($0, ctx) }
+        let statuses = shaped.map { $0?.toolStatus }
+        let codes = shaped.map { $0?.exitCode }
+
+        #expect(statuses == ["error", "error", "error"])
+        #expect(codes == [nil, nil, nil])
+    }
+
+    @Test func anOutcomeKeepsOnlyWhetherTheResultFailedAndItsExitCode() {
+        #expect(ToolOutcome(exit2Result) == ToolOutcome(isError: true, exitCode: 2))
+        #expect(ToolOutcome(errorResult) == ToolOutcome(isError: true, exitCode: nil))
+        #expect(ToolOutcome(okResult) == ToolOutcome(isError: false, exitCode: nil))
     }
 
     @Test func anExitCodeIsReadOnlyFromAnErrorsFirstLine() {
@@ -340,9 +367,10 @@ struct TranscriptShaperTests {
         let item = call("toolu_b", "Bash", #"{"command":"swift test"}"#)
 
         let alone = TranscriptShaper.shape(item, ShapingContext())
-        let joinedOK = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": okResult]))
-        let joinedError = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": errorResult]))
-        let joinedElsewhere = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_other": okResult]))
+        let joinedOK = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": ToolOutcome(okResult)]))
+        let joinedError = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": ToolOutcome(errorResult)]))
+        let joinedElsewhere = TranscriptShaper.shape(
+            item, ShapingContext(joinedResults: ["toolu_other": ToolOutcome(okResult)]))
 
         #expect(alone?.toolStatus == "running")
         #expect(joinedOK == row("toolu_b", .tool, toolName: "Bash", target: "swift test", toolStatus: "ok"))
@@ -353,7 +381,7 @@ struct TranscriptShaperTests {
     @Test func theItemsOwnResultWinsOverAJoinedOne() {
         let item = call("toolu_b", "Bash", #"{"command":"swift test"}"#, result: errorResult)
 
-        let shaped = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": okResult]))
+        let shaped = TranscriptShaper.shape(item, ShapingContext(joinedResults: ["toolu_b": ToolOutcome(okResult)]))
 
         #expect(shaped?.toolStatus == "error")
     }

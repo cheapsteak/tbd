@@ -414,6 +414,35 @@ struct TranscriptParserWindowTests {
         #expect(open.output == "still writing")
     }
 
+    @Test func aTagThatIsNeitherStreamIsSkippedAndTheReadGoesOn() throws {
+        let line = try WindowLine.decoded(WindowLine.commandOutput(
+            "o1", parent: "c1",
+            content: "<local-command-stdout>a</local-command-stdout><local-command-caveat>x</local-command-caveat>"
+                + "<local-command-<local-command-stderr>b</local-command-stderr>"))
+
+        let output = try #require(TranscriptParser.localCommandOutput(fromLine: line))
+
+        #expect(output.output == "a\nb")
+    }
+
+    @Test func aLineOfManyTagsOfOneStreamReadsEveryOne() throws {
+        let count = 2_000
+        let content = String(repeating: "<local-command-stdout>a</local-command-stdout>", count: count)
+        let line = try WindowLine.decoded(WindowLine.commandOutput("o1", parent: "c1", content: content))
+
+        let output = try #require(TranscriptParser.localCommandOutput(fromLine: line))
+
+        #expect(output.output == Array(repeating: "a", count: count).joined(separator: "\n"))
+    }
+
+    @Test func anItemsLineIDIsItsIDBeforeItsFirstHash() {
+        #expect(TranscriptParser.lineID(ofItem: "a1#0") == "a1")
+        #expect(TranscriptParser.lineID(ofItem: "at-120#3") == "at-120")
+        #expect(TranscriptParser.lineID(ofItem: "u1#2#3") == "u1")
+        #expect(TranscriptParser.lineID(ofItem: "u1") == "u1")
+        #expect(TranscriptParser.lineID(ofItem: "") == "")
+    }
+
     @Test func aLineThatIsNotACommandsOutputHasNone() throws {
         let caveat = WindowLine.commandOutput(
             "o1", parent: "c1", content: "<local-command-caveat>Caveat: the messages below</local-command-caveat>")

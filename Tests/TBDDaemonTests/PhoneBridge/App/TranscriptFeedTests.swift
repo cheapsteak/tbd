@@ -110,6 +110,32 @@ struct TranscriptFeedTests {
         await d.feed.close()
     }
 
+    /// A file edit that fails after it was read updates its status only: an
+    /// exit code is carried by tool rows alone, the one kind that draws it.
+    @Test func aLateFailedFileEditSendsNoExitCode() async throws {
+        let fixture = try FeedFixture([
+            FeedLine.prompt("m1", "placeholder prompt 1"),
+            FeedLine.edit("a1", id: "toolu_e1", filePath: "/Users/acme/repo/src/a.ts"),
+        ])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+
+        _ = try await d.feed.open()
+        await d.feed.start()
+        try fixture.append([
+            FeedLine.toolResult("r1", toolUseID: "toolu_e1", text: "Exit code 2\nplaceholder", isError: true),
+        ])
+        await d.nudge()
+
+        let update = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.updated)
+        let row = try #require(update.items.first)
+        #expect(update.items.count == 1)
+        #expect(row.kind == .fileEdit)
+        #expect(row.toolStatus == TranscriptShaper.errorStatus)
+        #expect(row.exitCode == nil)
+        await d.feed.close()
+    }
+
     /// A slash command on the first page whose output is written after the
     /// page was read reaches the phone as an update of the slash row that
     /// carries the output. The output's own line adds no row.
@@ -138,6 +164,35 @@ struct TranscriptFeedTests {
             agentType: nil, itemCount: nil, sender: nil, output: "Set model to opus")
         #expect(update.items == [expected])
         #expect(d.events.values.count == 1)
+        await d.feed.close()
+    }
+
+    /// Only the newest `waitingSlashLimit` slash rows with no output wait for
+    /// one. An older row's output, which Claude Code writes on the line after
+    /// its command and so never this late, sends no update.
+    @Test func onlyTheNewestSlashRowsWaitForTheirOutput() async throws {
+        let fixture = try FeedFixture([FeedLine.prompt("m1", "placeholder prompt 1")])
+        defer { fixture.remove() }
+        let d = DirectFeed(path: fixture.path)
+        let count = TranscriptFeed.waitingSlashLimit + 1
+
+        _ = try await d.feed.open()
+        await d.feed.start()
+        try await waitUntil("the feed's first read") { await d.feed.readCount >= 1 }
+        try fixture.append((1...count).map { FeedLine.slashCommand("c\($0)", name: "model", args: "opus") })
+        await d.nudge()
+        let appended = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.appended)
+        #expect(appended.items.count == count)
+
+        try fixture.append([
+            FeedLine.commandOutput("o1", parent: "c1", output: "Set model to opus"),
+            FeedLine.commandOutput("o\(count)", parent: "c\(count)", output: "Set model to sonnet"),
+        ])
+        await d.nudge()
+
+        let update = try #require(await d.events.next(timeout: TestDeadlines.saturatedPass)?.updated)
+        let updated = update.items.map { [$0.id, $0.output ?? ""] }
+        #expect(updated == [["c\(count)", "Set model to sonnet"]])
         await d.feed.close()
     }
 

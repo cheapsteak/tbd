@@ -143,6 +143,14 @@ public enum TranscriptParser {
         }
     }
 
+    /// The ID of the line the item `itemID` came from: the item's ID before its
+    /// first `#`, which starts an item's `#<block>` suffix, or the whole ID
+    /// when it has none. A line's ID never holds a `#`: it is a `uuid` or a
+    /// positional fallback (`isPositionalFallbackID`).
+    public static func lineID(ofItem itemID: String) -> String {
+        String(itemID.prefix(while: { $0 != "#" }))
+    }
+
     /// Whether `itemID` comes from a line with no `uuid`, whose stable ID is a
     /// positional fallback: `line-<n>` in the full parse (and
     /// `IncrementalTranscript`), `tail-<n>` in a tail read, `at-<n>` in a
@@ -154,9 +162,9 @@ public enum TranscriptParser {
     /// same way, but the full parse names that line differently. Real Claude
     /// lines always carry a `uuid`, so their items never match.
     public static func isPositionalFallbackID(_ itemID: String) -> Bool {
-        let lineID = itemID.prefix(while: { $0 != "#" })
-        guard let prefix = ["line-", "tail-", "at-"].first(where: { lineID.hasPrefix($0) }) else { return false }
-        let position = lineID.dropFirst(prefix.count)
+        let line = Self.lineID(ofItem: itemID)
+        guard let prefix = ["line-", "tail-", "at-"].first(where: { line.hasPrefix($0) }) else { return false }
+        let position = line.dropFirst(prefix.count)
         return !position.isEmpty && position.allSatisfy { ("0"..."9").contains($0) }
     }
 

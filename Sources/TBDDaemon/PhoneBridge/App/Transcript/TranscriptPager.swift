@@ -20,9 +20,9 @@ struct PageBuild: Sendable {
     /// `ShapingContext.joinedResults`. The feed updates them when a result
     /// arrives.
     let unresolvedCalls: [String: PhoneItem]
-    /// Every tool result in the bytes the window read, for joins into older
-    /// pages.
-    let results: [String: ToolResult]
+    /// What every tool result in the bytes the window read says, for joins
+    /// into older pages.
+    let results: [String: ToolOutcome]
     /// `tool_use` id → subagent `agentId`, for every subagent call whose
     /// result is in the bytes the window read, so `transcript.detail` can
     /// find a subagent row's transcript.
@@ -30,9 +30,9 @@ struct PageBuild: Sendable {
     /// A slash command's item ID → its output, for every output in the bytes
     /// the window read, for joins into older pages.
     let slashOutputs: [String: String]
-    /// The page's slash rows with no output, by item ID. The feed updates
-    /// them when an output arrives.
-    let waitingSlashes: [String: PhoneItem]
+    /// The page's slash rows with no output, oldest first. The feed keeps the
+    /// first page's newest ones to update when an output arrives.
+    let waitingSlashes: [PhoneItem]
 }
 
 /// Builds transcript pages (spec section 7, "Pages"): the first page from the
@@ -102,7 +102,7 @@ enum TranscriptPager {
     static let emptyBuild = PageBuild(
         page: TranscriptPage(items: [], cursor: nil, reachedStart: true, omittedItems: 0),
         startOffset: 0, endOffset: 0, lineOffsets: [:], unresolvedCalls: [:], results: [:], subagentAgentIDs: [:],
-        slashOutputs: [:], waitingSlashes: [:])
+        slashOutputs: [:], waitingSlashes: [])
 
     // MARK: - Cursors
 
@@ -293,14 +293,14 @@ enum TranscriptPager {
 
         var lineOffsets: [String: UInt64] = [:]
         var unresolvedCalls: [String: PhoneItem] = [:]
-        var waitingSlashes: [String: PhoneItem] = [:]
+        var waitingSlashes: [PhoneItem] = []
         for (row, item) in zip(kept, items) {
             lineOffsets[item.id] = row.lineOffset
             if item.toolStatus == TranscriptShaper.runningStatus {
                 unresolvedCalls[item.id] = item
             }
             if item.kind == .slash, item.output == nil {
-                waitingSlashes[item.id] = item
+                waitingSlashes.append(item)
             }
         }
         return PageBuild(
@@ -309,7 +309,7 @@ enum TranscriptPager {
             endOffset: window.endOffset,
             lineOffsets: lineOffsets,
             unresolvedCalls: unresolvedCalls,
-            results: window.toolResultsByID,
+            results: window.toolResultsByID.mapValues { ToolOutcome($0) },
             subagentAgentIDs: window.subagentAgentIDs,
             slashOutputs: window.localCommandOutputs,
             waitingSlashes: waitingSlashes)

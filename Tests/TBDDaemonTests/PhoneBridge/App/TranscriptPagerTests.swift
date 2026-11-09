@@ -365,8 +365,7 @@ struct TranscriptPagerTests {
         let slash = try #require(build.page.items.last)
 
         #expect(slash.output == nil)
-        #expect(build.waitingSlashes["c1"] == slash)
-        #expect(build.waitingSlashes.count == 1)
+        #expect(build.waitingSlashes == [slash])
     }
 
     @Test func anOlderPageJoinsASlashOutputItDoesNotHold() throws {
@@ -387,12 +386,13 @@ struct TranscriptPagerTests {
         let alone = try TranscriptPager.olderPage(
             filePath: fixture.path, cursor: cursor, generation: 0, ctx: ShapingContext())
         let joinedIDs = joined.page.items.map(\.id)
+        let aloneWaiting = alone.waitingSlashes.map(\.id)
 
         #expect(joinedIDs == ["c1"])
         #expect(joined.page.items.first?.output == "Set model to opus")
         #expect(joined.waitingSlashes.isEmpty)
         #expect(alone.page.items.first?.output == nil)
-        #expect(alone.waitingSlashes["c1"] != nil)
+        #expect(aloneWaiting == ["c1"])
     }
 
     @Test func anAPIErrorLineIsAnErrorRow() throws {

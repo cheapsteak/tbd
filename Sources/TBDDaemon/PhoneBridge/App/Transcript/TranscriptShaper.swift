@@ -12,9 +12,10 @@ struct ShapingContext: Sendable {
     /// `tool_use` id → the subagent's `agentId`, for each subagent call whose
     /// result has been seen.
     let subagentAgentIDs: [String: String]
-    /// `tool_use` id → its result, for results that are not on the item: ones
-    /// in a newer window the phone already holds, or ones that arrived live.
-    let joinedResults: [String: ToolResult]
+    /// `tool_use` id → what its result says, for results that are not on the
+    /// item: ones in a newer window the phone already holds, or ones that
+    /// arrived live.
+    let joinedResults: [String: ToolOutcome]
     /// A subagent's item count by its `agentId`, or nil when unknown. The
     /// pager calls it only for the subagent rows a page keeps, and measures
     /// rows with a copy that answers the largest count instead.
@@ -33,7 +34,7 @@ struct ShapingContext: Sendable {
         showDetails: Bool = false,
         fileEdits: [String: FileEditStats] = [:],
         subagentAgentIDs: [String: String] = [:],
-        joinedResults: [String: ToolResult] = [:],
+        joinedResults: [String: ToolOutcome] = [:],
         subagentItemCount: @escaping @Sendable (String) -> Int? = { _ in nil },
         worktreeRoot: String? = nil,
         slashOutputs: [String: String] = [:],
@@ -47,6 +48,21 @@ struct ShapingContext: Sendable {
         self.worktreeRoot = worktreeRoot
         self.slashOutputs = slashOutputs
         self.apiErrors = apiErrors
+    }
+}
+
+/// What shaping reads from a tool call's result: whether it is an error, and
+/// the exit code it names (`TranscriptShaper.exitCode(of:)`). The feed keeps
+/// these for results it joins, rather than the results, so it holds no tool
+/// output.
+struct ToolOutcome: Sendable, Equatable {
+    let isError: Bool
+    let exitCode: Int?
+}
+
+extension ToolOutcome {
+    init(_ result: ToolResult) {
+        self.init(isError: result.isError, exitCode: TranscriptShaper.exitCode(of: result))
     }
 }
 
@@ -125,10 +141,12 @@ enum TranscriptShaper {
     ///   system note carries its `SystemKind` raw value as `noteKind`.
     ///
     /// Every tool row carries `toolName` and `toolStatus`: `running` with no
-    /// result, `error` when the result is an error, else `ok`. An error result
-    /// that names an exit code adds it as `exitCode` (`exitCode(of:)`). The
-    /// result is the item's own, or `ctx.joinedResults` for its ID. `id` is
-    /// the item's own, and `at` its timestamp in Unix milliseconds.
+    /// result, `error` when the result is an error, else `ok`. A `tool` row
+    /// whose error result names an exit code adds it as `exitCode`
+    /// (`exitCode(of:)`); a file edit or a subagent, whose row draws no exit
+    /// code, never carries one. The result is the item's own, or
+    /// `ctx.joinedResults` for its ID. `id` is the item's own, and `at` its
+    /// timestamp in Unix milliseconds.
     static func shape(_ item: TranscriptItem, _ ctx: ShapingContext) -> PhoneItem? {
         guard isShown(item, showDetails: ctx.showDetails) else { return nil }
         let at = item.timestamp.map(PhoneTime.ms)
@@ -139,10 +157,11 @@ enum TranscriptShaper {
             }
             return message(id, .slash, at: at, text, output: ctx.slashOutputs[id].map(slashOutput))
         case .assistantText(let id, let text, _, _):
-            let apiError = ctx.apiErrors[lineID(ofItem: id)].map { capped($0, apiErrorLimit) }
+            let apiError = ctx.apiErrors[TranscriptParser.lineID(ofItem: id)].map { capped($0, apiErrorLimit) }
             return message(id, .assistant, at: at, text, apiError: apiError)
         case .toolCall(let id, let name, let inputJSON, _, let result, _, _, _):
-            return toolRow(id: id, name: name, inputJSON: inputJSON, result: result ?? ctx.joinedResults[id], at: at, ctx: ctx)
+            let outcome = result.map { ToolOutcome($0) } ?? ctx.joinedResults[id]
+            return toolRow(id: id, name: name, inputJSON: inputJSON, outcome: outcome, at: at, ctx: ctx)
         case .peerMessage(let id, let sender, let text, _, _):
             return message(id, .peer, at: at, text, sender: senderLabel(sender))
         case .thinking(let id, let text, _):
@@ -224,18 +243,26 @@ enum TranscriptShaper {
         return preview(shown, limit: targetLimit).truncated ? nil : shown
     }
 
-    /// `path` relative to `root`, or nil when it does not lie inside it. The
-    /// two are compared as written, whole components at a time, trailing `/`
-    /// on `root` ignored. A path that climbs out with a `..` component counts
-    /// as outside, and so does every path when `root` is empty or `/`.
+    /// `path` relative to `root`, or nil when it does not lie inside it. Both
+    /// must be absolute. They are compared whole components at a time, with
+    /// the empty components of repeated or trailing `/` and every `.`
+    /// component left out, so `/repo//src/./a.ts` is `src/a.ts` under
+    /// `/repo`. A `..` component in either counts as outside, since it can
+    /// climb out, and so does every path when `root` names no component, as
+    /// `/` does.
     static func relativePath(_ path: String, root: String?) -> String? {
-        guard var root else { return nil }
-        while root.count > 1, root.hasSuffix("/") { root.removeLast() }
-        guard !root.isEmpty, root != "/", path.hasPrefix(root + "/") else { return nil }
-        let relative = String(path.dropFirst(root.count + 1))
-        let components = relative.split(separator: "/")
-        guard !components.isEmpty, !components.contains("..") else { return nil }
-        return relative
+        guard let root, path.hasPrefix("/"), root.hasPrefix("/") else { return nil }
+        let rootParts = pathComponents(root)
+        let pathParts = pathComponents(path)
+        guard !rootParts.isEmpty, !rootParts.contains(".."), !pathParts.contains(".."),
+              pathParts.count > rootParts.count, pathParts.starts(with: rootParts) else { return nil }
+        return pathParts.dropFirst(rootParts.count).joined(separator: "/")
+    }
+
+    /// `path`'s components, without the empty ones that repeated, leading or
+    /// trailing `/` leave, and without `.`.
+    private static func pathComponents(_ path: String) -> [Substring] {
+        path.split(separator: "/").filter { $0 != "." }
     }
 
     // MARK: - Rows
@@ -254,11 +281,10 @@ enum TranscriptShaper {
     }
 
     private static func toolRow(
-        id: String, name: String, inputJSON: String, result: ToolResult?, at: Int64?, ctx: ShapingContext
+        id: String, name: String, inputJSON: String, outcome: ToolOutcome?, at: Int64?, ctx: ShapingContext
     ) -> PhoneItem {
         let input = decodedInput(inputJSON)
-        let status = result.map { $0.isError ? errorStatus : okStatus } ?? runningStatus
-        let code = result.flatMap(Self.exitCode(of:))
+        let status = outcome.map { $0.isError ? errorStatus : okStatus } ?? runningStatus
         let toolName = name.isEmpty ? nil : capped(name, toolNameLimit)
 
         if fileEditTools.contains(name) {
@@ -268,7 +294,7 @@ enum TranscriptShaper {
                 toolName: toolName, target: fileName(input), toolStatus: status,
                 added: stats?.added, removed: stats?.removed,
                 agentType: nil, itemCount: nil, sender: nil,
-                exitCode: code, path: fileEditPath(input, root: ctx.worktreeRoot))
+                path: fileEditPath(input, root: ctx.worktreeRoot))
         }
         if subagentTools.contains(name) {
             let agentType = (input["subagent_type"] as? String).flatMap { $0.isEmpty ? nil : capped($0, targetLimit) }
@@ -278,12 +304,12 @@ enum TranscriptShaper {
                 toolName: toolName, target: summaryTarget(name: name, input: input), toolStatus: status,
                 added: nil, removed: nil,
                 agentType: agentType, itemCount: count.map(boundedItemCount),
-                sender: nil, exitCode: code)
+                sender: nil)
         }
         return PhoneItem(
             id: id, kind: .tool, at: at, text: nil, truncated: false,
             toolName: toolName, target: summaryTarget(name: name, input: input), toolStatus: status,
-            added: nil, removed: nil, agentType: nil, itemCount: nil, sender: nil, exitCode: code)
+            added: nil, removed: nil, agentType: nil, itemCount: nil, sender: nil, exitCode: outcome?.exitCode)
     }
 
     // MARK: - Fields
@@ -315,12 +341,6 @@ enum TranscriptShaper {
             return nil
         }
         return detail.isEmpty ? nil : capped(String(detail), targetLimit)
-    }
-
-    /// The ID of the line an item came from: the item's ID before its last
-    /// `#`, or the whole ID when it has none.
-    static func lineID(ofItem id: String) -> String {
-        id.lastIndex(of: "#").map { String(id[..<$0]) } ?? id
     }
 
     /// A subagent row's item count, held to `0...subagentCountLimit`

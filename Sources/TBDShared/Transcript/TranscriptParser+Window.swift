@@ -306,30 +306,28 @@ extension TranscriptParser {
               content.hasPrefix("<local-command-stdout>") || content.hasPrefix("<local-command-stderr>") else {
             return nil
         }
+        // One pass: each search runs over the line itself, from where the last
+        // one ended, so a line of many tags costs time in proportion to its
+        // length.
         var parts: [Substring] = []
-        var rest = content[...]
-        while let open = localCommandOpenTag(in: rest) {
-            let body = rest[open.range.upperBound...]
-            if let close = body.range(of: "</local-command-\(open.stream)>") {
-                parts.append(body[..<close.lowerBound])
-                rest = body[close.upperBound...]
-            } else {
-                parts.append(body)
+        var from = content.startIndex
+        while let tag = content.range(of: "<local-command-", range: from..<content.endIndex) {
+            let afterTag = content[tag.upperBound...]
+            guard let stream = ["stdout", "stderr"].first(where: { afterTag.hasPrefix($0 + ">") }) else {
+                from = tag.upperBound
+                continue
+            }
+            let bodyStart = content.index(tag.upperBound, offsetBy: stream.count + 1)
+            guard let close = content.range(of: "</local-command-\(stream)>", range: bodyStart..<content.endIndex) else {
+                parts.append(content[bodyStart...])
                 break
             }
+            parts.append(content[bodyStart..<close.lowerBound])
+            from = close.upperBound
         }
         let output = ANSIEscape.strip(parts.joined(separator: "\n")).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !output.isEmpty else { return nil }
         return (commandLineID: parentID, output: output)
-    }
-
-    /// The first `<local-command-stdout>` or `<local-command-stderr>` tag in
-    /// `text`, with its stream name.
-    private static func localCommandOpenTag(in text: Substring) -> (range: Range<Substring.Index>, stream: String)? {
-        let found = ["stdout", "stderr"].compactMap { stream in
-            text.range(of: "<local-command-\(stream)>").map { (range: $0, stream: stream) }
-        }
-        return found.min { $0.range.lowerBound < $1.range.lowerBound }
     }
 
     /// The error class of an API error that Claude Code wrote as an assistant
