@@ -5,7 +5,7 @@
  */
 
 import type { AppEvent } from '../protocol/types.ts';
-import { applyPromptChanged } from './prompts.ts';
+import { applyPromptChanged, clearStaleRefusals } from './prompts.ts';
 import { findSession, pendingOpenTarget, resolveRoute, sameRoute } from './route.ts';
 import { applySessionsChanged } from './sessionsData.ts';
 import { nextToast } from './store.ts';
@@ -26,8 +26,8 @@ const SLICES: EventSlices = { applyTranscriptEvent, applyPromptChanged, addRecei
  * - `sessions.changed` merges into the list (`applySessionsChanged`), and the route follows
  *   the list (`applySessions`);
  * - `transcript.*` goes to the transcript slice (`applyTranscriptEvent`);
- * - `prompt.changed` goes to the prompt slice (`applyPromptChanged`), and each receipt that
- *   gives goes to the transcript (`addReceipt`), in order.
+ * - `prompt.changed` goes to the prompt slice (`applyPromptChanged`, with the session the route
+ *   shows), and each receipt that gives goes to the transcript (`addReceipt`), in order.
  *
  * It returns `state` itself when no slice changed.
  */
@@ -47,7 +47,8 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
       return transcript === state.transcript ? state : { ...state, transcript };
     }
     case 'prompt.changed': {
-      const { prompts, receipts } = slices.applyPromptChanged(state.prompts, event.data);
+      const { route } = state.ui;
+      const { prompts, receipts } = slices.applyPromptChanged(state.prompts, event.data, route.screen === 'session' ? route.ref : null);
       let transcript = state.transcript;
       for (const receipt of receipts) {
         transcript = slices.addReceipt(transcript, event.data.session, receipt.id, receipt.text);
@@ -65,6 +66,9 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * 2. Then a pending open that the list now shows opens, and is cleared. A `{ worktreeID }`
  *    open with a toast template shows it, `{name}` replaced by the row's name.
  *
+ * A prompt card's refusal goes once its session's `answer` capability turns from unavailable to
+ * available (`clearStaleRefusals`).
+ *
  * A change of screen clears the menu and every sheet, since they act on the session the screen
  * showed. The one exception is `new`, which acts on a repo, not a session: it stays when the
  * route goes back to the sessions list, which it opens from, so a session that leaves the list
@@ -77,7 +81,7 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
  * show; a menu left set would open again when the row comes.
  */
 export function applySessions(state: AppState, sessions: SessionsData): AppState {
-  return { ...state, sessions, ui: followList(state.ui, sessions) };
+  return { ...state, sessions, ui: followList(state.ui, sessions), prompts: clearStaleRefusals(state.prompts, state.sessions, sessions) };
 }
 
 /**

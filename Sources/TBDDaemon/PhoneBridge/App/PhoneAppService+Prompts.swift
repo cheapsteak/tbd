@@ -822,12 +822,22 @@ struct PhonePromptFeed: Sendable {
 /// **`prompt.answer`** adds no authority. It calls the core of `prompt.answer`
 /// (`phoneAnswerPrompt`) or of `remote.answer` (`phoneAnswerRemotePrompt`)
 /// under the device of the verified pairing, `context.peer.deviceID`, never a
-/// value from the request, with the answer exactly as the phone sent it. The
-/// core checks `transcript_prompt_answer_enabled`, the setting the laptop's
-/// prompt card obeys, and `PromptDecisionEncoder` checks the answer against
-/// the prompt, so the phone answers exactly the kinds the laptop does. The
-/// method is in the request memory, so a resent answer acts once. A remote
-/// answer's refusal reaches the phone only in words TBD wrote
+/// value from the request, with the answer exactly as the phone sent it.
+/// `transcript_prompt_answer_enabled`, the setting the laptop's prompt card
+/// obeys, is read twice: first through the session's `answer` capability, as
+/// the sessions list shows it, so while the setting is off the answer is
+/// `unsupported` with `PhoneSessionStatus.answerTurnedOffReason` before the
+/// core is called, and while it cannot be read likewise with
+/// `PhoneSessionStatus.answerSettingUnreadReason`; then by the core itself,
+/// before it acts, which refuses an answer whose setting was turned off
+/// after the first read, or whose config row it cannot read. The phone gets
+/// that refusal as `refused` in the sessions list's words for the same
+/// thing: `PhoneSessionStatus.answerTurnedOffReason` for the setting turned
+/// off, `PhoneSessionStatus.answerSettingUnreadReason` for a row the core
+/// cannot read. `PromptDecisionEncoder` checks
+/// the answer against the prompt, so the phone answers exactly the kinds the
+/// laptop does. The method is in the request memory, so a resent answer acts
+/// once. A remote answer's refusal reaches the phone only in words TBD wrote
 /// (`answerRefusal(_:remoteRefusals:)`), since a provider's own can quote a
 /// secret.
 ///
@@ -850,26 +860,33 @@ extension PhoneAppService {
     /// - A permission answer whose reason is over `promptTextCap` UTF-8 bytes
     ///   is `bad_request`, before anything is called.
     /// - **A local session** the phone cannot see (`phoneVisibleTerminal`) is
-    ///   `not_found`. One whose `answer` capability the sessions list shows
-    ///   unavailable (a Codex session, a tab in a remote lane) is
-    ///   `unsupported` with the list's reason, and any other session that is
-    ///   not Claude (a shell) is `unsupported` with `notAClaudeAnswerReason`
-    ///   (`phoneCapableClaudeTerminal`). Otherwise `phoneAnswerPrompt` with
-    ///   the terminal, the prompt and the answer.
-    /// - **A remote session** needs its provider's `answer` capability, as the
-    ///   sessions list shows it, or it is `unsupported` with the same reason;
-    ///   a provider that is not registered, and a session the phone cannot
+    ///   `not_found`. Then, in this order, each is `unsupported`
+    ///   (`phoneCapableClaudeTerminal`): a session that can never answer (a
+    ///   Codex session, a tab in a remote lane), with the reason the sessions
+    ///   list shows; any other session that is not Claude (a shell), with
+    ///   `notAClaudeAnswerReason`; and a Claude session while the setting for
+    ///   answering prompts is off, with the list's reason,
+    ///   `PhoneSessionStatus.answerTurnedOffReason`, or cannot be read, with
+    ///   `PhoneSessionStatus.answerSettingUnreadReason`. Otherwise
+    ///   `phoneAnswerPrompt` with the terminal, the prompt and the answer.
+    /// - **A remote session** needs its `answer` capability, as the sessions
+    ///   list shows it (its provider declares `answer`, and the setting is
+    ///   on and readable), or it is `unsupported` with the same reason; a
+    ///   provider that is not registered, and a session the phone cannot
     ///   see, are `not_found` (`checkPhoneCapableRemoteSession`). Then
     ///   `phoneAnswerRemotePrompt` with the provider, the session, the prompt
     ///   and the answer.
     ///
     /// The core's result is the reply's: "already answered" is the outcome
-    /// `already_resolved`, not an error. A refusal (the setting is off, no
+    /// `already_resolved`, not an error. A refusal (the setting was turned off
+    /// after the capability check read it, or the core could not read it, no
     /// hook picked the answer up, the answer does not fit the prompt) is
-    /// `refused`: a local answer's with the core's text, and a remote
-    /// answer's only in words TBD wrote (`answerRefusal(_:remoteRefusals:)`).
-    /// A result that does not decode is `internal`, never a success. A revoke
-    /// noticed before the call stops it.
+    /// `refused`: the setting's with `PhoneSessionStatus.answerTurnedOffReason`
+    /// or `PhoneSessionStatus.answerSettingUnreadReason`, any other local
+    /// answer's with the core's text, and any other remote answer's only in
+    /// words TBD wrote (`answerRefusal(_:remoteRefusals:)`). A result that does not
+    /// decode is `internal`, never a success. A revoke noticed before the
+    /// call stops it.
     nonisolated func promptAnswer(_ params: PhonePromptAnswerParams, _ context: DeviceContext) async throws -> PromptAnswerResult {
         if case .permission(_, let reason?) = params.answer, reason.utf8.count > PhoneAppConstants.promptTextCap {
             throw PhoneAppError(code: .badRequest, message: Self.answerReasonTooLongReason)
@@ -935,10 +952,20 @@ extension PhoneAppService {
 
     /// The `refused` error for an answer the core refused with `reason`.
     ///
-    /// - **A local answer** (`remoteRefusals` nil) is refused by TBD alone:
-    ///   the setting is off, no hook picked the answer up, or the answer does
-    ///   not fit the prompt. Its reason reaches the phone as `refusal(_:)`
-    ///   sends it, or `answerRefusedReason` when it gave none.
+    /// - **The setting's refusals** are written for a developer, so the phone
+    ///   gets the words its sessions list shows for the same thing, local or
+    ///   remote: `PhoneSessionStatus.answerTurnedOffReason` for
+    ///   `PromptAnswerRefusal.disabled`, the setting turned off after the
+    ///   phone's own check read it on, and
+    ///   `PhoneSessionStatus.answerSettingUnreadReason` for
+    ///   `PromptAnswerRefusal.settingUnread`, the core's own read of the
+    ///   config row failing after the phone's check passed. The local core
+    ///   reads the row for the setting; the remote core reads it once for its
+    ///   remote backends gate, its cloud gate and the setting.
+    /// - **Any other local answer** (`remoteRefusals` nil) is refused by TBD
+    ///   alone: no hook picked the answer up, or the answer does not fit the
+    ///   prompt. Its reason reaches the phone as `refusal(_:)` sends it, or
+    ///   `answerRefusedReason` when it gave none.
     /// - **A remote answer** can be refused by the provider, whose error
     ///   message can quote a URL with an access token in it. Its reason
     ///   reaches the phone only when it is in `remoteRefusals`, the words TBD
@@ -946,6 +973,12 @@ extension PhoneAppService {
     ///   anything else is `remoteRefusedReason`, and the reason goes to the
     ///   log as private data (`remoteRefusal(_:method:tbdRefusals:)`).
     static func answerRefusal(_ reason: String?, remoteRefusals: Set<String>?) -> PhoneAppError {
+        if reason == PromptAnswerRefusal.disabled {
+            return Self.refusal(PhoneSessionStatus.answerTurnedOffReason)
+        }
+        if reason == PromptAnswerRefusal.settingUnread {
+            return Self.refusal(PhoneSessionStatus.answerSettingUnreadReason)
+        }
         guard let remoteRefusals else {
             return Self.refusal(reason.flatMap { $0.isEmpty ? nil : $0 } ?? Self.answerRefusedReason)
         }
@@ -957,8 +990,7 @@ extension PhoneAppService {
     /// sent them, are `promptQuestions`, which reach a phone as they are
     /// (`answerRefusal(_:remoteRefusals:)`):
     /// - the gates' (`tbdRemoteGateRefusals`);
-    /// - the setting's, and a session with no mirror row
-    ///   (`PromptAnswerRefusal`);
+    /// - a session with no mirror row (`PromptAnswerRefusal.notMirrored`);
     /// - a session that has exited (`RemoteSendMessageRefusal.exited`);
     /// - every `PromptAnswerValidation` message whose words are TBD's and
     ///   text the phone has: the fixed ones, and, for a question answer, the
@@ -972,10 +1004,11 @@ extension PhoneAppService {
     /// have. The refusals TBD builds from anything else, such as a validation
     /// message naming a question no phone was sent, a stale provider's and an
     /// undeclared verb's, are left out, and the phone gets
-    /// `remoteRefusedReason` for them.
+    /// `remoteRefusedReason` for them. The setting's refusals are not here:
+    /// `answerRefusal(_:remoteRefusals:)` gives the phone the sessions list's
+    /// words for them before it reads this set.
     static func tbdRemoteAnswerRefusals(for answer: PromptAnswer, promptQuestions: [String] = []) -> Set<String> {
         var refusals = tbdRemoteGateRefusals.union([
-            PromptAnswerRefusal.disabled,
             PromptAnswerRefusal.notMirrored,
             RemoteSendMessageRefusal.exited,
             PromptAnswerValidation.kindMismatch.message,

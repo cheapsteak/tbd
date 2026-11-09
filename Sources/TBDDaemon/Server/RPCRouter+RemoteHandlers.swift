@@ -135,10 +135,14 @@ extension RPCRouter {
     /// not just when the outer flag is.
     func cloudGate(provider: String) async throws -> RPCResponse? {
         guard provider == ClaudeCloudProvider.name else { return nil }
-        guard try await db.config.get().claudeCloudEnabled else {
-            return Self.claudeCloudDisabledResponse
-        }
-        return nil
+        return cloudGate(provider: provider, config: try await db.config.get())
+    }
+
+    /// `cloudGate(provider:)` against a config row the caller already read,
+    /// for a verb that reads the row once for all its gates (`remote.answer`).
+    func cloudGate(provider: String, config: Config) -> RPCResponse? {
+        guard provider == ClaudeCloudProvider.name, !config.claudeCloudEnabled else { return nil }
+        return Self.claudeCloudDisabledResponse
     }
 
     static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
@@ -148,7 +152,13 @@ extension RPCRouter {
     /// Internal for the same reason as `remoteBackendsDisabledResponse` above:
     /// the worktree handlers' remote branches pass through the same gate.
     func remoteGate() async throws -> RemoteProviderManager? {
-        guard try await db.config.get().remoteBackendsEnabled else { return nil }
+        remoteGate(config: try await db.config.get())
+    }
+
+    /// `remoteGate()` against a config row the caller already read, for a
+    /// verb that reads the row once for all its gates (`remote.answer`).
+    func remoteGate(config: Config) -> RemoteProviderManager? {
+        guard config.remoteBackendsEnabled else { return nil }
         return remoteManager
     }
 

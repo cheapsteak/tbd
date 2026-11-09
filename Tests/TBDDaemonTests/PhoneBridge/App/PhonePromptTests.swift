@@ -199,9 +199,13 @@ struct PhonePromptTests {
         #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptHookDetachedRefusal))
     }
 
-    /// The core refuses while `transcript_prompt_answer_enabled` is off, and
-    /// the phone gets that refusal as it is. `PhonePromptAnswerRouterTests`
-    /// runs the same through the real core.
+    /// The core refuses while `transcript_prompt_answer_enabled` is off, in
+    /// words written for a developer, and the phone gets the words its
+    /// sessions list shows for the same thing instead. The phone's own check
+    /// reads the setting first, so this is the answer whose setting was
+    /// turned off between the two reads: the setting here is on, and the
+    /// fake core refuses as the real one would after the change.
+    /// `PhonePromptAnswerRouterTests` runs the setting through the real core.
     @Test func theSettingsRefusalReachesThePhone() async throws {
         let h = try await PhoneServiceHarness.make()
         h.actions.respond(to: .answerPrompt, with: RPCResponse(error: RPCRouter.promptAnswerDisabledRefusal))
@@ -210,7 +214,7 @@ struct PhonePromptTests {
         let terminalID = try await h.seedTerminal().id
         let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
 
-        #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptAnswerDisabledRefusal))
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerTurnedOffReason))
     }
 
     @Test func aRefusalWithNoReasonIsRefusedWithAFixedLine() async throws {
@@ -315,6 +319,91 @@ struct PhonePromptTests {
         #expect(h.actions.calls.isEmpty)
     }
 
+    /// Off, the setting for answering prompts refuses a local answer
+    /// `unsupported` with the reason the sessions list shows, and the core is
+    /// never called. On, the answer reaches the core.
+    @Test(arguments: [false, true])
+    func aLocalAnswerFollowsTheAnswerSetting(enabled: Bool) async throws {
+        let h = try await PhoneServiceHarness.make()
+        try await h.db.config.setTranscriptPromptAnswerEnabled(enabled)
+        let terminalID = try await h.seedTerminal().id
+        h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
+        let outbox = await h.connect()
+
+        let (reply, bytes) = try await h.request(.promptAnswer, params: Self.local(terminalID, "toolu-1"), on: outbox)
+
+        if enabled {
+            #expect(reply.error == nil)
+            #expect(try Self.outcome(bytes) == .delivered)
+            #expect(h.actions.calls == [FakeSessionActions.Call(method: .answerPrompt, deviceID: h.peer.deviceID)])
+        } else {
+            #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.answerTurnedOffReason))
+            #expect(h.actions.answers.isEmpty)
+            #expect(h.actions.calls.isEmpty)
+        }
+        // The refusal and the sessions list say the same.
+        let snapshot = try await h.service.gatherSnapshot()
+        let listed = snapshot.rows.flatMap(\.sessions).first { $0.ref == .local(terminalID: terminalID) }
+        let session = try #require(listed)
+        #expect(session.capabilities.answer.available == enabled)
+        if !enabled {
+            #expect(session.capabilities.answer.reason == reply.error?.message)
+        }
+    }
+
+    /// A local session that cannot answer anyway keeps its own reason while
+    /// the setting is off, as the sessions list shows it.
+    @Test(arguments: [
+        (TerminalKind.codex, false, "Codex sessions show status only."),
+        (TerminalKind.shell, false, "Only a Claude session can answer prompts."),
+        (TerminalKind.claude, true, "This tab belongs to a remote lane. Use its remote session."),
+    ])
+    func aSessionThatCannotAnswerKeepsItsReasonWhileTheSettingIsOff(
+        _ kind: TerminalKind, _ inRemoteLane: Bool, _ reason: String
+    ) async throws {
+        let h = try await PhoneServiceHarness.make()
+        try await h.db.config.setTranscriptPromptAnswerEnabled(false)
+        h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
+        let terminal = try await h.seedTerminal(kind: kind, inRemoteLane: inRemoteLane)
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(.promptAnswer, params: Self.local(terminal.id, "toolu-1"), on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .unsupported, message: reason))
+        #expect(h.actions.calls.isEmpty)
+    }
+
+    /// A setting for answering prompts that cannot be read refuses the
+    /// answer before the core is called, local and remote, as `unsupported`
+    /// with `answerSettingUnreadReason`, the reason the sessions list shows
+    /// then. An `internal` reply would be remembered, and a phone reads it
+    /// as an answer that may have landed. Phone control reads as on without
+    /// the database, or the request would stop at that check.
+    @Test func anUnreadableAnswerSettingRefusesTheAnswerBeforeTheCore() async throws {
+        let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
+        h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
+        h.actions.respond(to: .answerRemotePrompt, with: try Self.answered(.delivered))
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
+        let terminal = try await h.seedTerminal()
+        let outbox = await h.connect()
+        try await h.makeConfigUnreadable()
+
+        let (local, _) = try await h.request(.promptAnswer, params: Self.local(terminal.id, "toolu-1"), on: outbox)
+        let (remote, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(session: Self.remoteSession, promptID: "rp-1", answer: Self.allow),
+            on: outbox)
+
+        let refused = PhoneAppError(code: .unsupported, message: PhoneSessionStatus.answerSettingUnreadReason)
+        #expect(local.error == refused)
+        #expect(remote.error == refused)
+        #expect(h.actions.answers.isEmpty)
+        #expect(h.actions.remoteAnswers.isEmpty)
+        let answering = h.actions.calls.filter { $0.method == .answerPrompt || $0.method == .answerRemotePrompt }
+        #expect(answering.isEmpty)
+    }
+
     // MARK: - prompt.answer, a remote session
 
     @Test func aRemoteAnswerNeedsTheAnswerCapability() async throws {
@@ -361,6 +450,58 @@ struct PhonePromptTests {
             deviceName: "Acme Phone", action: "prompt.answer", target: "remote:acme-cloud/rs-1")])
     }
 
+    /// Off, the setting refuses a remote answer `unsupported` with the reason
+    /// the sessions list shows, before the session list is read or the
+    /// provider called, even where the provider declares `answer`. On, the
+    /// answer reaches the provider. Either way the sessions list shows the
+    /// session's `answer` as the refusal reads it.
+    @Test(arguments: [false, true])
+    func aRemoteAnswerFollowsTheAnswerSetting(enabled: Bool) async throws {
+        let h = try await PhoneServiceHarness.make()
+        try await h.db.config.setTranscriptPromptAnswerEnabled(enabled)
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
+        h.actions.respond(to: .answerRemotePrompt, with: try Self.answered(.delivered))
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(session: Self.remoteSession, promptID: "rp-1", answer: Self.allow),
+            on: outbox)
+
+        if enabled {
+            #expect(reply.error == nil)
+            #expect(h.actions.remoteAnswers.count == 1)
+        } else {
+            #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.answerTurnedOffReason))
+            #expect(h.actions.remoteAnswers.isEmpty)
+            #expect(h.actions.calls == [FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil)])
+        }
+        let snapshot = try await h.service.gatherSnapshot()
+        let shown = snapshot.rows.flatMap(\.sessions).first { $0.ref == Self.remoteSession }
+        let session = try #require(shown)
+        #expect(session.capabilities.answer.available == enabled)
+    }
+
+    /// A provider that does not declare `answer` keeps its own reason while
+    /// the setting is off.
+    @Test func aProviderThatCannotAnswerKeepsItsReasonWhileTheSettingIsOff() async throws {
+        let h = try await PhoneServiceHarness.make()
+        try await h.db.config.setTranscriptPromptAnswerEnabled(false)
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(session: Self.remoteSession, promptID: "rp-1", answer: Self.allow),
+            on: outbox)
+
+        #expect(reply.error == PhoneAppError(
+            code: .unsupported, message: "This provider does not support answering prompts."))
+        #expect(h.actions.remoteAnswers.isEmpty)
+    }
+
     @Test func aRemoteAnswerToAnUnregisteredProviderIsNotFound() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-other", capabilities: [RemoteCapability.answer])
@@ -376,8 +517,9 @@ struct PhonePromptTests {
     }
 
     /// A remote answer's refusal reaches the phone only in words TBD wrote:
-    /// the setting's, a session state's, the remote gates' and a validation
-    /// message about the phone's own answer pass as they are, and a
+    /// the setting's in the words the sessions list shows for it, and a
+    /// session state's, the remote gates' and a validation message about the
+    /// phone's own answer as they are, and a
     /// provider's own words, which can quote a token, become
     /// `remoteRefusedReason`, as does a validation message naming a question
     /// the answer did not name.
@@ -391,8 +533,9 @@ struct PhonePromptTests {
             (PhoneProviderSecret.error, Self.allow, PhoneAppService.remoteRefusedReason),
             ("invalid_params: \(PhoneProviderSecret.error)", Self.allow, PhoneAppService.remoteRefusedReason),
             ("", Self.allow, PhoneAppService.remoteRefusedReason),
-            (PromptAnswerRefusal.disabled, Self.allow, PromptAnswerRefusal.disabled),
-            (RPCRouter.promptAnswerDisabledRefusal, Self.allow, RPCRouter.promptAnswerDisabledRefusal),
+            (PromptAnswerRefusal.disabled, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (RPCRouter.promptAnswerDisabledRefusal, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (PromptAnswerRefusal.settingUnread, Self.allow, PhoneSessionStatus.answerSettingUnreadReason),
             (PromptAnswerRefusal.notMirrored, Self.allow, PromptAnswerRefusal.notMirrored),
             (RemoteSendMessageRefusal.exited, Self.allow, RemoteSendMessageRefusal.exited),
             (RemoteGateRefusal.backendsDisabled, Self.allow, RemoteGateRefusal.backendsDisabled),
@@ -1408,7 +1551,8 @@ struct PhonePromptTests {
 
 /// `prompt.answer` through the real core, `RPCRouter.answerPrompt`, so the
 /// phone is shown to obey `transcript_prompt_answer_enabled` the way the
-/// laptop's prompt card does, by the core's own check.
+/// laptop's prompt card does: by its own check, and by the core's when the
+/// setting changes, or stops being readable, between the two.
 ///
 /// Tier 2: in-memory GRDB, a dry-run tmux and an actuation log under the
 /// run's fenced scratch dir.
@@ -1420,7 +1564,29 @@ struct PhonePromptAnswerRouterTests {
         let peer: PhonePeer
     }
 
-    private func makeFixture() async throws -> Fixture {
+    /// The remote provider `remoteProvider` stands for.
+    private static let provider = "acme-cloud"
+
+    /// `describe`, declaring `answer`.
+    private static let describeDeclaringAnswer = providerOK(
+        #"{"contract_versions": [1], "name": "\#(provider)", "capabilities": ["\#(RemoteCapability.answer)"]}"#)
+
+    /// `list`, naming session `s-1` blocked on permission prompt `p-1`.
+    private static let listingAPrompt = providerOK(#"""
+        {"sessions": [{"id": "s-1", "state": "running", "agent_state": "\#(RemoteAgentState.waitingInput.rawValue)", \#
+        "pending_prompt": {"id": "p-1", "kind": "permission", "tool_name": "Bash", \#
+        "tool_input": {"command": "touch x"}}}]}
+        """#)
+
+    /// With `beforeTheCore`, the service reaches the router through
+    /// `ChangingTheSettingBeforeTheCore`, which runs it on the database just
+    /// before the core of an answer runs. With `remoteProvider`, remote
+    /// backends are on and the router has a provider, `provider`, that runs
+    /// through it, has described itself and has mirrored its sessions once.
+    private func makeFixture(
+        remoteProvider: FakeProviderInvoker? = nil,
+        beforeTheCore: (@Sendable (TBDDatabase) async throws -> Void)? = nil
+    ) async throws -> Fixture {
         let directory = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-prompt"), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
@@ -1430,6 +1596,19 @@ struct PhonePromptAnswerRouterTests {
             id: peer.deviceID, name: peer.deviceName, publicKey: Data(repeating: 7, count: 32),
             roomID: UUID().uuidString, pairedAt: Date(timeIntervalSince1970: 1_800_000_000)))
         let subs = StateSubscriptionManager()
+        var remoteManager: RemoteProviderManager?
+        if let remoteProvider {
+            try await db.config.setRemoteBackendsEnabled(true)
+            let registryURL = directory.appendingPathComponent("agent-providers.json")
+            try #"[{"name": "\#(Self.provider)", "exec": "/nonexistent"}]"#
+                .write(to: registryURL, atomically: true, encoding: .utf8)
+            let manager = RemoteProviderManager(
+                db: db, subscriptions: subs, runner: remoteProvider, registryURL: registryURL,
+                actuationLog: ActuationLog(path: directory.appendingPathComponent("provider-actuations.jsonl").path))
+            await manager.loadRegistryAndDescribe()
+            await manager.pollOnce(provider: RemoteProviderConfig(name: Self.provider, exec: "/nonexistent"))
+            remoteManager = manager
+        }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -1438,22 +1617,24 @@ struct PhonePromptAnswerRouterTests {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
+            remoteManager: remoteManager,
             actuationLog: ActuationLog(path: directory.appendingPathComponent("actuations.jsonl").path))
+        let actions: any PhoneSessionActions
+        if let beforeTheCore {
+            actions = ChangingTheSettingBeforeTheCore(router: router, db: db, change: beforeTheCore)
+        } else {
+            actions = router
+        }
         let service = PhoneAppService(
-            db: db, actions: router, subscriptions: subs, pendingPrompts: router.pendingQuestions,
+            db: db, actions: actions, subscriptions: subs, pendingPrompts: router.pendingQuestions,
             locateTranscript: PhoneServiceHarness.locateTranscript,
             recorder: CapturingRecorder(), clock: EventDrivenTestClock())
         return Fixture(db: db, service: service, peer: peer)
     }
 
-    /// Off, the core refuses before it looks for the prompt, and the phone
-    /// gets that refusal. On, the core looks, finds no such prompt, and says
-    /// it was already answered.
-    @Test(arguments: [false, true])
-    func thePhoneObeysThePromptAnswerSetting(enabled: Bool) async throws {
-        let f = try await makeFixture()
-        try await f.db.config.setTranscriptPromptAnswerEnabled(enabled)
-        // A terminal the phone can see, since the service answers no other.
+    /// Answers a permission prompt on a Claude terminal the phone can see,
+    /// since the service answers no other, and returns the reply's bytes.
+    private func answer(_ f: Fixture) async throws -> Data {
         let repo = try await f.db.repos.create(
             path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await f.db.worktrees.create(
@@ -1471,14 +1652,169 @@ struct PhonePromptAnswerRouterTests {
         await f.service.handleAppMessage(
             try PhoneTestRequests.body(.promptAnswer, id: "answer-1", params: params), from: f.peer)
 
-        let bytes = try await outbox.body(at: 0)
+        return try await outbox.body(at: 0)
+    }
+
+    /// Answers remote session `s-1`'s permission prompt `p-1` on `provider`,
+    /// and returns the reply's bytes.
+    private func answerRemote(_ f: Fixture) async throws -> Data {
+        let outbox = CapturingOutbox()
+        await f.service.phoneConnected(f.peer, outbox: outbox)
+        let params = PhonePromptAnswerParams(
+            session: .remote(provider: Self.provider, sessionID: "s-1"), promptID: "p-1",
+            answer: .permission(decision: .allow, message: nil))
+
+        await f.service.handleAppMessage(
+            try PhoneTestRequests.body(.promptAnswer, id: "answer-1", params: params), from: f.peer)
+
+        return try await outbox.body(at: 0)
+    }
+
+    /// Off, the phone's own check refuses `unsupported` with the reason the
+    /// sessions list shows, so the core never sees the answer. On, the core
+    /// looks, finds no such prompt, and says it was already answered.
+    @Test(arguments: [false, true])
+    func thePhoneObeysThePromptAnswerSetting(enabled: Bool) async throws {
+        let f = try await makeFixture()
+        try await f.db.config.setTranscriptPromptAnswerEnabled(enabled)
+
+        let bytes = try await answer(f)
+
         let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
         if enabled {
             #expect(reply.error == nil)
             let result = try JSONDecoder().decode(PhoneReplyEnvelope<PromptAnswerResult>.self, from: bytes).result
             #expect(result.outcome == .alreadyResolved)
         } else {
-            #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptAnswerDisabledRefusal))
+            #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.answerTurnedOffReason))
         }
+    }
+
+    /// The setting turned off after the phone's own check read it on: the
+    /// core reads it again and refuses before it looks for the prompt, and
+    /// the phone gets that refusal in the words its sessions list shows for
+    /// the setting, not the core's.
+    @Test func theCoreRefusesWhenTheSettingIsTurnedOffAfterThePhonesCheck() async throws {
+        let f = try await makeFixture(beforeTheCore: { db in
+            try await db.config.setTranscriptPromptAnswerEnabled(false)
+        })
+        try await f.db.config.setTranscriptPromptAnswerEnabled(true)
+
+        let bytes = try await answer(f)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerTurnedOffReason))
+        #expect(try await f.db.config.get().transcriptPromptAnswerEnabled == false)
+    }
+
+    /// The setting read on by the phone's own check, then unreadable when the
+    /// core reads it again: the core refuses before it looks for the prompt,
+    /// rather than failing the call, which the phone would have to take for
+    /// an answer that may have gone out. The phone gets that refusal in the
+    /// words its sessions list shows for a setting it cannot read.
+    @Test func theCoreRefusesWhenTheSettingCannotBeReadAfterThePhonesCheck() async throws {
+        let f = try await makeFixture(beforeTheCore: { db in
+            try await db.makeConfigUnreadable()
+        })
+        try await f.db.config.setTranscriptPromptAnswerEnabled(true)
+
+        let bytes = try await answer(f)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerSettingUnreadReason))
+    }
+
+    /// A remote answer whose provider declares `answer` and whose setting is
+    /// on passes the phone's own check, then the config row is unreadable
+    /// when the core of `remote.answer` reads it once for its remote
+    /// backends gate, its cloud gate and the setting. The core refuses
+    /// before it calls the provider, and the phone gets that refusal in the
+    /// words its sessions list shows for a setting it cannot read.
+    @Test func theRemoteCoreRefusesWhenTheConfigCannotBeReadAfterThePhonesCheck() async throws {
+        let invoker = FakeProviderInvoker(script: [Self.describeDeclaringAnswer, Self.listingAPrompt])
+        let f = try await makeFixture(remoteProvider: invoker, beforeTheCore: { db in
+            try await db.makeConfigUnreadable()
+        })
+        try await f.db.config.setTranscriptPromptAnswerEnabled(true)
+
+        let bytes = try await answerRemote(f)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneSessionStatus.answerSettingUnreadReason))
+        let answers = invoker.callsSnapshot().filter { $0.first == "answer" }
+        #expect(answers.isEmpty, "the provider is never asked to answer")
+    }
+}
+
+/// The router as the phone's session actions, except that an answer, local
+/// or remote, first runs `change` on the database, as a user who turns the
+/// setting for answering prompts off between the phone's own check and the
+/// core's call does, or a read of the config row that starts failing there.
+/// Every other method goes straight to the router.
+private struct ChangingTheSettingBeforeTheCore: PhoneSessionActions {
+    let router: RPCRouter
+    let db: TBDDatabase
+    let change: @Sendable (TBDDatabase) async throws -> Void
+
+    func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {
+        try await change(db)
+        return try await router.phoneAnswerPrompt(p, deviceID: deviceID)
+    }
+
+    func phoneSessionStates() async throws -> RPCResponse {
+        try await router.phoneSessionStates()
+    }
+
+    func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse {
+        try await change(db)
+        return try await router.phoneAnswerRemotePrompt(p, deviceID: deviceID)
+    }
+
+    func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneSend(p, deviceID: deviceID)
+    }
+
+    func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneWake(p, deviceID: deviceID)
+    }
+
+    func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneSwapProfile(p, deviceID: deviceID)
+    }
+
+    func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneCreateWorktree(p, deviceID: deviceID)
+    }
+
+    func phoneSpawnsOnHolder() async -> Bool {
+        await router.phoneSpawnsOnHolder()
+    }
+
+    func phoneRemoteProviders() async throws -> RPCResponse {
+        try await router.phoneRemoteProviders()
+    }
+
+    func phoneCachedRemoteProviders() async throws -> RPCResponse {
+        try await router.phoneCachedRemoteProviders()
+    }
+
+    func phoneRemoteSessions() async throws -> RPCResponse {
+        try await router.phoneRemoteSessions()
+    }
+
+    func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneRemoteCreate(p, deviceID: deviceID)
+    }
+
+    func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneRemoteSendMessage(p, deviceID: deviceID)
+    }
+
+    func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse {
+        try await router.phoneRemoteTranscriptSync(p)
+    }
+
+    func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
+        try await router.phoneRemoteTranscriptLoadEarlier(p)
     }
 }

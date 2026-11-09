@@ -275,6 +275,10 @@ actor PhoneAppService: PhoneAppHandling {
     /// When a sessions gather last re-read the provider registry, on the
     /// date seam; nil before the first. See `claimProviderRefresh(force:)`.
     var providersRefreshedAt: Date?
+    /// Whether the last read of the setting for answering prompts failed,
+    /// so the log says so once when reads start failing and once when they
+    /// recover. See `recordPromptAnswerSettingRead(failed:)`.
+    var promptAnswerSettingUnreadable = false
 
     /// Each phone the service keeps state for, by device ID.
     var devices: [UUID: PhoneDeviceState] = [:]

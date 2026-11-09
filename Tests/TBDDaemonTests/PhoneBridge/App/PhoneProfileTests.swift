@@ -283,6 +283,78 @@ struct PhoneProfileTests {
         #expect(forked.error?.code == .internalError)
     }
 
+    /// Switch and fork read a local session through the same capability
+    /// check as `prompt.answer` (`phoneCapableClaudeTerminal`). The setting
+    /// for answering prompts gates answering only, so with it off both still
+    /// reach the swap.
+    @Test func switchAndForkIgnoreTheAnswerSetting() async throws {
+        let h = try await PhoneServiceHarness.make()
+        try await h.db.config.setTranscriptPromptAnswerEnabled(false)
+        let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
+        let terminal = try await h.seedTerminal()
+        let forkID = UUID()
+        let outbox = await h.connect()
+
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(terminal.id))
+        let (switched, _) = try await h.request(
+            .sessionSwitchProfile,
+            params: SessionSwitchProfileParams(session: .local(terminalID: terminal.id), profileID: profile.id),
+            on: outbox)
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(forkID))
+        let (forked, forkBytes) = try await h.request(
+            .sessionFork,
+            params: SessionForkParams(session: .local(terminalID: terminal.id), profileID: profile.id), on: outbox)
+
+        #expect(switched.error == nil)
+        #expect(forked.error == nil)
+        #expect(try Self.sessionRef(forkBytes) == .local(terminalID: forkID))
+        #expect(Self.swaps(h) == [
+            [terminal.id.uuidString, profile.id.uuidString, "inPlace"],
+            [terminal.id.uuidString, profile.id.uuidString, "fork"],
+        ])
+    }
+
+    /// Switch and fork never read the setting for answering prompts, which
+    /// gates neither (`listedCapability`), so a config row that cannot be
+    /// read does not stop them: both reach the swap. An answer on the same
+    /// session does read it, and is refused for the unreadable setting,
+    /// which shows the row is unreadable.
+    @Test func switchAndForkDoNotReadTheAnswerSetting() async throws {
+        let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
+        let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
+        let terminal = try await h.seedTerminal()
+        let forkID = UUID()
+        let outbox = await h.connect()
+        try await h.makeConfigUnreadable()
+
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(terminal.id))
+        let (switched, _) = try await h.request(
+            .sessionSwitchProfile,
+            params: SessionSwitchProfileParams(session: .local(terminalID: terminal.id), profileID: profile.id),
+            on: outbox)
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(forkID))
+        let (forked, forkBytes) = try await h.request(
+            .sessionFork,
+            params: SessionForkParams(session: .local(terminalID: terminal.id), profileID: profile.id), on: outbox)
+        let (answered, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(
+                session: .local(terminalID: terminal.id), promptID: "p-1",
+                answer: .permission(decision: .allow, message: nil)),
+            on: outbox)
+
+        #expect(switched.error == nil)
+        #expect(forked.error == nil)
+        #expect(try Self.sessionRef(forkBytes) == .local(terminalID: forkID))
+        #expect(Self.swaps(h) == [
+            [terminal.id.uuidString, profile.id.uuidString, "inPlace"],
+            [terminal.id.uuidString, profile.id.uuidString, "fork"],
+        ])
+        #expect(answered.error == PhoneAppError(
+            code: .unsupported, message: PhoneSessionStatus.answerSettingUnreadReason))
+        #expect(h.actions.answers.isEmpty)
+    }
+
     // MARK: - session.fork
 
     @Test func forkRepliesWithTheNewSession() async throws {

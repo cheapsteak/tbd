@@ -7,7 +7,10 @@ import TestSupport
 
 /// Tier 1: the sessions publisher over canned snapshots and a virtual clock,
 /// and `sessions.subscribe` through the service over an in-memory database
-/// with fake session actions. Nothing touches the disk or the network.
+/// with fake session actions. One test also runs the answer setting's RPC on
+/// a router, whose actuation log path is under the run's fenced scratch root
+/// (`fencedScratchRoot`); that RPC writes no actuation. Nothing touches the
+/// network.
 @Suite("Phone sessions publisher", .clockDriven)
 struct PhoneSessionsPublisherTests {
     // MARK: - Fixtures
@@ -393,16 +396,72 @@ struct PhoneSessionsPublisherTests {
     @Test func onlyTheGatherReReadsTheProviderRegistry() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
 
         _ = try await h.service.gatherSnapshot()
         let gathered = h.actions.calls.map(\.method)
         #expect(gathered.contains(.remoteProviders))
         #expect(!gathered.contains(.cachedRemoteProviders))
 
-        let capabilities = try await h.service.remoteCapabilities(ofProvider: "acme-cloud")
-        #expect(capabilities.send.available)
+        try await h.service.checkPhoneCapableRemoteSession(
+            provider: "acme-cloud", sessionID: "rs-1", needing: { $0.send },
+            orElse: PhoneAppService.cannotTakeMessagesReason)
         let checked = h.actions.calls.map(\.method).dropFirst(gathered.count)
-        #expect(Array(checked) == [.cachedRemoteProviders])
+        #expect(Array(checked) == [.cachedRemoteProviders, .remoteSessions])
+    }
+
+    /// A config row that cannot be read does not take the sessions list
+    /// down. Only `answer` depends on the setting it holds, so the list still
+    /// arrives, with no session offering an answer, for the reason
+    /// `answerSettingUnreadReason` gives, and every other capability as it
+    /// was. Phone control reads as on without the database, or the request
+    /// would stop at that check.
+    @Test func anUnreadableAnswerSettingLeavesTheListWithoutAnswers() async throws {
+        let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
+        let terminal = try await h.seedTerminal()
+        let rowID = terminal.worktreeID.uuidString
+        let outbox = await h.connect()
+        let readable = try await h.service.gatherSnapshot()
+        let readableRow = readable.rows.first { $0.id == rowID }
+        let before = try #require(readableRow?.sessions.first)
+        try await h.makeConfigUnreadable()
+
+        let (reply, bytes) = try await h.request(.sessionsSubscribe, params: Self.fresh, on: outbox)
+
+        #expect(reply.error == nil)
+        let result = try Self.result(bytes)
+        let subscribedRow = (result.rows ?? []).first { $0.id == rowID }
+        let after = try #require(subscribedRow?.sessions.first)
+        #expect(before.capabilities.answer == PhoneCapability(available: true, reason: nil))
+        #expect(after.capabilities == PhoneCapabilities(
+            transcript: before.capabilities.transcript, send: before.capabilities.send,
+            answer: PhoneCapability(available: false, reason: PhoneSessionStatus.answerSettingUnreadReason),
+            switchProfile: before.capabilities.switchProfile, fork: before.capabilities.fork,
+            model: before.capabilities.model))
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
+    }
+
+    /// Every gather reads the setting for answering prompts, so the service
+    /// records whether the last read failed and `promptAnswerSetting()` logs
+    /// only where that changes: a run of failed reads changes it once, at
+    /// the first, and the first good read after them changes it back once.
+    @Test func aRunOfFailedSettingReadsChangesTheReadStateOnce() async throws {
+        let h = try await PhoneServiceHarness.make()
+        #expect(try await h.service.promptAnswerSetting() != nil)
+        #expect(await h.service.promptAnswerSettingUnreadable == false)
+        try await h.makeConfigUnreadable()
+
+        #expect(try await h.service.promptAnswerSetting() == nil)
+        #expect(await h.service.promptAnswerSettingUnreadable)
+        #expect(try await h.service.promptAnswerSetting() == nil)
+        #expect(await h.service.promptAnswerSettingUnreadable)
+
+        // The dropped table cannot be read again, so the recovery is
+        // recorded as `promptAnswerSetting()` records a good read.
+        #expect(await h.service.recordPromptAnswerSettingRead(failed: true) == false)
+        #expect(await h.service.recordPromptAnswerSettingRead(failed: false))
+        #expect(await h.service.recordPromptAnswerSettingRead(failed: false) == false)
+        #expect(await h.service.promptAnswerSettingUnreadable == false)
     }
 
     /// A gather re-reads the provider registry at most once per
@@ -568,6 +627,99 @@ struct PhoneSessionsPublisherTests {
         let groupIDs = (event.data.layout ?? []).map { $0.id }
         #expect(groupIDs == ["repo:\(repo.id.uuidString)"])
         await h.service.phoneRevoked(deviceID: deviceID)
+    }
+
+    /// The fields of an app body that tell an event from a reply.
+    private struct BodyHead: Decodable {
+        let kind: String
+        let event: String?
+    }
+
+    /// The `index`th `sessions.changed` event (from 0) `outbox` has
+    /// received, once it has arrived.
+    private static func sessionsChanged(_ index: Int, in outbox: CapturingOutbox) async throws -> SessionsChangedData {
+        func events() -> [SessionsChangedData] {
+            outbox.bodies.compactMap { body in
+                guard let head = try? JSONDecoder().decode(BodyHead.self, from: body), head.kind == "event",
+                      head.event == PhoneAppEventName.sessionsChanged.rawValue else { return nil }
+                return try? JSONDecoder().decode(PhoneEventEnvelope<SessionsChangedData>.self, from: body).data
+            }
+        }
+        try await waitUntil("sessions.changed #\(index)") { events().count > index }
+        return events()[index]
+    }
+
+    /// Turning the setting for answering prompts off and on again through
+    /// its RPC reaches the phone as `sessions.changed`, each time with the
+    /// session's new `answer`. The whole chain runs: the setter
+    /// (`config.setTranscriptPromptAnswerEnabled` on a router that shares the
+    /// service's database and subscriptions) writes the column and
+    /// broadcasts a state delta, the delta opens the publisher's window, the
+    /// gather after it reads the setting, and the service emits the change.
+    ///
+    /// Nothing else broadcasts here, so a window opens only on the setter's
+    /// delta: without it no sleeper arms, and `requireAdvanceWhenArmed`
+    /// fails. The publisher's first window is spent before the setter runs,
+    /// on a change of its own, so it cannot carry the setting.
+    @Test func theAnswerSettingReachesThePhoneAsAChange() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let logPath = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-answer-setting"), isDirectory: true)
+            .appendingPathComponent("actuations.jsonl").path
+        let router = RPCRouter(
+            db: h.db,
+            lifecycle: WorktreeLifecycle(
+                db: h.db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+                subscriptions: h.subscriptions),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            subscriptions: h.subscriptions,
+            actuationLog: ActuationLog(path: logPath))
+        let terminal = try await h.seedTerminal()
+        let rowID = terminal.worktreeID.uuidString
+        let outbox = await h.connect()
+
+        let (reply, bytes) = try await h.request(.sessionsSubscribe, params: Self.fresh, on: outbox)
+        #expect(reply.error == nil)
+        let result = try Self.result(bytes)
+        let subscribed = (result.rows ?? []).first { $0.id == rowID }
+        let before = try #require(subscribed?.sessions.first)
+        #expect(before.capabilities.answer == PhoneCapability(available: true, reason: nil))
+
+        // The publisher's first window gathers a new repo, which no delta
+        // announced, and is done once that change arrives.
+        try await h.clock.requireSleeperArmed()
+        let repo = try await h.db.repos.create(path: "/acme/other", displayName: "acme-other", defaultBranch: "main")
+        await h.clock.advance(by: PhoneAppConstants.sessionsDebounce)
+        let firstWindow = try await Self.sessionsChanged(0, in: outbox)
+        let groupIDs = (firstWindow.layout ?? []).map(\.id)
+        #expect(groupIDs.contains("repo:\(repo.id.uuidString)"))
+
+        func setAnswering(_ enabled: Bool) async throws {
+            let request = try RPCRequest(
+                method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
+                params: ConfigSetPromptAnswerParams(enabled: enabled))
+            let response = await router.handle(request)
+            #expect(response.success)
+        }
+
+        try await setAnswering(false)
+        try await h.clock.requireAdvanceWhenArmed(by: PhoneAppConstants.sessionsDebounce)
+        let turnedOff = try await Self.sessionsChanged(1, in: outbox)
+        let offRow = turnedOff.rows.first { $0.id == rowID }
+        let off = try #require(offRow?.sessions.first)
+        #expect(off.capabilities == PhoneCapabilities(
+            transcript: before.capabilities.transcript, send: before.capabilities.send,
+            answer: PhoneCapability(available: false, reason: PhoneSessionStatus.answerTurnedOffReason),
+            switchProfile: before.capabilities.switchProfile, fork: before.capabilities.fork,
+            model: before.capabilities.model))
+
+        try await setAnswering(true)
+        try await h.clock.requireAdvanceWhenArmed(by: PhoneAppConstants.sessionsDebounce)
+        let turnedOn = try await Self.sessionsChanged(2, in: outbox)
+        let onRow = turnedOn.rows.first { $0.id == rowID }
+        let on = try #require(onRow?.sessions.first)
+        #expect(on.capabilities == before.capabilities)
+        await h.service.phoneRevoked(deviceID: h.peer.deviceID)
     }
 
     /// A second `sessions.subscribe` on the connection replaces the publisher
