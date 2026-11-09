@@ -829,9 +829,12 @@ struct PhonePromptFeed: Sendable {
 /// `unsupported` with `PhoneSessionStatus.answerTurnedOffReason` before the
 /// core is called, and while it cannot be read likewise with
 /// `PhoneSessionStatus.answerSettingUnreadReason`; then by the core itself,
-/// which refuses an answer whose setting was turned off after the first
-/// read, and the phone gets that refusal as `refused` in the same words as
-/// the setting turned off. `PromptDecisionEncoder` checks
+/// before it acts, which refuses an answer whose setting was turned off
+/// after the first read, or whose config row it cannot read. The phone gets
+/// that refusal as `refused` in the sessions list's words for the same
+/// thing: `PhoneSessionStatus.answerTurnedOffReason` for the setting turned
+/// off, `PhoneSessionStatus.answerSettingUnreadReason` for a row the core
+/// cannot read. `PromptDecisionEncoder` checks
 /// the answer against the prompt, so the phone answers exactly the kinds the
 /// laptop does. The method is in the request memory, so a resent answer acts
 /// once. A remote answer's refusal reaches the phone only in words TBD wrote
