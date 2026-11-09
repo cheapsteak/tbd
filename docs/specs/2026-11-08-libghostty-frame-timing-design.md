@@ -95,8 +95,10 @@ seven of these hold:
    the last frame was built, or a hold ended in the chunks this delivery covers.
 
 Otherwise the delivery calls `requestFrame()`, as it does today, and the display link
-coalesces. Bulk output stays at one frame per refresh: rule 4 lets at most one output frame
-through per interval, and rule 7 sends large output to the tick.
+coalesces. The rules limit only the leading edge. It draws only after a full interval with
+no output frame, and rule 7 sends large output to the tick. Sustained output is drawn by
+the tick, once per refresh, as it is today. The one case where two output frames fall
+within an interval is a tick soon after a leading-edge frame. "Risks" covers it.
 
 To draw now, the delivery calls the same `renderTick(now:)` that the link calls. That runs
 inside the delivery that already exists, so the design adds no main-queue hop. A frame drawn
@@ -128,7 +130,8 @@ skipped by the tick it calls, so the policy coalesces at once instead.
 - `FrameRing.depth`, 3 – unchanged.
 - `LeadingEdgePolicy.fallbackRefreshInterval`, 1/60 s – for a window with no screen, as in
   the offscreen tests.
-- `DrawableTracker.presentReportTimeout`, 100 ms – see "Drop, never block".
+- `DrawableTracker.presentReportTimeout`, 1 s – the same as `nextDrawable()`'s own timeout.
+  See "Drop, never block".
 
 **The refresh interval.** While the link runs, the interval is `targetTimestamp - timestamp`
 from its last tick. `DisplayLinkProxy.fired(_:)` passes it with the timestamp, and
@@ -255,12 +258,21 @@ newer screen.
   - The one path that drops an acquired drawable unpresented, a failed render encoder,
     removes the entry too. Removal is by id, so whichever of the two runs second finds
     nothing.
-  - **The backstop.** An offscreen window's drawable may never be reported presented, which
+  - **Lost reports.** An offscreen window's drawable may never be reported presented, which
     `TerminalEngineInstrumentTests` records as a known issue. A lost report would hold the
-    count up and stop the view drawing for good. So an entry older than
-    `presentReportTimeout`, 100 ms or about twelve 120 Hz frames, stops counting, measured
-    against the frame's `now`. The first such release in a run logs a `.notice`, so a soak
-    shows whether reports go missing.
+    count up and stop the view drawing for good. An old entry is not proof that its drawable
+    is free, though. If the pool is still full, a tick that trusts the age alone calls
+    `nextDrawable()` and blocks. So recovery uses evidence first and time last:
+    - **Evidence** – a layer's presents reach the screen in the order they were made, so a
+      report for one drawable also removes every older entry. One lost report clears at the
+      next report. "Risks" says what happens if that order fails.
+    - **Time** – only when no report has arrived for `presentReportTimeout`, one second by
+      the frames' `now`, does the tracker clear its entries. No report for a second means
+      either that Metal is not reporting this layer's presents or that nothing has reached
+      the screen for a second. In the second case `nextDrawable()` waits at most its own
+      one-second timeout and returns nil, which takes today's nil-drawable path. That is the
+      cost today's code already pays on every tick of such a stall. The first clear in a
+      run logs a `.notice`, so a soak shows whether reports go missing.
   - The handler also counts presents that report a `presentedTime` of 0, which the Metal
     header documents as a frame that "has not been presented or has been skipped". A count
     that rises while typing is the sign of the shared-vsync risk under "Risks".
@@ -293,8 +305,8 @@ frame path is less to maintain than two.
 
 - **A redraw split across writes** – a program that does not use mode 2026 and writes one
   screen update in several small writes can show the first part for one frame. The size
-  limit and the one-frame-per-interval rule bound this to a single frame, which the next
-  frame replaces. If the A/B or daily use shows it, the fallback is foot's short coalescing
+  limit and rule 4's interval bound this to a single frame, which the next tick's frame
+  replaces. If the A/B or daily use shows it, the fallback is foot's short coalescing
   timer, 0.5 ms and reset by each chunk. That would be a new delay, on the injected clock.
 - **A late leading-edge frame sharing a vsync with the next tick** – a frame drawn just
   before a vsync can miss it and land on the same vsync as the next tick's frame, which
@@ -304,8 +316,13 @@ frame path is less to maintain than two.
 - **View tests that count frames** – a feed into a visible, sized view now draws inside the
   relay delivery, one main-queue turn later, without `renderTick()`. Tests that count frames
   after a feed change, and so does the fixture (see "Testing").
-- **A lost present report** – the backstop covers it, and its `.notice` says how often it
-  happens.
+- **A lost present report** – the next report clears it. If no report comes for a second,
+  the tracker clears itself and logs a `.notice`. If that clear comes during a real stall,
+  one `nextDrawable()` call can wait up to its one-second timeout, as every tick does today.
+- **Present order** – recovery from a lost report assumes that a layer's presents reach the
+  screen in the order they were made. If that stops being true, a report could clear an
+  entry whose drawable is still queued, and one tick could wait in `nextDrawable()` for up to
+  a refresh while the queue drains.
 
 ## Testing
 
@@ -334,8 +351,10 @@ on `DrawableTracker`. The tests of the limits leave those reports out.
     `ESC[?2026l ESC[?2026h` in one chunk draws nothing at once.
   - A live resize draws no leading-edge frame.
   - With the ring full, or with two drawables unreported, a tick builds nothing and keeps
-    `needsUpdate`, and the view draws once the limit clears. The backstop releases an
-    unreported drawable once `presentReportTimeout` of `now` has passed.
+    `needsUpdate`, and the view draws once the limit clears.
+  - With two drawables unreported and younger than `presentReportTimeout`, a tick makes no
+    drawable request (`drawableRequests` does not move), and neither does the leading edge.
+    A report for the newer drawable then clears both, and the next tick draws.
 - **Hold edges, on a real `GhosttyTerminal`:**
   - setting mode 2026 opens one hold, and resetting it ends the hold
   - an in-band RIS (`ESC c`) and `reset()` each end a hold, and so does `resize`
@@ -348,8 +367,12 @@ on `DrawableTracker`. The tests of the limits leave those reports out.
   `now`, including back-to-back holds that span every tick.
 - **The ring** – `tryAcquire()` gives three slots and then nil, without blocking. A release
   frees one, and `hasFreeSlot` follows both.
-- **The tracker** – acquiring adds an entry and the handler removes it. The drop path and the
-  handler together remove it once. The timeout releases an entry.
+- **The tracker:**
+  - acquiring adds an entry, and the handler removes it
+  - the drop path and the handler together remove an entry once
+  - a report for one drawable removes every older entry, and no newer one
+  - entries younger than `presentReportTimeout` stay, however long reports are delayed
+  - with no report for `presentReportTimeout`, the entries clear and the notice logs once
 - **The engine contract suite** – no new case. Draw timing is not part of the
   `TerminalEngine` seam, and whether SwiftTerm draws at once offscreen was not checked, so
   such a case would hold for one engine only. The suite stays green, and so do
@@ -464,7 +487,7 @@ About 250 lines of code and 300 of tests:
 
 - **Drawables** – `Render/FrameRing.swift` and `Render/TerminalRenderer.swift`, plus the
   tracker in a new `Render/DrawableTracker.swift`: `tryAcquire()`, the slot count, the
-  always-installed handler, the drop path and the backstop. Also the limit check and early
+  always-installed handler, the drop path and lost-report recovery. Also the limit check and early
   return in `GhosttyTerminalView.renderNow()`. About 70 lines.
 - **The terminal** – `GhosttyTerminal.swift`: the hold callback and its two values, the byte
   counter, and `RenderHint` in `Aftermath`. About 60 lines.
