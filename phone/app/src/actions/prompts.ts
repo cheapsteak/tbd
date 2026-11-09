@@ -41,8 +41,10 @@
 //   The session's status plays no part: the laptop takes a message while a session works and
 //   answers for itself, and the app shows its reply. When the send goes out it marks the session
 //   as sending (`beginSend`), takes down the session's refusal, and, when the list shows the
-//   session `parked`, toasts "Waking the session, then sending…". When the request settles the
-//   mark goes (`endSend`), and:
+//   session `parked`, toasts "Waking the session, then sending…". It does not toast a message
+//   whose body the client refuses before posting (too large for one frame, or params that make
+//   no body), since nothing goes to the session; the client's refusal shows as any error does.
+//   When the request settles the mark goes (`endSend`), and:
 //   - a reply (`sent`, `woken` or any other outcome) clears the draft, but only when it still
 //     holds the text sent: what the user typed meanwhile stays;
 //   - an error keeps the draft and puts the error's message in `ui.refusal` as it came,
@@ -62,7 +64,7 @@
 
 import { AppError, BAD_PARAMS_TEXT, newRequestID } from '../client/client.ts';
 import { fitsFrame } from '../limits.ts';
-import type { PhonePrompt, PhonePromptAnswerParams, PhoneSessionRef, PromptAnswer } from '../protocol/types.ts';
+import type { Method, ParamsOf, PhonePrompt, PhonePromptAnswerParams, PhoneSessionRef, PromptAnswer } from '../protocol/types.ts';
 import { refKey, requestBody, sameRef } from '../protocol/wire.ts';
 import {
   answerFits, answerSummary, beginAnswer, beginSend, dismissCard, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt,
@@ -98,13 +100,13 @@ function answerTarget(s: AppState, promptID: string, answer: PromptAnswer): { re
 }
 
 /**
- * Whether `params` make a `prompt.answer` body that fits one frame, measured as the client
- * measures it before posting (`request` in `client/client.ts`), with an ID of the length the
- * client gives. One that does not is refused `too_large` before it is posted.
+ * Whether `params` make a `method` body that fits one frame, measured as the client measures it
+ * before posting (`request` in `client/client.ts`), with an ID of the length the client gives.
+ * One that does not, or whose params do not make a body at all, is refused before it is posted.
  */
-function fitsOneFrame(params: PhonePromptAnswerParams): boolean {
+function fitsOneFrame<M extends Method>(method: M, params: ParamsOf<M>): boolean {
   try {
-    return fitsFrame(requestBody(newRequestID(), 'prompt.answer', params));
+    return fitsFrame(requestBody(newRequestID(), method, params));
   } catch {
     return false;
   }
@@ -114,12 +116,16 @@ function withPrompts(s: AppState, prompts: PromptsState): AppState {
   return prompts === s.prompts ? s : { ...s, prompts };
 }
 
-/** Where a message goes and what it says: the session, its `refKey`, the draft as typed, and whether the list shows the session parked. */
+/**
+ * Where a message goes and what it says: the session, its `refKey`, the draft as typed, and
+ * whether the message wakes the session: the list shows it parked, and the body fits one frame,
+ * so the client will post it rather than refuse it at once.
+ */
 interface SendTarget {
   ref: PhoneSessionRef;
   key: string;
   text: string;
-  parked: boolean;
+  wakes: boolean;
 }
 
 /**
@@ -136,7 +142,8 @@ function sendTarget(s: AppState): SendTarget | null {
   const key = refKey(ref);
   const text = textAt(s.ui.drafts, key) ?? '';
   if (isBlankMessage(text)) return null;
-  return { ref, key, text, parked: found.session.status.chip === 'parked' };
+  const wakes = found.session.status.chip === 'parked' && fitsOneFrame('message.send', { session: ref, text });
+  return { ref, key, text, wakes };
 }
 
 /** `ui` with `drafts` and `refusal` replaced, or `ui` itself when neither changed. */
@@ -164,7 +171,7 @@ export function promptActions(ctx: ActionContext, self: () => Actions) {
       const ref = sent.ref;
       if (ref === null) return;
       const params: PhonePromptAnswerParams = { session: ref, promptID, answer };
-      const fits = fitsOneFrame(params);
+      const fits = fitsOneFrame('prompt.answer', params);
       let settled: AnswerSettlement;
       try {
         const result = await client.request('prompt.answer', params);
@@ -212,7 +219,7 @@ export function promptActions(ctx: ActionContext, self: () => Actions) {
       });
       const to = sent.to;
       if (to === null) return;
-      if (to.parked) self().toast(WAKING_TEXT);
+      if (to.wakes) self().toast(WAKING_TEXT);
       // How the request ended: taken, or failed with the words to show, null for none.
       let settled: { taken: true } | { taken: false; refusal: string | null };
       try {

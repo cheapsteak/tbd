@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AppError, BAD_PARAMS_TEXT, NOT_CONFIRMED_TEXT, SUPERSEDED_TEXT } from '../client/client.ts';
+import { MAX_BODY_BYTES } from '../limits.ts';
 import type {
   Method, ParamsOf, PhoneAnsweredBy, PhonePrompt, PhoneRow, PhoneSession, PhoneSessionRef, PhoneStatusChip, PromptAnswer, PromptChangedData,
   ResultOf, SessionsSubscribeResult,
@@ -1069,6 +1070,39 @@ test('each session has its own draft, refusal and message on its way', async () 
   await toOther;
   assert.equal(h.draft(OTHER), undefined);
   assert.equal(h.draft(R), 'For R.');
+});
+
+test("a reply that comes after the user moved clears the sending session's draft, never the one shown", async () => {
+  const h = sendHarness();
+  h.actions.setDraft('Run the unit tests.');
+  const toR = h.actions.sendMessage();
+  // The user moves to the other session and types the same words there.
+  h.show(OTHER);
+  h.actions.setDraft('Run the unit tests.');
+  h.sends()[0]!.resolve({ outcome: 'sent' });
+  await toR;
+  assert.equal(h.draft(R), undefined, "R's draft goes: R's laptop took it");
+  assert.equal(h.draft(OTHER), 'Run the unit tests.', "the other session's draft stays");
+  assert.equal(h.sends().length, 1);
+});
+
+test('a parked session gets no waking toast for a message the client refuses before posting', async () => {
+  const h = sendHarness({ chip: 'parked' });
+  // A body over one frame: the client refuses it `too_large` and posts nothing.
+  h.actions.setDraft('a'.repeat(MAX_BODY_BYTES));
+  const pending = h.actions.sendMessage();
+  assert.equal(h.sends().length, 1, 'handed to the client, which refuses it');
+  assert.equal(h.state().ui.toast, null, 'no toast: nothing goes to the session');
+  h.sends()[0]!.reject(new AppError('too_large', TOO_LONG));
+  await pending;
+  assert.equal(h.refusal(), TOO_LONG);
+  assert.equal(h.draft(), 'a'.repeat(MAX_BODY_BYTES));
+  // A message that fits still toasts.
+  h.actions.setDraft('Pick this up again.');
+  const fits = h.actions.sendMessage();
+  assert.equal(h.state().ui.toast?.text, WAKING_TEXT);
+  h.sends()[1]!.resolve({ outcome: 'woken' });
+  await fits;
 });
 
 test('setDraft keeps the text by session and takes down its refusal; on the sessions list it does nothing', () => {
