@@ -35,7 +35,9 @@
 //     - The entries are read just after the tick decided, so a report landing in between can show
 //       fewer `entries` than `awaiting`.
 //     - A drawable a leading-edge frame acquired after a vsync, and before that vsync's tick ran,
-//       can show a negative age of under one refresh: the tick's `now` is its vsync.
+//       can show a negative age of under one refresh: the tick's `now` is its vsync. For the same
+//       reason a tick that runs late, after a later vsync's present was reported, can show a
+//       negative `sincepresentms`.
 //
 // Acquire and handler times, and a window's bounds, come off `hostNow`, host time, the clock of
 // `presentedTime`. A dropped tick's ages are by the frames' own `now`, the timebase the tracker's
@@ -134,7 +136,7 @@ struct PresentTimingSummary: Sendable, Equatable {
 ///
 /// Reports arrive on whatever thread Metal calls a presented handler on, and dropped ticks on
 /// main, so the window sits behind a lock of its own: the tracker's lock is held no longer than
-/// before. Both lines are emitted outside it.
+/// before. A finished window is summarised, and both lines are emitted, outside it.
 final class PresentTimingLog: Sendable {
     /// How often the `presents` line comes while reports arrive or ticks drop.
     static let summaryInterval: Duration = .seconds(1)
@@ -185,11 +187,12 @@ final class PresentTimingLog: Sendable {
         var lastGPUBehind: GPUBehindSample?
 
         /// Stretches the window's bounds to an event at `time`, first ending the window when `time`
-        /// is `summaryInterval` or more past its first event. Returns the ended window's summary.
-        mutating func advance(to time: Duration) -> PresentTimingSummary? {
-            var finished: PresentTimingSummary?
+        /// is `summaryInterval` or more past its first event. Returns the ended window, for the
+        /// caller to summarise once the lock is released: the summary sorts its samples.
+        mutating func advance(to time: Duration) -> Window? {
+            var finished: Window?
             if let started = window.startedAt, time - started >= PresentTimingLog.summaryInterval {
-                finished = window.summary
+                finished = window
                 window = Window()
             }
             window.startedAt = window.startedAt ?? time
@@ -230,7 +233,7 @@ final class PresentTimingLog: Sendable {
     func notePresented(
         acquiredAt: Duration, reportedAt: Duration, presentedTime: CFTimeInterval, onMainThread: Bool
     ) {
-        let finished = state.withLock { state -> PresentTimingSummary? in
+        let finished = state.withLock { state -> Window? in
             let finished = state.advance(to: reportedAt)
             state.window.presents += 1
             if onMainThread { state.window.onMainThread += 1 }
@@ -245,13 +248,13 @@ final class PresentTimingLog: Sendable {
             }
             return finished
         }
-        if let finished { emitSummary(viewID, finished) }
+        if let summary = finished?.summary { emitSummary(viewID, summary) }
     }
 
     /// A display tick dropped its frame for the GPU, and found `sample`.
     func noteGPUBehind(_ sample: GPUBehindSample) {
         let noticedAt = hostNow()
-        let finished = state.withLock { state -> PresentTimingSummary? in
+        let finished = state.withLock { state -> Window? in
             let finished = state.advance(to: noticedAt)
             state.window.drops += 1
             if !sample.ringHasFreeSlot { state.window.ringFullDrops += 1 }
@@ -260,7 +263,7 @@ final class PresentTimingLog: Sendable {
             state.lastGPUBehind = sample
             return finished
         }
-        if let finished { emitSummary(viewID, finished) }
+        if let summary = finished?.summary { emitSummary(viewID, summary) }
         emitDrop(viewID, sample)
     }
 
