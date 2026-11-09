@@ -91,12 +91,11 @@ final class FDSidecarClient: @unchecked Sendable {
         // socket that arrives already connected. See `adopt` for what an
         // inherited copy costs.
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
-        // `SO_NOSIGPIPE` twice over too: here, before `connect`, because XNU
-        // refuses `setsockopt` with EINVAL once the peer has closed, so the
-        // copy `adopt` sets would be lost if the daemon hung up first — which
-        // is the case it exists for. `adopt` keeps its own for sockets that
-        // arrive already connected; on this path a refusal there (and the one
-        // `.fault` line `SocketSIGPIPE` logs for it) leaves this one in force.
+        // `SO_NOSIGPIPE` here, before `connect`, because XNU refuses
+        // `setsockopt` with EINVAL once the peer has closed, so the copy
+        // `adopt` sets would be lost if the daemon hung up first — which is
+        // the case it exists for. `adopt` sets it for sockets that arrive
+        // already connected, and finds it already set on this one.
         SocketSIGPIPE.suppress(on: fd)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)

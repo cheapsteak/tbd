@@ -45,6 +45,26 @@ struct SocketSIGPIPETests {
         #expect(noSIGPIPE(on: a))
     }
 
+    /// A socket protected before its peer hung up stays protected, and
+    /// protecting it again says so.
+    ///
+    /// `FDSidecarClient.connect(path:)` sets the option before connecting and
+    /// `adopt` sets it again, so the second call routinely lands on a socket
+    /// whose daemon has already gone. XNU refuses `setsockopt` there with
+    /// EINVAL, so a second call that set the option again would report a
+    /// protected socket as unprotected and spend the one `.fault` line a real
+    /// refusal gets.
+    @Test("suppress on an already protected socket whose peer has closed reports it protected")
+    func suppressAgainAfterThePeerClosedReportsProtected() throws {
+        let (a, b) = try makeSocketPair()
+        defer { Darwin.close(a) }
+        try #require(SocketSIGPIPE.suppress(on: a))
+        Darwin.close(b)
+
+        #expect(SocketSIGPIPE.suppress(on: a))
+        #expect(noSIGPIPE(on: a))
+    }
+
     /// `adopt(fd:)` is the one funnel every sidecar socket passes through —
     /// `connect(path:)` calls it, and so do the tests' `socketpair` ends — so
     /// this is the assertion that covers the production connection too.
