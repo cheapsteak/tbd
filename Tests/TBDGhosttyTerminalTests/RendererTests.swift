@@ -11,7 +11,9 @@ import Testing
 /// with this reason; it never passes without having drawn.
 let noMetalDevice: Comment = "no Metal device on this runner"
 
+/// Main actor, because a `FontSet` is built there.
 @Suite(.fastPassBounded)
+@MainActor
 struct RendererTests {
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func shaderSourceCompiles() throws {
@@ -278,30 +280,6 @@ struct RendererTests {
         ring.release()
     }
 
-    /// Monaco has no italic, so its italic is the regular face slanted, and an italic "l" leans:
-    /// the ink at its top sits right of the ink at its foot. Menlo has a real italic, which is
-    /// used as it is.
-    @Test(.enabled(if: NSFont(name: "Monaco", size: 13) != nil && NSFont(name: "Menlo", size: 13) != nil,
-                   "Monaco or Menlo is not installed"))
-    func familyWithoutItalicGetsASlantedFace() throws {
-        let monaco = FontSet(font: try #require(NSFont(name: "Monaco", size: 13)), scale: 2)
-        #expect(monaco.needsSyntheticItalic, "Monaco was taken to have an italic face")
-        let shear = CTFontGetMatrix(monaco.font(for: .italic)).c
-        #expect(abs(shear - tan(FontSet.syntheticItalicSkew)) < 0.001, "the italic face's shear is \(shear)")
-
-        let metrics = CellMetrics(fontSet: monaco)
-        let shaper = GraphemeShaper(fontSet: monaco)
-        let rasterizer = GlyphRasterizer(fontSet: monaco, metrics: metrics)
-        let upright = try #require(rasterizer.rasterize(shaper.shape("l", style: .regular), style: .regular))
-        let slanted = try #require(rasterizer.rasterize(shaper.shape("l", style: .italic), style: .italic))
-        let lean = inkLean(of: slanted) - inkLean(of: upright)
-        #expect(lean > 1.5, "the italic l leans \(lean) px further right at the top than the upright one")
-
-        let menlo = FontSet(font: try #require(NSFont(name: "Menlo", size: 13)), scale: 2)
-        #expect(!menlo.needsSyntheticItalic, "Menlo's italic was synthesized")
-        #expect(CTFontGetMatrix(menlo.font(for: .italic)).c == 0, "Menlo's real italic was slanted again")
-    }
-
     @Test func selectionCompositesOverTheCellBackground() {
         // White at 20% over black is 51 grey, opaque.
         let blended = composite(FrameBuilder.defaultSelectionColor, over: 0xFF00_0000)
@@ -309,23 +287,4 @@ struct RendererTests {
         // Fully transparent changes nothing but the alpha.
         #expect(composite(0x00FF_FFFF, over: 0x0012_3456) == 0xFF12_3456)
     }
-}
-
-/// How many pixels further right the ink in a grayscale glyph's top quarter sits than the ink
-/// in its bottom quarter. The bitmap's first row is its top.
-private func inkLean(of glyph: RasterizedGlyph) -> Double {
-    func centroid(of rows: Range<Int>) -> Double {
-        var weighted = 0.0
-        var total = 0.0
-        for y in rows {
-            for x in 0..<glyph.width {
-                let ink = Double(glyph.pixels[y * glyph.bytesPerRow + x * glyph.bytesPerPixel])
-                weighted += ink * Double(x)
-                total += ink
-            }
-        }
-        return total > 0 ? weighted / total : 0
-    }
-    let quarter = max(1, glyph.height / 4)
-    return centroid(of: 0..<quarter) - centroid(of: (glyph.height - quarter)..<glyph.height)
 }

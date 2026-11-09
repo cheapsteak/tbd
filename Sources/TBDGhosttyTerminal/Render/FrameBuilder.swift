@@ -375,16 +375,11 @@ final class FrameBuilder {
             explicitBackground = pack(color)
         }
 
-        // Bold-brightening: the library already resolved the palette index into RGB, so the *index*
-        // has to come from the style. Only the low 8 entries brighten (spike 4).
-        if hasStyling, style.has(.bold), style.fg_color.tag == UInt8(GHOSTTY_STYLE_COLOR_PALETTE.rawValue) {
-            let index = Int(style.fg_color.value.palette)
-            if index < 8 { explicitForeground = colors.palette[index + 8] }
-        }
-
         var foreground = explicitForeground ?? colors.foreground
         var background = explicitBackground
         var programColored = explicitForeground != nil
+        // The style's own colour for the text, which bold may brighten below.
+        var textColor = style.fg_color
 
         // Inverse is app-side, and when a colour is unset it is the *default* that gets swapped.
         if hasStyling, style.has(.inverse) {
@@ -392,7 +387,15 @@ final class FrameBuilder {
             let newBackground = foreground
             foreground = newForeground
             background = newBackground
+            textColor = style.bg_color
             programColored = true
+        }
+
+        // Bold brightening is ours too (spike 4), and comes after the swap, as in SwiftTerm: it is
+        // the colour the text ends up in that brightens, never the background.
+        let isBold = hasStyling && style.has(.bold)
+        if isBold, let bright = boldBright(textColor, colors: colors) {
+            foreground = bright
         }
 
         if hasStyling, style.has(.faint) {
@@ -407,7 +410,11 @@ final class FrameBuilder {
 
         // --- Decorations ---------------------------------------------------------------------
         if hasStyling {
-            let underlineColor = resolve(style.underline_color, colors: colors) ?? foreground
+            // SwiftTerm brightens a bold cell's underline colour as it does its text colour.
+            var underlineColor = resolve(style.underline_color, colors: colors) ?? foreground
+            if isBold, let bright = boldBright(style.underline_color, colors: colors) {
+                underlineColor = bright
+            }
             if style.underlineStyle != Int32(GHOSTTY_SGR_UNDERLINE_NONE.rawValue) {
                 decorations.add(.underline(rectStyle(forUnderline: style.underlineStyle)),
                                 column: column, color: underlineColor)
@@ -538,6 +545,19 @@ final class FrameBuilder {
         case GHOSTTY_STYLE_COLOR_PALETTE.rawValue: return colors.palette[Int(color.value.palette)]
         default: return nil
         }
+    }
+
+    /// The colour bold text drawn in `color` takes instead, or `nil` when bold leaves it alone.
+    ///
+    /// SwiftTerm's rule, with `useBrightColors` at the default TBD leaves it on (adapted from
+    /// SwiftTerm, MIT, Copyright (c) 2019-2026 Miguel de Icaza, `mapColor` in
+    /// Sources/SwiftTerm/Apple/SnapshotTextBuilder.swift at cheapsteak/SwiftTerm b4db5b0): palette
+    /// entries 0 to 6 move to their bright twins 8 to 14. Its test is `ansi < 7`, so palette 7,
+    /// white, keeps its colour, as do the bright entries, the rest of the 256 and RGB colours.
+    private func boldBright(_ color: GhosttyStyleColor, colors: SurfaceColors) -> UInt32? {
+        guard UInt32(color.tag) == GHOSTTY_STYLE_COLOR_PALETTE.rawValue else { return nil }
+        let index = Int(color.value.palette)
+        return index < 7 ? colors.palette[index + 8] : nil
     }
 
     private func rectStyle(forUnderline underline: Int32) -> UInt32 {

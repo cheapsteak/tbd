@@ -3,6 +3,11 @@
 //
 // TBD bundles no fonts: the caller hands in the `NSFont` it already shows terminals in, and this
 // builds that face plus its bold, italic and bold-italic siblings at device-pixel size.
+//
+// The siblings are the faces SwiftTerm draws with, found the way SwiftTerm finds them, and nothing
+// is synthesized: a family with no bold face draws bold at its regular weight, and one with no
+// italic draws italic upright, as in a SwiftTerm terminal. Monaco, TBD's default font, has only a
+// regular face, so all four of its styles are that face.
 
 import AppKit
 import CoreText
@@ -24,11 +29,12 @@ enum FontStyle: UInt8, CaseIterable, Sendable, Hashable {
         }
     }
 
-    var symbolicTraits: CTFontSymbolicTraits {
-        var traits: CTFontSymbolicTraits = []
-        if isBold { traits.insert(.boldTrait) }
-        if isItalic { traits.insert(.italicTrait) }
-        return traits
+    /// The traits `NSFontManager` is asked to add to the regular face for this style.
+    var fontTraitMask: NSFontTraitMask {
+        var mask: NSFontTraitMask = []
+        if isBold { mask.insert(.boldFontMask) }
+        if isItalic { mask.insert(.italicFontMask) }
+        return mask
     }
 }
 
@@ -47,16 +53,6 @@ final class FontSet {
     /// pixel-exact and every metric is already in device pixels.
     let pixelSize: CGFloat
 
-    /// True when the family has no real bold face and bold must be synthesized (fill + stroke).
-    let needsSyntheticBold: Bool
-    /// True when an italic face had to be made by slanting an upright one by
-    /// `syntheticItalicSkew`, because the family has no such face.
-    let needsSyntheticItalic: Bool
-
-    /// The slant of a synthesized italic, in radians from the vertical: the shear a face's
-    /// matrix gets when the family has no italic of its own.
-    static let syntheticItalicSkew: CGFloat = 0.2
-
     private let faces: [FontStyle: CTFont]
     private let regular: CTFont
     /// CTFont construction goes through one XPC connection; keep every construction on one side
@@ -74,9 +70,13 @@ final class FontSet {
 
     // MARK: - Init
 
+    /// Main actor only, because the faces come from `NSFontManager`, an AppKit object SwiftTerm
+    /// also uses only there.
+    ///
     /// - Parameters:
     ///   - font: the regular face, at the point size terminals are shown in.
     ///   - scale: backing scale factor; faces are built at `font.pointSize * scale`.
+    @MainActor
     init(font: NSFont, scale: CGFloat) {
         let pointSize = max(font.pointSize, 1)
         let scale = max(scale, 1)
@@ -88,35 +88,18 @@ final class FontSet {
         FontSet.coreTextLock.lock()
         let base = CTFontCreateCopyWithAttributes(font as CTFont, pixelSize, nil, nil)
         var faces: [FontStyle: CTFont] = [.regular: base]
-        var syntheticBold = false
-        var syntheticItalic = false
-        // `allCases` runs bold and italic before bold italic, which builds on them.
+        // SwiftTerm's faces (adapted from SwiftTerm, MIT, Copyright (c) 2019-2026 Miguel de Icaza,
+        // Sources/SwiftTerm/Mac/MacTerminalView.swift `FontSet.init` at cheapsteak/SwiftTerm
+        // b4db5b0): the font converted to have the style's traits, which `NSFontManager` returns
+        // unchanged when the family has no face with all of them. So Monaco's bold is Monaco
+        // regular, and PT Mono's bold italic is PT Mono regular, though PT Mono has a bold.
+        // CoreText's own trait lookup, `CTFontCreateCopyWithSymbolicTraits`, agrees for Monaco,
+        // Menlo, SF Mono, Courier, PT Mono and Andale Mono, but over the 660 faces of one Mac's
+        // installed fonts it picked a different face for 140 of the 1,980 styles, Hiragino Sans'
+        // bold among them, so it is not used.
         for style in FontStyle.allCases where style != .regular {
-            if let face = CTFontCreateCopyWithSymbolicTraits(
-                base, pixelSize, nil, style.symbolicTraits, style.symbolicTraits) {
-                faces[style] = face
-                continue
-            }
-            // The family has no such face.
-            switch style {
-            case .regular:
-                break
-            case .bold:
-                // The regular face, which the rasterizer strokes heavier.
-                syntheticBold = true
-                faces[style] = base
-            case .italic:
-                syntheticItalic = true
-                faces[style] = FontSet.slanted(base, pixelSize: pixelSize)
-            case .boldItalic:
-                if syntheticBold {
-                    // No bold to slant: the italic face, real or slanted, stroked heavier.
-                    faces[style] = faces[.italic] ?? base
-                } else {
-                    syntheticItalic = true
-                    faces[style] = FontSet.slanted(faces[.bold] ?? base, pixelSize: pixelSize)
-                }
-            }
+            let face = NSFontManager.shared.convert(font, toHaveTrait: style.fontTraitMask)
+            faces[style] = CTFontCreateCopyWithAttributes(face as CTFont, pixelSize, nil, nil)
         }
         let family = CTFontCopyFamilyName(base) as String
         FontSet.coreTextLock.unlock()
@@ -124,21 +107,11 @@ final class FontSet {
         self.resolvedFamily = family
         self.regular = base
         self.faces = faces
-        self.needsSyntheticBold = syntheticBold
-        self.needsSyntheticItalic = syntheticItalic
-    }
-
-    /// `face` sheared by `syntheticItalicSkew`: the top of each glyph leans right. Caller holds
-    /// `coreTextLock`.
-    private static func slanted(_ face: CTFont, pixelSize: CGFloat) -> CTFont {
-        var skew = CGAffineTransform(a: 1, b: 0, c: tan(syntheticItalicSkew), d: 1, tx: 0, ty: 0)
-        return CTFontCreateCopyWithAttributes(face, pixelSize, &skew, nil)
     }
 
     // MARK: - Lookup
 
-    /// The face for `style`. When the family lacks that face this is the regular face, or a
-    /// slanted copy of an upright one; see `needsSyntheticBold` and `needsSyntheticItalic`.
+    /// The face for `style`: the regular face itself when the family has no face for it.
     func font(for style: FontStyle) -> CTFont {
         faces[style] ?? regular
     }

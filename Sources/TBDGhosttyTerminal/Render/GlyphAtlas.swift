@@ -438,7 +438,7 @@ final class GlyphCache {
             case nil: break
             }
         }
-        guard let raster = rasterizer.rasterize(shaped, style: style) else {
+        guard let raster = rasterizer.rasterize(shaped) else {
             entries[key] = .empty
             return nil
         }

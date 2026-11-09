@@ -13,7 +13,10 @@ private let monacoOrMenloMissing: Comment = "Monaco or Menlo is not installed"
 /// pane. And glyphs sit in those cells as SwiftTerm puts them: narrow text at its natural size even
 /// where its ink is wider than the cell, wide glyphs scaled to fit their two cells and centred in
 /// them. Colour glyphs are fitted to their cells as well.
+///
+/// Main actor, because a `FontSet` is built there.
 @Suite(.fastPassBounded)
+@MainActor
 struct CellGeometryTests {
     // MARK: - Cell size and baseline
 
@@ -80,15 +83,15 @@ struct CellGeometryTests {
 
     /// The font's own text is drawn at its natural size even where its bitmap is wider than the
     /// cell: the ink of `%&@` in Monaco and `#WX_w~` in Menlo reaches past their 14 px cells by under
-    /// a pixel, Monaco's `W` fits but spans 15 whole pixels, and an italic or synthetic-bold glyph
-    /// reaches further. Scaled to fit, they would be smaller and softer than their neighbours.
+    /// a pixel, Monaco's `W` fits but spans 15 whole pixels, and Menlo's italic and bold reach
+    /// further. Scaled to fit, they would be smaller and softer than their neighbours.
     @Test(.enabled(if: monacoAndMenlo, monacoOrMenloMissing))
     func theFontsOwnTextIsNotScaledWhereItsInkOverhangsItsCell() throws {
         let cases: [(name: String, characters: String, style: FontStyle)] = [
             ("Monaco", "%&@W", .regular),
             ("Menlo", "#WX_w~", .regular),
-            ("Monaco", "W", .italic),
-            ("Monaco", "@", .bold),
+            ("Menlo", "WX", .italic),
+            ("Menlo", "#W", .bold),
         ]
         for (name, characters, style) in cases {
             let fontSet = FontSet(font: try #require(NSFont(name: name, size: 12)), scale: 2)
@@ -97,7 +100,7 @@ struct CellGeometryTests {
             let rasterizer = GlyphRasterizer(fontSet: fontSet, metrics: metrics)
             for character in characters {
                 let shaped = shaper.shape(character, style: style)
-                let glyph = try #require(rasterizer.rasterize(shaped, style: style), "\(name) drew no \(character)")
+                let glyph = try #require(rasterizer.rasterize(shaped), "\(name) drew no \(character)")
                 let inkWidth = glyph.width - 2 * rasterizer.padding
                 try #require(inkWidth > metrics.width,
                              "\(name) \(style) \(character) spans \(inkWidth) px, no wider than its \(metrics.width) px cell")
@@ -108,12 +111,12 @@ struct CellGeometryTests {
         }
         // At least one of them overhangs by more than a pixel, so a one-pixel tolerance would not
         // have passed this test.
-        let monaco = FontSet(font: try #require(NSFont(name: "Monaco", size: 12)), scale: 2)
-        let metrics = CellMetrics(fontSet: monaco)
-        let rasterizer = GlyphRasterizer(fontSet: monaco, metrics: metrics)
-        let italic = try #require(rasterizer.rasterize(GraphemeShaper(fontSet: monaco).shape("W", style: .italic), style: .italic))
+        let menlo = FontSet(font: try #require(NSFont(name: "Menlo", size: 12)), scale: 2)
+        let metrics = CellMetrics(fontSet: menlo)
+        let rasterizer = GlyphRasterizer(fontSet: menlo, metrics: metrics)
+        let italic = try #require(rasterizer.rasterize(GraphemeShaper(fontSet: menlo).shape("W", style: .italic)))
         let overhang = italic.width - 2 * rasterizer.padding - metrics.width
-        #expect(overhang > 1, "Monaco's italic W overhangs its cell by only \(overhang) px")
+        #expect(overhang > 1, "Menlo's italic W overhangs its cell by only \(overhang) px")
     }
 
     /// A narrow glyph from a fallback font is drawn at its natural size too, as SwiftTerm draws it:
