@@ -1363,6 +1363,38 @@ test('a reset starts over at the newest items', async ({ page, appHost }) => {
   expect(await pageCursors(page)).toHaveLength(asked + 2);
 });
 
+test('a page a reset made stale asks nothing while it is on its way, and once it settles the view near the top asks once', async ({ page, appHost }) => {
+  const { tx, asked } = await openLong(page, appHost);
+  await hostCall(page, 'hold', 'transcript.page');
+  await scrollTx(tx, 0);
+  await expect.poll(async () => (await pageCursors(page)).length).toBe(asked + 1);
+  const before = await pageCursors(page);
+
+  // A reset while that page is on its way: its rows, taller than the screen, start at the bottom.
+  // The fake laptop takes a reset's page as the whole transcript, so the cursor counts within it.
+  const items = LONG.slice(startBefore(LONG, LONG.length, OLDER_PAGE_MESSAGES));
+  const cursor = String(startBefore(items, items.length, FIRST_PAGE_MESSAGES));
+  await hostCall(page, 'emit', 'transcript.reset', {
+    session: CHECKOUT_REF, reason: 'rollover', page: { items, cursor, reachedStart: false, omittedItems: 0 },
+  });
+  await expect(tx.locator('.say', { hasText: `Answer ${LAST_TURN}, line 1:` })).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  const m = await metricsOf(tx);
+  expect(m.scrollHeight).toBeGreaterThan(m.clientHeight);
+
+  // At the top, the reader's scroll asks nothing: the stale page holds the turn.
+  await scrollTx(tx, 0);
+  await frames(tx, 6);
+  expect(await pageCursors(page)).toEqual(before);
+
+  // It lands and changes no row, and the view, still near the top, asks for the reset rows' page, once.
+  await hostCall(page, 'release', 'transcript.page');
+  await expect.poll(() => pageCursors(page)).toEqual([...before, cursor]);
+  await expect.poll(async () => (await metricsOf(tx)).scrollTop).toBeGreaterThan(0);
+  await frames(tx, 6);
+  expect(await pageCursors(page)).toEqual([...before, cursor]);
+});
+
 /** 200 short messages, alternating yours and the assistant's: a first page of them fits the screen. */
 function shortItems() {
   return Array.from({ length: 200 }, (_, i) => ({

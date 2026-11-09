@@ -50,7 +50,9 @@
  * the page (`loadOlder`). Rows that fit the view, which the reader cannot scroll, ask at once,
  * and since no scroll event can follow them, a touch, a press or a wheel on `.tx` stands in for
  * the reader's next scroll after a failure: it clears the failure, and the layout after it asks
- * again. Each failure waits for another gesture, so a failing page never retries in a loop.
+ * again. Each failure waits for another gesture, so a failing page never retries in a loop. A
+ * stale page that held the turn (`staleHolds`) asks nothing while it is unanswered, and the
+ * layout after it settles asks once, wherever the view is, if it still wants the page above.
  * - **While the page is on its way** the anchor follows the view: it is taken again after every
  *   scroll event and every layout, so a page that lands after a swipe or a fling went on holds
  *   where the reader is then, not where the page was asked for.
@@ -98,6 +100,7 @@ import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, typ
 import { elementScroll, observeElementRect, useVirtualizer, type Rect, type Virtualizer } from '@tanstack/react-virtual';
 import { useActions, useAppState } from '../state/context.tsx';
 import type { DetailState } from '../state/detail.ts';
+import { staleHolds } from '../state/transcript.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 import type { PhoneSession } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
@@ -180,6 +183,8 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
  * - `shown` and `paging`: the rows and paging of the last commit, for the listeners, which run
  *   between renders;
  * - `anchor`: the reader's place while an older page is on its way or going in, or null;
+ * - `held`: whether a stale page held the turn at the last layout, so the layout after it settles
+ *   can ask once;
  * - `restoring`: the animation frame request that ends the restore after a page went in, or
  *   null while no restore runs.
  */
@@ -192,6 +197,7 @@ interface ViewState {
   shown: readonly TranscriptRow[];
   paging: Paging | null;
   anchor: Anchor | null;
+  held: boolean;
   restoring: number | null;
 }
 
@@ -222,7 +228,7 @@ function List(p: {
   const listRef = useRef<HTMLDivElement>(null);
   const view = useRef<ViewState>({
     stuck: true, top: 0, seen: 0, rows: { replacements: NOT_SHOWN, appended: 0, count: 0 }, tail: NO_ROWS, shown: NO_ROWS, paging: null, anchor: null,
-    restoring: null,
+    held: false, restoring: null,
   }).current;
   const [pill, setPill] = useState(false);
   const [said, setSaid] = useState<Said>({ n: 0, lines: [] });
@@ -337,7 +343,8 @@ function List(p: {
 
   /**
    * After every layout: the restore while one runs, the bottom (`settle`), the anchor following
-   * the view while a page is on its way, and, for rows that fit the view, the page above.
+   * the view while a page is on its way, and the page above, for rows that fit the view or once
+   * a stale page that held the turn has settled.
    */
   const afterLayout = useCallback((): void => {
     const el = scrollRef.current;
@@ -347,8 +354,11 @@ function List(p: {
     if (view.anchor !== null && view.restoring === null) {
       view.anchor = olderOnItsWay(view.paging) ? anchorNow(el) : null;
     }
+    const { paging } = view;
+    const freed = view.held && paging !== null && !staleHolds(paging);
+    view.held = paging !== null && staleHolds(paging);
     const m = metricsOf(el);
-    if (view.anchor === null && view.paging !== null && fitsView(m) && wantsOlder(m, view.paging)) askOlder(el);
+    if (view.anchor === null && paging !== null && (fitsView(m) || freed) && wantsOlder(m, paging)) askOlder(el);
   }, [view, restore, settle, anchorNow, askOlder]);
 
   // The reader's scroll, their gestures on rows that fit the view, and a `.tx` that changed size.
