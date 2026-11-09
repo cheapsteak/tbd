@@ -561,6 +561,11 @@ function moveFocus(event, items) {
 /**
  * Asks before opening a link the app passed up, showing the whole URL. `onOpen` runs inside
  * the tap's click handler, so the browser lets it open a tab.
+ *
+ * A key held down when the sheet opens never presses its buttons. The app opens a link on its
+ * Enter, and the loader then focuses Open, so a held Enter's auto-repeat would land on Open
+ * and open the link without the sheet being read. A repeated Enter or Space does nothing here
+ * (`ignoreHeldKey`), and a fresh press works as on any button.
  * @param {{ url: string, onOpen: () => void, onCancel: () => void }} model
  * @returns {{ nodes: HTMLElement[], open: HTMLButtonElement }}
  */
@@ -568,6 +573,7 @@ export function renderLinkSheet({ url, onOpen, onCancel }) {
   const open = h('button', { class: 'btn pri wide', type: 'button', onClick: onOpen }, 'Open');
   const sheet = h('div', {
     class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'link-title', 'data-state': 'link',
+    onKeyDown: ignoreHeldKey,
   },
   h('div', { class: 'grab' }),
   h('div', { class: 'sh-top' }, h('p', { class: 'sh-title', id: 'link-title' }, 'Open link')),
@@ -576,4 +582,15 @@ export function renderLinkSheet({ url, onOpen, onCancel }) {
   h('button', { class: 'btn wide', type: 'button', onClick: onCancel }, 'Cancel'));
   const scrim = h('div', { class: 'scrim', 'aria-hidden': 'true', onClick: onCancel });
   return { nodes: [scrim, sheet], open };
+}
+
+/**
+ * Drops an auto-repeated Enter or Space, the two keys that press a button. Preventing the
+ * keydown also stops the keypress that Enter presses with, and the active state that Space's
+ * keyup presses from, so a key that went down before the sheet opened, and repeats into it,
+ * cannot press Open or Cancel.
+ * @param {KeyboardEvent} event
+ */
+function ignoreHeldKey(event) {
+  if (event.repeat && (event.key === 'Enter' || event.key === ' ')) event.preventDefault();
 }

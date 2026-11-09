@@ -1168,7 +1168,10 @@ class LoaderPage {
     });
     this.#sheet = nodes;
     this.#doc.body.append(...nodes);
-    open.focus();
+    // Without scrolling: a URL near the length cap runs past the sheet's height, and scrolling
+    // Open into view would carry the title, the scheme and the host off the top. The sheet
+    // stays at its top, so the URL reads from its start, and Open is a scroll away.
+    open.focus({ preventScroll: true });
   }
 
   #closeSheet() {
