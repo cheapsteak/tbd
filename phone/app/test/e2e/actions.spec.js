@@ -7,7 +7,9 @@
 // outside or Escape closing them. Then the session menu sheet, with a remote and a parked
 // session's unavailable rows, and its Switch account, "Restart under X?", Fork and Model sheets:
 // what each sends, one request per gesture, no double tap landing on an acting button, a sheet
-// closing when an event takes its session off the list, focus, and errors.
+// closing when an event takes its session off the list, focus, and errors. Then what a closing
+// menu or sheet uncovers: no second tap of a double tap lands on Send or on a card's choice under
+// it.
 //
 // Every test that acts checks the exact params the fake laptop got. Checkout v2's Review tab is
 // the mock's `s-co-rev`: acme-work, opus, idle. Its Claude tab is working, on Personal and
@@ -702,4 +704,91 @@ test('a model change refused from the sheet shows there, and in the composer onc
   await expect(sheet(page)).toHaveCount(0);
   await expect(app(page).locator('.dock > .refusal')).toHaveText('That is not a model name.');
   expect(await acting(page)).toEqual([{ method: 'session.setModel', params: { session: REVIEW_REF, model: 'opus-9' } }]);
+});
+
+// MARK: - What a closing menu or sheet uncovers
+
+/** @param {Page} page */
+function sendButton(page) {
+  return app(page).locator('.dock .comp button.send');
+}
+
+/**
+ * How many messages reached the fake laptop.
+ * @param {Page} page
+ */
+async function sends(page) {
+  return count(page, 'message.send');
+}
+
+test("a double tap on the session menu's Cancel never sends the draft under it", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await app(page).getByRole('textbox', { name: 'Message' }).fill('rm -rf build');
+  const send = sendButton(page);
+  await expect(send).toBeEnabled();
+  const at = await centre(send);
+  await openMenuSheet(page);
+  const cancel = sheet(page).getByRole('button', { name: 'Cancel' });
+  expect(await covers(cancel, at), 'Cancel lies over Send').toBe(true);
+  await page.mouse.dblclick(at.x, at.y);
+  await expect(sheet(page)).toHaveCount(0);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await sends(page)).toBe(0);
+  await expect(app(page).getByRole('textbox', { name: 'Message' })).toHaveValue('rm -rf build');
+  await expect(send).toBeEnabled();
+});
+
+test('a double tap outside the account menu never sends the draft under it', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await app(page).getByRole('textbox', { name: 'Message' }).fill('rm -rf build');
+  const send = sendButton(page);
+  await expect(send).toBeEnabled();
+  await accountButton(page, 'acme-work').click();
+  await expect(row(accountMenu(page), 'Personal')).toBeVisible();
+  const at = await centre(send);
+  await page.mouse.dblclick(at.x, at.y);
+  await expect(accountMenu(page)).toHaveCount(0);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await sends(page)).toBe(0);
+  await expect(send).toBeEnabled();
+});
+
+test('a double tap outside the model menu never answers the question under it', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const option = app(page).locator('.dock .card button.opt', { hasText: 'No, this is enough' });
+  await expect(option).toBeEnabled();
+  await modelButton(page, 'opus').click();
+  const menu = modelMenu(page);
+  await expect(menu).toBeVisible();
+  const at = await centre(option);
+  expect(await covers(menu, at), 'the option lies outside the menu').toBe(false);
+  await page.mouse.dblclick(at.x, at.y);
+  await expect(menu).toHaveCount(0);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await count(page, 'prompt.answer')).toBe(0);
+  await expect(option).toBeEnabled();
+});
+
+test("closing a menu by Escape or by its own button holds Send for a moment", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await app(page).getByRole('textbox', { name: 'Message' }).fill('rm -rf build');
+  const send = sendButton(page);
+  await expect(send).toBeEnabled();
+  await accountButton(page, 'acme-work').click();
+  await expect(accountMenu(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(accountMenu(page)).toHaveCount(0);
+  await expect(send).toBeDisabled();
+  await expect(send).toBeEnabled();
+  await modelButton(page, 'opus').click();
+  await expect(modelMenu(page)).toBeVisible();
+  await modelButton(page, 'opus').click();
+  await expect(modelMenu(page)).toHaveCount(0);
+  await expect(send).toBeDisabled();
+  await expect(send).toBeEnabled();
+  expect(await sends(page)).toBe(0);
 });

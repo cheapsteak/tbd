@@ -27,7 +27,10 @@
  * - when the card's view changes (`cardView`): it expands from its strip, moves to another
  *   question or to or from the review, opens or closes the Other or the deny form, shows a
  *   refusal, gains or loses its choices as the session's answer capability changes, or turns
- *   into Answered or Answered elsewhere.
+ *   into Answered or Answered elsewhere;
+ * - when a sheet or a menu closes (`useUncoverHold`): the card shows again under the finger that
+ *   closed it, as when the second tap of a double tap on the scrim, or outside a menu, lands on a
+ *   choice.
  * A change during a hold starts it again.
  *
  * The composer's Send is held the same way (`useChangeHold` in `ui/tapGuard.ts`, which holds the
@@ -35,9 +38,10 @@
  * `TAP_GUARD_MS` later: when the dock mounts, since a draft kept from before can leave Send
  * enabled the moment the session opens, under the second tap of a double tap on its row; when the
  * composer replaces the note that sending is unavailable; and when its label changes between
- * "Send" and "Send and wake", which moves its edge over the textarea. Nothing on the card holds
- * Send: the card sits above the composer, and the dock grows upward from the screen's bottom, so
- * the card never moves it.
+ * "Send" and "Send and wake", which moves its edge over the textarea; and when a sheet or a menu
+ * closes, since the session menu's Cancel sits right over Send. Nothing on the card holds Send:
+ * the card sits above the composer, and the dock grows upward from the screen's bottom, so the
+ * card never moves it.
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -45,7 +49,7 @@ import type { JSX } from 'react';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useAppState } from '../state/context.tsx';
 import { cardFor, cardKey } from '../state/prompts.ts';
-import { TAP_GUARD_MS, useChangeHold } from '../ui/tapGuard.ts';
+import { TAP_GUARD_MS, useChangeHold, useUncoverHold } from '../ui/tapGuard.ts';
 import { Composer, sendLabel } from './Composer.tsx';
 import { cardView, FRESH_CARD_UI, PromptCard } from './PromptCard.tsx';
 import type { CardUI } from './PromptCard.tsx';
@@ -61,8 +65,10 @@ export function Dock({ session }: { session: PhoneSession }): JSX.Element {
   const id = shown === null ? null : shown.prompt.id;
   const ui = id === null ? FRESH_CARD_UI : (drafts.get(id) ?? FRESH_CARD_UI);
   const view = shown === null ? null : cardView(shown.card, ui, session.capabilities.answer.available);
-  const held = useTapGuard(id, view);
-  const sendHeld = useChangeHold(sendLabel(session));
+  const covered = useAppState((s) => s.ui.sheet !== null || s.ui.menu !== null);
+  const uncoverHeld = useUncoverHold(covered);
+  const held = useTapGuard(id, view) || (id !== null && uncoverHeld);
+  const sendHeld = useChangeHold(sendLabel(session)) || uncoverHeld;
   const setUI = (next: CardUI): void => {
     if (id === null) return;
     setDrafts((before) => {
