@@ -115,6 +115,15 @@ test('an honest nest draws every item, with markdown for messages only', () => {
   assert.equal(many.rows.length, MAX_SUBAGENT_ITEMS);
 });
 
+test("an API error in a nest reads no markdown, and spends none of the nest's", () => {
+  const error: PhoneItem = { id: 'e', kind: 'assistant', text: '**API Error**: overloaded', truncated: false, apiError: 'server_error' };
+  const message: PhoneItem = { id: 'a', kind: 'assistant', text: 'I read **three** files.', truncated: false };
+  const plan = planNest([error, message]);
+  assert.deepEqual(plan.rows.map((r) => r.tree !== null), [false, true]);
+  assert.equal(plan.left.markdown, planNest([message]).left.markdown);
+  assert.ok(plan.left.markdown < NEST_MARKDOWN_LENGTH);
+});
+
 test('an empty nest draws nothing and leaves nothing out', () => {
   const plan = planNest([]);
   assert.deepEqual(plan.rows, []);

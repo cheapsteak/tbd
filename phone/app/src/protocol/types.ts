@@ -181,6 +181,16 @@ export type PhoneItem = {
   agentType?: string;
   itemCount?: number;
   sender?: string;
+  /** A failed tool's exit code, from the first line of its result. An older laptop sends none. */
+  exitCode?: number;
+  /** A slash command's output, cut to 1 KB with `…` at the cut. */
+  output?: string;
+  /** On an assistant row that is an API error: its class, such as `rate_limit` or `server_error`. */
+  apiError?: string;
+  /** A system note's kind: a `SystemKind` raw value, such as `hookOutput`. Open-ended, so a `String` here. */
+  noteKind?: string;
+  /** A file edit's path: relative to the worktree when the file is inside it, else absolute. */
+  path?: string;
 };
 
 export type TranscriptPage = {

@@ -8,10 +8,16 @@
  * same row object, detail record and `toggle` until that row changes, so an append, an update of
  * another row or a tick of another part of the state draws no row again, an open nest included.
  *
- * Where the wire holds less than the mock shows, the row shows less, and says what it can:
- * - a failed tool's mark reads "failed", since the wire has no exit code;
- * - a slash row has its command only, since the wire has no output;
- * - a system note's label is always "System", since the wire has no label.
+ * **Fields an older laptop does not send** (`rowWords.ts`). Each row draws what the mock draws
+ * from the field when the laptop sent it, and what it drew before the field existed when not:
+ * - a failed tool's mark reads "exit 2" with the exit code, and "failed" without one;
+ * - a file edit names the file's path, relative to the worktree when the file is inside it,
+ *   and the file's name without one;
+ * - a slash command shows its output under the command, as plain text, and nothing without one;
+ * - a system note's label is its kind's, such as "Hook", and "System" without one;
+ * - Claude's text that is an API error (`apiError`) draws as the mock's error row, its text
+ *   plain rather than markdown, in the rate-limit tone for a rate limit and the error tone for
+ *   the rest; without the field it is Claude's text, as before.
  *
  * **Details** (`DetailPane`, and `state/detail.ts` for the chunk rules). A row whose detail is
  * open (it has a record) reads `aria-expanded="true"` and turns its triangle down.
@@ -59,6 +65,7 @@ import { Markdown } from '../markdown/Markdown.tsx';
 import { Dots, Icon } from '../ui/Icon.tsx';
 import { DetailPane } from './DetailPane.tsx';
 import { planNest, type NestPlan } from './nest.ts';
+import { editTarget, errorTone, failMark, noteLabel } from './rowWords.ts';
 
 /** The part each kind of row opens with a tap: a tool's input (then its result), the rest of a message, or a subagent's items. */
 export type RowPart = 'input' | 'text' | 'subagent';
@@ -133,6 +140,9 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
     case 'user':
       return message('me', <span className="who">You</span>, <Markdown inline text={shown} nodes={tree} />, true);
     case 'assistant':
+      if (it.apiError !== undefined) {
+        return message(`errrow ${errorTone(it.apiError)}`, <Icon name="octa" />, <span>{shown}</span>, true);
+      }
       return message('say', null, <Markdown text={shown} nodes={tree} />, false);
     case 'tool': {
       const label = (
@@ -140,7 +150,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
           <Icon name={toolGlyph(name)} cls="ti" />
           <b>{name}</b>
           <code>{it.target ?? ''}</code>
-          {toolMark(it.toolStatus, name)}
+          {toolMark(it.toolStatus, name, it.exitCode)}
         </>
       );
       return (
@@ -155,7 +165,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
         <>
           <Icon name="pen" cls="ti" />
           <b>{name}</b>
-          <code>{it.target ?? ''}</code>
+          <code>{editTarget(it)}</code>
           <span className="plus">+{it.added ?? 0}</span>
           <span className="minus">{`−${it.removed ?? 0}`}</span>
         </>
@@ -178,8 +188,15 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
         </>
       );
     }
-    case 'slash':
-      return message('slash', null, <code>{shown}</code>, true);
+    case 'slash': {
+      const body = (
+        <>
+          <code>{shown}</code>
+          {it.output !== undefined && <span>{it.output}</span>}
+        </>
+      );
+      return message('slash', null, body, true);
+    }
     case 'peer': {
       const head = (
         <span className="who">
@@ -192,7 +209,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
     case 'thinking':
       return message('extra', <span className="dl">Thinking</span>, shown, true);
     case 'systemNote':
-      return message('extra', <span className="dl">System</span>, shown, true);
+      return message('extra', <span className="dl">{noteLabel(it.noteKind)}</span>, shown, true);
   }
 });
 
@@ -224,10 +241,13 @@ function toolLine(label: JSX.Element, expanded: boolean, onTap: (() => void) | n
   );
 }
 
-/** A tool row's mark: the dots while it runs, "failed" after an error, and a check after a Bash call that did not fail. */
-function toolMark(status: string | undefined, name: string): JSX.Element | null {
+/**
+ * A tool row's mark: the dots while it runs, the exit code or "failed" after an error
+ * (`failMark`), and a check after a Bash call that did not fail.
+ */
+function toolMark(status: string | undefined, name: string, exitCode: number | undefined): JSX.Element | null {
   if (status === 'running') return <Dots />;
-  if (status === 'error') return <span className="fail">failed</span>;
+  if (status === 'error') return <span className="fail">{failMark(exitCode)}</span>;
   if (name !== 'Bash') return null;
   return (
     <span className="okm">

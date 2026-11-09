@@ -734,6 +734,7 @@
         "truncated": false,
         "toolName": "Edit",
         "target": "redirect.ts",
+        "path": "src/auth/redirect.ts",
         "toolStatus": "ok",
         "added": 12,
         "removed": 3
@@ -744,6 +745,7 @@
         "truncated": false,
         "toolName": "Write",
         "target": "isLocalPath.ts",
+        "path": "src/auth/isLocalPath.ts",
         "toolStatus": "ok",
         "added": 18,
         "removed": 0
@@ -760,6 +762,7 @@
         "id": "login-9",
         "kind": "systemNote",
         "text": "PostToolUse: eslint src/auth passed.",
+        "noteKind": "hookOutput",
         "truncated": false
       },
       {
@@ -804,6 +807,7 @@
         "truncated": false,
         "toolName": "Write",
         "target": "AddressStep.tsx",
+        "path": "src/checkout/AddressStep.tsx",
         "toolStatus": "ok",
         "added": 84,
         "removed": 0
@@ -814,6 +818,7 @@
         "truncated": false,
         "toolName": "Edit",
         "target": "CheckoutForm.tsx",
+        "path": "src/checkout/CheckoutForm.tsx",
         "toolStatus": "ok",
         "added": 9,
         "removed": 212
@@ -837,6 +842,7 @@
         "truncated": false,
         "toolName": "Write",
         "target": "ShippingStep.tsx",
+        "path": "src/checkout/ShippingStep.tsx",
         "toolStatus": "ok",
         "added": 67,
         "removed": 0
@@ -847,7 +853,8 @@
         "truncated": false,
         "toolName": "Bash",
         "target": "npm run typecheck",
-        "toolStatus": "error"
+        "toolStatus": "error",
+        "exitCode": 2
       },
       {
         "id": "co-11",
@@ -861,6 +868,7 @@
         "truncated": false,
         "toolName": "Edit",
         "target": "ShippingStep.tsx",
+        "path": "src/checkout/ShippingStep.tsx",
         "toolStatus": "ok",
         "added": 6,
         "removed": 2
@@ -931,6 +939,7 @@
         "truncated": false,
         "toolName": "Edit",
         "target": "README.md",
+        "path": "README.md",
         "toolStatus": "ok",
         "added": 31,
         "removed": 44
@@ -941,6 +950,7 @@
         "truncated": false,
         "toolName": "Write",
         "target": "manual-setup.md",
+        "path": "docs/manual-setup.md",
         "toolStatus": "ok",
         "added": 52,
         "removed": 0
@@ -973,9 +983,17 @@
         "truncated": false,
         "toolName": "Edit",
         "target": "client.ts",
+        "path": "src/webhooks/client.ts",
         "toolStatus": "ok",
         "added": 27,
         "removed": 2
+      },
+      {
+        "id": "rate-4",
+        "kind": "assistant",
+        "text": "API error 529: the model is overloaded. The turn stopped. Send a message to try again.",
+        "truncated": false,
+        "apiError": "server_error"
       }
     ],
     "local:00000000-0000-4000-8000-000000000108": [
@@ -998,6 +1016,13 @@
         "kind": "assistant",
         "text": "The dry run found 41 bad rows. Most have a date in the wrong format. Starting the real import now.",
         "truncated": false
+      },
+      {
+        "id": "bulk-4",
+        "kind": "assistant",
+        "text": "Usage limit reached. It resets at 3:00 pm.",
+        "truncated": false,
+        "apiError": "rate_limit"
       }
     ],
     "local:00000000-0000-4000-8000-000000000109": [
@@ -1021,6 +1046,7 @@
         "truncated": false,
         "toolName": "Edit",
         "target": "client.ts",
+        "path": "src/stream/client.ts",
         "toolStatus": "ok",
         "added": 22,
         "removed": 4
@@ -1031,6 +1057,7 @@
         "truncated": false,
         "toolName": "Write",
         "target": "stream.reconnect.test.ts",
+        "path": "test/stream.reconnect.test.ts",
         "toolStatus": "ok",
         "added": 56,
         "removed": 0
@@ -1055,6 +1082,7 @@
         "truncated": false,
         "toolName": "Write",
         "target": "0042_split_name.sql",
+        "path": "migrations/0042_split_name.sql",
         "toolStatus": "ok",
         "added": 24,
         "removed": 0

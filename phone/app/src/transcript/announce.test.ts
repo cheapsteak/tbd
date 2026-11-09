@@ -27,6 +27,12 @@ test("each row that says something says its own words, and its markdown's marks 
   assert.equal(spoken(row({ kind: 'tool', toolName: 'Bash', target: 'npm test -- auth', toolStatus: 'running' })), 'Bash npm test -- auth');
 });
 
+test('an API error says its text as typed, as its row draws it, and the same text without the field reads as markdown', () => {
+  const text = 'API Error: 529 **Overloaded**. See `status` &amp; retry.\nThe turn stopped.';
+  assert.equal(spoken(row({ kind: 'assistant', text, apiError: 'server_error' })), 'API Error: 529 **Overloaded**. See `status` &amp; retry. The turn stopped.');
+  assert.equal(spoken(row({ kind: 'assistant', text })), 'API Error: 529 Overloaded. See status & retry. The turn stopped.');
+});
+
 test('a message says the text its author meant: its characters as typed and its character references decoded', () => {
   assert.equal(spoken(row({ kind: 'assistant', text: "it&#39;s a & b, &lt;tag&gt; &amp; `a &amp; b`" })), "it's a & b, <tag> & a &amp; b");
   assert.equal(spoken(row({ kind: 'user', text: "it&#39;s a & b &quot;q&quot;" })), 'it\'s a & b "q"');
