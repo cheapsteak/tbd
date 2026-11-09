@@ -361,25 +361,23 @@ final class TerminalCore {
     /// for the next call that signals.
     func aftermath(signalsRender: Bool) -> Aftermath {
         let drain = harvest()
-        guard signalsRender, let renderSignal else {
-            return Aftermath(drain: drain, renderSignal: nil, hint: .empty)
-        }
+        guard signalsRender, let renderSignal else { return Aftermath(drain: drain, render: nil) }
         let hint = RenderHint(
             outputBytesSinceFrame: outputBytesSinceFrame,
             holdOpen: context.holdOpen,
             holdEnded: context.holdEnded)
         context.holdEnded = false
-        return Aftermath(drain: drain, renderSignal: renderSignal, hint: hint)
+        return Aftermath(drain: drain, render: (signal: renderSignal, hint: hint))
     }
 }
 
 /// See `TerminalCore.aftermath(signalsRender:)`.
 struct Aftermath {
     var drain: Bool
-    var renderSignal: (@Sendable (RenderHint) -> Void)?
-    /// What `renderSignal` is handed. Built under the lock, so it is the terminal as the call left
+    /// The render signal to run and the hint to hand it, when the call changed the screen with a
+    /// signal installed. The hint is built under the lock, so it is the terminal as the call left
     /// it.
-    var hint: RenderHint
+    var render: (signal: @Sendable (RenderHint) -> Void, hint: RenderHint)?
 }
 
 /// What a render signal tells the view about the call that raised it, so the view can decide
@@ -650,7 +648,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// asks for a frame, with its hint, if it changed the screen.
     private func finish(_ aftermath: Aftermath) {
         if aftermath.drain { drainOutbox() }
-        aftermath.renderSignal?(aftermath.hint)
+        if let render = aftermath.render { render.signal(render.hint) }
     }
 
     /// `withRaw`, plus the locked state, for the calls that keep a count in it: `feed` and a

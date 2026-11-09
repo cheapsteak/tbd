@@ -727,14 +727,16 @@ public final class GhosttyTerminalView: NSView {
         }
         surface.isFocused = isTerminalFocused
         surface.cursorBlinkOn = true
+        // While detached the view took no frames, so the watchdog's record of when a hold was
+        // first seen is stale. Kept, it would force off a hold the program began just now. The
+        // call also sets the hold from one read of mode 2026, and drops a hold's end that no
+        // signal took. It comes before the signal is installed, so no chunk fed in between can
+        // hand the view that stale end.
+        terminal.resetSyncOutputWatchdog()
         let target = selfRef
         let relay = RenderSignalRelay { target.object?.renderSignalled($0) }
         self.relay = relay
         renderSignalToken = terminal.setRenderSignal { [weak relay] in relay?.signal($0) }
-        // While detached the view took no frames, so the watchdog's record of when a hold was
-        // first seen is stale. Kept, it would force off a hold the program began just now. The
-        // call also sets the hold from one read of mode 2026.
-        terminal.resetSyncOutputWatchdog()
         frameDriver.update {
             $0.hasVisibleSurface = true
             $0.needsUpdate = true
@@ -817,6 +819,8 @@ public final class GhosttyTerminalView: NSView {
             return
         }
         let now = self.now()
+        // As `renderNow` does first, so rule 1 reads the drawable size a frame would draw at.
+        updateDrawableSize()
         let decision = LeadingEdgePolicy.decide(leadingEdgeFacts(hint, now: now))
         renderSignalDeliveries += 1
         lastLeadingEdgeDecision = decision
@@ -830,6 +834,11 @@ public final class GhosttyTerminalView: NSView {
 
     /// What `LeadingEdgePolicy` decides from, read on main. Main is the only thread that takes
     /// ring slots and drawables, so the GPU facts stay true until this delivery acts on them.
+    ///
+    /// The drawables are read with `peekAwaitingPresent(now:)`, which changes nothing: a delivery
+    /// that coalesces must not clear the tracker or start a nil drawable's hold, as a view that
+    /// cannot draw would otherwise do on every chunk. A delivery that draws calls `renderTick`,
+    /// whose own check, at the same `now`, does both.
     private func leadingEdgeFacts(_ hint: RenderHint, now: Duration) -> LeadingEdgeFacts {
         let hasDrawable = metalLayer.map { $0.drawableSize.width >= 1 && $0.drawableSize.height >= 1 } ?? false
         return LeadingEdgeFacts(
@@ -839,7 +848,7 @@ public final class GhosttyTerminalView: NSView {
             lastOutputFrameAt: lastOutputFrameAt,
             refreshInterval: refreshInterval,
             ringHasFreeSlot: surface.frameRing?.hasFreeSlot ?? true,
-            drawablesAwaitingPresent: drawableTracker.awaitingPresent(now: now),
+            drawablesAwaitingPresent: drawableTracker.peekAwaitingPresent(now: now),
             outputBytesSinceFrame: hint.outputBytesSinceFrame,
             holdOpen: hint.holdOpen,
             holdEnded: hint.holdEnded)
@@ -1194,7 +1203,9 @@ public final class GhosttyTerminalView: NSView {
                 framesCommitted += 1
                 // An output frame. One whose build consumed no output, such as a cursor-only frame,
                 // stamps nothing: it must not use up the interval the next echo draws at once in.
-                if outcome.update.outputBytes > 0 { lastOutputFrameAt = now }
+                // The stamp never moves back. A tick's `now` is its link's timestamp, the vsync it
+                // fired for, which can be earlier than a delivery's `now` drawn just before it ran.
+                if outcome.update.outputBytes > 0 { lastOutputFrameAt = max(lastOutputFrameAt ?? now, now) }
                 onFrameEncoded?()
             }
         } catch {

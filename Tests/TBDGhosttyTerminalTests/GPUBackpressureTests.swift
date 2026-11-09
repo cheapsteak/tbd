@@ -299,6 +299,29 @@ struct DrawableTrackerTests {
         #expect(after == 0, "a timeout after the hold began the tracker counted \(after)")
     }
 
+    /// A peek answers what the check would, and changes nothing: entries past the timeout are
+    /// counted as cleared but stay, no notice logs, and a nil drawable's hold does not start.
+    @Test func aPeekAnswersAsTheCheckWouldAndChangesNothing() {
+        let tracker = DrawableTracker()
+        _ = tracker.add(acquiredAt: .seconds(100))
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+        let young = tracker.peekAwaitingPresent(now: .seconds(100.5))
+        #expect(young == 2, "a peek within the timeout counted \(young)")
+        let pastTimeout = tracker.peekAwaitingPresent(now: .seconds(101.5))
+        #expect(pastTimeout == 0, "a peek past the timeout counted \(pastTimeout), not the 0 a clear leaves")
+        let afterPeeks = [tracker.entryCount, tracker.timeoutClears, tracker.lostReportNotices]
+        #expect(afterPeeks == [2, 0, 0], "after two peeks, [entries, clears, notices] is \(afterPeeks)")
+        let checked = tracker.awaitingPresent(now: .seconds(101.5))
+        #expect(checked == pastTimeout, "the check counted \(checked) where the peek counted \(pastTimeout)")
+
+        // A peek is not the first check after a nil drawable: the hold starts at the next real one.
+        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        let peekedHold = tracker.peekAwaitingPresent(now: .seconds(102))
+        #expect(peekedHold == tracker.limit, "a peek during a nil drawable's hold counted \(peekedHold)")
+        let firstCheck = tracker.awaitingPresent(now: .seconds(103.25))
+        #expect(firstCheck == tracker.limit, "the first check after a peeked hold counted \(firstCheck): the peek started its timer")
+    }
+
     /// Metal reports a frame that was skipped, or never presented, with a `presentedTime` of 0.
     /// The handler counts those, and only those.
     @Test func aPresentWithNoPresentedTimeCountsAsSkipped() {

@@ -1572,6 +1572,64 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         #expect(stamped == expectedStamp, "the live resize's output frame stamped \(String(describing: stamped))")
     }
 
+    /// A delivery that coalesces only peeks at the tracker. Entries past the timeout stay for the
+    /// next frame's own check to clear, and no notice logs.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDeliveryThatCoalescesLeavesTheTrackerAlone() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        // A live resize, so the delivery coalesces before the GPU rules.
+        view.viewWillStartLiveResize()
+        defer { view.viewDidEndLiveResize() }
+        let tracker = view.drawableTracker
+        // Two drawables with no report since, acquired more than `presentReportTimeout` ago.
+        _ = tracker.add(acquiredAt: .seconds(98))
+        _ = tracker.add(acquiredAt: .seconds(98.5))
+
+        await feedAndDeliver("a", to: fixture)
+        let decision = view.lastLeadingEdgeDecision
+        let liveResize: LeadingEdgePolicy.Decision? = .coalesce(.liveResize)
+        try #require(decision == liveResize, "a feed during a live resize answered \(String(describing: decision))")
+        let afterDelivery = [tracker.entryCount, tracker.timeoutClears, tracker.lostReportNotices]
+        #expect(afterDelivery == [2, 0, 0], "after a coalesced delivery, [entries, clears, notices] is \(afterDelivery)")
+    }
+
+    /// A tick's `now` is the vsync it fired for, which can be earlier than the `now` of a frame a
+    /// delivery drew just before the tick ran. The tick's output frame keeps the later stamp.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aTickForAnEarlierVsyncDoesNotMoveTheStampBack() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100.005))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        await feedAndDeliver("a", to: fixture)
+        let drawn = view.lastOutputFrameAt
+        let deliveryStamp: Duration? = .seconds(100.005)
+        try #require(drawn == deliveryStamp, "the delivery's frame stamped \(String(describing: drawn))")
+
+        // Output the delivery leaves to the tick, and the tick for the vsync at 100 s drawing it.
+        await feedAndDeliver("b", to: fixture)
+        await waitForAFreeRingSlot(view)
+        let beforeTick = view.framesCommitted
+        view.renderTick(now: .seconds(100))
+        let tickFrames = view.framesCommitted - beforeTick
+        try #require(tickFrames == 1, "the tick did not draw the output left to it")
+        let afterTick = view.lastOutputFrameAt
+        #expect(afterTick == deliveryStamp, "a tick for an earlier vsync moved the stamp to \(String(describing: afterTick))")
+    }
+
     /// At either GPU limit the delivery builds nothing and asks for no drawable. Once the limit
     /// clears, the next feed draws at once.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: GPULimit.allCases)

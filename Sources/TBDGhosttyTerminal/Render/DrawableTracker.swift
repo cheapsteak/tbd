@@ -97,37 +97,8 @@ final class DrawableTracker: Sendable {
     /// while a nil drawable's hold lasts, and the entries otherwise. Called before the frame builds
     /// anything. Clears the entries when no report has arrived for `presentReportTimeout`.
     func awaitingPresent(now: Duration) -> Int {
-        let (count, clearedForNotice) = state.withLock { state -> (Int, Int?) in
-            if state.undatedReportPending {
-                state.undatedReportPending = false
-                state.lastReportAt = max(state.lastReportAt ?? now, now)
-            }
-            switch state.hold {
-            case nil:
-                break
-            case .awaitingFirstCheck:
-                // Timed from the first check after the nil drawable, not from that frame's own
-                // `now`: its `nextDrawable()` waited up to a second before returning nil, so that
-                // `now` is already old, and timing from it would let the next wait follow at once.
-                state.hold = .since(now)
-                return (limit, nil)
-            case .since(let started):
-                guard now - started >= Self.presentReportTimeout else { return (limit, nil) }
-                state.hold = nil
-            }
-            guard let oldest = state.entries.first else { return (0, nil) }
-            var quietSince = oldest.acquiredAt
-            if state.reports != oldest.reportsBefore, let lastReportAt = state.lastReportAt {
-                quietSince = max(quietSince, lastReportAt)
-            }
-            guard now - quietSince >= Self.presentReportTimeout else { return (state.entries.count, nil) }
-            let cleared = state.entries.count
-            state.entries.removeAll()
-            state.timeoutClears += 1
-            guard !state.noticeLoggedThisRun else { return (0, nil) }
-            state.noticeLoggedThisRun = true
-            state.lostReportNotices += 1
-            return (0, cleared)
+        let (count, clearedForNotice) = state.withLock { state in
+            Self.check(&state, now: now, limit: limit)
         }
         if let clearedForNotice {
             let timeout = String(describing: Self.presentReportTimeout)
@@ -137,6 +108,55 @@ final class DrawableTracker: Sendable {
                 """)
         }
         return count
+    }
+
+    /// What `awaitingPresent(now:)` would answer at `now`, with none of its side effects: no
+    /// clear, no notice, no start to a nil drawable's hold, and no date given to a report. For a
+    /// caller that only asks, as a render signal's delivery does when it decides whether to draw.
+    /// The frame it then draws makes the real check, at the same `now`, and a report that lands in
+    /// between can only lower the count.
+    func peekAwaitingPresent(now: Duration) -> Int {
+        state.withLock { state in
+            var copy = state
+            return Self.check(&copy, now: now, limit: limit).count
+        }
+    }
+
+    /// The check behind `awaitingPresent(now:)`, run on `state` under the lock. Returns the count,
+    /// and how many entries a clear removed when that clear is the first in its run and so logs.
+    private static func check(
+        _ state: inout State, now: Duration, limit: Int
+    ) -> (count: Int, clearedForNotice: Int?) {
+        if state.undatedReportPending {
+            state.undatedReportPending = false
+            state.lastReportAt = max(state.lastReportAt ?? now, now)
+        }
+        switch state.hold {
+        case nil:
+            break
+        case .awaitingFirstCheck:
+            // Timed from the first check after the nil drawable, not from that frame's own
+            // `now`: its `nextDrawable()` waited up to a second before returning nil, so that
+            // `now` is already old, and timing from it would let the next wait follow at once.
+            state.hold = .since(now)
+            return (limit, nil)
+        case .since(let started):
+            guard now - started >= presentReportTimeout else { return (limit, nil) }
+            state.hold = nil
+        }
+        guard let oldest = state.entries.first else { return (0, nil) }
+        var quietSince = oldest.acquiredAt
+        if state.reports != oldest.reportsBefore, let lastReportAt = state.lastReportAt {
+            quietSince = max(quietSince, lastReportAt)
+        }
+        guard now - quietSince >= presentReportTimeout else { return (state.entries.count, nil) }
+        let cleared = state.entries.count
+        state.entries.removeAll()
+        state.timeoutClears += 1
+        guard !state.noticeLoggedThisRun else { return (0, nil) }
+        state.noticeLoggedThisRun = true
+        state.lostReportNotices += 1
+        return (0, cleared)
     }
 
     /// Records a drawable the frame due at `now` acquired, and returns its id for the presented
