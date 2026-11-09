@@ -270,4 +270,27 @@ struct RenderSignalRelayTests {
         let expectedAll = expected + [RenderHint(outputBytesSinceFrame: 5)]
         #expect(all == expectedAll, "a signal after the delivery delivered \(all)")
     }
+
+    /// A cancelled relay delivers nothing, not even a hop queued before the cancel. A second relay
+    /// is the control: its hop is queued on main after the cancelled one's, so once the control's
+    /// delivery has arrived, the cancelled relay's hop has had its turn.
+    @Test func aCancelledRelayDeliversNothingEvenWithAHopQueued() async throws {
+        let cancelledDeliveries = DeliveredHints()
+        let cancelled = RenderSignalRelay { cancelledDeliveries.hints.append($0) }
+        cancelled.signal(RenderHint(outputBytesSinceFrame: 20_000, holdEnded: true))
+        cancelled.cancel()
+        let controlDeliveries = DeliveredHints()
+        let control = RenderSignalRelay { controlDeliveries.hints.append($0) }
+        control.signal(RenderHint(outputBytesSinceFrame: 1))
+        try await waitForDeliveries(controlDeliveries, count: 1)
+        let queued = cancelledDeliveries.hints
+        #expect(queued.isEmpty, "a relay cancelled with a hop queued delivered \(queued)")
+
+        // A signal after the cancel delivers nothing either.
+        cancelled.signal(RenderHint(outputBytesSinceFrame: 2))
+        control.signal(RenderHint(outputBytesSinceFrame: 3))
+        try await waitForDeliveries(controlDeliveries, count: 2)
+        let later = cancelledDeliveries.hints
+        #expect(later.isEmpty, "a cancelled relay delivered a later signal: \(later)")
+    }
 }

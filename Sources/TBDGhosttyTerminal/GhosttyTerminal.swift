@@ -325,6 +325,8 @@ final class TerminalCore {
     /// Program output fed since a frame last read the terminal. `feed` adds the bytes it writes;
     /// `FrameBuilder.update` reads and zeroes it in the lock hold it takes for
     /// `ghostty_render_state_begin_update`, so each frame's count is exactly the output it consumed.
+    /// There is one counter per terminal, so the count is exact only while one view draws the
+    /// terminal, as each engine has one view per terminal. Two attached views would split it.
     var outputBytesSinceFrame = 0
 
     init(raw: VtTerminal, context: IOContext, cols: UInt16, rows: UInt16) {

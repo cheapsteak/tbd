@@ -1353,6 +1353,12 @@ private final class ViewHandle {
     }
 }
 
+/// How many hints a test's own relay delivered.
+@MainActor
+private final class DeliveryCount {
+    var value = 0
+}
+
 /// Which GPU limit a test holds the view at.
 enum GPULimit: Sendable, CaseIterable {
     /// All three of the surface's ring slots in flight.
@@ -1721,6 +1727,40 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         try #require(decision == liveResize, "a feed during a live resize answered \(String(describing: decision))")
         let afterDelivery = [tracker.entryCount, tracker.timeoutClears, tracker.lostReportNotices]
         #expect(afterDelivery == [2, 0, 0], "after a coalesced delivery, [entries, clears, notices] is \(afterDelivery)")
+    }
+
+    /// A delivery queued before the view detaches never reaches it, even when the view attaches
+    /// again before the delivery runs: its hint, here a finished 2 KB hold, is from before the
+    /// attach. A relay of the test's own, signalled last, is the control: its hop runs on main
+    /// after every hop queued before it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDeliveryQueuedBeforeADetachDoesNotReachTheViewAttachedAgain() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+        let before = view.renderSignalDeliveries
+
+        // The feed queues its delivery; the view detaches and attaches again in the same turn.
+        fixture.terminal.feed(text: "\u{1b}[?2026h" + String(repeating: "x", count: 2048) + "\u{1b}[?2026l")
+        view.isHidden = true
+        view.isHidden = false
+        let attached = view.surface.isAttached
+        try #require(attached, "showing the view again left its surface detached")
+
+        let controlDeliveries = DeliveryCount()
+        let control = RenderSignalRelay { _ in controlDeliveries.value += 1 }
+        control.signal(.empty)
+        try await waitFor("the control relay's delivery") {
+            await MainActor.run { controlDeliveries.value > 0 }
+        }
+        let delivered = view.renderSignalDeliveries - before
+        #expect(delivered == 0, "a delivery queued before the detach reached the view \(delivered) times")
     }
 
     /// A tick's `now` is the vsync it fired for, which can be earlier than the `now` of a frame a

@@ -62,12 +62,23 @@ final class WeakRef<Object: AnyObject> {
 /// thousands of main-queue hops per frame. With it, at most one hop is in flight at a time. A
 /// signal that finds a hint pending folds into it (`RenderHint.merged(with:)`), and the hop hands
 /// the folded hint to the view.
+///
+/// A view cancels its relay when it detaches. A queued hop holds the relay, and the view it reaches
+/// may have attached again since, with a relay of its own: a cancelled relay's hop delivers nothing,
+/// so a hint from before the detach, and any hold end in it, never reaches the attached view.
 final class RenderSignalRelay: Sendable {
     private let pending = Mutex<RenderHint?>(nil)
+    private let cancelled = Mutex(false)
     private let deliver: @MainActor @Sendable (RenderHint) -> Void
 
     init(deliver: @escaping @MainActor @Sendable (RenderHint) -> Void) {
         self.deliver = deliver
+    }
+
+    /// Ends every delivery, including a hop already queued. Called on main, where the hop runs, so
+    /// a hop queued before the call finds it.
+    func cancel() {
+        cancelled.withLock { $0 = true }
     }
 
     /// Called from the feeding thread.
@@ -87,6 +98,8 @@ final class RenderSignalRelay: Sendable {
                 value = nil
                 return taken
             }
+            let isCancelled = self.cancelled.withLock { $0 }
+            guard !isCancelled else { return }
             self.deliver(hint)
         }
     }
@@ -783,6 +796,9 @@ public final class GhosttyTerminalView: NSView {
         guard surface.isAttached || renderSignalToken != nil else { return }
         if let renderSignalToken { terminal.clearRenderSignal(renderSignalToken) }
         renderSignalToken = nil
+        // A delivery already queued must not reach the view: it may attach again before the
+        // delivery runs, and the hint, with any hold end in it, is from before the attach.
+        relay?.cancel()
         relay = nil
         // Before the detach, which leaves a clean surface: stopping the blink marks it dirty.
         stopBlink()
