@@ -15,7 +15,9 @@
  *   shows (its link shows where it is used). Any other type, a future one included, shows its
  *   source text, never markup.
  * - **Links pass only through `safeLink`**, which is at least as strict as the loader's own check,
- *   so the app never offers a link the loader would refuse. A link that fails shows its text.
+ *   so the app never offers a link the loader would refuse. It checks the destination with its
+ *   character references decoded, the URL the link opens (`link`). A link that fails shows its
+ *   text.
  * - **Text shows as the author wrote it.** A text token shows its own source, with its character
  *   references decoded (`shownText`), never marked's `text`, which marked writes for an HTML
  *   renderer. Code, raw HTML and a table show their source as written.
@@ -112,8 +114,9 @@ export interface MdBudget {
  * rules. The URL parser drops tabs and newlines anywhere and controls and spaces at either end,
  * reads a backslash as a slash, and fills in the slashes of `https:acme.example`, so a link
  * written that way would go somewhere other than its source says. A relative link, `//host`, and
- * any other scheme (mail, data, script, file) never pass. marked leaves character references in a
- * link's destination as written, so an entity-escaped scheme fails the prefix rule.
+ * any other scheme (mail, data, script, file) never pass. `link` decodes a destination's character
+ * references before it asks, so these rules see a scheme or character written as a reference as
+ * the character it stands for.
  *
  * It returns the normalized `href`, not `target`, so the app holds exactly the string the loader
  * checks and opens: `openableURL` returns it unchanged, nothing normalizes it a second time, and
@@ -554,9 +557,17 @@ function plain(tokens: readonly Token[]): string {
   return out;
 }
 
-/** A link when it is not inside one and `safeLink` passes its destination; otherwise its text. */
+/**
+ * A link when it is not inside one and `safeLink` passes its destination; otherwise its text.
+ * The destination has its character references decoded first (`decodeReferences`), as CommonMark
+ * decodes them, so `safeLink` checks the URL the link opens: `&amp;` in a query opens as `&`,
+ * and a scheme or character written as a reference is refused as the character it stands for.
+ * An autolink's or a bare URL's destination is decoded as its shown text is. marked has already
+ * read a destination's backslash escapes, so an escaped `\&` before a name decodes too, where
+ * CommonMark keeps it as written.
+ */
 function link(token: Tokens.Link, children: Token[], level: number, inLink: boolean, walk: Walk): MdNode[] {
-  const url = inLink ? null : safeLink(token.href);
+  const url = inLink ? null : safeLink(decodeReferences(token.href));
   if (url === null) return inlines(children, level, inLink, walk);
   return nest(token, level, walk, (inner) => ({ t: 'link', url, children: inlines(children, inner, true, walk) }));
 }

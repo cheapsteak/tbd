@@ -125,11 +125,53 @@ test('code, raw HTML and a table show their source as written, references includ
   assert.deepEqual(mdTree(table), [{ t: 'pre', text: table }]);
 });
 
-test('a decoded character is text, never markup, and a link destination keeps its references as written', () => {
+test('a decoded character is text, never markup', () => {
   const tree = mdTree(`&lt;b&gt;bold&lt;/b&gt; &#60;img src=x&#62; &#42;not em&#42; &#91;a&#93;&#40;acme&#41; &#96;c&#96;`);
   assert.deepEqual(tree, [{ t: 'p', children: [t('<b>bold</b> <img src=x> *not em* [a](acme) `c`')] }]);
   assert.deepEqual(mdTree('&lt;script&gt;alert(1)&lt;/script&gt;'), [{ t: 'p', children: [t(`${open('script')}>alert(1)</script>`)] }]);
-  assert.deepEqual(links(mdTree('[a](https://acme.example/?a=1&amp;b=2)')), ['https://acme.example/?a=1&amp;b=2']);
+});
+
+test("a link's destination opens with its character references decoded, as CommonMark reads them", () => {
+  const passed: Array<[string, string]> = [
+    ['[report](https://acme.example/r?a=1&amp;b=2)', 'https://acme.example/r?a=1&b=2'],
+    ['[report](<https://acme.example/r?a=1&amp;b=2>)', 'https://acme.example/r?a=1&b=2'],
+    ['[report][r]\n\n[r]: https://acme.example/r?a=1&amp;b=2', 'https://acme.example/r?a=1&b=2'],
+    // An autolink and a bare URL open what their text shows, which is decoded too.
+    ['<https://acme.example/r?a=1&amp;b=2>', 'https://acme.example/r?a=1&b=2'],
+    ['see https://acme.example/r?a=1&amp;b=2 here', 'https://acme.example/r?a=1&b=2'],
+    ['[a](&#104;ttps://acme.example/ok)', 'https://acme.example/ok'],
+    ['[a](https&#58;//acme.example/)', 'https://acme.example/'],
+    ['[a](https://acme.example/&#x27;q&#39;&quot;)', "https://acme.example/'q'%22"],
+    // marked reads the backslash escape first, so the reference after it decodes too.
+    ['[a](https://acme.example/?q=\\&amp;)', 'https://acme.example/?q=&'],
+  ];
+  for (const [src, url] of passed) {
+    assert.deepEqual(links(mdTree(src)), [url], src);
+    assert.equal(openableURL(url), url, `the loader opens ${url} as it is`);
+  }
+  assert.deepEqual(flatText(mdTree('<https://acme.example/r?a=1&amp;b=2>')), 'https://acme.example/r?a=1&b=2');
+
+  // safeLink checks the decoded URL, so what it refuses is refused however it is written.
+  const refused = [
+    `[a](&#x6A;ava${JS.slice(4)}alert(1))`,
+    `[a](&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;alert(1))`,
+    `<&#x6A;ava${JS.slice(4)}alert(1)>`,
+    '[a](&#104;ttps://u:p@acme.example/)',
+    '[a](https://u&#58;p&#64;acme.example/)',
+    '[a](https://acme.example&#64;evil.example/)',
+    '[a](https&#58;acme.example)',
+    '[a](https://acme.example/&#9;x)',
+    '[a](https://acme.example/&#10;x)',
+    '[a](https://acme.example/&#x7f;x)',
+    '[a](https://acme.example/&#x85;x)',
+    '[a](https://acme.example/&#32;x)',
+    '[a](&#32;https://acme.example/)',
+    '[a](https:&#92;&#92;acme.example/x)',
+    '[a](https://acme.example&#92;@evil.example/)',
+    '[a](https://acme.example&#x5C;@evil.example/)',
+    '[a](&#x2F;&#x2F;acme.example/x)',
+  ];
+  for (const src of refused) assert.deepEqual(links(mdTree(src)), [], src);
 });
 
 test('only http and https links become links', () => {
@@ -140,9 +182,8 @@ test('only http and https links become links', () => {
   const refused = [
     `[a](JaVaScRiPt${JS.slice(10)}alert(1))`,
     `[a](${JS.toUpperCase()}alert(1))`,
-    `[a](jav&#x61;${JS.slice(4)}alert(1))`, // an entity-escaped scheme: marked leaves it as written
+    `[a](jav&#x61;${JS.slice(4)}alert(1))`, // an entity-escaped scheme decodes to the scheme it spells
     `[a](&#x6A;ava${JS.slice(4)}alert(1))`,
-    '[a](https&#58;//acme.example/)',
     '[a](data:text/plain,hi)',
     '[a](vbscript:msgbox)',
     '[a](file:///etc/passwd)',

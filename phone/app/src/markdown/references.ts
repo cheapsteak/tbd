@@ -5,11 +5,11 @@
  * text holds a numeric reference, marked decodes it and writes every other `&` in that text as
  * `&amp;`, which the app would show as typed.
  *
- * As in CommonMark, a reference stands for its character in text, a link's text, a heading, a
- * list item and an image's alt text, and nowhere else: code spans, code blocks, raw HTML and a
- * table's source show as written. So does a link's destination, which `safeLink` checks as
- * written. Decoding makes a character and never markup: the tree holds it as text, so `&lt;b&gt;`
- * shows as `<b>`.
+ * As in CommonMark, a reference stands for its character in text, a link's text and destination,
+ * a heading, a list item and an image's alt text, and nowhere else: code spans, code blocks, raw
+ * HTML and a table's source show as written. A link's destination is decoded before `safeLink`
+ * checks it, so the check sees the URL the link opens (`link` in `mdTree.ts`). Decoding makes a
+ * character and never markup: the tree holds it as text, so `&lt;b&gt;` shows as `<b>`.
  *
  * - **Numeric references**: `&#` and 1 to 7 decimal digits, or `&#x` (or `&#X`) and 1 to 6
  *   hexadecimal digits, then `;`. Zero, a surrogate, or a number past U+10FFFF shows as U+FFFD,
