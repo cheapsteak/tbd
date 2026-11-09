@@ -530,6 +530,25 @@ test('a failed older page is not asked for again until the next scroll', async (
   assert.equal(h.count('transcript.page'), 2);
 });
 
+test('an older page that adds no row or gives back its cursor is not asked for again until the next scroll', async () => {
+  for (const reply of [page([], 'c0'), page([], 'c1'), page([item('u0')], 'c1')]) {
+    const h = await showing();
+    const pending = h.actions.loadOlder();
+    h.last('transcript.page').resolve(reply);
+    await pending;
+    assert.equal(h.t().olderRequestID, null);
+    assert.equal(h.t().olderFailed, true);
+    await h.actions.loadOlder();
+    await h.actions.loadOlder();
+    assert.equal(h.count('transcript.page'), 1);
+    // The reader scrolls.
+    h.actions.clearOlderFailed();
+    void h.actions.loadOlder();
+    assert.equal(h.count('transcript.page'), 2);
+    assert.deepEqual(h.last('transcript.page').params, { session: R, cursor: reply.cursor });
+  }
+});
+
 test('clearOlderFailed with nothing failed changes nothing', async () => {
   const h = await showing();
   const before = h.store.get();

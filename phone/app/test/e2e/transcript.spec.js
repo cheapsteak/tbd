@@ -1603,6 +1603,40 @@ test('a failed older page above rows that fit the screen loads again on a tap, a
   await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
 });
 
+for (const [what, kind] of Object.entries({
+  'no row and the cursor it was asked with': 'same',
+  'no row and a new cursor': 'new',
+  'a row and the cursor it was asked with': 'row',
+})) {
+  test(`a laptop that answers every older page with ${what} is asked once above rows that fit the screen, and again only on a tap`, async ({ page, appHost }) => {
+    await openApp(page, appHost, { scenario: checkoutWith(shortItems()) });
+    await page.evaluate((kind) => {
+      let n = 0;
+      /** @type {any} */ (window).__host.setReply('transcript.page', (/** @type {any} */ params) => {
+        n += 1;
+        const items = kind === 'row' ? [{ id: `again-${n}`, kind: 'tool', toolName: 'Read', target: `again-${n}.ts`, toolStatus: 'ok', truncated: false }] : [];
+        return { result: { items, cursor: kind === 'new' ? `${params.cursor}-${n}` : params.cursor, reachedStart: false, omittedItems: 0 } };
+      });
+    }, kind);
+    await openSessionByName(page, 'Checkout v2', 'Claude');
+    const tx = app(page).locator('.tx');
+    await expect(tx.locator('.say', { hasText: 'Short message 199.' })).toBeInViewport();
+    await expect.poll(async () => (await pageCursors(page)).length).toBe(1);
+    // The page went nowhere, so nothing asks again by itself, though the rows still fit.
+    await frames(tx, 20);
+    expect(await pageCursors(page)).toHaveLength(1);
+    const m = await metricsOf(tx);
+    expect(m.scrollHeight).toBeLessThanOrEqual(m.clientHeight);
+
+    // A tap on the transcript, above its rows, asks once more, and only once.
+    const above = { position: { x: 20, y: 20 } };
+    await tx.tap(above);
+    await expect.poll(async () => (await pageCursors(page)).length).toBe(2);
+    await frames(tx, 20);
+    expect(await pageCursors(page)).toHaveLength(2);
+  });
+}
+
 /**
  * How many rows the list holds: one past the index of its last row, which a view at the bottom draws.
  * @param {Locator} tx

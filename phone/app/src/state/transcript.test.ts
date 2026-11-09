@@ -228,6 +228,31 @@ test('an older page keeps the rows below it and their keys, and takes its cursor
   assert.equal(s2.reachedStart, true);
 });
 
+test('an older page that adds no row, or gives back the cursor it was asked with, stops paging until the reader scrolls', () => {
+  const waiting = { ...withRows([item('u1')]), olderRequestID: 'page-1' };
+  assert.equal(waiting.cursor, 'c1');
+  const stuck = [
+    ['no row and a new cursor', page([], 'c0')],
+    ['no row and the same cursor', page([], 'c1')],
+    ['a row and the same cursor', page([item('u0')], 'c1')],
+  ] as const;
+  for (const [what, p] of stuck) {
+    const s = prependPage(waiting, p);
+    assert.equal(s.olderFailed, true, what);
+    assert.equal(s.olderRequestID, null, what);
+    assert.equal(mayAskOlder(s), false, what);
+  }
+  // Its rows still go in, and the reader's scroll lets the next page go.
+  const same = prependPage(waiting, page([item('u0')], 'c1'));
+  assert.deepEqual(shown(same), ['u0:u0', 'u1:u1']);
+  assert.equal(mayAskOlder({ ...same, olderFailed: false }), true);
+  // A page that moved back, and one that reached the start, with rows or none, do not stop it.
+  for (const p of [page([item('u0')], 'c0'), page([], null), page([item('u0')], null)]) {
+    assert.equal(prependPage(waiting, p).olderFailed, false);
+  }
+  assert.equal(mayAskOlder(prependPage(waiting, page([item('u0')], 'c0'))), true);
+});
+
 test('events for another session are ignored', () => {
   const s0 = withRows([item('u1')]);
   for (const other of [OTHER, REMOTE]) {

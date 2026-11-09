@@ -89,7 +89,11 @@ export interface TranscriptState {
    * `MAX_STALE_PAGES`, none is asked for until one settles.
    */
   stalePages: number;
-  /** The last older page failed to load. Nothing asks for another until the reader scrolls. */
+  /**
+   * The last older page failed to load, or moved the scroll back nowhere: it added no row, or
+   * gave back the cursor it was asked with (`prependPage`). Nothing asks for another until the
+   * reader scrolls, or touches rows that fit the screen.
+   */
   olderFailed: boolean;
   /**
    * A `transcript.close` went out unanswered, so the laptop may still keep a transcript open
@@ -242,10 +246,20 @@ export function applyPage(s: TranscriptState, page: TranscriptPage): TranscriptS
  * is dropped for sharing an ID with a row below it. An older page ends where the shown rows
  * begin, and two lines can share an ID (this file's header). It takes the page's cursor and
  * `reachedStart`, and ends the wait for the page.
+ *
+ * A page short of the start that adds no row, or that gives back the cursor it was asked with,
+ * which is `s.cursor` while the slice waits on it, moved the scroll back nowhere, and the next
+ * page would ask the same. So it sets `olderFailed`, as a failed page does, and nothing asks
+ * again until the reader's next scroll or touch. Rows that fit the screen would otherwise ask
+ * again after every layout, back to back, for as long as the laptop answered so.
  */
 export function prependPage(s: TranscriptState, page: TranscriptPage): TranscriptState {
   const { rows, nextKey } = itemRows(page.items, s.nextKey);
-  return { ...s, rows: [...rows, ...s.rows], nextKey, cursor: page.cursor ?? null, reachedStart: page.reachedStart, olderRequestID: null };
+  const cursor = page.cursor ?? null;
+  const stuck = !page.reachedStart && (page.items.length === 0 || cursor === s.cursor);
+  return {
+    ...s, rows: [...rows, ...s.rows], nextKey, cursor, reachedStart: page.reachedStart, olderRequestID: null, olderFailed: s.olderFailed || stuck,
+  };
 }
 
 /**

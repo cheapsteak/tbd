@@ -50,9 +50,11 @@
  * the page (`loadOlder`). Rows that fit the view, which the reader cannot scroll, ask at once,
  * and since no scroll event can follow them, a touch, a press or a wheel on `.tx` stands in for
  * the reader's next scroll after a failure: it clears the failure, and the layout after it asks
- * again. Each failure waits for another gesture, so a failing page never retries in a loop. A
- * stale page that held the turn (`staleHolds`) asks nothing while it is unanswered, and the
- * layout after it settles asks once, wherever the view is, if it still wants the page above.
+ * again. Each failure waits for another gesture, so a failing page never retries in a loop, and
+ * neither does a page that adds no row or gives back the cursor it was asked with, which counts
+ * as failed (`prependPage`). A stale page that held the turn (`staleHolds`) asks nothing while
+ * it is unanswered, and the layout after it settles asks once, wherever the view is, if it
+ * still wants the page above.
  * - **While the page is on its way** the anchor follows the view: it is taken again after every
  *   scroll event and every layout, so a page that lands after a swipe or a fling went on holds
  *   where the reader is then, not where the page was asked for.

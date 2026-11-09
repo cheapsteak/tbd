@@ -417,7 +417,9 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
      * (`olderRequestID`), and its reply counts only while the slice still waits on that token.
      * A page whose open, reset or close came first changes no row: its settling frees the turn
      * it held, if any (`settleStalePage`), a change the list sees, so the list asks once more if
-     * the view still wants the page above (`TranscriptView`). On an error:
+     * the view still wants the page above (`TranscriptView`). A page that adds no row, or gives
+     * back the cursor it was asked with, sets `olderFailed` as an error does (`prependPage`). On
+     * an error:
      * - `stale_cursor` or `not_open` opens the transcript again, from its tail;
      * - any other error ends the wait and sets `olderFailed`, so nothing asks again until the
      *   reader scrolls (`clearOlderFailed`). A failing load never retries in a loop.
