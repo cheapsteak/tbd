@@ -7,7 +7,8 @@
  * - **Which rows.** Rows that came in at the bottom, new items or a receipt (`rowsChange` reads
  *   `appended`), and a message among the last `ANNOUNCE_ROWS` rows whose text changed in place,
  *   as when its text comes after its row: it says its new words, once (`changedWords`), which are
- *   the words added when the new text extends the old, as a message written as it streams does.
+ *   the words its row draws after the old ones when the new text extends the old, as a message
+ *   written as it streams does.
  *   A tool whose status changes, a receipt that changes, and a row further up say nothing. Never
  *   the rows of an open, a reopen or a reset, an older page, or rows drawn as the reader scrolls.
  * - **What each says** (`spoken`), in the row's own words and no others: a message from the
@@ -20,6 +21,8 @@
  *   only, read as markdown, since the list works out an announcement as it lays its rows out.
  *   Read whole, a message would cost up to `MAX_MARKDOWN_LENGTH` characters of markdown, whose
  *   time can grow with the square of a paragraph's length (`markdown/mdTree.ts`), to keep 500.
+ *   A message whose text grew is read with its old text, at most `ANNOUNCE_SOURCE_CHARS`
+ *   characters of it, so at most twice those characters in all.
  *
  * Everything here is pure.
  */
@@ -56,14 +59,24 @@ export function spoken(row: TranscriptRow): string | null {
   }
 }
 
+/** The kinds of row whose text is a message, read as markdown. */
+type MessageKind = 'assistant' | 'user' | 'peer';
+
 /**
  * The words of a message of `kind` whose text is `text`, as `spoken` says them: its first
  * `ANNOUNCE_SOURCE_CHARS` characters read as markdown, as the row draws it (`mdTree` for Claude,
  * `mdInline` for the reader and a peer), its plain text cut to `ANNOUNCE_CHARS`.
  */
-function messageWords(kind: 'assistant' | 'user' | 'peer', text: string): string | null {
-  const read = cut(text, ANNOUNCE_SOURCE_CHARS);
-  return said(plainText(kind === 'assistant' ? mdTree(read) : mdInline(read)));
+function messageWords(kind: MessageKind, text: string): string | null {
+  return said(plainWords(kind, cut(text, ANNOUNCE_SOURCE_CHARS)));
+}
+
+/**
+ * The plain text of `text` read as markdown, as a message of `kind` draws it, with each run of
+ * white space as one space, uncut.
+ */
+function plainWords(kind: MessageKind, text: string): string {
+  return plainText(kind === 'assistant' ? mdTree(text) : mdInline(text)).replace(/\s+/g, ' ').trim();
 }
 
 /** `words` with each run of white space as one space, cut to `ANNOUNCE_CHARS`, or null when nothing is left. */
@@ -99,9 +112,15 @@ export function lastRows(rows: readonly TranscriptRow[]): readonly TranscriptRow
  * The new words of `row` when it is a message that changed in place since `before`, which holds
  * it, by its key, with other text. Null for any other row, so a tool whose status changes says
  * nothing.
- * - **Text that extends the old text**, as a message's does while it streams, says only what was
- *   added, read as `spoken` reads a message: its first `ANNOUNCE_SOURCE_CHARS` characters, cut
- *   to `ANNOUNCE_CHARS`. So a message past those characters still says each addition.
+ * - **Text that extends the old text**, as a message's does while it streams, says the words its
+ *   row draws after the ones it drew before, cut to `ANNOUNCE_CHARS`. Both texts are read as
+ *   markdown, the old one whole and the new one up to `ANNOUNCE_SOURCE_CHARS` characters past
+ *   the old, so an addition reads as its row draws it: inside the code block, link or emphasis
+ *   the old text left open. When the old words do not begin the new ones, as when an addition
+ *   closes a link or emphasis the old text opened, it says the new text's start, as any other
+ *   change does.
+ * - **Past `ANNOUNCE_SOURCE_CHARS` characters of old text**, the addition alone is read, as
+ *   `spoken` reads a message, so a message past those characters still says each addition.
  * - **Any other change** says the new text's start, as `spoken` does, when its words are not
  *   empty and not the ones it said then.
  */
@@ -113,7 +132,12 @@ function changedWords(row: TranscriptRow, before: readonly TranscriptRow[]): str
   if (was === undefined || was === row || was.kind !== 'item' || was.item.text === row.item.text) return null;
   const old = was.item.text ?? '';
   const now = row.item.text ?? '';
-  if (now.startsWith(old)) return messageWords(kind, now.slice(pairSafeEnd(now, old.length)));
+  if (now.startsWith(old)) {
+    if (old.length > ANNOUNCE_SOURCE_CHARS) return messageWords(kind, now.slice(pairSafeEnd(now, old.length)));
+    const oldWords = plainWords(kind, old);
+    const newWords = plainWords(kind, cut(now, old.length + ANNOUNCE_SOURCE_CHARS));
+    if (newWords.startsWith(oldWords)) return said(newWords.slice(pairSafeEnd(newWords, oldWords.length)));
+  }
   const words = spoken(row);
   return words !== null && words !== spoken(was) ? words : null;
 }

@@ -127,6 +127,31 @@ test('a message whose text grows says only the words added, however long it is',
   assert.deepEqual(announcement([changed(emoji, { text: 'a😀 b' })], 0, [emoji]), ['😀 b']);
 });
 
+test('an addition says the words its row draws, inside the code block, link or emphasis the old text left open', () => {
+  // The fence the old text opened holds the addition, so its line is code, not a heading.
+  const fenced = row({ kind: 'assistant', text: 'Run this:\n```\nconst a = 1' });
+  assert.deepEqual(announcement([changed(fenced, { text: 'Run this:\n```\nconst a = 1\n# not a heading\n```' })], 0, [fenced]), [
+    '# not a heading',
+  ]);
+  // An addition that closes emphasis or a link changes the words before it, so the new text is said from its start.
+  const em = row({ kind: 'user', text: 'Use the *fast' });
+  assert.deepEqual(announcement([changed(em, { text: 'Use the *fast* path' })], 0, [em]), ['Use the fast path']);
+  const link = row({ kind: 'peer', text: 'See [the guide' });
+  assert.deepEqual(announcement([changed(link, { text: 'See [the guide](https://acme.example/guide) first.' })], 0, [link]), [
+    'See the guide first.',
+  ]);
+  // Emphasis still open after the addition says only the words added.
+  const open = row({ kind: 'assistant', text: 'Use **both' });
+  assert.deepEqual(announcement([changed(open, { text: 'Use **both files' })], 0, [open]), ['files']);
+  // Old text of ANNOUNCE_SOURCE_CHARS characters is still read with its addition, and the
+  // addition is read as far past it as an addition read on its own.
+  const full = `\`\`\`\n${'x'.repeat(ANNOUNCE_SOURCE_CHARS - 4)}`;
+  assert.equal(full.length, ANNOUNCE_SOURCE_CHARS);
+  const fullRow = row({ kind: 'assistant', text: full });
+  const tail = announcement([changed(fullRow, { text: `${full}\n# ${'y '.repeat(ANNOUNCE_CHARS)}` })], 0, [fullRow]);
+  assert.deepEqual(tail.map((line) => [line.length, line.slice(0, 6)]), [[ANNOUNCE_CHARS, '# y y ']]);
+});
+
 test('a message whose text changes other than by growing says its new text from the start', () => {
   const said = row({ kind: 'assistant', text: 'Both **pass**.' });
   assert.deepEqual(announcement([changed(said, { text: 'All pass.' })], 0, [said]), ['All pass.']);
