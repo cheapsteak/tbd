@@ -26,6 +26,11 @@ struct PhoneSnapshotInput: Sendable {
     let openPrompts: [UUID: PendingPromptPayload]
     let remoteSessions: [RemoteSessionInfo]
     let providers: [RemoteProviderStatus]
+    /// The laptop's setting for answering prompts,
+    /// `config.transcriptPromptAnswerEnabled`, as the gather read it. While
+    /// it is off, no session's `answer` is available
+    /// (`PhoneSessionStatus.localCapabilities`, `remoteCapabilities`).
+    let promptAnswerEnabled: Bool
 }
 
 /// The sessions list at one moment: the groups with their rows' places, and
@@ -148,9 +153,10 @@ enum PhoneSnapshotBuilder {
     ///
     /// The walk reads only the repos, the worktree and scratch rows, the
     /// remote sessions and the providers to place a remote session, so a
-    /// caller may leave the other fields of `input` empty. A row `build`
-    /// would leave out for its size still counts: the size limits keep the
-    /// list within its frames and say nothing about what the phone may see.
+    /// caller may leave the other fields of `input` empty, and
+    /// `promptAnswerEnabled` changes nothing here. A row `build` would leave
+    /// out for its size still counts: the size limits keep the list within its
+    /// frames and say nothing about what the phone may see.
     static func listsRemoteSession(provider: String, sessionID: String, in input: PhoneSnapshotInput) -> Bool {
         let ref = PhoneSessionRef.remote(provider: provider, sessionID: sessionID)
         return orderedRows(input).entries.contains { entry in
@@ -372,7 +378,8 @@ enum PhoneSnapshotBuilder {
                 // No stored field holds a session's current model; reading
                 // it from the transcript is too slow for this path.
                 model: nil,
-                capabilities: PhoneSessionStatus.localCapabilities(terminal: terminal, isRemoteWorktree: false),
+                capabilities: PhoneSessionStatus.localCapabilities(
+                    terminal: terminal, isRemoteWorktree: false, promptAnswerEnabled: input.promptAnswerEnabled),
                 openPromptID: prompt?.id))
         }
         return sessions
@@ -402,7 +409,9 @@ enum PhoneSnapshotBuilder {
             profileName: nil,
             profileID: nil,
             model: nil,
-            capabilities: PhoneSessionStatus.remoteCapabilities(declared: context.declared[session.provider] ?? []),
+            capabilities: PhoneSessionStatus.remoteCapabilities(
+                declared: context.declared[session.provider] ?? [],
+                promptAnswerEnabled: context.input.promptAnswerEnabled),
             // An exited session's prompt can no longer be answered.
             openPromptID: status.chip == .exited ? nil : session.payload.effectivePendingPrompt?.id)
     }

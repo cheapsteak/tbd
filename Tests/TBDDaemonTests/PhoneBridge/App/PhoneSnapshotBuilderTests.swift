@@ -24,13 +24,15 @@ struct PhoneSnapshotBuilderTests {
         terminals: [TBDShared.Terminal] = [], tabOrder: [UUID: [UUID]] = [:], tabLabels: [UUID: String] = [:],
         profiles: [ModelProfile] = [], states: [UUID: SessionState] = [:],
         openPrompts: [UUID: PendingPromptPayload] = [:],
-        remoteSessions: [RemoteSessionInfo] = [], providers: [RemoteProviderStatus] = []
+        remoteSessions: [RemoteSessionInfo] = [], providers: [RemoteProviderStatus] = [],
+        promptAnswerEnabled: Bool = true
     ) -> PhoneSnapshotInput {
         PhoneSnapshotInput(
             repos: repos, worktrees: worktrees, scratch: scratch,
             terminals: Dictionary(grouping: terminals, by: { $0.worktreeID }),
             tabOrder: tabOrder, tabLabels: tabLabels, profiles: profiles, states: states,
-            openPrompts: openPrompts, remoteSessions: remoteSessions, providers: providers)
+            openPrompts: openPrompts, remoteSessions: remoteSessions, providers: providers,
+            promptAnswerEnabled: promptAnswerEnabled)
     }
 
     private static func worktree(
@@ -409,7 +411,7 @@ struct PhoneSnapshotBuilderTests {
     }
 
     @Test func remoteCapabilitiesFollowTheProvider() throws {
-        let caps = PhoneSessionStatus.remoteCapabilities(declared: ["transcript.read", "answer"])
+        let caps = PhoneSessionStatus.remoteCapabilities(declared: ["transcript.read", "answer"], promptAnswerEnabled: true)
 
         #expect(caps.transcript == Self.available)
         #expect(caps.answer == Self.available)
@@ -430,6 +432,101 @@ struct PhoneSnapshotBuilderTests {
             == PhoneCapability(available: false, reason: "This provider does not support reading transcripts."))
         #expect(session.capabilities.answer
             == PhoneCapability(available: false, reason: "This provider does not support answering prompts."))
+    }
+
+    // MARK: - The setting for answering prompts
+
+    /// One local Claude session, parked so its `fork` is unavailable, and one
+    /// remote session whose provider declares every capability, built with
+    /// the setting for answering prompts `enabled`.
+    private static func answerSettingSnapshot(
+        enabled: Bool, terminal: TBDShared.Terminal, worktree: Worktree, repo: Repo
+    ) -> PhoneSnapshot {
+        PhoneSnapshotBuilder.build(Self.input(
+            repos: [repo], worktrees: [worktree], terminals: [terminal],
+            remoteSessions: [Self.remote("rs-1", repo: repo.id)],
+            providers: [Self.provider("acme", capabilities: [
+                RemoteCapability.transcriptRead, RemoteCapability.sendSubmit, RemoteCapability.answer,
+            ])],
+            promptAnswerEnabled: enabled))
+    }
+
+    /// On, a local Claude session and a remote session whose provider
+    /// declares `answer` both offer Answer. Off, neither does, each with the
+    /// setting's reason, and every other capability is what it was with the
+    /// setting on.
+    @Test func theAnswerSettingTurnsOffOnlyAnswer() throws {
+        let a = UUID()
+        let repo = Repo(id: a, path: "/tmp/acme", displayName: "acme")
+        let w = Self.worktree("fix-login", repo: a)
+        var claude = Self.terminal(in: w.id, kind: .claude)
+        claude.hibernatedAt = Self.base
+        let remoteRowID = "remote:acme/rs-1"
+
+        let on = Self.answerSettingSnapshot(enabled: true, terminal: claude, worktree: w, repo: repo)
+        let off = Self.answerSettingSnapshot(enabled: false, terminal: claude, worktree: w, repo: repo)
+
+        let localOn = try #require(try Self.row(w.id.uuidString, in: on).sessions.first)
+        let remoteOn = try #require(try Self.row(remoteRowID, in: on).sessions.first)
+        #expect(localOn.capabilities.answer == Self.available)
+        #expect(remoteOn.capabilities.answer == Self.available)
+
+        let turnedOff = PhoneCapability(
+            available: false, reason: "Answering prompts is turned off in TBD's settings on the laptop.")
+        #expect(PhoneSessionStatus.answerTurnedOffReason == turnedOff.reason)
+        let localOff = try #require(try Self.row(w.id.uuidString, in: off).sessions.first)
+        let remoteOff = try #require(try Self.row(remoteRowID, in: off).sessions.first)
+        #expect(localOff.capabilities == PhoneCapabilities(
+            transcript: localOn.capabilities.transcript, send: localOn.capabilities.send, answer: turnedOff,
+            switchProfile: localOn.capabilities.switchProfile, fork: localOn.capabilities.fork,
+            model: localOn.capabilities.model))
+        #expect(remoteOff.capabilities == PhoneCapabilities(
+            transcript: remoteOn.capabilities.transcript, send: remoteOn.capabilities.send, answer: turnedOff,
+            switchProfile: remoteOn.capabilities.switchProfile, fork: remoteOn.capabilities.fork,
+            model: remoteOn.capabilities.model))
+        // The capabilities left alone are the ones the session has: Send and
+        // Model on both, Fork off for the parked session, and no switch or
+        // fork for the remote one.
+        #expect(localOff.capabilities.send == Self.available)
+        #expect(localOff.capabilities.model == Self.available)
+        #expect(localOff.capabilities.switchProfile == Self.available)
+        #expect(localOff.capabilities.fork
+            == PhoneCapability(available: false, reason: PhoneSessionStatus.parkedForkReason))
+        #expect(remoteOff.capabilities.send == Self.available)
+        #expect(remoteOff.capabilities.transcript == Self.available)
+        #expect(remoteOff.capabilities.fork
+            == PhoneCapability(available: false, reason: PhoneSessionStatus.remoteOnlyReason))
+    }
+
+    /// A session that cannot answer whatever the setting says keeps its own
+    /// reason while the setting is off, since that reason stays true once
+    /// the setting is on again: a Codex session, a tab in a remote lane, a
+    /// provider that does not declare `answer`.
+    @Test func aSessionThatCannotAnswerKeepsItsOwnReasonWhileTheSettingIsOff() throws {
+        let a = UUID()
+        let w = Self.worktree("fix-login", repo: a)
+        let codex = Self.terminal(in: w.id, kind: .codex, claudeSessionID: nil)
+
+        let s = PhoneSnapshotBuilder.build(Self.input(
+            repos: [Repo(id: a, path: "/tmp/acme", displayName: "acme")], worktrees: [w], terminals: [codex],
+            remoteSessions: [Self.remote("rs-1")],
+            providers: [Self.provider("acme", capabilities: [RemoteCapability.sendSubmit])],
+            promptAnswerEnabled: false))
+
+        let codexSession = try #require(try Self.row(w.id.uuidString, in: s).sessions.first)
+        #expect(codexSession.capabilities.answer
+            == PhoneCapability(available: false, reason: "Codex sessions show status only."))
+        let remote = try #require(try Self.row("remote:acme/rs-1", in: s).sessions.first)
+        #expect(remote.capabilities.answer
+            == PhoneCapability(available: false, reason: "This provider does not support answering prompts."))
+        // The sessions list never builds a remote lane's tab, as the lane's
+        // remote session stands for it; an action on one reads it so.
+        let laneTab = PhoneSessionStatus.localCapabilities(
+            terminal: Self.terminal(in: w.id, kind: .claude), isRemoteWorktree: true, promptAnswerEnabled: false)
+        #expect(laneTab.answer == PhoneCapability(
+            available: false, reason: "This tab belongs to a remote lane. Use its remote session."))
+        let remoteCaps = PhoneSessionStatus.remoteCapabilities(declared: [], promptAnswerEnabled: false)
+        #expect(remoteCaps.answer == remote.capabilities.answer)
     }
 
     @Test func aUserTabLabelWinsOverTheAutomaticName() throws {

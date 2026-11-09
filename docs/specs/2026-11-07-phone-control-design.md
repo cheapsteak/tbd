@@ -360,7 +360,13 @@ handler's logic.
   `terminal.wake`. A refusal returns its reason.
 - **Answer** – the core of `prompt.answer`, with the answer shapes `PromptAnswer` supports, which
   are the choices the laptop's prompt card offers. A prompt that is no longer open returns "already
-  answered".
+  answered". The phone obeys the laptop's setting for answering prompts, as the prompt card does.
+  While the setting is off, every session's answer capability is unavailable, with the reason
+  "Answering prompts is turned off in TBD's settings on the laptop.", and `prompt.answer` is
+  refused with that reason before the core is called. A session that cannot answer anyway (a Codex
+  session, a tab in a remote lane, a provider that does not declare `answer`) keeps its own reason,
+  which stays true once the setting is on again. Turning the setting on or off updates every
+  connected phone's sessions list through `sessions.changed`.
 - **Switch profile and fork** – `terminal.swapProfile` in `inPlace` and `fork` modes.
 - **Model** – `/model <name>` through the send path.
 - **New worktree** – the core of `worktree.create`, with the first message and TBD's defaults for
@@ -392,7 +398,8 @@ a TBD notification naming the phone, so a pairing the user did not make is visib
     its sync, the same as opening the laptop pane. Scrolling past the cached part uses
     `remote.transcriptLoadEarlier`.
   - **Send** – where the provider declares `send` with `send-submit`.
-  - **Answer** – where the provider declares `answer`.
+  - **Answer** – where the provider declares `answer` and the laptop's setting for answering
+    prompts is on.
   - **Model** – where the provider declares `send-submit`.
   - **Create** – from the "New" sheet. TBD fills `repo` and `prompt`. Any other required field is
     shown as a form built from the provider's `create_params`.

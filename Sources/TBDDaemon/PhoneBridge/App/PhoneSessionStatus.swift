@@ -138,6 +138,7 @@ enum PhoneSessionStatus {
     static let remoteOnlyReason = "Not available for remote sessions."
     static let cannotTakeMessagesReason = "This session cannot take messages."
     static let parkedForkReason = "This session is parked. Send it a message to wake it, then fork it."
+    static let answerTurnedOffReason = "Answering prompts is turned off in TBD's settings on the laptop."
 
     /// A local session's capabilities. A Claude session has all six; a Codex
     /// session shows its status only. A tab in a remote lane's row has none,
@@ -153,15 +154,23 @@ enum PhoneSessionStatus {
     /// the profile swap moves a parked row in place whatever its mode, so
     /// `session.fork` refuses one. Parking is the only reason `fork` and
     /// `switchProfile` differ.
-    static func localCapabilities(terminal: TBDShared.Terminal, isRemoteWorktree: Bool) -> PhoneCapabilities {
+    ///
+    /// `answer` also follows the laptop's setting for answering prompts,
+    /// `promptAnswerEnabled` (`answerCapability(_:promptAnswerEnabled:)`).
+    static func localCapabilities(
+        terminal: TBDShared.Terminal, isRemoteWorktree: Bool, promptAnswerEnabled: Bool
+    ) -> PhoneCapabilities {
         if isRemoteWorktree {
             let none = unavailable(remoteLaneTabReason)
-            return PhoneCapabilities(transcript: none, send: none, answer: none, switchProfile: none, fork: none, model: none)
+            return PhoneCapabilities(
+                transcript: none, send: none, answer: answerCapability(none, promptAnswerEnabled: promptAnswerEnabled),
+                switchProfile: none, fork: none, model: none)
         }
         if terminal.isCodexTerminal {
             let statusOnly = unavailable(codexStatusOnlyReason)
             return PhoneCapabilities(
-                transcript: unavailable(codexTranscriptReason), send: statusOnly, answer: statusOnly,
+                transcript: unavailable(codexTranscriptReason), send: statusOnly,
+                answer: answerCapability(statusOnly, promptAnswerEnabled: promptAnswerEnabled),
                 switchProfile: statusOnly, fork: statusOnly, model: statusOnly)
         }
         let messages: PhoneCapability
@@ -172,9 +181,32 @@ enum PhoneSessionStatus {
             messages = available
         }
         return PhoneCapabilities(
-            transcript: available, send: messages, answer: available,
+            transcript: available, send: messages,
+            answer: answerCapability(available, promptAnswerEnabled: promptAnswerEnabled),
             switchProfile: available, fork: terminal.isParked ? unavailable(parkedForkReason) : available,
             model: messages)
+    }
+
+    /// A session's `answer` under the laptop's setting for answering prompts
+    /// (`config.transcriptPromptAnswerEnabled`, which the laptop's prompt
+    /// card and the core of `prompt.answer` and `remote.answer` obey):
+    /// `session`, what the session itself allows, while the setting is on;
+    /// while it is off, unavailable with `answerTurnedOffReason` in place of
+    /// an available one.
+    ///
+    /// **A session that cannot answer anyway keeps its own reason** while the
+    /// setting is off: a tab in a remote lane, a Codex session, a provider
+    /// that does not declare `answer`. That reason stays true when the
+    /// setting is turned on again, so it is the one that tells the phone what
+    /// would have to change; the setting's reason shows only where turning
+    /// the setting on would make `answer` available.
+    ///
+    /// Only `answer` follows the setting. It gates answering prompts and
+    /// nothing else the phone does, so `send`, `model`, `fork`,
+    /// `switchProfile` and `transcript` ignore it.
+    private static func answerCapability(_ session: PhoneCapability, promptAnswerEnabled: Bool) -> PhoneCapability {
+        guard session.available, !promptAnswerEnabled else { return session }
+        return unavailable(answerTurnedOffReason)
     }
 
     /// Each provider's declared capabilities, by provider name, from its
@@ -191,9 +223,11 @@ enum PhoneSessionStatus {
 
     /// A remote session's capabilities, from the capabilities its provider
     /// declares in `describe`: `transcript` needs `transcript.read`, `send`
-    /// and `model` need `send-submit`, `answer` needs `answer`. A remote
-    /// session never switches profiles or forks.
-    static func remoteCapabilities(declared: Set<String>) -> PhoneCapabilities {
+    /// and `model` need `send-submit`, `answer` needs `answer` and the
+    /// laptop's setting for answering prompts, `promptAnswerEnabled`, on
+    /// (`answerCapability(_:promptAnswerEnabled:)`), as a local session's
+    /// does. A remote session never switches profiles or forks.
+    static func remoteCapabilities(declared: Set<String>, promptAnswerEnabled: Bool) -> PhoneCapabilities {
         func needs(_ capability: String, _ action: String) -> PhoneCapability {
             declared.contains(capability)
                 ? PhoneSessionStatus.available
@@ -203,7 +237,8 @@ enum PhoneSessionStatus {
         return PhoneCapabilities(
             transcript: needs(RemoteCapability.transcriptRead, "reading transcripts"),
             send: needs(RemoteCapability.sendSubmit, "sending messages"),
-            answer: needs(RemoteCapability.answer, "answering prompts"),
+            answer: answerCapability(
+                needs(RemoteCapability.answer, "answering prompts"), promptAnswerEnabled: promptAnswerEnabled),
             switchProfile: remoteOnly,
             fork: remoteOnly,
             model: needs(RemoteCapability.sendSubmit, "changing the model"))

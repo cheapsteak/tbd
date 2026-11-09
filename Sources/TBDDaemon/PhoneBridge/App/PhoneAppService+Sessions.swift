@@ -208,6 +208,13 @@ extension PhoneAppService {
     /// `PhoneAppConstants.providerRefreshInterval`, or always with
     /// `forceProviderRefresh`, as a `sessions.subscribe` asks
     /// (`gatheredRemoteProviders(forceRefresh:)`).
+    ///
+    /// The setting for answering prompts is read on every gather
+    /// (`promptAnswerSetting()`), never kept. Turning it on or off reaches a
+    /// phone through the publisher like any other change: the setter,
+    /// `config.setTranscriptPromptAnswerEnabled`, broadcasts a state delta
+    /// once it has written the column, the delta opens the publisher's
+    /// window, and the gather after it reads the new value.
     nonisolated func gatherSnapshot(forceProviderRefresh: Bool = false) async throws -> PhoneSnapshot {
         let repos = try await db.repos.list()
         let worktrees = try await db.worktrees.list(excludeArchived: true)
@@ -231,6 +238,7 @@ extension PhoneAppService {
             }
         }
         let profiles = try await db.modelProfiles.list()
+        let promptAnswerEnabled = try await promptAnswerSetting()
         let openPrompts = await pendingPrompts.oldestOpenPrompts()
         let states = await gatheredSessionStates()
         let remoteSessions = await gatheredRemoteSessions()
@@ -238,7 +246,20 @@ extension PhoneAppService {
         return PhoneSnapshotBuilder.build(PhoneSnapshotInput(
             repos: repos, worktrees: worktrees, scratch: scratch, terminals: terminals,
             tabOrder: tabOrder, tabLabels: tabLabels, profiles: profiles, states: states,
-            openPrompts: openPrompts, remoteSessions: remoteSessions, providers: providers))
+            openPrompts: openPrompts, remoteSessions: remoteSessions, providers: providers,
+            promptAnswerEnabled: promptAnswerEnabled))
+    }
+
+    /// The laptop's setting for answering prompts,
+    /// `config.transcriptPromptAnswerEnabled`, read from the database on
+    /// every call. The sessions list (`gatherSnapshot`) and every action's
+    /// capability check (`phoneCapableClaudeTerminal`,
+    /// `checkPhoneCapableRemoteSession`, `remoteCapabilities(ofProvider:)`)
+    /// read it here, so the list never offers an answer that `prompt.answer`
+    /// refuses, nor refuses one it offers, but for a change between the two
+    /// reads; the core of the answer reads it again. A failed read throws.
+    nonisolated func promptAnswerSetting() async throws -> Bool {
+        try await db.config.get().transcriptPromptAnswerEnabled
     }
 
     private nonisolated func gatheredSessionStates() async -> [UUID: SessionState] {
@@ -359,11 +380,13 @@ extension PhoneAppService {
     /// Checks that the phone may act on the remote session
     /// `provider`/`sessionID`, needing the capability `needed` picks from its
     /// capabilities as the sessions list shows them
-    /// (`PhoneSessionStatus.remoteCapabilities`):
+    /// (`PhoneSessionStatus.remoteCapabilities`, with the setting for
+    /// answering prompts read as the list reads it, `promptAnswerSetting()`):
     /// - a provider that is not registered is `not_found` with
     ///   `noSuchProviderReason`;
     /// - an unavailable capability is `unsupported` with its reason, as the
-    ///   list shows it, or `fallback` when it gives none;
+    ///   list shows it, or `fallback` when it gives none: an `answer` while
+    ///   the setting is off is `PhoneSessionStatus.answerTurnedOffReason`;
     /// - a session the list places in no row is `not_found` with
     ///   `noSuchSessionReason`: one missing from the laptop's remote session
     ///   list, dismissed, or matched to a hidden repo. The rule is the list's
@@ -376,13 +399,17 @@ extension PhoneAppService {
     /// the laptop no longer shows it, as `phoneVisibleTerminal` holds a local
     /// session. So every action on a remote session checks it here, and
     /// nowhere else: `message.send` and `session.setModel` (`sendText`),
-    /// `prompt.answer` and `transcript.open`.
+    /// `prompt.answer` and `transcript.open`. Every one of them reads the
+    /// setting with the rest, since only `answer` follows it; for the others
+    /// it changes nothing.
     nonisolated func checkPhoneCapableRemoteSession(
         provider: String, sessionID: String,
         needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, orElse fallback: String
     ) async throws {
         let providers = try await providerStatuses()
-        let capabilities = try Self.remoteCapabilities(ofProvider: provider, in: providers)
+        let promptAnswerEnabled = try await promptAnswerSetting()
+        let capabilities = try Self.remoteCapabilities(
+            ofProvider: provider, in: providers, promptAnswerEnabled: promptAnswerEnabled)
         try Self.requireCapability(needed(capabilities), orElse: fallback)
         let response = try await actions.phoneRemoteSessions()
         let sessions = try Self.succeeded(RemoteSessionsResult.self, from: response, method: "remote.sessions").sessions
@@ -393,7 +420,8 @@ extension PhoneAppService {
         let input = PhoneSnapshotInput(
             repos: repos, worktrees: worktrees, scratch: scratch, terminals: [:],
             tabOrder: [:], tabLabels: [:], profiles: [], states: [:],
-            openPrompts: [:], remoteSessions: sessions, providers: providers)
+            openPrompts: [:], remoteSessions: sessions, providers: providers,
+            promptAnswerEnabled: promptAnswerEnabled)
         guard PhoneSnapshotBuilder.listsRemoteSession(provider: provider, sessionID: sessionID, in: input) else {
             throw PhoneAppError(code: .notFound, message: Self.noSuchSessionReason)
         }
@@ -406,18 +434,24 @@ extension PhoneAppService {
     /// session by the list's reading (`PhoneSnapshotBuilder.agent(of:)`).
     ///
     /// An unavailable capability is `unsupported` with its reason, as the
-    /// list shows it: a Codex session, a tab in a remote lane. Any other
+    /// list shows it: a Codex session, a tab in a remote lane, or an
+    /// `answer` while the setting for answering prompts is off
+    /// (`promptAnswerSetting()`, read as the list reads it). Any other
     /// session the list does not show as Claude (a shell, or a row with no
     /// kind and no Claude session) is `unsupported` with `notClaude`.
     /// `prompt.answer`, `session.switchProfile` and `session.fork` read a
     /// local session through this, so each refuses what the list marks
-    /// unavailable, in the list's words.
+    /// unavailable, in the list's words. Switch and fork read the setting
+    /// too, since the capabilities returned are the list's whole set; only
+    /// `answer` follows it, so it changes nothing for them.
     nonisolated func phoneCapableClaudeTerminal(
         _ terminalID: UUID, needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, notClaude: String
     ) async throws -> (terminal: TBDShared.Terminal, capabilities: PhoneCapabilities) {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
+        let promptAnswerEnabled = try await promptAnswerSetting()
         let capabilities = PhoneSessionStatus.localCapabilities(
-            terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
+            terminal: terminal, isRemoteWorktree: !worktree.location.isLocal,
+            promptAnswerEnabled: promptAnswerEnabled)
         try Self.requireCapability(needed(capabilities), orElse: notClaude)
         guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
             throw PhoneAppError(code: .unsupported, message: notClaude)

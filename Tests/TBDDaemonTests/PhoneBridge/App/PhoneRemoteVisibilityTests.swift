@@ -162,7 +162,8 @@ struct PhoneRemoteVisibilityTests {
                 errorMessage: nil, remediationLabel: nil, remediationCommand: nil)
             return PhoneSnapshotInput(
                 repos: repos, worktrees: [], scratch: [], terminals: [:], tabOrder: [:], tabLabels: [:],
-                profiles: [], states: [:], openPrompts: [:], remoteSessions: [session], providers: [provider])
+                profiles: [], states: [:], openPrompts: [:], remoteSessions: [session], providers: [provider],
+                promptAnswerEnabled: true)
         }
 
         let hidden = PhoneSnapshotBuilder.listsRemoteSession(provider: "acme-cloud", sessionID: "rs-1", in: input(hiddenID))

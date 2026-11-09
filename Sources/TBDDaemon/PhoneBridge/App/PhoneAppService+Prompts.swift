@@ -822,12 +822,16 @@ struct PhonePromptFeed: Sendable {
 /// **`prompt.answer`** adds no authority. It calls the core of `prompt.answer`
 /// (`phoneAnswerPrompt`) or of `remote.answer` (`phoneAnswerRemotePrompt`)
 /// under the device of the verified pairing, `context.peer.deviceID`, never a
-/// value from the request, with the answer exactly as the phone sent it. The
-/// core checks `transcript_prompt_answer_enabled`, the setting the laptop's
-/// prompt card obeys, and `PromptDecisionEncoder` checks the answer against
-/// the prompt, so the phone answers exactly the kinds the laptop does. The
-/// method is in the request memory, so a resent answer acts once. A remote
-/// answer's refusal reaches the phone only in words TBD wrote
+/// value from the request, with the answer exactly as the phone sent it.
+/// `transcript_prompt_answer_enabled`, the setting the laptop's prompt card
+/// obeys, is read twice: first through the session's `answer` capability, as
+/// the sessions list shows it, so while the setting is off the answer is
+/// `unsupported` with `PhoneSessionStatus.answerTurnedOffReason` before the
+/// core is called; then by the core itself, which refuses an answer whose
+/// setting was turned off after the first read. `PromptDecisionEncoder` checks
+/// the answer against the prompt, so the phone answers exactly the kinds the
+/// laptop does. The method is in the request memory, so a resent answer acts
+/// once. A remote answer's refusal reaches the phone only in words TBD wrote
 /// (`answerRefusal(_:remoteRefusals:)`), since a provider's own can quote a
 /// secret.
 ///
@@ -851,25 +855,26 @@ extension PhoneAppService {
     ///   is `bad_request`, before anything is called.
     /// - **A local session** the phone cannot see (`phoneVisibleTerminal`) is
     ///   `not_found`. One whose `answer` capability the sessions list shows
-    ///   unavailable (a Codex session, a tab in a remote lane) is
+    ///   unavailable (a Codex session, a tab in a remote lane, or any Claude
+    ///   session while the setting for answering prompts is off) is
     ///   `unsupported` with the list's reason, and any other session that is
     ///   not Claude (a shell) is `unsupported` with `notAClaudeAnswerReason`
     ///   (`phoneCapableClaudeTerminal`). Otherwise `phoneAnswerPrompt` with
     ///   the terminal, the prompt and the answer.
-    /// - **A remote session** needs its provider's `answer` capability, as the
-    ///   sessions list shows it, or it is `unsupported` with the same reason;
-    ///   a provider that is not registered, and a session the phone cannot
-    ///   see, are `not_found` (`checkPhoneCapableRemoteSession`). Then
-    ///   `phoneAnswerRemotePrompt` with the provider, the session, the prompt
-    ///   and the answer.
+    /// - **A remote session** needs its `answer` capability, as the sessions
+    ///   list shows it (its provider declares `answer`, and the setting is
+    ///   on), or it is `unsupported` with the same reason; a provider that is
+    ///   not registered, and a session the phone cannot see, are `not_found`
+    ///   (`checkPhoneCapableRemoteSession`). Then `phoneAnswerRemotePrompt`
+    ///   with the provider, the session, the prompt and the answer.
     ///
     /// The core's result is the reply's: "already answered" is the outcome
-    /// `already_resolved`, not an error. A refusal (the setting is off, no
-    /// hook picked the answer up, the answer does not fit the prompt) is
-    /// `refused`: a local answer's with the core's text, and a remote
-    /// answer's only in words TBD wrote (`answerRefusal(_:remoteRefusals:)`).
-    /// A result that does not decode is `internal`, never a success. A revoke
-    /// noticed before the call stops it.
+    /// `already_resolved`, not an error. A refusal (the setting was turned off
+    /// after the capability check read it, no hook picked the answer up, the
+    /// answer does not fit the prompt) is `refused`: a local answer's with the
+    /// core's text, and a remote answer's only in words TBD wrote
+    /// (`answerRefusal(_:remoteRefusals:)`). A result that does not decode is
+    /// `internal`, never a success. A revoke noticed before the call stops it.
     nonisolated func promptAnswer(_ params: PhonePromptAnswerParams, _ context: DeviceContext) async throws -> PromptAnswerResult {
         if case .permission(_, let reason?) = params.answer, reason.utf8.count > PhoneAppConstants.promptTextCap {
             throw PhoneAppError(code: .badRequest, message: Self.answerReasonTooLongReason)

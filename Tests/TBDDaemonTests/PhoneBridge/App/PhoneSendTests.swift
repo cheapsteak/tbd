@@ -494,7 +494,8 @@ struct PhoneSendTests {
         let (reply, _) = try await h.request(.messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
 
         // The reason the sessions list shows for the same provider.
-        let shown = PhoneSessionStatus.remoteCapabilities(declared: [RemoteCapability.transcriptRead]).send
+        let shown = PhoneSessionStatus.remoteCapabilities(
+            declared: [RemoteCapability.transcriptRead], promptAnswerEnabled: true).send
         #expect(reply.error == PhoneAppError(code: .unsupported, message: "This provider does not support sending messages."))
         #expect(reply.error?.message == shown.reason)
         #expect(h.actions.remoteSends.isEmpty)
@@ -515,6 +516,25 @@ struct PhoneSendTests {
         #expect(sends == [["acme-cloud", "rs-1", "hi"]])
         let acting = h.actions.calls.filter { $0.method == .remoteSendMessage }
         #expect(acting == [FakeSessionActions.Call(method: .remoteSendMessage, deviceID: h.peer.deviceID)])
+    }
+
+    /// The setting for answering prompts gates answering only: a remote send
+    /// goes through the same capability check as a remote answer
+    /// (`checkPhoneCapableRemoteSession`), and is sent with the setting off.
+    @Test func aRemoteSendIgnoresTheAnswerSetting() async throws {
+        let h = try await PhoneServiceHarness.make()
+        try await h.db.config.setTranscriptPromptAnswerEnabled(false)
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit, RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
+        h.actions.respond(to: .remoteSendMessage, with: try RPCResponse(result: RemoteSendMessageResult(outcome: .sent)))
+        let outbox = await h.connect()
+
+        let (reply, bytes) = try await h.request(.messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
+
+        #expect(reply.error == nil)
+        #expect(try Self.outcome(bytes) == "sent")
+        let sends = h.actions.remoteSends.map { [$0.provider, $0.sessionID, $0.text] }
+        #expect(sends == [["acme-cloud", "rs-1", "hi"]])
     }
 
     /// The provider may have pressed Enter before its call ended: the phone
