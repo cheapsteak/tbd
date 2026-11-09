@@ -8,7 +8,8 @@
  *   reason is all it shows (`.codex-note`).
  * - **Opening.** The mock has no loading state for a transcript, so while an open is on its way
  *   with no rows, the list is empty.
- * - **Failed.** The slice's error, which is the laptop's own text, in the same note.
+ * - **Failed.** The slice's error, which is the laptop's own text, in the same note, when the
+ *   failed open is this session's (`openFailure`).
  *
  * **The list** (`List`). `.tx` is the scroll element, as in the mock (mock 207-208). Inside it,
  * `.tx-list` is as tall as the virtualizer's total, and sits at the bottom of a short transcript
@@ -102,7 +103,7 @@ import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties, typ
 import { elementScroll, observeElementRect, useVirtualizer, type Rect, type Virtualizer } from '@tanstack/react-virtual';
 import { useActions, useAppState } from '../state/context.tsx';
 import type { DetailState } from '../state/detail.ts';
-import { staleHolds } from '../state/transcript.ts';
+import { openFailure, staleHolds } from '../state/transcript.ts';
 import type { TranscriptRow } from '../state/transcript.ts';
 import type { PhoneSession } from '../protocol/types.ts';
 import { sameRef } from '../protocol/wire.ts';
@@ -156,7 +157,8 @@ export function TranscriptView(p: { session: PhoneSession }): JSX.Element {
   const toggle = useCallback((rowKey: number, part: RowPart) => void actions.toggleDetail(rowKey, part), [actions]);
   const { available, reason } = p.session.capabilities.transcript;
   if (!available) return <Note text={reason ?? ''} />;
-  if (t.phase === 'failed') return <Note text={t.error ?? ''} />;
+  const failure = openFailure(t, p.session.ref);
+  if (failure !== null) return <Note text={failure} />;
   const shown = t.ref !== null && sameRef(t.ref, p.session.ref);
   const { status } = p.session;
   return (

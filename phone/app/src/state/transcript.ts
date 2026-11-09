@@ -308,6 +308,14 @@ export function addReceipt(s: TranscriptState, ref: PhoneSessionRef, id: string,
   return { ...s, rows };
 }
 
+/**
+ * The laptop's message for a failed open of `ref`'s transcript, or null when the slice holds no
+ * failed open of that session. A failed open of another session is no failure of this one.
+ */
+export function openFailure(s: TranscriptState, ref: PhoneSessionRef): string | null {
+  return s.phase === 'failed' && s.ref !== null && sameRef(s.ref, ref) ? (s.error ?? '') : null;
+}
+
 /** Whether `s` shows `ref`'s transcript, so its events and receipts fold in. */
 function holds(s: TranscriptState, ref: PhoneSessionRef): boolean {
   return s.phase === 'open' && s.ref !== null && sameRef(s.ref, ref);

@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import type { AppEvent, PhoneItem, PhoneSessionRef, TranscriptPage } from '../protocol/types.ts';
 import type { DetailState } from './detail.ts';
 import {
-  addReceipt, applyPage, applyTranscriptEvent, beginOpen, beginResume, clearTranscript, emptyTranscript, MAX_STALE_PAGES, mayAskOlder, prependPage,
-  settleStalePage, staleHolds,
+  addReceipt, applyPage, applyTranscriptEvent, beginOpen, beginResume, clearTranscript, emptyTranscript, MAX_STALE_PAGES, mayAskOlder, openFailure,
+  prependPage, settleStalePage, staleHolds,
 } from './transcript.ts';
 import type { TranscriptRow, TranscriptState } from './transcript.ts';
 
@@ -467,6 +467,24 @@ test('events and receipts fold in only while the transcript shows: not while it 
   assert.equal(applyTranscriptEvent(failed, append([item('u2')])), failed);
   assert.equal(applyTranscriptEvent(failed, reset(page([item('u2')]))), failed);
   assert.equal(addReceipt(failed, R, 'p1', 'Answered on the laptop'), failed);
+});
+
+test("a failed open is reported for its own session only, with the laptop's message", () => {
+  const message = 'The remote session did not load. Try again later.';
+  const failedOf = (ref: PhoneSessionRef, error: string | null): TranscriptState => ({
+    ...beginOpen(emptyTranscript(), ref, false, 'open-1'), phase: 'failed', error,
+  });
+  assert.equal(openFailure(failedOf(R, message), R), message);
+  assert.equal(openFailure(failedOf(REMOTE, message), { kind: 'remote', provider: 'acme-cloud', sessionID: 'S1' }), message);
+  assert.equal(openFailure(failedOf(R, null), R), '');
+  // Another session's failure is none of this one's: its view shows no note.
+  for (const [failed, ref] of [[R, OTHER], [OTHER, R], [R, REMOTE], [REMOTE, R]] as const) {
+    assert.equal(openFailure(failedOf(failed, message), ref), null);
+  }
+  // A slice that is not failed reports nothing, for any session.
+  for (const s of [emptyTranscript(), beginOpen(emptyTranscript(), R, false, 'open-1'), withRows([item('u1')])]) {
+    assert.equal(openFailure(s, R), null);
+  }
 });
 
 test('a resume keeps the slice showing, so the events the laptop replays before its reply fold in', () => {
