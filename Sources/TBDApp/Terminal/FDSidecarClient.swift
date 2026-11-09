@@ -91,6 +91,13 @@ final class FDSidecarClient: @unchecked Sendable {
         // socket that arrives already connected. See `adopt` for what an
         // inherited copy costs.
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        // `SO_NOSIGPIPE` twice over too: here, before `connect`, because XNU
+        // refuses `setsockopt` with EINVAL once the peer has closed, so the
+        // copy `adopt` sets would be lost if the daemon hung up first — which
+        // is the case it exists for. `adopt` keeps its own for sockets that
+        // arrive already connected; on this path a refusal there (and the one
+        // `.fault` line `SocketSIGPIPE` logs for it) leaves this one in force.
+        SocketSIGPIPE.suppress(on: fd)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let sunPathSize = MemoryLayout.size(ofValue: addr.sun_path)
@@ -124,11 +131,12 @@ final class FDSidecarClient: @unchecked Sendable {
         // the `fd >= 0` guard passes because the receive loop has not torn
         // down yet, and the write lands on a closed peer. `SO_NOSIGPIPE` is
         // what turns that into the `EPIPE` those `catch` blocks log instead of
-        // a signal that kills the app. Set here rather than in `connect(path:)`
-        // because `adopt` is the one funnel every socket passes through
-        // (`connect` calls it, and so do the tests' `socketpair` ends), and
-        // per-socket rather than process-wide for the fork-inheritance reason
-        // spelled out on `SocketSIGPIPE`.
+        // a signal that kills the app. Set here because `adopt` is the one
+        // funnel every socket passes through (`connect` calls it, and so do
+        // the tests' `socketpair` ends), and also by `connect(path:)` before it
+        // connects, since a setting made after the daemon has hung up is
+        // refused. Per-socket rather than process-wide for the
+        // fork-inheritance reason spelled out on `SocketSIGPIPE`.
         SocketSIGPIPE.suppress(on: fd)
         // Close-on-exec, at the same funnel and for a failure with the same
         // shape. This is the connection whose EOF is the **only** thing that
