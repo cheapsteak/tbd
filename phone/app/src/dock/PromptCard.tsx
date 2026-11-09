@@ -19,6 +19,11 @@
  *   several, it records the value and moves to the next question, and Back returns to the one
  *   before. After the last comes the review: "Send these answers?", one button per question with
  *   its header and value (a tap returns to that question), then Back and "Send answers".
+ * - **Focus.** A move to another question or to or from the review puts the focus on the
+ *   question's text (`.q`, focusable by script only), not on whichever button now sits where the
+ *   one tapped was, so a key press meant for the last question never answers the next.
+ * - Cancel closes the Other form and leaves the draft as it was, so an Other value recorded
+ *   before stays recorded.
  *
  * **A permission** (`PermissionCard`, mock 946-960). The head holds the hand glyph, "Permission"
  * and Hide; then `.perm-tool` (the tool's glyph and name), `.perm-desc` (the summary) and
@@ -68,7 +73,7 @@ import type { JSX, RefObject } from 'react';
 import type { PhonePrompt, PhoneQuestion, PhoneSession, PromptAnswer } from '../protocol/types.ts';
 import { useActions } from '../state/context.tsx';
 import {
-  chooseOption, chooseOther, emptyQuestionDraft, permissionAnswer, questionAnswer, questionValue, setOtherText, trimLikeLaptop,
+  chooseOption, emptyQuestionDraft, permissionAnswer, questionAnswer, questionValue, setOtherText, trimLikeLaptop,
 } from '../state/prompts.ts';
 import type { CardState, QuestionDraft } from '../state/prompts.ts';
 import { toolGlyph } from '../state/status.ts';
@@ -240,6 +245,19 @@ function useEndInView(field: RefObject<HTMLTextAreaElement | null>, open: boolea
   }, [field, open]);
 }
 
+/**
+ * Puts the focus on `el` whenever `step` changes after the first render, so the focus leaves the
+ * button that was tapped or pressed (see the header).
+ */
+function useFocusOnStep(el: RefObject<HTMLElement | null>, step: number): void {
+  const last = useRef(step);
+  useEffect(() => {
+    if (last.current === step) return;
+    last.current = step;
+    el.current?.focus({ preventScroll: true });
+  }, [el, step]);
+}
+
 /** The reason the session cannot answer, in place of the choices; nothing when the list gave none. */
 function Unavailable(p: { reason: string }): JSX.Element | null {
   return p.reason === '' ? null : <div className="dock-note">{p.reason}</div>;
@@ -344,6 +362,8 @@ function QuestionCard(p: {
   useEndInView(otherField, ui.otherOpen);
   const total = questions.length;
   const step = Math.min(ui.step, total);
+  const questionText = useRef<HTMLDivElement>(null);
+  useFocusOnStep(questionText, step);
   const several = total > 1;
   const shownStep = Math.min(step + 1, total);
   const head = (
@@ -374,7 +394,7 @@ function QuestionCard(p: {
     return (
       <div className="card" role="region" aria-label="Question">
         {head}
-        {q !== undefined && <div className="q">{q.text}</div>}
+        {q !== undefined && <div ref={questionText} className="q" tabIndex={-1}>{q.text}</div>}
         {p.unavailable !== null && <Unavailable reason={p.unavailable} />}
       </div>
     );
@@ -397,7 +417,7 @@ function QuestionCard(p: {
     return (
       <div className="card" role="region" aria-label="Questions">
         {head}
-        <div className="q">Send these answers?</div>
+        <div ref={questionText} className="q" tabIndex={-1}>Send these answers?</div>
         {refusal}
         <div className="review">
           {questions.map((q, i) => (
@@ -417,10 +437,7 @@ function QuestionCard(p: {
 
   const q = questions[step]!;
   const openOther = (): void => setUI({ ...ui, otherOpen: true, otherText: ui.draft.other[q.text] ?? '' });
-  const cancelOther = (): void => {
-    const draft = q.multiSelect && ui.draft.otherChosen[q.text] === true ? chooseOther(ui.draft, q) : ui.draft;
-    setUI({ ...ui, draft, otherOpen: false });
-  };
+  const cancelOther = (): void => setUI({ ...ui, otherOpen: false });
   const sendOther = (): void => {
     if (trimLikeLaptop(ui.otherText) === '') return;
     advance(setOtherText(ui.draft, q, ui.otherText));
@@ -459,7 +476,7 @@ function QuestionCard(p: {
     return (
       <div className="card" role="region" aria-label="Question">
         {head}
-        <div className="q">{q.text}</div>
+        <div ref={questionText} className="q" tabIndex={-1}>{q.text}</div>
         {refusal}
         <div className="opts">
           {q.options.map((o, i) => (
@@ -498,7 +515,7 @@ function QuestionCard(p: {
   return (
     <div className="card" role="region" aria-label="Question">
       {head}
-      <div className="q">{q.text}</div>
+      <div ref={questionText} className="q" tabIndex={-1}>{q.text}</div>
       {refusal}
       <div className="opts">
         {q.options.map((o, i) => (

@@ -2,8 +2,9 @@
 // as an Android phone: a question card's options, Other, steps and review, multi-select, Hide,
 // a session that cannot answer, a refused answer, and one send per gesture. Then the permission
 // card: Yes, the session rule, Deny with a message, and the keyboard. Then no tap landing on
-// what the user has not seen: a card that appeared or changed holds its choices at first, and
-// what the user did on a card outlasts a card that took its place. Last, who answered: the Answered card, the card that says someone else answered first,
+// what the user has not seen: a card that appeared or changed holds its choices at first, the
+// focus leaves the button pressed, and what the user did on a card outlasts a card that took its
+// place. Last, who answered: the Answered card, the card that says someone else answered first,
 // and the receipts the transcript keeps ("Answered on this phone: …", "Answered on the laptop",
 // "Answered on another phone").
 //
@@ -753,6 +754,58 @@ test("a double tap on Send answer in the last step's Other form lands on the rev
       session: ONBOARDING_REF,
       promptID: ONBOARDING_PROMPT,
       answer: { kind: 'question', answers: { [TONE]: 'Friendly and short', [STEPS]: '3 steps', [SKIP]: 'Only after the first run' } },
+    },
+  ]);
+});
+
+test('after a step the focus is on the next question, so Enter answers nothing', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('button', { name: 'Friendly and short' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(c.locator('.c-head')).toContainText('2 of 3');
+  await expect(c.locator('.q')).toBeFocused();
+  await expect(c.getByRole('button', { name: '3 steps' })).toBeEnabled();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  await expect(c.locator('.c-head')).toContainText('2 of 3');
+  await expect(c.locator('.q')).toHaveText(STEPS);
+  await expect(c.locator('textarea')).toHaveCount(0);
+  // Back moves the focus to the question too.
+  await c.getByRole('button', { name: 'Back' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(c.locator('.q')).toHaveText(TONE);
+  await expect(c.locator('.q')).toBeFocused();
+  expect(await answers(page)).toEqual([]);
+});
+
+test('Cancel on a multi-select Other keeps the Other value recorded before', async ({ page, appHost }) => {
+  const multi = { header: 'Sections', text: 'Which sections?', multiSelect: true, options: [{ label: 'Account' }, { label: 'Billing' }] };
+  const base = MOCK.prompts[`local:${ONBOARDING_REF.terminalID}`][0];
+  await openApp(page, appHost, { scenario: withOnboardingPrompts({ questions: [multi, base.questions[1]] }) });
+  await openSessionByName(page, 'Onboarding copy');
+  const c = card(page);
+  await c.getByRole('checkbox', { name: 'Account' }).check();
+  await c.getByRole('button', { name: 'Other answer…' }).click();
+  await c.getByRole('textbox', { name: 'Type your answer' }).fill('Privacy');
+  await c.getByRole('button', { name: 'Send answer' }).click();
+  await expect(c.locator('.q')).toHaveText(STEPS);
+  await c.getByRole('button', { name: 'Back' }).click();
+  // The form opens with the recorded text; Cancel closes it and the value stays.
+  await c.getByRole('button', { name: 'Other answer…' }).click();
+  await expect(c.getByRole('textbox', { name: 'Type your answer' })).toHaveValue('Privacy');
+  await c.getByRole('button', { name: 'Cancel' }).click();
+  await c.getByRole('button', { name: 'Send 1 selected' }).click();
+  await c.getByRole('button', { name: '3 steps' }).click();
+  await expect(c.locator('.review button').nth(0)).toHaveText('SectionsAccount, Privacy');
+  await c.getByRole('button', { name: 'Send answers' }).click();
+  await expect.poll(() => answers(page)).toEqual([
+    {
+      session: ONBOARDING_REF,
+      promptID: ONBOARDING_PROMPT,
+      answer: { kind: 'question', answers: { 'Which sections?': 'Account, Privacy', [STEPS]: '3 steps' } },
     },
   ]);
 });
