@@ -553,36 +553,48 @@ extension AppState {
         }
     }
 
-    /// Swap the model profile associated with a running terminal.
+    /// Swap the model profile of a terminal, awake or parked.
     ///
-    /// `.inPlace` (default, "Switch account"): the daemon respawns the SAME
-    /// tmux window/terminal row under the new profile. The row is updated in
-    /// place via the `terminalProfileChanged` delta — no new tab is created, so
-    /// this method just fires the RPC and lets the delta reconcile local state.
-    /// For the RPC's duration an awake terminal is recorded in
-    /// `switchingAccountTerminals`, so a holder row's park and wake render as
+    /// `.inPlace` (default, "Switch account"): the daemon moves the SAME
+    /// terminal row to the new profile. An awake row is respawned under it; a
+    /// parked row takes the daemon's cold path, which re-homes it without a
+    /// wake, so it stays parked and wakes under the new profile next time.
+    /// The row is updated in place via the `terminalProfileChanged` delta — no
+    /// new tab is created, so this method just fires the RPC and lets the delta
+    /// reconcile local state. For the RPC's duration an awake holder row is
+    /// recorded in `switchingAccountTerminals`, so its park and wake render as
     /// one switch rather than a hibernation (see `SwitchingAccount`).
     ///
     /// `.fork` ("Fork session"): the daemon forks the conversation into a NEW
-    /// tab/terminal row; this method appends it to local state and selects it.
+    /// tab/terminal row, from an awake or a parked row alike, and leaves the
+    /// source row as it was; this method appends the new row to local state
+    /// and selects it.
     func swapTerminalProfile(
         terminalID: UUID,
         newProfileID: UUID?,
         mode: TerminalSwapMode = .inPlace
     ) async {
-        // Recorded only for a holder row the cache holds awake, and only by the
-        // first swap to claim it.
+        // Recorded only for an in-place switch of a holder row the cache holds
+        // awake, and only by the first swap to claim it.
+        //
+        // The `mode == .inPlace` term matters because only an in-place switch
+        // parks and wakes the row it names. A fork opens a new row and leaves
+        // its source as it was, so an awake source has no park or wake to
+        // ride. A record on it would caption the source's pane with the fork's
+        // profile, as if the source were switching, for the length of the RPC,
+        // and relabel an unrelated hibernation of the source landing mid-fork
+        // as a switch.
         //
         // A tmux row's swap respawns the agent inside the window the pane is
         // attached to and never parks it, so it has nothing to ride; a record
         // there would only relabel an unrelated hibernation landing mid-swap
         // as the switch.
         //
-        // A row already parked takes the daemon's cold path: it is re-homed and
-        // stays parked, so there is no park or wake to ride. Recording it would
-        // flip the pane's identity to the switching one and back — two rebuilds
-        // of a pane that needs none, and a parked placeholder that loses its
-        // notice for the length of the RPC.
+        // An in-place switch of a row already parked takes the daemon's cold
+        // path: it is re-homed and stays parked, so there is no park or wake to
+        // ride. Recording it would flip the pane's identity to the switching
+        // one and back — two rebuilds of a pane that needs none, and a parked
+        // placeholder that loses its notice for the length of the RPC.
         //
         // A second swap on a row whose switch is still in flight neither
         // replaces the record nor clears it: the daemon refuses that swap while
