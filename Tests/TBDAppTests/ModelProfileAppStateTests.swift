@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // DaemonClient is a concrete actor (no protocol), so we can't inject a stub.
 // These tests verify pure-Swift state mutations on AppState — full integration
@@ -168,4 +169,15 @@ import TBDShared
     // Idempotent — a second dismissal is a no-op.
     state.dismissedProxyWarnings.insert(terminalA)
     #expect(state.dismissedProxyWarnings.count == 1)
+}
+
+@MainActor
+@Test func appState_openModelProfilesSettingsSelectsTheTabAndOpens() {
+    withTestDefaults("TBDAppTests.ModelProfileSettings") { defaults in
+        let state = AppState(userDefaults: defaults)
+        var tabsAtOpen: [SettingsTab] = []
+        state.settingsWindowOpener = { tabsAtOpen.append(state.settingsTab) }
+        state.openModelProfilesSettings()
+        #expect(tabsAtOpen == [.modelProfiles])
+    }
 }

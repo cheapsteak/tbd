@@ -238,9 +238,8 @@ extension AppState {
     /// Opens Settings on the Phone tab, with the relay setup sheet when
     /// `relaySetup` is true.
     func openPhoneSettings(relaySetup: Bool) {
-        settingsTab = .phone
         phoneRelaySetupRequested = relaySetup
-        settingsWindowOpener()
+        openSettings(on: .phone)
     }
 
     /// The text to show for a failed phone call: the daemon's own sentence
