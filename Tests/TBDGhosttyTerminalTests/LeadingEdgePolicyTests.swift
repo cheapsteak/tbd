@@ -35,6 +35,7 @@ struct LeadingEdgePolicyTests {
         case .ringFull: facts.ringHasFreeSlot = !broken
         case .drawablesBehind:
             facts.drawablesAwaitingPresent = broken ? TerminalRenderer.maxDrawablesAwaitingPresent : 0
+        case .noOutput: facts.outputBytesSinceFrame = broken ? 0 : 1
         case .bulkOutput: facts.outputBytesSinceFrame = broken ? 2048 : 1
         }
         return facts
@@ -55,13 +56,15 @@ struct LeadingEdgePolicyTests {
     }
 
     /// The rules are checked in order: with every rule broken the first is named, and mending
-    /// each in turn names the next.
+    /// each in turn names the next. No output and bulk output cannot both hold, so the walk breaks
+    /// bulk output, and `noOutputIsCheckedAfterTheGPUAndBeforeTheSize` places the other.
     @Test func theFirstBrokenRuleIsTheReason() {
+        let walked = LeadingEdgePolicy.Reason.allCases.filter { $0 != .noOutput }
         var facts = Self.drawable
-        for reason in LeadingEdgePolicy.Reason.allCases {
+        for reason in walked {
             facts = Self.setting(reason, broken: true, in: facts)
         }
-        for reason in LeadingEdgePolicy.Reason.allCases {
+        for reason in walked {
             let decision = LeadingEdgePolicy.decide(facts)
             let expected: LeadingEdgePolicy.Decision = .coalesce(reason)
             #expect(decision == expected, "with every rule from \(reason) on broken, the policy answered \(decision)")
@@ -73,6 +76,23 @@ struct LeadingEdgePolicyTests {
     }
 
     // MARK: Rule 7, small output
+
+    /// A delivery with no output, a resize's or a reset's, is left to the tick, even when it
+    /// ended a hold: the hold's end that the program writes is output. Checked after the GPU
+    /// rules, and before the size of the output.
+    @Test func noOutputIsCheckedAfterTheGPUAndBeforeTheSize() {
+        var facts = Self.drawable
+        facts.outputBytesSinceFrame = 0
+        facts.holdEnded = true
+        let ended = LeadingEdgePolicy.decide(facts)
+        let noOutput: LeadingEdgePolicy.Decision = .coalesce(.noOutput)
+        #expect(ended == noOutput, "a delivery with no output that ended a hold answered \(ended)")
+
+        facts.ringHasFreeSlot = false
+        let ringFull = LeadingEdgePolicy.decide(facts)
+        let ringFullExpected: LeadingEdgePolicy.Decision = .coalesce(.ringFull)
+        #expect(ringFull == ringFullExpected, "no output with the ring full answered \(ringFull)")
+    }
 
     @Test func exactlyTheSmallOutputLimitCoalescesAndOneByteLessDraws() {
         let limit = LeadingEdgePolicy.smallOutputLimit

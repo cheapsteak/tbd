@@ -1374,9 +1374,14 @@ struct GhosttyTerminalViewLeadingEdgeTests {
 
     /// Feeds `text` and waits, bounded, for its render signal's delivery: one main-queue turn.
     private func feedAndDeliver(_ text: String, to fixture: ViewFixture) async {
+        await signalAndDeliver(to: fixture) { fixture.terminal.feed(text: text) }
+    }
+
+    /// Runs `call`, which must signal a render, and waits, bounded, for the delivery.
+    private func signalAndDeliver(to fixture: ViewFixture, _ call: () -> Void) async {
         let view = fixture.view
         let before = view.renderSignalDeliveries
-        fixture.terminal.feed(text: text)
+        call()
         let start = ContinuousClock.now
         let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
             await MainActor.run { view.renderSignalDeliveries > before }
@@ -1384,7 +1389,7 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         if outcome == .timedOut {
             Issue.record(BoundedWaitTimeout(
                 what: "the render signal's delivery",
-                observed: "no delivery \(ContinuousClock.now - start) after the feed",
+                observed: "no delivery \(ContinuousClock.now - start) after the call",
                 deadline: TestDeadlines.saturatedPass))
         }
     }
@@ -1570,6 +1575,37 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         let stamped = view.lastOutputFrameAt
         let expectedStamp: Duration? = .seconds(100.25)
         #expect(stamped == expectedStamp, "the live resize's output frame stamped \(String(describing: stamped))")
+    }
+
+    /// A signal with no output behind it, as a reset's, is left to the tick: the leading edge is
+    /// for output. The output that follows it still draws at once.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aResetDrawsNothingAtOnceAndTheOutputAfterItDoes() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        await signalAndDeliver(to: fixture) { fixture.terminal.reset() }
+        let reset = view.lastLeadingEdgeDecision
+        let noOutput: LeadingEdgePolicy.Decision? = .coalesce(.noOutput)
+        #expect(reset == noOutput, "a reset answered \(String(describing: reset))")
+        let committedAfterReset = view.framesCommitted
+        #expect(committedAfterReset == 1, "a reset was drawn by the delivery")
+        let ticking = view.frameDriver.demand.needsUpdate
+        #expect(ticking, "the reset left to the tick asked the link for no frame")
+
+        await feedAndDeliver("$ ", to: fixture)
+        let prompt = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        #expect(prompt == drawNow, "the prompt after a reset answered \(String(describing: prompt))")
+        let committed = view.framesCommitted
+        #expect(committed == 2, "the prompt after a reset committed \(committed - 1) frames, not 1")
     }
 
     /// A delivery that coalesces only peeks at the tracker. Entries past the timeout stay for the

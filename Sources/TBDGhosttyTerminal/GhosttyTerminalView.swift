@@ -179,7 +179,9 @@ struct LeadingEdgeFacts: Sendable, Equatable {
 ///
 /// It limits only the leading edge. A delivery draws at once only after a full refresh interval
 /// with no output frame, and only small output or a finished hold, so sustained output is still
-/// drawn by the tick, once per refresh.
+/// drawn by the tick, once per refresh. A delivery that covers no output at all, such as a
+/// resize's, a reset's or a change of colours, is left to the tick too: the leading edge is for
+/// output, and frames that no output causes keep going through the display link.
 enum LeadingEdgePolicy {
     /// Output this size or larger goes to the tick, unless a hold just ended. An echo is a few
     /// bytes and a prompt or status-line redraw usually a few hundred; a coloured full-screen
@@ -188,7 +190,8 @@ enum LeadingEdgePolicy {
     /// The refresh interval of a window with no screen, as in the offscreen tests.
     static let fallbackRefreshInterval = Duration.seconds(1) / 60
 
-    /// Why a delivery leaves its frame to the display link. One per rule, in rule order.
+    /// Why a delivery leaves its frame to the display link. One per rule, in rule order; the last
+    /// rule, that the output is small, has two: none at all, and too much.
     enum Reason: Sendable, Equatable, CaseIterable {
         /// The view cannot build a frame: detached, hidden, occluded, closed or sizeless.
         case cannotBuildFrames
@@ -202,6 +205,9 @@ enum LeadingEdgePolicy {
         case ringFull
         /// `TerminalRenderer.maxDrawablesAwaitingPresent` drawables await their present report.
         case drawablesBehind
+        /// No output has been fed since the last frame read the terminal: the signal came from a
+        /// resize, a reset or new defaults, or a frame has already drawn the output it covers.
+        case noOutput
         /// `smallOutputLimit` or more bytes have been fed since the last frame, and no hold ended.
         case bulkOutput
     }
@@ -225,6 +231,9 @@ enum LeadingEdgePolicy {
         guard facts.drawablesAwaitingPresent < TerminalRenderer.maxDrawablesAwaitingPresent else {
             return .coalesce(.drawablesBehind)
         }
+        // A hold's end is output too (`ESC[?2026l`), so a delivery with no bytes ended no hold
+        // the program wrote: a reset or resize that ended one finished no frame.
+        guard facts.outputBytesSinceFrame > 0 else { return .coalesce(.noOutput) }
         // A finished hold is a complete frame, the program promised, so its size does not matter.
         guard facts.holdEnded || facts.outputBytesSinceFrame < smallOutputLimit else {
             return .coalesce(.bulkOutput)
