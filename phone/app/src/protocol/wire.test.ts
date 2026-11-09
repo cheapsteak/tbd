@@ -341,7 +341,10 @@ test('no two session refs share a refKey', () => {
   }
 });
 
-/** The names of the stored properties (`let`) of Swift struct `name` in `file`, in order, not those in a nested body. */
+/**
+ * The names of the stored properties (`let` and `var`) of Swift struct `name` in `file`, in order,
+ * not those in a nested body. A `var` whose line opens a body is computed, and is left out.
+ */
 function swiftStructFields(file: string, name: string): string[] {
   const source = readFileSync(new URL(file, SOURCES), 'utf8');
   const head = new RegExp(`\\bstruct ${name}\\b[^{]*\\{`).exec(source);
@@ -351,11 +354,13 @@ function swiftStructFields(file: string, name: string): string[] {
   for (let i = head.index + head[0].length; depth > 0; i++) {
     const c = source[i];
     if (c === undefined) throw new Error(`struct ${name} in ${file} never closes`);
+    // A brace that opens a nested body is kept, so the line it opens shows it.
+    if (c === '{' && depth === 1) body += c;
     if (c === '{') depth++;
     else if (c === '}') depth--;
     else if (depth === 1) body += c;
   }
-  return [...body.matchAll(/^\s*let\s+(\w+)\s*:/gm)].map((m) => m[1] ?? '');
+  return [...body.matchAll(/^\s*(?:let|var)\s+(\w+)\s*:[^{\n]*$/gm)].map((m) => m[1] ?? '');
 }
 
 test("a transcript row's fields are PhoneItem.swift's, and each one decodes", () => {

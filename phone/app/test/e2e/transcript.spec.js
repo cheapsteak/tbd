@@ -122,6 +122,10 @@ test('the fields a newer laptop sends draw as the mock draws them, and rows with
       item({ id: 'f-7', kind: 'systemNote', text: 'PostToolUse: lint passed.', noteKind: 'hookOutput' }),
       item({ id: 'f-8', kind: 'systemNote', text: 'A note of a kind this build does not know.', noteKind: 'someNewKind' }),
       item({ id: 'f-9', kind: 'systemNote', text: 'A note from an older laptop.' }),
+      item({
+        id: 'f-10', kind: 'fileEdit', toolName: 'Edit', target: 'ShippingRates.tsx', toolStatus: 'ok', added: 3, removed: 1,
+        path: `src/${'a-deeply-nested-folder/'.repeat(8)}ShippingRates.tsx`,
+      }),
     ],
   });
   const tool = (/** @type {string} */ target) => tx.locator('button.tool', { hasText: target });
@@ -129,6 +133,22 @@ test('the fields a newer laptop sends draw as the mock draws them, and rows with
   await expect(tool('npm run e2e').locator('.fail')).toHaveText('failed');
   await expect(tx.locator('div.tool', { hasText: 'PaymentStep.tsx' }).locator('code')).toHaveText('src/checkout/PaymentStep.tsx');
   await expect(tx.locator('div.tool', { hasText: 'Summary.tsx' }).locator('code')).toHaveText('Summary.tsx');
+  // A path too long for the row gives way in its folders, dimmed, and keeps the file's name whole, with the counts after it.
+  const long = tx.locator('div.tool', { hasText: 'ShippingRates.tsx' });
+  await expect(long.locator('code .dir')).toHaveText(`src/${'a-deeply-nested-folder/'.repeat(8)}`);
+  await expect(long.locator('code .base')).toHaveText('ShippingRates.tsx');
+  const fit = await long.evaluate((row) => {
+    const part = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (row.querySelector(sel));
+    const [dir, base, code, plus] = ['code .dir', 'code .base', 'code', '.plus'].map(part);
+    return {
+      dirCut: dir.scrollWidth > dir.clientWidth,
+      baseWhole: base.scrollWidth <= base.clientWidth,
+      baseInside: base.getBoundingClientRect().right <= code.getBoundingClientRect().right + 0.5,
+      countsAfter: plus.getBoundingClientRect().left >= code.getBoundingClientRect().right - 0.5,
+      dimmed: Number(getComputedStyle(dir).opacity) < 1,
+    };
+  });
+  expect(fit).toEqual({ dirCut: true, baseWhole: true, baseInside: true, countsAfter: true, dimmed: true });
 
   // A slash command's output is plain text under it, its line breaks kept; one without output shows the command alone.
   const model = tx.locator('.slash', { hasText: '/model opus' });
@@ -143,6 +163,37 @@ test('the fields a newer laptop sends draw as the mock draws them, and rows with
   await expect(note('PostToolUse: lint passed.')).toHaveText('Hook');
   await expect(note('a kind this build does not know')).toHaveText('System');
   await expect(note('A note from an older laptop.')).toHaveText('System');
+});
+
+test("a cut slash command's Show more sits with the command, above its output, and the output stays after the whole text", async ({ page, appHost }) => {
+  const id = 'x-cut-slash-output';
+  const cut = '/review src/auth/redirect.ts';
+  const whole = '/review src/auth/redirect.ts src/auth/callback.ts';
+  const scenario = structuredClone(MOCK);
+  scenario.details[id] = { text: whole };
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Fixed. Here is what changed:' })).toBeVisible();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF, items: [{ id, kind: 'slash', text: cut, truncated: true, output: 'Reviewed 2 files.' }],
+  });
+  const box = tx.locator('.slash', { hasText: cut });
+  const children = () => box.evaluate((el) => [...el.children].map((c) => c.tagName));
+  await expect(box.locator('.morebtn')).toHaveText('Show more');
+  expect(await children()).toEqual(['CODE', 'BUTTON', 'SPAN']);
+  const gap = await box.evaluate((el) => {
+    const more = /** @type {HTMLElement} */ (el.querySelector('.morebtn'));
+    const output = /** @type {HTMLElement} */ (el.querySelector(':scope > span'));
+    return output.getBoundingClientRect().top - more.getBoundingClientRect().bottom;
+  });
+  expect(gap).toBeGreaterThanOrEqual(-0.5);
+
+  await box.locator('.morebtn').click();
+  await expect(box.locator('code')).toHaveText(whole);
+  await expect(box.locator('.morebtn')).toHaveCount(0);
+  expect(await children()).toEqual(['CODE', 'SPAN']);
+  await expect(box.locator('span')).toHaveText('Reviewed 2 files.');
 });
 
 test("an API error draws as the mock's error row, in the error tone or the rate-limit tone", async ({ page, appHost }) => {

@@ -51,10 +51,13 @@ export function errorTone(apiError: string): 'st-rate' | 'st-err' {
 }
 
 /**
- * What a file edit's row names: the file's path, relative to the worktree when the file is inside
- * it, as the mock draws it; else, from a laptop that sends no path or a path too long to send,
- * the file's name.
+ * What a file edit's row names, split where the row draws it in two: the file's path, relative to
+ * the worktree when the file is inside it, as the mock draws it, as its `folders` up to and
+ * including the last `/`, and its `name` after them; else, from a laptop that sends no path or a
+ * path too long to send, the file's name alone.
  */
-export function editTarget(item: PhoneItem): string {
-  return item.path ?? item.target ?? '';
+export function editTarget(item: PhoneItem): { folders: string; name: string } {
+  if (item.path === undefined) return { folders: '', name: item.target ?? '' };
+  const cut = item.path.lastIndexOf('/') + 1;
+  return { folders: item.path.slice(0, cut), name: item.path.slice(cut) };
 }

@@ -36,7 +36,9 @@
 //   under its label, "Hook".
 // - `file-edit`: Docs refresh, whose file edits name each file by its path in the worktree
 //   (`README.md`, `docs/manual-setup.md`), as the mock's "Parked" shows them
-//   (`file-edit=parked`).
+//   (`file-edit=parked`). Its folders show dimmed, before the file's name.
+// - `file-edit-long`: the same, with an edit whose path is too long for its row arrived at the
+//   bottom: its folders give way, cut with an ellipsis, and the file's name shows whole.
 
 import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -93,6 +95,8 @@ test('agent-open', async ({ page, appHost }) => {
 
 /** Checkout v2's Claude session. */
 const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
+/** Docs refresh's Claude session. */
+const DOCS_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000106' };
 /** Login redirect fix's Claude session. */
 const LOGIN_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000102' };
 
@@ -205,4 +209,23 @@ test('file-edit', async ({ page, appHost }) => {
   await expect(edit.locator('code')).toHaveText('docs/manual-setup.md');
   await expect(edit).toBeInViewport();
   await capture(page, 'file-edit', edit);
+});
+
+test('file-edit-long', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say').last()).toBeInViewport();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: DOCS_REF,
+    items: [{
+      id: 'docs-long', kind: 'fileEdit', toolName: 'Write', target: 'container-setup.md', toolStatus: 'ok', added: 40, removed: 0,
+      path: 'docs/onboarding/dev-environment/containers/macos/container-setup.md', truncated: false,
+    }],
+  });
+  const edit = tx.locator('div.tool', { hasText: 'container-setup.md' });
+  await expect(edit.locator('code .base')).toHaveText('container-setup.md');
+  await expect(edit).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await capture(page, 'file-edit-long', edit);
 });

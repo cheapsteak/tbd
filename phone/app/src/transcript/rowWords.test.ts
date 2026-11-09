@@ -34,9 +34,10 @@ test('an API error row takes the rate-limit tone for a rate limit, and the error
   for (const kind of ['server_error', 'unknown', 'authentication_failed', '']) assert.equal(errorTone(kind), 'st-err', kind);
 });
 
-test("a file edit names its path, and from an older laptop its file's name", () => {
-  assert.equal(editTarget(edit({ path: 'src/auth/redirect.ts', target: 'redirect.ts' })), 'src/auth/redirect.ts');
-  assert.equal(editTarget(edit({ path: '/Users/acme/notes/plan.md', target: 'plan.md' })), '/Users/acme/notes/plan.md');
-  assert.equal(editTarget(edit({ target: 'redirect.ts' })), 'redirect.ts', 'an older laptop, or a path too long to send');
-  assert.equal(editTarget(edit({})), '');
+test("a file edit names its path, split into its folders and its name, and from an older laptop its file's name", () => {
+  assert.deepEqual(editTarget(edit({ path: 'src/auth/redirect.ts', target: 'redirect.ts' })), { folders: 'src/auth/', name: 'redirect.ts' });
+  assert.deepEqual(editTarget(edit({ path: '/Users/acme/notes/plan.md', target: 'plan.md' })), { folders: '/Users/acme/notes/', name: 'plan.md' });
+  assert.deepEqual(editTarget(edit({ path: 'README.md', target: 'README.md' })), { folders: '', name: 'README.md' });
+  assert.deepEqual(editTarget(edit({ target: 'redirect.ts' })), { folders: '', name: 'redirect.ts' }, 'an older laptop, or a path too long to send');
+  assert.deepEqual(editTarget(edit({})), { folders: '', name: '' });
 });

@@ -12,8 +12,10 @@
  * from the field when the laptop sent it, and what it drew before the field existed when not:
  * - a failed tool's mark reads "exit 2" with the exit code, and "failed" without one;
  * - a file edit names the file's path, relative to the worktree when the file is inside it,
- *   and the file's name without one;
- * - a slash command shows its output under the command, as plain text, and nothing without one;
+ *   and the file's name without one. The path's folders are dimmed and give way first, cut
+ *   with an ellipsis, so the file's name shows whole unless it alone is wider than the row;
+ * - a slash command shows its output under the command, as plain text, and nothing without one.
+ *   A cut command's "Show more" sits with the command, above the output;
  * - a system note's label is its kind's, such as "Hook", and "System" without one;
  * - Claude's text that is an API error (`apiError`) draws as the mock's error row, its text
  *   plain rather than markdown, in the rate-limit tone for a rate limit and the error tone for
@@ -108,10 +110,10 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
   const tree = full === null ? p.tree : null;
   /**
    * A message's row (this file's header): its box `cls`, holding `head`, then `body`, its text,
-   * then "Show more" while it offers it, on a line of its own after inline text; then the
-   * detail's box.
+   * then "Show more" while it offers it, on a line of its own after inline text, then `after`,
+   * which is no part of the text "Show more" brings; then the detail's box.
    */
-  const message = (cls: string, head: ReactNode, body: ReactNode, inline: boolean): JSX.Element => {
+  const message = (cls: string, head: ReactNode, body: ReactNode, inline: boolean, after: ReactNode = null): JSX.Element => {
     const loading = detail?.phase === 'loading';
     return (
       <>
@@ -129,6 +131,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
               Show more
             </button>
           )}
+          {after}
         </div>
         {detail !== null && (full !== null || loading || detail.phase === 'failed') && (
           <DetailPane detail={detail} parts={false} cut={full?.cut === true} />
@@ -165,7 +168,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
         <>
           <Icon name="pen" cls="ti" />
           <b>{name}</b>
-          <code>{editTarget(it)}</code>
+          <EditTarget item={it} />
           <span className="plus">+{it.added ?? 0}</span>
           <span className="minus">{`−${it.removed ?? 0}`}</span>
         </>
@@ -188,15 +191,8 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
         </>
       );
     }
-    case 'slash': {
-      const body = (
-        <>
-          <code>{shown}</code>
-          {it.output !== undefined && <span>{it.output}</span>}
-        </>
-      );
-      return message('slash', null, body, true);
-    }
+    case 'slash':
+      return message('slash', null, <code>{shown}</code>, true, it.output !== undefined && <span>{it.output}</span>);
     case 'peer': {
       const head = (
         <span className="who">
@@ -218,6 +214,21 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
  * own, as after Claude's blocks, and only as wide as its words, so the tap goes to it alone.
  */
 const OWN_LINE: CSSProperties = { display: 'block', alignSelf: 'flex-start' };
+
+/**
+ * A file edit's file (`editTarget`): its folders, dimmed, then its name, as plain text. The
+ * folders give way first, cut with an ellipsis, so the name shows whole unless it alone is wider
+ * than the row (`.tool code.path` in app.css).
+ */
+function EditTarget({ item }: { item: PhoneItem }): JSX.Element {
+  const { folders, name } = editTarget(item);
+  return (
+    <code className="path">
+      {folders !== '' && <span className="dir">{folders}</span>}
+      <span className="base">{name}</span>
+    </code>
+  );
+}
 
 /**
  * A tool, file edit or subagent row's line, `label` after the triangle: a button that opens the

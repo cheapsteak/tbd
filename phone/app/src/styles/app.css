@@ -303,3 +303,7 @@ button.tool:active{background:var(--box)}
 /* a slash command's output keeps its line breaks, and a long word in it or in an error row wraps rather than widening the transcript */
 .slash span{white-space:pre-wrap;overflow-wrap:anywhere}
 .errrow span{min-width:0;overflow-wrap:anywhere}
+/* a file edit's path: its folders dim and give way first, cut with an ellipsis, so the file's name shows whole unless it alone is wider than the row */
+.tool code.path{display:flex}
+.tool code.path .dir{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.65}
+.tool code.path .base{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
