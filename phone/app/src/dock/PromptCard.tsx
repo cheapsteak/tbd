@@ -1,10 +1,11 @@
 /**
  * The card of one waiting prompt, in the dock above the composer (spec section 8.3; mock
- * `promptHTML`, mock 938-986). Contract: `PromptCard({ session, prompt, card, held, ui, setUI })`,
- * where `card` is the prompt's card in the prompt slice (`cardFor`), `held` says its choices wait
- * (the dock's tap guard), and `ui` is what the user picked, typed or hid on it (`CardUI`), which
- * the dock keeps by prompt ID and `setUI` replaces. The dock keys the card by the prompt's ID, so
- * none of that ever carries over to another prompt.
+ * `promptHTML`, mock 938-986). Contract: `PromptCard({ session, prompt, card, live, held, ui,
+ * setUI })`, where `card` is the prompt's card in the prompt slice (`cardFor`), `live` says the
+ * session's transcript is open, so its prompt set is the laptop's live one (`promptsLive`), `held`
+ * says its choices wait (the dock's tap guard), and `ui` is what the user picked, typed or hid on
+ * it (`CardUI`), which the dock keeps by prompt ID and `setUI` replaces. The dock keys the card by
+ * the prompt's ID, so none of that ever carries over to another prompt.
  *
  * **A question** (`QuestionCard`). The head (`.c-head`) holds the hand glyph, "Claude asks", and
  * " · i of n" with `.steps` under it when the prompt asks several questions, then Hide.
@@ -50,9 +51,10 @@
  *
  * **What is sent** is exactly `questionAnswer(prompt.questions, draft)` or
  * `permissionAnswer(decision, message)`, through `answerPrompt(prompt.id, answer)`, which
- * computes the summary and sends once per gesture: it sends nothing unless the card is `open`.
- * While the card is `sending`, and while `held`, every choice and button but Hide is disabled, so
- * a second tap sends nothing either.
+ * computes the summary and sends once per gesture: it sends nothing unless the card is `open` and
+ * the session's transcript is open. While the card is `sending`, while `held`, and while the card
+ * is not `live` (the transcript is opening, failed or closed, so the set may be stale and an answer
+ * would go nowhere), every choice and button but Hide is disabled, so a tap sends nothing either.
  *
  * **No answer capability.** When the list shows the session's `answer` capability unavailable,
  * the card shows its head and the question or the permission's text, no choices, and the list's
@@ -64,7 +66,9 @@
  * **The keyboard.** The dock lifts above it by `--dock-pad`, and when that leaves too little room
  * the card shrinks and scrolls (app.css). The Other and deny forms end the card, so while one's
  * textarea has focus, the card keeps its end in view whenever its size changes (`useEndInView`):
- * the field and the buttons after it stay above the keyboard.
+ * the field and the buttons after it stay above the keyboard. It follows the textarea itself,
+ * through its ref, so a form that was open while the card showed no choices, and whose textarea
+ * mounts once they come back, is kept in view all the same.
  *
  * **Answered** (mock 941). Once the laptop took this phone's answer, and until the prompt closes,
  * the card is `.card.done` with the check glyph, "Answered" and the answer's summary.
@@ -79,7 +83,7 @@
  * "Show". Hiding keeps what the user picked and typed; a new prompt starts expanded.
  */
 
-import { useEffect, useId, useRef } from 'react';
+import { useCallback, useEffect, useId, useRef } from 'react';
 import type { JSX, RefObject } from 'react';
 import type { PhonePrompt, PhoneQuestion, PhoneSession, PromptAnswer } from '../protocol/types.ts';
 import { useActions } from '../state/context.tsx';
@@ -138,11 +142,12 @@ export function PromptCard(p: {
   session: PhoneSession;
   prompt: PhonePrompt;
   card: CardState;
+  live: boolean;
   held: boolean;
   ui: CardUI;
   setUI: (ui: CardUI) => void;
 }): JSX.Element {
-  const { session, prompt, card, held, ui, setUI } = p;
+  const { session, prompt, card, live, held, ui, setUI } = p;
   const actions = useActions();
 
   const isPermission = prompt.kind === 'permission';
@@ -186,7 +191,7 @@ export function PromptCard(p: {
       </button>
     );
   }
-  const locked = held || card.phase === 'sending';
+  const locked = held || !live || card.phase === 'sending';
   const capability = session.capabilities.answer;
   const send = (answer: PromptAnswer | null): void => {
     if (answer === null || locked) return;
@@ -241,21 +246,22 @@ export function Refusal(p: { text: string }): JSX.Element {
 }
 
 /**
- * While `open`, keeps the end of the card that holds `field` in view whenever the card's size
- * changes and `field` has focus, as when the keyboard comes up and the card shrinks to the room
- * left above it (see the header).
+ * The ref for a form's textarea that keeps the end of the card holding it in view whenever the
+ * card's size changes and the textarea has focus, as when the keyboard comes up and the card
+ * shrinks to the room left above it (see the header). It watches from the moment the textarea
+ * mounts until it unmounts, whenever that is, so it never misses a textarea that mounts later
+ * than its form opened. It does nothing where the browser has no `ResizeObserver`.
  */
-function useEndInView(field: RefObject<HTMLTextAreaElement | null>, open: boolean): void {
-  useEffect(() => {
-    const el = field.current;
+function useEndInView(): (el: HTMLTextAreaElement | null) => (() => void) | undefined {
+  return useCallback((el: HTMLTextAreaElement | null) => {
     const card = el?.closest('.card');
-    if (!open || el == null || !(card instanceof HTMLElement) || typeof ResizeObserver !== 'function') return;
+    if (el == null || !(card instanceof HTMLElement) || typeof ResizeObserver !== 'function') return undefined;
     const observer = new ResizeObserver(() => {
       if (el.ownerDocument.activeElement === el) card.scrollTop = card.scrollHeight;
     });
     observer.observe(card);
     return () => observer.disconnect();
-  }, [field, open]);
+  }, []);
 }
 
 /**
@@ -290,8 +296,7 @@ function PermissionCard(p: {
 }): JSX.Element {
   const { prompt, ui, setUI, locked, send } = p;
   const denyID = useId();
-  const denyField = useRef<HTMLTextAreaElement>(null);
-  useEndInView(denyField, ui.denyOpen);
+  const denyField = useEndInView();
   const tool = prompt.toolName ?? '';
   const body = (
     <>
@@ -372,8 +377,7 @@ function QuestionCard(p: {
   send: (answer: PromptAnswer | null) => void;
 }): JSX.Element {
   const { questions, ui, setUI, locked, send } = p;
-  const otherField = useRef<HTMLTextAreaElement>(null);
-  useEndInView(otherField, ui.otherOpen);
+  const otherField = useEndInView();
   const total = questions.length;
   const step = Math.min(ui.step, total);
   const questionText = useRef<HTMLDivElement>(null);

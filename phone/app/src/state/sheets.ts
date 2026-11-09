@@ -13,11 +13,11 @@
  *   request; `endAct` clears it once the request settles, whatever the outcome. While a session
  *   is marked, none of the three goes out for it, and the menus and sheets disable their acting
  *   buttons.
- * - **A failure in a sheet** (`failed`): the words of the last action that failed while a sheet
- *   was open over its session, or of a create that failed while its New sheet showed, and that
- *   sheet, by identity. The sheet shows them while it is the one `ui.sheet` holds; any move to
- *   another sheet, or closing it, makes a new `ui.sheet`, so the words go with it. The next action
- *   clears them.
+ * - **A failure in a sheet or a menu** (`failed`): the words of the last action that failed while a
+ *   sheet or the account menu's ask was open over its session, or of a create that failed while
+ *   its New sheet showed, and that sheet or menu, by identity (`on`). It shows them while it is the
+ *   one `ui.sheet` or `ui.menu` holds; any move to another sheet or menu, or closing it, makes a
+ *   new one, so the words go with it. The next action clears them.
  * - **Providers** (`providers`): the last `remote.providers`, for the New sheet's repo, loaded
  *   afresh each time the sheet shows its remote form. A load that a later one replaced changes
  *   nothing when it ends (`id`), and a list loaded for one repo never shows for another.
@@ -58,7 +58,7 @@ import { refKey } from '../protocol/wire.ts';
 import { isBlankMessage, own, trimLikeLaptop, withKey, withoutKey, withValue } from './prompts.ts';
 import { PROFILE_KIND_WORDS } from './status.ts';
 import { emptyRecord } from './store.ts';
-import type { PendingOpen, SheetState } from './store.ts';
+import type { MenuState, PendingOpen, SheetState } from './store.ts';
 
 // MARK: - The slice
 
@@ -108,8 +108,8 @@ export interface SheetsState {
   profiles: ProfilesLoad;
   /** The sessions whose switch, fork or model change is on its way, by `refKey`. */
   acting: Readonly<Record<string, ActingKind>>;
-  /** The last action's failure, shown in `sheet` while `ui.sheet` is that very object; null for none. */
-  failed: { sheet: SheetState; text: string } | null;
+  /** The last action's failure, shown in `on` while `ui.sheet` or `ui.menu` is that very object; null for none. */
+  failed: { on: SheetState | MenuState; text: string } | null;
   providers: ProvidersLoad;
   /** The create on its way, or null. */
   creating: CreateOnItsWay | null;
@@ -146,14 +146,14 @@ export function endAct(s: SheetsState, ref: PhoneSessionRef): SheetsState {
   return acting === s.acting ? s : { ...s, acting };
 }
 
-/** `s` with `text` showing in `sheet` (`failed`). */
-export function failIn(s: SheetsState, sheet: SheetState, text: string): SheetsState {
-  return { ...s, failed: { sheet, text } };
+/** `s` with `text` showing in `on`, a sheet or a menu (`failed`). */
+export function failIn(s: SheetsState, on: SheetState | MenuState, text: string): SheetsState {
+  return { ...s, failed: { on, text } };
 }
 
-/** The failure to show in `sheet`, the sheet `ui.sheet` holds now, or null. */
-export function failureIn(s: SheetsState, sheet: SheetState | null): string | null {
-  return sheet !== null && s.failed !== null && s.failed.sheet === sheet ? s.failed.text : null;
+/** The failure to show in `on`, the sheet `ui.sheet` or the menu `ui.menu` holds now, or null. */
+export function failureIn(s: SheetsState, on: SheetState | MenuState | null): string | null {
+  return on !== null && s.failed !== null && s.failed.on === on ? s.failed.text : null;
 }
 
 /** `s` with a new `profiles.list` on its way, numbered `id`. */
@@ -230,7 +230,7 @@ export function newSheetShown(s: SheetsState, sheet: SheetState, nav: number): S
   const { repoID } = sheet;
   let next = s;
   const lost = own(s.lostCreates, repoID);
-  if (lost !== undefined) next = { ...next, failed: { sheet, text: lost }, lostCreates: withoutKey(s.lostCreates, repoID) };
+  if (lost !== undefined) next = { ...next, failed: { on: sheet, text: lost }, lostCreates: withoutKey(s.lostCreates, repoID) };
   const c = next.creating;
   if (c !== null) {
     const mark = c.repoID === repoID ? nav : null;

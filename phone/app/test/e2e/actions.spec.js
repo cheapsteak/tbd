@@ -258,7 +258,7 @@ test('a fork the user moved away from while it was on its way opens nothing', as
   expect(await count(page, 'transcript.open')).toBe(opens);
 });
 
-test('a refused switch shows in the composer, and the menu stays open', async ({ page, appHost }) => {
+test("a refused switch shows in the ask and in the composer, and the menu stays open", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openCheckout(page);
   const reason = 'TBD could not restart this session. Try again on the laptop.';
@@ -268,10 +268,95 @@ test('a refused switch shows in the composer, and the menu stays open', async ({
   await row(menu, 'acme-bedrock').click();
   await menu.getByRole('button', { name: 'Restart' }).click();
   await expect(app(page).locator('.dock > .refusal')).toHaveText(reason);
+  await expect(menu.locator('.pd-ask > .refusal')).toHaveText(reason);
   await expect(menu.locator('.pd-ask b')).toHaveText('Restart this session under acme-bedrock?');
   await expect(menu.getByRole('button', { name: 'Restart' })).toBeEnabled();
   await expect(app(page).locator('.toast')).toHaveCount(0);
   expect(await acting(page)).toEqual([{ method: 'session.switchProfile', params: { session: REVIEW_REF, profileID: BEDROCK } }]);
+});
+
+/**
+ * Checkout v2's row in mock.json with its Review tab changed by `edit`, as a sessions.changed
+ * reports it.
+ * @param {(session: any) => void} edit
+ */
+function reviewWith(edit) {
+  const changed = structuredClone(MOCK.rows.find((/** @type {any} */ r) => r.name === 'Checkout v2'));
+  edit(changed.sessions.find((/** @type {any} */ s) => s.ref.terminalID === REVIEW_REF.terminalID));
+  return changed;
+}
+
+test("a fork's error shows in the ask, laid out as every refusal, and not in the composer", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  const reason = 'TBD could not copy this conversation.';
+  await hostCall(page, 'setReply', 'session.fork', { error: { code: 'internal', message: reason } });
+  await accountButton(page, 'acme-work').click();
+  const menu = accountMenu(page);
+  await row(menu, 'Personal').click();
+  await menu.getByRole('button', { name: 'Fork into a new tab' }).click();
+  const refusal = menu.locator('.pd-ask > .refusal');
+  await expect(refusal).toHaveText(reason);
+  await expect(app(page).locator('.dock > .refusal')).toHaveCount(0);
+  // Above the buttons: the glyph and the words in one row, in the refusal's own colour, as everywhere else.
+  expect(await refusal.evaluate((el) => {
+    const style = getComputedStyle(el);
+    const words = /** @type {Element} */ (el.querySelector('span'));
+    return { direction: style.flexDirection, colour: getComputedStyle(words).color === style.color, next: el.nextElementSibling?.tagName };
+  })).toEqual({ direction: 'row', colour: true, next: 'DIV' });
+  await expect(menu.getByRole('button', { name: 'Fork into a new tab' })).toBeEnabled();
+  expect(await acting(page)).toEqual([{ method: 'session.fork', params: { session: REVIEW_REF, profileID: PERSONAL } }]);
+  // Cancel and the same pick make another ask, which shows none of it.
+  await menu.getByRole('button', { name: 'Cancel' }).click();
+  await row(menu, 'Personal').click();
+  await expect(menu.locator('.pd-ask b')).toHaveText('Restart this session under Personal?');
+  await expect(menu.locator('.refusal')).toHaveCount(0);
+});
+
+test("a fork's error from a menu closed meanwhile shows in the composer, even on a session that takes no messages", async ({ page, appHost }) => {
+  const scenario = structuredClone(MOCK);
+  scenario.rows = scenario.rows.map((/** @type {any} */ r) => (r.name === 'Checkout v2'
+    ? reviewWith((s) => { s.capabilities.send = { available: false, reason: 'This session cannot take messages from a phone.' }; })
+    : r));
+  await openApp(page, appHost, { scenario });
+  await openCheckout(page);
+  const dock = app(page).locator('.dock');
+  await expect(dock.locator(':scope > .dock-note')).toHaveText('Sending is not available for this session.');
+  const reason = 'TBD could not copy this conversation.';
+  await hostCall(page, 'setReply', 'session.fork', { error: { code: 'internal', message: reason } });
+  await hostCall(page, 'hold', 'session.fork');
+  await accountButton(page, 'acme-work').click();
+  const menu = accountMenu(page);
+  await row(menu, 'Personal').click();
+  await menu.getByRole('button', { name: 'Fork into a new tab' }).click();
+  await expect.poll(() => acting(page)).toHaveLength(1);
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await hostCall(page, 'release', 'session.fork');
+  await expect(dock.locator(':scope > .refusal')).toHaveText(reason);
+  expect(await dock.evaluate((el) => [...el.children].map((c) => c.className))).toEqual(['refusal', 'dock-note']);
+});
+
+test('a menu whose capability turns unavailable closes, and does not come back when it returns', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  const off = reviewWith((s) => {
+    s.capabilities.switchProfile = { available: false, reason: 'Not available for remote sessions.' };
+    s.capabilities.model = { available: false, reason: 'Not available for remote sessions.' };
+  });
+  const on = reviewWith(() => {});
+  for (const [button, menu] of [[accountButton(page, 'acme-work'), accountMenu(page)], [modelButton(page, 'opus'), modelMenu(page)]]) {
+    await button.click();
+    await expect(menu).toBeVisible();
+    await hostCall(page, 'emit', 'sessions.changed', { rows: [off], removedRowIDs: [] });
+    await expect(menu).toHaveCount(0);
+    await expect(button).toHaveCount(0);
+    await hostCall(page, 'emit', 'sessions.changed', { rows: [on], removedRowIDs: [] });
+    await expect(button).toHaveAttribute('aria-expanded', 'false');
+    await page.waitForTimeout(300);
+    await expect(menu).toHaveCount(0);
+  }
+  expect(await acting(page)).toEqual([]);
 });
 
 test('a double click on Restart posts one request, and the toast waits for the reply', async ({ page, appHost }) => {

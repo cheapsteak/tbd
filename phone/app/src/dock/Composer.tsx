@@ -7,13 +7,17 @@
  * `sendMessage` (`actions/prompts.ts`), which read their target from the store when the user
  * taps, never from this render.
  *
+ * **The refusal**, when there is one, comes first, as `.refusal` (`role="alert"`) with the warn
+ * glyph, whether or not the session can take messages. It holds whatever `ui.refusal` holds for
+ * the session: a refused message, a refused switch or model change, or a fork's error that no
+ * sheet or menu showed. So the words of a request made from a menu or a sheet never go unshown,
+ * even on a session that takes no messages.
+ *
  * **Sending unavailable.** When the list shows the session's `send` capability unavailable, the
- * composer is the `.dock-note` "Sending is not available for this session.", the mock's words,
- * whatever reason the list gives.
+ * rest of the composer is the `.dock-note` "Sending is not available for this session.", the
+ * mock's words, whatever reason the list gives.
  *
  * **Otherwise:**
- * - the refusal, when there is one, as `.refusal` (`role="alert"`) with the warn glyph. It holds
- *   whatever `ui.refusal` holds for the session: a refused message, or a refused model change;
  * - `.comp`: the `textarea.field` ("Message", one row, growing with its text to at most
  *   `MAX_FIELD_PX`), then `button.send`, which reads "Send and wake" while the list shows the
  *   session `parked` and "Send" otherwise (`sendLabel`).
@@ -65,10 +69,18 @@ export function Composer({ session, held }: { session: PhoneSession; held: boole
     el.style.height = `${Math.min(el.scrollHeight + 2, MAX_FIELD_PX)}px`;
   }, [draft, label]);
 
-  if (label === null) return <div className="dock-note">Sending is not available for this session.</div>;
+  const shownRefusal = refusal === null ? null : <Refusal text={refusal} />;
+  if (label === null) {
+    return (
+      <>
+        {shownRefusal}
+        <div className="dock-note">Sending is not available for this session.</div>
+      </>
+    );
+  }
   return (
     <>
-      {refusal !== null && <Refusal text={refusal} />}
+      {shownRefusal}
       <div className="comp">
         <textarea
           ref={field}

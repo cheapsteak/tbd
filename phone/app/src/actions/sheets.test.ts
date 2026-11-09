@@ -186,20 +186,65 @@ test('a switch to the current profile sends nothing and says why; one to a profi
   assert.equal(noList.refusal(), undefined);
 });
 
-test('a refused switch shows in the composer and keeps the menu open; a later one may go out', async () => {
+test("a refused switch shows in the account menu's ask and in the composer, and keeps the menu open; a later one may go out", async () => {
   const h = await harness();
   h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
+  const menu = h.state().ui.menu;
   const pending = h.actions.switchProfile(PERSONAL.id, R);
   h.last('session.switchProfile').reject(new AppError('refused', REFUSED));
   await pending;
   assert.equal(h.refusal(), REFUSED);
-  assert.deepEqual(h.state().ui.menu, { name: 'account', askProfileID: PERSONAL.id });
+  assert.equal(h.state().ui.menu, menu);
   assert.equal(h.state().ui.toast, null);
-  assert.equal(h.state().sheets.failed, null);
+  assert.deepEqual(h.state().sheets.failed, { on: menu, text: REFUSED });
+  assert.equal(h.state().sheets.failed?.on, menu);
   const again = h.actions.switchProfile(PERSONAL.id, R);
+  // The next gesture clears the words.
+  assert.equal(h.state().sheets.failed, null);
   assert.equal(h.of('session.switchProfile').length, 2);
   h.last('session.switchProfile').resolve({ session: R });
   await again;
+});
+
+test("a fork's error, or a gesture refused at the tap, shows in the account menu's ask it was made in, and only there", async () => {
+  // A fork's error shows in the ask while it shows, and not in the composer.
+  let h = await harness();
+  h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
+  let menu = h.state().ui.menu;
+  let pending = h.actions.fork(PERSONAL.id, R);
+  h.last('session.fork').reject(new AppError('internal', 'TBD could not copy this conversation.'));
+  await pending;
+  assert.deepEqual(h.state().sheets.failed, { on: menu, text: 'TBD could not copy this conversation.' });
+  assert.equal(h.state().sheets.failed?.on, menu);
+  assert.equal(h.refusal(), undefined);
+  assert.equal(h.state().ui.menu, menu);
+  // An ask for the same profile opened since, by Cancel and a pick, is another one: the composer shows it.
+  h = await harness();
+  h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
+  pending = h.actions.fork(PERSONAL.id, R);
+  h.actions.openMenu({ name: 'account', askProfileID: null });
+  h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
+  h.last('session.fork').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
+  await pending;
+  assert.equal(h.state().sheets.failed, null);
+  assert.equal(h.refusal(), NOT_CONFIRMED_TEXT);
+  // Refused at the tap, as when an event parked the session as the user tapped: the ask and the composer show why.
+  const parked = 'This session is parked. Send it a message to wake it, then fork it.';
+  h = await harness({ sessions: [session(R, { capabilities: { ...session(R).capabilities, fork: { available: false, reason: parked } } })] });
+  h.actions.openMenu({ name: 'account', askProfileID: PERSONAL.id });
+  menu = h.state().ui.menu;
+  await h.actions.fork(PERSONAL.id, R);
+  assert.deepEqual(h.acting(), []);
+  assert.deepEqual(h.state().sheets.failed, { on: menu, text: parked });
+  assert.equal(h.refusal(), parked);
+  // The model menu has no place for words: a refused model change goes to the composer only.
+  h = await harness();
+  h.actions.openMenu({ name: 'model' });
+  pending = h.actions.setModel('sonnet', R);
+  h.last('session.setModel').reject(new AppError('refused', 'The laptop refused the model.'));
+  await pending;
+  assert.equal(h.state().sheets.failed, null);
+  assert.equal(h.refusal(), 'The laptop refused the model.');
 });
 
 test('a switch refused while a sheet is open shows in that sheet and in the composer', async () => {
@@ -210,7 +255,7 @@ test('a switch refused while a sheet is open shows in that sheet and in the comp
   h.last('session.switchProfile').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
   await pending;
   assert.equal(h.state().ui.sheet, sheet);
-  assert.deepEqual(h.state().sheets.failed, { sheet, text: NOT_CONFIRMED_TEXT });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: NOT_CONFIRMED_TEXT });
   assert.equal(h.refusal(), NOT_CONFIRMED_TEXT);
 });
 
@@ -278,7 +323,7 @@ test('a failure or a success reaches only the sheet the tap was made in, never o
   assert.equal(h.state().ui.sheet, tapped);
   h.last('session.setModel').reject(new AppError('refused', REFUSED));
   await model;
-  assert.deepEqual(h.state().sheets.failed, { sheet: tapped, text: REFUSED });
+  assert.deepEqual(h.state().sheets.failed, { on: tapped, text: REFUSED });
 });
 
 // MARK: - The target
@@ -360,7 +405,7 @@ test('an unavailable capability says why before any profile is looked up, so wit
   fromSheet.actions.openSheet({ name: 'switch-confirm', profileID: PERSONAL.id });
   const sheet = fromSheet.state().ui.sheet as SheetState;
   await fromSheet.actions.fork(PERSONAL.id, R);
-  assert.deepEqual(fromSheet.state().sheets.failed, { sheet, text: parked });
+  assert.deepEqual(fromSheet.state().sheets.failed, { on: sheet, text: parked });
   // A session the route does not show still gets nothing, and nothing is said.
   const elsewhere = await harness({ sessions: [session(R, { capabilities: caps })], profiles: null });
   await elsewhere.actions.fork(PERSONAL.id, OTHER);
@@ -378,7 +423,7 @@ test("a parked session's fork from switch-confirm sends nothing; the laptop's re
   await h.actions.fork(PERSONAL.id, R);
   assert.deepEqual(h.acting(), []);
   assert.equal(h.refusal(), parked);
-  assert.deepEqual(h.state().sheets.failed, { sheet, text: parked });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: parked });
   // The switch itself still goes out.
   const pending = h.actions.switchProfile(PERSONAL.id, R);
   assert.deepEqual(h.acting().map((r) => r.params), [{ session: R, profileID: PERSONAL.id }]);
@@ -461,7 +506,7 @@ test("a fork's error shows in the sheet open over the session, else in the compo
   let pending = h.actions.fork(BEDROCK.id, R);
   h.last('session.fork').reject(new AppError('refused', 'This session is parked. Send it a message to wake it, then fork it.'));
   await pending;
-  assert.deepEqual(h.state().sheets.failed, { sheet, text: 'This session is parked. Send it a message to wake it, then fork it.' });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: 'This session is parked. Send it a message to wake it, then fork it.' });
   assert.equal(h.refusal(), undefined);
   assert.equal(h.state().ui.sheet, sheet);
   // The sheet closed meanwhile: the composer shows it.
@@ -786,7 +831,7 @@ test("a create's error shows in its New sheet, which stays open; superseded show
   let pending = h.actions.createWorktree(REPO, MESSAGE);
   h.last('worktree.create').reject(new AppError('not_confirmed', NOT_CONFIRMED_TEXT));
   await pending;
-  assert.deepEqual(h.state().sheets.failed, { sheet, text: NOT_CONFIRMED_TEXT });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: NOT_CONFIRMED_TEXT });
   assert.equal(h.sheet(), sheet);
   assert.equal(h.state().ui.toast, null);
   assert.equal(h.state().sheets.creating, null);
@@ -820,7 +865,7 @@ test('the error of a create whose sheet closed toasts nothing, and shows in the 
   assert.equal(h.state().sheets.failed, null);
   // The repo's next sheet does, once.
   const sheet = h.showNew(REPO);
-  assert.deepEqual(h.state().sheets.failed, { sheet, text: 'The worktree could not be created. Check the laptop.' });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: 'The worktree could not be created. Check the laptop.' });
   assert.deepEqual(plain(h.state().sheets.lostCreates), {});
 });
 
@@ -837,10 +882,10 @@ test('the errors of creates in two repos that no sheet showed are each kept for 
   await pending;
   assert.deepEqual(plain(h.state().sheets.lostCreates), { [REPO]: 'A failed.', [OTHER_REPO]: 'B failed.' });
   const a = h.showNew(REPO);
-  assert.deepEqual(h.state().sheets.failed, { sheet: a, text: 'A failed.' });
+  assert.deepEqual(h.state().sheets.failed, { on: a, text: 'A failed.' });
   h.actions.closeSheet();
   const b = h.showNew(OTHER_REPO);
-  assert.deepEqual(h.state().sheets.failed, { sheet: b, text: 'B failed.' });
+  assert.deepEqual(h.state().sheets.failed, { on: b, text: 'B failed.' });
   assert.deepEqual(plain(h.state().sheets.lostCreates), {});
 });
 
@@ -852,7 +897,7 @@ test('a New sheet open for the repo when the create fails shows the error, even 
   const again = h.sheet();
   h.last('worktree.create').reject(new AppError('refused', 'The worktree could not be created. Check the laptop.'));
   await pending;
-  assert.deepEqual(h.state().sheets.failed, { sheet: again, text: 'The worktree could not be created. Check the laptop.' });
+  assert.deepEqual(h.state().sheets.failed, { on: again, text: 'The worktree could not be created. Check the laptop.' });
   assert.deepEqual(plain(h.state().sheets.lostCreates), {});
 });
 
@@ -986,7 +1031,7 @@ test("a remote refusal shows the laptop's words in the sheet as they come", asyn
   const pending = h.actions.createRemote(remoteCreateParams(REPO, SANDBOX, MESSAGE, NO_EDITS));
   h.last('remote.create').reject(new AppError('refused', 'The remote provider refused this. Check the laptop.'));
   await pending;
-  assert.deepEqual(h.state().sheets.failed, { sheet, text: 'The remote provider refused this. Check the laptop.' });
+  assert.deepEqual(h.state().sheets.failed, { on: sheet, text: 'The remote provider refused this. Check the laptop.' });
   assert.equal(h.state().ui.toast, null);
 });
 

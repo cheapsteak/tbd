@@ -11,7 +11,8 @@
  * answered it (`answeredBy`). So the slice holds one session's set at a time: a set for another
  * session means the laptop's feed moved there, and the sets it held before are dropped. The feed
  * says nothing when it stops, so the slice can hold a set the laptop no longer sends; the prompt
- * actions answer only while the transcript slice shows the session open.
+ * actions answer, and the card offers its choices enabled, only while the transcript slice shows
+ * the session open (`promptsLive`).
  *
  * **Keys.** Cards and `answeredHere` are keyed by session and prompt ID together (`cardKey`), so
  * a prompt of another session with the same ID never takes a card's place.
@@ -80,6 +81,7 @@ import type {
 } from '../protocol/types.ts';
 import { refKey, sameRef } from '../protocol/wire.ts';
 import { emptyRecord } from './store.ts';
+import type { TranscriptState } from './transcript.ts';
 
 // MARK: - The slice
 
@@ -263,6 +265,17 @@ export function openPrompt(s: PromptsState, ref: PhoneSessionRef, promptID: stri
   const card = own(s.cards, cardKey(ref, promptID));
   if (prompt === undefined || card === undefined || card.phase !== 'open') return null;
   return prompt;
+}
+
+/**
+ * Whether the set the slice holds for `ref`'s session is the laptop's live one: the transcript
+ * slice `t` shows that session's transcript open (`phase` `open`, a resume included). The laptop
+ * sends a session's prompts only while its transcript is open on this phone and says nothing when
+ * it stops, so a set held while the transcript is opening, failed or closed may be stale: no
+ * answer goes to it (`answerPrompt`), and the card disables its choices meanwhile.
+ */
+export function promptsLive(t: Pick<TranscriptState, 'phase' | 'ref'>, ref: PhoneSessionRef): boolean {
+  return t.phase === 'open' && t.ref !== null && sameRef(t.ref, ref);
 }
 
 /**

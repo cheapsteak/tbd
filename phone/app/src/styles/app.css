@@ -291,6 +291,9 @@ button.tool:active{background:var(--box)}
 .dock{padding-bottom:calc(10px + var(--dock-pad))}
 /* when the keyboard leaves too little room, the dock shrinks and its prompt card scrolls (a scroll container shrinks to nothing), so the dock never runs under the keyboard */
 .dock{flex-shrink:1;min-height:0}
+/* a refusal in the account menu's ask reads as every other refusal does, though .pd-ask lays out its divs as a column and mutes its spans */
+.pd-ask .refusal{flex-direction:row;gap:7px;margin-top:0}
+.pd-ask .refusal span{color:inherit}
 /* the transcript's virtual list keeps the view in place itself (TranscriptView), so the browser's scroll anchoring would move it a second time, which reads as the reader's scroll */
 .tx{overflow-anchor:none}
 /* the transcript's virtual list: .tx-list is as tall as its rows, and each .tx-row is placed by a transform and lays out its row as .tx does. A row's padding stands in for .tx's 8px gap, and the list's margin takes back the last row's. */

@@ -5,7 +5,9 @@
  *
  * **Which card.** One at a time, the one `cardFor` picks from the prompt slice: an `elsewhere`
  * card first, since it waits for OK, then one on its way or answered, then the first open prompt
- * in the order the laptop sent. The card is keyed by its prompt's ID.
+ * in the order the laptop sent. The card is keyed by its prompt's ID. Its choices are disabled
+ * while the session's transcript is not open (`promptsLive`, passed as `live`): the set the slice
+ * holds may then be stale, and an answer would go nowhere (`answerPrompt`).
  *
  * **What the user did on a card** (`CardUI`: the picks, the question shown, the Other text, the
  * deny text, and whether the card is hidden) is kept here by prompt ID rather than in the card.
@@ -48,7 +50,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import type { PhoneSession } from '../protocol/types.ts';
 import { useAppState } from '../state/context.tsx';
-import { cardFor, cardKey } from '../state/prompts.ts';
+import { cardFor, cardKey, promptsLive } from '../state/prompts.ts';
 import { TAP_GUARD_MS, useChangeHold, useUncoverHold } from '../ui/tapGuard.ts';
 import { Composer, sendLabel } from './Composer.tsx';
 import { cardView, FRESH_CARD_UI, PromptCard } from './PromptCard.tsx';
@@ -65,6 +67,7 @@ export function Dock({ session }: { session: PhoneSession }): JSX.Element {
   const id = shown === null ? null : shown.prompt.id;
   const ui = id === null ? FRESH_CARD_UI : (drafts.get(id) ?? FRESH_CARD_UI);
   const view = shown === null ? null : cardView(shown.card, ui, session.capabilities.answer.available);
+  const live = useAppState((s) => promptsLive(s.transcript, ref));
   const covered = useAppState((s) => s.ui.sheet !== null || s.ui.menu !== null);
   const uncoverHeld = useUncoverHold(covered);
   const held = useTapGuard(id, view) || (id !== null && uncoverHeld);
@@ -81,7 +84,9 @@ export function Dock({ session }: { session: PhoneSession }): JSX.Element {
   return (
     <div className="dock">
       {shown !== null && (
-        <PromptCard key={shown.prompt.id} session={session} prompt={shown.prompt} card={shown.card} held={held} ui={ui} setUI={setUI} />
+        <PromptCard
+          key={shown.prompt.id} session={session} prompt={shown.prompt} card={shown.card} live={live} held={held} ui={ui} setUI={setUI}
+        />
       )}
       <Composer session={session} held={sendHeld} />
     </div>

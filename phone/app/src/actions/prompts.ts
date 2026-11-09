@@ -1,5 +1,3 @@
-// Filled by plan 6 part 6d
-//
 // The prompt and composer actions: answering an open prompt, taking its card down, and sending
 // a message. The prompt slice they change is `state/prompts.ts`.
 //
@@ -11,9 +9,9 @@
 //   the moment of the gesture:
 //   - the route shows a session, and the list shows that session (`findSession`);
 //   - the transcript slice shows that session's transcript open (`phase` `open`, a resume
-//     included). The laptop sends a session's prompts only while its transcript is open on this
-//     phone and says nothing when it stops, so a set the slice holds for a session whose
-//     transcript is opening, failed or closed may be stale;
+//     included; `promptsLive`). The laptop sends a session's prompts only while its transcript is
+//     open on this phone and says nothing when it stops, so a set the slice holds for a session
+//     whose transcript is opening, failed or closed may be stale;
 //   - that session's prompt set holds `promptID`, and its card is `open`, so a second tap while
 //     the first answer is on its way, or on a card that shows it was answered, sends nothing;
 //   - `answer` fits the prompt (`answerFits`).
@@ -65,10 +63,10 @@
 import { AppError, BAD_PARAMS_TEXT, newRequestID } from '../client/client.ts';
 import { fitsFrame } from '../limits.ts';
 import type { Method, ParamsOf, PhonePrompt, PhonePromptAnswerParams, PhoneSessionRef, PromptAnswer } from '../protocol/types.ts';
-import { refKey, requestBody, sameRef } from '../protocol/wire.ts';
+import { refKey, requestBody } from '../protocol/wire.ts';
 import {
   answerFits, answerSummary, beginAnswer, beginSend, dismissCard, endSend, isBlankMessage, isSending, mayHaveLanded, openPrompt,
-  refuseAnswer, settleAnswer, textAt, withText,
+  promptsLive, refuseAnswer, settleAnswer, textAt, withText,
 } from '../state/prompts.ts';
 import type { AnswerSettlement, PromptsState } from '../state/prompts.ts';
 import { findSession } from '../state/route.ts';
@@ -89,8 +87,7 @@ export const WAKING_TEXT = 'Waking the session, then sending…';
 function answerTarget(s: AppState, promptID: string, answer: PromptAnswer): { ref: PhoneSessionRef; prompt: PhonePrompt; refusal: string | null } | null {
   const { route } = s.ui;
   if (route.screen !== 'session') return null;
-  const t = s.transcript;
-  if (t.phase !== 'open' || t.ref === null || !sameRef(t.ref, route.ref)) return null;
+  if (!promptsLive(s.transcript, route.ref)) return null;
   const prompt = openPrompt(s.prompts, route.ref, promptID);
   if (prompt === null || !answerFits(prompt, answer)) return null;
   const found = findSession(s.sessions, route.ref);

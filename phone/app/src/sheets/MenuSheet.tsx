@@ -7,7 +7,8 @@
  * "Fork" ("Copy this conversation into a new tab") and "Model" ("Now <model>", left out when the
  * laptop does not know the model). A row whose capability (`switchProfile`, `fork`, `model`) is
  * unavailable is disabled and shows the capability's reason in place of its line, as a remote
- * session's Switch account and Fork do, or a parked session's Fork. Last comes Cancel. Nothing
+ * session's Switch account and Fork do, or a parked session's Fork; with no line at all when the
+ * laptop gave no reason. Last comes Cancel. Nothing
  * here acts on the session: each row only opens a sheet.
  */
 
@@ -46,7 +47,11 @@ export function MenuSheet({ row, session, titleID }: { row: PhoneRow; session: P
   );
 }
 
-/** One row of the menu: `detail` under `label` while `capability` is available, else disabled with its reason. */
+/**
+ * One row of the menu: `detail` under `label` while `capability` is available, else disabled with
+ * its reason, or with nothing under the label when the laptop gave none (as `Why` in
+ * `ProfileSheets.tsx` shows no empty line).
+ */
 function MenuRow({ icon, label, capability, detail, onOpen }: {
   icon: GlyphName;
   label: string;
@@ -60,7 +65,7 @@ function MenuRow({ icon, label, capability, detail, onOpen }: {
       <Icon name={icon} />
       <span>
         {label}
-        {line !== null && <small>{line}</small>}
+        {line !== null && line !== '' && <small>{line}</small>}
       </span>
       <Icon name="chev-r" cls="chev" />
     </button>

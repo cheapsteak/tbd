@@ -454,6 +454,46 @@ test("a session that can answer again shows the choices once the list says so", 
   ]);
 });
 
+test("a card's choices stay disabled while the session's transcript is not open, and answer once it is", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const c = card(page);
+  const choice = c.getByRole('button', { name: 'Yes, add the test' });
+  await expect(choice).toBeEnabled();
+  const back = async () => {
+    await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+    await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'sessions');
+  };
+  // Opened again with the laptop's reply held, then with the open failing: the card shows the set
+  // kept from before, which may be stale, so nothing on it but Hide acts, even once every hold is over.
+  for (const make of [
+    () => hostCall(page, 'hold', 'transcript.open'),
+    () => hostCall(page, 'setReply', 'transcript.open', { error: { code: 'internal', message: 'TBD could not open this transcript.' } }),
+  ]) {
+    await back();
+    await make();
+    await openSessionByName(page, 'Login redirect fix');
+    await expect(c.locator('.q')).toHaveText(LOGIN_QUESTION);
+    await page.waitForTimeout(OPENING_MS + TAP_GUARD_MS + 100);
+    await expect(choice).toBeDisabled();
+    await expect(c.getByRole('button', { name: 'Other answer…' })).toBeDisabled();
+    await expect(c.getByRole('button', { name: 'Hide' })).toBeEnabled();
+    await tap(page, choice);
+    await page.waitForTimeout(200);
+    expect(await answers(page)).toEqual([]);
+    await hostCall(page, 'release', 'transcript.open');
+    await hostCall(page, 'setReply', 'transcript.open', null);
+  }
+  // Open again: the choices act.
+  await back();
+  await openSessionByName(page, 'Login redirect fix');
+  await expect(choice).toBeEnabled();
+  await choice.click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: LOGIN_REF, promptID: LOGIN_PROMPT, answer: { kind: 'question', answers: { [LOGIN_QUESTION]: 'Yes, add the test' } } },
+  ]);
+});
+
 test("a refused answer shows the laptop's words and offers the choices again", async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Login redirect fix');
@@ -610,6 +650,41 @@ test('the deny form sits above the keyboard', async ({ page, appHost }) => {
   await expect(text).toBeFocused();
   // The textarea and Deny end above the keyboard's top edge, once the card has scrolled to its
   // end after the layout the keyboard brought.
+  for (const el of [text, c.getByRole('button', { name: 'Deny' })]) {
+    await expect.poll(() => el.evaluate((node) => node.getBoundingClientRect().bottom <= window.innerHeight - 336)).toBe(true);
+  }
+  await hostCall(page, 'sendEnv', null);
+});
+
+test('a deny form that comes back with the choices keeps its end above the keyboard', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await c.getByRole('button', { name: 'No' }).click();
+  const text = c.getByLabel('Tell Claude what to do instead (optional)');
+  await expect(text).toBeFocused();
+  // The session stops taking answers, so the form's textarea goes, then takes them again: the
+  // form comes back with a new textarea. The user taps it, and the keyboard comes up.
+  const row = structuredClone(MOCK.rows.find((/** @type {any} */ r) => r.name === 'SSE reconnect'));
+  row.sessions[0].capabilities.answer = { available: false, reason: ANSWERING_OFF };
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
+  await expect(c.locator('.dock-note')).toHaveText(ANSWERING_OFF);
+  await expect(text).toHaveCount(0);
+  row.sessions[0].capabilities.answer = { available: true };
+  await hostCall(page, 'emit', 'sessions.changed', { rows: [row], removedRowIDs: [] });
+  await expect(text).toBeFocused();
+  await text.evaluate((el) => /** @type {HTMLElement} */ (el).blur());
+  await text.click();
+  await expect(text).toBeFocused();
+  const { width, height } = /** @type {{ width: number, height: number }} */ (page.viewportSize());
+  await hostCall(page, 'sendEnv', {
+    safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+    viewport: { width, height: height - 336, offsetTop: 0, offsetLeft: 0, scale: 1 },
+    layout: { width, height },
+  });
+  const dock = app(page).locator('.dock');
+  await expect.poll(() => dock.evaluate((el) => getComputedStyle(el).paddingBottom)).toBe('346px');
+  await expect(text).toBeFocused();
   for (const el of [text, c.getByRole('button', { name: 'Deny' })]) {
     await expect.poll(() => el.evaluate((node) => node.getBoundingClientRect().bottom <= window.innerHeight - 336)).toBe(true);
   }

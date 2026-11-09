@@ -90,8 +90,9 @@
 // the session's capability (`switchProfile`, `fork`, `model`, `unavailableReason`), and for a
 // switch, that the session runs under that profile already (`switchBlock`). A gesture that meets
 // one of these all the same, as when an event changed the session as the user tapped, sends
-// nothing and shows the reason in the session's `ui.refusal`, and in the sheet it was made on
-// while that shows (as an error does, below), unless the laptop gave none. The capability comes
+// nothing and shows the reason in the session's `ui.refusal`, and in the sheet or the account
+// menu's ask it was made on while that shows (as an error does, below), unless the laptop gave
+// none. The capability comes
 // right after the target, before the profile: a gesture whose capability is unavailable shows
 // its reason whether or not the profiles are loaded, and never ends silent on a profile it
 // could not have used anyway.
@@ -101,16 +102,16 @@
 // and does nothing while the mark stands. The mark goes when the request settles, on every path.
 //
 // **Errors** show their message as they come, `not_confirmed` included; `superseded` is silent.
-// They show in the sheet the gesture was made on (`failed` in the slice) while that sheet still
-// shows over the session: the very `ui.sheet` object of the tap. Every opening of a sheet makes a
-// new one (`openSheet`), and every other change of `ui` keeps it, so a sheet of the same name, or
-// a `switch-confirm` for the same profile, that the user opened since is another sheet and gets
-// none of it. A success closes only that object too (`settle`). A refused
-// switch or model change also goes to the session's `ui.refusal`, which the composer shows once
-// the sheet is gone. A fork's error goes to `ui.refusal` only when no sheet shows it: made from
-// the account menu, or the user moved to another sheet or closed it meanwhile. So an error never
-// lands in a sheet that did not ask, and never goes unshown. An error closes nothing: a menu or
-// sheet closes only on success.
+// They show in the sheet or the account menu's ask the gesture was made on (`failed` in the
+// slice) while it still shows over the session: the very `ui.sheet` or `ui.menu` object of the
+// tap. Every opening of a sheet or a menu makes a new one (`openSheet`, `openMenu`), and every
+// other change of `ui` keeps it, so a sheet of the same name, a `switch-confirm` or an ask for the
+// same profile, that the user opened since is another one and gets none of it. A success closes
+// only that object too (`settle`). A refused switch or model change also goes to the session's
+// `ui.refusal`, which the composer shows, whether or not the session can take messages. A fork's
+// error goes to `ui.refusal` only when neither shows it: the user moved to another sheet or menu,
+// or closed it, meanwhile. So an error never lands in a sheet or a menu that did not ask, and
+// never goes unshown. An error closes nothing: a menu or sheet closes only on success.
 //
 // **Never retry one of these automatically under a new request ID.** Each but the loads acts,
 // and one that failed with `not_confirmed`, `bad_reply`, `internal` or `too_large` may have
@@ -197,15 +198,25 @@ function gestureSheet(ui: UIState, to: ActTarget): SheetState | null {
 }
 
 /**
- * `s` with `text`, the words of `to`'s refused or failed request, where they show: in the sheet the
- * gesture was made on while it still shows (`gestureSheet`), and in the session's `ui.refusal`
- * when `composerToo` is set or no sheet shows them.
+ * The account menu `ui` holds when it is still the one `to`'s gesture was made on, by identity,
+ * over `to`'s session; else null. Its ask is the only place in a menu a switch or a fork is made.
+ */
+function gestureMenu(ui: UIState, to: ActTarget): MenuState | null {
+  const { route, menu } = ui;
+  if (menu === null || menu !== to.menu || menu.name !== 'account') return null;
+  return route.screen === 'session' && sameRef(route.ref, to.ref) ? menu : null;
+}
+
+/**
+ * `s` with `text`, the words of `to`'s refused or failed request, where they show: in the sheet or
+ * the account menu the gesture was made on while it still shows (`gestureSheet`, `gestureMenu`),
+ * and in the session's `ui.refusal` when `composerToo` is set or neither shows them.
  */
 function withWords(s: AppState, to: ActTarget, text: string, composerToo: boolean): AppState {
-  const sheet = gestureSheet(s.ui, to);
-  const sheets = sheet === null ? s.sheets : failIn(s.sheets, sheet, text);
+  const on = gestureSheet(s.ui, to) ?? gestureMenu(s.ui, to);
+  const sheets = on === null ? s.sheets : failIn(s.sheets, on, text);
   let ui = s.ui;
-  if (composerToo || sheet === null) {
+  if (composerToo || on === null) {
     const refusal = withText(ui.refusal, to.key, text);
     if (refusal !== ui.refusal) ui = { ...ui, refusal };
   }
@@ -215,8 +226,8 @@ function withWords(s: AppState, to: ActTarget, text: string, composerToo: boolea
 
 /**
  * `s` once a gesture for `to` was refused at the tap with `reason`: the reason in the session's
- * `ui.refusal`, and in the sheet the gesture was made on while it shows (`withWords`); nothing
- * when the laptop gave no reason.
+ * `ui.refusal`, and in the sheet or the account menu the gesture was made on while it shows
+ * (`withWords`); nothing when the laptop gave no reason.
  */
 function refused(s: AppState, to: ActTarget, reason: string): AppState {
   return reason === '' ? s : withWords(s, to, reason, true);
