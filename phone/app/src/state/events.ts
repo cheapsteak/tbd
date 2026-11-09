@@ -26,8 +26,8 @@ const SLICES: EventSlices = { applyTranscriptEvent, applyPromptChanged, addRecei
  * - `sessions.changed` merges into the list (`applySessionsChanged`), and the route follows
  *   the list (`applySessions`);
  * - `transcript.*` goes to the transcript slice (`applyTranscriptEvent`);
- * - `prompt.changed` goes to the prompt slice (`applyPromptChanged`), and each receipt that
- *   gives goes to the transcript (`addReceipt`), in order.
+ * - `prompt.changed` goes to the prompt slice (`applyPromptChanged`, with the session the route
+ *   shows), and each receipt that gives goes to the transcript (`addReceipt`), in order.
  *
  * It returns `state` itself when no slice changed.
  */
@@ -47,7 +47,8 @@ export function applyEventWith(state: AppState, event: AppEvent, slices: EventSl
       return transcript === state.transcript ? state : { ...state, transcript };
     }
     case 'prompt.changed': {
-      const { prompts, receipts } = slices.applyPromptChanged(state.prompts, event.data);
+      const { route } = state.ui;
+      const { prompts, receipts } = slices.applyPromptChanged(state.prompts, event.data, route.screen === 'session' ? route.ref : null);
       let transcript = state.transcript;
       for (const receipt of receipts) {
         transcript = slices.addReceipt(transcript, event.data.session, receipt.id, receipt.text);

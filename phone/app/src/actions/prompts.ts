@@ -183,7 +183,9 @@ export function promptActions(ctx: ActionContext, self: () => Actions) {
           : { error: 'internal', message: BAD_PARAMS_TEXT, mayHaveLanded: false };
       }
       store.update((s) => {
-        const { prompts, receipt } = settleAnswer(s.prompts, ref, promptID, answerID, settled);
+        const { route } = s.ui;
+        const shown = route.screen === 'session' ? route.ref : null;
+        const { prompts, receipt } = settleAnswer(s.prompts, ref, promptID, answerID, settled, shown);
         const transcript = receipt === null ? s.transcript : addReceipt(s.transcript, receipt.session, receipt.id, receipt.text);
         if (prompts === s.prompts && transcript === s.transcript) return s;
         return { ...s, prompts, transcript };

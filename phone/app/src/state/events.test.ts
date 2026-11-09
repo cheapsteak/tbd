@@ -211,7 +211,7 @@ test("a new list clears a prompt card's refusal once its session's answers turn 
     return { ...r, sessions: r.sessions.map((x) => ({ ...x, capabilities: { ...x.capabilities, answer } })) };
   };
   const s0 = stateWith([withAnswer(off)], { route: { screen: 'session', ref: R } });
-  const opened = applyPromptChanged(s0.prompts, { session: R, prompts: [{ id: 'p1', kind: 'permission', toolName: 'Bash', targetTruncated: false, allowAlways: false }] }).prompts;
+  const opened = applyPromptChanged(s0.prompts, { session: R, prompts: [{ id: 'p1', kind: 'permission', toolName: 'Bash', targetTruncated: false, allowAlways: false }] }, null).prompts;
   const refused = { ...s0, prompts: refuseAnswer(opened, R, 'p1', 'Answering prompts is turned off.') };
   const refusal = (s: AppState) => s.prompts.cards[cardKey(R, 'p1')]!.refusal;
   // A list that leaves answering off keeps the refusal.

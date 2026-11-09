@@ -59,7 +59,10 @@
  * at most `ANSWERED_HERE_LIMIT` entries, the oldest going first, for answers whose resolution
  * never comes (a feed that moved to another session sends none for the old one). The `elsewhere`
  * cards are held to `ELSEWHERE_LIMIT` the same way, for sessions nobody opens again to tap OK,
- * except that the open session's never go (`withinElsewhereLimit`).
+ * except that none of the session the screen shows goes, nor of the session the event or reply
+ * is for (`withinElsewhereLimit`). The caller says which session the screen shows (`shown`, from
+ * `ui.route`), as the slice's sets cannot: an `elsewhere` card shows while its session's set is
+ * empty, and the slice holds no set for a session whose set is empty.
  *
  * **A new card is new.** Each card the slice makes has its own `serial`, so a prompt whose card
  * went and came back is told from one whose card stayed, and the dock starts its card afresh.
@@ -178,11 +181,13 @@ export function emptyPrompts(): PromptsState {
  * resolutions are applied first, then `d.prompts` replaces the session's set, and every other
  * session's set is dropped. When nothing changed it returns `s` itself and no receipts. A
  * resolution for a prompt that has no card still gives its receipt, with `s` itself when nothing
- * else changed.
+ * else changed. `shown` is the session the screen shows (`ui.route`), or null on the sessions
+ * list: its cards stay whatever the limit on `elsewhere` cards (`withinElsewhereLimit`).
  */
 export function applyPromptChanged(
   s: PromptsState,
   d: PromptChangedData,
+  shown: PhoneSessionRef | null,
 ): { prompts: PromptsState; receipts: ReadonlyArray<{ id: string; text: string }> } {
   const key = refKey(d.session);
   const cards = editable(s.cards);
@@ -245,7 +250,7 @@ export function applyPromptChanged(
 
   if (!cards.changed && !here.changed && !sets.changed) return { prompts: s, receipts };
   const next = { ...s, bySession: sets.value, cards: cards.value, answeredHere: here.value, made };
-  return { prompts: withinElsewhereLimit(next, d.session), receipts };
+  return { prompts: withinElsewhereLimit(next, d.session, shown), receipts };
 }
 
 /**
@@ -370,6 +375,7 @@ export function mayHaveLanded(code: string, fitsOneFrame: boolean): boolean {
  * (`withSettledCard`): its prompt left with no resolution, so nothing waits on it. What the reply
  * records in `answeredHere` it records all the same, so the prompt, should it enter the set again,
  * gets its card back `answered` or `open` (`newCard`); a refusal on it goes with the card.
+ * `shown` is the session the screen shows, as for `applyPromptChanged`.
  */
 export function settleAnswer(
   s: PromptsState,
@@ -377,6 +383,7 @@ export function settleAnswer(
   promptID: string,
   answerID: string,
   settled: AnswerSettlement,
+  shown: PhoneSessionRef | null,
 ): { prompts: PromptsState; receipt: { session: PhoneSessionRef; id: string; text: string } | null } {
   const k = cardKey(ref, promptID);
   const card = own(s.cards, k);
@@ -393,7 +400,7 @@ export function settleAnswer(
     const receipt = { session: card.session, id: promptID, text: receiptText(source, landed ? summary : (earlier?.summary ?? null)) };
     const after = source === 'thisPhone'
       ? withoutCard(s, k)
-      : withinElsewhereLimit(withCard(s, k, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null }), ref);
+      : withinElsewhereLimit(withCard(s, k, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null }), ref, shown);
     return { prompts: forget(after, k), receipt };
   }
   if (taken) {
@@ -404,7 +411,7 @@ export function settleAnswer(
     const after: CardState = earlier === undefined
       ? { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }
       : { ...card, phase: 'answered', summary: earlier.summary, answerID: null };
-    return { prompts: withinElsewhereLimit(withSettledCard(s, k, after), ref), receipt: null };
+    return { prompts: withinElsewhereLimit(withSettledCard(s, k, after), ref, shown), receipt: null };
   }
   const refusal = 'error' in settled && settled.error !== 'superseded' ? settled.message : null;
   const reopened = withSettledCard(s, k, { ...card, phase: 'open', refusal, summary: null, answerID: null });
@@ -515,10 +522,11 @@ function withSettledCard(s: PromptsState, k: string, card: CardState): PromptsSt
 
 /**
  * `s` with at most `ELSEWHERE_LIMIT` `elsewhere` cards, the oldest going first, by when the slice
- * made them, or `s` itself when it holds no more. No card of `keep`'s session goes, nor of the
- * session whose set the slice holds: the open session's cards wait for OK whatever the others do.
+ * made them, or `s` itself when it holds no more. No card of `keep`'s session goes, the session
+ * the event or reply is for, nor of `shown`, the session the screen shows: the cards the dock may
+ * be showing wait for OK whatever the others do.
  */
-function withinElsewhereLimit(s: PromptsState, keep: PhoneSessionRef): PromptsState {
+function withinElsewhereLimit(s: PromptsState, keep: PhoneSessionRef, shown: PhoneSessionRef | null): PromptsState {
   const elsewhere = Object.keys(s.cards).filter((k) => s.cards[k]!.phase === 'elsewhere');
   let over = elsewhere.length - ELSEWHERE_LIMIT;
   if (over <= 0) return s;
@@ -526,7 +534,7 @@ function withinElsewhereLimit(s: PromptsState, keep: PhoneSessionRef): PromptsSt
   for (const k of elsewhere) {
     if (over === 0) break;
     const { session } = s.cards[k]!;
-    if (sameRef(session, keep) || Object.hasOwn(s.bySession, refKey(session))) continue;
+    if (sameRef(session, keep) || (shown !== null && sameRef(session, shown))) continue;
     cards ??= copy(s.cards);
     delete cards[k];
     over--;

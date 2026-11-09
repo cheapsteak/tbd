@@ -13,7 +13,7 @@ import type {
 } from '../protocol/types.ts';
 import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
-import { cardKey, isSending } from '../state/prompts.ts';
+import { cardKey, ELSEWHERE_LIMIT, isSending } from '../state/prompts.ts';
 import type { AnsweredHere, CardState } from '../state/prompts.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState } from '../state/store.ts';
@@ -808,6 +808,63 @@ test('dismissing a prompt with no card changes nothing', async () => {
   h.actions.dismissPrompt('no-such-prompt');
   h.actions.dismissPrompt('constructor');
   assert.equal(h.state(), before);
+});
+
+/** The session numbered `i`, for the tests that fill the slice with cards. */
+function nth(i: number): PhoneSessionRef {
+  return { kind: 'local', terminalID: `T-${i}` };
+}
+
+/** Prompt `id` of `ref`'s session, opened and then answered on the laptop, so its card waits for OK. */
+function answeredOnLaptop(h: ReturnType<typeof harness>, ref: PhoneSessionRef, id: string): void {
+  h.changed({ session: ref, prompts: [{ ...Q, id }] });
+  h.changed({ session: ref, prompts: [], resolved: resolved(id, 'laptop') });
+}
+
+function elsewhereCount(h: ReturnType<typeof harness>): number {
+  return Object.values(h.state().prompts.cards).filter((c) => c.phase === 'elsewhere').length;
+}
+
+test('the elsewhere cards of the session on screen wait for OK however many others a prompt.changed adds', async () => {
+  // R's card is the oldest, and R's set is empty once its prompt is answered.
+  const h = await showing([Q]);
+  h.changed({ prompts: [], resolved: resolved(Q.id, 'laptop') });
+  for (let i = 1; i <= ELSEWHERE_LIMIT; i++) answeredOnLaptop(h, nth(i), `p-${i}`);
+  assert.equal(elsewhereCount(h), ELSEWHERE_LIMIT);
+  assert.equal(h.card(Q.id)?.phase, 'elsewhere', 'the card on screen stays');
+  assert.equal(h.card('p-1', nth(1)), undefined, 'the oldest of the others goes');
+  // On the sessions list no screen shows R, so its card goes as the oldest.
+  h.actions.back();
+  answeredOnLaptop(h, nth(ELSEWHERE_LIMIT + 1), 'p-next');
+  assert.equal(h.card(Q.id), undefined);
+  assert.equal(h.card('p-2', nth(2))?.phase, 'elsewhere');
+});
+
+test('the elsewhere cards of the session on screen wait for OK however many others a late reply adds to', async () => {
+  // An answer in OTHER's session is on its way when the user opens R.
+  const h = harness();
+  h.actions.onChannelUp();
+  h.last('sessions.subscribe').resolve({ stream: 's1', seq: 10, replayed: true, omittedRows: 0, more: false });
+  h.actions.openSession(OTHER);
+  h.last('transcript.open').resolve({ resumed: false, seq: 10, page: { items: [], reachedStart: true, omittedItems: 0 } });
+  await flush();
+  h.changed({ session: OTHER, prompts: [QO] });
+  const pending = h.actions.answerPrompt(QO.id, YES);
+  assert.equal(h.card(QO.id, OTHER)?.phase, 'sending');
+  h.actions.openSession(R);
+  h.last('transcript.open').resolve({ resumed: false, seq: 10, page: { items: [], reachedStart: true, omittedItems: 0 } });
+  await flush();
+  // R's prompt is answered on the laptop, leaving R's set empty, and others fill the slice.
+  answeredOnLaptop(h, R, Q.id);
+  for (let i = 1; i < ELSEWHERE_LIMIT; i++) answeredOnLaptop(h, nth(i), `p-${i}`);
+  assert.equal(elsewhereCount(h), ELSEWHERE_LIMIT);
+  // OTHER's reply comes: its prompt was answered elsewhere, one card more than the slice keeps.
+  h.last('prompt.answer').resolve({ outcome: 'already_resolved' });
+  await pending;
+  assert.equal(h.card(QO.id, OTHER)?.phase, 'elsewhere');
+  assert.equal(elsewhereCount(h), ELSEWHERE_LIMIT);
+  assert.equal(h.card(Q.id)?.phase, 'elsewhere', 'the card on screen stays');
+  assert.equal(h.card('p-1', nth(1)), undefined, 'the oldest of the others goes');
 });
 
 // MARK: - Receipts land in the transcript of their session only
