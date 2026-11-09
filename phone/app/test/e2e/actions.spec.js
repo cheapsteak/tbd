@@ -1,9 +1,13 @@
-// The session header's menus end to end (spec sections 4.4 and 8.3), in WebKit as an iPhone and
-// in Chromium as an Android phone. The account menu: its profiles, the ask that a pick opens,
-// Restart, "Fork into a new tab" and the new tab that opens only once the list shows it, a fork
-// the user moved away from, a refused switch, the profiles loading and failing. The model menu:
-// a pick, another name typed, a session that works. Both: one request per gesture, no double tap
-// landing on an acting button the user has not seen, and a tap outside or Escape closing them.
+// The session header's menus and the session menu's sheets end to end (spec sections 4.4 and
+// 8.3), in WebKit as an iPhone and in Chromium as an Android phone. The account menu: its
+// profiles, the ask that a pick opens, Restart, "Fork into a new tab" and the new tab that opens
+// only once the list shows it, a fork the user moved away from, a refused switch, the profiles
+// loading and failing. The model menu: a pick, another name typed, a session that works. Both: one
+// request per gesture, no double tap landing on an acting button the user has not seen, and a tap
+// outside or Escape closing them. Then the session menu sheet, with a remote and a parked
+// session's unavailable rows, and its Switch account, "Restart under X?", Fork and Model sheets:
+// what each sends, one request per gesture, no double tap landing on an acting button, a sheet
+// closing when an event takes its session off the list, focus, and errors.
 //
 // Every test that acts checks the exact params the fake laptop got. Checkout v2's Review tab is
 // the mock's `s-co-rev`: acme-work, opus, idle. Its Claude tab is working, on Personal and
@@ -423,4 +427,279 @@ test('Escape, a tap outside and the menu\'s own button close a menu; the other b
   await modelButton(page, 'opus').click();
   await expect(modelMenu(page)).toHaveCount(0);
   expect(await acting(page)).toEqual([]);
+});
+
+// MARK: - The session menu and its sheets
+
+/** @param {Page} page */
+function sheet(page) {
+  return app(page).getByRole('dialog');
+}
+
+/**
+ * Opens the session menu sheet from the header.
+ * @param {Page} page
+ */
+async function openMenuSheet(page) {
+  await app(page).getByRole('button', { name: 'Session menu' }).click();
+  await expect(sheet(page)).toBeVisible();
+}
+
+test('the session menu names the row, and the tab when the row has several', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  await openMenuSheet(page);
+  const dialog = sheet(page);
+  await expect(dialog).toHaveAttribute('aria-modal', 'true');
+  await expect(dialog).toHaveAccessibleName('Login redirect fix');
+  await expect(dialog.locator('.sh-title')).toHaveText('Login redirect fix');
+  const rows = dialog.locator('button.mi');
+  await expect(rows.locator('small')).toHaveText(['Now Personal. Restarts in this tab.', 'Copy this conversation into a new tab', 'Now opus']);
+  for (const r of await rows.all()) await expect(r).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sheet(page)).toHaveCount(0);
+  await app(page).getByRole('button', { name: 'Back to sessions' }).click();
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await expect(sheet(page).locator('.sh-title')).toHaveText('Checkout v2 · Review');
+});
+
+test("a remote session's Switch and Fork rows are disabled with the laptop's reason", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Triage flaky test');
+  await openMenuSheet(page);
+  const rows = sheet(page).locator('button.mi');
+  await expect(rows.locator('small')).toHaveText(['Not available for remote sessions.', 'Not available for remote sessions.', 'Now opus']);
+  await expect(rows.nth(0)).toBeDisabled();
+  await expect(rows.nth(1)).toBeDisabled();
+  await expect(rows.nth(2)).toBeEnabled();
+});
+
+test("a parked session's Fork row is disabled with the laptop's reason", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  await openMenuSheet(page);
+  const rows = sheet(page).locator('button.mi');
+  await expect(rows.nth(1).locator('small')).toHaveText('This session is parked. Send it a message to wake it, then fork it.');
+  await expect(rows.nth(1)).toBeDisabled();
+  await expect(rows.nth(0)).toBeEnabled();
+  await expect(rows.nth(2)).toBeEnabled();
+});
+
+test('switch-confirm Restart sends switchProfile', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(0).click();
+  const dialog = sheet(page);
+  await expect(dialog.locator('.sh-title')).toHaveText('Switch account');
+  await expect(dialog.locator('.sh-sub')).toHaveText('Restarts this session under another profile, in the same tab. The conversation stays.');
+  const rows = dialog.locator('button.mi');
+  await expect(rows).toHaveCount(3);
+  await expect(rows.locator('small')).toHaveText(['Claude subscription · default', 'Claude subscription', 'Amazon Bedrock']);
+  await expect(rows.nth(1)).toBeDisabled();
+  await expect(rows.nth(1).locator('.cur')).toHaveText('Current');
+  await rows.nth(0).click();
+  await expect(dialog).toHaveAccessibleName('Restart this session under Personal?');
+  await expect(dialog.locator('.confirm p')).toHaveText([
+    'The conversation stays. Claude restarts in this tab.',
+    'To keep this session as it is, fork instead. A copy opens in a new tab under Personal.',
+  ]);
+  await expect(dialog.locator('.confirm button')).toHaveText(['Restart', 'Fork into a new tab', 'Cancel']);
+  await dialog.getByRole('button', { name: 'Restart' }).click();
+  await expect.poll(() => acting(page)).toEqual([
+    { method: 'session.switchProfile', params: { session: REVIEW_REF, profileID: PERSONAL } },
+  ]);
+  await expect(app(page).locator('.toast')).toHaveText('Restarted under Personal');
+  await expect(sheet(page)).toHaveCount(0);
+  expect(await acting(page)).toHaveLength(1);
+});
+
+test('Fork from the sheet opens the new tab', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(1).click();
+  const dialog = sheet(page);
+  await expect(dialog.locator('.sh-title')).toHaveText('Fork');
+  await expect(dialog.locator('.sh-sub')).toHaveText('Copies this conversation into a new tab, under the account you pick. The phone switches to the new tab.');
+  const rows = dialog.locator('button.mi');
+  await expect(rows).toHaveCount(3);
+  expect(await rows.evaluateAll((els) => els.map((el) => el.querySelector('span')?.firstChild?.textContent))).toEqual(['acme-work', 'Personal', 'acme-bedrock']);
+  await expect(rows.locator('small')).toHaveText(['Same account as now', 'Claude subscription', 'Amazon Bedrock']);
+  await hostCall(page, 'hold', 'sessions.changed');
+  await rows.nth(1).click();
+  await expect(app(page).locator('.toast')).toHaveText('Forked into a new tab, under Personal');
+  expect(await acting(page)).toEqual([{ method: 'session.fork', params: { session: REVIEW_REF, profileID: PERSONAL } }]);
+  await expect(sheet(page)).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await expect(app(page).getByRole('tab')).toHaveCount(3);
+  await hostCall(page, 'release', 'sessions.changed');
+  await expect(app(page).locator('[role="tab"][aria-selected="true"]')).toContainText('Review 4');
+});
+
+test('"Same account as now" forks with no profileID', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(1).click();
+  await sheet(page).locator('button.mi').filter({ hasText: 'Same account as now' }).click();
+  await expect(app(page).locator('.toast')).toHaveText('Forked into a new tab, under acme-work');
+  expect(await acting(page)).toEqual([{ method: 'session.fork', params: { session: REVIEW_REF } }]);
+});
+
+test('a double click on a Fork sheet row posts one request', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(1).click();
+  const personal = sheet(page).locator('button.mi').nth(1);
+  await expect(personal).toBeEnabled();
+  await hostCall(page, 'hold', 'session.fork');
+  await personal.dblclick();
+  await expect.poll(() => acting(page)).toHaveLength(1);
+  for (const r of await sheet(page).locator('button.mi').all()) await expect(r).toBeDisabled();
+  await page.waitForTimeout(300);
+  await hostCall(page, 'release', 'session.fork');
+  await expect(app(page).locator('.toast')).toHaveText('Forked into a new tab, under Personal');
+  expect(await acting(page)).toEqual([{ method: 'session.fork', params: { session: REVIEW_REF, profileID: PERSONAL } }]);
+});
+
+test("a double tap on the session menu's Fork row never forks, and the Fork sheet's rows wait as they appear", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await hostCall(page, 'hold', 'profiles.list');
+  const at = await doubleTap(page, sheet(page).locator('button.mi').nth(1));
+  await expect(sheet(page).locator('.sh-title')).toHaveText('Fork');
+  await expect(sheet(page).locator('[data-state="profiles-loading"] .spin')).toBeVisible();
+  // The profiles arrive, and a tap lands where a row has just appeared.
+  await hostCall(page, 'release', 'profiles.list');
+  const first = sheet(page).locator('button.mi').first();
+  await expect(first).toBeVisible();
+  expect(await covers(first, at), "a fork row lies under the double tap on the menu's Fork").toBe(true);
+  await page.mouse.click(at.x, at.y);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await acting(page)).toEqual([]);
+  await expect(first).toBeEnabled();
+});
+
+test("a double tap on a Switch account profile lands on its question, whose Restart waits", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(0).click();
+  const personal = sheet(page).locator('button.mi').nth(0);
+  await expect(personal).toBeEnabled();
+  const at = await doubleTap(page, personal);
+  const restart = sheet(page).getByRole('button', { name: 'Restart' });
+  await expect(restart).toBeVisible();
+  expect(await covers(restart, at), 'Restart lies under the double tap on Personal').toBe(true);
+  await page.waitForTimeout(TAP_GUARD_MS + 200);
+  expect(await acting(page)).toEqual([]);
+  await expect(restart).toBeEnabled();
+});
+
+test('an event that takes the session off the list closes its sheet, and nothing is sent', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(0).click();
+  await sheet(page).locator('button.mi').nth(0).click();
+  await expect(sheet(page).getByRole('button', { name: 'Restart' })).toBeEnabled();
+  const checkout = '00000000-0000-4000-8000-0000000000C3';
+  const layout = MOCK.layout.map((/** @type {any} */ g) => ({ ...g, rows: g.rows.filter((/** @type {any} */ r) => r.id !== checkout) }));
+  await hostCall(page, 'emit', 'sessions.changed', { layout, rows: [], removedRowIDs: [checkout] });
+  await expect(app(page).locator('#app')).toHaveAttribute('data-screen', 'sessions');
+  await expect(sheet(page)).toHaveCount(0);
+  expect(await acting(page)).toEqual([]);
+});
+
+test('focus moves into the sheet when it opens and back to its opener when it closes', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  const opener = app(page).getByRole('button', { name: 'Session menu' });
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  await expect(sheet(page)).toBeVisible();
+  await expect(sheet(page)).toBeFocused();
+  // Another sheet takes the focus too, as the row that opened it is gone.
+  await sheet(page).locator('button.mi').nth(2).focus();
+  await page.keyboard.press('Enter');
+  await expect(sheet(page).locator('.sh-title')).toHaveText('Model');
+  await expect(sheet(page)).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  // The scrim closes it as well.
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  await expect(sheet(page)).toBeVisible();
+  await app(page).locator('.scrim').click({ position: { x: 20, y: 20 } });
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(opener).toBeFocused();
+});
+
+test("a fork's error shows in the sheet, which stays open", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  const reason = 'TBD could not copy this conversation. Try again on the laptop.';
+  await hostCall(page, 'setReply', 'session.fork', { error: { code: 'refused', message: reason } });
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(1).click();
+  await sheet(page).locator('button.mi').nth(2).click();
+  await expect(sheet(page).locator('.refusal')).toHaveText(reason);
+  await expect(sheet(page).locator('.sh-title')).toHaveText('Fork');
+  await expect(app(page).locator('.toast')).toHaveCount(0);
+  await expect(app(page).locator('.dock > .refusal')).toHaveCount(0);
+  expect(await acting(page)).toEqual([{ method: 'session.fork', params: { session: REVIEW_REF, profileID: BEDROCK } }]);
+  // The rows wait once more as the refusal moves them.
+  await expect(sheet(page).locator('button.mi').first()).toBeEnabled();
+});
+
+test('the Model sheet sends the pick, or the typed name trimmed', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(2).click();
+  const dialog = sheet(page);
+  await expect(dialog.locator('.sh-title')).toHaveText('Model');
+  await expect(dialog.locator('.sh-sub')).toHaveText('Sends /model to the session.');
+  const rows = dialog.locator('button.mi');
+  await expect(rows).toHaveText(['default', 'opusCurrent', 'sonnet', 'haiku']);
+  await expect(rows.nth(1).locator('.tick')).toHaveCount(1);
+  const set = dialog.getByRole('button', { name: 'Set' });
+  await expect(set).toBeDisabled();
+  await rows.nth(2).click();
+  await expect(rows.nth(2).locator('.tick')).toHaveCount(1);
+  await expect(dialog.locator('.tick')).toHaveCount(1);
+  await set.click();
+  await expect.poll(() => acting(page)).toEqual([{ method: 'session.setModel', params: { session: REVIEW_REF, model: 'sonnet' } }]);
+  await expect(app(page).locator('.toast')).toHaveText('Model set to sonnet');
+  await expect(sheet(page)).toHaveCount(0);
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(2).click();
+  const field = sheet(page).getByLabel('Other model name');
+  await expect(field).toHaveAttribute('placeholder', 'for example claude-opus-5-5');
+  await field.fill('  claude-opus-5-5 ');
+  await expect(sheet(page).locator('.tick')).toHaveCount(0);
+  await sheet(page).getByRole('button', { name: 'Set' }).click();
+  await expect.poll(async () => (await acting(page)).at(-1)).toEqual({ method: 'session.setModel', params: { session: REVIEW_REF, model: 'claude-opus-5-5' } });
+  await expect(app(page).locator('.toast')).toHaveText('Model set to claude-opus-5-5');
+});
+
+test('a model change refused from the sheet shows there, and in the composer once the sheet closes', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openCheckout(page);
+  await hostCall(page, 'setReply', 'session.setModel', { error: { code: 'bad_request', message: 'That is not a model name.' } });
+  await openMenuSheet(page);
+  await sheet(page).locator('button.mi').nth(2).click();
+  await sheet(page).getByLabel('Other model name').fill('opus-9');
+  await sheet(page).getByRole('button', { name: 'Set' }).click();
+  await expect(sheet(page).locator('.refusal')).toHaveText('That is not a model name.');
+  await app(page).locator('.scrim').click({ position: { x: 20, y: 20 } });
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(app(page).locator('.dock > .refusal')).toHaveText('That is not a model name.');
+  expect(await acting(page)).toEqual([{ method: 'session.setModel', params: { session: REVIEW_REF, model: 'opus-9' } }]);
 });

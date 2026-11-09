@@ -9,9 +9,16 @@
 //   menu open.
 // - `prof-ask`: the same with Personal picked, so the menu asks about restarting under it.
 // - `modelmenu`: the same tab with its model menu open.
+// - `menu`: Login redirect fix (the mock's `s-login`), its question in the dock, with the session
+//   menu sheet open.
+// - `switch`: Checkout v2's Review tab with the Switch account sheet open.
+// - `switch-ask`: the same with Personal picked, so the sheet asks about restarting under it.
+// - `fork`: the same tab with the Fork sheet open.
+// - `model`: the same tab with the Model sheet open, nothing picked yet, so Set waits.
 //
 // A state is captured once the tap guard lets its acting buttons go, since the mocks draw them
-// enabled.
+// enabled. The Model sheet's Set is the exception: it waits for a pick, which the mock makes the
+// current model when the sheet opens.
 
 import { app, capture, expect, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -60,4 +67,60 @@ test('modelmenu', async ({ page, appHost }) => {
   const menu = app(page).getByRole('menu', { name: 'Model for this session' });
   await expect(menu.getByRole('menuitemradio').last()).toBeEnabled();
   await capture(page, 'modelmenu', menu.getByRole('menuitemradio').last());
+});
+
+/**
+ * Opens the session menu sheet from the header, then the row of it named `row`, if given.
+ * @param {Page} page
+ * @param {string} [row]
+ */
+async function openSheet(page, row) {
+  await app(page).getByRole('button', { name: 'Session menu' }).click();
+  const sheet = app(page).getByRole('dialog');
+  await expect(sheet).toBeVisible();
+  if (row !== undefined) await sheet.locator('button.mi', { hasText: row }).click();
+  return sheet;
+}
+
+test('menu', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Login redirect fix');
+  await expect(app(page).locator('.dock .card')).toBeVisible();
+  const sheet = await openSheet(page);
+  await capture(page, 'menu', sheet.getByRole('button', { name: 'Cancel' }));
+});
+
+test('switch', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Checkout v2', 'Review');
+  const sheet = await openSheet(page, 'Switch account');
+  await expect(sheet.locator('button.mi')).toHaveCount(3);
+  await capture(page, 'switch', sheet.locator('button.mi').last());
+});
+
+test('switch-ask', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Checkout v2', 'Review');
+  const sheet = await openSheet(page, 'Switch account');
+  await sheet.locator('button.mi', { hasText: 'Personal' }).click();
+  const restart = sheet.getByRole('button', { name: 'Restart' });
+  await expect(restart).toBeEnabled();
+  await capture(page, 'switch-ask', restart);
+});
+
+test('fork', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Checkout v2', 'Review');
+  const sheet = await openSheet(page, 'Copy this conversation into a new tab');
+  await expect(sheet.locator('button.mi')).toHaveCount(3);
+  await expect(sheet.locator('button.mi').last()).toBeEnabled();
+  await capture(page, 'fork', sheet.locator('button.mi').last());
+});
+
+test('model', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'Checkout v2', 'Review');
+  const sheet = await openSheet(page, 'Now opus');
+  await expect(sheet.locator('.sh-title')).toHaveText('Model');
+  await capture(page, 'model', sheet.getByLabel('Other model name'));
 });
