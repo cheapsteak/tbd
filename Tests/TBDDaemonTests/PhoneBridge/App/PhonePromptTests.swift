@@ -1514,7 +1514,8 @@ struct PhonePromptTests {
 
 /// `prompt.answer` through the real core, `RPCRouter.answerPrompt`, so the
 /// phone is shown to obey `transcript_prompt_answer_enabled` the way the
-/// laptop's prompt card does.
+/// laptop's prompt card does: by its own check, and by the core's when the
+/// setting changes between the two.
 ///
 /// Tier 2: in-memory GRDB, a dry-run tmux and an actuation log under the
 /// run's fenced scratch dir.
@@ -1526,7 +1527,10 @@ struct PhonePromptAnswerRouterTests {
         let peer: PhonePeer
     }
 
-    private func makeFixture() async throws -> Fixture {
+    /// With `answeringTurnedOffBeforeTheCore`, the service reaches the
+    /// router through `AnsweringTurnedOffBeforeTheCore`, which turns the
+    /// setting off just before the core of a local answer runs.
+    private func makeFixture(answeringTurnedOffBeforeTheCore: Bool = false) async throws -> Fixture {
         let directory = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-prompt"), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let db = try TBDDatabase(inMemory: true)
@@ -1545,21 +1549,22 @@ struct PhonePromptAnswerRouterTests {
             startTime: Date(),
             subscriptions: subs,
             actuationLog: ActuationLog(path: directory.appendingPathComponent("actuations.jsonl").path))
+        let actions: any PhoneSessionActions
+        if answeringTurnedOffBeforeTheCore {
+            actions = AnsweringTurnedOffBeforeTheCore(router: router, db: db)
+        } else {
+            actions = router
+        }
         let service = PhoneAppService(
-            db: db, actions: router, subscriptions: subs, pendingPrompts: router.pendingQuestions,
+            db: db, actions: actions, subscriptions: subs, pendingPrompts: router.pendingQuestions,
             locateTranscript: PhoneServiceHarness.locateTranscript,
             recorder: CapturingRecorder(), clock: EventDrivenTestClock())
         return Fixture(db: db, service: service, peer: peer)
     }
 
-    /// Off, the phone's own check refuses `unsupported` with the reason the
-    /// sessions list shows, so the core never sees the answer. On, the core
-    /// looks, finds no such prompt, and says it was already answered.
-    @Test(arguments: [false, true])
-    func thePhoneObeysThePromptAnswerSetting(enabled: Bool) async throws {
-        let f = try await makeFixture()
-        try await f.db.config.setTranscriptPromptAnswerEnabled(enabled)
-        // A terminal the phone can see, since the service answers no other.
+    /// Answers a permission prompt on a Claude terminal the phone can see,
+    /// since the service answers no other, and returns the reply's bytes.
+    private func answer(_ f: Fixture) async throws -> Data {
         let repo = try await f.db.repos.create(
             path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await f.db.worktrees.create(
@@ -1577,7 +1582,19 @@ struct PhonePromptAnswerRouterTests {
         await f.service.handleAppMessage(
             try PhoneTestRequests.body(.promptAnswer, id: "answer-1", params: params), from: f.peer)
 
-        let bytes = try await outbox.body(at: 0)
+        return try await outbox.body(at: 0)
+    }
+
+    /// Off, the phone's own check refuses `unsupported` with the reason the
+    /// sessions list shows, so the core never sees the answer. On, the core
+    /// looks, finds no such prompt, and says it was already answered.
+    @Test(arguments: [false, true])
+    func thePhoneObeysThePromptAnswerSetting(enabled: Bool) async throws {
+        let f = try await makeFixture()
+        try await f.db.config.setTranscriptPromptAnswerEnabled(enabled)
+
+        let bytes = try await answer(f)
+
         let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
         if enabled {
             #expect(reply.error == nil)
@@ -1586,5 +1603,89 @@ struct PhonePromptAnswerRouterTests {
         } else {
             #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.answerTurnedOffReason))
         }
+    }
+
+    /// The setting turned off after the phone's own check read it on: the
+    /// core reads it again, refuses before it looks for the prompt, and the
+    /// phone gets the core's refusal as it is.
+    @Test func theCoreRefusesWhenTheSettingIsTurnedOffAfterThePhonesCheck() async throws {
+        let f = try await makeFixture(answeringTurnedOffBeforeTheCore: true)
+        try await f.db.config.setTranscriptPromptAnswerEnabled(true)
+
+        let bytes = try await answer(f)
+
+        let reply = try JSONDecoder().decode(PhoneTestReply.self, from: bytes)
+        #expect(reply.error == PhoneAppError(code: .refused, message: RPCRouter.promptAnswerDisabledRefusal))
+        #expect(try await f.db.config.get().transcriptPromptAnswerEnabled == false)
+    }
+}
+
+/// The router as the phone's session actions, except that a local answer
+/// first turns the setting for answering prompts off, as a user who turns it
+/// off between the phone's own check and the core's call does. Every other
+/// method goes straight to the router.
+private struct AnsweringTurnedOffBeforeTheCore: PhoneSessionActions {
+    let router: RPCRouter
+    let db: TBDDatabase
+
+    func phoneAnswerPrompt(_ p: PromptAnswerParams, deviceID: UUID) async throws -> RPCResponse {
+        try await db.config.setTranscriptPromptAnswerEnabled(false)
+        return try await router.phoneAnswerPrompt(p, deviceID: deviceID)
+    }
+
+    func phoneSessionStates() async throws -> RPCResponse {
+        try await router.phoneSessionStates()
+    }
+
+    func phoneAnswerRemotePrompt(_ p: RemoteAnswerParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneAnswerRemotePrompt(p, deviceID: deviceID)
+    }
+
+    func phoneSend(_ p: TerminalSendParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneSend(p, deviceID: deviceID)
+    }
+
+    func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneWake(p, deviceID: deviceID)
+    }
+
+    func phoneSwapProfile(_ p: TerminalSwapProfileParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneSwapProfile(p, deviceID: deviceID)
+    }
+
+    func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneCreateWorktree(p, deviceID: deviceID)
+    }
+
+    func phoneSpawnsOnHolder() async -> Bool {
+        await router.phoneSpawnsOnHolder()
+    }
+
+    func phoneRemoteProviders() async throws -> RPCResponse {
+        try await router.phoneRemoteProviders()
+    }
+
+    func phoneCachedRemoteProviders() async throws -> RPCResponse {
+        try await router.phoneCachedRemoteProviders()
+    }
+
+    func phoneRemoteSessions() async throws -> RPCResponse {
+        try await router.phoneRemoteSessions()
+    }
+
+    func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneRemoteCreate(p, deviceID: deviceID)
+    }
+
+    func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
+        try await router.phoneRemoteSendMessage(p, deviceID: deviceID)
+    }
+
+    func phoneRemoteTranscriptSync(_ p: RemoteTranscriptSyncParams) async throws -> RPCResponse {
+        try await router.phoneRemoteTranscriptSync(p)
+    }
+
+    func phoneRemoteTranscriptLoadEarlier(_ p: RemoteTranscriptLoadEarlierParams) async throws -> RPCResponse {
+        try await router.phoneRemoteTranscriptLoadEarlier(p)
     }
 }

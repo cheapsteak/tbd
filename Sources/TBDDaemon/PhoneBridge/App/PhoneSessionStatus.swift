@@ -157,6 +157,12 @@ enum PhoneSessionStatus {
     ///
     /// `answer` also follows the laptop's setting for answering prompts,
     /// `promptAnswerEnabled` (`answerCapability(_:promptAnswerEnabled:)`).
+    ///
+    /// Every terminal that is neither Codex nor in a remote lane reads as
+    /// Claude here, a shell included. The sessions list builds sessions only
+    /// for agent tabs (`PhoneSnapshotBuilder.agent(of:)`), so it never shows
+    /// a shell, and an action refuses a shell as not Claude before it looks
+    /// at the setting (`PhoneAppService.phoneCapableClaudeTerminal`).
     static func localCapabilities(
         terminal: TBDShared.Terminal, isRemoteWorktree: Bool, promptAnswerEnabled: Bool
     ) -> PhoneCapabilities {

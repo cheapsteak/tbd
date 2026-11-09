@@ -430,15 +430,25 @@ extension PhoneAppService {
     /// The terminal row behind a local session, with its capabilities as the
     /// sessions list shows them (`PhoneSessionStatus.localCapabilities`),
     /// when the phone can see it (`phoneVisibleTerminal`, else `not_found`),
-    /// the capability `needed` picks is available, and it is a Claude
-    /// session by the list's reading (`PhoneSnapshotBuilder.agent(of:)`).
+    /// it is a Claude session by the list's reading
+    /// (`PhoneSnapshotBuilder.agent(of:)`), and the capability `needed`
+    /// picks is available.
     ///
-    /// An unavailable capability is `unsupported` with its reason, as the
-    /// list shows it: a Codex session, a tab in a remote lane, or an
-    /// `answer` while the setting for answering prompts is off
-    /// (`promptAnswerSetting()`, read as the list reads it). Any other
-    /// session the list does not show as Claude (a shell, or a row with no
-    /// kind and no Claude session) is `unsupported` with `notClaude`.
+    /// The refusals come in this order, each `unsupported`:
+    /// 1. **What the session itself cannot do**, with the reason the list
+    ///    shows: a Codex session, a tab in a remote lane. This check leaves
+    ///    the setting for answering prompts out, so a session that could
+    ///    never answer says why, whatever the setting.
+    /// 2. **Not Claude**, with `notClaude`: any other session the list does
+    ///    not show as Claude, a shell or a row with no kind and no Claude
+    ///    session. The list never shows such a row, so it gives no reason of
+    ///    its own; `localCapabilities` reads any terminal that is neither
+    ///    Codex nor in a remote lane as Claude, which is why this guard
+    ///    comes before the setting's.
+    /// 3. **The setting**, read as the list reads it
+    ///    (`promptAnswerSetting()`): an `answer` while it is off, with
+    ///    `PhoneSessionStatus.answerTurnedOffReason`.
+    ///
     /// `prompt.answer`, `session.switchProfile` and `session.fork` read a
     /// local session through this, so each refuses what the list marks
     /// unavailable, in the list's words. Switch and fork read the setting
@@ -448,14 +458,17 @@ extension PhoneAppService {
         _ terminalID: UUID, needing needed: @Sendable (PhoneCapabilities) -> PhoneCapability, notClaude: String
     ) async throws -> (terminal: TBDShared.Terminal, capabilities: PhoneCapabilities) {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
-        let promptAnswerEnabled = try await promptAnswerSetting()
-        let capabilities = PhoneSessionStatus.localCapabilities(
-            terminal: terminal, isRemoteWorktree: !worktree.location.isLocal,
-            promptAnswerEnabled: promptAnswerEnabled)
-        try Self.requireCapability(needed(capabilities), orElse: notClaude)
+        let isRemoteWorktree = !worktree.location.isLocal
+        let ownCapabilities = PhoneSessionStatus.localCapabilities(
+            terminal: terminal, isRemoteWorktree: isRemoteWorktree, promptAnswerEnabled: true)
+        try Self.requireCapability(needed(ownCapabilities), orElse: notClaude)
         guard PhoneSnapshotBuilder.agent(of: terminal) == .claude else {
             throw PhoneAppError(code: .unsupported, message: notClaude)
         }
+        let promptAnswerEnabled = try await promptAnswerSetting()
+        let capabilities = PhoneSessionStatus.localCapabilities(
+            terminal: terminal, isRemoteWorktree: isRemoteWorktree, promptAnswerEnabled: promptAnswerEnabled)
+        try Self.requireCapability(needed(capabilities), orElse: notClaude)
         return (terminal, capabilities)
     }
 }

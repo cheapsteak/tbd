@@ -854,13 +854,14 @@ extension PhoneAppService {
     /// - A permission answer whose reason is over `promptTextCap` UTF-8 bytes
     ///   is `bad_request`, before anything is called.
     /// - **A local session** the phone cannot see (`phoneVisibleTerminal`) is
-    ///   `not_found`. One whose `answer` capability the sessions list shows
-    ///   unavailable (a Codex session, a tab in a remote lane, or any Claude
-    ///   session while the setting for answering prompts is off) is
-    ///   `unsupported` with the list's reason, and any other session that is
-    ///   not Claude (a shell) is `unsupported` with `notAClaudeAnswerReason`
-    ///   (`phoneCapableClaudeTerminal`). Otherwise `phoneAnswerPrompt` with
-    ///   the terminal, the prompt and the answer.
+    ///   `not_found`. Then, in this order, each is `unsupported`
+    ///   (`phoneCapableClaudeTerminal`): a session that can never answer (a
+    ///   Codex session, a tab in a remote lane), with the reason the sessions
+    ///   list shows; any other session that is not Claude (a shell), with
+    ///   `notAClaudeAnswerReason`; and a Claude session while the setting for
+    ///   answering prompts is off, with the list's reason,
+    ///   `PhoneSessionStatus.answerTurnedOffReason`. Otherwise
+    ///   `phoneAnswerPrompt` with the terminal, the prompt and the answer.
     /// - **A remote session** needs its `answer` capability, as the sessions
     ///   list shows it (its provider declares `answer`, and the setting is
     ///   on), or it is `unsupported` with the same reason; a provider that is

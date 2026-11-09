@@ -7,7 +7,10 @@ import TestSupport
 
 /// Tier 1: the sessions publisher over canned snapshots and a virtual clock,
 /// and `sessions.subscribe` through the service over an in-memory database
-/// with fake session actions. Nothing touches the disk or the network.
+/// with fake session actions. One test also runs the answer setting's RPC on
+/// a router, whose actuation log path is under the run's fenced scratch root
+/// (`fencedScratchRoot`); that RPC writes no actuation. Nothing touches the
+/// network.
 @Suite("Phone sessions publisher", .clockDriven)
 struct PhoneSessionsPublisherTests {
     // MARK: - Fixtures
@@ -604,8 +607,7 @@ struct PhoneSessionsPublisherTests {
     /// on a change of its own, so it cannot carry the setting.
     @Test func theAnswerSettingReachesThePhoneAsAChange() async throws {
         let h = try await PhoneServiceHarness.make()
-        let logPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-phone-answer-setting-\(UUID().uuidString)", isDirectory: true)
+        let logPath = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-answer-setting"), isDirectory: true)
             .appendingPathComponent("actuations.jsonl").path
         let router = RPCRouter(
             db: h.db,
