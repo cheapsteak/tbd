@@ -2427,6 +2427,72 @@ struct ModelProfileSpawnTests {
                 "wake must NOT reference A's config dir after a cold swap to B")
     }
 
+    /// A FORK of a parked session is a fork, not a cold swap. It opens a new
+    /// tab that resumes the parked conversation with `--fork-session` under
+    /// the requested profile, and leaves the parked session as it was: on its
+    /// own profile, still parked, with the same session and backdrop. The
+    /// cold re-home is `.inPlace`'s alone (`coldSwapParkedDoesNotRespawn`).
+    /// Both kinds of parked row: hibernated, and legacy suspended.
+    @Test("fork of a parked session: a new tab on the new profile, the parked session left on its own",
+          arguments: [false, true])
+    func forkOfParkedSessionForksAndLeavesItParked(legacySuspended: Bool) async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        #expect(oldTerm.profileID == a.id)
+        let sessionID = try #require(oldTerm.claudeSessionID)
+        if legacySuspended {
+            try await db.terminals.setSuspended(id: oldTerm.id, sessionID: sessionID, snapshot: "FROZEN")
+        } else {
+            try await db.terminals.setHibernated(id: oldTerm.id, sessionID: sessionID, snapshot: "FROZEN")
+        }
+        let parked = try #require(try await db.terminals.get(id: oldTerm.id))
+        #expect(parked.isParked)
+        #expect(parked.transcriptPath != nil)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
+        ))
+        #expect(swapResp.success, "\(swapResp.error ?? "")")
+        let forked = try swapResp.decodeResult(TBDShared.Terminal.self)
+
+        // A new tab, awake, on B.
+        #expect(forked.id != oldTerm.id, "the fork answered with the parked session's own row")
+        #expect(forked.profileID == b.id)
+        #expect(!forked.isParked)
+        let rows = try await db.terminals.list(worktreeID: wt.id)
+        let rowIDs = Set(rows.map { $0.id })
+        let expectedRowIDs: Set<UUID> = [oldTerm.id, forked.id]
+        #expect(rowIDs == expectedRowIDs, "the fork did not leave exactly the parked row and one new row")
+
+        // It resumes the parked conversation as a fork, in a new window, and
+        // never touches the parked pane.
+        let joined = Array(recorder.calls.dropFirst(beforeSwap))
+            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(joined.contains("new-window"), "the fork opened no window; got: \(joined)")
+        #expect(joined.contains("claude --resume \(sessionID)"), "got: \(joined)")
+        #expect(joined.contains("--fork-session"), "got: \(joined)")
+        #expect(!joined.contains("respawn-window"), "the fork respawned the parked pane; got: \(joined)")
+        #expect(!joined.contains("C-c"), "the fork interrupted the parked pane; got: \(joined)")
+
+        // The parked session is as it was.
+        let after = try #require(try await db.terminals.get(id: oldTerm.id))
+        #expect(after.profileID == a.id, "the fork moved the parked session to the fork's profile")
+        #expect(after.isParked, "the fork woke the parked session")
+        #expect(after.hibernatedAt == parked.hibernatedAt)
+        #expect(after.suspendedAt == parked.suspendedAt)
+        #expect(after.suspendedSnapshot == "FROZEN", "the parked backdrop must survive the fork")
+        #expect(after.claudeSessionID == sessionID)
+        #expect(after.transcriptPath == parked.transcriptPath)
+    }
+
     // MARK: - Login sessions (Settings → "Open login session")
 
     /// Pane text mimicking Claude's interactive, logged-out idle state — the
