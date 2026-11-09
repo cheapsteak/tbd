@@ -186,7 +186,7 @@ let package = Package(
                 "TBDTerminalSerialization",
             ],
             path: "Sources/TBDGhosttyTerminal",
-            exclude: ["LICENSE-tkzmux.txt"],
+            exclude: ["LICENSE-termio.txt", "LICENSE-tkzmux.txt"],
             // libghostty-vt is a static library with C++ inside.
             linkerSettings: [.linkedLibrary("c++")]
         ),

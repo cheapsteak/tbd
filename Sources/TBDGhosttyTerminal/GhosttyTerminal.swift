@@ -1,11 +1,13 @@
 // Adapted from tkzmux c961533 Sources/TkzTerminalCore/TerminalSession.swift (MIT, see LICENSE-tkzmux.txt).
+// DEC 2026 hold edges adapted from termio 8196587 Shared/Sources/TermioStream/TermiodStreamTerminal.swift (MIT, see LICENSE-termio.txt).
 // GhosttyTerminal — one libghostty-vt terminal behind one lock.
 //
 // ## Callbacks run *inside* `vt_write`
 //
 // libghostty invokes every effect callback (`WRITE_PTY`, `BELL`, `CLIPBOARD_WRITE`, ...)
 // synchronously, on the calling thread, from within `ghostty_terminal_vt_write` (terminal.h: "All
-// callbacks are invoked synchronously during VT writes ... no reentrancy"). `vt_write` only runs
+// callbacks are invoked synchronously during VT writes ... no reentrancy"). `RENDER_HOLD` also
+// runs from within `ghostty_terminal_reset` and `ghostty_terminal_resize`. All three only run
 // with the lock held, so a callback that took the lock, directly or by calling back into
 // `GhosttyTerminal`, would deadlock at once.
 //
@@ -75,6 +77,16 @@ final class IOContext {
     var reportedSize: GhosttySizeReportSize
     /// Answered to `CSI ? 996 n`.
     var colorScheme: GhosttyColorScheme = GHOSTTY_COLOR_SCHEME_DARK
+    /// True while a DEC 2026 hold is open: from libghostty's begin edge to its end edge. The
+    /// render tick skips frames while it is set. The edges cover every write, reset and resize.
+    /// Two places set it without an edge: the watchdog's force-off, which turns the mode off
+    /// through `OPT_MODE` and so raises none, and an attach, which reads the mode once.
+    var holdOpen = false
+    /// Set by every end edge and cleared only by the reader that takes it, so an end that comes
+    /// between two reads is not lost. Nothing in this module takes it; the `renderHold` test seam
+    /// reads it. It is for the render hint of `docs/specs/2026-11-08-libghostty-frame-timing-design.md`,
+    /// which takes it in the lock hold of a call that signals a render.
+    var holdEnded = false
 
     /// XTVERSION must return a `GhosttyString` whose bytes outlive the callback body, so the answer
     /// is copied here and kept until the next query or until the context goes away.
@@ -110,7 +122,8 @@ private func ioContext(_ userdata: UnsafeMutableRawPointer?) -> IOContext? {
 
 // MARK: - C callbacks
 //
-// Each of these runs inside `ghostty_terminal_vt_write` (or `ghostty_terminal_paste`), with the
+// Each of these runs inside `ghostty_terminal_vt_write` (or `ghostty_terminal_paste`, and the
+// render-hold one inside `ghostty_terminal_reset` and `ghostty_terminal_resize` too), with the
 // terminal's lock already held by the caller. They must not block, must not write to the terminal,
 // and must not touch `GhosttyTerminal`. They are top-level functions, so they are nonisolated and
 // capture nothing; everything they reach comes through `userdata`.
@@ -249,6 +262,18 @@ private func cbClipboardWrite(
     request.reply?(write, &reply)
 }
 
+/// A DEC 2026 hold began (`held`) or ended. libghostty raises it from `vt_write`, `reset` and
+/// `resize`, and pairs the calls: a set during a hold and a reset with no hold raise nothing.
+///
+/// The mute does not apply. A hold is terminal state, not an effect for the owner, and a muted
+/// call can end one: `prepareForPreamble()` resets a muted terminal, and a muted preamble can
+/// replay `?2026h`. Dropping those edges would leave `holdOpen` wrong.
+private func cbRenderHold(_ terminal: VtTerminal?, _ userdata: UnsafeMutableRawPointer?, _ held: Bool) {
+    guard let context = ioContext(userdata) else { return }
+    context.holdOpen = held
+    if !held { context.holdEnded = true }
+}
+
 private func cbClipboardRead(
     _ terminal: VtTerminal?, _ userdata: UnsafeMutableRawPointer?,
     _ read: UnsafePointer<GhosttyClipboardRead>?
@@ -333,6 +358,12 @@ final class TerminalCore {
 struct Aftermath {
     var drain: Bool
     var renderSignal: (@Sendable () -> Void)?
+}
+
+/// The DEC 2026 hold as the edges left it: `IOContext.holdOpen` and `IOContext.holdEnded`.
+struct RenderHold: Equatable, Sendable {
+    var isOpen: Bool
+    var ended: Bool
 }
 
 /// Names one `setRenderSignal` call, so only the view that installed a signal can clear it.
@@ -463,6 +494,10 @@ public final class GhosttyTerminal: @unchecked Sendable {
                 unsafeBitCast(colorScheme, to: UnsafeRawPointer.self), "COLOR_SCHEME")
         let size: GhosttyTerminalSizeFn = cbSize
         try set(GHOSTTY_TERMINAL_OPT_SIZE, unsafeBitCast(size, to: UnsafeRawPointer.self), "SIZE")
+        // Set before the first byte, so `holdOpen` sees every edge from the terminal's start.
+        let renderHold: GhosttyTerminalRenderHoldFn = cbRenderHold
+        try set(GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
+                unsafeBitCast(renderHold, to: UnsafeRawPointer.self), "RENDER_HOLD")
 
         // Optional ones. Left unset, libghostty answers DA and XTVERSION with its own defaults, and
         // gives an OSC 7501 support query no reply.
@@ -587,17 +622,20 @@ public final class GhosttyTerminal: @unchecked Sendable {
         return value
     }
 
-    /// `withRaw`, plus the object bound to this terminal, made by `make` on first use. The terminal
-    /// owns that object from then on and releases it before it frees the C terminal.
+    /// `withRaw`, plus the object bound to this terminal, made by `make` on first use, and the
+    /// callbacks' context. The terminal owns that object from then on and releases it before it
+    /// frees the C terminal. The context is for the DEC 2026 watchdog, which reads `holdOpen` in
+    /// the same lock hold as the rest of its work, and sets it after a mode change that raised no
+    /// hold edge.
     @discardableResult
     func withBound<Object: TerminalBoundObject, T>(
         signalsRender: Bool = false,
         make: (VtTerminal) throws -> Object,
-        _ body: (VtTerminal, Object) throws -> T
+        _ body: (VtTerminal, Object, IOContext) throws -> T
     ) rethrows -> T? {
         let (value, aftermath): (T?, Aftermath?) = try locked { core in
             guard let raw = core.raw else { return (nil, nil) }
-            let value = try body(raw, try core.boundObject(raw, make: make))
+            let value = try body(raw, try core.boundObject(raw, make: make), core.context)
             return (value, core.aftermath(signalsRender: signalsRender))
         }
         if let aftermath { finish(aftermath) }
@@ -655,6 +693,11 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
     /// Whether a render signal is installed. A test seam.
     var hasRenderSignal: Bool { locked { $0.renderSignal != nil } }
+
+    /// What the hold edges have recorded, read without clearing anything. A test seam.
+    var renderHold: RenderHold {
+        locked { RenderHold(isOpen: $0.context.holdOpen, ended: $0.context.holdEnded) }
+    }
 
     // MARK: Public API
 

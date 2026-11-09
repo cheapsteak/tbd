@@ -1,4 +1,5 @@
 // Adapted from tkzmux c961533 Sources/TkzTerminalCore/TerminalSession.swift, its input seam and DEC 2026 watchdog (MIT, see LICENSE-tkzmux.txt).
+// The watchdog's hold edges, force-off and attach read adapted from termio 8196587 Shared/Sources/TermioStream/TermiodStreamTerminal.swift (MIT, see LICENSE-termio.txt).
 // The input half of a terminal: its key and mouse encoders, its selection gesture and its DEC 2026
 // watchdog, bound to the terminal so they live and die with the C handle.
 //
@@ -26,15 +27,27 @@ import GhosttyVt
 ///
 /// libghostty-vt does **not** hide unsynchronized frames: with mode 2026 set the render state still
 /// reports rows dirty. Hiding is the host's job, exactly as in Ghostty's own renderer: skip frames
-/// while the mode is set, and force it off if a program leaves it set.
+/// while a hold is open, and force the mode off if a program leaves it set.
+///
+/// The hold comes from libghostty's `RENDER_HOLD` edges (`IOContext.holdOpen`), not from a read of
+/// the mode. The watchdog times how long ticks have seen a hold without a break, from the first
+/// tick that saw one. A hold that ends and another that starts between two ticks do not restart
+/// it: timed per hold, back-to-back holds that span every tick would hide every frame for good.
 ///
 /// Time is a `Duration` since any fixed origin. The view passes the display link's timestamp, so
 /// the policy compares the moments frames were due and never reads a clock itself.
 struct SyncOutputWatchdog: Sendable, Equatable {
+    /// The DEC private mode number of synchronized output.
+    static let mode: UInt16 = 2026
+
     /// How long a program may hold mode 2026 before we stop believing it.
     var timeout: Duration
 
     private var activeSince: Duration?
+    /// Ticks that skipped their frame since `activeSince`.
+    private var skippedTicks = 0
+    /// The run that the last answer, if it was `.forceOffAndRender`, ended. nil after any other.
+    private(set) var lastForceOff: ForceOff?
 
     init(timeout: Duration = .seconds(1)) {
         self.timeout = timeout
@@ -42,36 +55,66 @@ struct SyncOutputWatchdog: Sendable, Equatable {
     }
 
     enum Decision: Sendable, Equatable {
-        /// Mode 2026 is not set: render normally.
+        /// No hold is open: render normally.
         case render
-        /// Mode 2026 has been set for less than `timeout`: skip this frame, keep the link running.
+        /// Ticks have seen a hold for less than `timeout`: skip this frame, keep the link running.
         case skipFrame
-        /// Mode 2026 has been held too long: force it off and render.
+        /// Ticks have seen a hold for `timeout`: force the mode off and render.
         case forceOffAndRender
     }
 
-    /// `modeActive` comes from `ghostty_terminal_get(DATA_MODE, ghostty_mode_new(2026, false))`.
-    mutating func evaluate(modeActive: Bool, now: Duration) -> Decision {
-        guard modeActive else {
-            activeSince = nil
+    /// What a force-off logs: how long ticks saw the hold, and how many frames they skipped.
+    struct ForceOff: Sendable, Equatable {
+        /// From the first tick that saw the hold to the tick that forced it off.
+        var heldFor: Duration
+        /// The ticks in that run that skipped their frame. The tick that forces off renders. The
+        /// watchdog is the terminal's, so two views ticking over one terminal both count here.
+        var skippedTicks: Int
+
+        var notice: String {
+            let milliseconds = Int((heldFor / Duration.milliseconds(1)).rounded())
+            return "forced DEC 2026 off: ticks saw a hold for \(milliseconds) ms without a break, "
+                + "and \(skippedTicks) ticks skipped their frame"
+        }
+    }
+
+    /// Logs a force-off at `.notice`, so A/B logs show runs of skipped frames that ended in one.
+    static func logForceOff(_ forceOff: ForceOff) {
+        terminalEngineLog.notice("\(forceOff.notice, privacy: .public)")
+    }
+
+    /// `holdOpen` is `IOContext.holdOpen`: whether a DEC 2026 hold is open as this tick is due.
+    mutating func evaluate(holdOpen: Bool, now: Duration) -> Decision {
+        lastForceOff = nil
+        guard holdOpen else {
+            reset()
             return .render
         }
         guard let since = activeSince else {
             activeSince = now
+            skippedTicks = 1
             return .skipFrame
         }
         if now - since >= timeout {
+            lastForceOff = ForceOff(heldFor: now - since, skippedTicks: skippedTicks)
             activeSince = nil
+            skippedTicks = 0
             return .forceOffAndRender
         }
+        skippedTicks += 1
         return .skipFrame
     }
 
-    /// Whether the mode has been continuously active since the last `.render`.
+    /// Whether ticks have seen a hold without a break since the last `.render`.
     var isTracking: Bool { activeSince != nil }
 
-    /// Forgets when the mode was first seen, so the next active tick starts the timeout afresh.
-    mutating func reset() { activeSince = nil }
+    /// Forgets when the hold was first seen, so the next tick that sees one starts the timeout
+    /// afresh.
+    mutating func reset() {
+        activeSince = nil
+        skippedTicks = 0
+        lastForceOff = nil
+    }
 }
 
 // MARK: - The binding
@@ -115,6 +158,13 @@ extension GhosttyTerminal {
     /// and returns `fallback`; also returns `fallback` once the terminal is closed.
     private func input<T>(
         _ operation: String, fallback: T, _ body: (VtTerminal, InputBinding) throws -> T
+    ) -> T {
+        inputWithContext(operation, fallback: fallback) { raw, binding, _ in try body(raw, binding) }
+    }
+
+    /// `input`, plus the callbacks' context, where the hold edges keep `holdOpen`.
+    private func inputWithContext<T>(
+        _ operation: String, fallback: T, _ body: (VtTerminal, InputBinding, IOContext) throws -> T
     ) -> T {
         do {
             return try withBound(make: { try InputBinding(terminal: $0) }, body) ?? fallback
@@ -328,28 +378,45 @@ extension GhosttyTerminal {
 
     // MARK: DEC 2026
 
-    /// Restarts the DEC 2026 watchdog. The view calls this when it attaches: it took no frames
-    /// while detached, so the watchdog's record of when the mode was first seen is stale. Kept,
-    /// it would force off at the first frame a mode the program set only just now.
+    /// Restarts the DEC 2026 watchdog and sets `holdOpen` from one read of the mode, in one lock
+    /// hold. The view calls this when it attaches. It took no frames while detached, so the
+    /// watchdog's record of when the hold was first seen is stale: kept, it would force off at
+    /// the first frame a hold the program began only just now. The edges cover every write, reset
+    /// and resize; the read keeps `holdOpen` right after a change that raised no edge, as
+    /// `OPT_MODE` raises none.
     func resetSyncOutputWatchdog() {
-        input("resetting the synchronized-output watchdog", fallback: ()) { _, binding in
+        inputWithContext("resetting the synchronized-output watchdog", fallback: ()) { raw, binding, context in
             binding.watchdog.reset()
+            context.holdOpen = GhosttyTerminalState(raw: raw).mode(SyncOutputWatchdog.mode)
         }
     }
 
-    /// One render-tick decision: reads mode 2026, runs the watchdog, and forces the mode off when a
-    /// program has held it past the timeout. A closed terminal renders.
-    func syncOutputDecision(now: Duration) -> SyncOutputWatchdog.Decision {
-        input("checking synchronized output", fallback: .render) { raw, binding in
-            var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(2026, false), value: false)
-            let active = ghostty_terminal_get(raw, GHOSTTY_TERMINAL_DATA_MODE, &config) == GHOSTTY_SUCCESS
-                && config.value
-            let decision = binding.watchdog.evaluate(modeActive: active, now: now)
+    /// One render-tick decision: runs the watchdog on `holdOpen`, and forces the mode off when ticks
+    /// have seen a hold for the timeout. A closed terminal renders.
+    ///
+    /// - Parameter onForceOff: hears each force-off, after the lock drops. It logs the notice;
+    ///   tests replace it.
+    func syncOutputDecision(
+        now: Duration,
+        onForceOff: (SyncOutputWatchdog.ForceOff) -> Void = SyncOutputWatchdog.logForceOff
+    ) -> SyncOutputWatchdog.Decision {
+        var forceOff: SyncOutputWatchdog.ForceOff?
+        let decision: SyncOutputWatchdog.Decision = inputWithContext(
+            "checking synchronized output", fallback: .render
+        ) { raw, binding, context in
+            let decision = binding.watchdog.evaluate(holdOpen: context.holdOpen, now: now)
             if decision == .forceOffAndRender {
-                var off = GhosttyTerminalModeConfig(mode: ghostty_mode_new(2026, false), value: false)
+                var off = GhosttyTerminalModeConfig(
+                    mode: ghostty_mode_new(SyncOutputWatchdog.mode, false), value: false)
                 _ = ghostty_terminal_set(raw, GHOSTTY_TERMINAL_OPT_MODE, &off)
+                // `OPT_MODE` raises no edge, so the hold is closed here. Left open, the ticks
+                // after it would go on skipping frames with the mode already off.
+                context.holdOpen = false
+                forceOff = binding.watchdog.lastForceOff
             }
             return decision
         }
+        if let forceOff { onForceOff(forceOff) }
+        return decision
     }
 }

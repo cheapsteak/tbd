@@ -694,7 +694,7 @@ struct GhosttyTerminalViewTests {
     }
 
     /// A view takes no frames while hidden, so the DEC 2026 watchdog must start afresh when it is
-    /// shown. Otherwise the mode's first sighting before the hide counts against it, and the
+    /// shown. Otherwise the hold's first sighting before the hide counts against it, and the
     /// first frame after the show forces it off.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func syncOutputIsTimedAfreshWhenTheViewIsShownAgain() throws {
