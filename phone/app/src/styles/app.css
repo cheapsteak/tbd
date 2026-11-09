@@ -289,6 +289,8 @@ button.tool:active{background:var(--box)}
 /* app additions */
 #app{--home:var(--safe-bottom);padding:var(--safe-top) var(--safe-right) 0 var(--safe-left)}
 .dock{padding-bottom:calc(10px + var(--dock-pad))}
+/* when the keyboard leaves too little room, the dock shrinks and its prompt card scrolls (a scroll container shrinks to nothing), so the dock never runs under the keyboard */
+.dock{flex-shrink:1;min-height:0}
 /* the transcript's virtual list: .tx-list is as tall as its rows, and each .tx-row is placed by a transform and lays out its row as .tx does. A row's padding stands in for .tx's 8px gap, and the list's margin takes back the last row's. */
 .tx-list{position:relative;flex:none;margin-bottom:-8px}
 .tx-row{position:absolute;top:0;left:0;right:0;display:flex;flex-direction:column;gap:8px;padding-bottom:8px}

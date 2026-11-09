@@ -1,6 +1,8 @@
 // The prompt card end to end (spec sections 4.4 and 8.3), in WebKit as an iPhone and in Chromium
 // as an Android phone: a question card's options, Other, steps and review, multi-select, Hide,
-// a session that cannot answer, a refused answer, and one send per gesture.
+// a session that cannot answer, a refused answer, and one send per gesture. Then the permission
+// card: Yes, the session rule, Deny with a message, the keyboard, and no tap landing on a
+// prompt that took another's place before the user could read it.
 //
 // Every test that answers checks the exact `prompt.answer` params the fake laptop got: the
 // session the route shows, the prompt's ID, and the answer `questionAnswer` builds. mock.json
@@ -28,6 +30,11 @@ const ONBOARDING_PROMPT = '00000000-0000-4000-8000-0000000000E3';
 const SETTINGS_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-00000000010C' };
 const SETTINGS_PROMPT = '00000000-0000-4000-8000-0000000000E4';
 const SETTINGS_QUESTION = 'Which settings should move to the new screen?';
+/** SSE reconnect's Claude session and its permission prompt. */
+const SSE_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000109' };
+const SSE_PROMPT = '00000000-0000-4000-8000-0000000000E2';
+const SSE_KEY = `local:${SSE_REF.terminalID}`;
+const SSE_TARGET = 'npm run test:integration -- --grep "reconnects after 30 s idle" --reporter=dot && git diff --stat origin/main...HEAD';
 /** The daemon's reason while the laptop's "answer prompts" setting is off (`PhoneSessionStatus.answerTurnedOffReason`). */
 const ANSWERING_OFF = "Answering prompts is turned off in TBD's settings on the laptop.";
 
@@ -57,6 +64,18 @@ function withSession(terminalID, edit) {
   for (const row of scenario.rows) {
     for (const session of row.sessions) if (session.ref.terminalID === terminalID) edit(session);
   }
+  return scenario;
+}
+
+/**
+ * mock.json with SSE reconnect's open prompts replaced by `prompts`, each laid over the mock's
+ * permission prompt.
+ * @param {...object} prompts
+ */
+function withSSEPrompts(...prompts) {
+  const scenario = structuredClone(MOCK);
+  const base = MOCK.prompts[SSE_KEY][0];
+  scenario.prompts[SSE_KEY] = prompts.map((p) => ({ ...base, ...p }));
   return scenario;
 }
 
@@ -341,4 +360,158 @@ test("a new prompt never inherits the last one's picks", async ({ page, appHost 
   await expect(c.locator('.c-head')).toContainText('1 of 3');
   await expect(c.locator('.q')).toHaveText('Which tone should the welcome screen use?');
   await expect(c.getByRole('button', { name: 'Back' })).toHaveCount(0);
+});
+
+test('a permission shows the tool, its summary and target, and Yes allows', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await expect(c).toHaveAttribute('role', 'region');
+  await expect(c).toHaveAttribute('aria-label', 'Permission prompt');
+  await expect(c.locator('.c-head')).toHaveText('PermissionHide');
+  await expect(c.locator('.perm-tool')).toHaveText('Bash');
+  await expect(c.locator('.perm-tool svg')).toHaveCount(1);
+  await expect(c.locator('.perm-desc')).toHaveText('Run the reconnect integration tests, then show which files changed');
+  await expect(c.locator('pre.perm-target')).toHaveText(SSE_TARGET);
+  await expect(c.locator('button.opt')).toHaveText(['Yes', "Yes, and don't ask again this sessionBash(npm run test:integration:*)", 'No']);
+  await expect(c.locator('button.opt.pri')).toHaveText('Yes');
+  await expect(c.locator('button.opt.danger')).toHaveText('No');
+  await c.locator('button.opt.pri').click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
+  ]);
+});
+
+test('the session rule lists each rule as sent, and allows for the session', async ({ page, appHost }) => {
+  await openApp(page, appHost, {
+    scenario: withSSEPrompts({ suggestions: ['Bash(npm run test:integration:*)', 'Bash(git diff:*)'] }),
+  });
+  await openSessionByName(page, 'SSE reconnect');
+  const rule = card(page).getByRole('button', { name: /^Yes, and don't ask again this session/ });
+  await expect(rule.locator('small')).toHaveText(['Bash(npm run test:integration:*)', 'Bash(git diff:*)']);
+  await rule.click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow_always' } },
+  ]);
+});
+
+test('a permission that offers no session rule has no rule choice, and a cut target ends in "…"', async ({ page, appHost }) => {
+  await openApp(page, appHost, {
+    scenario: withSSEPrompts({ allowAlways: false, suggestions: undefined, target: 'npm run test:integration -- --grep', targetTruncated: true }),
+  });
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await expect(c.locator('pre.perm-target')).toHaveText('npm run test:integration -- --grep…');
+  await expect(c.locator('button.opt')).toHaveText(['Yes', 'No']);
+});
+
+test('Deny sends the message, trimmed', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await c.getByRole('button', { name: 'No' }).click();
+  await expect(c.locator('button.opt')).toHaveCount(0);
+  const text = c.getByLabel('Tell Claude what to do instead (optional)');
+  await expect(text).toBeFocused();
+  await expect(c.locator('label.perm-desc')).toHaveText('Tell Claude what to do instead (optional)');
+  // Back returns to the choices, and the text stays for the next time.
+  await text.fill('  Run only the unit tests for now. ');
+  await c.getByRole('button', { name: 'Back' }).click();
+  await expect(text).toHaveCount(0);
+  await c.getByRole('button', { name: 'No' }).click();
+  await expect(text).toHaveValue('  Run only the unit tests for now. ');
+  const deny = c.locator('.c-actions .btn.danger');
+  await expect(deny).toHaveText('Deny');
+  await deny.click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'deny', message: 'Run only the unit tests for now.' } },
+  ]);
+});
+
+test('a blank Deny sends no message', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await c.getByRole('button', { name: 'No' }).click();
+  await c.getByLabel('Tell Claude what to do instead (optional)').fill(' \n ');
+  await c.getByRole('button', { name: 'Deny' }).click();
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'deny' } },
+  ]);
+});
+
+test('the deny form sits above the keyboard', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await c.getByRole('button', { name: 'No' }).click();
+  const text = c.getByLabel('Tell Claude what to do instead (optional)');
+  await expect(text).toBeFocused();
+  const { width, height } = /** @type {{ width: number, height: number }} */ (page.viewportSize());
+  await hostCall(page, 'sendEnv', {
+    safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+    viewport: { width, height: height - 336, offsetTop: 0, offsetLeft: 0, scale: 1 },
+    layout: { width, height },
+  });
+  const dock = app(page).locator('.dock');
+  await expect.poll(() => dock.evaluate((el) => getComputedStyle(el).paddingBottom)).toBe('346px');
+  await expect(text).toBeFocused();
+  // The textarea and Deny end above the keyboard's top edge.
+  for (const el of [text, c.getByRole('button', { name: 'Deny' })]) {
+    expect(await el.evaluate((node) => node.getBoundingClientRect().bottom <= window.innerHeight - 336)).toBe(true);
+  }
+  await hostCall(page, 'sendEnv', null);
+});
+
+test('a permission the session cannot answer shows its text and the reason, and no choices', async ({ page, appHost }) => {
+  await openApp(page, appHost, {
+    scenario: withSession(SSE_REF.terminalID, (s) => { s.capabilities.answer = { available: false, reason: ANSWERING_OFF }; }),
+  });
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  await expect(c.locator('.perm-tool')).toHaveText('Bash');
+  await expect(c.locator('pre.perm-target')).toHaveText(SSE_TARGET);
+  await expect(c.locator('.dock-note')).toHaveText(ANSWERING_OFF);
+  await expect(c.locator('button.opt')).toHaveCount(0);
+  await page.waitForTimeout(200);
+  expect(await answers(page)).toEqual([]);
+});
+
+test('Hide shows "Permission waiting"', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'SSE reconnect');
+  await card(page).getByRole('button', { name: 'Hide' }).click();
+  const strip = app(page).locator('.dock button.card-strip');
+  await expect(strip).toHaveText('Permission waitingShow');
+  await strip.click();
+  await expect(card(page).locator('.perm-tool')).toHaveText('Bash');
+});
+
+test("no tap lands on the next permission before it has been on screen for 500 ms", async ({ page, appHost }) => {
+  const second = { id: 'sse-second', summary: 'Show the reconnect log', target: 'tail -n 50 logs/stream.log' };
+  await openApp(page, appHost, { scenario: withSSEPrompts({ id: SSE_PROMPT }, second) });
+  await openSessionByName(page, 'SSE reconnect');
+  const c = card(page);
+  const yes = c.locator('button.opt.pri');
+  // The first card shown as the session opens takes a tap at once.
+  await expect(c.locator('pre.perm-target')).toHaveText(SSE_TARGET);
+  await yes.click();
+  // Its answer takes it down, and the second takes its place: a tap there at once, as the
+  // second half of a double tap, lands on a disabled button and sends nothing.
+  await c.locator('pre.perm-target', { hasText: second.target }).waitFor();
+  const box = await yes.boundingBox();
+  if (box === null) throw new Error('Yes has no box');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(yes).toBeDisabled();
+  await page.waitForTimeout(700);
+  expect(await answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
+  ]);
+  // Once it has been on screen for 500 ms, a tap answers it.
+  await expect(yes).toBeEnabled();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect.poll(() => answers(page)).toEqual([
+    { session: SSE_REF, promptID: SSE_PROMPT, answer: { kind: 'permission', decision: 'allow' } },
+    { session: SSE_REF, promptID: 'sse-second', answer: { kind: 'permission', decision: 'allow' } },
+  ]);
 });

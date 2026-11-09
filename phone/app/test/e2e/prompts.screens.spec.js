@@ -11,6 +11,9 @@
 // - `q3`: Onboarding copy's first of three questions.
 // - `q3-review`: the same after 'Friendly and short', '4 steps' and 'Yes, show a Skip button'.
 // - `card-hidden`: Login redirect fix's question hidden to its strip.
+// - `perm`: SSE reconnect's permission.
+// - `deny-msg`: the same with No tapped and "Run only the unit tests for now." typed, the
+//   textarea then left, as the mock draws it with no focus.
 
 import { app, capture, expect, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -83,4 +86,20 @@ test('card-hidden', async ({ page, appHost }) => {
   await openAtBottom(page, 'Login redirect fix');
   await card(page).getByRole('button', { name: 'Hide' }).click();
   await capture(page, 'card-hidden', app(page).locator('.dock .card-strip'));
+});
+
+test('perm', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'SSE reconnect');
+  await capture(page, 'perm', card(page).getByRole('button', { name: 'No' }));
+});
+
+test('deny-msg', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openAtBottom(page, 'SSE reconnect');
+  await card(page).getByRole('button', { name: 'No' }).click();
+  const text = card(page).getByLabel('Tell Claude what to do instead (optional)');
+  await text.fill('Run only the unit tests for now.');
+  await text.blur();
+  await capture(page, 'deny-msg', card(page).getByRole('button', { name: 'Deny' }));
 });
