@@ -1,42 +1,372 @@
-// Filled by plan 6 part 6d
-//
-// The prompt slice of `AppState`: each session's open prompts, the answers this phone sent,
-// and the card's own state. Task 6d-2 gives it fields. Until then it is empty.
-//
-// Contract of the slice, once filled:
-// - `emptyPrompts()`: the slice with no prompts.
-// - `applyPromptChanged(s, d)`: one `prompt.changed` folded into the slice. It returns the new
-//   slice, and one receipt for each prompt in `d.resolved` that should leave a line in the
-//   transcript, `id` being the prompt ID and `text` the line ("Answered on this phone: …",
-//   "Answered on the laptop", …). `applyEvent` passes each receipt to `addReceipt` in
-//   `state/transcript.ts`, in order. When nothing changed it returns `s` itself and no receipts.
-//
-// The stub: an empty slice, and `applyPromptChanged` returns `{ prompts: s, receipts: [] }`.
-//
-// Below the slice are the pure rules the prompt card and the slice use: how an answer is built
-// from what the user picked, what an answer's one-line summary reads, and which receipt a
-// resolution leaves. They are the laptop's rules (`PromptAnswerController` in
-// `Sources/TBDApp/Panes/Transcript/PromptAnswerController.swift`), as 4b states them for the
-// phone (`PhonePromptAnswerParams` in `PhoneAppMessages.swift`), so the phone sends exactly
-// the answer the laptop's card would.
+/**
+ * The prompt slice of `AppState`: the open session's prompts, each prompt's card in the dock,
+ * and the answers this phone sent (spec section 4.4, "Open prompts"). Everything here is pure.
+ * `applyEvent` (`events.ts`) folds each `prompt.changed` in with `applyPromptChanged`; the
+ * prompt actions (`actions/prompts.ts`) send an answer with `beginAnswer` and fold its reply in
+ * with `settleAnswer`; the dock reads `cardFor`.
+ *
+ * **Where prompts come from.** The laptop sends `prompt.changed` only for the session whose
+ * transcript is open on this phone: the session's whole open set, after the transcript opens and
+ * on every change, with a resolution for each prompt that closed since the last event, saying who
+ * answered it (`answeredBy`). So the slice holds one session's set at a time: a set for another
+ * session means the laptop's feed moved there, and the sets it held before are dropped.
+ *
+ * **Cards.** A prompt that enters a set gets a card, `open`. A prompt that leaves a set with no
+ * resolution loses its card and leaves no receipt, whatever the card showed, with two
+ * exceptions: an `elsewhere` card stays until `dismissPrompt`, and a `sending` card that holds
+ * its prompt's resolution stays until its reply settles. A card keeps the prompt it shows, so it
+ * can outlive its prompt's set. A prompt still in the set whose card was taken down does not get
+ * a new one.
+ *
+ * **Answering.** `beginAnswer` turns an `open` card `sending`, and nothing else does, so one
+ * gesture sends one answer. Its reply (`settleAnswer`):
+ * - `delivered` or `unknown` turns the card `answered`, and records the answer's summary in
+ *   `answeredHere`;
+ * - `already_resolved` turns it `elsewhere`;
+ * - an error turns it back `open`, with the laptop's message as its `refusal`, except
+ *   `superseded`, which leaves no refusal.
+ *
+ * **A resolution** (`applyPromptChanged`) leaves a receipt, `receiptText(receiptSource(…))`,
+ * and then:
+ * - an `answered` card is taken down;
+ * - an `open` card turns `elsewhere`, `elsewhereBy` saying who answered;
+ * - an `elsewhere` card stays, and takes `elsewhereBy` from the resolution when it names one;
+ * - a `sending` card with a laptop resolution turns `elsewhere` (`laptop`) with the receipt "Answered
+ *   on the laptop" at once, and its reply then changes nothing. With a `phone` or `unknown`
+ *   resolution the card holds it (`held`), with no receipt yet, since the laptop may be naming this
+ *   phone's own answer: `settleAnswer` writes the receipt once the reply comes, "Answered on this
+ *   phone: <summary>" and the card taken down for `delivered` or `unknown`, or the receipt as if
+ *   this phone had not answered, and the card `elsewhere`, for `already_resolved` or an error.
+ *
+ * A resolution's `answeredHere` entry goes once the resolution is applied, and the record keeps
+ * at most `ANSWERED_HERE_LIMIT` entries, the oldest going first, for answers whose resolution
+ * never comes (a feed that moved to another session sends none for the old one).
+ *
+ * Records are on a null prototype, so an ID such as `constructor` reads nothing inherited. Each
+ * function returns a new object when it changes anything and `s` itself when it does not.
+ *
+ * Below the slice are the pure rules the card and the slice use: how an answer is built from
+ * what the user picked, what an answer's one-line summary reads, and which receipt a resolution
+ * leaves. They are the laptop's rules (`PromptAnswerController` in
+ * `Sources/TBDApp/Panes/Transcript/PromptAnswerController.swift`), as 4b states them for the
+ * phone (`PhonePromptAnswerParams` in `PhoneAppMessages.swift`), so the phone sends exactly the
+ * answer the laptop's card would.
+ */
 
 import type {
-  PermissionDecision, PhonePromptResolution, PhoneQuestion, PromptAnswer, PromptChangedData,
+  PermissionDecision, PhonePrompt, PhonePromptResolution, PhoneQuestion, PhoneSessionRef, PromptAnswer, PromptAnswerOutcome,
+  PromptChangedData,
 } from '../protocol/types.ts';
+import { refKey, sameRef } from '../protocol/wire.ts';
 import { emptyRecord } from './store.ts';
 
-// Empty until task 6d-2 gives it fields.
-export interface PromptsState {}
+// MARK: - The slice
 
-export function emptyPrompts(): PromptsState {
-  return {};
+/**
+ * A card's phase:
+ * - `open`: the prompt waits for an answer, and the card offers its choices;
+ * - `sending`: this phone's answer is on its way;
+ * - `answered`: the laptop took this phone's answer (`delivered`, or `unknown`), and the prompt
+ *   has not closed yet;
+ * - `elsewhere`: someone else answered first. The card says so until `dismissPrompt`.
+ */
+export type CardPhase = 'open' | 'sending' | 'answered' | 'elsewhere';
+
+export interface CardState {
+  phase: CardPhase;
+  /** The laptop's words for the last answer it refused, shown on an `open` card, or null. */
+  refusal: string | null;
+  /** The summary of this phone's answer while it is `sending` and once it is `answered`, or null. */
+  summary: string | null;
+  /** Who answered an `elsewhere` card's prompt: the laptop, another phone, or null when the laptop did not say. */
+  elsewhereBy: 'laptop' | 'phone' | null;
+  /** The session the prompt is open in. */
+  session: PhoneSessionRef;
+  /** The prompt, as its session's set last sent it. */
+  prompt: PhonePrompt;
+  /** The token of the answer on its way while `sending`, so only its own reply settles the card; null otherwise. */
+  answerID: string | null;
+  /** A `phone` or `unknown` resolution that came while `sending`, held until the reply settles; null otherwise. */
+  held: PhonePromptResolution | null;
 }
 
+export interface PromptsState {
+  /** The open prompts, by `refKey` of their session, in the laptop's order. Only the open session's set is held. */
+  bySession: Readonly<Record<string, readonly PhonePrompt[]>>;
+  /** Each card, by prompt ID. */
+  cards: Readonly<Record<string, CardState>>;
+  /** The summary of this phone's answer to each prompt the laptop took it for, by prompt ID. */
+  answeredHere: Readonly<Record<string, string>>;
+}
+
+/** The most entries `answeredHere` keeps. */
+export const ANSWERED_HERE_LIMIT = 64;
+
+/** The slice with no prompts. */
+export function emptyPrompts(): PromptsState {
+  return { bySession: emptyRecord(), cards: emptyRecord(), answeredHere: emptyRecord() };
+}
+
+/**
+ * `s` with one `prompt.changed` folded in, and one receipt for each resolution whose receipt is
+ * due now, in order, `id` being the prompt ID: `applyEvent` passes each to `addReceipt`. The
+ * resolutions are applied first, then `d.prompts` replaces the session's set, and every other
+ * session's set is dropped. When nothing changed it returns `s` itself and no receipts. A
+ * resolution for a prompt that has no card still gives its receipt, with `s` itself when nothing
+ * else changed.
+ */
 export function applyPromptChanged(
   s: PromptsState,
   d: PromptChangedData,
 ): { prompts: PromptsState; receipts: ReadonlyArray<{ id: string; text: string }> } {
-  return { prompts: s, receipts: [] };
+  const key = refKey(d.session);
+  const cards = editable(s.cards);
+  const here = editable(s.answeredHere);
+  const sets = editable(s.bySession);
+  const receipts: { id: string; text: string }[] = [];
+
+  for (const r of d.resolved ?? []) {
+    const id = r.promptID;
+    const found = own(cards.value, id);
+    const card = found !== undefined && sameRef(found.session, d.session) ? found : undefined;
+    if (card?.phase === 'sending') {
+      if (r.answeredBy === 'laptop') {
+        cards.set(id, { ...card, phase: 'elsewhere', elsewhereBy: 'laptop', refusal: null, held: null });
+        receipts.push({ id, text: receiptText('laptop', null) });
+      } else {
+        cards.set(id, { ...card, held: r });
+      }
+      continue;
+    }
+    const answered = Object.hasOwn(here.value, id) || card?.phase === 'answered';
+    const source = receiptSource(r, answered);
+    receipts.push({ id, text: receiptText(source, own(here.value, id) ?? card?.summary ?? null) });
+    here.delete(id);
+    if (card === undefined) continue;
+    const by = elsewhereBy(r);
+    if (card.phase === 'answered') {
+      cards.delete(id);
+    } else if (card.phase === 'open') {
+      cards.set(id, { ...card, phase: 'elsewhere', elsewhereBy: by, refusal: null });
+    } else if (by !== null && by !== card.elsewhereBy && source !== 'thisPhone') {
+      cards.set(id, { ...card, elsewhereBy: by });
+    }
+  }
+
+  const before = own(s.bySession, key) ?? [];
+  const kept = samePrompts(before, d.prompts) ? before : d.prompts;
+  for (const p of kept) {
+    const card = own(cards.value, p.id);
+    if (card !== undefined && sameRef(card.session, d.session)) {
+      if (card.prompt !== p && !samePrompt(card.prompt, p)) cards.set(p.id, { ...card, prompt: p });
+    } else if (!before.some((b) => b.id === p.id)) {
+      cards.set(p.id, openCard(d.session, p));
+    }
+  }
+  for (const other of Object.keys(s.bySession)) if (other !== key) sets.delete(other);
+  if (kept.length === 0) sets.delete(key);
+  else if (kept !== before) sets.set(key, kept);
+
+  for (const id of Object.keys(cards.value)) {
+    const card = cards.value[id]!;
+    if (card.phase === 'elsewhere' || (card.phase === 'sending' && card.held !== null)) continue;
+    const set = own(sets.value, refKey(card.session)) ?? [];
+    if (!set.some((p) => p.id === id)) cards.delete(id);
+  }
+
+  if (!cards.changed && !here.changed && !sets.changed) return { prompts: s, receipts };
+  return { prompts: { bySession: sets.value, cards: cards.value, answeredHere: here.value }, receipts };
+}
+
+/**
+ * The card the dock shows for `ref`'s session, and the prompt it shows, or null when it shows
+ * none. An `elsewhere` card comes first, so the user reads that their prompt was answered before
+ * another prompt takes its place, then a `sending` card, then an `answered` one, then an `open`
+ * one, so a second tap meant for the prompt just answered never lands on the next. Cards of one
+ * phase go in the order of the session's set.
+ */
+export function cardFor(s: PromptsState, ref: PhoneSessionRef): { prompt: PhonePrompt; card: CardState } | null {
+  const set = own(s.bySession, refKey(ref)) ?? [];
+  const candidates: CardState[] = [];
+  for (const p of set) {
+    const card = own(s.cards, p.id);
+    if (card !== undefined) candidates.push(card);
+  }
+  for (const id of Object.keys(s.cards)) candidates.push(s.cards[id]!);
+  let best: CardState | null = null;
+  for (const card of candidates) {
+    if (!sameRef(card.session, ref)) continue;
+    if (best === null || PHASE_RANK[card.phase] < PHASE_RANK[best.phase]) best = card;
+  }
+  return best === null ? null : { prompt: best.prompt, card: best };
+}
+
+const PHASE_RANK: Readonly<Record<CardPhase, number>> = { elsewhere: 0, sending: 1, answered: 2, open: 3 };
+
+/**
+ * The prompt `promptID` when `ref`'s set holds it and its card is `open`, or null: the one prompt
+ * an answer may go to now.
+ */
+export function openPrompt(s: PromptsState, ref: PhoneSessionRef, promptID: string): PhonePrompt | null {
+  const prompt = (own(s.bySession, refKey(ref)) ?? []).find((p) => p.id === promptID);
+  const card = own(s.cards, promptID);
+  if (prompt === undefined || card === undefined || card.phase !== 'open' || !sameRef(card.session, ref)) return null;
+  return prompt;
+}
+
+/**
+ * Whether `answer` fits `prompt` (the checks of 4b's `PromptAnswer.validate`), so a stale card
+ * never sends an answer of the wrong shape:
+ * - its kind is the prompt's;
+ * - a question answer has a value, not blank once trimmed, under exactly the prompt's question
+ *   texts, and the prompt has at least one question;
+ * - a permission answer's decision is one of the three, `allow_always` only when the prompt
+ *   offers it (`allowAlways`), and only a deny carries a message, never a blank one.
+ */
+export function answerFits(prompt: PhonePrompt, answer: PromptAnswer): boolean {
+  if (answer.kind !== prompt.kind) return false;
+  if (answer.kind === 'permission') {
+    if (!Object.hasOwn(PERMISSION_SUMMARIES, answer.decision)) return false;
+    if (answer.decision === 'allow_always' && !prompt.allowAlways) return false;
+    return answer.message === undefined || (answer.decision === 'deny' && trimLikeLaptop(answer.message) !== '');
+  }
+  const texts = new Set((prompt.questions ?? []).map((q) => q.text));
+  const keys = Object.keys(answer.answers);
+  if (texts.size === 0 || keys.length !== texts.size) return false;
+  return keys.every((k) => texts.has(k) && trimLikeLaptop(answer.answers[k]!) !== '');
+}
+
+/**
+ * `s` with `promptID`'s card turned `sending`, for this phone's answer, whose summary is
+ * `summary` and whose token is `answerID`. Only an `open` card turns; otherwise it returns `s`.
+ */
+export function beginAnswer(s: PromptsState, promptID: string, summary: string, answerID: string): PromptsState {
+  const card = own(s.cards, promptID);
+  if (card === undefined || card.phase !== 'open') return s;
+  return withCard(s, promptID, { ...card, phase: 'sending', refusal: null, summary, answerID, held: null });
+}
+
+/** How a `prompt.answer` ended: the laptop's outcome, or the error it failed with. */
+export type AnswerSettlement = { outcome: PromptAnswerOutcome } | { error: string; message: string };
+
+/**
+ * `s` with the reply to the answer whose token is `answerID` folded into `promptID`'s card, and
+ * the receipt due now, if any, for the transcript of `session`. Only a card still `sending` that
+ * answer changes, so a reply that comes after a laptop resolution, or after the card was taken
+ * down, changes nothing.
+ */
+export function settleAnswer(
+  s: PromptsState,
+  promptID: string,
+  answerID: string,
+  settled: AnswerSettlement,
+): { prompts: PromptsState; receipt: { session: PhoneSessionRef; id: string; text: string } | null } {
+  const card = own(s.cards, promptID);
+  if (card === undefined || card.phase !== 'sending' || card.answerID !== answerID) return { prompts: s, receipt: null };
+  const landed = 'outcome' in settled && settled.outcome !== 'already_resolved';
+  if (card.held !== null) {
+    const held = card.held;
+    const text = landed ? receiptText('thisPhone', card.summary) : receiptText(receiptSource(held, false), null);
+    const receipt = { session: card.session, id: promptID, text };
+    const after = landed
+      ? withoutCard(s, promptID)
+      : withCard(s, promptID, { ...card, phase: 'elsewhere', elsewhereBy: elsewhereBy(held), refusal: null, answerID: null, held: null });
+    return { prompts: forget(after, promptID), receipt };
+  }
+  if (landed) {
+    const answered = withCard(s, promptID, { ...card, phase: 'answered', answerID: null });
+    return { prompts: { ...answered, answeredHere: remember(answered.answeredHere, promptID, card.summary ?? '') }, receipt: null };
+  }
+  if ('outcome' in settled) {
+    return { prompts: withCard(s, promptID, { ...card, phase: 'elsewhere', elsewhereBy: null, summary: null, answerID: null }), receipt: null };
+  }
+  const refusal = settled.error === 'superseded' ? null : settled.message;
+  return { prompts: withCard(s, promptID, { ...card, phase: 'open', refusal, summary: null, answerID: null }), receipt: null };
+}
+
+/** `s` with `promptID`'s `open` card showing `refusal`, or `s` itself when it has no `open` card. */
+export function refuseAnswer(s: PromptsState, promptID: string, refusal: string): PromptsState {
+  const card = own(s.cards, promptID);
+  if (card === undefined || card.phase !== 'open' || card.refusal === refusal) return s;
+  return withCard(s, promptID, { ...card, refusal });
+}
+
+/**
+ * `s` without `promptID`'s card. A `sending` card stays, since its reply still has to say who
+ * answered; so does `s` when there is no such card.
+ */
+export function dismissCard(s: PromptsState, promptID: string): PromptsState {
+  const card = own(s.cards, promptID);
+  if (card === undefined || card.phase === 'sending') return s;
+  return withoutCard(s, promptID);
+}
+
+function openCard(session: PhoneSessionRef, prompt: PhonePrompt): CardState {
+  return { phase: 'open', refusal: null, summary: null, elsewhereBy: null, session, prompt, answerID: null, held: null };
+}
+
+function elsewhereBy(r: PhonePromptResolution): 'laptop' | 'phone' | null {
+  return r.answeredBy === 'unknown' ? null : r.answeredBy;
+}
+
+function withCard(s: PromptsState, id: string, card: CardState): PromptsState {
+  return { ...s, cards: withKey(s.cards, id, card) };
+}
+
+function withoutCard(s: PromptsState, id: string): PromptsState {
+  const cards = withoutKey(s.cards, id);
+  return cards === s.cards ? s : { ...s, cards };
+}
+
+/** `s` without `id`'s `answeredHere` entry. */
+function forget(s: PromptsState, id: string): PromptsState {
+  const answeredHere = withoutKey(s.answeredHere, id);
+  return answeredHere === s.answeredHere ? s : { ...s, answeredHere };
+}
+
+/** `r` with `id` recorded last as `summary`, and only the newest `ANSWERED_HERE_LIMIT` entries kept. */
+function remember(r: Readonly<Record<string, string>>, id: string, summary: string): Record<string, string> {
+  const next = copy(r);
+  delete next[id];
+  next[id] = summary;
+  const keys = Object.keys(next);
+  for (let i = 0; i < keys.length - ANSWERED_HERE_LIMIT; i++) delete next[keys[i]!];
+  return next;
+}
+
+/** Two prompt sets that hold the same prompts, field for field, in the same order. */
+function samePrompts(a: readonly PhonePrompt[], b: readonly PhonePrompt[]): boolean {
+  return a.length === b.length && a.every((p, i) => samePrompt(p, b[i]!));
+}
+
+/**
+ * Two prompts with the same fields. Both are decoded from the laptop's JSON, which writes a
+ * prompt's fields in one order, so their encodings match when their fields do.
+ */
+function samePrompt(a: PhonePrompt, b: PhonePrompt): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * A record copied the first time it is changed, so the one it started from stays as it was and
+ * `changed` says whether it was.
+ */
+function editable<V>(base: Readonly<Record<string, V>>) {
+  let value: Record<string, V> = base as Record<string, V>;
+  let changed = false;
+  const writable = (): Record<string, V> => {
+    if (!changed) {
+      value = copy(base);
+      changed = true;
+    }
+    return value;
+  };
+  return {
+    get value(): Readonly<Record<string, V>> { return value; },
+    get changed(): boolean { return changed; },
+    set(key: string, v: V): void { writable()[key] = v; },
+    delete(key: string): void { if (Object.hasOwn(value, key)) delete writable()[key]; },
+  };
 }
 
 // MARK: - Drafts
