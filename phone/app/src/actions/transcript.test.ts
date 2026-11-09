@@ -380,13 +380,56 @@ test('opening a session with no transcript closes the transcript open before it'
   assert.deepEqual(ids(h.t()), []);
 });
 
-test('a transcript that turned unavailable is closed at the next channel up, not resumed', async () => {
+test('a transcript whose session turns unavailable while it shows closes at once, takes no more events, and opens again once it turns available', async () => {
   const h = await showing();
   h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  assert.equal(h.count('transcript.close'), 1);
+  assert.deepEqual(h.last('transcript.close').params, {});
+  assert.equal(h.t().ref, null);
+  assert.equal(h.t().phase, 'idle');
+  assert.deepEqual(ids(h.t()), []);
+  h.actions.onEvent(appended([item('u3')]));
+  assert.deepEqual(ids(h.t()), []);
+  // The list again, its transcript still unavailable: nothing more goes out.
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  assert.equal(h.count('transcript.close'), 1);
+  assert.equal(h.count('transcript.open'), 1);
+
+  h.actions.onEvent(transcriptTurned('W1', R, CAN));
+  assert.equal(h.count('transcript.open'), 2);
+  assert.deepEqual(h.last('transcript.open').params, { session: R, showDetails: false, resume: false });
+  assert.equal(h.t().phase, 'opening');
+});
+
+test('a transcript still opening when its session turns unavailable closes, and its reply changes nothing', async () => {
+  const h = harness();
+  h.actions.openSession(R);
+  const opening = h.last('transcript.open');
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  assert.equal(h.count('transcript.close'), 1);
+  assert.equal(h.t().ref, null);
+  opening.resolve({ resumed: false, seq: 10, page: page([item('u1')]) });
+  await flush();
+  assert.equal(h.t().ref, null);
+  assert.deepEqual(ids(h.t()), []);
+});
+
+test('a transcript that turned unavailable is not resumed at the next channel up', async () => {
+  const h = await showing();
+  h.actions.onEvent(transcriptTurned('W1', R, NO_TRANSCRIPT));
+  h.last('transcript.close').resolve({});
+  await flush();
   reconnect(h);
   assert.equal(h.count('transcript.open'), 1);
   assert.equal(h.count('transcript.close'), 1);
   assert.equal(h.t().ref, null);
+});
+
+test('a list that changes another session leaves the open transcript alone', async () => {
+  const h = await showing();
+  h.actions.onEvent(transcriptTurned('W2', OTHER, NO_TRANSCRIPT));
+  assert.equal(h.count('transcript.close'), 0);
+  assert.deepEqual(ids(h.t()), ['u1', 'u2']);
 });
 
 test('a session with no transcript opens once the list shows its transcript available, while it shows', () => {

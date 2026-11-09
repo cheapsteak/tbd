@@ -34,10 +34,12 @@
  * its transcript unavailable (`capabilities.transcript`), as a Codex session's is: not when it is
  * opened, not when "Show details" changes, and not at a channel up. The laptop would refuse it.
  * Held back, it closes any transcript the slice holds, since a refused open leaves the laptop
- * sending the one it opened before. It opens once the list shows its transcript available while
- * the route still shows it, as a remote session's can turn when its provider describes itself
- * late (`openHeldBack`). A session the list does not show opens as before, since only the laptop
- * can answer for it.
+ * sending the one it opened before. A transcript whose session the list comes to show with its
+ * transcript unavailable, while it is open or opening, closes too, and is held back the same way
+ * (`closeUnavailable`), so the slice does not go on taking its events under the view's note. It
+ * opens once the list shows its transcript available while the route still shows it, as a remote
+ * session's can turn when its provider describes itself late (`openHeldBack`). A session the
+ * list does not show opens as before, since only the laptop can answer for it.
  *
  * Every action resolves and never rejects (`actions/index.ts`); `superseded` is silent.
  */
@@ -136,6 +138,25 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
     if (s.sessions === heldBack.sessions) return;
     heldBack = { ref: heldBack.ref, sessions: s.sessions };
     if (findSession(s.sessions, heldBack.ref)?.session.capabilities.transcript.available === true) open(heldBack.ref, s.ui.showDetails, false);
+  }
+
+  /** The sessions list `closeUnavailable` last looked at. */
+  let checkedSessions = store.get().sessions;
+
+  /**
+   * Closes the transcript the slice holds, and holds its open back (`heldBack`), once the list
+   * shows its session with the transcript unavailable, so `openHeldBack` opens it again when the
+   * list shows it available. It looks only when the list changed and a transcript is held, so
+   * any other change costs it a comparison.
+   */
+  function closeUnavailable(): void {
+    const { sessions, transcript } = store.get();
+    if (sessions === checkedSessions) return;
+    checkedSessions = sessions;
+    const { ref } = transcript;
+    if (ref === null || !unavailable(sessions, ref)) return;
+    heldBack = { ref, sessions };
+    close();
   }
 
   /**
@@ -360,6 +381,7 @@ export function transcriptActions(ctx: ActionContext, self: () => Actions) {
   let looked = store.get().transcript;
   store.subscribe(() => {
     openHeldBack();
+    closeUnavailable();
     const t = store.get().transcript;
     if (t === looked) return;
     looked = t;

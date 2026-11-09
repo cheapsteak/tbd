@@ -136,6 +136,33 @@ test('a session with no transcript shows the laptop’s reason, and never asks f
   expect(asked.map((r) => [r.method, r.params])).toEqual([['transcript.open', { session: LOGIN_REF, showDetails: true, resume: false }]]);
 });
 
+test('a transcript whose session turns unavailable closes and shows the laptop’s reason, and opens again once it turns available', async ({ page, appHost }) => {
+  const reason = 'This session has no transcript to show.';
+  const row = MOCK.rows.find((/** @type {any} */ r) => r.name === 'Login redirect fix');
+  /** @param {object} transcript */
+  const turned = (transcript) => hostCall(page, 'emit', 'sessions.changed', {
+    rows: [{
+      ...row,
+      sessions: row.sessions.map((/** @type {any} */ s) => (s.ref.terminalID === LOGIN_REF.terminalID ? { ...s, capabilities: { ...s.capabilities, transcript } } : s)),
+    }],
+    removedRowIDs: [],
+  });
+  const openOrClose = async () => (await hostRequests(page)).filter((r) => r.method === 'transcript.open' || r.method === 'transcript.close').map((r) => r.method);
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Fixed. Here is what changed:' })).toBeVisible();
+
+  await turned({ available: false, reason });
+  await expect(app(page).locator('.codex-note b')).toHaveText(reason);
+  await expect.poll(openOrClose).toEqual(['transcript.open', 'transcript.close']);
+
+  await turned({ available: true });
+  await expect(tx.locator('.say', { hasText: 'Fixed. Here is what changed:' })).toBeVisible();
+  await expect(app(page).locator('.codex-note')).toHaveCount(0);
+  expect(await openOrClose()).toEqual(['transcript.open', 'transcript.close', 'transcript.open']);
+});
+
 // --- details --------------------------------------------------------------------------------
 
 /**
