@@ -85,10 +85,17 @@ final class DrawableTracker: Sendable {
 
     /// The count a full pool reports: `TerminalRenderer.maxDrawablesAwaitingPresent`.
     let limit: Int
+    /// The diagnostic for the bulk-output frame cap: how late this view's reports come, and what
+    /// each dropped tick found. It reads the tracker and changes nothing.
+    let presentTiming: PresentTimingLog
     private let state = Mutex(State())
 
-    init(limit: Int = TerminalRenderer.maxDrawablesAwaitingPresent) {
+    init(
+        limit: Int = TerminalRenderer.maxDrawablesAwaitingPresent,
+        presentTiming: PresentTimingLog = PresentTimingLog()
+    ) {
         self.limit = limit
+        self.presentTiming = presentTiming
     }
 
     // MARK: - The frame's side (main)
@@ -191,6 +198,23 @@ final class DrawableTracker: Sendable {
             guard state.reports == reportsBefore else { return }
             state.hold = .awaitingFirstCheck
         }
+    }
+
+    /// A display tick due at `now` dropped its frame for the GPU: hands `presentTiming` the age of
+    /// each entry, and how long ago the newest reported drawable reached the screen. Reads the
+    /// state and changes none of it, so it runs no recovery, as `entryCount` does not.
+    ///
+    /// - Parameters:
+    ///   - ringHasFreeSlot: whether the surface's ring had a slot free.
+    ///   - awaitingPresent: what `awaitingPresent(now:)` reported to the tick.
+    func noteGPUBehind(now: Duration, ringHasFreeSlot: Bool, awaitingPresent: Int) {
+        let sample = state.withLock { state in
+            GPUBehindSample(
+                ringHasFreeSlot: ringHasFreeSlot, awaitingPresent: awaitingPresent,
+                entryAges: state.entries.map { now - $0.acquiredAt },
+                sinceLastPresent: state.lastReportAt.map { now - $0 })
+        }
+        presentTiming.noteGPUBehind(sample)
     }
 
     // MARK: - Metal's side (any thread)

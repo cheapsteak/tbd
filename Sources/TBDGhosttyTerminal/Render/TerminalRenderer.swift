@@ -281,10 +281,20 @@ final class TerminalRenderer {
                 }
                 self?.stats.drawablesAcquired += 1
                 let id = tracker.add(acquiredAt: now)
+                // The diagnostic for the bulk-output frame cap times the present from here, in
+                // host time, rather than from the frame's `now`: a tick's `now` is its vsync,
+                // which comes before the frame is built.
+                let timing = tracker.presentTiming
+                let acquiredAt = timing.hostNow()
                 // Always installed: the tracker needs every report, whether or not the view
                 // wants to hear of them.
                 drawable.addPresentedHandler { presented in
-                    tracker.reportPresented(id, presentedTime: presented.presentedTime)
+                    let reportedAt = timing.hostNow()
+                    let presentedTime = presented.presentedTime
+                    tracker.reportPresented(id, presentedTime: presentedTime)
+                    timing.notePresented(
+                        acquiredAt: acquiredAt, reportedAt: reportedAt,
+                        presentedTime: presentedTime, onMainThread: Thread.isMainThread)
                     onPresented?()
                 }
                 acquired = drawable

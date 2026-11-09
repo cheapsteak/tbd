@@ -1170,6 +1170,67 @@ struct GhosttyTerminalViewBackpressureTests {
         #expect(committed == 2, "after the report the view committed \(committed) frames in all, not 2")
     }
 
+    /// A tick dropped at either GPU limit hands the diagnostic for the bulk-output frame cap what
+    /// it found: whether the ring was full, and the age of each unreported drawable by the tick's
+    /// `now`. A tick that draws hands it nothing.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: GPULimit.allCases)
+    func aDroppedTickHandsThePresentTimingLogWhatItFound(_ limit: GPULimit) throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        try placeWithAFirstFrame(fixture, in: window)
+
+        let tracker = view.drawableTracker
+        let timing = tracker.presentTiming
+        var held: HeldRingSlots?
+        defer { held?.releaseAll() }
+        var newer: DrawableTracker.DrawableID?
+        let expectedAges: [String]
+        switch limit {
+        case .ringFull:
+            let slots = HeldRingSlots(on: view.surface)
+            held = slots
+            try #require(slots.held == FrameRing.depth, "only \(slots.held) of the ring's slots could be taken")
+            expectedAges = []
+        case .drawablesBehind:
+            // Younger than `presentReportTimeout`, so the tracker clears neither.
+            _ = tracker.add(acquiredAt: .seconds(100.25))
+            newer = tracker.add(acquiredAt: .seconds(100.5))
+            expectedAges = ["750.000", "500.000"]
+        }
+        fixture.terminal.feed(text: "behind the GPU")
+        view.requestFrame()
+        let notedBefore = timing.gpuBehindNoted
+
+        view.renderTick(now: .seconds(101))
+        let noted = timing.gpuBehindNoted - notedBefore
+        try #require(noted == 1, "a tick dropped at the \(limit) limit was noted \(noted) times")
+        let found = try #require(timing.lastGPUBehind, "a tick dropped at the \(limit) limit left no sample")
+        let ringFree = found.ringHasFreeSlot
+        let expectedRingFree = limit != .ringFull
+        #expect(ringFree == expectedRingFree, "a tick dropped at the \(limit) limit read the ring free: \(ringFree)")
+        let ages = found.entryAges.map(PresentTimingLog.milliseconds)
+        #expect(ages == expectedAges, "a tick dropped at the \(limit) limit read the ages \(ages)")
+
+        switch limit {
+        case .ringFull:
+            held?.releaseOne()
+        case .drawablesBehind:
+            if let newer { tracker.reportPresented(newer, presentedTime: 101) }
+        }
+        let notedBeforeDraw = timing.gpuBehindNoted
+        view.renderTick(now: .seconds(101.25))
+        let committed = view.framesCommitted
+        try #require(committed == 2,
+                     "once the \(limit) limit cleared the view committed \(committed) frames in all, not 2")
+        let notedByDraw = timing.gpuBehindNoted - notedBeforeDraw
+        #expect(notedByDraw == 0, "a tick that drew was noted as dropped \(notedByDraw) times")
+    }
+
     /// Two drawables unreported for `presentReportTimeout`: the tracker clears them, and the tick
     /// makes the one bounded drawable request. The seam returns nil, as a full pool would after a
     /// second's wait: `nilDrawables` rises by one, nothing commits, and `needsUpdate` stays set.
