@@ -116,5 +116,47 @@ test('an honest nest draws every item, with markdown for messages only', () => {
 });
 
 test('an empty nest draws nothing and leaves nothing out', () => {
-  assert.deepEqual(planNest([]), { rows: [], cut: false });
+  const plan = planNest([]);
+  assert.deepEqual(plan.rows, []);
+  assert.equal(plan.cut, false);
+});
+
+/** `all` in chunks of `size` as a detail adds them, each chunk's items a new array that begins with the last. */
+function arrivals(all: readonly PhoneItem[], size: number): PhoneItem[][] {
+  const out: PhoneItem[][] = [];
+  for (let end = size; end < all.length + size; end += size) out.push(all.slice(0, end));
+  return out;
+}
+
+/** A plan's rows as what they draw: each item, its tree and its row. */
+function drawing(plan: NestPlan): unknown {
+  return { cut: plan.cut, rows: plan.rows.map((r) => [r.item, r.tree, r.row]) };
+}
+
+test('a plan that goes on as items arrive is the plan made afresh, and keeps the rows it planned', () => {
+  const honest: PhoneItem[] = Array.from({ length: 300 }, (_, i) => (i % 3 === 2
+    ? { id: `t${i}`, kind: 'tool', truncated: false, toolName: 'Read', target: `src/${i}.ts`, toolStatus: 'ok' }
+    : { id: `m${i}`, kind: i % 3 === 0 ? 'assistant' : 'user', text: `Item **${i}** reads [src](https://acme.example/${i}).`, truncated: false }));
+  // Hostile texts that read past the nest's markdown, and that pass its nodes partway through a chunk.
+  const hostile = HOSTILE.filter(([name]) => name === 'stars and dots' || name === 'short lines, a preview long');
+  const cases: Array<[string, PhoneItem[]]> = [['honest', honest], ...hostile.map(([name, text]): [string, PhoneItem[]] => [name, items('user', text, 100)])];
+  for (const [name, all] of cases) {
+    let plan: NestPlan | null = null;
+    for (const now of arrivals(all, 15)) {
+      const before: NestPlan | null = plan;
+      plan = planNest(now, before);
+      assert.deepEqual(drawing(plan), drawing(planNest(now)), `${name}, ${now.length} items`);
+      if (before === null) continue;
+      // The rows planned before are the same objects, so the nested rows they draw draw nothing again.
+      before.rows.forEach((r, i) => assert.equal(plan!.rows[i], r, `${name}, row ${i}`));
+      if (before.cut) assert.equal(plan, before, `${name}: a plan that left items out stays as it is`);
+    }
+  }
+  // Other items, or the same ones as other objects, are planned afresh.
+  const first = planNest(honest.slice(0, 9));
+  const other = planNest(honest.slice(0, 9).map((item) => ({ ...item })), first);
+  assert.notEqual(other.rows[0], first.rows[0]);
+  assert.deepEqual(drawing(other), drawing(first));
+  const shorter = planNest(honest.slice(0, 3), first);
+  assert.deepEqual(drawing(shorter), drawing(planNest(honest.slice(0, 3))));
 });

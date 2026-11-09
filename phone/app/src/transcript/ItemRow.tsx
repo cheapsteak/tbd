@@ -35,8 +35,9 @@
  *   app.css is not this file's, so it starts a line there too.
  * - A subagent row draws its items in `.nest`, each through this component as a nested row,
  *   under one budget for the whole nest (`nest.ts`): items past it are not drawn, and the row
- *   shows "Too large for the phone. Open on the laptop." under the nest. It collapses as a tool
- *   row does.
+ *   shows "Too large for the phone. Open on the laptop." under the nest. While the rest load,
+ *   the items that arrived show, and the loading line under them, as a tool row's box keeps its
+ *   Input while its Result loads. It collapses as a tool row does.
  *
  * **Nested rows draw, and never open.** A nested row has no row key, so it has no record in
  * `details`, and the laptop could not serve one anyway: it finds a detail by looking the item ID
@@ -47,7 +48,7 @@
  * row alone.
  */
 
-import { memo, useMemo, type CSSProperties, type JSX, type ReactNode } from 'react';
+import { memo, useMemo, useRef, type CSSProperties, type JSX, type ReactNode } from 'react';
 import type { MdNode } from '../markdown/mdTree.ts';
 import type { PhoneItem } from '../protocol/types.ts';
 import { firstLines } from '../state/detail.ts';
@@ -57,7 +58,7 @@ import { toolGlyph } from '../state/status.ts';
 import { Markdown } from '../markdown/Markdown.tsx';
 import { Dots, Icon } from '../ui/Icon.tsx';
 import { DetailPane } from './DetailPane.tsx';
-import { planNest } from './nest.ts';
+import { planNest, type NestPlan } from './nest.ts';
 
 /** The part each kind of row opens with a tap: a tool's input (then its result), the rest of a message, or a subagent's items. */
 export type RowPart = 'input' | 'text' | 'subagent';
@@ -173,7 +174,7 @@ export const ItemRow = memo(function ItemRow(p: ItemRowProps): JSX.Element | nul
       return (
         <>
           {toolLine(label, expanded, toggle === null ? null : () => toggle('subagent'))}
-          {detail !== null && (detail.phase === 'loading' ? <DetailPane detail={detail} parts={false} /> : <Nest detail={detail} />)}
+          {detail !== null && <Nest detail={detail} />}
         </>
       );
     }
@@ -236,20 +237,22 @@ function toolMark(status: string | undefined, name: string): JSX.Element | null 
 }
 
 /**
- * A subagent's items in `.nest`, as `planNest` plans them, then the detail's box: the
- * too-large line when the laptop's detail or the nest's budget left items out, or the laptop's
- * message. Each nested row is an `ItemRow` with no `toggle`, so it never opens and never nests.
- * The plan is read again only when the items change.
+ * A subagent's items in `.nest`, as `planNest` plans them, then the detail's box: the loading
+ * line while more items load, the too-large line when the laptop's detail or the nest's budget
+ * left items out, or the laptop's message. Each nested row is an `ItemRow` with no `toggle`, so
+ * it never opens and never nests. The plan is read again only when the items change, and goes
+ * on from the last one as more items arrive, so the rows already drawn are not drawn again.
  */
 const Nest = memo(function Nest(p: { detail: DetailState }): JSX.Element {
   const { items } = p.detail;
-  const plan = useMemo(() => planNest(items), [items]);
+  const last = useRef<NestPlan | null>(null);
+  const plan = useMemo(() => (last.current = planNest(items, last.current)), [items]);
   return (
     <>
       {plan.rows.length > 0 && (
         <div className="nest">
           {plan.rows.map((r, i) => (
-            <ItemRow key={i} row={{ key: i, kind: 'item', item: r.item }} detail={undefined} toggle={null} tree={r.tree} />
+            <ItemRow key={i} row={r.row} detail={undefined} toggle={null} tree={r.tree} />
           ))}
         </div>
       )}

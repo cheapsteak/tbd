@@ -228,6 +228,34 @@ test('a subagent row opens to its items, which draw but do not open', async ({ p
   expect(await detailRequests(page)).toEqual([['login-3', 'subagent', 0]]);
 });
 
+test('a subagent row shows the items that arrived while the rest load, with the loading line after them', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  // Two chunks of one item each; the second chunk's reply is held.
+  await page.evaluate(() => {
+    const host = /** @type {any} */ (window).__host;
+    host.setReply('transcript.detail', (/** @type {any} */ params) => {
+      if (params.chunk === 1) host.hold('transcript.detail');
+      const items = [{ id: `n${params.chunk}`, kind: 'assistant', text: `Chunk ${params.chunk} found it.`, truncated: false }];
+      return { result: { itemID: params.itemID, part: params.part, chunk: params.chunk, chunkCount: 2, totalBytes: 0, tooLarge: false, items } };
+    });
+  });
+  const tx = app(page).locator('.tx');
+  const agent = tx.locator('button.tool', { hasText: 'Explore agent' });
+  const key = await agent.evaluate((el) => el.closest('[data-tx-row]')?.getAttribute('data-key'));
+  const row = tx.locator(`[data-tx-row][data-key="${key}"]`);
+  await agent.click();
+  await expect.poll(() => detailRequests(page)).toEqual([['login-3', 'subagent', 0], ['login-3', 'subagent', 1]]);
+  await expect(row.locator('.nest .say')).toHaveText(['Chunk 0 found it.']);
+  await expect(row.locator('.detail .loading')).toHaveText('Loading from the laptop…');
+  expect(await row.locator('.nest, .detail').evaluateAll((els) => els.map((el) => el.className))).toEqual(['nest', 'detail']);
+
+  await hostCall(page, 'release', 'transcript.detail');
+  await expect(row.locator('.nest .say')).toHaveText(['Chunk 0 found it.', 'Chunk 1 found it.']);
+  await expect(row.locator('.detail')).toHaveCount(0);
+  await expect(agent).toHaveAttribute('aria-expanded', 'true');
+});
+
 test('Show more shows the whole message', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openSessionByName(page, 'Login redirect fix');
