@@ -444,9 +444,8 @@ final class GhosttyEngine: TerminalEngine {
 
     /// Metal's present, from the drawable's presented handler hopped to main;
     /// see `TerminalEngine.onFramePresented` for how that differs from
-    /// SwiftTerm's. Installed on the view only while set: the view registers
-    /// a presented handler on every drawable it presents while its own hook is
-    /// set.
+    /// SwiftTerm's. Installed on the view only while set: the view hops each
+    /// present to main only while its own hook is set.
     var onFramePresented: (@MainActor () -> Void)? {
         didSet {
             if onFramePresented == nil {
