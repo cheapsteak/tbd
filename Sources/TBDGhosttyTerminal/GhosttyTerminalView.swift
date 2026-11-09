@@ -565,8 +565,9 @@ public final class GhosttyTerminalView: NSView {
         let relay = RenderSignalRelay { target.object?.renderSignalled() }
         self.relay = relay
         renderSignalToken = terminal.setRenderSignal { [weak relay] in relay?.signal() }
-        // While detached the view took no frames, so the watchdog's record of when mode 2026
-        // was first seen is stale. Kept, it would force off a mode the program set just now.
+        // While detached the view took no frames, so the watchdog's record of when a hold was
+        // first seen is stale. Kept, it would force off a hold the program began just now. The
+        // call also sets the hold from one read of mode 2026.
         terminal.resetSyncOutputWatchdog()
         frameDriver.update {
             $0.hasVisibleSurface = true
@@ -907,7 +908,7 @@ public final class GhosttyTerminalView: NSView {
             // Nothing can be drawn, so there is no DEC 2026 deadline to wait out either. A kept
             // deadline would hold the link running: a terminal closed right after a skipped frame
             // would tick at 120 Hz for good. Every way back to drawable asks for a frame, and that
-            // tick reads the mode afresh.
+            // tick reads the hold afresh.
             frameDriver.update {
                 $0.needsUpdate = false
                 $0.hasSyncDeadline = false

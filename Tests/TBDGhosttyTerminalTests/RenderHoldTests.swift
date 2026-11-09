@@ -186,9 +186,27 @@ struct RenderHoldTests {
         #expect(reports.count == 1, "one force-off was reported \(reports.count) times")
     }
 
-    /// A program that ends one hold and starts the next between every two ticks never shows a
-    /// tick an open-free moment. The watchdog times the run of ticks that saw a hold, so it still
-    /// forces the mode off after a second; a restart per hold would hide every frame for good.
+    /// A program forced off still sends `?2026h` with its next frame. The force-off cleared the
+    /// mode bit, and libghostty's begin edge compares against that bit, so the set opens a new
+    /// hold and the next tick hides the half-drawn frame again.
+    @Test func aSetAfterAForceOffOpensANewHold() throws {
+        let terminal = try Self.makeTerminal()
+        defer { terminal.close() }
+        terminal.feed(text: Self.begin)
+        _ = terminal.syncOutputDecision(now: .seconds(100)) { _ in }
+        let forced = terminal.syncOutputDecision(now: .seconds(101)) { _ in }
+        try #require(forced == .forceOffAndRender, "the hold was not forced off: \(forced)")
+
+        terminal.feed(text: Self.begin + "next frame")
+        let hold = terminal.renderHold
+        let next = terminal.syncOutputDecision(now: .seconds(101.01)) { _ in }
+        #expect(hold == Self.holding, "a set after the force-off left the hold reading \(hold)")
+        #expect(next == .skipFrame, "the tick after a new set answered \(next)")
+    }
+
+    /// A program that ends one hold and starts the next between every two ticks never lets a tick
+    /// see the screen free of a hold. The watchdog times the run of ticks that saw a hold, so it
+    /// still forces the mode off after a second; a restart per hold would hide every frame for good.
     @Test func backToBackHoldsSpanningEveryTickAreForcedOffAfterOneSecond() throws {
         let terminal = try Self.makeTerminal()
         defer { terminal.close() }

@@ -67,7 +67,8 @@ struct SyncOutputWatchdog: Sendable, Equatable {
     struct ForceOff: Sendable, Equatable {
         /// From the first tick that saw the hold to the tick that forced it off.
         var heldFor: Duration
-        /// The ticks in that run that skipped their frame. The tick that forces off renders.
+        /// The ticks in that run that skipped their frame. The tick that forces off renders. The
+        /// watchdog is the terminal's, so two views ticking over one terminal both count here.
         var skippedTicks: Int
 
         var notice: String {
