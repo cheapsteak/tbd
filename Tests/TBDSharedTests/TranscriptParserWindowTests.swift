@@ -372,6 +372,133 @@ struct TranscriptParserWindowTests {
         #expect(w.subagentAgentIDs == ["toolu_agent": "a0123456789abcdef"])
     }
 
+    // MARK: - local command outputs
+
+    @Test func aLocalCommandsOutputIsReadFromEachShape() throws {
+        let userString = try WindowLine.decoded(WindowLine.commandOutput(
+            "o1", parent: "c1", content: "<local-command-stdout>Set model to opus</local-command-stdout>"))
+        var userBlocks = WindowLine.commandOutput("o2", parent: "c2", content: "")
+        let blocks: [[String: Any]] = [
+            ["type": "text", "text": "<local-command-stderr>Unknown skill: acme</local-command-stderr>"],
+        ]
+        userBlocks["message"] = ["role": "user", "content": blocks] as [String: Any]
+        let system: [String: Any] = [
+            "type": "system", "subtype": "local_command", "uuid": "o3", "parentUuid": "c3", "level": "info",
+            "content": "<local-command-stdout>\u{1B}[2mCompacted\u{1B}[22m\n</local-command-stdout>",
+        ]
+
+        let fromString = try #require(TranscriptParser.localCommandOutput(fromLine: userString))
+        let fromBlocks = try #require(TranscriptParser.localCommandOutput(fromLine: try WindowLine.decoded(userBlocks)))
+        let fromSystem = try #require(TranscriptParser.localCommandOutput(fromLine: try WindowLine.decoded(system)))
+
+        #expect(fromString.commandLineID == "c1")
+        #expect(fromString.output == "Set model to opus")
+        #expect(fromBlocks.commandLineID == "c2")
+        #expect(fromBlocks.output == "Unknown skill: acme")
+        #expect(fromSystem.commandLineID == "c3")
+        #expect(fromSystem.output == "Compacted")
+    }
+
+    @Test func everyStreamOnALineJoinsInOrder() throws {
+        let both = try WindowLine.decoded(WindowLine.commandOutput(
+            "o1", parent: "c1",
+            content: "<local-command-stdout>wrote 2 files</local-command-stdout>"
+                + "<local-command-stderr>1 warning</local-command-stderr>"))
+        let unclosed = try WindowLine.decoded(WindowLine.commandOutput(
+            "o2", parent: "c2", content: "<local-command-stdout>still writing"))
+
+        let joined = try #require(TranscriptParser.localCommandOutput(fromLine: both))
+        let open = try #require(TranscriptParser.localCommandOutput(fromLine: unclosed))
+
+        #expect(joined.output == "wrote 2 files\n1 warning")
+        #expect(open.output == "still writing")
+    }
+
+    @Test func aTagThatIsNeitherStreamIsSkippedAndTheReadGoesOn() throws {
+        let line = try WindowLine.decoded(WindowLine.commandOutput(
+            "o1", parent: "c1",
+            content: "<local-command-stdout>a</local-command-stdout><local-command-caveat>x</local-command-caveat>"
+                + "<local-command-<local-command-stderr>b</local-command-stderr>"))
+
+        let output = try #require(TranscriptParser.localCommandOutput(fromLine: line))
+
+        #expect(output.output == "a\nb")
+    }
+
+    @Test func aLineOfManyTagsOfOneStreamReadsEveryOne() throws {
+        let count = 2_000
+        let content = String(repeating: "<local-command-stdout>a</local-command-stdout>", count: count)
+        let line = try WindowLine.decoded(WindowLine.commandOutput("o1", parent: "c1", content: content))
+
+        let output = try #require(TranscriptParser.localCommandOutput(fromLine: line))
+
+        #expect(output.output == Array(repeating: "a", count: count).joined(separator: "\n"))
+    }
+
+    @Test func anItemsLineIDIsItsIDBeforeItsFirstHash() {
+        #expect(TranscriptParser.lineID(ofItem: "a1#0") == "a1")
+        #expect(TranscriptParser.lineID(ofItem: "at-120#3") == "at-120")
+        #expect(TranscriptParser.lineID(ofItem: "u1#2#3") == "u1")
+        #expect(TranscriptParser.lineID(ofItem: "u1") == "u1")
+        #expect(TranscriptParser.lineID(ofItem: "") == "")
+    }
+
+    @Test func aLineThatIsNotACommandsOutputHasNone() throws {
+        let caveat = WindowLine.commandOutput(
+            "o1", parent: "c1", content: "<local-command-caveat>Caveat: the messages below</local-command-caveat>")
+        let empty = WindowLine.commandOutput("o2", parent: "c2", content: "<local-command-stdout></local-command-stdout>")
+        let blank = WindowLine.commandOutput("o3", parent: "c3", content: "<local-command-stdout> \n </local-command-stdout>")
+        var orphan = WindowLine.commandOutput("o4", parent: "c4", content: "<local-command-stdout>hi</local-command-stdout>")
+        orphan.removeValue(forKey: "parentUuid")
+        let otherSystem: [String: Any] = [
+            "type": "system", "subtype": "informational", "uuid": "o5", "parentUuid": "c5",
+            "content": "<local-command-stdout>hi</local-command-stdout>",
+        ]
+        var assistant = WindowLine.assistantText("a1", "<local-command-stdout>hi</local-command-stdout>")
+        assistant["parentUuid"] = "c6"
+
+        let lines = [caveat, empty, blank, orphan, otherSystem, assistant]
+        for (index, line) in lines.enumerated() {
+            let output = TranscriptParser.localCommandOutput(fromLine: try WindowLine.decoded(line))?.output
+            #expect(output == nil, "line \(index)")
+        }
+    }
+
+    // MARK: - API errors
+
+    @Test func anAPIErrorLineNamesItsClass() throws {
+        let rateLimit = WindowLine.apiError("e1", error: "rate_limit")
+        let unnamed = WindowLine.apiError("e2", error: nil)
+        var unmarked = WindowLine.apiError("e3", error: "server_error")
+        unmarked["isApiErrorMessage"] = false
+        var onAUserLine = WindowLine.prompt("m1", "placeholder prompt")
+        onAUserLine["isApiErrorMessage"] = true
+
+        #expect(TranscriptParser.apiErrorClass(fromLine: try WindowLine.decoded(rateLimit)) == "rate_limit")
+        #expect(TranscriptParser.apiErrorClass(fromLine: try WindowLine.decoded(unnamed)) == "unknown")
+        #expect(TranscriptParser.apiErrorClass(fromLine: try WindowLine.decoded(unmarked)) == nil)
+        #expect(TranscriptParser.apiErrorClass(fromLine: try WindowLine.decoded(onAUserLine)) == nil)
+    }
+
+    @Test func aWindowReportsOutputsAndAPIErrorsByLine() throws {
+        var positional = WindowLine.apiError("", error: nil)
+        positional.removeValue(forKey: "uuid")
+        let fixture = try WindowFixture([
+            WindowLine.prompt("m1", "placeholder prompt"),
+            WindowLine.prompt("c1", "<command-name>/model</command-name>\n<command-args>opus</command-args>"),
+            WindowLine.commandOutput("o1", parent: "c1", content: "<local-command-stdout>Set model to opus</local-command-stdout>"),
+            WindowLine.apiError("e1", error: "rate_limit"),
+            positional,
+        ])
+        defer { fixture.remove() }
+
+        let w = try #require(TranscriptParser.parseWindow(
+            filePath: fixture.path, endingBefore: nil, messageLimit: 4, itemLimit: 256))
+
+        #expect(w.localCommandOutputs == ["c1": "Set model to opus"])
+        #expect(w.apiErrors == ["e1": "rate_limit", "at-\(fixture.offsets[4])": "unknown"])
+    }
+
     // MARK: - detail lookup
 
     @Test func lookupFromAnOffsetFindsTheSameDetail() throws {
@@ -571,6 +698,23 @@ private enum WindowLine {
         let block: [String: Any] = ["type": "tool_result", "tool_use_id": toolUseID, "content": text]
         let message: [String: Any] = ["role": "user", "content": [block]]
         return ["type": "user", "uuid": uuid, "timestamp": timestamp, "message": message]
+    }
+
+    /// A user line with string `content` whose `parentUuid` is `parent`, the
+    /// shape of a local slash command's output.
+    static func commandOutput(_ uuid: String, parent: String, content: String) -> [String: Any] {
+        var line = prompt(uuid, content)
+        line["parentUuid"] = parent
+        return line
+    }
+
+    /// An API error, as Claude Code writes it: an assistant line marked
+    /// `isApiErrorMessage` with the error's class, when `error` is not nil.
+    static func apiError(_ uuid: String, error: String?) -> [String: Any] {
+        var line = assistantText(uuid, "API Error: placeholder")
+        line["isApiErrorMessage"] = true
+        if let error { line["error"] = error }
+        return line
     }
 
     /// Prompts `m1`…`m<messages>`, each followed by a tool row: a Bash call

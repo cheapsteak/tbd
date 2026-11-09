@@ -15,6 +15,9 @@
 // mock.json has no slash item and no running tool, and its fake laptop leaves out thinking and
 // system notes unless "Show details" is on, so the first test has those arrive through `emit`,
 // which the fake forwards as the laptop would. The Show details tests turn the switch on instead.
+// mock.json's rows carry the fields a newer laptop sends (a failed tool's exit code, a file
+// edit's path, a system note's kind, an API error); the rows that arrive through `emit` show both
+// those fields and their absence, as from an older laptop that sends none of them.
 // mock.json's details are all small, so a test that needs a large one loads a scenario object.
 //
 // Playwright has neither a wheel nor a swipe in mobile WebKit, so a test scrolls the transcript
@@ -55,11 +58,12 @@ test('each item kind draws as the mock draws it', async ({ page, appHost }) => {
   await expect(ok.locator('b')).toHaveText('Bash');
   await expect(ok.locator('.okm')).toHaveCount(1);
   await expect(tx.locator('button.tool', { hasText: 'src/checkout/CheckoutForm.tsx' }).locator('.okm')).toHaveCount(0);
-  // tool error: the failed mark
-  await expect(tx.locator('button.tool .fail')).toHaveText('failed');
-  // fileEdit: a div.tool with +N and −N
+  // tool error: the failed mark, with its exit code
+  await expect(tx.locator('button.tool .fail')).toHaveText('exit 2');
+  // fileEdit: a div.tool with its path, +N and −N
   const edit = tx.locator('div.tool', { hasText: 'CheckoutForm.tsx' });
   await expect(edit.locator('b')).toHaveText('Edit');
+  await expect(edit.locator('code')).toHaveText('src/checkout/CheckoutForm.tsx');
   await expect(edit.locator('.plus')).toHaveText('+9');
   await expect(edit.locator('.minus')).toHaveText('−212');
   // peer: "From …" and the text
@@ -98,6 +102,135 @@ test('each item kind draws as the mock draws it', async ({ page, appHost }) => {
   const keys = await tx.locator('[data-tx-row]').evaluateAll((els) => els.map((el) => el.getAttribute('data-key')));
   expect(keys.length).toBeGreaterThan(15);
   expect(new Set(keys).size).toBe(keys.length);
+});
+
+test('the fields a newer laptop sends draw as the mock draws them, and rows without them draw as before', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.working')).toBeInViewport();
+  const item = (/** @type {object} */ x) => ({ truncated: false, ...x });
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: CHECKOUT_REF,
+    items: [
+      item({ id: 'f-1', kind: 'tool', toolName: 'Bash', target: 'npm run lint', toolStatus: 'error', exitCode: 1 }),
+      item({ id: 'f-2', kind: 'tool', toolName: 'Bash', target: 'npm run e2e', toolStatus: 'error' }),
+      item({ id: 'f-3', kind: 'fileEdit', toolName: 'Write', target: 'PaymentStep.tsx', path: 'src/checkout/PaymentStep.tsx', toolStatus: 'ok', added: 121, removed: 0 }),
+      item({ id: 'f-4', kind: 'fileEdit', toolName: 'Edit', target: 'Summary.tsx', toolStatus: 'ok', added: 4, removed: 1 }),
+      item({ id: 'f-5', kind: 'slash', text: '/model opus', output: 'Set model to opus\nIt applies from the next turn.' }),
+      item({ id: 'f-6', kind: 'slash', text: '/compact' }),
+      item({ id: 'f-7', kind: 'systemNote', text: 'PostToolUse: lint passed.', noteKind: 'hookOutput' }),
+      item({ id: 'f-8', kind: 'systemNote', text: 'A note of a kind this build does not know.', noteKind: 'someNewKind' }),
+      item({ id: 'f-9', kind: 'systemNote', text: 'A note from an older laptop.' }),
+      item({
+        id: 'f-10', kind: 'fileEdit', toolName: 'Edit', target: 'ShippingRates.tsx', toolStatus: 'ok', added: 3, removed: 1,
+        path: `src/${'a-deeply-nested-folder/'.repeat(8)}ShippingRates.tsx`,
+      }),
+    ],
+  });
+  const tool = (/** @type {string} */ target) => tx.locator('button.tool', { hasText: target });
+  await expect(tool('npm run lint').locator('.fail')).toHaveText('exit 1');
+  await expect(tool('npm run e2e').locator('.fail')).toHaveText('failed');
+  await expect(tx.locator('div.tool', { hasText: 'PaymentStep.tsx' }).locator('code')).toHaveText('src/checkout/PaymentStep.tsx');
+  await expect(tx.locator('div.tool', { hasText: 'Summary.tsx' }).locator('code')).toHaveText('Summary.tsx');
+  // A path too long for the row gives way in its folders, dimmed, and keeps the file's name whole, with the counts after it.
+  const long = tx.locator('div.tool', { hasText: 'ShippingRates.tsx' });
+  await expect(long.locator('code .dir')).toHaveText(`src/${'a-deeply-nested-folder/'.repeat(8)}`);
+  await expect(long.locator('code .base')).toHaveText('ShippingRates.tsx');
+  const fit = await long.evaluate((row) => {
+    const part = (/** @type {string} */ sel) => /** @type {HTMLElement} */ (row.querySelector(sel));
+    const [dir, base, code, plus] = ['code .dir', 'code .base', 'code', '.plus'].map(part);
+    return {
+      dirCut: dir.scrollWidth > dir.clientWidth,
+      baseWhole: base.scrollWidth <= base.clientWidth,
+      baseInside: base.getBoundingClientRect().right <= code.getBoundingClientRect().right + 0.5,
+      countsAfter: plus.getBoundingClientRect().left >= code.getBoundingClientRect().right - 0.5,
+      dimmed: Number(getComputedStyle(dir).opacity) < 1,
+    };
+  });
+  expect(fit).toEqual({ dirCut: true, baseWhole: true, baseInside: true, countsAfter: true, dimmed: true });
+
+  // A slash command's output is plain text under it, its line breaks kept; one without output shows the command alone.
+  const model = tx.locator('.slash', { hasText: '/model opus' });
+  await expect(model.locator('code')).toHaveText('/model opus');
+  await expect(model.locator('span')).toHaveText('Set model to opus\nIt applies from the next turn.');
+  expect(await model.locator('span').evaluate((el) => getComputedStyle(el).whiteSpace)).toBe('pre-wrap');
+  const compact = tx.locator('.slash', { hasText: '/compact' });
+  await expect(compact.locator('code')).toHaveText('/compact');
+  await expect(compact.locator('span')).toHaveCount(0);
+
+  const note = (/** @type {string} */ text) => tx.locator('.extra', { hasText: text }).locator('.dl');
+  await expect(note('PostToolUse: lint passed.')).toHaveText('Hook');
+  await expect(note('a kind this build does not know')).toHaveText('System');
+  await expect(note('A note from an older laptop.')).toHaveText('System');
+});
+
+test("a cut slash command's Show more sits with the command, above its output, and the output stays after the whole text", async ({ page, appHost }) => {
+  const id = 'x-cut-slash-output';
+  const cut = '/review src/auth/redirect.ts';
+  const whole = '/review src/auth/redirect.ts src/auth/callback.ts';
+  const scenario = structuredClone(MOCK);
+  scenario.details[id] = { text: whole };
+  await openApp(page, appHost, { scenario });
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say', { hasText: 'Fixed. Here is what changed:' })).toBeVisible();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF, items: [{ id, kind: 'slash', text: cut, truncated: true, output: 'Reviewed 2 files.' }],
+  });
+  const box = tx.locator('.slash', { hasText: cut });
+  const children = () => box.evaluate((el) => [...el.children].map((c) => c.tagName));
+  await expect(box.locator('.morebtn')).toHaveText('Show more');
+  expect(await children()).toEqual(['CODE', 'BUTTON', 'SPAN']);
+  const gap = await box.evaluate((el) => {
+    const more = /** @type {HTMLElement} */ (el.querySelector('.morebtn'));
+    const output = /** @type {HTMLElement} */ (el.querySelector(':scope > span'));
+    return output.getBoundingClientRect().top - more.getBoundingClientRect().bottom;
+  });
+  expect(gap).toBeGreaterThanOrEqual(-0.5);
+
+  await box.locator('.morebtn').click();
+  await expect(box.locator('code')).toHaveText(whole);
+  await expect(box.locator('.morebtn')).toHaveCount(0);
+  expect(await children()).toEqual(['CODE', 'SPAN']);
+  await expect(box.locator('span')).toHaveText('Reviewed 2 files.');
+});
+
+test("an API error draws as the mock's error row, in the error tone or the rate-limit tone", async ({ page, appHost }) => {
+  for (const [name, tone, text] of [
+    ['Rate limit retry', 'st-err', 'API error 529: the model is overloaded. The turn stopped. Send a message to try again.'],
+    ['Bulk import', 'st-rate', 'Usage limit reached. It resets at 3:00 pm.'],
+  ]) {
+    await openApp(page, appHost);
+    await openSessionByName(page, name);
+    const row = app(page).locator('.tx .errrow');
+    await expect(row, name).toHaveCount(1);
+    await expect(row, name).toContainClass(tone);
+    await expect(row, name).toHaveText(text);
+    await expect(row.locator('svg'), name).toHaveCount(1);
+    // Its text is plain, with no markdown drawn in it.
+    await expect(row.locator('strong, em, code, a'), name).toHaveCount(0);
+  }
+});
+
+test("an API error's text is plain text, its markdown marks and HTML drawn as typed, and Claude's text without the field is markdown", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.working')).toBeInViewport();
+  const text = `API Error: 400 **bad** request ${ANCHOR_TAG} and ${IMG_TAG}`;
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: CHECKOUT_REF,
+    items: [
+      { id: 'e-1', kind: 'assistant', text, truncated: false, apiError: 'invalid_request' },
+      { id: 'e-2', kind: 'assistant', text: 'Claude says **bold**.', truncated: false },
+    ],
+  });
+  const row = tx.locator('.errrow');
+  await expect(row).toHaveText(text);
+  await expect(row).toContainClass('st-err');
+  await expect(row.locator('a, img, strong, b')).toHaveCount(0);
+  await expect(tx.locator('.say', { hasText: 'Claude says' }).locator('strong')).toHaveText('bold');
 });
 
 test('a truncated assistant message offers Show more', async ({ page, appHost }) => {
@@ -1833,7 +1966,7 @@ test('Show details reopens the transcript with thinking and system notes, and of
     { session: LOGIN_REF, showDetails: false, resume: false }, { session: LOGIN_REF, showDetails: true, resume: false },
   ]);
   const extra = tx.locator('.extra');
-  await expect(extra.locator('.dl')).toHaveText(['Thinking', 'System']);
+  await expect(extra.locator('.dl')).toHaveText(['Thinking', 'Hook']);
   await expect(extra.nth(0)).toContainText('The redirect target is probably lost in the sign-in callback. Look at finishLogin first.');
   await expect(extra.nth(1)).toContainText('PostToolUse: eslint src/auth passed.');
   // Each where the laptop put it: the thinking after your message, the note after the Bash call.

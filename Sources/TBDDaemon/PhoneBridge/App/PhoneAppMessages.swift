@@ -222,7 +222,10 @@ enum PhoneItemKind: String, Codable, CaseIterable, Sendable {
     case systemNote
 }
 
-/// One transcript row, shaped for the phone (spec section 7).
+/// One transcript row, shaped for the phone (spec section 7). The fields a
+/// row's later update changes (`TranscriptFeed`'s `resolvedRow` and
+/// `withOutput`) are `var`, so an update copies the row and changes only
+/// those, and keeps every other field.
 struct PhoneItem: Codable, Equatable, Sendable {
     let id: String
     let kind: PhoneItemKind
@@ -233,12 +236,57 @@ struct PhoneItem: Codable, Equatable, Sendable {
     let toolName: String?
     let target: String?
     /// `running`, `ok` or `error`.
-    let toolStatus: String?
+    var toolStatus: String?
     let added: Int?
     let removed: Int?
     let agentType: String?
-    let itemCount: Int?
+    var itemCount: Int?
     let sender: String?
+    /// A failed tool call's exit code, from the first line of its result
+    /// (`TranscriptShaper.exitCode(of:)`), on a `tool` row only. Absent when
+    /// the result is not an error or names no exit code.
+    var exitCode: Int?
+    /// A slash command's output, cut to `PhoneAppConstants.slashOutputBytes`.
+    /// Absent when the command wrote none, or none has been seen yet.
+    var output: String?
+    /// On an assistant row that is an API error, the error class, such as
+    /// `rate_limit` or `server_error`.
+    let apiError: String?
+    /// A system note's kind: a `SystemKind` raw value, such as `hookOutput`.
+    let noteKind: String?
+    /// A file edit's path: relative to the worktree when the file is inside
+    /// it (`TranscriptShaper.relativePath(_:root:)`), else as the call wrote
+    /// it. A remote session has no worktree on the laptop, so its paths are
+    /// always as written. Absent when it is longer than
+    /// `TranscriptShaper.targetLimit`.
+    let path: String?
+
+    init(
+        id: String, kind: PhoneItemKind, at: Int64?, text: String?, truncated: Bool,
+        toolName: String?, target: String?, toolStatus: String?, added: Int?, removed: Int?,
+        agentType: String?, itemCount: Int?, sender: String?,
+        exitCode: Int? = nil, output: String? = nil, apiError: String? = nil,
+        noteKind: String? = nil, path: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.at = at
+        self.text = text
+        self.truncated = truncated
+        self.toolName = toolName
+        self.target = target
+        self.toolStatus = toolStatus
+        self.added = added
+        self.removed = removed
+        self.agentType = agentType
+        self.itemCount = itemCount
+        self.sender = sender
+        self.exitCode = exitCode
+        self.output = output
+        self.apiError = apiError
+        self.noteKind = noteKind
+        self.path = path
+    }
 }
 
 struct TranscriptPage: Codable, Equatable, Sendable {

@@ -187,7 +187,7 @@ extension PhoneAppService {
             Self.logger.fault("Phone transcript: an open arrived with no stamp")
             throw PhoneAppError(code: .internalError, message: Self.internalErrorReason)
         }
-        try await checkTranscript(params.session)
+        let worktreeRoot = try await checkTranscript(params.session)
         if params.resume, await canResumeTranscript(params, deviceID: deviceID) {
             return .onQueue { service in
                 service.queueResumedTranscript(params, stamp: stamp, requestID: requestID, deviceID: deviceID)
@@ -210,6 +210,7 @@ extension PhoneAppService {
             emit: { [weak self] event in
                 await self?.emitTranscript(event, to: deviceID, token: token)
             },
+            worktreeRoot: worktreeRoot,
             clock: clock)
         let page: TranscriptPage
         do {
@@ -244,19 +245,22 @@ extension PhoneAppService {
     /// Checks that the phone may open `session`'s transcript, for a fresh
     /// open and a resume alike: a local tab (`checkLocalTranscript`) or a
     /// remote session (`checkRemoteTranscript`) the laptop still shows it.
-    private nonisolated func checkTranscript(_ session: PhoneSessionRef) async throws {
+    /// Returns a local tab's worktree path, so the feed sends file-edit paths
+    /// inside it relative to it, and nil for a remote session.
+    private nonisolated func checkTranscript(_ session: PhoneSessionRef) async throws -> String? {
         switch session {
         case .local(let terminalID):
-            try await checkLocalTranscript(terminalID)
+            return try await checkLocalTranscript(terminalID)
         case .remote(let provider, let sessionID):
             try await checkRemoteTranscript(provider: provider, sessionID: sessionID)
+            return nil
         }
     }
 
     /// Checks that the phone may open `terminalID`'s transcript: a terminal
     /// it can see (`phoneVisibleTerminal`), in a local worktree, running
-    /// Claude.
-    private nonisolated func checkLocalTranscript(_ terminalID: UUID) async throws {
+    /// Claude. Returns the worktree's path.
+    private nonisolated func checkLocalTranscript(_ terminalID: UUID) async throws -> String {
         let (terminal, worktree) = try await phoneVisibleTerminal(terminalID)
         guard worktree.location.isLocal else {
             throw PhoneAppError(code: .unsupported, message: PhoneSessionStatus.remoteLaneTabReason)
@@ -269,6 +273,7 @@ extension PhoneAppService {
         case .remote, nil:
             throw PhoneAppError(code: .unsupported, message: Self.notAClaudeTranscriptReason)
         }
+        return worktree.localPath
     }
 
     /// Checks that the phone may open a remote session's transcript. Its
@@ -584,9 +589,10 @@ extension PhoneAppService {
             throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)
         }
         let showDetails = feed.showDetails
+        let worktreeRoot = feed.worktreeRoot
         let detail = await Self.readOffThePool {
             TranscriptDetailReader.subagent(
-                agentID: agentID, transcriptPath: place.filePath, showDetails: showDetails)
+                agentID: agentID, transcriptPath: place.filePath, showDetails: showDetails, worktreeRoot: worktreeRoot)
         }
         guard let detail else {
             throw PhoneAppError(code: .notFound, message: Self.detailNotFoundReason)

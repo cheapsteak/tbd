@@ -242,6 +242,11 @@ export const decodePhoneItem = obj<PhoneItem>({ id: str, kind: decodePhoneItemKi
   agentType: str,
   itemCount: int,
   sender: str,
+  exitCode: int,
+  output: str,
+  apiError: str,
+  noteKind: str,
+  path: str,
 });
 
 export const decodeTranscriptPage = obj<TranscriptPage>(

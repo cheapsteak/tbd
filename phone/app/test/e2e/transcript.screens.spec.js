@@ -20,6 +20,25 @@
 //   this one pairs as `transcript-working=working`.
 // - `details`: the same tab with "Show details" on, so its thinking shows, as the mock's "Show
 //   details on" shows it. The switch is tapped, which opens the transcript again.
+//
+// The fields a newer laptop sends, each in a state of its own. The mocks have none of these
+// states, so each pairs with no mock (`--no-mock`), except where a state names its mock.
+// - `tool-failed`: Checkout v2's Claude tab with its failed Bash call (`npm run typecheck`, exit
+//   2) open to its input and result, the row scrolled to the top of the transcript, or as near
+//   as the transcript's end allows.
+// - `slash-output`: Login redirect fix with a slash command (`/model opus`) and its output
+//   arrived at the bottom of the transcript.
+// - `error-row`: Rate limit retry at its newest rows, ending in the API error's row in the error
+//   tone, as the mock's "Error" shows it (`error-row=error`).
+// - `rate-row`: Bulk import at its newest rows, ending in the rate limit's row in the rate-limit
+//   tone, as the mock's "Rate limited" shows it (`rate-row=rate`).
+// - `details-note`: Login redirect fix with "Show details" on, so its hook's system note shows
+//   under its label, "Hook".
+// - `file-edit`: Docs refresh, whose file edits name each file by its path in the worktree
+//   (`README.md`, `docs/manual-setup.md`), as the mock's "Parked" shows them
+//   (`file-edit=parked`). Its folders show dimmed, before the file's name.
+// - `file-edit-long`: the same, with an edit whose path is too long for its row arrived at the
+//   bottom: its folders give way, cut with an ellipsis, and the file's name shows whole.
 
 import { app, capture, expect, hostCall, openApp, openSessionByName, test } from './fixtures.js';
 
@@ -76,14 +95,18 @@ test('agent-open', async ({ page, appHost }) => {
 
 /** Checkout v2's Claude session. */
 const CHECKOUT_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000103' };
+/** Docs refresh's Claude session. */
+const DOCS_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000106' };
+/** Login redirect fix's Claude session. */
+const LOGIN_REF = { kind: 'local', terminalID: '00000000-0000-4000-8000-000000000102' };
 
 /** The mock's live stream (mock 671-677) as items, with the fields the wire has. */
 const LIVE = [
-  { kind: 'fileEdit', toolName: 'Write', target: 'PaymentStep.tsx', toolStatus: 'ok', added: 121, removed: 0 },
+  { kind: 'fileEdit', toolName: 'Write', target: 'PaymentStep.tsx', path: 'src/checkout/PaymentStep.tsx', toolStatus: 'ok', added: 121, removed: 0 },
   { kind: 'tool', toolName: 'Read', target: 'src/checkout/SavedCards.tsx', toolStatus: 'ok' },
   { kind: 'assistant', text: 'The payment step now shows the saved-card list first, then the form for a new card.' },
   { kind: 'tool', toolName: 'Bash', target: 'npm test -- checkout', toolStatus: 'ok' },
-  { kind: 'fileEdit', toolName: 'Edit', target: 'CheckoutSteps.tsx', toolStatus: 'ok', added: 18, removed: 5 },
+  { kind: 'fileEdit', toolName: 'Edit', target: 'CheckoutSteps.tsx', path: 'src/checkout/CheckoutSteps.tsx', toolStatus: 'ok', added: 18, removed: 5 },
 ];
 
 test('pill', async ({ page, appHost }) => {
@@ -124,4 +147,85 @@ test('details', async ({ page, appHost }) => {
   await expect(thinking).toBeInViewport();
   await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
   await capture(page, 'details', thinking);
+});
+
+test('tool-failed', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Checkout v2', 'Claude');
+  const failed = app(page).locator('.tx button.tool:has(.fail)');
+  await expect(failed.locator('.fail')).toHaveText('exit 2');
+  await failed.click();
+  await expect(failed).toHaveAttribute('aria-expanded', 'true');
+  const result = app(page).locator('.tx .detail pre').nth(1);
+  await expect(result).toContainText('Found 1 error.');
+  await scrollToTop(failed);
+  await capture(page, 'tool-failed', result);
+});
+
+test('slash-output', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say').last()).toBeInViewport();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: LOGIN_REF,
+    items: [{ id: 'login-slash', kind: 'slash', text: '/model opus', output: 'Set model to opus', truncated: false }],
+  });
+  const output = tx.locator('.slash span');
+  await expect(output).toHaveText('Set model to opus');
+  await expect(output).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await capture(page, 'slash-output', output);
+});
+
+for (const [state, name, tone] of /** @type {const} */ ([['error-row', 'Rate limit retry', 'st-err'], ['rate-row', 'Bulk import', 'st-rate']])) {
+  test(state, async ({ page, appHost }) => {
+    await openApp(page, appHost);
+    await openSessionByName(page, name);
+    const row = app(page).locator('.tx .errrow');
+    await expect(row).toContainClass(tone);
+    await expect(row).toBeInViewport();
+    await capture(page, state, row);
+  });
+}
+
+test('details-note', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Login redirect fix');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say').last()).toBeInViewport();
+  await app(page).locator('.s-head .tg').click();
+  await expect(app(page).getByRole('switch', { name: 'Show details' })).toBeChecked();
+  const note = tx.locator('.extra', { hasText: 'PostToolUse: eslint src/auth passed.' });
+  await expect(note.locator('.dl')).toHaveText('Hook');
+  await expect(note).toBeInViewport();
+  await capture(page, 'details-note', note);
+});
+
+test('file-edit', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  const edit = app(page).locator('.tx div.tool', { hasText: 'docs/manual-setup.md' });
+  await expect(edit.locator('code')).toHaveText('docs/manual-setup.md');
+  await expect(edit).toBeInViewport();
+  await capture(page, 'file-edit', edit);
+});
+
+test('file-edit-long', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openSessionByName(page, 'Docs refresh');
+  const tx = app(page).locator('.tx');
+  await expect(tx.locator('.say').last()).toBeInViewport();
+  await hostCall(page, 'emit', 'transcript.append', {
+    session: DOCS_REF,
+    items: [{
+      id: 'docs-long', kind: 'fileEdit', toolName: 'Write', target: 'container-setup.md', toolStatus: 'ok', added: 40, removed: 0,
+      path: 'docs/onboarding/dev-environment/containers/macos/container-setup.md', truncated: false,
+    }],
+  });
+  const edit = tx.locator('div.tool', { hasText: 'container-setup.md' });
+  await expect(edit.locator('code .base')).toHaveText('container-setup.md');
+  await expect(edit).toBeInViewport();
+  await expect.poll(() => fromBottom(tx)).toBeLessThanOrEqual(1);
+  await capture(page, 'file-edit-long', edit);
 });

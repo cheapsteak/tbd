@@ -89,12 +89,15 @@ function beginsWith(items: readonly PhoneItem[], head: readonly PhoneItem[]): bo
   return head.length <= items.length && head.every((item, i) => items[i] === item);
 }
 
-/** The markdown of `item`'s text, spent from `budget`, for the kinds `ItemRow` draws through `Markdown`; null for the rest. */
+/**
+ * The markdown of `item`'s text, spent from `budget`, for the rows `ItemRow` draws through
+ * `Markdown`; null for the rest, an API error among them, whose text draws plain.
+ */
 function treeOf(item: PhoneItem, budget: MdBudget): readonly MdNode[] | null {
   const text = item.text ?? '';
   switch (item.kind) {
     case 'assistant':
-      return mdTree(text, budget);
+      return item.apiError === undefined ? mdTree(text, budget) : null;
     case 'user':
     case 'peer':
       return mdInline(text, budget);

@@ -12,25 +12,57 @@ struct ShapingContext: Sendable {
     /// `tool_use` id → the subagent's `agentId`, for each subagent call whose
     /// result has been seen.
     let subagentAgentIDs: [String: String]
-    /// `tool_use` id → its result, for results that are not on the item: ones
-    /// in a newer window the phone already holds, or ones that arrived live.
-    let joinedResults: [String: ToolResult]
+    /// `tool_use` id → what its result says, for results that are not on the
+    /// item: ones in a newer window the phone already holds, or ones that
+    /// arrived live.
+    let joinedResults: [String: ToolOutcome]
     /// A subagent's item count by its `agentId`, or nil when unknown. The
-    /// pager calls it only for the subagent rows a page keeps.
-    let subagentItemCount: @Sendable (String) -> Int?
+    /// pager calls it only for the subagent rows a page keeps, and measures
+    /// rows with a copy that answers the largest count instead.
+    var subagentItemCount: @Sendable (String) -> Int?
+    /// The session's worktree, so a file edit's path is sent relative to it.
+    /// Nil sends every path as the call wrote it.
+    let worktreeRoot: String?
+    /// A slash command's item ID → the output Claude Code wrote for it
+    /// (`TranscriptParser.localCommandOutput(fromLine:)`), from any line seen.
+    let slashOutputs: [String: String]
+    /// A line's ID → its API error class (`TranscriptParser.apiErrorClass(fromLine:)`).
+    /// An assistant item's ID is its line's ID followed by `#<block>`.
+    let apiErrors: [String: String]
 
     init(
         showDetails: Bool = false,
         fileEdits: [String: FileEditStats] = [:],
         subagentAgentIDs: [String: String] = [:],
-        joinedResults: [String: ToolResult] = [:],
-        subagentItemCount: @escaping @Sendable (String) -> Int? = { _ in nil }
+        joinedResults: [String: ToolOutcome] = [:],
+        subagentItemCount: @escaping @Sendable (String) -> Int? = { _ in nil },
+        worktreeRoot: String? = nil,
+        slashOutputs: [String: String] = [:],
+        apiErrors: [String: String] = [:]
     ) {
         self.showDetails = showDetails
         self.fileEdits = fileEdits
         self.subagentAgentIDs = subagentAgentIDs
         self.joinedResults = joinedResults
         self.subagentItemCount = subagentItemCount
+        self.worktreeRoot = worktreeRoot
+        self.slashOutputs = slashOutputs
+        self.apiErrors = apiErrors
+    }
+}
+
+/// What shaping reads from a tool call's result: whether it is an error, and
+/// the exit code it names (`TranscriptShaper.exitCode(of:)`). The feed keeps
+/// these for results it joins, rather than the results, so it holds no tool
+/// output.
+struct ToolOutcome: Sendable, Equatable {
+    let isError: Bool
+    let exitCode: Int?
+}
+
+extension ToolOutcome {
+    init(_ result: ToolResult) {
+        self.init(isError: result.isError, exitCode: TranscriptShaper.exitCode(of: result))
     }
 }
 
@@ -49,6 +81,10 @@ enum TranscriptShaper {
     static let senderLimit = PhoneText.fieldLimit
     /// The most encoded bytes a tool name keeps.
     static let toolNameLimit = PhoneText.fieldLimit
+    /// The most encoded bytes an API error class keeps.
+    static let apiErrorLimit = PhoneText.fieldLimit
+    /// Ends a slash command's output that was cut.
+    static let cutMark = "\u{2026}"
     /// Follows a sender the receiving harness did not verify, the same mark
     /// the laptop's transcript draws (`PeerHeaderChrome.displayName`): an
     /// asserted name is never shown bare.
@@ -83,10 +119,15 @@ enum TranscriptShaper {
     /// (`isShown`).
     ///
     /// - `.userPrompt` – `slash` when the text starts with `/` and holds no
-    ///   newline, else `user`. Both carry the text's preview.
-    /// - `.assistantText` – `assistant`, with the preview.
+    ///   newline, else `user`. Both carry the text's preview. A slash row
+    ///   carries `output` from `ctx.slashOutputs` when it holds the row's ID,
+    ///   cut to `PhoneAppConstants.slashOutputBytes` (`slashOutput(_:)`).
+    /// - `.assistantText` – `assistant`, with the preview. When
+    ///   `ctx.apiErrors` names the item's line, the row is an API error and
+    ///   carries its class as `apiError`.
     /// - `.toolCall` named Edit, Write or MultiEdit – `fileEdit`: the file's
-    ///   last path component as `target`, and `added` and `removed` from
+    ///   last path component as `target`, its path as `path`
+    ///   (`fileEditPath(_:root:)`), and `added` and `removed` from
     ///   `ctx.fileEdits`.
     /// - `.toolCall` named Agent or Task – `subagent`: the call's description
     ///   as `target`, the input's `subagent_type` as `agentType`, and
@@ -96,29 +137,38 @@ enum TranscriptShaper {
     ///   `TranscriptParser.toolInputSummary` without the tool name.
     /// - `.peerMessage` – `peer`, with the sender label and the preview.
     /// - `.thinking` – `thinking`, and `.systemReminder` – `systemNote`, with
-    ///   the preview. A reminder the parser already cut is `truncated` too.
+    ///   the preview. A reminder the parser already cut is `truncated` too. A
+    ///   system note carries its `SystemKind` raw value as `noteKind`.
     ///
     /// Every tool row carries `toolName` and `toolStatus`: `running` with no
-    /// result, `error` when the result is an error, else `ok`. The result is
-    /// the item's own, or `ctx.joinedResults` for its ID. `id` is the item's
-    /// own, and `at` its timestamp in Unix milliseconds.
+    /// result, `error` when the result is an error, else `ok`. A `tool` row
+    /// whose error result names an exit code adds it as `exitCode`
+    /// (`exitCode(of:)`); a file edit or a subagent, whose row draws no exit
+    /// code, never carries one. The result is the item's own, or
+    /// `ctx.joinedResults` for its ID. `id` is the item's own, and `at` its
+    /// timestamp in Unix milliseconds.
     static func shape(_ item: TranscriptItem, _ ctx: ShapingContext) -> PhoneItem? {
         guard isShown(item, showDetails: ctx.showDetails) else { return nil }
         let at = item.timestamp.map(PhoneTime.ms)
         switch item {
         case .userPrompt(let id, let text, _):
-            let isSlash = text.hasPrefix("/") && !text.contains(where: \.isNewline)
-            return message(id, isSlash ? .slash : .user, at: at, text)
+            guard text.hasPrefix("/"), !text.contains(where: \.isNewline) else {
+                return message(id, .user, at: at, text)
+            }
+            return message(id, .slash, at: at, text, output: ctx.slashOutputs[id].map(slashOutput))
         case .assistantText(let id, let text, _, _):
-            return message(id, .assistant, at: at, text)
+            let apiError = ctx.apiErrors[TranscriptParser.lineID(ofItem: id)].map { capped($0, apiErrorLimit) }
+            return message(id, .assistant, at: at, text, apiError: apiError)
         case .toolCall(let id, let name, let inputJSON, _, let result, _, _, _):
-            return toolRow(id: id, name: name, inputJSON: inputJSON, result: result ?? ctx.joinedResults[id], at: at, ctx: ctx)
+            let outcome = result.map { ToolOutcome($0) } ?? ctx.joinedResults[id]
+            return toolRow(id: id, name: name, inputJSON: inputJSON, outcome: outcome, at: at, ctx: ctx)
         case .peerMessage(let id, let sender, let text, _, _):
             return message(id, .peer, at: at, text, sender: senderLabel(sender))
         case .thinking(let id, let text, _):
             return message(id, .thinking, at: at, text)
-        case .systemReminder(let id, _, let text, _, _, let truncatedTo):
-            return message(id, .systemNote, at: at, text, alreadyCut: truncatedTo != nil)
+        case .systemReminder(let id, let kind, let text, _, _, let truncatedTo):
+            return message(
+                id, .systemNote, at: at, text, alreadyCut: truncatedTo != nil, noteKind: kind.rawValue)
         case .slashCommand:
             return nil
         }
@@ -154,24 +204,87 @@ enum TranscriptShaper {
         return capped(sender.from, room) + unverifiedSuffix
     }
 
+    /// The exit code on the first line of a failed tool's result. Claude Code
+    /// starts the result of a Bash call whose command exits non-zero with
+    /// `Exit code <n>` on a line of its own. Nil when the result is not an
+    /// error, or its first line is not exactly that, `n` a whole number of at
+    /// most 10 digits, optionally negative.
+    static func exitCode(of result: ToolResult) -> Int? {
+        guard result.isError else { return nil }
+        let prefix = "Exit code "
+        let firstLine = result.text.prefix(while: { !$0.isNewline })
+        guard firstLine.hasPrefix(prefix) else { return nil }
+        let number = firstLine.dropFirst(prefix.count)
+        let digits = number.hasPrefix("-") ? number.dropFirst() : number
+        guard !digits.isEmpty, digits.count <= 10,
+              digits.allSatisfy({ ("0"..."9").contains($0) }) else { return nil }
+        return Int(number)
+    }
+
+    /// A slash command's output as its row carries it: whole when it takes
+    /// at most `PhoneAppConstants.slashOutputBytes` encoded bytes, else cut
+    /// at a `Character` boundary and ended with `cutMark`, the two together
+    /// within that limit.
+    static func slashOutput(_ output: String) -> String {
+        let limit = PhoneAppConstants.slashOutputBytes
+        guard preview(output, limit: limit).truncated else { return output }
+        let room = limit - PhoneFrameBudget.escapedLength(cutMark[...].unicodeScalars)
+        return preview(output, limit: room).text + cutMark
+    }
+
+    /// A file edit's `file_path` as its row carries it: relative to `root`
+    /// when the file lies inside it (`relativePath(_:root:)`), else as the
+    /// call wrote it. Nil when there is none, or when it takes more than
+    /// `targetLimit` encoded bytes, since a path cut short would name another
+    /// file; the row's `target` still names the file.
+    static func fileEditPath(_ input: [String: Any], root: String?) -> String? {
+        guard let path = input["file_path"] as? String, !path.isEmpty else { return nil }
+        let shown = relativePath(path, root: root) ?? path
+        return preview(shown, limit: targetLimit).truncated ? nil : shown
+    }
+
+    /// `path` relative to `root`, or nil when it does not lie inside it. Both
+    /// must be absolute. They are compared whole components at a time, with
+    /// the empty components of repeated or trailing `/` and every `.`
+    /// component left out, so `/repo//src/./a.ts` is `src/a.ts` under
+    /// `/repo`. A `..` component in either counts as outside, since it can
+    /// climb out, and so does every path when `root` names no component, as
+    /// `/` does.
+    static func relativePath(_ path: String, root: String?) -> String? {
+        guard let root, path.hasPrefix("/"), root.hasPrefix("/") else { return nil }
+        let rootParts = pathComponents(root)
+        let pathParts = pathComponents(path)
+        guard !rootParts.isEmpty, !rootParts.contains(".."), !pathParts.contains(".."),
+              pathParts.count > rootParts.count, pathParts.starts(with: rootParts) else { return nil }
+        return pathParts.dropFirst(rootParts.count).joined(separator: "/")
+    }
+
+    /// `path`'s components, without the empty ones that repeated, leading or
+    /// trailing `/` leave, and without `.`.
+    private static func pathComponents(_ path: String) -> [Substring] {
+        path.split(separator: "/").filter { $0 != "." }
+    }
+
     // MARK: - Rows
 
     private static func message(
         _ id: String, _ kind: PhoneItemKind, at: Int64?, _ text: String,
-        alreadyCut: Bool = false, sender: String? = nil
+        alreadyCut: Bool = false, sender: String? = nil,
+        output: String? = nil, apiError: String? = nil, noteKind: String? = nil
     ) -> PhoneItem {
         let cut = preview(text)
         return PhoneItem(
             id: id, kind: kind, at: at, text: cut.text, truncated: cut.truncated || alreadyCut,
             toolName: nil, target: nil, toolStatus: nil, added: nil, removed: nil,
-            agentType: nil, itemCount: nil, sender: sender)
+            agentType: nil, itemCount: nil, sender: sender,
+            output: output, apiError: apiError, noteKind: noteKind)
     }
 
     private static func toolRow(
-        id: String, name: String, inputJSON: String, result: ToolResult?, at: Int64?, ctx: ShapingContext
+        id: String, name: String, inputJSON: String, outcome: ToolOutcome?, at: Int64?, ctx: ShapingContext
     ) -> PhoneItem {
         let input = decodedInput(inputJSON)
-        let status = result.map { $0.isError ? errorStatus : okStatus } ?? runningStatus
+        let status = outcome.map { $0.isError ? errorStatus : okStatus } ?? runningStatus
         let toolName = name.isEmpty ? nil : capped(name, toolNameLimit)
 
         if fileEditTools.contains(name) {
@@ -180,7 +293,8 @@ enum TranscriptShaper {
                 id: id, kind: .fileEdit, at: at, text: nil, truncated: false,
                 toolName: toolName, target: fileName(input), toolStatus: status,
                 added: stats?.added, removed: stats?.removed,
-                agentType: nil, itemCount: nil, sender: nil)
+                agentType: nil, itemCount: nil, sender: nil,
+                path: fileEditPath(input, root: ctx.worktreeRoot))
         }
         if subagentTools.contains(name) {
             let agentType = (input["subagent_type"] as? String).flatMap { $0.isEmpty ? nil : capped($0, targetLimit) }
@@ -195,7 +309,7 @@ enum TranscriptShaper {
         return PhoneItem(
             id: id, kind: .tool, at: at, text: nil, truncated: false,
             toolName: toolName, target: summaryTarget(name: name, input: input), toolStatus: status,
-            added: nil, removed: nil, agentType: nil, itemCount: nil, sender: nil)
+            added: nil, removed: nil, agentType: nil, itemCount: nil, sender: nil, exitCode: outcome?.exitCode)
     }
 
     // MARK: - Fields

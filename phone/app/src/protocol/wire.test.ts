@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { obj, record, str } from './decode.ts';
 import {
   decodeEnvelope, decodeEventData, decodeParams, decodePhoneGroupLayout, decodePhonePrompt, decodePhoneRow,
-  decodePhoneSessionRef, decodePhoneStatus, decodePhoneStatusChip, decodePromptAnswer, decodePromptAnswerResult,
+  decodePhoneItem, decodePhoneSessionRef, decodePhoneStatus, decodePhoneStatusChip, decodePromptAnswer, decodePromptAnswerResult,
   decodeResult, DecodeError, ERROR_CODES, EVENTS, METHODS, PENDING_PROMPT_KINDS, PERMISSION_DECISIONS,
   PHONE_AGENTS, PHONE_ANSWERED_BY, PHONE_ITEM_KINDS, PHONE_STATUS_CHIPS, PROMPT_ANSWER_OUTCOMES, refKey,
   requestBody, sameRef, TRANSCRIPT_DETAIL_PARTS,
@@ -338,6 +338,57 @@ test('no two session refs share a refKey', () => {
     const other = seen.get(key);
     assert.equal(other, undefined, `${JSON.stringify(ref)} and ${JSON.stringify(other)} share ${key}`);
     seen.set(key, ref);
+  }
+});
+
+/**
+ * The names of the stored properties (`let` and `var`) of Swift struct `name` in `file`, in order,
+ * not those in a nested body. A `var` whose line opens a body is computed, and is left out.
+ */
+function swiftStructFields(file: string, name: string): string[] {
+  const source = readFileSync(new URL(file, SOURCES), 'utf8');
+  const head = new RegExp(`\\bstruct ${name}\\b[^{]*\\{`).exec(source);
+  if (head === null) throw new Error(`${file} declares no struct ${name}`);
+  let depth = 1;
+  let body = '';
+  for (let i = head.index + head[0].length; depth > 0; i++) {
+    const c = source[i];
+    if (c === undefined) throw new Error(`struct ${name} in ${file} never closes`);
+    // A brace that opens a nested body is kept, so the line it opens shows it.
+    if (c === '{' && depth === 1) body += c;
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    else if (depth === 1) body += c;
+  }
+  return [...body.matchAll(/^\s*(?:let|var)\s+(\w+)\s*:[^{\n]*$/gm)].map((m) => m[1] ?? '');
+}
+
+test("a transcript row's fields are PhoneItem.swift's, and each one decodes", () => {
+  const swift = swiftStructFields('TBDDaemon/PhoneBridge/App/PhoneAppMessages.swift', 'PhoneItem');
+  assert.ok(swift.includes('exitCode') && swift.includes('path'), swift.join(', '));
+  const full = {
+    id: 'i1', kind: 'tool', at: 1, text: 't', truncated: false, toolName: 'Bash', target: 'npm test', toolStatus: 'error',
+    added: 1, removed: 2, agentType: 'Explore', itemCount: 3, sender: 'acme', exitCode: 2, output: 'Set model to opus',
+    apiError: 'rate_limit', noteKind: 'hookOutput', path: 'src/auth/redirect.ts',
+  };
+  assert.deepEqual(Object.keys(full).sort(), [...swift].sort(), 'the test row names every Swift field');
+  assert.deepEqual(decodePhoneItem(full), full);
+});
+
+test('a transcript row from an older laptop, with none of the newer fields, decodes without them', () => {
+  const older = { id: 'i1', kind: 'tool', truncated: false, toolName: 'Bash', target: 'npm test', toolStatus: 'error' };
+  const item = decodePhoneItem(older);
+  assert.deepEqual(item, older);
+  for (const key of ['exitCode', 'output', 'apiError', 'noteKind', 'path']) assert.equal(key in item, false, key);
+});
+
+test('the newer transcript row fields are checked like the rest', () => {
+  const row = { id: 'i1', kind: 'tool', truncated: false };
+  assert.throws(() => decodePhoneItem({ ...row, exitCode: '2' }), at('exitCode'));
+  assert.throws(() => decodePhoneItem({ ...row, exitCode: 2.5 }), at('exitCode'));
+  for (const key of ['output', 'apiError', 'noteKind', 'path']) {
+    assert.throws(() => decodePhoneItem({ ...row, [key]: 7 }), at(key), key);
+    assert.throws(() => decodePhoneItem({ ...row, [key]: null }), at(key), key);
   }
 });
 

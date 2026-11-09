@@ -156,7 +156,12 @@ struct TranscriptDetailTests {
             toolStatus: TranscriptShaper.runningStatus, added: Int.max, removed: Int.max,
             agentType: String(repeating: control, count: TranscriptShaper.targetLimit / 6),
             itemCount: Int.max,
-            sender: String(repeating: control, count: TranscriptShaper.senderLimit / 6))
+            sender: String(repeating: control, count: TranscriptShaper.senderLimit / 6),
+            exitCode: Int.min,
+            output: String(repeating: control, count: PhoneAppConstants.slashOutputBytes / 6),
+            apiError: String(repeating: control, count: TranscriptShaper.apiErrorLimit / 6),
+            noteKind: SystemKind.environmentDetails.rawValue,
+            path: String(repeating: control, count: TranscriptShaper.targetLimit / 6))
         let requestID = String(repeating: control, count: PhoneAppConstants.requestIDMaxBytes)
         let encoder = PhoneAppCoding.makeEncoder()
 

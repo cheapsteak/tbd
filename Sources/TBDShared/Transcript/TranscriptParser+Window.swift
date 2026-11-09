@@ -44,12 +44,22 @@ public struct TranscriptWindow: Sendable {
     /// `tool_use` id → the subagent's `agentId`, for every subagent call whose
     /// result is in the bytes read.
     public let subagentAgentIDs: [String: String]
+    /// The ID of a local slash command's line → the command's output
+    /// (`TranscriptParser.localCommandOutput(fromLine:)`), for every output
+    /// line in the bytes read. The ID is the one the command's item carries.
+    public let localCommandOutputs: [String: String]
+    /// A line's ID → its API error class (`TranscriptParser.apiErrorClass(fromLine:)`),
+    /// for every API error line in the bytes read. The line's items carry the
+    /// ID before their `#<block>` suffix.
+    public let apiErrors: [String: String]
 
     public init(
         entries: [Entry], startOffset: UInt64, endOffset: UInt64,
         toolResultsByID: [String: ToolResult],
         fileEdits: [String: FileEditStats],
-        subagentAgentIDs: [String: String]
+        subagentAgentIDs: [String: String],
+        localCommandOutputs: [String: String] = [:],
+        apiErrors: [String: String] = [:]
     ) {
         self.entries = entries
         self.startOffset = startOffset
@@ -57,6 +67,8 @@ public struct TranscriptWindow: Sendable {
         self.toolResultsByID = toolResultsByID
         self.fileEdits = fileEdits
         self.subagentAgentIDs = subagentAgentIDs
+        self.localCommandOutputs = localCommandOutputs
+        self.apiErrors = apiErrors
     }
 }
 
@@ -122,8 +134,9 @@ extension TranscriptParser {
     ///   The one exception: when the read started at the first byte of the
     ///   file and no item was trimmed, `startOffset` is 0.
     ///
-    /// `toolResultsByID`, `fileEdits` and `subagentAgentIDs` cover every line
-    /// read, trimmed lines included. Sidechain (subagent) lines build items
+    /// `toolResultsByID`, `fileEdits`, `subagentAgentIDs`,
+    /// `localCommandOutputs` and `apiErrors` cover every line read, trimmed
+    /// lines included. Sidechain (subagent) lines build items
     /// only when `includeSidechain` is true. Limits below 1 count as 1.
     public static func parseWindow(
         filePath: String, endingBefore requestedEnd: UInt64?, messageLimit: Int,
@@ -263,6 +276,71 @@ extension TranscriptParser {
         return [toolUseID: agentID]
     }
 
+    /// The output of a local slash command, one Claude Code runs itself such
+    /// as `/model` or `/compact`, and the ID of the line that ran it.
+    ///
+    /// Claude Code writes the output on a line of its own after the command's
+    /// line, whose `uuid` the output line's `parentUuid` names. Two shapes of
+    /// line carry it:
+    /// - a user line whose content, a string or its first text block, starts
+    ///   with `<local-command-stdout>` or `<local-command-stderr>`;
+    /// - a system line with subtype `local_command` whose string `content`
+    ///   starts the same way.
+    ///
+    /// The output is the text inside each such tag on the line, in order,
+    /// joined by a newline; an opening tag with no closing one runs to the
+    /// end. ANSI escape sequences are removed and whitespace is trimmed from
+    /// both ends. Nil when the line is neither shape, has no string
+    /// `parentUuid`, or its output is empty.
+    public static func localCommandOutput(fromLine json: [String: Any]) -> (commandLineID: String, output: String)? {
+        let content: String?
+        switch json["type"] as? String {
+        case "user":
+            content = extractUserText(from: json)
+        case "system" where json["subtype"] as? String == "local_command":
+            content = json["content"] as? String
+        default:
+            content = nil
+        }
+        guard let content, let parentID = json["parentUuid"] as? String, !parentID.isEmpty,
+              content.hasPrefix("<local-command-stdout>") || content.hasPrefix("<local-command-stderr>") else {
+            return nil
+        }
+        // One pass: each search runs over the line itself, from where the last
+        // one ended, so a line of many tags costs time in proportion to its
+        // length.
+        var parts: [Substring] = []
+        var from = content.startIndex
+        while let tag = content.range(of: "<local-command-", range: from..<content.endIndex) {
+            let afterTag = content[tag.upperBound...]
+            guard let stream = ["stdout", "stderr"].first(where: { afterTag.hasPrefix($0 + ">") }) else {
+                from = tag.upperBound
+                continue
+            }
+            let bodyStart = content.index(tag.upperBound, offsetBy: stream.count + 1)
+            guard let close = content.range(of: "</local-command-\(stream)>", range: bodyStart..<content.endIndex) else {
+                parts.append(content[bodyStart...])
+                break
+            }
+            parts.append(content[bodyStart..<close.lowerBound])
+            from = close.upperBound
+        }
+        let output = ANSIEscape.strip(parts.joined(separator: "\n")).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { return nil }
+        return (commandLineID: parentID, output: output)
+    }
+
+    /// The error class of an API error that Claude Code wrote as an assistant
+    /// line, marked `isApiErrorMessage: true`: the line's string `error`,
+    /// such as `rate_limit` or `server_error`, or `unknown` when it names
+    /// none. Nil for every other line. The line's text blocks hold the
+    /// message the laptop shows.
+    public static func apiErrorClass(fromLine json: [String: Any]) -> String? {
+        guard json["type"] as? String == "assistant", json["isApiErrorMessage"] as? Bool == true else { return nil }
+        guard let error = json["error"] as? String, !error.isEmpty else { return "unknown" }
+        return error
+    }
+
     // MARK: - window helpers
 
     /// The stable ID of a window line with no `uuid`: `at-<offset>`, where
@@ -292,6 +370,8 @@ extension TranscriptParser {
         var toolResultsByID: [String: ToolResult] = [:]
         var fileEdits: [String: FileEditStats] = [:]
         var subagentAgentIDs: [String: String] = [:]
+        var localCommandOutputs: [String: String] = [:]
+        var apiErrors: [String: String] = [:]
 
         /// Puts `older`, the lines just before these, in front of them. Where
         /// both name the same id, the later line wins, as it does within one
@@ -303,6 +383,8 @@ extension TranscriptParser {
             toolResultsByID.merge(older.toolResultsByID) { later, _ in later }
             fileEdits.merge(older.fileEdits) { later, _ in later }
             subagentAgentIDs.merge(older.subagentAgentIDs) { later, _ in later }
+            localCommandOutputs.merge(older.localCommandOutputs) { later, _ in later }
+            apiErrors.merge(older.apiErrors) { later, _ in later }
         }
     }
 
@@ -322,15 +404,22 @@ extension TranscriptParser {
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
+            let lineID = (json["uuid"] as? String) ?? windowLineID(offset: offset)
             lines.rawLines.append(json)
             lines.offsets.append(offset)
-            lines.stableIDs.append((json["uuid"] as? String) ?? windowLineID(offset: offset))
+            lines.stableIDs.append(lineID)
 
             for toolResult in toolResults(fromLine: json) {
                 lines.toolResultsByID[toolResult.id] = toolResult.result
             }
             lines.fileEdits.merge(fileEditStats(fromLine: json)) { _, newer in newer }
             lines.subagentAgentIDs.merge(subagentAgentIDs(fromLine: json)) { _, newer in newer }
+            if let local = localCommandOutput(fromLine: json) {
+                lines.localCommandOutputs[local.commandLineID] = local.output
+            }
+            if let errorClass = apiErrorClass(fromLine: json) {
+                lines.apiErrors[lineID] = errorClass
+            }
         }
         return lines
     }
@@ -376,7 +465,9 @@ extension TranscriptParser {
             entries: entries, startOffset: startOffset, endOffset: end,
             toolResultsByID: lines.toolResultsByID,
             fileEdits: lines.fileEdits,
-            subagentAgentIDs: lines.subagentAgentIDs)
+            subagentAgentIDs: lines.subagentAgentIDs,
+            localCommandOutputs: lines.localCommandOutputs,
+            apiErrors: lines.apiErrors)
     }
 
     /// `parseWindow`'s read size after `chunk`: twice it, but no more than

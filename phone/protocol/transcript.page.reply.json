@@ -11,7 +11,16 @@
         "truncated": false
       },
       {
+        "apiError": "server_error",
+        "at": 1762497630000,
+        "id": "6b0e2f4a-35c1-5d0e-8f4b-2f7f0c9d41aa",
+        "kind": "assistant",
+        "text": "API Error: 500 Internal server error",
+        "truncated": false
+      },
+      {
         "at": 1762497660000,
+        "exitCode": 128,
         "id": "f9fda178-90ae-5c15-b98c-7f0274aacb9c",
         "kind": "tool",
         "target": "git switch -c fix-login",
