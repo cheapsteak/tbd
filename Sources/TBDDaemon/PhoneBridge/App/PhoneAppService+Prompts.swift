@@ -827,9 +827,11 @@ struct PhonePromptFeed: Sendable {
 /// obeys, is read twice: first through the session's `answer` capability, as
 /// the sessions list shows it, so while the setting is off the answer is
 /// `unsupported` with `PhoneSessionStatus.answerTurnedOffReason` before the
-/// core is called; then by the core itself, which refuses an answer whose
-/// setting was turned off after the first read, and the phone gets that
-/// refusal as `refused` in the same words. `PromptDecisionEncoder` checks
+/// core is called, and while it cannot be read likewise with
+/// `PhoneSessionStatus.answerSettingUnreadReason`; then by the core itself,
+/// which refuses an answer whose setting was turned off after the first
+/// read, and the phone gets that refusal as `refused` in the same words as
+/// the setting turned off. `PromptDecisionEncoder` checks
 /// the answer against the prompt, so the phone answers exactly the kinds the
 /// laptop does. The method is in the request memory, so a resent answer acts
 /// once. A remote answer's refusal reaches the phone only in words TBD wrote
@@ -861,14 +863,16 @@ extension PhoneAppService {
     ///   list shows; any other session that is not Claude (a shell), with
     ///   `notAClaudeAnswerReason`; and a Claude session while the setting for
     ///   answering prompts is off, with the list's reason,
-    ///   `PhoneSessionStatus.answerTurnedOffReason`. Otherwise
+    ///   `PhoneSessionStatus.answerTurnedOffReason`, or cannot be read, with
+    ///   `PhoneSessionStatus.answerSettingUnreadReason`. Otherwise
     ///   `phoneAnswerPrompt` with the terminal, the prompt and the answer.
     /// - **A remote session** needs its `answer` capability, as the sessions
     ///   list shows it (its provider declares `answer`, and the setting is
-    ///   on), or it is `unsupported` with the same reason; a provider that is
-    ///   not registered, and a session the phone cannot see, are `not_found`
-    ///   (`checkPhoneCapableRemoteSession`). Then `phoneAnswerRemotePrompt`
-    ///   with the provider, the session, the prompt and the answer.
+    ///   on and readable), or it is `unsupported` with the same reason; a
+    ///   provider that is not registered, and a session the phone cannot
+    ///   see, are `not_found` (`checkPhoneCapableRemoteSession`). Then
+    ///   `phoneAnswerRemotePrompt` with the provider, the session, the prompt
+    ///   and the answer.
     ///
     /// The core's result is the reply's: "already answered" is the outcome
     /// `already_resolved`, not an error. A refusal (the setting was turned off

@@ -373,6 +373,37 @@ struct PhonePromptTests {
         #expect(h.actions.calls.isEmpty)
     }
 
+    /// A setting for answering prompts that cannot be read refuses the
+    /// answer before the core is called, local and remote, as `unsupported`
+    /// with `answerSettingUnreadReason`, the reason the sessions list shows
+    /// then. An `internal` reply would be remembered, and a phone reads it
+    /// as an answer that may have landed. Phone control reads as on without
+    /// the database, or the request would stop at that check.
+    @Test func anUnreadableAnswerSettingRefusesTheAnswerBeforeTheCore() async throws {
+        let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
+        h.actions.respond(to: .answerPrompt, with: try Self.answered(.delivered))
+        h.actions.respond(to: .answerRemotePrompt, with: try Self.answered(.delivered))
+        try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
+        try h.actions.listRemoteSession("acme-cloud", "rs-1")
+        let terminal = try await h.seedTerminal()
+        let outbox = await h.connect()
+        try await h.makeConfigUnreadable()
+
+        let (local, _) = try await h.request(.promptAnswer, params: Self.local(terminal.id, "toolu-1"), on: outbox)
+        let (remote, _) = try await h.request(
+            .promptAnswer,
+            params: PhonePromptAnswerParams(session: Self.remoteSession, promptID: "rp-1", answer: Self.allow),
+            on: outbox)
+
+        let refused = PhoneAppError(code: .unsupported, message: PhoneSessionStatus.answerSettingUnreadReason)
+        #expect(local.error == refused)
+        #expect(remote.error == refused)
+        #expect(h.actions.answers.isEmpty)
+        #expect(h.actions.remoteAnswers.isEmpty)
+        let answering = h.actions.calls.filter { $0.method == .answerPrompt || $0.method == .answerRemotePrompt }
+        #expect(answering.isEmpty)
+    }
+
     // MARK: - prompt.answer, a remote session
 
     @Test func aRemoteAnswerNeedsTheAnswerCapability() async throws {

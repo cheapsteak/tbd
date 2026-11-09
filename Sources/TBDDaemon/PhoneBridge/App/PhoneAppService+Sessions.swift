@@ -211,7 +211,8 @@ extension PhoneAppService {
     /// (`gatheredRemoteProviders(forceRefresh:)`).
     ///
     /// The setting for answering prompts is read on every gather
-    /// (`gatheredPromptAnswerSetting()`), never kept. Turning it on or off
+    /// (`promptAnswerSetting()`), never kept; a read that fails builds the
+    /// list with no session offering an answer. Turning it on or off
     /// reaches a phone through the publisher like any other change: the
     /// setter, `config.setTranscriptPromptAnswerEnabled`, broadcasts a state
     /// delta once it has written the column, the delta opens the publisher's
@@ -239,7 +240,7 @@ extension PhoneAppService {
             }
         }
         let profiles = try await db.modelProfiles.list()
-        let promptAnswerEnabled = try await gatheredPromptAnswerSetting()
+        let promptAnswerEnabled = try await promptAnswerSetting()
         let openPrompts = await pendingPrompts.oldestOpenPrompts()
         let states = await gatheredSessionStates()
         let remoteSessions = await gatheredRemoteSessions()
@@ -253,14 +254,28 @@ extension PhoneAppService {
 
     /// The laptop's setting for answering prompts,
     /// `config.transcriptPromptAnswerEnabled`, read from the database on
-    /// every call. The sessions list (`gatherSnapshot`) reads it here, and so
-    /// does an action's capability check whenever the capability it needs
-    /// follows the setting (`listedCapability`), so the list never offers an
-    /// answer that `prompt.answer` refuses, nor refuses one it offers, but
-    /// for a change between the two reads; the core of the answer reads it
-    /// again. A failed read throws.
-    nonisolated func promptAnswerSetting() async throws -> Bool {
-        try await db.config.get().transcriptPromptAnswerEnabled
+    /// every call, or nil when the read fails, which is logged. The sessions
+    /// list (`gatherSnapshot`) reads it here, and so does an action's
+    /// capability check whenever the capability it needs follows the setting
+    /// (`listedCapability`), so the list never offers an answer that
+    /// `prompt.answer` refuses, nor refuses one it offers, but for a change
+    /// between the two reads; the core of the answer reads it again.
+    ///
+    /// Only `answer` depends on the setting, so a read that fails takes
+    /// neither the list nor any other action down: the list shows no session
+    /// offering an answer, and `prompt.answer` is refused before the core is
+    /// called, both with `PhoneSessionStatus.answerSettingUnreadReason`. A
+    /// cancelled read throws.
+    nonisolated func promptAnswerSetting() async throws -> Bool? {
+        do {
+            return try await db.config.get().transcriptPromptAnswerEnabled
+        } catch let cancelled as CancellationError {
+            throw cancelled
+        } catch {
+            Self.logger.error(
+                "Phone: could not read the setting for answering prompts, so answering is unavailable: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
     }
 
     /// The capability `needed` picks from a session's capabilities as the
@@ -270,8 +285,14 @@ extension PhoneAppService {
     /// The setting is read (`promptAnswerSetting()`) only when the two picks
     /// differ, which is when the capability follows it: `answer`, on a
     /// session that could otherwise answer. Any other pick is the same
-    /// either way, so an action that needs it never reads the config row,
-    /// and a read that would fail cannot stop it. A failed read throws.
+    /// either way, so an action that needs it never reads the config row.
+    ///
+    /// A read that fails gives the pick the list shows then: unavailable,
+    /// with `PhoneSessionStatus.answerSettingUnreadReason`. The caller
+    /// refuses it `unsupported` before the core is called, as it refuses an
+    /// answer while the setting is off, and never as `internal`, which a
+    /// phone reads as an answer that may have landed. A cancelled read
+    /// throws.
     nonisolated func listedCapability(
         _ needed: @Sendable (PhoneCapabilities) -> PhoneCapability,
         settingOn: PhoneCapabilities, settingOff: PhoneCapabilities
@@ -279,25 +300,13 @@ extension PhoneAppService {
         let on = needed(settingOn)
         let off = needed(settingOff)
         guard on != off else { return on }
-        return try await promptAnswerSetting() ? on : off
-    }
-
-    /// The setting for answering prompts as a gather reads it, or nil when
-    /// the read fails. Only `answer` depends on it, so a config row that
-    /// cannot be read does not take the whole list down: the list is built
-    /// with no session offering an answer
-    /// (`PhoneSessionStatus.answerSettingUnreadReason`), which is what
-    /// `prompt.answer` would do anyway, since it reads the setting again
-    /// (`listedCapability`). A cancelled read throws.
-    private nonisolated func gatheredPromptAnswerSetting() async throws -> Bool? {
-        do {
-            return try await promptAnswerSetting()
-        } catch let cancelled as CancellationError {
-            throw cancelled
-        } catch {
-            Self.logger.error(
-                "Phone sessions: could not read the setting for answering prompts, so no session offers an answer: \(Self.errorType(error), privacy: .public): \(error.localizedDescription, privacy: .private)")
-            return nil
+        switch try await promptAnswerSetting() {
+        case .some(true):
+            return on
+        case .some(false):
+            return off
+        case .none:
+            return PhoneCapability(available: false, reason: PhoneSessionStatus.answerSettingUnreadReason)
         }
     }
 
@@ -426,7 +435,9 @@ extension PhoneAppService {
     ///   `noSuchProviderReason`;
     /// - an unavailable capability is `unsupported` with its reason, as the
     ///   list shows it, or `fallback` when it gives none: an `answer` while
-    ///   the setting is off is `PhoneSessionStatus.answerTurnedOffReason`;
+    ///   the setting is off is `PhoneSessionStatus.answerTurnedOffReason`,
+    ///   and one while it cannot be read is
+    ///   `PhoneSessionStatus.answerSettingUnreadReason`;
     /// - a session the list places in no row is `not_found` with
     ///   `noSuchSessionReason`: one missing from the laptop's remote session
     ///   list, dismissed, or matched to a hidden repo. The rule is the list's
@@ -489,7 +500,8 @@ extension PhoneAppService {
     /// 3. **The setting**, read as the list reads it, and only when the
     ///    capability `needed` picks follows it (`listedCapability`): an
     ///    `answer` while it is off, with
-    ///    `PhoneSessionStatus.answerTurnedOffReason`.
+    ///    `PhoneSessionStatus.answerTurnedOffReason`, and while it cannot be
+    ///    read, with `PhoneSessionStatus.answerSettingUnreadReason`.
     ///
     /// `prompt.answer`, `session.switchProfile` and `session.fork` read a
     /// local session through this, so each refuses what the list marks

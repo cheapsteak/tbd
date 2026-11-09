@@ -317,7 +317,8 @@ struct PhoneProfileTests {
     /// Switch and fork never read the setting for answering prompts, which
     /// gates neither (`listedCapability`), so a config row that cannot be
     /// read does not stop them: both reach the swap. An answer on the same
-    /// session does read it, and fails, which shows the row is unreadable.
+    /// session does read it, and is refused for the unreadable setting,
+    /// which shows the row is unreadable.
     @Test func switchAndForkDoNotReadTheAnswerSetting() async throws {
         let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
         let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
@@ -349,7 +350,8 @@ struct PhoneProfileTests {
             [terminal.id.uuidString, profile.id.uuidString, "inPlace"],
             [terminal.id.uuidString, profile.id.uuidString, "fork"],
         ])
-        #expect(answered.error?.code == .internalError)
+        #expect(answered.error == PhoneAppError(
+            code: .unsupported, message: PhoneSessionStatus.answerSettingUnreadReason))
         #expect(h.actions.answers.isEmpty)
     }
 

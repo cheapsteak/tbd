@@ -201,8 +201,8 @@ enum PhoneSessionStatus {
     /// `session`, what the session itself allows, while the setting is on;
     /// while it is off, unavailable with `answerTurnedOffReason` in place of
     /// an available one; and while it could not be read (nil), unavailable
-    /// with `answerSettingUnreadReason`, since `prompt.answer` reads the
-    /// setting again before it answers and would fail the same way.
+    /// with `answerSettingUnreadReason`, as `prompt.answer` is refused when
+    /// its own read of the setting fails.
     ///
     /// **A session that cannot answer anyway keeps its own reason** while the
     /// setting is off or unread: a tab in a remote lane, a Codex session, a

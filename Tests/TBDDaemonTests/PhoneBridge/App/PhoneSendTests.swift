@@ -540,8 +540,8 @@ struct PhoneSendTests {
     /// A remote send and a remote model change never read the setting for
     /// answering prompts, which gates neither (`listedCapability`), so a
     /// config row that cannot be read does not stop them: both are sent. A
-    /// remote answer on the same session does read it, and fails, which
-    /// shows the row is unreadable.
+    /// remote answer on the same session does read it, and is refused for
+    /// the unreadable setting, which shows the row is unreadable.
     @Test func aRemoteSendAndModelChangeDoNotReadTheAnswerSetting() async throws {
         let h = try await PhoneServiceHarness.make(phoneControlAlwaysOn: true)
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit, RemoteCapability.answer])
@@ -565,7 +565,8 @@ struct PhoneSendTests {
         #expect(modelSet.error == nil)
         let sends = h.actions.remoteSends.map { [$0.provider, $0.sessionID, $0.text] }
         #expect(sends == [["acme-cloud", "rs-1", "hi"], ["acme-cloud", "rs-1", "/model opus"]])
-        #expect(answered.error?.code == .internalError)
+        #expect(answered.error == PhoneAppError(
+            code: .unsupported, message: PhoneSessionStatus.answerSettingUnreadReason))
         #expect(h.actions.remoteAnswers.isEmpty)
     }
 
