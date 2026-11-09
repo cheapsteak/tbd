@@ -40,6 +40,12 @@ enum TestHolderError: LocalizedError, CustomStringConvertible {
     /// stayed alive, until the shared deadline ran out.
     case connectRefusedUntilDeadline(path: String, refusedAttempts: Int, elapsed: Duration, diagnostics: String)
     case noResponse
+    /// The holder sent `observed` where the test needed `expected`; `meaning`
+    /// says what that reveals about the holder.
+    case unexpectedResponse(expected: String, observed: String, meaning: String, diagnostics: String)
+    /// A test that needed its job to exit and stay unreaped found it reaped:
+    /// the holder noticed the exit before the test woke it.
+    case jobReapedBeforeTheTestWokeTheHolder(jobPID: Int32, diagnostics: String)
 
     var description: String {
         switch self {
@@ -62,6 +68,12 @@ enum TestHolderError: LocalizedError, CustomStringConvertible {
                 + "\n\(diagnostics)"
         case .noResponse:
             return "the holder closed the connection without answering"
+        case .unexpectedResponse(let expected, let observed, let meaning, let diagnostics):
+            return "expected \(expected), got \(observed): \(meaning)\n\(diagnostics)"
+        case .jobReapedBeforeTheTestWokeTheHolder(let jobPID, let diagnostics):
+            return "the holder reaped job \(jobPID) before the test woke it, so the gap between the job's "
+                + "exit and the reap never held open; a holder that ignores --poll-slice-ms reaps within "
+                + "its default \(HolderArguments.defaultPollSliceMilliseconds) ms slice\n\(diagnostics)"
         }
     }
 
@@ -162,6 +174,36 @@ func processIsZombie(_ pid: Int32) -> Bool {
     var size = MemoryLayout<kinfo_proc>.stride
     guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return false }
     return Int32(info.kp_proc.p_stat) == SZOMB
+}
+
+/// The run state (`TH_STATE_*`) of each of `pid`'s threads, or nil when the
+/// kernel will not list them.
+func threadRunStates(_ pid: Int32) -> [Int32]? {
+    guard pid > 0 else { return nil }
+    var threadIDs = [UInt64](repeating: 0, count: 64)
+    let listed = threadIDs.withUnsafeMutableBytes { buffer in
+        proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, buffer.baseAddress, Int32(buffer.count))
+    }
+    guard listed > 0 else { return nil }
+    var states: [Int32] = []
+    for threadID in threadIDs.prefix(Int(listed) / MemoryLayout<UInt64>.stride) {
+        var info = proc_threadinfo()
+        let size = Int32(MemoryLayout<proc_threadinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTHREADINFO, threadID, &info, size) == size else { return nil }
+        states.append(info.pth_run_state)
+    }
+    return states
+}
+
+/// Whether every thread of `pid` is blocked in an interruptible wait.
+///
+/// For the holder that means parked in `poll`: it runs one thread, and `poll`
+/// is the only interruptible wait in its serving loop. Merely not running is
+/// a weaker fact, since a thread also waits uninterruptibly, on a page fault
+/// or a lock, anywhere in the loop.
+func processIsWaitingInterruptibly(_ pid: Int32) -> Bool {
+    guard let states = threadRunStates(pid), !states.isEmpty else { return false }
+    return states.allSatisfy { $0 == Int32(TH_STATE_WAITING) }
 }
 
 /// Takes whatever is queued on a handed-over pty master, without blocking.

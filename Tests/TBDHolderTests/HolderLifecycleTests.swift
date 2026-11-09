@@ -479,8 +479,10 @@ struct HolderLifecycleTests {
             else { return nil }
             return pid
         }
-        try #require(
-            await waitUntil("the job to report its pid\n\(fixture.diagnostics())") { published() != nil })
+        let reported = await waitUntil("the job to report its pid\n\(fixture.diagnostics())") {
+            published() != nil
+        }
+        try #require(reported)
         let jobPID = try #require(published())
         fixture.trackChild(jobPID)
         return jobPID
@@ -491,6 +493,66 @@ struct HolderLifecycleTests {
     /// holder given this slice notices the exit only when something else
     /// wakes it, and the test decides what that is.
     private static let pollSliceOutlivingTheTest = Int32(TestDeadlines.outlivingChildSeconds) * 1000
+
+    /// Releases a holder's job only once the holder is parked in `poll`, and
+    /// returns once the job has exited and sat unreaped for two of the
+    /// holder's default poll slices.
+    ///
+    /// The long slice alone does not order the release against the reap. The
+    /// holder reaps at the top of every pass of its loop, so a pass that the
+    /// test's last request or connect started can still be on its way to
+    /// `poll` when the job exits, and then it reaps before the test wakes it.
+    /// Parked in `poll`, it has already looked at the job, found it alive, and
+    /// will not look again until the test wakes it.
+    ///
+    /// The two slices prove the holder is running the long slice: one running
+    /// the default would have reaped the job inside them. A job reaped anyway
+    /// means the gap never held open, most likely because the holder ignored
+    /// `--poll-slice-ms`. That is a broken premise rather than a slow one, so
+    /// it fails at once instead of at the deadline.
+    private static func releaseJobAndHoldItUnreaped(
+        jobPID: Int32, home: String, fixture: HolderFixture
+    ) async throws {
+        let holderPID = fixture.holderPID
+        let parked = await waitUntil(
+            """
+            the holder to park in poll (thread run states \
+            \(threadRunStates(holderPID).map { "\($0)" } ?? "unreadable"))
+            \(fixture.diagnostics())
+            """
+        ) { processIsWaitingInterruptibly(holderPID) }
+        try #require(parked)
+
+        FileManager.default.createFile(atPath: home + "/go", contents: nil)
+        let unreapedFor = Duration.milliseconds(2 * Int(HolderArguments.defaultPollSliceMilliseconds))
+        var firstSeenUnreaped: ContinuousClock.Instant?
+        let settled = await waitUntil("job \(jobPID) to exit and stay unreaped\n\(fixture.diagnostics())") {
+            // A reaped job ends the wait too, so the guard below reports it
+            // at once.
+            guard processIsZombie(jobPID) else { return !processIsAlive(jobPID) }
+            let since = firstSeenUnreaped ?? ContinuousClock.now
+            firstSeenUnreaped = since
+            return ContinuousClock.now - since >= unreapedFor
+        }
+        try #require(settled)
+        guard processIsZombie(jobPID) else {
+            throw TestHolderError.jobReapedBeforeTheTestWokeTheHolder(
+                jobPID: jobPID, diagnostics: fixture.diagnostics())
+        }
+    }
+
+    /// Reads the busy refusal `probe` must get while another client holds the
+    /// holder's one slot. `meaning` says what its absence reveals.
+    private static func requireRefusal(
+        of probe: TestHolderClient, meaning: String, fixture: HolderFixture
+    ) throws {
+        let refusal = try probe.receive()
+        guard refusal == .rejected(version: HolderProtocolVersion.busySentinel) else {
+            throw TestHolderError.unexpectedResponse(
+                expected: ".rejected(busy sentinel)", observed: "\(refusal)",
+                meaning: meaning, diagnostics: fixture.diagnostics())
+        }
+    }
 
     /// Brings up a holder, releases its job, and returns once the holder has
     /// **reaped** it — with no client having ever connected.
@@ -554,7 +616,7 @@ struct HolderLifecycleTests {
     /// beat that test's first write.
     ///
     /// A poll slice longer than the test holds the gap open, so this needs no
-    /// luck. The job exits while the holder waits in a poll and stays a
+    /// luck. The job exits while the holder is parked in `poll` and stays a
     /// zombie, because nothing else reaps it, and this client's connect is
     /// what wakes the holder. A holder that pushes at whatever client it finds
     /// connected when it reaps either answers the hand-over with that bare
@@ -568,25 +630,17 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
         let jobPID = try await Self.awaitJobPID(home: home, fixture: fixture)
-
-        FileManager.default.createFile(atPath: home + "/go", contents: nil)
-        try #require(
-            await waitUntil("the job to exit and stay unreaped while its holder polls\n\(fixture.diagnostics())") {
-                processIsZombie(jobPID)
-            })
+        try await Self.releaseJobAndHoldItUnreaped(jobPID: jobPID, home: home, fixture: fixture)
 
         let client = try await fixture.connect()
         defer { client.close() }
         let (response, fds) = try client.requestWithFDs(.handOverPTY)
         defer { fds.forEach { close($0) } }
         guard case .handedOverPTY(let description) = response else {
-            Issue.record(
-                """
-                expected .handedOverPTY, got \(response): the holder pushed the exit at a \
-                client it had not answered yet
-                \(fixture.diagnostics())
-                """)
-            return
+            throw TestHolderError.unexpectedResponse(
+                expected: ".handedOverPTY", observed: "\(response)",
+                meaning: "the holder pushed the exit at a client it had not answered yet",
+                diagnostics: fixture.diagnostics())
         }
         #expect(fds.count == 1, "the master must ride the hand-over")
         #expect(description.status == .exited(code: 5))
@@ -594,7 +648,7 @@ struct HolderLifecycleTests {
     }
 
     /// A client the holder admitted while the job was alive, and has not yet
-    /// answered when the job exits.
+    /// answered when the holder reaps it.
     ///
     /// Being connected when the exit happened does not make a push safe: the
     /// client has asked nothing yet, so the next frame on its socket belongs
@@ -602,42 +656,49 @@ struct HolderLifecycleTests {
     /// close before reading it. This is the daemon connecting to a holder
     /// whose job ends a moment later, before its first verb is written.
     ///
-    /// The second client's refusal proves the first was admitted before the
-    /// exit: the holder refuses a connection only while it has one, and
-    /// accepts in arrival order. The pid disappearing proves the reap
-    /// happened while that client was connected and silent.
+    /// A first refused connection proves the client was admitted while the
+    /// job was alive: the holder refuses a connection only while it has one,
+    /// and accepts in arrival order. The long slice keeps the job unreaped
+    /// until a second refused connection wakes the holder, and the pid
+    /// disappearing after that proves the reap happened while the client was
+    /// connected and silent. The long slice also keeps the exit-report window
+    /// out of it: the holder checks that window only before it polls, so the
+    /// request is served however long it takes to arrive.
     @Test func handsOverThePTYToAClientThatWasConnectedButUnansweredWhenTheJobExited() async throws {
         let home = HolderFixture.scratchHome()
         let fixture = try await HolderFixture.start(
-            launch: Self.jobThatExitsOnCue(home: home, code: 6), home: home)
+            launch: Self.jobThatExitsOnCue(home: home, code: 6),
+            home: home,
+            pollSliceMilliseconds: Self.pollSliceOutlivingTheTest)
         defer { fixture.tearDown() }
         await fixture.waitForSocket()
         let jobPID = try await Self.awaitJobPID(home: home, fixture: fixture)
 
         let client = try await fixture.connect()
         defer { client.close() }
-        let probe = try await fixture.connect()
-        defer { probe.close() }
-        try #require(
-            try probe.receive() == .rejected(version: HolderProtocolVersion.busySentinel),
-            "the holder had not admitted the first client\n\(fixture.diagnostics())")
+        let admissionProbe = try await fixture.connect()
+        defer { admissionProbe.close() }
+        try Self.requireRefusal(
+            of: admissionProbe, meaning: "the holder had not admitted the first client", fixture: fixture)
 
-        FileManager.default.createFile(atPath: home + "/go", contents: nil)
-        try #require(
-            await waitUntil("the holder to reap its exited job\n\(fixture.diagnostics())") {
-                !processIsAlive(jobPID)
-            })
+        try await Self.releaseJobAndHoldItUnreaped(jobPID: jobPID, home: home, fixture: fixture)
+
+        let waker = try await fixture.connect()
+        defer { waker.close() }
+        try Self.requireRefusal(
+            of: waker, meaning: "the holder no longer held the first client when it woke", fixture: fixture)
+        let reaped = await waitUntil("the holder to reap job \(jobPID)\n\(fixture.diagnostics())") {
+            !processIsAlive(jobPID)
+        }
+        try #require(reaped)
 
         let (response, fds) = try client.requestWithFDs(.handOverPTY)
         defer { fds.forEach { close($0) } }
         guard case .handedOverPTY(let description) = response else {
-            Issue.record(
-                """
-                expected .handedOverPTY, got \(response): the holder pushed the exit at a \
-                client it had admitted but not answered
-                \(fixture.diagnostics())
-                """)
-            return
+            throw TestHolderError.unexpectedResponse(
+                expected: ".handedOverPTY", observed: "\(response)",
+                meaning: "the holder pushed the exit at a client it had admitted but not answered",
+                diagnostics: fixture.diagnostics())
         }
         #expect(fds.count == 1, "the master must ride the hand-over")
         #expect(description.status == .exited(code: 6))
@@ -654,7 +715,7 @@ struct HolderLifecycleTests {
     /// its answer carries the status.
     ///
     /// The long poll slice orders the steps. The job exits while the holder
-    /// waits in a poll and stays a zombie; the first piece of the frame is
+    /// is parked in `poll` and stays a zombie; the first piece of the frame is
     /// what wakes the holder, which reads it, finds the frame incomplete, and
     /// reaps before polling again. The pid disappearing proves the reap
     /// happened with the partial frame buffered, and only then does the rest
@@ -671,37 +732,33 @@ struct HolderLifecycleTests {
 
         let client = try await fixture.connect()
         defer { client.close() }
-        guard case .described(let alive) = try client.request(.describe) else {
-            Issue.record("expected .described\n\(fixture.diagnostics())")
-            return
+        let first = try client.request(.describe)
+        guard case .described(let alive) = first else {
+            throw TestHolderError.unexpectedResponse(
+                expected: ".described", observed: "\(first)",
+                meaning: "the holder did not answer the client's first request",
+                diagnostics: fixture.diagnostics())
         }
         #expect(alive.status == .alive)
 
-        FileManager.default.createFile(atPath: home + "/go", contents: nil)
-        try #require(
-            await waitUntil("the job to exit and stay unreaped while its holder polls\n\(fixture.diagnostics())") {
-                processIsZombie(jobPID)
-            })
+        try await Self.releaseJobAndHoldItUnreaped(jobPID: jobPID, home: home, fixture: fixture)
 
         let frame = try HolderFraming.frame(HolderRequest.handOverPTY)
         let lengthPrefix = MemoryLayout<UInt32>.size
         try client.sendBytes(frame.prefix(lengthPrefix))
-        try #require(
-            await waitUntil("the holder to reap its exited job\n\(fixture.diagnostics())") {
-                !processIsAlive(jobPID)
-            })
+        let reaped = await waitUntil("the holder to reap job \(jobPID)\n\(fixture.diagnostics())") {
+            !processIsAlive(jobPID)
+        }
+        try #require(reaped)
         try client.sendBytes(frame.dropFirst(lengthPrefix))
 
         let (response, fds) = try client.receiveWithFDs()
         defer { fds.forEach { close($0) } }
         guard case .handedOverPTY(let description) = response else {
-            Issue.record(
-                """
-                expected .handedOverPTY, got \(response): the holder pushed the exit over a \
-                request it had begun to read
-                \(fixture.diagnostics())
-                """)
-            return
+            throw TestHolderError.unexpectedResponse(
+                expected: ".handedOverPTY", observed: "\(response)",
+                meaning: "the holder pushed the exit over a request it had begun to read",
+                diagnostics: fixture.diagnostics())
         }
         #expect(fds.count == 1, "the master must ride the hand-over")
         #expect(description.status == .exited(code: 8))
