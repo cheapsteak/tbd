@@ -1608,6 +1608,47 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         #expect(committed == 2, "the prompt after a reset committed \(committed - 1) frames, not 1")
     }
 
+    /// Output that changes nothing on screen builds a frame and commits none, so it stamps no
+    /// output frame. The delivery that drew it still counts for rule 4: output within an interval
+    /// of it goes to the tick, so such output is read once per refresh, not at every hop.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func outputThatDrawsNothingStillLimitsTheLeadingEdgeToOncePerInterval() async throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        let now = ManualNow(.seconds(100))
+        try placeWithAFirstFrame(fixture, in: window, now: now)
+
+        // SGR 0 with the default rendition already set: output, and nothing to draw.
+        let built = view.framesBuilt
+        await feedAndDeliver("\u{1b}[0m", to: fixture)
+        let invisible = view.lastLeadingEdgeDecision
+        let drawNow: LeadingEdgePolicy.Decision? = .drawNow
+        try #require(invisible == drawNow, "output that draws nothing answered \(String(describing: invisible))")
+        let builtForIt = view.framesBuilt - built
+        try #require(builtForIt == 1, "the delivery built \(builtForIt) frames for output that draws nothing")
+        let committedForIt = view.framesCommitted
+        try #require(committedForIt == 1, "SGR 0 committed a frame, so this test's premise fails")
+        let stamped = view.lastOutputFrameAt
+        let none: Duration? = nil
+        #expect(stamped == none, "a frame that committed nothing stamped an output frame at \(String(describing: stamped))")
+
+        now.value = .seconds(100.002)
+        await feedAndDeliver("a", to: fixture)
+        let next = view.lastLeadingEdgeDecision
+        let within: LeadingEdgePolicy.Decision? = .coalesce(.withinRefreshInterval)
+        #expect(next == within, "output 2 ms after a delivery that drew nothing answered \(String(describing: next))")
+
+        now.value = .seconds(100) + view.refreshInterval
+        await feedAndDeliver("b", to: fixture)
+        let later = view.lastLeadingEdgeDecision
+        #expect(later == drawNow, "output one interval later answered \(String(describing: later))")
+    }
+
     /// A delivery that coalesces only peeks at the tracker. Entries past the timeout stay for the
     /// next frame's own check to clear, and no notice logs.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

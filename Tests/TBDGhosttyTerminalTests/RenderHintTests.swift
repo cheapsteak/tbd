@@ -138,19 +138,32 @@ struct RenderHintTests {
         #expect(ended == true, "a chunk ending one hold and beginning the next signalled no end: \(String(describing: hint))")
     }
 
-    /// `reset()` and `resize` end a hold, and both signal a render, so their hints carry the end.
-    @Test func aResetAndAResizeSignalTheEndTheyCause() throws {
+    /// `reset()` and `resize` end a hold the program did not finish. Each takes the end, so no
+    /// later hint reports it, and reports none itself: a half-written frame is no finished one.
+    @Test func aResetAndAResizeTakeTheEndTheyCauseAndReportNone() throws {
         let (terminal, log) = try Self.makeTerminal()
         defer { terminal.close() }
-        terminal.feed(text: Self.begin)
+        terminal.feed(text: Self.begin + "half a frame")
         terminal.reset()
-        let afterReset = log.last?.holdEnded
-        #expect(afterReset == true, "a reset during a hold signalled no end")
+        let afterReset = log.last
+        let resetExpected: RenderHint? = RenderHint(outputBytesSinceFrame: 20, holdOpen: false, holdEnded: false)
+        #expect(afterReset == resetExpected, "a reset during a hold signalled \(String(describing: afterReset))")
+        let leftByReset = terminal.renderHold.ended
+        #expect(!leftByReset, "a reset left its end for the next call to report")
 
         terminal.feed(text: Self.begin)
         terminal.resize(cols: 30, rows: 6)
-        let afterResize = log.last?.holdEnded
-        #expect(afterResize == true, "a resize during a hold signalled no end")
+        let afterResize = log.last
+        let resizeHoldEnded = afterResize?.holdEnded
+        let resizeHoldOpen = afterResize?.holdOpen
+        #expect(resizeHoldEnded == false, "a resize during a hold reported an end: \(String(describing: afterResize))")
+        #expect(resizeHoldOpen == false, "a resize during a hold left it open: \(String(describing: afterResize))")
+        let leftByResize = terminal.renderHold.ended
+        #expect(!leftByResize, "a resize left its end for the next call to report")
+
+        terminal.feed(text: "x")
+        let next = log.last?.holdEnded
+        #expect(next == false, "the feed after a reset and a resize reported an end")
     }
 
     /// With no signal installed no call signals a render, so the end stays on the terminal for

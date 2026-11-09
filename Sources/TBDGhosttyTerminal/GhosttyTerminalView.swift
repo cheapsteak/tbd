@@ -157,8 +157,8 @@ struct LeadingEdgeFacts: Sendable, Equatable {
     var isLiveResizing: Bool
     /// When the delivery runs, in the display link's timebase.
     var now: Duration
-    /// When the last output frame was built, or nil before the first. See
-    /// `GhosttyTerminalView.lastOutputFrameAt`.
+    /// When the last output frame was built, or nil before the first: the later of
+    /// `GhosttyTerminalView.lastOutputFrameAt` and `lastEmptyLeadingEdgeDrawAt`.
     var lastOutputFrameAt: Duration?
     /// How long one frame stays on screen: see `LeadingEdgePolicy.refreshInterval`.
     var refreshInterval: Duration
@@ -231,8 +231,8 @@ enum LeadingEdgePolicy {
         guard facts.drawablesAwaitingPresent < TerminalRenderer.maxDrawablesAwaitingPresent else {
             return .coalesce(.drawablesBehind)
         }
-        // A hold's end is output too (`ESC[?2026l`), so a delivery with no bytes ended no hold
-        // the program wrote: a reset or resize that ended one finished no frame.
+        // Frames that no output causes go through the display link. A hold's end the program
+        // writes is output (`ESC[?2026l`); a reset's or a resize's is not reported as one.
         guard facts.outputBytesSinceFrame > 0 else { return .coalesce(.noOutput) }
         // A finished hold is a complete frame, the program promised, so its size does not matter.
         guard facts.holdEnded || facts.outputBytesSinceFrame < smallOutputLimit else {
@@ -507,6 +507,12 @@ public final class GhosttyTerminalView: NSView {
     /// the live-resize path all stamp it. A frame with no output in it stamps nothing, so the
     /// cursor frame a key press's blink reset asks for cannot hold back the echo that follows.
     private(set) var lastOutputFrameAt: Duration?
+    /// The `now` of the last delivery that drew at once, built a frame, and committed nothing,
+    /// because its output changed nothing on screen: the view is scrolled back into history, or
+    /// the output only set a title or a mode. Rule 4 counts it as an output frame. Uncounted,
+    /// output that draws nothing would never stamp `lastOutputFrameAt`, and every delivery would
+    /// build a frame of its own, at the main-queue hop rate in place of once per refresh.
+    private(set) var lastEmptyLeadingEdgeDrawAt: Duration?
     /// How many render-signal deliveries have reached `LeadingEdgePolicy`, and what the last one
     /// decided. Test seams.
     private(set) var renderSignalDeliveries = 0
@@ -835,7 +841,10 @@ public final class GhosttyTerminalView: NSView {
         lastLeadingEdgeDecision = decision
         switch decision {
         case .drawNow:
+            let built = framesBuilt
+            let committed = framesCommitted
             renderTick(now: now)
+            if framesBuilt > built, framesCommitted == committed { lastEmptyLeadingEdgeDrawAt = now }
         case .coalesce:
             frameDriver.requestFrame()
         }
@@ -854,7 +863,7 @@ public final class GhosttyTerminalView: NSView {
             canBuildFrames: canBuildFrames && hasDrawable,
             isLiveResizing: frameDriver.demand.isLiveResizing,
             now: now,
-            lastOutputFrameAt: lastOutputFrameAt,
+            lastOutputFrameAt: [lastOutputFrameAt, lastEmptyLeadingEdgeDrawAt].compactMap { $0 }.max(),
             refreshInterval: refreshInterval,
             ringHasFreeSlot: surface.frameRing?.hasFreeSlot ?? true,
             drawablesAwaitingPresent: drawableTracker.peekAwaitingPresent(now: now),

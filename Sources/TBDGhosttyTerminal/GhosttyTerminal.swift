@@ -88,6 +88,9 @@ final class IOContext {
     /// not lost. A call that signals no render, as every call does while no view has a signal
     /// installed, leaves it for the next one that does. An attach clears it too: the view's first
     /// frame after an attach is a full rebuild, so an end from before it is no news to the view.
+    ///
+    /// `reset()` and `resize` end a hold that the program did not finish. When they signal, they
+    /// take the flag and report no end, so the half-written frame is not drawn as a finished one.
     var holdEnded = false
 
     /// XTVERSION must return a `GhosttyString` whose bytes outlive the callback body, so the answer
@@ -357,21 +360,22 @@ final class TerminalCore {
     /// render signal to run, with its hint, if the call changed the screen. Called under the lock.
     ///
     /// A call signals a render only when it changed the screen and a view has a signal installed.
-    /// Such a call takes `IOContext.holdEnded` into its hint, clearing it. Any other call leaves it
-    /// for the next call that signals.
-    func aftermath(signalsRender: Bool) -> Aftermath {
+    /// Such a call takes `IOContext.holdEnded`, clearing it, and puts it in its hint unless
+    /// `reportsHoldEnd` is false: a reset or a resize ends a hold the program did not finish. Any
+    /// other call leaves it for the next call that signals.
+    func aftermath(signalsRender: Bool, reportsHoldEnd: Bool = true) -> Aftermath {
         let drain = harvest()
         guard signalsRender, let renderSignal else { return Aftermath(drain: drain, render: nil) }
         let hint = RenderHint(
             outputBytesSinceFrame: outputBytesSinceFrame,
             holdOpen: context.holdOpen,
-            holdEnded: context.holdEnded)
+            holdEnded: reportsHoldEnd && context.holdEnded)
         context.holdEnded = false
         return Aftermath(drain: drain, render: (signal: renderSignal, hint: hint))
     }
 }
 
-/// See `TerminalCore.aftermath(signalsRender:)`.
+/// See `TerminalCore.aftermath(signalsRender:reportsHoldEnd:)`.
 struct Aftermath {
     var drain: Bool
     /// The render signal to run and the hint to hand it, when the call changed the screen with a
@@ -389,8 +393,9 @@ struct RenderHint: Sendable, Equatable {
     var outputBytesSinceFrame = 0
     /// Whether a DEC 2026 hold was open as the call left it: `IOContext.holdOpen`.
     var holdOpen = false
-    /// Whether a hold ended since the last call that signalled a render: `IOContext.holdEnded`,
-    /// which this call took.
+    /// Whether the program ended a hold since the last call that signalled a render:
+    /// `IOContext.holdEnded`, which this call took. A reset's or a resize's hint reports none,
+    /// though either ends a hold: the program finished no frame.
     var holdEnded = false
 
     /// What `close()` signals: no output and no hold.
@@ -655,13 +660,14 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// frame's `begin_update`.
     @discardableResult
     private func withCore<T>(
-        signalsRender: Bool, changesModes: Bool, _ body: (TerminalCore, VtTerminal) throws -> T
+        signalsRender: Bool, changesModes: Bool, reportsHoldEnd: Bool = true,
+        _ body: (TerminalCore, VtTerminal) throws -> T
     ) rethrows -> T? {
         let (value, aftermath): (T?, Aftermath?) = try locked { core in
             guard let raw = core.raw else { return (nil, nil) }
             let value = try body(core, raw)
             if changesModes { core.bound?.terminalModesMayHaveChanged(raw) }
-            return (value, core.aftermath(signalsRender: signalsRender))
+            return (value, core.aftermath(signalsRender: signalsRender, reportsHoldEnd: reportsHoldEnd))
         }
         if let aftermath { finish(aftermath) }
         return value
@@ -792,8 +798,13 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// A full reset (RIS): screens, scrollback, modes and the cursor go back to their initial
     /// state. The size is kept. Use before replaying a snapshot into a terminal that was used
     /// before, so nothing from its earlier life (an alternate screen, a colour) survives.
+    ///
+    /// A reset ends any DEC 2026 hold, and its render signal reports no end: the program finished
+    /// no frame.
     public func reset() {
-        withRaw(signalsRender: true, changesModes: true) { raw in ghostty_terminal_reset(raw) }
+        withCore(signalsRender: true, changesModes: true, reportsHoldEnd: false) { _, raw in
+            ghostty_terminal_reset(raw)
+        }
     }
 
     /// Resizes the grid. The primary screen reflows; the alternate screen does not.
@@ -824,7 +835,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
                 core.context.reportedSize = previousSize
                 failure = result
             }
-            return core.aftermath(signalsRender: true)
+            // A resize ends any DEC 2026 hold, and the program finished no frame: no end reported.
+            return core.aftermath(signalsRender: true, reportsHoldEnd: false)
         }
         if let failure {
             let error = GhosttyCallError(result: failure, operation: "ghostty_terminal_resize")
