@@ -32,14 +32,15 @@
 //   sends; on success it closes the New sheet of that repo, if one still shows, and opens the new
 //   worktree's first session once the list shows it, toasting "Created <row name>" then
 //   (`openPending({ worktreeID, toast: 'Created {name}' }, mark)`), unless the user has
-//   navigated since the mark.
+//   navigated since the mark or moved on from the create (below).
 // - `createRemote(params): Promise<void>` – `remote.create` with `params`, as the New sheet built
 //   them (`remoteCreateParams`). It takes a mark as it sends; on success it closes the New sheet
 //   of that repo, if one still shows, toasts "Remote session started on <provider>", and opens
 //   the new session once the list shows it (`openPending({ ref }, mark)`), unless the user has
-//   navigated since the mark.
-// - `claimLostCreate(sheet): void` – shows in `sheet`, a New sheet that has just opened, the
-//   words of a create in its repo that failed while no New sheet showed them (below).
+//   navigated since the mark; when the user moved on from it, it does neither.
+// - `newSheetShown(sheet): void` – the New sheet calls it as `sheet` shows: the words of a create
+//   in its repo that failed while no New sheet of it showed appear in it, and a create for another
+//   repo is one the user moved on from (below).
 //
 // **The repo.** A create goes only to the repo of the New sheet `ui.sheet` shows at the moment
 // of the gesture, read from the store in one read: `repoID` must be that sheet's, the repo whose
@@ -59,9 +60,15 @@
 // may exist all the same); `superseded` is silent. It shows in the New sheet of the create's repo
 // that shows when it settles, which shows its form again, its values kept while it stayed open.
 // When none shows, because the user closed it while the create was on its way, nothing toasts:
-// the words are kept for the next New sheet that opens for that repo (`lostCreate`), which shows
-// them. A closed sheet does not stop a create that succeeds from opening its session; only a
-// navigation does, by the mark.
+// the words are kept for the next New sheet that shows for that repo (`lostCreates`, by repo),
+// which shows them.
+//
+// **Moving on.** A closed sheet does not stop a create that succeeds from opening its session; a
+// navigation does, by the mark, and so does a New sheet that shows for another repo: the create's
+// mark is then null (`newSheetShown` in `state/sheets.ts`), so it opens nothing and toasts
+// nothing, and an open of its session still waiting for the list is dropped, so its session never
+// closes that sheet and the form in it. The new row just appears in the list. A New sheet that
+// shows for the create's own repo takes it back, so its session opens all the same.
 //
 // **The target.** `from` is the session the menu or sheet showed when the user tapped. Each of
 // the three acts only on the session the route shows at the moment of the gesture, read from the
@@ -105,13 +112,13 @@ import { refKey, sameRef } from '../protocol/wire.ts';
 import { isBlankMessage, trimLikeLaptop, withText } from '../state/prompts.ts';
 import { findSession } from '../state/route.ts';
 import {
-  beginAct, beginCreate, claimLostCreate, endAct, endCreate, failIn, isActing, keepLostCreate, loadedProfiles, loadedProviders,
-  profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading, remoteParamsReady, sameAccountName, switchBlock,
-  unavailableReason,
+  awaitOpen, beginAct, beginCreate, endAct, endCreate, failIn, isActing, keepLostCreate, loadedProfiles, loadedProviders,
+  newSheetShown, profileByID, profilesEnded, profilesLoading, providersEnded, providersLoading, remoteParamsReady, sameAccountName,
+  switchBlock, unavailableReason,
 } from '../state/sheets.ts';
 import type { ActingKind, CreateInFlight, ProfilesLoad, ProvidersLoad } from '../state/sheets.ts';
 import { nextToast } from '../state/store.ts';
-import type { AppState, MenuState, SheetState, UIState } from '../state/store.ts';
+import type { AppState, MenuState, PendingOpen, SheetState, UIState } from '../state/store.ts';
 import type { ActionContext, Actions } from './index.ts';
 
 /**
@@ -220,26 +227,30 @@ function newSheetFor(ui: UIState, repoID: string): SheetState | null {
 }
 
 /**
- * `s` with `c` on its way (`beginCreate`) when a create may go out for `repoID` now: a New sheet
- * for it shows, `ready` holds, and no create is on its way; else `s` itself.
+ * `s` with `c` on its way (`beginCreate`, with the navigation count as its mark) when a create may
+ * go out for `repoID` now: a New sheet for it shows, `ready` holds, and no create is on its way;
+ * else `s` itself.
  */
 function startedCreate(s: AppState, c: CreateInFlight, ready: boolean): AppState {
-  if (!ready || s.sheets.creating !== null || newSheetFor(s.ui, c.repoID) === null) return s;
-  return { ...s, sheets: beginCreate(s.sheets, c) };
+  if (!ready || newSheetFor(s.ui, c.repoID) === null) return s;
+  const sheets = beginCreate(s.sheets, c, s.ui.nav);
+  return sheets === s.sheets ? s : { ...s, sheets };
 }
 
 /**
  * `s` once create `c` settled as `how`: the mark gone, and then, when taken, the New sheet of its
- * repo closed, if one shows, and the toast, if any; when failed, the words in that sheet, or kept
- * for the next one of its repo when none shows (`keepLostCreate`). Nothing for `superseded`.
+ * repo closed, if one shows, and the toast, if any, unless the user moved on from the create (its
+ * mark is null); when failed, the words in that sheet, or kept for the next one of its repo when
+ * none shows (`keepLostCreate`). Nothing for `superseded`.
  */
 function settleCreate(s: AppState, c: CreateInFlight, how: { taken: true; toast: string | null } | { taken: false; text: string | null }): AppState {
+  const movedOn = s.sheets.creating?.mark === null;
   let sheets = endCreate(s.sheets);
   let ui = s.ui;
   const sheet = newSheetFor(ui, c.repoID);
   if (how.taken) {
     if (sheet !== null) ui = { ...ui, sheet: null };
-    if (how.toast !== null) ui = { ...ui, toast: nextToast(ui, how.toast) };
+    if (how.toast !== null && !movedOn) ui = { ...ui, toast: nextToast(ui, how.toast) };
   } else if (how.text !== null) {
     sheets = sheet !== null ? failIn(sheets, sheet, how.text) : keepLostCreate(sheets, c.repoID, how.text);
   }
@@ -253,6 +264,30 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
   let loads = 0;
   /** The number of the last `remote.providers` sent, so only the newest lands. */
   let providerLoads = 0;
+
+  /**
+   * Settles create `c` as `how` (`settleCreate`), and gives back the mark its session opens by,
+   * or null when the user moved on from it.
+   */
+  const settled = (c: CreateInFlight, how: Parameters<typeof settleCreate>[2]): number | null => {
+    const end: { mark: number | null } = { mark: null };
+    store.update((s) => {
+      end.mark = s.sheets.creating?.mark ?? null;
+      return settleCreate(s, c, how);
+    });
+    return end.mark;
+  };
+
+  /**
+   * Opens `open`, the session create `c` made, once the list shows it (`openPending`), unless
+   * `mark` is null or the user navigated since it; and, while it waits, keeps it as the create's
+   * (`awaitOpen`), so a New sheet that shows for another repo can drop it.
+   */
+  const openCreated = (c: CreateInFlight, open: PendingOpen, mark: number | null): void => {
+    if (mark === null) return;
+    self().openPending(open, mark);
+    store.update((s) => (s.ui.pendingOpen === open ? { ...s, sheets: awaitOpen(s.sheets, c.repoID, open) } : s));
+  };
 
   return {
     async loadProfiles(): Promise<void> {
@@ -388,8 +423,7 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         return next;
       });
       if (!sent.yes) return;
-      // Taken as the request goes out: a navigation from here on means the user chose where to go.
-      const mark = self().navMark();
+      // Its mark was taken with it (`beginCreate`): a navigation from here on means the user chose where to go.
       let worktreeID: string | null = null;
       let text: string | null = null;
       try {
@@ -397,8 +431,8 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       } catch (error) {
         text = errorText(error);
       }
-      store.update((s) => settleCreate(s, c, worktreeID === null ? { taken: false, text } : { taken: true, toast: null }));
-      if (worktreeID !== null) self().openPending({ worktreeID, toast: 'Created {name}' }, mark);
+      const mark = settled(c, worktreeID === null ? { taken: false, text } : { taken: true, toast: null });
+      if (worktreeID !== null) openCreated(c, { worktreeID, toast: 'Created {name}' }, mark);
     },
 
     async createRemote(params: PhoneRemoteCreateParams): Promise<void> {
@@ -411,7 +445,6 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
         return next;
       });
       if (!sent.yes) return;
-      const mark = self().navMark();
       let made: PhoneSessionRef | null = null;
       let text: string | null = null;
       try {
@@ -419,21 +452,25 @@ export function sheetActions(ctx: ActionContext, self: () => Actions) {
       } catch (error) {
         text = errorText(error);
       }
-      store.update((s) => settleCreate(
-        s, c, made === null ? { taken: false, text } : { taken: true, toast: `Remote session started on ${params.provider}` },
-      ));
-      if (made !== null) self().openPending({ ref: made }, mark);
+      const mark = settled(c, made === null ? { taken: false, text } : { taken: true, toast: `Remote session started on ${params.provider}` });
+      if (made !== null) openCreated(c, { ref: made }, mark);
     },
 
     /**
-     * Shows in `sheet`, a New sheet that has just opened, the words of a create in its repo that
-     * failed while no New sheet showed them (`lostCreate`), and keeps them no longer. The New sheet
-     * calls it as it opens.
+     * What a New sheet's showing does (`newSheetShown` in `state/sheets.ts`), while `sheet` is the
+     * sheet `ui.sheet` holds: the words kept for its repo show in it; a create for another repo is
+     * one the user moved on from, and an open of its session still waiting is dropped
+     * (`ui.pendingOpen`, when it is still that open); a create for its own repo is taken back.
+     * The New sheet calls it as it shows, before it is drawn.
      */
-    claimLostCreate(sheet: SheetState): void {
+    newSheetShown(sheet: SheetState): void {
       store.update((s) => {
-        const sheets = claimLostCreate(s.sheets, sheet);
-        return sheets === s.sheets ? s : { ...s, sheets };
+        if (sheet.name !== 'new' || s.ui.sheet !== sheet) return s;
+        const waiting = s.sheets.awaitingOpen;
+        const drop = waiting !== null && waiting.repoID !== sheet.repoID && s.ui.pendingOpen === waiting.open;
+        const sheets = newSheetShown(s.sheets, sheet, s.ui.nav);
+        if (sheets === s.sheets && !drop) return s;
+        return { ...s, sheets, ui: drop ? { ...s.ui, pendingOpen: null } : s.ui };
       });
     },
   };

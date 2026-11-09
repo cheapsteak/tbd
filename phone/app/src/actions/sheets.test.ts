@@ -14,8 +14,9 @@ import type {
 import { refKey } from '../protocol/wire.ts';
 import { applySnapshot } from '../state/sessionsData.ts';
 import {
-  currentProfileID, enumChoices, fieldOn, fieldText, forkOrder, isActing, kindWords, NO_EDITS, profileDetail, providerDetail,
-  remoteCreateParams, remoteParamsReady, restartNote, withFieldOn, withFieldText,
+  beginCreate, currentProfileID, emptySheets, enumChoices, fieldOn, fieldProblem, fieldText, forkOrder, isActing, isWholeNumber,
+  kindWords, NO_EDITS, profileDetail, providerDetail, remoteCreateParams, remoteParamsReady, restartNote, WHOLE_NUMBER_TEXT,
+  withFieldBadInput, withFieldOn, withFieldText,
 } from '../state/sheets.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, SheetState } from '../state/store.ts';
@@ -549,7 +550,14 @@ async function newHarness(options: { repoID?: string; providers?: PhoneProvider[
     const layout = snapshot().layout.map((g) => ({ ...g, rows: [...g.rows, { id, depth: 0 }] }));
     h.actions.onEvent({ event: 'sessions.changed', seq: 50, data: { layout, rows, removedRowIDs: [] } });
   };
-  return { ...h, creates, listRow, sheet: (): SheetState | null => h.state().ui.sheet };
+  /** Opens the New sheet for `repo` as its "+" does, and shows it as the New sheet does (`newSheetShown`). */
+  const showNew = (repo: string): SheetState => {
+    h.actions.openSheet({ name: 'new', repoID: repo, repoName: repo === REPO ? 'acme-web' : 'acme-api' });
+    const shown = h.state().ui.sheet!;
+    h.actions.newSheetShown(shown);
+    return shown;
+  };
+  return { ...h, creates, listRow, showNew, sheet: (): SheetState | null => h.state().ui.sheet };
 }
 
 test('loadProviders asks for the repo, shows loading at once, then the providers for that repo; only the newest lands', async () => {
@@ -575,10 +583,17 @@ test('createWorktree sends the repo of the New sheet, as the daemon wrote it, an
   const h = await newHarness();
   const pending = h.actions.createWorktree(REPO, `  ${MESSAGE}\n`);
   assert.deepEqual(h.last('worktree.create').params, { repoID: REPO, message: `  ${MESSAGE}\n` });
-  assert.deepEqual(h.state().sheets.creating, { repoID: REPO, mode: 'local' });
+  assert.deepEqual(h.state().sheets.creating, { repoID: REPO, mode: 'local', mark: h.state().ui.nav });
   h.last('worktree.create').resolve({ worktreeID: 'W-new' });
   await pending;
   assert.equal(h.state().sheets.creating, null);
+});
+
+test('a create begins only while none is on its way', () => {
+  const idle = emptySheets();
+  const one = beginCreate(idle, { repoID: REPO, mode: 'local' }, 3);
+  assert.deepEqual(one.creating, { repoID: REPO, mode: 'local', mark: 3 });
+  assert.equal(beginCreate(one, { repoID: OTHER_REPO, mode: 'remote' }, 4), one);
 });
 
 test('back-to-back creates post one, whichever kind, until the first settles', async () => {
@@ -660,7 +675,7 @@ test("a create's error shows in its New sheet, which stays open; superseded show
   h.last('worktree.create').reject(new AppError('superseded', SUPERSEDED_TEXT));
   await pending;
   assert.equal(h.state().sheets.failed, null);
-  assert.equal(h.state().sheets.lostCreate, null);
+  assert.deepEqual(plain(h.state().sheets.lostCreates), {});
   assert.equal(h.sheet(), sheet);
 });
 
@@ -671,18 +686,41 @@ test('the error of a create whose sheet closed toasts nothing, and shows in the 
   h.last('worktree.create').reject(new AppError('refused', 'The worktree could not be created. Check the laptop.'));
   await pending;
   assert.equal(h.state().ui.toast, null);
-  assert.deepEqual(h.state().sheets.lostCreate, { repoID: REPO, text: 'The worktree could not be created. Check the laptop.' });
+  assert.deepEqual(plain(h.state().sheets.lostCreates), { [REPO]: 'The worktree could not be created. Check the laptop.' });
   // Another repo's sheet does not take them.
-  h.actions.openSheet({ name: 'new', repoID: OTHER_REPO, repoName: 'acme-api' });
-  h.actions.claimLostCreate(h.sheet()!);
+  h.showNew(OTHER_REPO);
   assert.equal(h.state().sheets.failed, null);
   h.actions.closeSheet();
-  // The repo's next sheet does, once.
+  // Nor does a sheet that no longer shows.
   h.actions.openSheet({ name: 'new', repoID: REPO, repoName: 'acme-web' });
-  const sheet = h.sheet()!;
-  h.actions.claimLostCreate(sheet);
+  const gone = h.sheet()!;
+  h.actions.closeSheet();
+  h.actions.newSheetShown(gone);
+  assert.equal(h.state().sheets.failed, null);
+  // The repo's next sheet does, once.
+  const sheet = h.showNew(REPO);
   assert.deepEqual(h.state().sheets.failed, { sheet, text: 'The worktree could not be created. Check the laptop.' });
-  assert.equal(h.state().sheets.lostCreate, null);
+  assert.deepEqual(plain(h.state().sheets.lostCreates), {});
+});
+
+test('the errors of creates in two repos that no sheet showed are each kept for their own repo', async () => {
+  const h = await newHarness();
+  let pending = h.actions.createWorktree(REPO, MESSAGE);
+  h.actions.closeSheet();
+  h.last('worktree.create').reject(new AppError('refused', 'A failed.'));
+  await pending;
+  h.showNew(OTHER_REPO);
+  pending = h.actions.createWorktree(OTHER_REPO, MESSAGE);
+  h.actions.closeSheet();
+  h.last('worktree.create').reject(new AppError('refused', 'B failed.'));
+  await pending;
+  assert.deepEqual(plain(h.state().sheets.lostCreates), { [REPO]: 'A failed.', [OTHER_REPO]: 'B failed.' });
+  const a = h.showNew(REPO);
+  assert.deepEqual(h.state().sheets.failed, { sheet: a, text: 'A failed.' });
+  h.actions.closeSheet();
+  const b = h.showNew(OTHER_REPO);
+  assert.deepEqual(h.state().sheets.failed, { sheet: b, text: 'B failed.' });
+  assert.deepEqual(plain(h.state().sheets.lostCreates), {});
 });
 
 test('a New sheet open for the repo when the create fails shows the error, even one opened again meanwhile', async () => {
@@ -694,18 +732,65 @@ test('a New sheet open for the repo when the create fails shows the error, even 
   h.last('worktree.create').reject(new AppError('refused', 'The worktree could not be created. Check the laptop.'));
   await pending;
   assert.deepEqual(h.state().sheets.failed, { sheet: again, text: 'The worktree could not be created. Check the laptop.' });
-  assert.equal(h.state().sheets.lostCreate, null);
+  assert.deepEqual(plain(h.state().sheets.lostCreates), {});
 });
 
-test('a success closes only a New sheet of its own repo', async () => {
+test("a New sheet shown for another repo while a create is on its way: the create opens nothing, and the sheet stays", async () => {
   const h = await newHarness();
+  const made: PhoneSessionRef = { kind: 'local', terminalID: 'T-made' };
   const pending = h.actions.createWorktree(REPO, MESSAGE);
   h.actions.closeSheet();
-  h.actions.openSheet({ name: 'new', repoID: OTHER_REPO, repoName: 'acme-api' });
-  const other = h.sheet();
+  const other = h.showNew(OTHER_REPO);
+  assert.equal(h.state().sheets.creating?.mark, null);
   h.last('worktree.create').resolve({ worktreeID: 'W-new' });
   await pending;
   assert.equal(h.sheet(), other);
+  assert.equal(h.state().ui.pendingOpen, null);
+  h.listRow('W-new', 'new-worktree-1', made);
+  assert.deepEqual(h.state().ui.route, { screen: 'sessions' });
+  assert.equal(h.sheet(), other);
+  assert.equal(h.state().ui.toast, null);
+});
+
+test('a New sheet shown for another repo drops the open of a created session still waiting for the list', async () => {
+  const h = await newHarness();
+  const made: PhoneSessionRef = { kind: 'local', terminalID: 'T-made' };
+  const pending = h.actions.createWorktree(REPO, MESSAGE);
+  h.last('worktree.create').resolve({ worktreeID: 'W-new' });
+  await pending;
+  assert.deepEqual(h.state().ui.pendingOpen, { worktreeID: 'W-new', toast: 'Created {name}' });
+  const other = h.showNew(OTHER_REPO);
+  assert.equal(h.state().ui.pendingOpen, null);
+  h.listRow('W-new', 'new-worktree-1', made);
+  assert.deepEqual(h.state().ui.route, { screen: 'sessions' });
+  assert.equal(h.sheet(), other);
+  assert.equal(h.state().ui.toast, null);
+});
+
+test("a New sheet shown again for the create's own repo keeps its open, before the reply or after it", async () => {
+  const made: PhoneSessionRef = { kind: 'local', terminalID: 'T-made' };
+  // Before the reply, and after a sheet for another repo meanwhile: the sheet of its repo takes it back.
+  let h = await newHarness();
+  let pending = h.actions.createWorktree(REPO, MESSAGE);
+  h.actions.closeSheet();
+  h.showNew(OTHER_REPO);
+  h.actions.closeSheet();
+  h.showNew(REPO);
+  assert.equal(h.state().sheets.creating?.mark, h.state().ui.nav);
+  h.last('worktree.create').resolve({ worktreeID: 'W-new' });
+  await pending;
+  h.listRow('W-new', 'new-worktree-1', made);
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: made });
+  assert.equal(h.state().ui.toast?.text, 'Created new-worktree-1');
+  // After the reply, while the session waits for the list.
+  h = await newHarness();
+  pending = h.actions.createWorktree(REPO, MESSAGE);
+  h.last('worktree.create').resolve({ worktreeID: 'W-new' });
+  await pending;
+  h.showNew(REPO);
+  assert.deepEqual(h.state().ui.pendingOpen, { worktreeID: 'W-new', toast: 'Created {name}' });
+  h.listRow('W-new', 'new-worktree-1', made);
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: made });
 });
 
 test('createRemote sends the params, toasts the provider after the reply, and opens the session once listed', async () => {
@@ -713,9 +798,10 @@ test('createRemote sends the params, toasts the provider after the reply, and op
   const made: PhoneSessionRef = { kind: 'remote', provider: 'acme-cloud', sessionID: 'rs-1' };
   const params = remoteCreateParams(REPO, CLOUD, MESSAGE, NO_EDITS);
   const pending = h.actions.createRemote(params);
-  assert.deepEqual(h.state().sheets.creating, { repoID: REPO, mode: 'remote' });
+  assert.deepEqual(h.state().sheets.creating, { repoID: REPO, mode: 'remote', mark: h.state().ui.nav });
   assert.deepEqual(plainParams(h.last('remote.create').params), {
-    provider: 'acme-cloud', repoID: REPO, message: MESSAGE, strings: { branch: 'main', size: 'Medium', hours: '4' }, bools: { setup: true },
+    provider: 'acme-cloud', repoID: REPO, message: MESSAGE, strings: { branch: 'main', size: 'Medium', hours: '4', notes: '' },
+    bools: { setup: true },
   });
   assert.equal(h.state().ui.toast, null);
   h.last('remote.create').resolve({ session: made });
@@ -725,6 +811,34 @@ test('createRemote sends the params, toasts the provider after the reply, and op
   assert.deepEqual(h.state().ui.pendingOpen, { ref: made });
 });
 
+test('a remote create opens nothing once the user navigated away, or toasts nothing once they moved on to another repo', async () => {
+  const made: PhoneSessionRef = { kind: 'remote', provider: 'acme-sandbox', sessionID: 'rs-1' };
+  const remoteRow = (h: Awaited<ReturnType<typeof newHarness>>): void => {
+    const rows: PhoneRow[] = [{ id: 'RS-1', kind: 'remote', name: 'rs-1', remote: true, statusChangedAt: 3, sessions: [session(made)] }];
+    const layout = snapshot().layout.map((g) => ({ ...g, rows: [...g.rows, { id: 'RS-1', depth: 0 }] }));
+    h.actions.onEvent({ event: 'sessions.changed', seq: 50, data: { layout, rows, removedRowIDs: [] } });
+  };
+  let h = await newHarness();
+  let pending = h.actions.createRemote(remoteCreateParams(REPO, SANDBOX, MESSAGE, NO_EDITS));
+  h.actions.closeSheet();
+  h.actions.openSession(OTHER);
+  h.last('remote.create').resolve({ session: made });
+  await pending;
+  remoteRow(h);
+  assert.deepEqual(h.state().ui.route, { screen: 'session', ref: OTHER });
+  assert.equal(h.state().ui.pendingOpen, null);
+  h = await newHarness();
+  pending = h.actions.createRemote(remoteCreateParams(REPO, SANDBOX, MESSAGE, NO_EDITS));
+  h.actions.closeSheet();
+  const other = h.showNew(OTHER_REPO);
+  h.last('remote.create').resolve({ session: made });
+  await pending;
+  remoteRow(h);
+  assert.deepEqual(h.state().ui.route, { screen: 'sessions' });
+  assert.equal(h.sheet(), other);
+  assert.equal(h.state().ui.toast, null);
+});
+
 test('createRemote sends nothing for a provider the loaded list does not offer, or a form Create would not send', async () => {
   const h = await newHarness({ providers: [CLOUD, SIGNED_OUT] });
   await h.actions.createRemote(remoteCreateParams(REPO, SANDBOX, MESSAGE, NO_EDITS));
@@ -732,6 +846,7 @@ test('createRemote sends nothing for a provider the loaded list does not offer, 
   await h.actions.createRemote(remoteCreateParams(REPO, CLOUD, '  ', NO_EDITS));
   await h.actions.createRemote(remoteCreateParams(REPO, CLOUD, MESSAGE, withFieldText(NO_EDITS, 'branch', ' ')));
   await h.actions.createRemote({ ...remoteCreateParams(REPO, CLOUD, MESSAGE, NO_EDITS), strings: { branch: 'main', size: 'Huge' } });
+  await h.actions.createRemote(remoteCreateParams(REPO, CLOUD, MESSAGE, withFieldText(NO_EDITS, 'hours', '4.5')));
   assert.deepEqual(h.creates(), []);
   // No list loaded for the repo: nothing.
   const bare = await newHarness({ providers: null });
@@ -749,7 +864,7 @@ test("a remote refusal shows the laptop's words in the sheet as they come", asyn
   assert.equal(h.state().ui.toast, null);
 });
 
-test('remote.create params: strings by type, trimmed, empty optional ones left out; bools for every switch', () => {
+test('remote.create params: every field that is not a switch in strings, trimmed, blank ones as ""; bools for every switch', () => {
   let edits = withFieldText(NO_EDITS, 'branch', '  release/1.2 \n');
   edits = withFieldText(edits, 'size', 'Large');
   edits = withFieldOn(edits, 'setup', false);
@@ -758,7 +873,7 @@ test('remote.create params: strings by type, trimmed, empty optional ones left o
   const params = remoteCreateParams(REPO, CLOUD, ` ${MESSAGE}`, edits);
   assert.deepEqual(plainParams(params), {
     provider: 'acme-cloud', repoID: REPO, message: ` ${MESSAGE}`,
-    strings: { branch: 'release/1.2', size: 'Large', notes: 'Use the staging data.' }, bools: { setup: false },
+    strings: { branch: 'release/1.2', size: 'Large', hours: '', notes: 'Use the staging data.' }, bools: { setup: false },
   });
   assert.equal(remoteParamsReady(params, CLOUD), true);
   // A required field left blank holds Create.
@@ -776,6 +891,49 @@ test('remote.create params: strings by type, trimmed, empty optional ones left o
   const oddParams = remoteCreateParams(REPO, odd, MESSAGE, NO_EDITS);
   assert.deepEqual(Object.keys(oddParams.strings), ['__proto__']);
   assert.equal(remoteParamsReady(oddParams, odd), true);
+});
+
+test('a cleared prefilled field goes as "", so the laptop does not fill its prefill back in', () => {
+  const cmd: PhoneFormField = { name: 'cmd', type: 'string', required: false, prefill: 'make dev' };
+  const provider: PhoneProvider = { ...SANDBOX, fields: [HOURS, cmd, { ...SIZE, required: false }] };
+  let edits = withFieldText(NO_EDITS, 'hours', '');
+  edits = withFieldText(edits, 'cmd', '   ');
+  edits = withFieldText(edits, 'size', '');
+  const params = remoteCreateParams(REPO, provider, MESSAGE, edits);
+  assert.deepEqual(plain(params.strings), { hours: '', cmd: '', size: '' });
+  assert.equal(remoteParamsReady(params, provider), true);
+});
+
+test('a field of a type the app does not know goes in strings, trimmed, as a text field does', () => {
+  const due: PhoneFormField = { name: 'due', type: 'date', label: 'Due', required: true, prefill: '2026-12-01' };
+  const provider: PhoneProvider = { ...SANDBOX, fields: [due] };
+  assert.equal(fieldText(due, NO_EDITS), '2026-12-01');
+  const params = remoteCreateParams(REPO, provider, MESSAGE, withFieldText(NO_EDITS, 'due', ' 2027-01-15 '));
+  assert.deepEqual(plain(params.strings), { due: '2027-01-15' });
+  assert.equal(remoteParamsReady(params, provider), true);
+  assert.equal(remoteParamsReady(remoteCreateParams(REPO, provider, MESSAGE, withFieldText(NO_EDITS, 'due', ' ')), provider), false);
+});
+
+test('a number field takes a whole number or nothing: Create waits on any other text, and the field says why', () => {
+  for (const whole of ['4', '0', '-2', '007', '9223372036854775807', '-9223372036854775808']) assert.equal(isWholeNumber(whole), true, whole);
+  for (const not of ['', '4.5', '4.0', '1e3', '+4', ' 4', 'abc', '9223372036854775808']) assert.equal(isWholeNumber(not), false, not);
+  const ready = (edits: typeof NO_EDITS): boolean => remoteParamsReady(remoteCreateParams(REPO, CLOUD, MESSAGE, edits), CLOUD);
+  assert.equal(ready(withFieldText(NO_EDITS, 'hours', '-2')), true);
+  assert.equal(ready(withFieldText(NO_EDITS, 'hours', '')), true);
+  assert.equal(ready(withFieldText(NO_EDITS, 'hours', '4.5')), false);
+  assert.equal(ready(withFieldText(NO_EDITS, 'hours', '1e3')), false);
+  assert.equal(fieldProblem(HOURS, NO_EDITS), null);
+  assert.equal(fieldProblem(HOURS, withFieldText(NO_EDITS, 'hours', '')), null);
+  assert.equal(fieldProblem(HOURS, withFieldText(NO_EDITS, 'hours', '4.5')), WHOLE_NUMBER_TEXT);
+  // Text the browser cannot read as a number gives "" with badInput; the field says why until it reads again.
+  const bad = withFieldBadInput(withFieldText(NO_EDITS, 'hours', ''), 'hours', true);
+  assert.equal(fieldProblem(HOURS, bad), WHOLE_NUMBER_TEXT);
+  assert.equal(fieldProblem(HOURS, withFieldBadInput(bad, 'hours', false)), null);
+  assert.equal(fieldProblem(BRANCH, withFieldBadInput(NO_EDITS, 'branch', true)), null);
+  // A prefill that is not a whole number shows blank, and goes blank, as the number input shows it.
+  const odd: PhoneFormField = { ...HOURS, prefill: 'four' };
+  assert.equal(fieldText(odd, NO_EDITS), '');
+  assert.deepEqual(plain(remoteCreateParams(REPO, { ...SANDBOX, fields: [odd] }, MESSAGE, NO_EDITS).strings), { hours: '' });
 });
 
 test('a field shows its prefill: an enum only one of its values, a switch on for "true"', () => {

@@ -19,15 +19,18 @@
  *   text input for `string`, a text area for `text`, a switch for `bool`, a number input for `int`,
  *   a select of its values for `enum`, and a text input for any type the app does not know, as the
  *   laptop's create sheet draws one. Each shows its prefill (`fieldText`, `fieldOn`), and a
- *   required field other than a switch is marked "required".
+ *   required field other than a switch is marked "required". A number field whose text is not a
+ *   whole number, or that the browser cannot read as a number, says "Whole numbers only." under
+ *   it (`fieldProblem`).
  * - **Local** ends with "TBD picks the branch, the worktree name and everything else from its
  *   defaults."
  *
  * **Create** is enabled when local has a message that is not blank by the laptop's rule
  * (`isBlankMessage`), or remote has an available provider picked whose params are ready
- * (`remoteParamsReady`: the message unless the provider takes none, and every required field), and
- * no create is on its way. It sends `worktree.create` (`createWorktree`) or `remote.create`
- * (`createRemote`, with `remoteCreateParams`) for the sheet's own repo, and nothing else: the
+ * (`remoteParamsReady`: the message unless the provider takes none, every required field, and
+ * whole numbers) and whose form shows no problem (`fieldProblem`), and no create is on its way. It
+ * sends `worktree.create` (`createWorktree`) or `remote.create` (`createRemote`, with
+ * `remoteCreateParams`, every field as it shows) for the sheet's own repo, and nothing else: the
  * action reads the sheet again at the tap.
  *
  * **While it creates**, the sheet shows only "Creating the worktree…" or "Starting the remote
@@ -37,13 +40,16 @@
  * with the error's message, as the laptop sent it, and the values as the user left them; a
  * success closes the sheet, and the new session opens once the list shows it (`actions/sheets.ts`).
  * The words of a create that failed after its sheet closed show here when this sheet opens for
- * that repo (`claimLostCreate`).
+ * that repo, and a create for another repo still on its way, or its session still waiting for the
+ * list, is one the user moved on from: it opens nothing and never closes this sheet
+ * (`newSheetShown`).
  *
  * **The tap guard.** Create and the provider rows are held for `TAP_GUARD_MS` (`useChangeHold`)
  * from the first render of the form and after each change of what it shows that a tap aimed a
- * moment before could land on: Local or Remote chosen, the providers loading or loaded, another
- * provider picked (its form appears, and its first message may hide), an error showing, the form
- * coming back after "Creating…", and a create elsewhere ending.
+ * moment before could land on: Local or Remote chosen, in the remote form the providers loading
+ * or loaded and another provider picked (its form appears, and its first message may hide), an
+ * error showing, the form coming back after "Creating…", and a create elsewhere ending. The local
+ * form shows none of the remote form's changes, so they hold nothing there.
  */
 
 import { useId, useLayoutEffect, useState } from 'react';
@@ -53,8 +59,8 @@ import type { PhoneFormField, PhoneProvider } from '../protocol/types.ts';
 import { useActions, useAppState } from '../state/context.tsx';
 import { isBlankMessage } from '../state/prompts.ts';
 import {
-  enumChoices, failureIn, fieldLabel, fieldOn, fieldText, isBoolField, NO_EDITS, providerDetail, remoteCreateParams,
-  remoteParamsReady, withFieldOn, withFieldText,
+  enumChoices, failureIn, fieldLabel, fieldOn, fieldProblem, fieldText, isBoolField, NO_EDITS, providerDetail, remoteCreateParams,
+  remoteParamsReady, withFieldBadInput, withFieldOn, withFieldText,
 } from '../state/sheets.ts';
 import type { CreateMode, FieldEdits, ProvidersLoad } from '../state/sheets.ts';
 import type { SheetState } from '../state/store.ts';
@@ -81,7 +87,7 @@ export function NewSheet({ sheet, titleID }: { sheet: NewSheetState; titleID: st
 
   // Before the first paint, so the words show as the sheet does.
   useLayoutEffect(() => {
-    actions.claimLostCreate(sheet);
+    actions.newSheetShown(sheet);
   }, [actions, sheet]);
   // Afresh each time the remote form shows, before it paints, so an earlier list never shows.
   useLayoutEffect(() => {
@@ -99,10 +105,11 @@ export function NewSheet({ sheet, titleID }: { sheet: NewSheetState; titleID: st
   const here = creating !== null && creating.repoID === repoID;
   const elsewhere = creating !== null && !here;
   const params = mode === 'remote' && picked !== null ? remoteCreateParams(repoID, picked, message, edits) : null;
-  const ready = mode === 'local' ? !isBlankMessage(message) : picked !== null && params !== null && remoteParamsReady(params, picked);
-  const held = useChangeHold(here ? 'creating' : JSON.stringify([
-    'form', mode, mine.phase, picked?.name ?? null, picked?.acceptsPrompt ?? null, failure !== null, elsewhere,
-  ]));
+  const ready = mode === 'local'
+    ? !isBlankMessage(message)
+    : picked !== null && params !== null && remoteParamsReady(params, picked) && picked.fields.every((f) => fieldProblem(f, edits) === null);
+  const remoteView = mode === 'remote' ? [mine.phase, picked?.name ?? null, picked?.acceptsPrompt ?? null] : [];
+  const held = useChangeHold(here ? 'creating' : JSON.stringify(['form', mode, ...remoteView, failure !== null, elsewhere]));
 
   if (here) {
     return (
@@ -237,6 +244,7 @@ function Field({ field, edits, edit }: { field: PhoneFormField; edits: FieldEdit
     );
   }
   const value = fieldText(field, edits);
+  const problem = fieldProblem(field, edits);
   const onText = (text: string): void => edit((before) => withFieldText(before, name, text));
   let input: JSX.Element;
   switch (field.type) {
@@ -251,7 +259,17 @@ function Field({ field, edits, edit }: { field: PhoneFormField; edits: FieldEdit
       );
       break;
     case 'int':
-      input = <input id={id} type="number" inputMode="numeric" value={value} onChange={(e) => onText(e.currentTarget.value)} />;
+      // `onInput` too: text the browser cannot read as a number leaves the value `""` as it was, and
+      // React fires no `onChange` for that.
+      input = (
+        <input
+          id={id} type="number" inputMode="numeric" value={value} onChange={(e) => onText(e.currentTarget.value)}
+          onInput={(e) => {
+            const bad = e.currentTarget.validity.badInput;
+            edit((before) => withFieldBadInput(before, name, bad));
+          }}
+        />
+      );
       break;
     default:
       // `string`, and any type the app does not know, as the laptop's create sheet draws them.
@@ -269,6 +287,7 @@ function Field({ field, edits, edit }: { field: PhoneFormField; edits: FieldEdit
         )}
       </label>
       {input}
+      {problem !== null && <p className="sh-sub">{problem}</p>}
     </div>
   );
 }

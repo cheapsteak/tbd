@@ -1114,6 +1114,46 @@ test('while a create is on its way, a New sheet for its repo shows it, and one f
   expect(await creates(page)).toHaveLength(1);
 });
 
+test('a New sheet for another repo while a create is on its way: no jump when it lands, and the sheet keeps its text', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await hostCall(page, 'hold', 'worktree.create');
+  await openNew(page, 'acme-web');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect(sheet(page).locator('.creating')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await openNew(page, 'acme-api');
+  await firstMessage(page).fill(REMOTE_MESSAGE);
+  await hostCall(page, 'release', 'worktree.create');
+  await expect.poll(() => page.evaluate(() => /** @type {any} */ (window).__host.state.rows.some((/** @type {any} */ r) => r.name === 'new-worktree-1')))
+    .toBe(true);
+  await expect(app(page).locator('.row', { hasText: 'new-worktree-1' })).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(screenName(page)).toHaveAttribute('data-screen', 'sessions');
+  await expect(sheet(page).locator('.sh-title')).toHaveText('New in acme-api');
+  await expect(firstMessage(page)).toHaveValue(REMOTE_MESSAGE);
+  await expect(app(page).locator('.toast')).toHaveCount(0);
+  // Its own create can go now.
+  await expect(createButton(page)).toBeEnabled();
+});
+
+test("a New sheet for the create's own repo, opened again while it is on its way, still opens the new session", async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await hostCall(page, 'hold', 'worktree.create');
+  await openNew(page, 'acme-web');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await createButton(page).click();
+  await expect(sheet(page).locator('.creating')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(sheet(page)).toHaveCount(0);
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await plus(page, 'acme-web').click();
+  await expect(sheet(page).locator('.creating')).toContainText('Creating the worktree…');
+  await hostCall(page, 'release', 'worktree.create');
+  await expect(screenName(page)).toHaveAttribute('data-screen', 'session');
+  await expect(app(page).locator('.toast')).toHaveText('Created new-worktree-1');
+});
+
 test('a double click on Create posts one worktree.create', async ({ page, appHost }) => {
   await openApp(page, appHost);
   await openNew(page, 'acme-web');
@@ -1146,7 +1186,7 @@ test('a double click on Create posts one remote.create, with the form as the lap
     method: 'remote.create',
     params: {
       provider: 'acme-cloud', repoID: API_REPO, message: REMOTE_MESSAGE,
-      strings: { branch: 'main', size: 'Medium', hours: '4' }, bools: { setup: true },
+      strings: { branch: 'main', size: 'Medium', hours: '4', notes: '' }, bools: { setup: true },
     },
   }]);
 });
@@ -1195,8 +1235,54 @@ test('remote.create carries strings and bools by field type', async ({ page, app
     method: 'remote.create',
     params: {
       provider: 'acme-cloud', repoID: API_REPO, message: REMOTE_MESSAGE,
-      strings: { branch: 'release/1.2', size: 'Large', notes: 'Use the staging data.' }, bools: { setup: false },
+      // The cleared hours go as "", so the laptop does not fill its prefill back in.
+      strings: { branch: 'release/1.2', size: 'Large', hours: '', notes: 'Use the staging data.' }, bools: { setup: false },
     },
+  }]);
+});
+
+test('a number field takes a whole number or nothing, and says so', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openNew(page, 'acme-api');
+  await pickProvider(page, 'acme-cloud');
+  await firstMessage(page).fill(REMOTE_MESSAGE);
+  const hours = sheet(page).getByLabel('Time limit, hours');
+  const note = sheet(page).locator('.frow', { hasText: 'Time limit, hours' }).locator('.sh-sub');
+  const create = createButton(page);
+  await expect(create).toBeEnabled();
+  await expect(note).toHaveCount(0);
+  await hours.fill('4.5');
+  await expect(note).toHaveText('Whole numbers only.');
+  await expect(create).toBeDisabled();
+  // Text the browser cannot read as a number.
+  await hours.fill('');
+  await hours.pressSequentially('1e');
+  await expect(note).toHaveText('Whole numbers only.');
+  await expect(create).toBeDisabled();
+  await hours.fill('6');
+  await expect(note).toHaveCount(0);
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expect.poll(async () => (await creates(page)).map((c) => c.params.strings.hours)).toEqual(['6']);
+});
+
+test('a field of a type the app does not know is a text field, and goes in strings', async ({ page, appHost }) => {
+  await openApp(page, appHost, {
+    scenario: withProviders((providers) => {
+      providers[1].fields = [{ name: 'due', type: 'date', label: 'Due', required: true, prefill: '2026-12-01' }];
+    }),
+  });
+  await openNew(page, 'acme-api');
+  await pickProvider(page, 'acme-sandbox');
+  const due = sheet(page).getByLabel(/^Due/);
+  await expect(due).toHaveAttribute('type', 'text');
+  await expect(due).toHaveValue('2026-12-01');
+  await due.fill(' 2027-01-15 ');
+  await firstMessage(page).fill(REMOTE_MESSAGE);
+  await createButton(page).click();
+  await expect.poll(() => creates(page)).toEqual([{
+    method: 'remote.create',
+    params: { provider: 'acme-sandbox', repoID: API_REPO, message: REMOTE_MESSAGE, strings: { due: '2027-01-15' }, bools: {} },
   }]);
 });
 
@@ -1306,6 +1392,32 @@ test('Create and the provider rows wait a moment after the view changes under th
   await expect(create).toBeDisabled();
   await expect(create).toBeEnabled();
   expect(await creates(page)).toEqual([]);
+});
+
+test('a providers load that lands after Local is chosen again holds nothing', async ({ page, appHost }) => {
+  await openApp(page, appHost);
+  await openNew(page, 'acme-api');
+  await firstMessage(page).fill(LOCAL_MESSAGE);
+  await hostCall(page, 'hold', 'remote.providers');
+  await sheet(page).getByRole('button', { name: 'Remote session' }).click();
+  await expect(sheet(page).locator('[data-state="providers-loading"]')).toBeVisible();
+  await sheet(page).getByRole('button', { name: 'Local worktree' }).click();
+  const create = createButton(page);
+  await page.waitForTimeout(TAP_GUARD_MS + 100);
+  await expect(create).toBeEnabled();
+  // Watch Create on every frame while the load lands: the local form does not change, so Create stays enabled.
+  const disabledOnce = create.evaluate((button, ms) => new Promise((resolve) => {
+    const end = performance.now() + ms;
+    let seen = false;
+    const tick = () => {
+      if (/** @type {HTMLButtonElement} */ (button).disabled) seen = true;
+      if (performance.now() >= end) resolve(seen);
+      else requestAnimationFrame(tick);
+    };
+    tick();
+  }), TAP_GUARD_MS + 300);
+  await hostCall(page, 'release', 'remote.providers');
+  expect(await disabledOnce).toBe(false);
 });
 
 test('Cancel closes the sheet and sends nothing, and a double tap on it opens no session', async ({ page, appHost }) => {

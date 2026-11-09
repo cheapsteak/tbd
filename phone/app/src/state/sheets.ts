@@ -22,13 +22,23 @@
  *   afresh each time the sheet shows its remote form. A load that a later one replaced changes
  *   nothing when it ends (`id`), and a list loaded for one repo never shows for another.
  * - **Creating** (`creating`): the create on its way from this phone, a worktree or a remote
- *   session, and its repo; null for none. `beginCreate` marks it, and nothing else does, so one
- *   gesture sends one create; `endCreate` clears it once the create settles, whatever the
- *   outcome. One create at a time, whatever the repo: while one is on its way none goes out.
- * - **A create's failure no sheet showed** (`lostCreate`): the words of a create that failed after
- *   the user closed its New sheet, and its repo. The next New sheet that opens for that repo
- *   shows them (`claimLostCreate` makes them its `failed`), so they are never lost unseen; a
- *   create that begins for that repo drops them.
+ *   session, its repo, and the navigation mark its session opens by (`navMark`); null for none.
+ *   `beginCreate` marks it, and nothing else does, so one gesture sends one create; `endCreate`
+ *   clears it once the create settles, whatever the outcome. One create at a time, whatever the
+ *   repo: while one is on its way none goes out.
+ * - **Moving on** (`newSheetShown`): a New sheet that shows for another repo is the user moving on
+ *   from the create, as a navigation is. The create's mark becomes null, so its session opens
+ *   nowhere and its success toasts nothing: its row just appears in the list. A New sheet that
+ *   shows for the create's own repo takes the create back, with the mark of that moment, as that
+ *   sheet says the session opens when it is ready.
+ * - **Waiting to open** (`awaitingOpen`): the open a create handed to `openPending`, by identity,
+ *   and its repo, while it waits for the list to show the new session. A New sheet that shows for
+ *   another repo drops that open (the action clears `ui.pendingOpen` when it is still that one), so
+ *   the session's arrival never closes the sheet and the form in it.
+ * - **A create's failure no sheet showed** (`lostCreates`): the words of each create that failed
+ *   while no New sheet of its repo showed, by repo. The next New sheet that shows for that repo
+ *   shows them (`newSheetShown` makes them its `failed`), so they are never lost unseen; a create
+ *   that begins for that repo drops them.
  *
  * Records are on a null prototype, so an ID such as `constructor` reads nothing inherited. Each
  * function returns a new object when it changes anything and `s` itself when it does not.
@@ -46,7 +56,7 @@ import { refKey } from '../protocol/wire.ts';
 import { isBlankMessage, trimLikeLaptop } from './prompts.ts';
 import { PROFILE_KIND_WORDS } from './status.ts';
 import { emptyRecord } from './store.ts';
-import type { SheetState } from './store.ts';
+import type { PendingOpen, SheetState } from './store.ts';
 
 // MARK: - The slice
 
@@ -84,6 +94,20 @@ export interface CreateInFlight {
   mode: CreateMode;
 }
 
+/**
+ * The create on its way as the slice holds it: what `CreateInFlight` says, and the navigation mark
+ * (`navMark`) its session opens by, or null once the user moved on from it (`newSheetShown`).
+ */
+export interface CreateOnItsWay extends CreateInFlight {
+  mark: number | null;
+}
+
+/** The open a create handed to `openPending`, by identity, and the create's repo. */
+export interface CreateAwaitingOpen {
+  repoID: string;
+  open: PendingOpen;
+}
+
 export interface SheetsState {
   profiles: ProfilesLoad;
   /** The sessions whose switch, fork or model change is on its way, by `refKey`. */
@@ -92,13 +116,18 @@ export interface SheetsState {
   failed: { sheet: SheetState; text: string } | null;
   providers: ProvidersLoad;
   /** The create on its way, or null. */
-  creating: CreateInFlight | null;
-  /** The words of a create that failed while no New sheet showed it, for the next one of its repo; or null. */
-  lostCreate: { repoID: string; text: string } | null;
+  creating: CreateOnItsWay | null;
+  /** The last open a create handed to `openPending`, or null. It may have opened since. */
+  awaitingOpen: CreateAwaitingOpen | null;
+  /** The words of each create that failed while no New sheet of its repo showed, by repo. */
+  lostCreates: Readonly<Record<string, string>>;
 }
 
 export function emptySheets(): SheetsState {
-  return { profiles: { phase: 'idle' }, acting: emptyRecord(), failed: null, providers: { phase: 'idle' }, creating: null, lostCreate: null };
+  return {
+    profiles: { phase: 'idle' }, acting: emptyRecord(), failed: null, providers: { phase: 'idle' }, creating: null,
+    awaitingOpen: null, lostCreates: emptyRecord(),
+  };
 }
 
 /** Whether a switch, fork or model change for `ref`'s session is on its way. */
@@ -172,13 +201,13 @@ export function loadedProviders(s: SheetsState, repoID: string): readonly PhoneP
 }
 
 /**
- * `s` with `c` on its way and no failure showing; a failure kept for `c`'s repo goes too, as the
- * user has started again there. `s` itself while another create is on its way.
+ * `s` with `c` on its way, its session to open by `mark` (`navMark`), and no failure showing; the
+ * words kept for `c`'s repo go too, as the user has started again there. `s` itself while another
+ * create is on its way: this is the one check that keeps a second create from going out.
  */
-export function beginCreate(s: SheetsState, c: CreateInFlight): SheetsState {
+export function beginCreate(s: SheetsState, c: CreateInFlight, mark: number): SheetsState {
   if (s.creating !== null) return s;
-  const lostCreate = s.lostCreate !== null && s.lostCreate.repoID === c.repoID ? null : s.lostCreate;
-  return { ...s, creating: c, failed: null, lostCreate };
+  return { ...s, creating: { repoID: c.repoID, mode: c.mode, mark }, failed: null, lostCreates: withoutKey(s.lostCreates, c.repoID) };
 }
 
 /** `s` with no create on its way, or `s` itself when none was. */
@@ -186,20 +215,39 @@ export function endCreate(s: SheetsState): SheetsState {
   return s.creating === null ? s : { ...s, creating: null };
 }
 
-/** `s` keeping `text`, the words of a create in `repoID` that no New sheet showed when it failed, for the next one that opens there. */
+/** `s` keeping `text`, the words of a create in `repoID` that no New sheet showed when it failed, for the next one that shows there. */
 export function keepLostCreate(s: SheetsState, repoID: string, text: string): SheetsState {
-  return { ...s, lostCreate: { repoID, text } };
+  return { ...s, lostCreates: withValue(s.lostCreates, repoID, text) };
+}
+
+/** `s` with `open`, which a create in `repoID` handed to `openPending`, waiting for the list. */
+export function awaitOpen(s: SheetsState, repoID: string, open: PendingOpen): SheetsState {
+  return { ...s, awaitingOpen: { repoID, open } };
 }
 
 /**
- * `s` with the words of a create kept for `sheet`'s repo (`keepLostCreate`) showing in `sheet`
- * (`failIn`), and kept no longer; `s` itself when `sheet` is no New sheet or none are kept for
- * its repo.
+ * `s` once `sheet`, a New sheet, shows, at the navigation count `nav` (`UIState.nav`):
+ * 1. The words kept for its repo (`keepLostCreate`) show in it (`failed`) and are kept no longer.
+ * 2. The create on its way, when it is for another repo, is one the user moved on from: its mark
+ *    becomes null. When it is for this repo, the user is back with it: its mark becomes `nav`.
+ * 3. An open waiting for another repo's create (`awaitingOpen`) is dropped. The caller clears
+ *    `ui.pendingOpen` too while it is that open.
+ *
+ * `s` itself when `sheet` is no New sheet, or none of these changes anything.
  */
-export function claimLostCreate(s: SheetsState, sheet: SheetState): SheetsState {
-  const lost = s.lostCreate;
-  if (lost === null || sheet.name !== 'new' || sheet.repoID !== lost.repoID) return s;
-  return { ...s, failed: { sheet, text: lost.text }, lostCreate: null };
+export function newSheetShown(s: SheetsState, sheet: SheetState, nav: number): SheetsState {
+  if (sheet.name !== 'new') return s;
+  const { repoID } = sheet;
+  let next = s;
+  const lost = own(s.lostCreates, repoID);
+  if (lost !== undefined) next = { ...next, failed: { sheet, text: lost }, lostCreates: withoutKey(s.lostCreates, repoID) };
+  const c = next.creating;
+  if (c !== null) {
+    const mark = c.repoID === repoID ? nav : null;
+    if (c.mark !== mark) next = { ...next, creating: { ...c, mark } };
+  }
+  if (next.awaitingOpen !== null && next.awaitingOpen.repoID !== repoID) next = { ...next, awaitingOpen: null };
+  return next;
 }
 
 // MARK: - Rules the menus and the sheets share
@@ -287,16 +335,22 @@ export function restartNote(session: PhoneSession): string {
 
 /**
  * What the user changed in a provider's form, by field name: the text typed or the choice picked
- * (`strings`), and the switches turned (`bools`). A field with no change reads its prefill
- * (`fieldText`, `fieldOn`). Records on a null prototype, so a field named `__proto__` is a field.
+ * (`strings`), the switches turned (`bools`), and whether the browser could read what was typed in
+ * a number field as a number (`badInput`, the input's `validity.badInput`: it then gives its text
+ * as `""`). A field with no change reads its prefill (`fieldText`, `fieldOn`). Records on a null
+ * prototype, so a field named `__proto__` is a field.
  */
 export interface FieldEdits {
   strings: Readonly<Record<string, string>>;
   bools: Readonly<Record<string, boolean>>;
+  badInput: Readonly<Record<string, boolean>>;
 }
 
 /** A form nobody has changed. */
-export const NO_EDITS: FieldEdits = Object.freeze({ strings: emptyRecord<string>(), bools: emptyRecord<boolean>() });
+export const NO_EDITS: FieldEdits = Object.freeze({ strings: emptyRecord<string>(), bools: emptyRecord<boolean>(), badInput: emptyRecord<boolean>() });
+
+/** What a number field says when its text is not a whole number (`fieldProblem`). */
+export const WHOLE_NUMBER_TEXT = 'Whole numbers only.';
 
 /** `edits` with `text` typed or picked in the field named `name`. */
 export function withFieldText(edits: FieldEdits, name: string, text: string): FieldEdits {
@@ -306,6 +360,34 @@ export function withFieldText(edits: FieldEdits, name: string, text: string): Fi
 /** `edits` with the switch named `name` turned `on`. */
 export function withFieldOn(edits: FieldEdits, name: string, on: boolean): FieldEdits {
   return { ...edits, bools: withValue(edits.bools, name, on) };
+}
+
+/** `edits` with what was typed in the number field named `name` readable as a number or not (`bad`). */
+export function withFieldBadInput(edits: FieldEdits, name: string, bad: boolean): FieldEdits {
+  const badInput = withValue(edits.badInput, name, bad);
+  return badInput === edits.badInput ? edits : { ...edits, badInput };
+}
+
+/**
+ * Whether `text` is a whole number as the laptop reads one (Swift's `Int`, 64 bits): digits, with
+ * a minus sign or none.
+ */
+export function isWholeNumber(text: string): boolean {
+  if (!/^-?\d+$/.test(text)) return false;
+  const n = BigInt(text);
+  return n >= -(2n ** 63n) && n < 2n ** 63n;
+}
+
+/**
+ * Why a field's text cannot go, which the New sheet shows under it and which holds Create: for an
+ * `int` field, text the browser could not read as a number, or text that is not a whole number
+ * (`WHOLE_NUMBER_TEXT`), since the laptop refuses either. Null for any other field, and for a
+ * blank one.
+ */
+export function fieldProblem(f: PhoneFormField, edits: FieldEdits): string | null {
+  if (f.type !== 'int') return null;
+  const text = trimLikeLaptop(fieldText(f, edits));
+  return own(edits.badInput, f.name) === true || (text !== '' && !isWholeNumber(text)) ? WHOLE_NUMBER_TEXT : null;
 }
 
 /** Whether `f` is an on/off switch, the one type whose value goes in `bools`. */
@@ -321,13 +403,16 @@ export function fieldLabel(f: PhoneFormField): string {
 /**
  * The text a field that is not a switch shows: what the user typed or picked, else its prefill.
  * An `enum` field's prefill counts only when it is one of its values, so its select never shows a
- * choice the form does not hold.
+ * choice the form does not hold, and an `int` field's only when it is a whole number
+ * (`isWholeNumber`), as a number input shows no other text it is given.
  */
 export function fieldText(f: PhoneFormField, edits: FieldEdits): string {
   const typed = own(edits.strings, f.name);
   if (typed !== undefined) return typed;
   const prefill = f.prefill ?? '';
-  return f.type === 'enum' && !(f.values ?? []).includes(prefill) ? '' : prefill;
+  if (f.type === 'enum') return (f.values ?? []).includes(prefill) ? prefill : '';
+  if (f.type === 'int') return isWholeNumber(prefill) ? prefill : '';
+  return prefill;
 }
 
 /** Whether a switch is on: as the user turned it, else on when its prefill is `"true"`. */
@@ -360,9 +445,13 @@ export function providerDetail(p: PhoneProvider): string | null {
 
 /**
  * The `remote.create` params for `provider` in `repoID`, from the form as it shows: `strings`
- * holds every field that is not a switch, its text trimmed as the laptop trims it, and leaves out
- * one left empty; `bools` holds every switch. `message` goes as typed when the provider takes a
- * first message, and as `""` when it does not, since the laptop refuses one there.
+ * holds every field that is not a switch, its text trimmed as the laptop trims it, `""` for one
+ * left blank; `bools` holds every switch. A blank field goes as `""` and is not left out, because
+ * the laptop lays the phone's values over its own prefill: a field left out would keep its
+ * prefill, so a user who cleared it would get it all the same. The laptop leaves a blank field out
+ * of the session's params when it is optional, and refuses it when it is required. `message` goes
+ * as typed when the provider takes a first message, and as `""` when it does not, since the laptop
+ * refuses one there.
  */
 export function remoteCreateParams(repoID: string, provider: PhoneProvider, message: string, edits: FieldEdits): PhoneRemoteCreateParams {
   const strings = emptyRecord<string>();
@@ -372,8 +461,7 @@ export function remoteCreateParams(repoID: string, provider: PhoneProvider, mess
       bools[f.name] = fieldOn(f, edits);
       continue;
     }
-    const text = trimLikeLaptop(fieldText(f, edits));
-    if (text !== '') strings[f.name] = text;
+    strings[f.name] = trimLikeLaptop(fieldText(f, edits));
   }
   return { provider: provider.name, repoID, message: provider.acceptsPrompt ? message : '', strings, bools };
 }
@@ -381,9 +469,10 @@ export function remoteCreateParams(repoID: string, provider: PhoneProvider, mess
 /**
  * Whether Create may send `params` to `provider`: it is available and is the one `params` names;
  * the message is not blank (`isBlankMessage`) when it takes one, and is `""` when it does not;
- * every required field that is not a switch has a value; every switch is set; and nothing names a
- * field the form does not hold, a switch as text, or a choice an `enum` field does not offer. The
- * New sheet enables Create by it, and `createRemote` checks it again at the tap.
+ * every required field that is not a switch has a value; every switch is set; an `int` field holds
+ * a whole number or is blank; and nothing names a field the form does not hold, a switch as text,
+ * or a choice an `enum` field does not offer. The New sheet enables Create by it, and by
+ * `fieldProblem` for what the params cannot show, and `createRemote` checks it again at the tap.
  */
 export function remoteParamsReady(params: PhoneRemoteCreateParams, provider: PhoneProvider): boolean {
   if (!provider.available || params.provider !== provider.name) return false;
@@ -408,6 +497,7 @@ export function remoteParamsReady(params: PhoneRemoteCreateParams, provider: Pho
       continue;
     }
     if (f.type === 'enum' && !(f.values ?? []).includes(value)) return false;
+    if (f.type === 'int' && !isWholeNumber(trimLikeLaptop(value))) return false;
   }
   return true;
 }
@@ -415,6 +505,14 @@ export function remoteParamsReady(params: PhoneRemoteCreateParams, provider: Pho
 /** `r[key]` when it is `r`'s own, or undefined: never an inherited member such as `constructor`. */
 function own<V>(r: Readonly<Record<string, V>>, key: string): V | undefined {
   return Object.hasOwn(r, key) ? r[key] : undefined;
+}
+
+/** A copy of `r` on a null prototype without `key`, or `r` itself when it has no such key. */
+function withoutKey<V>(r: Readonly<Record<string, V>>, key: string): Readonly<Record<string, V>> {
+  if (!Object.hasOwn(r, key)) return r;
+  const next = emptyRecord<V>();
+  for (const k of Object.keys(r)) if (k !== key) next[k] = r[k]!;
+  return next;
 }
 
 /** A copy of `r` on a null prototype with `key` set to `value`, or `r` itself when it holds that already. */
