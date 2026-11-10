@@ -348,10 +348,27 @@ func refreshFailureNote(for error: Error) -> String? {
         + "yet, not stale numbers\n"
 }
 
+/// The key `resolveProfile` compares names by once neither the UUID nor the
+/// exact name matched: NFC, then every scalar whose
+/// `properties.isDefaultIgnorableCodePoint` dropped, then lowercased.
+///
+/// Two names that differ only in case, in normalization form, or in invisible
+/// format characters (a zero-width joiner, an emoji variation selector) share
+/// a key, so a name typed without its invisible characters still finds its
+/// profile.
+func foldedProfileKey(_ name: String) -> String {
+    var visible = String.UnicodeScalarView()
+    for scalar in name.precomposedStringWithCanonicalMapping.unicodeScalars
+    where !scalar.properties.isDefaultIgnorableCodePoint {
+        visible.append(scalar)
+    }
+    return String(visible).lowercased()
+}
+
 /// Resolve a user-supplied profile reference against the daemon's profile
-/// list. Accepts an exact name, a unique case-insensitive name, or a profile
-/// UUID (escape hatch for scripting). Throws a `CLIError` with actionable
-/// text when nothing (or more than one thing) matches.
+/// list. Tries, in order: a profile UUID (escape hatch for scripting), the
+/// exact name, then a unique match on `foldedProfileKey`. Throws a `CLIError`
+/// with actionable text when nothing (or more than one thing) matches.
 func resolveProfile(
     named reference: String,
     in profiles: [ModelProfileWithUsage]
@@ -363,9 +380,8 @@ func resolveProfile(
     if let exact = profiles.first(where: { $0.profile.name == reference }) {
         return exact
     }
-    let folded = profiles.filter {
-        $0.profile.name.lowercased() == reference.lowercased()
-    }
+    let key = foldedProfileKey(reference)
+    let folded = profiles.filter { foldedProfileKey($0.profile.name) == key }
     if folded.count == 1 {
         return folded[0]
     }

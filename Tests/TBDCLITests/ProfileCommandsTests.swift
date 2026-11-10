@@ -209,6 +209,61 @@ struct ProfileCommandsTests {
         }
     }
 
+    // MARK: - Folded name match
+
+    /// A zero-width joiner is invisible, so a person reading the name types it
+    /// without one.
+    @Test func foldMatchesZeroWidthJoiner() throws {
+        let profiles = [entry(name: "acme\u{200D}work"), entry(name: "acme-personal")]
+        let resolved = try resolveProfile(named: "acmework", in: profiles)
+        #expect(resolved.profile.name == "acme\u{200D}work")
+    }
+
+    @Test func foldMatchesVariationSelector() throws {
+        let profiles = [entry(name: "acme 🚀\u{FE0F}"), entry(name: "acme-personal")]
+        let resolved = try resolveProfile(named: "acme 🚀", in: profiles)
+        #expect(resolved.profile.name == "acme 🚀\u{FE0F}")
+    }
+
+    /// Swift's `==` already treats canonically equivalent strings as equal, so
+    /// the reference also differs in case: that keeps the exact-name step from
+    /// answering and makes the fold the step under test.
+    @Test func foldMatchesNFDvsNFC() throws {
+        let composed = "Caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        let profiles = [entry(name: composed), entry(name: "acme-personal")]
+        let resolved = try resolveProfile(named: decomposed, in: profiles)
+        #expect(resolved.profile.name == composed)
+    }
+
+    @Test func foldedKeyDropsInvisibleScalarsAndCase() {
+        #expect(foldedProfileKey("Acme\u{200D}Work") == "acmework")
+        #expect(foldedProfileKey("acme 🚀\u{FE0F}") == foldedProfileKey("acme 🚀"))
+        #expect(foldedProfileKey("acme-work") != foldedProfileKey("acme-personal"))
+    }
+
+    /// Two profiles whose names fold to one key are refused, never resolved to
+    /// whichever comes first.
+    @Test func foldAmbiguityRefused() {
+        let profiles = [entry(name: "acme\u{200D}work"), entry(name: "AcmeWork")]
+        do {
+            let resolved = try resolveProfile(named: "acmework", in: profiles)
+            Issue.record("expected an ambiguity refusal, resolved \(resolved.profile.name)")
+        } catch {
+            let message = "\(error)"
+            #expect(message.contains("is ambiguous"))
+            #expect(message.contains("acme\u{200D}work"))
+            #expect(message.contains("AcmeWork"))
+        }
+    }
+
+    /// The exact name still wins over a folded match.
+    @Test func exactNameWinsOverFoldedMatch() throws {
+        let profiles = [entry(name: "acme\u{200D}work"), entry(name: "acmework")]
+        let resolved = try resolveProfile(named: "acmework", in: profiles)
+        #expect(resolved.profile.name == "acmework")
+    }
+
     @Test func resolveProfile_emptyListExplains() {
         do {
             _ = try resolveProfile(named: "work", in: [])
