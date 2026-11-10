@@ -2581,6 +2581,17 @@ struct ModelProfileSpawnTests {
         let configDirManager: ClaudeProfileConfigDirManager
     }
 
+    /// Writes the account email Claude Code records after `/login` into the
+    /// profile's isolated config dir, which is what makes it logged in.
+    private static func logIn(
+        _ profile: ModelProfile, in configDirManager: ClaudeProfileConfigDirManager
+    ) throws {
+        let configDir = configDirManager.configDirectory(forProfileID: profile.id)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try Data(#"{"oauthAccount":{"emailAddress":"person@acme.example"}}"#.utf8)
+            .write(to: configDir.appendingPathComponent(".claude.json"))
+    }
+
     /// Fixture whose identity watcher is test-tuned (50 ms poll, bounded life
     /// so tests don't leave 30-minute poll tasks behind), whose dry-run tmux
     /// serves a pane that is ready for `/login` and counts every capture of
@@ -2681,7 +2692,8 @@ struct ModelProfileSpawnTests {
     }
 
     /// Branch guard: the same spawn WITHOUT the loginSession flag keeps the
-    /// normal Claude Code label.
+    /// normal Claude Code label. Outside a login session an explicit OAuth
+    /// profile must be logged in, so this one is.
     @Test("login session flag off: label stays Claude Code")
     func loginSessionFlagOff() async throws {
         let fixture = makeLoginFixture()
@@ -2689,6 +2701,7 @@ struct ModelProfileSpawnTests {
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Plain")
+        try Self.logIn(profile, in: fixture.configDirManager)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -2743,6 +2756,8 @@ struct ModelProfileSpawnTests {
         #expect(await titles.lastApplied(terminalID: login.id) == nil)
 
         // The open login tab holds no number: the next Claude tab is second.
+        // That tab is not a login session, so its profile must be logged in.
+        try Self.logIn(profile, in: fixture.configDirManager)
         let next = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(
@@ -2757,16 +2772,17 @@ struct ModelProfileSpawnTests {
         let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
+        let missing = UUID()
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(
                 worktreeID: wt.id, type: .claude,
-                overrideProfileID: UUID(), loginSession: true
+                overrideProfileID: missing, loginSession: true
             )
         ))
         #expect(!resp.success)
-        #expect(resp.error?.contains("Profile not found") == true)
+        #expect(resp.error == "Model profile \(missing.uuidString) does not exist. Run tbd profile list to see the profiles.")
         // ensureServer may have run, but no window was created and no row inserted.
         #expect(!recorder.joinedAll.contains("new-window"))
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)

@@ -189,6 +189,10 @@ extension RPCRouter {
         let isCodexType = params.type == .codex
         let isClaudeType = !isCodexType
             && (params.type == .claude || params.resumeSessionID != nil)
+        // Login sessions are always fresh Claude spawns pinned to a profile:
+        // the whole point is capturing `/login` credentials into that
+        // profile's isolated config dir.
+        let isLoginSession = params.loginSession == true && params.resumeSessionID == nil
 
         // Plugin folders are Claude Code's `--plugin-dir`. Refuse them for
         // every other kind rather than silently dropping them, as a model is
@@ -284,6 +288,20 @@ extension RPCRouter {
             }
         } else {
             spawnExtras = nil
+        }
+
+        // An explicit profile that is missing or has no credentials is refused
+        // here, before any spawn work, rather than starting the tab on the
+        // machine's own login or at Claude's login screen. A login session's
+        // profile is not logged in yet by design, so it is checked only for
+        // existence.
+        if isClaudeType, let overrideID = params.overrideProfileID,
+           let refusal = try await actuating(actuationID, {
+               try await explicitProfileCheck.refusal(
+                   for: overrideID, requireCredentials: !isLoginSession)
+           }) {
+            await finishActuation(actuationID, .refused(.notEligible), error: refusal)
+            return RPCResponse(error: refusal)
         }
 
         // Start admission: an agent start only. A shell tab starts no agent.
@@ -424,10 +442,6 @@ extension RPCRouter {
             return try RPCResponse(result: terminal)
         }
 
-        // Login sessions are always fresh Claude spawns pinned to a profile:
-        // the whole point is capturing `/login` credentials into that
-        // profile's isolated config dir.
-        let isLoginSession = params.loginSession == true && params.resumeSessionID == nil
         let claudeSessionID: String?
         let label: String?
 
@@ -438,6 +452,11 @@ extension RPCRouter {
             do {
                 if let overrideID = params.overrideProfileID {
                     resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
+                    // The check above passed, so only a profile deleted or
+                    // emptied since can land here.
+                    if resolvedProfile == nil {
+                        logger.warning("explicit profile \(overrideID, privacy: .public) went missing after its check; starting without it")
+                    }
                 } else {
                     // A resumed conversation belongs to the account holding its
                     // transcript, which the history row does not record, so a

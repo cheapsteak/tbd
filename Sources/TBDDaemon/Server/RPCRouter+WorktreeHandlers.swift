@@ -35,6 +35,16 @@ extension RPCRouter {
             return RPCResponse(error: "\(error)")
         }
 
+        // An explicit profile that is missing or has no credentials is refused
+        // here, for the same reason: phase 2 runs detached, so a caller that
+        // does not wait would never see a refusal from there. The profile is
+        // checked whatever the primary turns out to be.
+        if let profileID = params.profileID,
+           let refusal = try await explicitProfileCheck.refusal(
+               for: profileID, requireCredentials: true) {
+            return RPCResponse(error: refusal)
+        }
+
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
         let pending = try await lifecycle.beginCreateWorktree(
             repoID: params.repoID,
