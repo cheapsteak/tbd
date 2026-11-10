@@ -924,7 +924,7 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(worktreeID: wt.id, type: type, model: "acme-model")))
 
         #expect(!response.success)
-        #expect(response.error == TerminalCreateParams.modelRequiresCodexMessage)
+        #expect(response.error == TerminalCreateParams.modelRequiresAgentMessage)
         #expect(recorder.calls.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }

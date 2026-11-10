@@ -1536,15 +1536,23 @@ public struct WorktreeCreateParams: Codable, Sendable {
     public let useExistingBranch: Bool?
     /// Explicit per-creation model-profile override. When non-nil, the daemon
     /// resolves THIS profile for the new worktree's primary Claude terminal,
-    /// bypassing the repo/scratch/global precedence chain. nil preserves the
-    /// existing precedence-based resolution. Not persisted — creation-time only.
-    /// Optional/defaulted for backward compatibility with older clients.
+    /// bypassing the repo/scratch/global precedence chain, balancing and the
+    /// pool opt-out. The daemon checks it before anything of the create
+    /// exists, and refuses the create when the profile is missing or has no
+    /// credentials: an OAuth profile that never logged in, or a token or
+    /// API-key profile with no stored secret (a Bedrock profile is not
+    /// checked). The resolved profile is saved on the first tab's row, as
+    /// every chosen profile is; nothing is saved on the worktree. nil
+    /// preserves the existing precedence-based resolution. Optional/defaulted
+    /// for backward compatibility with older clients.
     public let profileID: UUID?
     /// Explicit per-creation Claude model override — either a Claude Code alias
     /// ("opus", what the model rail sends) or an exact id ("claude-opus-5"),
-    /// injected as ANTHROPIC_MODEL for the new worktree's INITIAL Claude spawn
-    /// only — later respawns (hibernation wake, new sessions) fall back to the
-    /// profile default. nil preserves the profile's own model. Optional/
+    /// injected as ANTHROPIC_MODEL for the new worktree's primary Claude
+    /// terminal. Saved on that tab's row (`Terminal.claudeSpawnExtras`) and
+    /// used for every later start of the tab — wake, reopen, revive, account
+    /// switch — ahead of the profile's own model. Ignored when the primary is
+    /// Codex. nil or blank preserves the profile's own model. Optional/
     /// defaulted for backward compatibility with older clients.
     public let model: String?
     /// Explicit primary-agent override for this creation only. nil preserves
@@ -2747,7 +2755,11 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let resumeSessionID: String?
     /// Initial prompt for a fresh Claude or Codex session.
     public let prompt: String?
-    /// Pin a specific profile ID for this terminal, bypassing resolve(repoID:).
+    /// Pin a specific profile ID for this Claude terminal, bypassing
+    /// resolve(repoID:) and balancing. The daemon refuses the create, before
+    /// any tab exists, when the profile is missing or has no credentials; a
+    /// login session skips the credential half, since its profile is not
+    /// logged in yet.
     public let overrideProfileID: UUID?
     /// True for a profile *login session* (Settings → "Open login session"):
     /// requires `overrideProfileID`; the daemon labels the terminal
@@ -2768,11 +2780,16 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// `pluginDirs` (`Terminal.claudeSpawnExtras`). Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
-    /// Codex model for this fresh Codex terminal, passed to Codex as
-    /// `-c model=<id>`. An opaque identifier: Codex owns the vocabulary and
-    /// reports unsupported values. Honored only for `type == .codex`, and
-    /// recorded on the row (`Terminal.codexLaunchOptions`) so a relaunch of
-    /// Codex in this tab keeps it. Optional/defaulted for backward compatibility.
+    /// The model for an agent terminal, an opaque identifier the agent owns.
+    /// For a Claude terminal (a Claude type, or any resume) it is the Claude
+    /// model — an alias such as `opus` or an exact model ID — passed as
+    /// `ANTHROPIC_MODEL` on a fresh start and a resume alike, and saved on the
+    /// row (`Terminal.claudeSpawnExtras`) so every later start of the tab
+    /// keeps it ahead of the profile's own model. For a Codex terminal it is
+    /// the Codex model, passed as `-c model=<id>` and recorded on the row
+    /// (`Terminal.codexLaunchOptions`) so a relaunch of Codex in this tab
+    /// keeps it. Refused for a shell (`modelRequiresAgentMessage`).
+    /// Optional/defaulted for backward compatibility.
     public let model: String?
     /// Codex feature keys (for example `computer_use`) to turn off for this
     /// fresh Codex terminal only, each passed to Codex as `--disable <key>`.
@@ -2808,12 +2825,12 @@ public struct TerminalCreateParams: Codable, Sendable {
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a
     /// caller sees the same explanation whichever layer stops it.
-    public static let modelRequiresCodexMessage =
-        "--model requires --type codex: Claude models come from TBD model profiles, and shell terminals have no model."
+    public static let modelRequiresAgentMessage =
+        "--model requires --type claude or --type codex: a shell terminal has no model."
 
     /// The refusal for plugin folders on a terminal that is not Claude, shared
     /// by the CLI's `--plugin-dir` validation and the daemon for the same
-    /// reason as `modelRequiresCodexMessage`.
+    /// reason as `modelRequiresAgentMessage`.
     public static let pluginDirsRequireClaudeMessage = "pluginDirs require a Claude terminal"
 
     public static let codexDisableRequiresCodexMessage =

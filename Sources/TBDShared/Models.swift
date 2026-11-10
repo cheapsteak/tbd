@@ -625,39 +625,49 @@ public enum TerminalTransport: String, Codable, Sendable, Equatable {
     case holder
 }
 
-/// The Claude spawn values a terminal's starter passed — a settings overlay
-/// and plugin folders — stored unchanged so TBD can apply them to the starts
-/// the starter does not make: wake, account switch, reopen, revive
-/// (docs/specs/2026-10-24-terminal-plugin-dirs-design.md, "What TBD stores").
+/// The Claude spawn values a terminal's starter passed — a settings overlay,
+/// plugin folders and a Claude model — stored unchanged so TBD can apply them
+/// to the starts the starter does not make: wake, account switch, reopen,
+/// revive (docs/specs/2026-10-24-terminal-plugin-dirs-design.md, "What TBD
+/// stores"; docs/specs/2026-11-10-create-with-profile-and-model-design.md).
 ///
 /// Stored as the JSON object
-/// `{"claudeSettingsOverlay": <string>, "pluginDirs": [<path>, ...]}`, with a
-/// key omitted when it is nil — on the terminal row, on its history entry, and
-/// as the values of an archived worktree's session-id-keyed map. Unknown keys
-/// are ignored on decode, so later keys can join the object without a
-/// migration. The overlay is stored as plain text and must not hold secrets.
+/// `{"claudeSettingsOverlay": <string>, "model": <string>, "pluginDirs": [<path>, ...]}`,
+/// with a key omitted when it is nil — on the terminal row, on its history
+/// entry, and as the values of an archived worktree's session-id-keyed map.
+/// Unknown keys are ignored on decode, so later keys can join the object
+/// without a migration. The overlay is stored as plain text and must not hold
+/// secrets.
 public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
     /// JSON object text merged into the session's settings file.
     public var claudeSettingsOverlay: String?
     /// Absolute plugin folder paths, each passed as `--plugin-dir`.
     public var pluginDirs: [String]?
+    /// The Claude model, an alias such as `opus` or an exact model ID. Every
+    /// start of the tab passes it as `ANTHROPIC_MODEL`, ahead of the profile's
+    /// own model. TBD passes it to Claude Code unchanged.
+    public var model: String?
 
-    public init(claudeSettingsOverlay: String? = nil, pluginDirs: [String]? = nil) {
+    public init(claudeSettingsOverlay: String? = nil, pluginDirs: [String]? = nil, model: String? = nil) {
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.pluginDirs = pluginDirs
+        self.model = model
     }
 
-    /// These values with an empty field normalized to nil — an overlay that is
-    /// nil or whitespace only, a `pluginDirs` that is nil or empty — or nil
-    /// when both fields are empty, so "nothing passed" has one spelling. A
-    /// non-blank overlay is kept verbatim, not trimmed.
+    /// These values with an empty field normalized to nil — an overlay or a
+    /// model that is nil or whitespace only, a `pluginDirs` that is nil or
+    /// empty — or nil when every field is empty, so "nothing passed" has one
+    /// spelling. A non-blank overlay or model is kept verbatim, not trimmed.
     public var nonEmpty: ClaudeSpawnExtras? {
         let overlay = claudeSettingsOverlay.flatMap {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
         }
         let dirs = pluginDirs.flatMap { $0.isEmpty ? nil : $0 }
-        guard overlay != nil || dirs != nil else { return nil }
-        return ClaudeSpawnExtras(claudeSettingsOverlay: overlay, pluginDirs: dirs)
+        let model = self.model.flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        }
+        guard overlay != nil || dirs != nil || model != nil else { return nil }
+        return ClaudeSpawnExtras(claudeSettingsOverlay: overlay, pluginDirs: dirs, model: model)
     }
 }
 

@@ -145,7 +145,7 @@ extension RPCRouter {
         // other kind rather than silently dropping it: Claude models come from
         // TBD model profiles, and a shell has no model.
         if params.model != nil, params.type != .codex {
-            return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
+            return RPCResponse(error: TerminalCreateParams.modelRequiresAgentMessage)
         }
         // Validate an explicit Codex home before creating any terminal, pane,
         // server or actuation. The normal no-flag launch remains unchanged.
