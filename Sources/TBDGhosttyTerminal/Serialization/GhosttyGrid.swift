@@ -114,18 +114,30 @@ extension GhosttyTerminalState {
         case history
         /// The rows on view, row 0 at the top, wherever the user has scrolled to.
         case viewport
+        /// The scrollback and the screen below it, row 0 the oldest.
+        case screen
 
         var tag: GhosttyPointTag {
             switch self {
             case .active: GHOSTTY_POINT_TAG_ACTIVE
             case .history: GHOSTTY_POINT_TAG_HISTORY
             case .viewport: GHOSTTY_POINT_TAG_VIEWPORT
+            case .screen: GHOSTTY_POINT_TAG_SCREEN
             }
         }
     }
 
     /// Rows of scrollback above the screen. The alternate screen keeps none.
     var historyRowCount: Int { isAlternateScreen ? 0 : scrollbackRows }
+
+    /// The `.screen` row at the top of the viewport: the scrollbar's offset, which counts in the
+    /// same rows. nil when the scrollbar cannot be read, or reads a viewport of another height.
+    var viewportTopScreenRow: Int? {
+        guard let raw else { return nil }
+        let metrics = TerminalScrollMetrics.read(raw)
+        guard metrics.visible == rows else { return nil }
+        return metrics.offset
+    }
 
     /// True when the cursor sits past a character printed in the last column, so the next one wraps.
     var cursorPendingWrap: Bool {

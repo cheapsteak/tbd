@@ -9,9 +9,10 @@ import TBDGhosttyTerminal
 /// `Terminal.link(at:mode:)` and hands what it finds to `requestOpenLink`. The matcher behind that
 /// call (Ghostty's URL and path pattern, and the rule for which rows a soft wrap or an editor's
 /// hard wrap joins into one line) is private to SwiftTerm, and the call is the one way in. So the
-/// rows the libghostty view read at the press are written into a headless SwiftTerm terminal of the
-/// same size, each character at its column and each soft wrap made the way a program makes one, by
-/// printing on past the end of the row, and SwiftTerm is asked what is under the pressed cell.
+/// rows the libghostty view read at the press, those on view and those its lines run on into, are
+/// written into a headless SwiftTerm terminal as wide as the grid and as tall as the rows read, each
+/// character at its column and each soft wrap made the way a program makes one, by printing on past
+/// the end of the row, and SwiftTerm is asked what is under the pressed cell.
 enum SwiftTermLinkDetector {
     /// The link SwiftTerm finds under the pressed cell of `clicked`, or nil.
     static func link(in clicked: GhosttyClickedText) -> String? {

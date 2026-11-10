@@ -1097,6 +1097,49 @@ struct GhosttyCommandClickTextTests {
         bytes.starts(with: Array("\u{1b}[<".utf8)) && bytes.last == final.asciiValue
     }
 
+    /// A line that runs off the viewport is read on past both its edges, as SwiftTerm reads a line
+    /// on its whole buffer, so a link on it is not cut where the view ends; and no further than the
+    /// line runs.
+    @Test func aLineRunningOffTheViewportIsReadOnPastBothEdges() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        // Screen rows: 0 "go", 1 to 6 one soft-wrapped line of 52 "y"s, the last row holding two of
+        // them, and 7 "end". A page back from the bottom shows rows 2 to 4, all inside the line.
+        terminal.feed(text: "go\r\n" + String(repeating: "y", count: 52) + "\r\nend")
+        let scrolled = terminal.scrollViewportByPage(up: true)
+        try #require(scrolled, "the viewport did not scroll back")
+        let top = terminal.withLocked { $0.viewportTopScreenRow }
+        let startsOnRowTwo = top == 2
+        try #require(startsOnRowTwo, "the viewport starts on screen row \(String(describing: top)), not 2")
+
+        let clicked = terminal.withLocked { GhosttyClickedText(viewportOf: $0, column: 3, row: 0) }
+
+        let full = String(repeating: "y", count: 10)
+        let expectedRows = [GhosttyClickedText.Row(text: full, isWrapContinuation: false)]
+            + Array(repeating: GhosttyClickedText.Row(text: full, isWrapContinuation: true), count: 4)
+            + [GhosttyClickedText.Row(text: "yy" + String(repeating: "\0", count: 8), isWrapContinuation: true)]
+        let rows = clicked.rows
+        #expect(rows == expectedRows, "the line read as \(rows.map(\.text.debugDescription))")
+        let pressed = [clicked.column, clicked.row]
+        #expect(pressed == [3, 1], "the pressed cell is column, row \(pressed) of the rows read")
+    }
+
+    /// Rows past the viewport are read on while SwiftTerm could join them: across a soft wrap, or
+    /// under a row with text at or past its middle column, which its hard-wrap heuristic needs.
+    @Test func aRowIsReadOnIntoWhileSwiftTermCouldJoinIt() {
+        func row(_ text: String, wraps: Bool = false) -> GhosttyClickedText.Row {
+            GhosttyClickedText.Row(text: text + String(repeating: "\0", count: 10 - text.count), isWrapContinuation: wraps)
+        }
+        let acrossASoftWrap = GhosttyClickedText.Row.mayJoin(row("go"), row("on", wraps: true), columns: 10)
+        #expect(acrossASoftWrap, "a soft wrap does not join")
+        let underTextAtTheMiddle = GhosttyClickedText.Row.mayJoin(row("aaaaa"), row("on"), columns: 10)
+        #expect(underTextAtTheMiddle, "text reaching the middle column does not join")
+        let underTextShortOfIt = GhosttyClickedText.Row.mayJoin(row("aaaa"), row("on"), columns: 10)
+        #expect(!underTextShortOfIt, "text short of the middle column joins")
+        let underTrailingSpaces = GhosttyClickedText.Row.mayJoin(row("aa        "), row("on"), columns: 10)
+        #expect(!underTrailingSpaces, "spaces past the text count as text")
+    }
+
     /// The rows come over as SwiftTerm reads its own: one character per column, `"\0"` for a cell
     /// with no text, and the row a soft wrap continues marked.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))

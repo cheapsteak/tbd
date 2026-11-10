@@ -159,11 +159,12 @@ struct TerminalCommandClickTests {
     }
 
     /// The second half of a wide character holds no text, and is not written: the character fills
-    /// it, so the URL after two wide characters starts where it did on the screen.
+    /// it, so the URL after two wide characters starts where it did on the screen. Pressed on the
+    /// URL's first column, which a shift to the right would leave on the space before it.
     @Test func wideCharactersKeepTheColumnsOfWhatFollows() throws {
         let text = "\u{65E5}\0\u{672C}\0 https://example.com/acme"
         let link = SwiftTermLinkDetector.link(in: clicked(
-            [(text, false)], column: try column(of: "example", in: text), row: 0, columns: 40))
+            [(text, false)], column: try column(of: "https", in: text), row: 0, columns: 40))
         #expect(link == "https://example.com/acme")
     }
 

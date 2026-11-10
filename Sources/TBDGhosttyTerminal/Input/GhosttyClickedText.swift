@@ -4,11 +4,11 @@
 // are the host's rules, and TBD's host already has them, written against SwiftTerm's rows; so the
 // rows are handed over in the shape SwiftTerm gives them.
 
-/// The screen under a left ⌘-press that landed on no OSC 8 link: the rows on view and the cell
-/// pressed, read under the terminal's lock at the press, so a feed between the press and its
-/// release cannot change what the press opens.
+/// The screen under a left ⌘-press that landed on no OSC 8 link: the rows on view, the rows past
+/// them that a line on view runs on into, and the cell pressed, read under the terminal's lock at
+/// the press, so a feed between the press and its release cannot change what the press opens.
 public struct GhosttyClickedText: Sendable, Equatable {
-    /// One row of the viewport.
+    /// One row of the screen.
     public struct Row: Sendable, Equatable {
         /// The row's text, one `Character` per column, as SwiftTerm's
         /// `BufferLine.translateToString()` reads a row: a cell's text, or `"\0"` for a cell with
@@ -24,7 +24,8 @@ public struct GhosttyClickedText: Sendable, Equatable {
         }
     }
 
-    /// The viewport's rows, top to bottom.
+    /// The viewport's rows, top to bottom, with the rows above and below it that a line on view
+    /// runs on into (`init(viewportOf:column:row:)`).
     public var rows: [Row]
     /// The pressed cell's column, zero-based.
     public var column: Int
@@ -46,19 +47,62 @@ public struct GhosttyClickedText: Sendable, Equatable {
 }
 
 extension GhosttyClickedText {
-    /// The viewport of `state` with the cell at `column`, `row` pressed. Inside the lock.
+    /// The most rows read past each edge of the viewport. A link that runs on further than this
+    /// past an edge is cut there.
+    static let reachPastViewport = 200
+
+    /// The viewport of `state`, with the cell at `column`, `row` of it pressed. Inside the lock.
+    ///
+    /// SwiftTerm finds a link on every row of its line, on view or not: the rows a soft wrap joins,
+    /// or, on a row no soft wrap joins, the rows its heuristic for an editor's hard wrap joins. Cut
+    /// at the viewport's edge, a link running off it would open the wrong page, so past each edge
+    /// rows are read on for as long as SwiftTerm could join them (`Row.mayJoin`). A row read that
+    /// SwiftTerm does not join changes nothing it finds.
     init(viewportOf state: GhosttyTerminalState, column: Int, row: Int) {
-        let rows = (0..<state.rows).map { index -> Row in
-            guard let gridRow = state.gridRow(.viewport, index) else {
-                return Row(text: "", isWrapContinuation: false)
+        let columns = state.cols
+        var rows = (0..<state.rows).map { Row(state.gridRow(.viewport, $0)) }
+        var pressedRow = row
+        if let top = state.viewportTopScreenRow {
+            for above in stride(from: top - 1, through: max(0, top - Self.reachPastViewport), by: -1) {
+                guard let upper = state.gridRow(.screen, above).map({ Row($0) }), let lower = rows.first,
+                      Row.mayJoin(upper, lower, columns: columns) else { break }
+                rows.insert(upper, at: 0)
+                pressedRow += 1
             }
-            var text = ""
-            text.reserveCapacity(gridRow.cells.count)
-            // The first character only: a cell holds one, and a matcher counts one per column.
-            for cell in gridRow.cells { text.append(cell.text.first ?? "\0") }
-            return Row(text: text, isWrapContinuation: gridRow.isWrapContinuation)
+            let bottom = top + state.rows
+            for below in bottom..<(bottom + Self.reachPastViewport) {
+                guard let lower = state.gridRow(.screen, below).map({ Row($0) }), let upper = rows.last,
+                      Row.mayJoin(upper, lower, columns: columns) else { break }
+                rows.append(lower)
+            }
         }
-        self.init(rows: rows, column: column, row: row, columns: state.cols)
+        self.init(rows: rows, column: column, row: pressedRow, columns: columns)
+    }
+}
+
+extension GhosttyClickedText.Row {
+    /// `gridRow` as SwiftTerm reads a row, or an empty row when it could not be read.
+    init(_ gridRow: GhosttyGridRow?) {
+        guard let gridRow else {
+            self.init(text: "", isWrapContinuation: false)
+            return
+        }
+        var text = ""
+        text.reserveCapacity(gridRow.cells.count)
+        // The first character only: a cell holds one, and a matcher counts one per column.
+        for cell in gridRow.cells { text.append(cell.text.first ?? "\0") }
+        self.init(text: text, isWrapContinuation: gridRow.isWrapContinuation)
+    }
+
+    /// Whether SwiftTerm could read `upper` and the `lower` row under it as one line: `lower`
+    /// continues a soft wrap, or `upper` has text at or past its middle column. SwiftTerm's
+    /// hard-wrap heuristic joins two rows only when the upper one has text in its last fifth (its
+    /// last two columns, on a grid narrower than ten), so this holds for every pair it joins.
+    static func mayJoin(_ upper: Self, _ lower: Self, columns: Int) -> Bool {
+        if lower.isWrapContinuation { return true }
+        let characters = Array(upper.text)
+        guard let last = characters.lastIndex(where: { $0 != "\0" && !$0.isWhitespace }) else { return false }
+        return last >= (columns - 1) / 2
     }
 }
 
