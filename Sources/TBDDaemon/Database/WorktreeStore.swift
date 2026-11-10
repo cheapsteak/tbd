@@ -941,16 +941,16 @@ public struct WorktreeStore: Sendable {
 
     private static func writeArchivedAgentTabs(_ tabs: [ArchivedAgentTab], to record: inout WorktreeRecord) throws {
         let encoder = JSONEncoder()
-        record.archived_agent_tabs = String(decoding: try encoder.encode(tabs), as: UTF8.self)
+        record.archived_agent_tabs = String(bytes: try encoder.encode(tabs), encoding: .utf8)
         let claude = tabs.filter { $0.identity.agentKind == .claude }
         record.archivedClaudeSessions = claude.isEmpty ? nil
-            : String(decoding: try encoder.encode(claude.map(\.identity.sessionID)), as: UTF8.self)
+            : String(bytes: try encoder.encode(claude.map(\.identity.sessionID)), encoding: .utf8)
         let extras = Dictionary(claude.compactMap { tab -> (String, ClaudeSpawnExtras)? in
             guard let extras = tab.claudeSpawnExtras?.nonEmpty else { return nil }
             return (tab.identity.sessionID, extras)
         }, uniquingKeysWith: { first, _ in first })
         record.archivedClaudeSpawnExtras = extras.isEmpty ? nil
-            : String(decoding: try encoder.encode(extras), as: UTF8.self)
+            : String(bytes: try encoder.encode(extras), encoding: .utf8)
     }
 
     /// Replace the archivedClaudeSessions list with `sessions` (re-encoded as JSON).

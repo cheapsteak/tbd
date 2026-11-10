@@ -729,17 +729,16 @@ struct ArchivedWorktreesView: View {
 
 // MARK: - Row model
 
-private struct ArchivedRow: Identifiable {
+struct ArchivedRow: Identifiable {
     let worktree: Worktree
     let reviveState: ReviveState?
     var id: UUID { worktree.id }
 
-    /// Best available count of conversations for this worktree:
-    /// the daemon-supplied live file count when present, falling back to
-    /// the stored `archivedClaudeSessions` length (older archives or when
-    /// the daemon couldn't scan).
+    /// The provider-neutral snapshot is authoritative, including an empty one.
+    /// Older archives use the live Claude file count, then the stored Claude list.
     var effectiveSessionCount: Int {
-        worktree.liveClaudeSessionCount ?? worktree.archivedClaudeSessions?.count ?? 0
+        worktree.archivedAgentTabs?.count
+            ?? worktree.liveClaudeSessionCount ?? worktree.archivedClaudeSessions?.count ?? 0
     }
 }
 

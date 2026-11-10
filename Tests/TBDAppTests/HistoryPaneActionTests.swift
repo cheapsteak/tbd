@@ -204,7 +204,7 @@ extension HistoryPaneActionTests {
                 closedCalls.record(1)
                 if staleResult == "closed", closedCalls.values.count == 1 {
                     oldStarted.record(1)
-                    #expect(oldRelease.wait(timeout: .now() + 45) == .success)
+                    oldRelease.waitForGate("older closed-history refresh response")
                     return try RPCResponse(result: [closed])
                 }
                 return try RPCResponse(result: [TerminalHistoryEntry]())
@@ -212,7 +212,7 @@ extension HistoryPaneActionTests {
                 listCalls.record(1)
                 if staleResult != "closed", listCalls.values.count == 1 {
                     oldStarted.record(1)
-                    #expect(oldRelease.wait(timeout: .now() + 45) == .success)
+                    oldRelease.waitForGate("older session-list refresh response")
                     switch staleResult {
                     case "error": return RPCResponse(error: "older refresh failed")
                     case "removed": return try RPCResponse(result: [SessionSummary]())
@@ -224,7 +224,7 @@ extension HistoryPaneActionTests {
                 let params = try JSONDecoder().decode(SessionMessagesParams.self, from: request.paramsData)
                 if (params.tailLimit == nil) == afterTail {
                     newerStarted.record(1)
-                    #expect(newerRelease.wait(timeout: .now() + 45) == .success)
+                    newerRelease.waitForGate("newer transcript load response")
                 }
                 return try RPCResponse(result: params.tailLimit == nil ? full : tail)
             default: return RPCResponse(error: "unexpected request")
@@ -234,9 +234,9 @@ extension HistoryPaneActionTests {
         let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
         state.historyLoadStates[worktreeID] = .loaded([summary])
         let older = Task { await state.fetchSessions(worktreeID: worktreeID) }
-        _ = try await oldStarted.next()
+        _ = try await oldStarted.next(timeout: TestDeadlines.saturatedPass)
         let newer = Task { await state.fetchSessions(worktreeID: worktreeID) }
-        _ = try await newerStarted.next()
+        _ = try await newerStarted.next(timeout: TestDeadlines.saturatedPass)
         let cache = state.sessionTranscripts
         let tokens = state.historyTranscriptRequests
         let loading = state.sessionTranscriptLoading
@@ -279,7 +279,7 @@ extension HistoryPaneActionTests {
             calls.record(1)
             if calls.values.count == 1 {
                 started.record(1)
-                #expect(release.wait(timeout: .now() + 45) == .success)
+                release.waitForGate("stale successful refresh response")
                 return try RPCResponse(result: [SessionSummary]())
             }
             return RPCResponse(error: "current refresh failed")
@@ -291,7 +291,7 @@ extension HistoryPaneActionTests {
         await state.loadSessionTranscript(sessionID: summary.id, readTail: { tail },
             readFull: { throw DaemonClientError.rpcError("try again", code: nil) })
         let older = Task { await state.fetchSessions(worktreeID: worktreeID) }
-        _ = try await started.next()
+        _ = try await started.next(timeout: TestDeadlines.saturatedPass)
         await state.fetchSessions(worktreeID: worktreeID)
         let failed = state.historyLoadStates[worktreeID]
         #expect(failed == .failed("RPC error: current refresh failed"))
@@ -320,10 +320,10 @@ extension HistoryPaneActionTests {
             let ordinal = calls.values.count
             started.record(ordinal)
             if ordinal == 1 {
-                #expect(oldRelease.wait(timeout: .now() + 45) == .success)
+                oldRelease.waitForGate("older pending refresh response")
                 return RPCResponse(error: "old failure")
             }
-            #expect(newRelease.wait(timeout: .now() + 45) == .success)
+            newRelease.waitForGate("newer pending refresh response")
             return try RPCResponse(result: [summary])
         }
         defer { server.stop() }
@@ -332,9 +332,9 @@ extension HistoryPaneActionTests {
         state.historyLoadStates[worktreeID] = .loaded([summary])
         state.sessionTranscripts[summary.id] = []
         let older = Task { await state.fetchSessions(worktreeID: worktreeID) }
-        #expect(try await started.next() == 1)
+        #expect(try await started.next(timeout: TestDeadlines.saturatedPass) == 1)
         let newer = Task { await state.fetchSessions(worktreeID: worktreeID) }
-        #expect(try await started.next() == 2)
+        #expect(try await started.next(timeout: TestDeadlines.saturatedPass) == 2)
         oldRelease.signal()
         await older.value
         #expect(state.historyLoadStates[worktreeID] == .loadingStale([summary]))
@@ -362,7 +362,7 @@ extension HistoryPaneActionTests {
             let params = try JSONDecoder().decode(SessionListParams.self, from: request.paramsData)
             if params.worktreeID == firstID {
                 firstStarted.record(1)
-                #expect(release.wait(timeout: .now() + 45) == .success)
+                release.waitForGate("first worktree refresh response")
                 return try RPCResponse(result: [first])
             }
             return try RPCResponse(result: [second])
@@ -374,7 +374,7 @@ extension HistoryPaneActionTests {
         state.sessionTranscripts[second.id] = []
         state.selectedWorktreeIDs = [firstID]
         let firstRefresh = Task { await state.fetchSessions(worktreeID: firstID) }
-        _ = try await firstStarted.next()
+        _ = try await firstStarted.next(timeout: TestDeadlines.saturatedPass)
         state.selectedWorktreeIDs = [secondID]
         await state.fetchSessions(worktreeID: secondID)
         #expect(state.historyLoadStates[secondID]?.currentSessions.map(\.id) == [second.id])

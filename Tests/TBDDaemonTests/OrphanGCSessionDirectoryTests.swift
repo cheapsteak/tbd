@@ -129,6 +129,27 @@ struct OrphanGCSessionDirectoryTests: ~Copyable {
         #expect(result.planned.contains("KEEP referenced \(kept)"))
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func codexThreadIDsDoNotPinClaudeDirectories(historyOnly: Bool, explicitKind: Bool) async throws {
+        let db = try newDB()
+        let worktree = try await makeWorktree(db)
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: explicitKind ? "Renamed agent" : TerminalLabel.codex, claudeSessionID: "thread-collision",
+            kind: explicitKind ? .codex : nil)
+        if historyOnly {
+            await db.terminalHistory.recordOnClose(terminal: terminal, capture: nil)
+            try await db.terminals.delete(id: terminal.id)
+        }
+        _ = try await addTerminal(db, worktree: worktree, sessionID: "claude-kept")
+        let orphan = writeSession("thread-collision")
+        let kept = writeSession("claude-kept")
+        let result = await makeGC(db: db).sweep()
+        #expect(!fm.fileExists(atPath: orphan))
+        #expect(result.planned.contains("REAP session-directory \(orphan)"))
+        #expect(fm.fileExists(atPath: kept))
+    }
+
     @Test func aDirectoryNamedOnlyByHistoryInAnArchivedWorktreeIsReclaimed() async throws {
         let db = try newDB()
         let worktree = try await makeWorktree(db)

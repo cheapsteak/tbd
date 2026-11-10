@@ -261,7 +261,7 @@ enum PeerUnjoinedReason: String, Encodable, Sendable {
     /// It runs inside a holder-backed terminal whose session is already
     /// joined by its captured session id.
     case terminalJoinedBySessionID
-    /// It runs inside a Claude tab whose captured session is a different one.
+    /// It runs inside an agent tab whose captured session is a different one.
     /// Usually a session the tab's Claude started (a `claude -p`), listed
     /// while the tab's own session is not. It is also the tab's own Claude
     /// when TBD's record of that session is stale, until the next
@@ -632,7 +632,8 @@ private struct PeerFleetIndex {
         var bySessionID: [String: Terminal] = [:]
         var byWorktreeAndPane: [PaneKey: Terminal] = [:]
         for terminal in fleet.terminals {
-            if let sessionID = nonEmptyPeerField(terminal.claudeSessionID),
+            if !terminal.isCodexTerminal,
+               let sessionID = nonEmptyPeerField(terminal.claudeSessionID),
                bySessionID[sessionID] == nil {
                 bySessionID[sessionID] = terminal
             }
@@ -744,7 +745,11 @@ private struct PeerFleetIndex {
             // tab's Claude started, listed while the tab's own record is not —
             // is not the tab's. A shell tab has no such identity, whatever id
             // its row carries, so descent still answers for it.
-            if terminal.claudeResumeDecision.resumableSessionID != nil {
+            // An explicitly identified Codex tab also owns its native identity.
+            // This does not grant Codex Claude's manual or idle parking support.
+            let hasCapturedCodexSession = terminal.kind == .codex
+                && terminal.claudeSessionID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            if terminal.claudeResumeDecision.resumableSessionID != nil || hasCapturedCodexSession {
                 for candidate in inTerminal {
                     answers[candidate.pid] = .external(.terminalCapturedAnotherSession)
                 }
@@ -1115,7 +1120,7 @@ func peerUnjoinedDetail(_ reason: PeerUnjoinedReason?) -> String? {
     case .noTerminal, nil: return nil
     case .processTableUnreadable: return "descent not checked"
     case .terminalJoinedBySessionID: return "inside a TBD tab whose own session is joined"
-    case .terminalCapturedAnotherSession: return "inside a Claude tab that TBD records under a different session"
+    case .terminalCapturedAnotherSession: return "inside an agent tab that TBD records under a different session"
     case .nearerSessionInTerminal: return "inside a TBD tab, below a nearer session"
     case .tiedInTerminal: return "inside a TBD tab, tied with another session"
     }

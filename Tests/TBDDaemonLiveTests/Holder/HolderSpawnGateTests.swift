@@ -302,10 +302,17 @@ struct HolderSpawnGateTests {
         let source = try await fixture.seedClaudeSourceTerminal()
 
         let terminalID = try await fixture.continueInCodex(terminalID: source.id)
+        // The gate shell emits no Codex hook. Record its eventual native ID
+        // through the store so parking eligibility is checked with an identity.
+        try await fixture.db.terminals.updateSessionID(id: terminalID, sessionID: "thread-gate-1")
 
         let row = try #require(try await fixture.db.terminals.get(id: terminalID))
         #expect(row.transport == .holder)
         #expect(row.kind == .codex)
+        #expect(row.claudeSessionID == "thread-gate-1")
+        #expect(row.claudeResumeDecision.resumableSessionID == nil)
+        #expect(!row.isManuallyHibernatable())
+        #expect(!row.isAutoHibernationEligible())
         #expect(row.holderPID != nil)
         #expect(row.childPID != nil)
         #expect(row.tmuxWindowID.isEmpty)

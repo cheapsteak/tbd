@@ -837,12 +837,14 @@ public struct TerminalStore: Sendable {
     /// Every Claude session ID any terminal row names, as raw column text.
     /// Read through SQL rather than `list()` so a row whose other columns fail
     /// to decode still counts as a reference: `OrphanGC`'s session-directory
-    /// arm reclaims whatever is NOT referenced.
+    /// arm reclaims whatever is NOT referenced. Codex kinds and legacy Codex
+    /// labels carry native thread IDs in this same column, not Claude IDs.
     public func claudeSessionReferences() async throws -> Set<String> {
         try await writer.read { db in
             Set(try String.fetchAll(db, sql: """
                 SELECT claudeSessionID FROM terminal WHERE claudeSessionID IS NOT NULL
-                """))
+                AND kind IS NOT ? AND label IS NOT ?
+                """, arguments: [TerminalKind.codex.rawValue, TerminalLabel.codex]))
         }
     }
 
