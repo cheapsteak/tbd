@@ -193,7 +193,7 @@ import Testing
     #expect(after == nil, "shell terminal with no session must still be deleted")
 }
 
-@Test func testReconcileDeadWindowCodexTerminalWithSessionMetadataDeleted() async throws {
+@Test func testReconcileDeadWindowCodexTerminalWithSessionMetadataParked() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -213,11 +213,17 @@ import Testing
         repoID: repo.id, name: "wt", branch: "main",
         path: repoDir.path, tmuxServer: serverName
     )
+    let sessionID = UUID().uuidString
+    let transcriptPath = tempDir.appendingPathComponent("rollout.jsonl").path
+    let options = CodexLaunchOptions(
+        model: "acme-model", disabledFeatures: ["acme-feature"], codexHome: "/tmp/acme/codex")
     let terminal = try await db.terminals.create(
         worktreeID: wt.id,
         tmuxWindowID: "@stale-codex", tmuxPaneID: "%stale-codex",
-        label: "Codex", claudeSessionID: UUID().uuidString, kind: .codex
+        label: "Codex", claudeSessionID: sessionID, kind: .codex, codexLaunchOptions: options
     )
+    try await db.terminals.updateSession(
+        id: terminal.id, sessionID: sessionID, transcriptPath: transcriptPath)
 
     do {
         try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
@@ -229,7 +235,17 @@ import Testing
     let after = try await db.terminals.get(id: terminal.id)
     try? await realTmux.killServer(server: serverName)
 
-    #expect(after == nil, "stale codex terminal must be deleted, not suspended via Claude semantics")
+    let parked = try #require(after, "identified Codex must survive positive window absence")
+    #expect(parked.isParked)
+    #expect(parked.hibernateReason == .recovery)
+    #expect(parked.kind == .codex)
+    #expect(parked.claudeSessionID == sessionID)
+    #expect(parked.transcriptPath == transcriptPath)
+    #expect(parked.codexLaunchOptions == options)
+    #expect(parked.tmuxWindowID == "@stale-codex")
+    #expect(parked.tmuxPaneID == "%stale-codex")
+    #expect(parked.recoveryResumePlan?.identity
+        == AgentSessionIdentity(agentKind: .codex, sessionID: sessionID))
 }
 
 @Test("Reconcile: dead window with Claude-resumable terminal parks, not deletes (safety check)")

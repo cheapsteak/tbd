@@ -51,6 +51,12 @@ struct ClaudeResumeDecisionTests {
             .claudeResumeDecision == .notAClaudeTab(.codex))
     }
 
+    @Test(arguments: [TerminalKind.claude, .shell, nil])
+    func codexLabelConflictsNeverAuthorizeClaudeResume(kind: TerminalKind?) {
+        #expect(Self.row(kind: kind, label: TerminalLabel.codex, sessionID: "native")
+            .claudeResumeDecision == .notAClaudeTab(.codex))
+    }
+
     /// The decision and the predicate the app and the rest of the daemon read
     /// never disagree.
     @Test(arguments: [TerminalKind.claude, .shell, .codex, nil])
