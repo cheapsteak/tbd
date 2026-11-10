@@ -405,6 +405,7 @@ extension RPCRouter {
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
             sessionName: claudeSpawnTitle.name,
+            foreignHead: worktree.foreignHead,
             // The overlay is written at launch, so its path counts as present.
             fileExists: claudeOverlay.commandFileExists)
         let claudeSensitiveEnv = EnvOverrideResolver.merge(

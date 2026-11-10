@@ -1937,6 +1937,7 @@ public actor HibernationCoordinator {
             extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             envSettingOverrides: claudeEnvOverrides,
             sessionName: spawnTitle.name,
+            foreignHead: worktree.foreignHead,
             // The overlay is written at launch, so its path counts as present.
             fileExists: overlay.commandFileExists
         )

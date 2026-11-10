@@ -105,6 +105,22 @@ struct ClaudeCompletionScanTests {
         #expect(result.agents.map(\.name).contains("scout"))
     }
 
+    /// No worktree means no project scope: a fork-head worktree's session never
+    /// loads it, so its fallback list must not offer it either.
+    @Test func withoutAWorktreeOnlyTheUserScopeIsScanned() throws {
+        let root = try makeTree()
+        defer { try? fm.removeItem(at: root) }
+
+        let result = ClaudeCompletionScan.scan(
+            configDir: root.appendingPathComponent("cfg").path,
+            worktreePath: nil)
+
+        let names = Set(result.commands.map(\.name))
+        #expect(names.contains("user-cmd"))
+        #expect(names.contains("user-skill"))
+        #expect(!names.contains("project-cmd"))
+    }
+
     /// A disabled plugin's commands must not be offered: typing one costs an
     /// "unknown command" reply from a plugin that is not loaded.
     @Test func aDisabledPluginContributesNothing() throws {
