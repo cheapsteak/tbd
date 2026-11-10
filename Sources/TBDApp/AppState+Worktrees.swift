@@ -38,9 +38,9 @@ extension AppState {
     /// `profileID` is an optional explicit model-profile override chosen at
     /// creation time (sidebar `+` profile picker). nil resolves the profile via
     /// the daemon's normal repo/scratch/global precedence chain (today's behavior).
-    /// `model` is an optional per-spawn Claude model override (picker model
-    /// buttons); it applies to the initial spawn only — later respawns fall
-    /// back to the profile default.
+    /// `model` is an optional Claude model override (picker model buttons).
+    /// The daemon saves it on the primary tab's row, and every later start of
+    /// that tab uses it ahead of the profile's model.
     func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, displayName: String? = nil) {
         // Optimistic placeholder so the row appears instantly. When picking an
         // existing branch we use its local name so the placeholder name
@@ -168,6 +168,14 @@ extension AppState {
                 // Remove the placeholder on failure
                 worktrees[repoID]?.removeAll { $0.id == placeholder.id }
                 logger.error("Failed to create worktree: \(error)")
+                // The daemon refuses a chosen profile that is missing or has
+                // no credentials, so say why rather than let the row vanish.
+                // An open first-message composer is left to report the failure
+                // when its message is sent, and a lost connection is shown by
+                // the app's own state.
+                if profileID != nil, promptTarget == nil, !Self.isDisconnectError(error) {
+                    showAlert("Couldn't create worktree: \(error.localizedDescription)", isError: true)
+                }
                 handleConnectionError(error)
             }
         }
