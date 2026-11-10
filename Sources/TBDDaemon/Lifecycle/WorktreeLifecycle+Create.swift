@@ -268,10 +268,12 @@ extension WorktreeLifecycle {
             // Same rollback as the failure path below, so a parked first
             // message is saved here too; a caller that rolls back itself
             // (`worktree.create`) finds the row still there to save from.
+            let failure = WorktreeLifecycleError.repoNotFound(rid)
             if rollBackOnFailure {
-                _ = await rollBackFailedCreate(worktreeID: worktreeID)
+                _ = await rollBackFailedCreate(
+                    worktreeID: worktreeID, reason: Self.creationFailureReason(failure))
             }
-            throw WorktreeLifecycleError.repoNotFound(rid)
+            throw failure
         }
 
         do {
@@ -645,7 +647,8 @@ extension WorktreeLifecycle {
             // keep the default (the legacy `createWorktree`, fresh revive)
             // still get the message saved, but nothing surfaces its path.
             if rollBackOnFailure {
-                _ = await rollBackFailedCreate(worktreeID: worktreeID)
+                _ = await rollBackFailedCreate(
+                    worktreeID: worktreeID, reason: Self.creationFailureReason(error))
             }
             throw error
         }
@@ -670,10 +673,14 @@ extension WorktreeLifecycle {
     /// checkout is not left untracked: it gets a fresh `.active` row through
     /// `adoptWorktree` (`readoptCheckoutOfFailedCreate`).
     ///
+    /// `reason` is why the creation failed (`creationFailureReason`), carried
+    /// on the delta so the app's alert can say it. Nil where no error is in
+    /// hand, as when startup recovery deletes a row stranded by a restart.
+    ///
     /// `reposDir` and `date` are test seams; production resolves them from
     /// `TBDConstants` (honoring `TBD_HOME`) and the lifecycle's date seam.
     func rollBackFailedCreate(
-        worktreeID: UUID, reposDir: URL? = nil, date: Date? = nil
+        worktreeID: UUID, reason: String? = nil, reposDir: URL? = nil, date: Date? = nil
     ) async -> WorktreeIDDelta {
         var savedPath: String?
         var lost = false
@@ -702,7 +709,8 @@ extension WorktreeLifecycle {
         }
         return WorktreeIDDelta(
             worktreeID: worktreeID, creationFailed: true,
-            unsentPromptPath: savedPath, unsentPromptLost: lost)
+            unsentPromptPath: savedPath, unsentPromptLost: lost,
+            failureReason: reason)
     }
 
     /// Give the checkout a failed create left behind a fresh `.active` row.
@@ -886,7 +894,7 @@ extension WorktreeLifecycle {
                 // it reads "'x' is already used by worktree at <path>", which
                 // names the directory holding it.
                 throw WorktreeLifecycleError.createFailed(
-                    "could not check out existing branch '\(branch)'\(formatErrorForMessage(error))"
+                    "could not check out existing branch '\(branch)'\(Self.repoLevelHint(error))\(Self.formatErrorForMessage(error))"
                 )
             }
         }
@@ -930,7 +938,7 @@ extension WorktreeLifecycle {
                     // Continuing here would make a wedged git report after
                     // 240 s, and after 480 s once the rename retry ran too.
                     throw WorktreeLifecycleError.createFailed(
-                        "git worktree add did not complete\(formatErrorForMessage(error))"
+                        "git worktree add did not complete\(Self.formatErrorForMessage(error))"
                     )
                 }
                 if lastKind == .nameCollision {
@@ -950,7 +958,7 @@ extension WorktreeLifecycle {
         // of guessing.
         if lastKind == .repoLevel, let lastError {
             throw WorktreeLifecycleError.createFailed(
-                "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
+                Self.worktreeAddFailedMessage(lastError)
             )
         }
 
@@ -967,7 +975,7 @@ extension WorktreeLifecycle {
         if lastKind == .nameCollision, userSpecifiedBranch,
            let lastError, gitSaysBranchNameIsTaken(lastError) {
             throw WorktreeLifecycleError.createFailed(
-                "could not create branch '\(branch)' — the name is already taken\(formatErrorForMessage(lastError))"
+                "could not create branch '\(branch)' — the name is already taken\(Self.formatErrorForMessage(lastError))"
             )
         }
 
@@ -981,7 +989,7 @@ extension WorktreeLifecycle {
         // Explicit folders and identity-sensitive callers cannot silently
         // switch to a different generated folder and branch either.
         if lastKind == .baseUnresolvable || userSpecifiedFolder || !retryGeneratedNameOnCollision {
-            let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
+            let errorDetail = lastError.flatMap { Self.formatErrorForMessage($0) } ?? ""
             throw WorktreeLifecycleError.createFailed(
                 "\(describeExhaustedBases(lastKind, baseBranches: baseBranches))\(errorDetail)"
             )
@@ -1041,7 +1049,7 @@ extension WorktreeLifecycle {
                     // said nothing, and another base costs another full
                     // subprocess timeout.
                     throw WorktreeLifecycleError.createFailed(
-                        "git worktree add did not complete\(formatErrorForMessage(error))"
+                        "git worktree add did not complete\(Self.formatErrorForMessage(error))"
                     )
                 }
                 if lastKind == .nameCollision {
@@ -1059,11 +1067,11 @@ extension WorktreeLifecycle {
         // "Spent" here means this loop's bases — the first loop spent its own.
         if lastKind == .repoLevel, let lastError {
             throw WorktreeLifecycleError.createFailed(
-                "git worktree add failed\(repoLevelHint(lastError))\(formatErrorForMessage(lastError))"
+                Self.worktreeAddFailedMessage(lastError)
             )
         }
 
-        let errorDetail = lastError.flatMap { formatErrorForMessage($0) } ?? ""
+        let errorDetail = lastError.flatMap { Self.formatErrorForMessage($0) } ?? ""
         throw WorktreeLifecycleError.createFailed(
             "git worktree add failed after all attempts\(errorDetail)"
         )
@@ -1345,21 +1353,34 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// A hint for the one repo-level failure a user can clear themselves.
-    private func repoLevelHint(_ error: Error) -> String {
-        guard let gitError = error as? GitError,
-              gitError.stderr.lowercased().contains("could not lock config file") else {
-            return ""
+    /// A hint for the repo-level failures a user can clear themselves: a full
+    /// disk, and a stale config lock. Matched on git's raw stderr, which the
+    /// message's own details may have shortened.
+    static func repoLevelHint(_ error: Error) -> String {
+        guard let gitError = error as? GitError else { return "" }
+        let stderr = gitError.stderr.lowercased()
+        if stderr.contains("no space left on device") {
+            return " — the disk is full; free space and try again"
         }
-        return " — a stale .git/config.lock in the repo can be deleted once no git process is holding it"
+        if stderr.contains("could not lock config file") {
+            return " — a stale .git/config.lock in the repo can be deleted once no git process is holding it"
+        }
+        return ""
     }
 
-    /// Formats an error for inclusion in a user-facing message, truncated to ~500 chars.
-    private func formatErrorForMessage(_ error: Error) -> String {
+    /// How many characters of detail a creation-failure message carries.
+    static let messageDetailBudget = 500
+
+    /// Formats an error for inclusion in a user-facing message, as a
+    /// `\nDetails: …` suffix of at most about `messageDetailBudget` characters.
+    ///
+    /// A `GitError` contributes `GitStderr.summary` of its stderr: git's last
+    /// lines, where its verdict is, without the progress meters that fill the
+    /// start of a long checkout's stderr.
+    static func formatErrorForMessage(_ error: Error) -> String {
         var detail = ""
         if let gitError = error as? GitError {
-            let stderr = gitError.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            detail = stderr
+            detail = GitStderr.summary(gitError.stderr, maxCharacters: messageDetailBudget)
         } else if let timeout = error as? GitTimeoutError {
             // `localizedDescription` on a bare `Error` struct renders as
             // "The operation couldn't be completed. (… error 1.)", which names
@@ -1368,15 +1389,47 @@ extension WorktreeLifecycle {
         } else {
             detail = error.localizedDescription
         }
+        detail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
         if detail.isEmpty {
             return ""
         }
-        // Truncate to ~500 chars and clean up
-        let maxLen = 500
-        if detail.count > maxLen {
-            detail = String(detail.prefix(maxLen)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+        if detail.count > messageDetailBudget {
+            detail = String(detail.prefix(messageDetailBudget))
+                .trimmingCharacters(in: .whitespacesAndNewlines) + "…"
         }
         return "\nDetails: \(detail)"
+    }
+
+    /// The failure message `git worktree add` earns once every base is spent
+    /// on a repo-level cause: what failed, the hint a user can act on, and
+    /// git's own last lines.
+    static func worktreeAddFailedMessage(_ error: Error) -> String {
+        "git worktree add failed\(repoLevelHint(error))\(formatErrorForMessage(error))"
+    }
+
+    /// The reason a failed creation reports to the app and the CLI.
+    ///
+    /// A `createFailed` gives its sentence without the "Failed to create
+    /// worktree:" its description puts in front, since both readers say that
+    /// themselves. Any other error gives its localized description when it
+    /// has a real one: a `LocalizedError`, or a Foundation error such as a
+    /// full disk refusing `createDirectory`. A Swift error with neither would
+    /// render as the NSError bridge string ("The operation couldn't be
+    /// completed. (… error 1.)"), so it gives its own description instead.
+    static func creationFailureReason(_ error: Error) -> String {
+        if let lifecycleError = error as? WorktreeLifecycleError,
+           case .createFailed(let reason) = lifecycleError {
+            return reason
+        }
+        if let localized = (error as? LocalizedError)?.errorDescription {
+            return localized
+        }
+        let bridged = error as NSError
+        if bridged.domain == NSCocoaErrorDomain || bridged.domain == NSPOSIXErrorDomain
+            || bridged.userInfo[NSLocalizedDescriptionKey] != nil {
+            return bridged.localizedDescription
+        }
+        return String(describing: error)
     }
 
     private func resolvePrimaryTerminalKind(

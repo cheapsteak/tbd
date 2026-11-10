@@ -130,6 +130,7 @@ extension RPCRouter {
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
         let db = self.db
+        let createFailures = self.worktreeCreateFailures
         let initialPrompt = params.prompt
         let userSpecifiedFolder = params.folder != nil
         let userSpecifiedBranch = params.branch != nil
@@ -182,20 +183,26 @@ extension RPCRouter {
                     break
                 }
             } catch {
+                // The reason goes on record BEFORE the row is deleted: the CLI
+                // asks for it once it sees the row gone, so recording it after
+                // would let that question arrive first and find nothing.
+                let reason = WorktreeLifecycle.creationFailureReason(error)
+                await createFailures.record(worktreeID: pending.id, reason: reason)
                 // Delete the row (saving any first message parked in it) and
                 // broadcast an archive delta so clients remove the pending
                 // entry. `creationFailed: true` is set ONLY here — this is the
                 // single path where a row disappears because its creation
                 // actually failed, so it's the only place that can tell
                 // clients apart from a deliberate archive of a still-`.creating`
-                // row.
+                // row. The delta carries the reason for the app's alert.
                 subs.broadcast(delta: .worktreeArchived(
-                    await lifecycle.rollBackFailedCreate(worktreeID: pending.id)))
+                    await lifecycle.rollBackFailedCreate(worktreeID: pending.id, reason: reason)))
                 // `String(describing:)` rather than `localizedDescription`:
-                // this line is the only record of the failure — the create runs
-                // detached, so nothing about it returns down the RPC. An error
-                // type that carries a payload but is not bridged as a localized
-                // error renders through `localizedDescription` as
+                // this line is the only lasting record of the failure — the
+                // create runs detached, the delta is gone once broadcast, and
+                // the record above holds only a few and not past a restart.
+                // An error type that carries a payload but is not bridged as a
+                // localized error renders through `localizedDescription` as
                 // "<Module>.<Type> error <caseIndex>", which names neither the
                 // command that failed nor what it said; `String(describing:)`
                 // prints the type's own `description` and falls back to the
@@ -210,6 +217,15 @@ extension RPCRouter {
         // the daemon handed it off.
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: pending)
+    }
+
+    /// `worktree.createFailure`: why a recent background creation failed, from
+    /// `worktreeCreateFailures`. Read-only. A nil reason means none is on
+    /// record, which `WorktreeCreateFailureResult` spells out.
+    func handleWorktreeCreateFailure(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeCreateFailureParams.self, from: paramsData)
+        let reason = await worktreeCreateFailures.reason(for: params.worktreeID)
+        return try RPCResponse(result: WorktreeCreateFailureResult(reason: reason))
     }
 
     func handleWorktreeList(_ paramsData: Data) async throws -> RPCResponse {

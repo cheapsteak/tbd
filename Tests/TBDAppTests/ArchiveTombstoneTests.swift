@@ -302,6 +302,33 @@ final class ArchiveTombstoneTests: XCTestCase {
         XCTAssertNil(message, "No message should be produced for .active worktree")
     }
 
+    /// With the daemon's reason, the alert says it and drops the pointer at
+    /// the daemon's log.
+    func testCreationFailureMessageCarriesTheDaemonsReason() {
+        let wt = makeWorktree(id: UUID(), status: .creating, displayName: "MyNewWorktree")
+        let reason = "git worktree add failed — the disk is full; free space and try again"
+
+        let message = AppState.creationFailureMessage(wt, creationFailed: true, reason: reason)
+
+        XCTAssertEqual(message, "Couldn't create worktree \"MyNewWorktree\": \(reason)")
+    }
+
+    /// Without one (an older daemon), the alert keeps pointing at the log.
+    func testCreationFailureMessageWithoutAReasonPointsAtTheLog() {
+        let wt = makeWorktree(id: UUID(), status: .creating, displayName: "MyNewWorktree")
+
+        let message = AppState.creationFailureMessage(wt, creationFailed: true, reason: nil)
+
+        XCTAssertTrue(message?.hasPrefix("Couldn't create worktree \"MyNewWorktree\" — the git worktree add failed.") ?? false)
+        XCTAssertTrue(message?.contains("/usr/bin/log show") ?? false)
+    }
+
+    /// A reason never turns a deliberate archive into a failure alert.
+    func testCreationFailureMessageWithAReasonStaysSilentForADeliberateArchive() {
+        let wt = makeWorktree(id: UUID(), status: .creating)
+        XCTAssertNil(AppState.creationFailureMessage(wt, creationFailed: false, reason: "x"))
+    }
+
     /// Test pure static helper: nil worktree does not produce message
     func testCreationFailureMessageForNilWorktree() {
         XCTAssertNil(AppState.creationFailureMessage(nil, creationFailed: false))
