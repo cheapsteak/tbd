@@ -43,6 +43,45 @@ import Testing
         #expect(cleared.codexLaunchOptions == nil)
     }
 
+    @Test(arguments: [false, true], [-0.0001, 0.0, 0.0001])
+    func upsertOrdersObservationsAcrossDateRepresentations(legacyDate: Bool, delta: Double) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let worktree = try await makeWorktree(db)
+        let firstTerminal = try await db.terminals.create(worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let nextTerminal = try await db.terminals.create(worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000.5)
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "shared-session")
+        let initial = LocalAgentSession(worktreeID: worktree.id, terminalID: firstTerminal.id,
+            identity: identity, transcriptPath: "/synthetic/first.jsonl", codexLaunchOptions: CodexLaunchOptions(model: "acme-first"),
+            firstObservedAt: timestamp, lastObservedAt: timestamp)
+        try await db.localAgentSessions.upsert(initial)
+        if legacyDate {
+            try await db.writerForTests.write { database in
+                try database.execute(sql: """
+                    UPDATE local_agent_session SET last_observed_at = '2023-11-14 22:13:20.500'
+                    WHERE id = ?
+                    """, arguments: [initial.id.uuidString])
+            }
+        }
+        let incomingDate = Date(timeIntervalSince1970: 1_700_000_000.5 + delta)
+        let options = CodexLaunchOptions(model: "acme-next")
+        try await db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: worktree.id, terminalID: nextTerminal.id, identity: identity,
+            transcriptPath: "/synthetic/next.jsonl", codexLaunchOptions: options,
+            firstObservedAt: incomingDate, lastObservedAt: incomingDate))
+        let stored = try #require(try await db.localAgentSessions.get(worktreeID: worktree.id, identity: identity))
+        if delta < 0 {
+            #expect(stored == initial)
+        } else {
+            #expect(stored.id == initial.id)
+            #expect(stored.firstObservedAt == timestamp)
+            #expect(stored.lastObservedAt == incomingDate)
+            #expect(stored.terminalID == nextTerminal.id)
+            #expect(stored.transcriptPath == "/synthetic/next.jsonl")
+            #expect(stored.codexLaunchOptions == options)
+        }
+    }
+
     @Test func worktreeAndProviderScopeSessionsAndDeletionRetainsOnlyOwnedHistory() async throws {
         let db = try TBDDatabase(inMemory: true)
         let first = try await makeWorktree(db)

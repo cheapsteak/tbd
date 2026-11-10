@@ -84,6 +84,9 @@ struct LocalAgentSessionRecord: Codable, FetchableRecord, PersistableRecord, Sen
         let record = try LocalAgentSessionRecord(from: model)
         // Raw SQL bindings bypass record date strategies. Numeric epochs retain
         // the accepted SessionStart's sub-millisecond ordering precision.
+        // Reconciliation may replay an older terminal after a newer hook. Only
+        // equal/newer observations may refresh the association; legacy text
+        // dates must compare chronologically with the incoming numeric epoch.
         try db.execute(sql: """
             INSERT INTO local_agent_session
                 (id, worktree_id, terminal_id, agent_kind, session_id, transcript_path,
@@ -94,6 +97,10 @@ struct LocalAgentSessionRecord: Codable, FetchableRecord, PersistableRecord, Sen
                 transcript_path = excluded.transcript_path,
                 codex_launch_options = excluded.codex_launch_options,
                 last_observed_at = excluded.last_observed_at
+            WHERE excluded.last_observed_at >= CASE typeof(local_agent_session.last_observed_at)
+                WHEN 'text' THEN CAST(strftime('%s', local_agent_session.last_observed_at) AS REAL)
+                    + CAST(substr(strftime('%f', local_agent_session.last_observed_at), 3) AS REAL)
+                ELSE local_agent_session.last_observed_at END
             """, arguments: [record.id, record.worktree_id, record.terminal_id,
                              record.agent_kind, record.session_id, record.transcript_path,
                              record.codex_launch_options,

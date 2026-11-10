@@ -101,6 +101,49 @@ struct CodexActivityReconciliationTests {
         #expect(rows.first?.terminalID == terminal.id)
     }
 
+    @Test("replaying an older terminal preserves the newer accepted session association", arguments: [false, true])
+    func olderTerminalReconciliationPreservesNewerAssociation(legacyCatalogDate: Bool) async throws {
+        let older = try await makeBoundaryTerminal(tag: "catalog-order")
+        let options = CodexLaunchOptions(model: "acme-newer", disabledFeatures: ["example_feature"])
+        let newer = try await db.terminals.create(
+            worktreeID: older.worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: TerminalLabel.codex, kind: .codex, codexLaunchOptions: options)
+        let metadata = #"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n"
+        let olderPath = try makeTranscript(metadata)
+        defer { try? FileManager.default.removeItem(at: olderPath.deletingLastPathComponent()) }
+        let newerPath = try makeTranscript(metadata)
+        defer { try? FileManager.default.removeItem(at: newerPath.deletingLastPathComponent()) }
+        let olderDate = Date(timeIntervalSince1970: 1_799_999_999)
+        let newerDate = Date(timeIntervalSince1970: 1_800_000_000)
+        // A surviving pre-catalog identity is deferred until reconciliation.
+        let acceptedOlder = try await db.terminals.applySessionStart(
+            id: older.id, expectedIncarnation: TerminalSessionIncarnation(terminal: older),
+            sessionID: "shared-session", transcriptPath: olderPath.path, observedAt: olderDate)
+        #expect(acceptedOlder != nil)
+        let response = await makeRouter(now: { newerDate }).handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(terminalID: newer.id, sessionID: "shared-session",
+                transcriptPath: newerPath.path, source: "startup")))
+        #expect(response.success)
+        if legacyCatalogDate {
+            try await db.writerForTests.write { database in
+                try database.execute(sql: """
+                    UPDATE local_agent_session SET last_observed_at = '2027-01-15 08:00:00.000'
+                    WHERE worktree_id = ?
+                    """, arguments: [older.worktreeID.uuidString])
+            }
+        }
+        let accepted = try #require(try await db.localAgentSessions.list(worktreeID: older.worktreeID).first)
+        #expect(accepted.terminalID == newer.id)
+        #expect(accepted.transcriptPath == newerPath.path)
+        #expect(accepted.codexLaunchOptions == options)
+        #expect(accepted.lastObservedAt == newerDate)
+
+        await LocalAgentSessionReconciler(db: db).reconcile(terminalID: older.id)
+
+        #expect(try await db.localAgentSessions.list(worktreeID: older.worktreeID) == [accepted])
+    }
+
     @Test("session list retries provenance before assembling sessions")
     func sessionListReconcilesCatalog() async throws {
         let terminal = try await makeBoundaryTerminal(tag: "catalog-list")
