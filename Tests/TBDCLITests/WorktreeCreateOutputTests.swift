@@ -79,4 +79,19 @@ struct WorktreeCreateOutputTests {
         #expect(notice.contains("a failure will not be reported here"))
         #expect(notice.contains("tbd worktree list"))
     }
+
+    /// A given `--profile` adds a `Profile:` line right after `Path:`, waited
+    /// or not, so an agent can check which account it got. Without one there
+    /// is no such line.
+    @Test(arguments: [true, false])
+    func aGivenProfileIsNamed(waited: Bool) throws {
+        let lines = WorktreeCreate.textOutput(Self.worktree, waited: waited, profileName: "acme-work")
+        let pathIndex = try #require(lines.firstIndex(of: "  Path:   /tmp/acme/worktrees/brave-otter"))
+        let profileIndex = try #require(lines.firstIndex(of: "  Profile: acme-work"))
+        #expect(profileIndex == pathIndex + 1)
+
+        let plain = WorktreeCreate.textOutput(Self.worktree, waited: waited)
+        let namesAProfile = plain.contains { $0.contains("Profile:") }
+        #expect(!namesAProfile)
+    }
 }
