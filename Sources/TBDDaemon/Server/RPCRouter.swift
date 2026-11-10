@@ -32,6 +32,11 @@ public final class RPCRouter: Sendable {
     public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
+    /// Refuses an explicit profile on `worktree.create` and `terminal.create`
+    /// that is missing or has no credentials, before anything is created.
+    /// Reads through the same store and keychain as `modelProfileResolver`,
+    /// so the check and the spawn that follows it agree.
+    let explicitProfileCheck: ExplicitProfileCheck
     /// Injected for the rate-limit handler's profile suggestion; a seam like
     /// `limitResumeScheduler` so tests can install one after construction.
     public nonisolated(unsafe) var profilePoolCandidateSource: ProfilePoolCandidateSource?
@@ -576,6 +581,16 @@ public final class RPCRouter: Sendable {
                 notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions))
         )
         self.modelProfileResolver = resolvedModelProfileResolver
+        self.explicitProfileCheck = ExplicitProfileCheck(
+            profile: { [profiles = resolvedModelProfileResolver.profiles] id in
+                try await profiles.get(id: id)
+            },
+            secret: { [keychain = resolvedModelProfileResolver.keychain] id in
+                try keychain(id.uuidString)
+            },
+            loginIdentity: { [configDirManager] id in
+                configDirManager.loginIdentity(forProfileID: id)
+            })
         // The daemon passes the store its holder readers feed and starts its
         // run loop, in mock mode too; a router built without one (tests) gets
         // its own.

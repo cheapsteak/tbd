@@ -183,3 +183,21 @@ import Foundation
     #expect(body.contains("a note or Changes panel closes in every tab, and the note is kept"))
     #expect(body.contains("It does not apply to a note or Changes panel"))
 }
+
+/// Agents that were told to use an account used to create the session on the
+/// default one and then swap, and the swap's restart can kill the background
+/// agents the session launched. The text has to teach the create-time flags
+/// and say why not to swap.
+@Test func skillTeachesProfileAndModelFlags() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("--profile"))
+    #expect(body.contains("--claude-model"))
+    #expect(body.contains("--profile caller"))
+    #expect(body.contains("swap-profile"))
+    #expect(body.contains("`--profile caller` uses the account you run on"))
+    #expect(body.contains("`--claude-model opus` to `tbd worktree create`"))
+    #expect(body.contains("`--model opus` to `tbd terminal create --type claude`"))
+    #expect(body.contains("can kill its background agents"))
+    // `--model` on `terminal create` is no longer Codex-only.
+    #expect(body.contains("`--model` follows `--type`"))
+}

@@ -731,12 +731,30 @@ extension AppState {
             return terminal
         } catch {
             logger.error("Failed to create Claude terminal: \(error)")
-            if loginSession {
-                showAlert("Failed to open login session: \(error.localizedDescription)", isError: true)
+            if let message = Self.claudeTerminalFailureAlert(
+                error, profileID: profileID, loginSession: loginSession) {
+                showAlert(message, isError: true)
             }
             handleConnectionError(error)
             return nil
         }
+    }
+
+    /// The alert a failed `createClaudeTerminal` shows, or nil for none.
+    ///
+    /// A login tab always says why it failed. So does a tab on a chosen
+    /// profile: the daemon refuses a profile that is missing or has no
+    /// credentials, and without an alert the click would do nothing. A lost
+    /// connection on a chosen profile shows nothing here, because the app
+    /// already shows that it is disconnected.
+    static func claudeTerminalFailureAlert(
+        _ error: Error, profileID: UUID?, loginSession: Bool
+    ) -> String? {
+        if loginSession {
+            return "Failed to open login session: \(error.localizedDescription)"
+        }
+        guard profileID != nil, !Self.isDisconnectError(error) else { return nil }
+        return "Couldn't open a Claude tab: \(error.localizedDescription)"
     }
 
     /// Create a Codex terminal in a worktree and add a new tab for it.

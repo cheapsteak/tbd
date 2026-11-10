@@ -1868,8 +1868,9 @@ public actor HibernationCoordinator {
             profile: resolvedProfile?.envOverrides
         )
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
-        // The terminal's own plugin folders and settings overlay, kept on its
-        // row so every start of its session reapplies them — a wake included.
+        // The terminal's own plugin folders, settings overlay and Claude
+        // model, kept on its row so every start of its session reapplies
+        // them — a wake included.
         // A folder that has gone since is skipped by the builder, with a
         // warning, and the wake goes on: a wake can run with nobody watching.
         let spawnExtras = terminal.claudeSpawnExtras
@@ -1926,7 +1927,8 @@ public actor HibernationCoordinator {
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
             profileBaseURL: resolvedProfile?.baseURL,
-            profileModel: resolvedProfile?.model,
+            // The terminal's saved model wins over the profile's.
+            profileModel: spawnExtras?.model ?? resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
             profileConfigDir: profileConfigDir,

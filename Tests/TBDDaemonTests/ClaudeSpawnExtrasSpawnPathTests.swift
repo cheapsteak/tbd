@@ -78,14 +78,14 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         }
 
         /// A Claude row carrying `extras`, parked the way hibernation leaves
-        /// one. Written straight to the database, so no settings file exists
-        /// for it until a start writes one.
+        /// one, on `profileID` when given. Written straight to the database,
+        /// so no settings file exists for it until a start writes one.
         func parkedClaudeTerminal(
-            sessionID: String, extras: ClaudeSpawnExtras?
+            sessionID: String, extras: ClaudeSpawnExtras?, profileID: UUID? = nil
         ) async throws -> Terminal {
             let terminal = try await db.terminals.create(
                 worktreeID: worktree.id, tmuxWindowID: "@90", tmuxPaneID: "%90",
-                label: "claude", claudeSessionID: sessionID, kind: .claude,
+                label: "claude", claudeSessionID: sessionID, profileID: profileID, kind: .claude,
                 claudeSpawnExtras: extras)
             try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
             return try #require(try await db.terminals.get(id: terminal.id))
@@ -101,6 +101,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let resp = try await create(TerminalCreateParams(
                 worktreeID: worktree.id, type: .claude,
                 claudeSettingsOverlay: extras.claudeSettingsOverlay,
+                model: extras.model,
                 pluginDirs: extras.pluginDirs))
             #expect(resp.success, "\(resp.error ?? "")")
             let created = try resp.decodeResult(Terminal.self)
@@ -1004,6 +1005,254 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 #expect(!command.contains("claude-overlay-session-"), "\(command)")
                 #expect(!FileManager.default.fileExists(
                     atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: restored.id.uuidString)))
+            }
+        }
+    }
+
+    // MARK: - The Claude model
+
+    /// The inline export a start passes `model` with. The builder re-exports
+    /// routing keys after the shell's startup files, so the command carries it.
+    private static func modelExport(_ model: String) -> String {
+        "export ANTHROPIC_MODEL=\(shellEscape(model));"
+    }
+
+    /// Fresh and resuming alike: the model is passed on this start and kept
+    /// on the row, ahead of the profile's own model.
+    @Test(arguments: [false, true])
+    func terminalCreateClaudeModelIsAppliedAndSaved(resume: Bool) async throws {
+        try await withFixture { f in
+            let profile = try await f.db.modelProfiles.create(
+                name: "acme-work", kind: .oauth, model: "acme-sonnet")
+            try await f.db.config.setDefaultProfileID(profile.id)
+            let sessionID = UUID().uuidString
+            let resp = try await f.create(TerminalCreateParams(
+                worktreeID: f.worktree.id, type: .claude,
+                resumeSessionID: resume ? sessionID : nil, model: "acme-opus"))
+            #expect(resp.success, "\(resp.error ?? "")")
+            let terminal = try resp.decodeResult(TBDShared.Terminal.self)
+
+            let expected = ClaudeSpawnExtras(model: "acme-opus")
+            #expect(terminal.claudeSpawnExtras == expected)
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == expected)
+
+            let command = try #require(f.recorder.newWindowCommands.last)
+            #expect(command.contains(resume ? "claude --resume \(sessionID)" : "claude --session-id"),
+                    "\(command)")
+            #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
+            #expect(!command.contains("acme-sonnet"), "\(command)")
+        }
+    }
+
+    /// A blank model is no model: nothing is stored and the profile's model
+    /// stands, rather than `ANTHROPIC_MODEL=  `.
+    @Test func terminalCreateBlankModelIsNoModel() async throws {
+        try await withFixture { f in
+            let profile = try await f.db.modelProfiles.create(
+                name: "acme-work", kind: .oauth, model: "acme-sonnet")
+            try await f.db.config.setDefaultProfileID(profile.id)
+            let resp = try await f.create(TerminalCreateParams(
+                worktreeID: f.worktree.id, type: .claude, model: "  "))
+            #expect(resp.success, "\(resp.error ?? "")")
+            let terminal = try resp.decodeResult(TBDShared.Terminal.self)
+            #expect(terminal.claudeSpawnExtras == nil)
+            let command = try #require(f.recorder.newWindowCommands.last)
+            #expect(command.contains(Self.modelExport("acme-sonnet")), "\(command)")
+            #expect(!command.contains(Self.modelExport("  ")), "\(command)")
+        }
+    }
+
+    /// With and without a pre-session hook: the primary starts on the model
+    /// and keeps it, and the hook's row carries it with the create's other
+    /// Claude values, for a primary that recovery starts from rows.
+    @Test(arguments: [false, true])
+    func worktreeCreateSavesModelOnPrimaryRow(withPreSessionHook: Bool) async throws {
+        try await withFixture(gitRepo: true) { f in
+            if withPreSessionHook {
+                try await installPreSessionHook(repoDir: f.repoDir)
+            }
+            let resp = try await f.createWorktree(WorktreeCreateParams(
+                repoID: f.repo.id, model: "acme-opus", primaryAgentPreference: .claude))
+            #expect(resp.success, "\(resp.error ?? "")")
+            let pending = try resp.decodeResult(Worktree.self)
+            let expected = ClaudeSpawnExtras(model: "acme-opus")
+
+            if withPreSessionHook {
+                let hookSpawned = await f.waitForTerminals(pending.id) { terminals in
+                    terminals.contains { $0.label == TerminalLabel.preSession }
+                }
+                #expect(hookSpawned, "phase 2 must spawn the pre-session terminal")
+                let hook = try #require(try await f.db.terminals.list(worktreeID: pending.id)
+                    .first { $0.label == TerminalLabel.preSession })
+                #expect(hook.claudeSpawnExtras == expected)
+                // The spawn deleted any stale marker, so writing it now is safe.
+                try writeMarker(worktreeID: pending.id, exitCode: 0)
+            }
+
+            let settled = try #require(try await f.settledWorktree(pending.id))
+            #expect(settled.status == .active)
+            let terminals = try await f.db.terminals.list(worktreeID: pending.id)
+            let primary = try #require(terminals.first { $0.kind == .claude })
+            #expect(primary.claudeSpawnExtras == expected)
+
+            let command = try #require(
+                f.recorder.newWindowCommands.first { $0.contains("claude --session-id") })
+            #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
+        }
+    }
+
+    /// A Codex primary has no use for a Claude model: no row keeps it — the
+    /// primary, the setup tab, nor the pre-session hook's row — and nothing
+    /// passes `ANTHROPIC_MODEL`.
+    @Test(arguments: [false, true])
+    func codexPrimaryIgnoresClaudeModel(withPreSessionHook: Bool) async throws {
+        try await withFixture(gitRepo: true) { f in
+            if withPreSessionHook {
+                try await installPreSessionHook(repoDir: f.repoDir)
+            }
+            let resp = try await f.createWorktree(WorktreeCreateParams(
+                repoID: f.repo.id, model: "acme-opus", primaryAgentPreference: .codex))
+            #expect(resp.success, "\(resp.error ?? "")")
+            let pending = try resp.decodeResult(Worktree.self)
+
+            if withPreSessionHook {
+                let hookSpawned = await f.waitForTerminals(pending.id) { terminals in
+                    terminals.contains { $0.label == TerminalLabel.preSession }
+                }
+                #expect(hookSpawned, "phase 2 must spawn the pre-session terminal")
+                let hook = try #require(try await f.db.terminals.list(worktreeID: pending.id)
+                    .first { $0.label == TerminalLabel.preSession })
+                #expect(hook.claudeSpawnExtras == nil)
+                try writeMarker(worktreeID: pending.id, exitCode: 0)
+            }
+
+            let settled = try #require(try await f.settledWorktree(pending.id))
+            #expect(settled.status == .active)
+            let terminals = try await f.db.terminals.list(worktreeID: pending.id)
+            #expect(terminals.contains { $0.kind == .codex })
+            #expect(!terminals.contains { $0.kind == .claude })
+            #expect(terminals.allSatisfy { $0.claudeSpawnExtras == nil })
+            let exported = f.recorder.calls.contains { call in
+                call.contains { $0.contains("ANTHROPIC_MODEL") }
+            }
+            #expect(!exported)
+        }
+    }
+
+    /// A wake passes the row's saved model, not the profile's.
+    @Test func wakeUsesSavedModelOverProfileModel() async throws {
+        try await withFixture { f in
+            let profile = try await f.db.modelProfiles.create(
+                name: "acme-work", kind: .oauth, model: "acme-sonnet")
+            let sessionID = UUID().uuidString
+            let extras = ClaudeSpawnExtras(model: "acme-opus")
+            let terminal = try await f.parkedClaudeTerminal(
+                sessionID: sessionID, extras: extras, profileID: profile.id)
+            let start = f.recorder.calls.count
+
+            let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
+            #expect(result.isOk, "\(result)")
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
+            #expect(!command.contains("acme-sonnet"), "\(command)")
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
+        }
+    }
+
+    /// Control: a row with no saved model wakes on its profile's model.
+    @Test func wakeWithoutSavedModelUsesProfileModel() async throws {
+        try await withFixture { f in
+            let profile = try await f.db.modelProfiles.create(
+                name: "acme-work", kind: .oauth, model: "acme-sonnet")
+            let sessionID = UUID().uuidString
+            let terminal = try await f.parkedClaudeTerminal(
+                sessionID: sessionID, extras: nil, profileID: profile.id)
+            let start = f.recorder.calls.count
+
+            let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
+            #expect(result.isOk, "\(result)")
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.modelExport("acme-sonnet")), "\(command)")
+        }
+    }
+
+    /// An account switch keeps the tab's model, ahead of the new profile's.
+    @Test func swapKeepsSavedModel() async throws {
+        try await withFixture { f in
+            // The overlay gives the create a settings file of its own, which
+            // the helper removes.
+            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.overlay, model: "acme-opus")
+            let terminal = try await f.liveClaudeTerminalWithConversation(extras: extras)
+            let sessionID = try #require(terminal.claudeSessionID)
+            let profile = try await f.db.modelProfiles.create(
+                name: "B", kind: .oauth, model: "acme-sonnet")
+            let start = f.recorder.calls.count
+
+            let resp = try await f.swapProfile(terminal.id, to: profile.id, mode: .inPlace)
+            #expect(resp.success, "\(resp.error ?? "")")
+            #expect(try resp.decodeResult(TBDShared.Terminal.self).profileID == profile.id)
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
+            #expect(!command.contains("acme-sonnet"), "\(command)")
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
+        }
+    }
+
+    /// A reopen from Closed Terminals passes the closed tab's model and keeps
+    /// it on the new row.
+    @Test func reopenFromHistoryUsesSavedModel() async throws {
+        try await withFixture { f in
+            let extras = ClaudeSpawnExtras(model: "acme-opus")
+            let sessionID = UUID().uuidString
+            let closing = try await f.claudeTerminal(
+                in: f.worktree.id, sessionID: sessionID, extras: extras)
+            await f.db.terminalHistory.recordOnClose(terminal: closing, capture: nil)
+            try await f.db.terminals.delete(id: closing.id)
+            let start = f.recorder.calls.count
+
+            let resp = try await f.reopen(closing.id)
+            #expect(resp.success, "\(resp.error ?? "")")
+            let reopened = try resp.decodeResult(TBDShared.Terminal.self)
+            #expect(reopened.claudeSpawnExtras == extras)
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
+        }
+    }
+
+    /// A revive restores each archived session on its own model — the primary
+    /// and the extra restore alike — and keeps it on the new rows.
+    @Test func reviveRestoresEachSessionsOwnModel() async throws {
+        try await withFixture(gitRepo: true) { f in
+            let wt = try await f.activeCheckout()
+            let sessions = [
+                (id: UUID().uuidString, model: "acme-opus"),
+                (id: UUID().uuidString, model: "acme-haiku"),
+            ]
+            for session in sessions {
+                _ = try await f.claudeTerminal(
+                    in: wt.id, sessionID: session.id, extras: ClaudeSpawnExtras(model: session.model))
+            }
+            try await f.lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+            #expect(try await f.revive(wt.id) == false)
+
+            let terminals = try await f.db.terminals.list(worktreeID: wt.id)
+            for session in sessions {
+                let restored = try #require(terminals.first { $0.claudeSessionID == session.id })
+                #expect(restored.claudeSpawnExtras == ClaudeSpawnExtras(model: session.model))
+                let command = try #require(
+                    f.recorder.newWindowCommands.last { $0.contains("claude --resume \(session.id)") })
+                #expect(command.contains(Self.modelExport(session.model)), "\(command)")
+                let others = sessions.filter { $0.id != session.id }.map { $0.model }
+                #expect(others.allSatisfy { !command.contains($0) }, "\(command)")
             }
         }
     }
