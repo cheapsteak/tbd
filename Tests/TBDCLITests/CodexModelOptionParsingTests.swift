@@ -5,7 +5,7 @@ import TBDShared
 
 @testable import TBDCLI
 
-@Suite("Codex model options on terminal create and worktree create")
+@Suite("Model options on terminal create and worktree create")
 struct CodexModelOptionParsingTests {
     @Test func terminalCreateAcceptsModelWithCodexType() throws {
         let parsed = try TerminalCreate.parse(["wt", "--type", "codex", "--model", "acme-model"])
@@ -18,16 +18,33 @@ struct CodexModelOptionParsingTests {
         #expect(parsed.model == nil)
     }
 
-    @Test(arguments: [["--type", "claude"], ["--type", "shell"], []])
-    func terminalCreateRefusesModelWithoutCodexType(typeArguments: [String]) {
-        #expect(throws: (any Error).self) {
+    /// `--model` follows `--type`, so a Claude terminal takes the Claude model.
+    @Test func terminalCreateAcceptsModelWithClaudeType() throws {
+        let parsed = try TerminalCreate.parse(["wt", "--type", "claude", "--model", "opus"])
+        #expect(parsed.model == "opus")
+        #expect(parsed.type == .claude)
+        let params = parsed.createParams(worktreeID: UUID(), prompt: nil, cwd: "/work")
+        #expect(params.model == "opus")
+        #expect(params.type == .claude)
+    }
+
+    /// Every shape that is a shell terminal: an explicit shell, no type, and no
+    /// type with `--cmd`.
+    @Test(arguments: [["--type", "shell"], [], ["--cmd", "make"]])
+    func terminalCreateRefusesModelWithoutAgentType(typeArguments: [String]) {
+        do {
             _ = try TerminalCreate.parse(["wt"] + typeArguments + ["--model", "acme-model"])
+            Issue.record("expected --model on a shell terminal to be refused")
+        } catch {
+            #expect(TerminalCreate.message(for: error)
+                == TerminalCreateParams.modelRequiresAgentMessage)
         }
     }
 
-    @Test func terminalCreateRefusesAnEmptyModel() {
+    @Test(arguments: ["codex", "claude"])
+    func terminalCreateRefusesAnEmptyModel(type: String) {
         #expect(throws: (any Error).self) {
-            _ = try TerminalCreate.parse(["wt", "--type", "codex", "--model", " "])
+            _ = try TerminalCreate.parse(["wt", "--type", type, "--model", " "])
         }
     }
 
