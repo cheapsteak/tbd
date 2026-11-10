@@ -18,6 +18,10 @@ private final class ViewRecorder {
     var openedLinks: [String] = []
     /// What `onMouseDownClaimFocus` answers.
     var claimsPress = true
+    /// Every text `onCommandClickText` was offered.
+    var clickedTexts: [GhosttyClickedText] = []
+    /// What `onCommandClickText` answers: whether the host opened something.
+    var opensText = false
 }
 
 /// An 80×24 terminal and a view over it in a monospaced font, 13 pt unless a test needs a render
@@ -1060,6 +1064,238 @@ struct GhosttyShellQuotingTests {
         let quoted = GhosttyTerminalView.shellQuoted("/tmp/x'\(mark); echo injected; '.png")
         let expected = "'/tmp/x'\\''\(mark); echo injected; '\\''.png'"
         #expect(Array(quoted.utf8) == Array(expected.utf8))
+    }
+}
+
+/// A ⌘-click on plain text. The view reads the screen once, at the press, offers it to the host's
+/// `onCommandClickText`, and consumes the press whole when the host says it opened something. An
+/// OSC 8 link under the press comes first, and its text is never offered; nor is a press the host
+/// declined.
+@Suite(.fastPassBounded)
+@MainActor
+struct GhosttyCommandClickTextTests {
+    /// The window point at the centre of the cell at `column`, `row`.
+    private func point(column: Int, row: Int, in view: GhosttyTerminalView) -> NSPoint {
+        let cell = view.cellSize
+        return view.convert(
+            NSPoint(x: (CGFloat(column) + 0.5) * cell.width, y: (CGFloat(row) + 0.5) * cell.height), to: nil)
+    }
+
+    /// Hands `view`'s hooks to `recorder`.
+    private func record(_ view: GhosttyTerminalView, into recorder: ViewRecorder) {
+        view.onSend = { recorder.sent.append($0) }
+        view.onOpenLink = { recorder.openedLinks.append($0) }
+        view.onMouseDownClaimFocus = { recorder.claimsPress }
+        view.onCommandClickText = { text in
+            recorder.clickedTexts.append(text)
+            return recorder.opensText
+        }
+    }
+
+    /// One SGR mouse report ending in `final`, whatever the button and modifier bits.
+    private func isReport(_ bytes: [UInt8], final: Character) -> Bool {
+        bytes.starts(with: Array("\u{1b}[<".utf8)) && bytes.last == final.asciiValue
+    }
+
+    /// The rows come over as SwiftTerm reads its own: one character per column, `"\0"` for a cell
+    /// with no text, and the row a soft wrap continues marked.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theHostIsOfferedTheViewportThePressedCellAndTheSoftWraps() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        _ = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        let grid = view.gridSize
+        let full = String(repeating: "a", count: grid.cols)
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2J\(full)bc\r\n\u{65E5}x")
+        let pressed = point(column: 1, row: 1, in: view)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: pressed, in: window, flags: .command))
+        // The host opened nothing, so the press goes on as an ordinary click, which selects.
+        let selects = view.mouseController.isSelecting
+        #expect(selects, "a ⌘-press the host opened nothing for started no selection")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: pressed, in: window, flags: .command))
+
+        let offered = recorder.clickedTexts
+        try #require(offered.count == 1, "the host was offered \(offered.count) texts")
+        let text = offered[0]
+        let shape = [text.column, text.row, text.columns, text.rows.count]
+        #expect(shape == [1, 1, grid.cols, grid.rows], "column, row, columns and rows: \(shape)")
+        let activates = text.activatesWindow
+        #expect(!activates, "an ordinary ⌘-press was offered as the activating click")
+        try #require(text.rows.count >= 3, "\(text.rows.count) rows")
+        let top = text.rows[0]
+        let topText = top.text
+        #expect(topText == full, "row 0 reads \(topText.debugDescription)")
+        let topWraps = top.isWrapContinuation
+        #expect(!topWraps, "row 0 continues a row above it")
+        let wrapped = text.rows[1]
+        let wrappedText = wrapped.text
+        let expectedWrapped = "bc" + String(repeating: "\0", count: grid.cols - 2)
+        #expect(wrappedText == expectedWrapped, "row 1 reads \(wrappedText.debugDescription)")
+        let wrappedWraps = wrapped.isWrapContinuation
+        #expect(wrappedWraps, "row 1 does not continue row 0")
+        // The second half of a wide character holds no text.
+        let wideText = text.rows[2].text
+        let wideStart = wideText.hasPrefix("\u{65E5}\0x")
+        #expect(wideStart, "row 2 reads \(wideText.debugDescription)")
+
+        // Control: a press without ⌘ is never offered.
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: pressed, in: window))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: pressed, in: window))
+        let offeredAfterPlainClick = recorder.clickedTexts.count
+        #expect(offeredAfterPlainClick == 1, "a press without ⌘ was offered to the host")
+    }
+
+    /// A program reporting the mouse gets none of a ⌘-press the host opened something for: not the
+    /// press, not its drag, not its release, and neither does the selection or the responder chain.
+    /// The same press the host opens nothing for is an ordinary click, and is reported.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aPressTheHostOpensIsConsumedWholeEvenWhileTheProgramReportsTheMouse() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let counter = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2Jsee notes.txt\u{1b}[?1002h\u{1b}[?1006h")
+        try #require(fixture.terminal.isMouseReporting, "the program did not take the mouse")
+        let onText = point(column: 5, row: 0, in: view)
+        let dragTo = point(column: 9, row: 0, in: view)
+
+        recorder.opensText = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
+        let selecting = view.mouseController.isSelecting
+        #expect(!selecting, "a ⌘-press the host opened something for started a selection")
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: dragTo, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: dragTo, in: window, flags: .command))
+        let offered = recorder.clickedTexts.count
+        #expect(offered == 1, "the press was offered \(offered) times")
+        let sentByOpened = recorder.sent
+        #expect(sentByOpened.isEmpty, "a ⌘-press the host opened something for reached the program: \(sentByOpened)")
+        let passedOn = [counter.draggedCount, counter.upCount]
+        #expect(passedOn == [0, 0], "its drag and release went up the responder chain: \(passedOn)")
+        let pending = view.mouseController.pendingReportReleases
+        #expect(pending.isEmpty, "\(pending) wait for a release")
+
+        // Control: the host opens nothing, so the same ⌘-press is an ordinary, reported click.
+        recorder.opensText = false
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command))
+        let reports = recorder.sent
+        let pressAndRelease = reports.count == 2
+            && reports.first.map { isReport($0, final: "M") } == true
+            && reports.last.map { isReport($0, final: "m") } == true
+        #expect(pressAndRelease, "control: a ⌘-press the host opened nothing for sent \(reports)")
+    }
+
+    /// The link is looked up first and opens alone: the host is not offered the text a link shows,
+    /// so one ⌘-click never opens two things. The press is consumed, release and all.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func anOSC8LinkOpensOnceAndItsTextIsNeverOffered() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let counter = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        recorder.opensText = true
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
+        let link = "https://example.com/acme"
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2J\u{1b}]8;;\(link)\u{1b}\\notes.txt\u{1b}]8;;\u{1b}\\")
+        let onLink = point(column: 1, row: 0, in: view)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command))
+
+        let opened = recorder.openedLinks
+        #expect(opened == [link], "the ⌘-click on the link opened \(opened)")
+        let offered = recorder.clickedTexts.count
+        #expect(offered == 0, "the host was also offered the link's text")
+        let ups = counter.upCount
+        #expect(ups == 0, "the release of the ⌘-click that opened the link went up the responder chain")
+    }
+
+    /// A press the host declined has something drawn over the view that owns it, so its text is not
+    /// offered, whether or not it activates the window. Claimed, the same ⌘-press is.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aPressTheHostDeclinedIsNeverOffered() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        _ = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        recorder.opensText = true
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2Jsee notes.txt")
+        let onText = point(column: 5, row: 0, in: view)
+
+        recorder.claimsPress = false
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
+        let selects = view.mouseController.isSelecting
+        #expect(selects, "a declined ⌘-press did not go on as an ordinary click")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command))
+        let activating = try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: 11)
+        let takesIt = view.acceptsFirstMouse(for: activating)
+        #expect(takesIt)
+        view.mouseDown(with: activating)
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: 11))
+        let offeredWhenDeclined = recorder.clickedTexts.count
+        #expect(offeredWhenDeclined == 0, "a declined ⌘-press was offered to the host")
+
+        // Control: claimed, the same ⌘-press is offered.
+        recorder.claimsPress = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: 12))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: 12))
+        let offeredWhenClaimed = recorder.clickedTexts.count
+        #expect(offeredWhenClaimed == 1, "a claimed ⌘-press was offered \(offeredWhenClaimed) times")
+    }
+
+    /// The click that brings the window forward is offered too, marked as that click, and is
+    /// consumed whichever way the host answers: it only activates unless the host opened something.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theActivatingCommandClickIsOfferedAndConsumedWhicheverWayTheHostAnswers() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let counter = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2Jsee notes.txt\u{1b}[?1002h\u{1b}[?1006h")
+        let onText = point(column: 5, row: 0, in: view)
+
+        for (offset, opens) in [false, true].enumerated() {
+            recorder.opensText = opens
+            let number = 21 + offset
+            let down = try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: number)
+            let takesIt = view.acceptsFirstMouse(for: down)
+            #expect(takesIt)
+            view.mouseDown(with: down)
+            let selecting = view.mouseController.isSelecting
+            #expect(!selecting, "the activating ⌘-click started a selection, the host opening \(opens)")
+            view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: number))
+        }
+        let markedActivating = recorder.clickedTexts.map(\.activatesWindow)
+        #expect(markedActivating == [true, true], "the activating ⌘-clicks were offered as \(markedActivating)")
+        let sent = recorder.sent
+        #expect(sent.isEmpty, "the activating ⌘-clicks reached the program: \(sent)")
+        let ups = counter.upCount
+        #expect(ups == 0, "the activating ⌘-clicks' releases went up the responder chain")
+
+        // Control: a ⌘-press in the active window is offered as an ordinary one.
+        recorder.opensText = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: 30))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: 30))
+        let lastActivates = recorder.clickedTexts.last?.activatesWindow
+        #expect(lastActivates == false, "an ordinary ⌘-press was offered as \(String(describing: lastActivates))")
     }
 }
 

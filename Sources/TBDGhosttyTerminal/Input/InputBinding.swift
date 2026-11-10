@@ -376,6 +376,19 @@ extension GhosttyTerminal {
         }
     }
 
+    /// What a ⌘-click at `position` lands on: the OSC 8 URI of its cell, or, when the cell has
+    /// none and `readsText` is true, the viewport's text with the cell pressed. One lock hold, so
+    /// the link and the text are read from the same screen.
+    func commandClickTarget(at position: SurfacePoint, readsText: Bool) -> CommandClickTarget? {
+        input("reading a ⌘-click", fallback: nil) { raw, binding in
+            guard let point = binding.selection.gridPoint(at: position) else { return nil }
+            if let uri = HyperlinkLookup.uri(at: point, in: raw) { return .link(uri) }
+            guard readsText else { return nil }
+            return .text(GhosttyClickedText(
+                viewportOf: GhosttyTerminalState(raw: raw), column: Int(point.x), row: Int(point.y)))
+        }
+    }
+
     // MARK: DEC 2026
 
     /// Restarts the DEC 2026 watchdog and sets `holdOpen` from one read of the mode, in one lock

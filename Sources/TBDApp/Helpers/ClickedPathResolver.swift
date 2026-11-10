@@ -3,14 +3,14 @@ import Foundation
 /// Turns a clicked token into an absolute path to an existing file, or nil.
 ///
 /// Pure and AppKit-free so both click surfaces share one definition of "this
-/// text names a file": the terminal's cmd+click (`TBDTerminalView`) and the
-/// transcript's link pass (`TranscriptLinkPass`). Keeping the rules in one
-/// place is the point — two implementations drifted apart is exactly the bug
-/// this replaces.
+/// text names a file": the terminal's cmd+click (`TerminalCommandClick`, which
+/// both terminal engines call) and the transcript's link pass
+/// (`TranscriptLinkPass`). Keeping the rules in one place is the point — two
+/// implementations drifted apart is exactly the bug this replaces.
 enum ClickedPathResolver {
     /// Characters that may appear inside a clicked path token.
     ///
-    /// Referenced by the terminal's `extractFilePath` widener and by
+    /// Referenced by the terminal's `TerminalCommandClick.filePath` widener and by
     /// `TranscriptLinkScanner` — never copied into either. Two surfaces that
     /// share a resolver but duplicate the tokenizer are still free to disagree
     /// about where a path begins and ends, which is the same drift the shared
