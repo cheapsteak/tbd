@@ -21,13 +21,19 @@
 // counts bytes written, drawables acquired, frames encoded and frames skipped, and the tests read
 // those counters.
 //
-// ## Drop, never block
+// ## Drop, never block on the ring
 //
-// A display tick never waits on the GPU. The view checks the ring and its `DrawableTracker` before
-// it builds a frame, and this file takes the ring's slot with `tryAcquire()`, so a frame the GPU
+// A display tick never waits on the ring. The view checks it and its `DrawableTracker` before it
+// builds a frame, and this file takes the ring's slot with `tryAcquire()`, so a frame the GPU
 // cannot take yet is dropped and the next tick draws the newer screen. Only a live resize and
-// `drawFrameNow()` pass `waitsForSlot` and block on the ring. Every drawable acquired goes into the
-// tracker, and its presented handler, always installed, takes it out.
+// `drawFrameNow()` pass `waitsForSlot` and block on the ring.
+//
+// The drawable is another matter. A tick asks the layer for one whatever the tracker counts, and
+// `nextDrawable()` may wait, up to its own one-second timeout, for a drawable the compositor
+// still holds. A nil from it makes the tracker hold every later tick off for a while, so the wait
+// is bounded. Only a leading-edge draw, which runs inside a render signal's delivery, drops at the
+// drawable limit, so it never waits for a drawable the tracker counts as out. Every drawable
+// acquired goes into the tracker, and its presented handler, always installed, takes it out.
 
 import CoreGraphics
 import Foundation
@@ -75,9 +81,9 @@ struct RenderOutcome {
 // MARK: - TerminalRenderer
 
 final class TerminalRenderer {
-    /// How many of a view's drawables may await their present report before a display tick stops
-    /// asking for another. The layer has three (`maximumDrawableCount`): with two waiting and one
-    /// on screen, `nextDrawable()` would block.
+    /// How many of a view's drawables may await their present report before a leading-edge draw
+    /// stops asking for another. The layer has three (`maximumDrawableCount`): with two waiting and
+    /// one on screen, `nextDrawable()` could block. A display tick asks whatever the count.
     static let maxDrawablesAwaitingPresent = 2
 
     let device: MTLDevice
@@ -271,19 +277,16 @@ final class TerminalRenderer {
             // The transaction must end with a present, so a live resize may not drop its frame.
             waitsForSlot: waitsForSlot || synchronous,
             acquire: { [weak self] in
-                // Read before the wait: a report that lands during it, or just after it returns
-                // nil, keeps the nil from setting a hold.
-                let reportsBefore = tracker.reportCount
                 guard let drawable = nextDrawable(layer) else {
                     // The pool is full, whatever the tracker counted.
-                    tracker.noteNoDrawable(reportsBefore: reportsBefore)
+                    tracker.noteNoDrawable(requestedAt: now)
                     return (nil, nil)
                 }
                 self?.stats.drawablesAcquired += 1
                 let id = tracker.add(acquiredAt: now)
-                // The diagnostic for the bulk-output frame cap times the present from here, in
-                // host time, rather than from the frame's `now`: a tick's `now` is its vsync,
-                // which comes before the frame is built.
+                // The present-timing diagnostic times the present from here, in host time,
+                // rather than from the frame's `now`: a tick's `now` is its vsync, which comes
+                // before the frame is built.
                 let timing = tracker.presentTiming
                 let acquiredAt = timing.hostNow()
                 // Always installed: the tracker needs every report, whether or not the view
@@ -291,7 +294,7 @@ final class TerminalRenderer {
                 drawable.addPresentedHandler { presented in
                     let reportedAt = timing.hostNow()
                     let presentedTime = presented.presentedTime
-                    tracker.reportPresented(id, presentedTime: presentedTime)
+                    tracker.reportFromPresentedHandler(id, presentedTime: presentedTime)
                     onPresented?()
                     // Last, so the diagnostic delays nothing the report drives.
                     timing.notePresented(

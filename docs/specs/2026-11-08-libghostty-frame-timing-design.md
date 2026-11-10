@@ -5,8 +5,8 @@ TBD's opt-in libghostty engine
 display-link tick, so output that arrives between ticks waits for the next one. This design
 draws small output at once when the screen has had no output frame for a refresh interval,
 and keeps bulk output at one frame per refresh. It also reads DEC 2026 holds from
-libghostty's own callback, and it stops the main thread from blocking on the GPU, apart from
-one bounded wait when present reports go missing. SwiftTerm does not change.
+libghostty's own callback. A display tick no longer blocks on the frame ring, and every wait
+main keeps for a drawable is bounded. SwiftTerm does not change.
 
 ## Goal
 
@@ -62,6 +62,13 @@ is one 120 Hz frame, and the paint times matched. In Claude Code's full-screen m
 libghostty used 0.41 to 0.54 of SwiftTerm's app CPU, with latency within 1 ms. This design
 must keep both results.
 
+**Present reports come late under bulk output.** While the 50 MB stream floods the pane, a
+drawable's present report reaches the tracker three or more refreshes after the frame that
+acquired the drawable. Field measurement on a 120 Hz screen showed what a tick that waits for
+those reports costs: one that dropped its frame while two drawables awaited their report drew
+60 to 80 frames a second, with a draw-wait p90 of 25 ms, where SwiftTerm drew about 120. So
+only the leading edge counts drawables (rule 6), and the tick asks for one on every refresh.
+
 **Other renderers,** read on 2026-11-08. Nine terminals whose frame scheduling is public were
 read. Six draw the first frame after a quiet spell at once: kitty, iTerm2 (for echo),
 Alacritty, WezTerm, foot and SwiftTerm. Three always wait for the display callback: Ghostty
@@ -90,15 +97,18 @@ seven of these hold:
    frame" below says which frames count.
 5. **The ring has a free slot** – fewer than three of the surface's frames are in flight on
    the GPU.
-6. **Fewer than two drawables await present.**
+6. **Fewer than two drawables await present** – so a frame drawn now never waits in
+   `nextDrawable()` for a drawable the tracker counts as out. Only the leading edge counts
+   drawables. A tick asks for one whatever the count ("Drop, never block").
 7. **The output is small, or a hold just ended** – fewer than 1,024 bytes have been fed since
    the last frame was built, or a hold ended in the chunks this delivery covers.
 
 Otherwise the delivery calls `requestFrame()`, as it does today, and the display link
 coalesces. The rules limit only the leading edge. It draws only after a full interval with
 no output frame, and rule 7 sends large output to the tick. Sustained output is drawn by
-the tick, once per refresh, as it is today. The one case where two output frames fall
-within an interval is a tick soon after a leading-edge frame. "Risks" covers it.
+the tick, once per refresh, as it is today. The tick counts no drawables, so present
+reports that come several refreshes late do not thin it. The one case where two output
+frames fall within an interval is a tick soon after a leading-edge frame. "Risks" covers it.
 
 To draw now, the delivery calls the same `renderTick(now:)` that the link calls. That runs
 inside the delivery that already exists, so the design adds no main-queue hop. A frame drawn
@@ -124,9 +134,9 @@ skipped by the tick it calls, so the policy coalesces at once instead.
 - `LeadingEdgePolicy.smallOutputLimit`, 1,024 bytes – rule 7. An echo is a few bytes, and a
   prompt or status line redraw is usually a few hundred. A coloured full-screen redraw is
   several KiB, and goes to the tick unless it came inside a hold.
-- `TerminalRenderer.maxDrawablesAwaitingPresent`, 2 – rule 6, which the tick also obeys. The
-  layer has three drawables (`maximumDrawableCount = 3`). With two waiting and one on screen,
-  `nextDrawable()` would block.
+- `TerminalRenderer.maxDrawablesAwaitingPresent`, 2 – rule 6, which the leading-edge frame
+  checks again before it builds. The layer has three drawables (`maximumDrawableCount = 3`).
+  With two waiting and one on screen, `nextDrawable()` could block. The tick does not use it.
 - `FrameRing.depth`, 3 – unchanged.
 - `LeadingEdgePolicy.fallbackRefreshInterval`, 1/60 s – for a window with no screen, as in
   the offscreen tests.
@@ -242,9 +252,12 @@ in the `vt-1.0.0` headers that ship inside the pinned xcframework). The header s
 
 Today a tick can block the main thread in two places. `FrameRing.acquire()` waits on a
 semaphore until the GPU frees a slot, and `nextDrawable()` can wait up to a second for a
-drawable. The design drops the frame instead, as termio does, and the next tick draws the
-newer screen. One wait remains, and it is bounded: the recovery from lost present reports,
-below.
+drawable. At a full ring the design drops the frame instead, as termio does, and the next
+tick draws the newer screen. For drawables the two callers differ. A leading-edge draw never
+waits for a drawable the tracker counts as out: it draws only while fewer than
+`maxDrawablesAwaitingPresent` drawables await their report (rule 6), and its frame checks the
+count again before it builds. A tick asks for a drawable whatever the count, and may wait for
+a bounded time ("The bounded wait", below).
 
 - **The ring** – `FrameRing.tryAcquire()` returns nil rather than waiting
   (`wait(timeout: .now())`). The ring also keeps an atomic count of slots in use. The count
@@ -252,7 +265,9 @@ below.
   `hasFreeSlot` can be read without taking a slot. `acquire()` stays, for the live-resize
   path only.
 - **The drawables** – a `DrawableTracker`, one per view, because the drawables belong to the
-  view's layer and outlive a surface detach. The renderer is handed it with each frame.
+  view's layer and outlive a surface detach. The renderer is handed it with each frame. It
+  counts the drawables awaiting their report for the leading edge, and after a nil drawable it
+  holds off ticks and leading-edge frames.
   - Each drawable the renderer acquires adds an entry, with an id and the frame's `now`.
   - A presented handler, now always installed, removes the entry. It still calls
     `onFramePresented` when one is set.
@@ -261,9 +276,10 @@ below.
     nothing.
   - **Lost reports.** An offscreen window's drawable may never be reported presented, which
     `TerminalEngineInstrumentTests` records as a known issue. A lost report would hold the
-    count up and stop the view drawing for good. An old entry is not proof that its drawable
-    is free, though. If the pool is still full, a tick that trusts the age alone calls
-    `nextDrawable()` and blocks. So recovery uses evidence first and time last:
+    count up and stop the leading edge drawing for good. An old entry is not proof that its
+    drawable is free, though. If the pool is still full, a leading-edge draw that trusts the
+    age alone calls `nextDrawable()` and blocks. So recovery uses evidence first and time
+    last:
     - **Evidence** – a layer's presents reach the screen in the order they were made, so a
       report for one drawable also removes every older entry. One lost report clears at the
       next report. "Risks" says what happens if that order fails.
@@ -271,29 +287,51 @@ below.
       the frames' `now`, does the tracker clear its entries. No report for a second means
       either that Metal is not reporting this layer's presents or that nothing has reached
       the screen for a second. The first clear in a run logs a `.notice`, so a soak shows
-      whether reports go missing.
-  - **The one wait left.** After a clear, the next frame calls `nextDrawable()` with no
-    proof that a drawable is free. This is the design's one exception to "never block", and
-    it is deliberate. Metal has no way to ask for a drawable without waiting, and a view that
-    never asked again would stop drawing for good once its reports were lost.
+      whether reports go missing. Every frame's check runs this recovery, a tick's included,
+      so the entries stay bounded while ticks draw past them.
+  - **The bounded wait.** A tick calls `nextDrawable()` with no proof that a drawable is
+    free, and the call may wait for the compositor to release one. So does a leading-edge
+    draw after a clear, and the same hold bounds its wait. This is the design's one
+    exception to "never block", and it is deliberate. Metal has no way to ask for a drawable
+    without waiting, and the wait is acceptable:
+    - Today's tick asks on every refresh too, and still draws one frame per refresh, so its
+      waits are short while the screen keeps up.
+    - A tick that waited for proof would draw about one refresh in two under bulk output,
+      whose present reports come several refreshes late ("Present reports come late under
+      bulk output", under "Evidence").
+    - A tick checks `canBuildFrames` first, as rule 1 does, so a hidden or occluded window
+      asks for no drawable at all.
+    - A stalled compositor costs one wait of up to a second, and then at least a second with
+      none, as "A nil drawable" shows.
+  - **A nil drawable.** It bounds the wait.
     - If the pool really is full, the call waits up to its own one-second timeout and
       returns nil. The frame takes today's nil-drawable path: it releases its ring slot and
       counts `nilDrawables`. The surface stays dirty, so `needsUpdate` stays set and the link
       keeps ticking.
-    - A nil drawable proves the pool is full, so the tracker holds the limit again until a
-      report arrives or another `presentReportTimeout` passes. While it holds, the count it
-      reports is the limit, so rule 6 and the tick both read it as full. That timeout starts
-      at the `now` of the next frame that checks the limit, not at the nil frame's own `now`,
-      which is a second old by the time the call returns. So the next wait cannot follow at
-      once.
+    - A nil drawable proves the pool is full, so the tracker holds off ticks and leading-edge
+      frames until a present made after the nil came back is reported, or another
+      `presentReportTimeout` passes. While the hold lasts, the tracker reports it, and the
+      count it gives is the limit. So rule 6, the leading-edge frame and the tick all drop.
+      The timeout starts at the `now` of the next frame that checks, not at the nil frame's
+      own `now`, which is a second old by the time the call returns. So the next wait cannot
+      follow at once.
+    - Only a present made after the nil came back ends the hold. For a full pool,
+      `nextDrawable()` returns nil only after its one-second wait, so a present counts once it
+      is dated a `presentReportTimeout` or more after the nil frame's `now`. A present dated
+      earlier was made before the nil, and had it freed a drawable that no frame took, the
+      request would have had it. Under bulk output several reports of such presents are still
+      queued when the nil comes back. They end nothing, so they cannot let the next tick wait
+      again at once. An undated report ends nothing either.
     - In a stall that never ends, main waits at most one second in every two. Today it waits
       on every tick.
   - The handler also counts presents that report a `presentedTime` of 0, which the Metal
     header documents as a frame that "has not been presented or has been skipped". A count
     that rises while typing is the sign of the shared-vsync risk under "Risks".
-- **Where the limits are checked** – `renderNow()` checks both limits before it builds
-  anything. At either limit it returns early, so it takes no lock and consumes no dirty
-  state, and it keeps `needsUpdate` set, so the link keeps ticking until the GPU catches up.
+- **Where the limits are checked** – `renderNow()` checks the limits before it builds
+  anything. A tick checks the ring and the tracker's hold. A leading-edge frame checks those
+  and the drawable count. At a limit it returns early, so it takes no lock and consumes no
+  dirty state, and it keeps `needsUpdate` set, so the link keeps ticking until the GPU
+  catches up.
   That last part is a change the tick needs. Today's `needsUpdate = surface.needsDisplay`
   would park the link, because output that was never built leaves the surface looking clean.
   `tryAcquire()` still guards the slot after the build. It cannot fail there, because only
@@ -301,9 +339,9 @@ below.
   its own, and the live-resize path reads the view's `now` seam.
 - **`drawFrameNow()` keeps today's behaviour.** Only tests call it, among them
   `TerminalEngineInstrumentTests`, which draw in an offscreen window whose presents may never
-  be reported. With the limit, a few unreported frames would stop it drawing for a second,
-  longer than those tests wait. So it skips the drawable limit and waits on the ring, as the
-  live-resize path does. Its drawables still go into the tracker.
+  be reported. A nil drawable's hold would stop it drawing for a second, longer than those
+  tests wait. So it skips the tracker's checks, the hold among them, and waits on the ring,
+  as the live-resize path does. Its drawables still go into the tracker.
 - **Live resize keeps today's behaviour.** While `presentsWithTransaction` is set,
   `renderNow()` from `setFrameSize` skips both checks, blocks on the ring and always encodes.
   The flag promises Core Animation that the transaction will end with an explicit
@@ -337,14 +375,27 @@ frame path is less to maintain than two.
 - **View tests that count frames** – a feed into a visible, sized view now draws inside the
   relay delivery, one main-queue turn later, without `renderTick()`. Tests that count frames
   after a feed change, and so does the fixture (see "Testing").
-- **A lost present report** – the next report clears it. If no report comes for a second,
-  the tracker clears itself and logs a `.notice`. If that clear comes during a real stall,
-  one `nextDrawable()` call waits up to its one-second timeout and returns nil, and the
-  next such wait comes at least a second later. Today every tick of a stall waits.
+- **A lost present report** – it holds the leading edge's count up until the next report
+  clears it. If no report comes for a second, the tracker clears itself and logs a
+  `.notice`. The tick counts no drawables, so a lost report never slows it.
+- **A stalled compositor** – a tick asks for a drawable whatever the tracker counts, so in a
+  real stall one `nextDrawable()` call waits up to its one-second timeout and returns nil.
+  The nil starts the hold, and the next such wait comes at least a second later. Today every
+  tick of a stall waits.
+- **A slow compositor or GPU** – a pool that frees each drawable late but within the
+  timeout never returns nil, so no hold starts, and every tick waits in `nextDrawable()`
+  for as long as the pool takes. Today's tick waits the same way. The wait falls inside the
+  paint span, so the done test's paint time on the 50 MB stream would show it. If it shows,
+  the fix is a short hold after a slow request, timed on the host clock, during which a tick
+  drops at the drawable limit as the leading edge does.
+- **Several panes flooding at once** – every visible pane's tick may wait in `nextDrawable()`
+  on main, so with several panes under bulk output the waits add up. Today's tick asks the
+  same way on every refresh. The done test measures one pane, so it does not show this case;
+  a run with two or three flooding panes would.
 - **Present order** – recovery from a lost report assumes that a layer's presents reach the
   screen in the order they were made. If that stops being true, a report could clear an
-  entry whose drawable is still queued, and one tick could wait in `nextDrawable()` for up to
-  a refresh while the queue drains.
+  entry whose drawable is still queued, and one leading-edge draw could wait in
+  `nextDrawable()` for up to a refresh while the queue drains.
 
 ## Testing
 
@@ -374,17 +425,24 @@ nil without waiting.
   - `ESC[?2026h` plus text draws nothing. `ESC[?2026l` then draws at once.
     `ESC[?2026l ESC[?2026h` in one chunk draws nothing at once.
   - A live resize draws no leading-edge frame.
-  - With the ring full, or with two drawables unreported, a tick builds nothing and keeps
-    `needsUpdate`, and the view draws once the limit clears.
-  - With two drawables unreported and younger than `presentReportTimeout`, a tick makes no
-    drawable request (`drawableRequests` does not move), and neither does the leading edge.
-    A report for the newer drawable then clears both, and the next tick draws.
-  - With two drawables unreported, `now` past `presentReportTimeout` and the drawable seam
-    returning nil, a tick makes one drawable request. `nilDrawables` rises by one, nothing
-    commits, and `needsUpdate` stays set. Ticks within the next `presentReportTimeout` make
-    no request. A report then lets the next tick draw. So does the seam returning a drawable
-    once that timeout has passed.
-  - With two drawables unreported, `drawFrameNow()` still commits a frame.
+  - With the ring full, a tick builds nothing and keeps `needsUpdate`, and the view draws
+    once a slot frees.
+  - With each drawable reported three refreshes after its frame acquired it, and output fed
+    before each of 20 ticks one `fallbackRefreshInterval` apart, every tick commits a frame.
+  - With two drawables unreported and younger than `presentReportTimeout`, the leading edge
+    coalesces with `.drawablesBehind`, and a leading-edge frame builds nothing and makes no
+    drawable request (`drawableRequests` does not move). A tick then asks for a drawable and
+    commits.
+  - With two drawables unreported and the drawable seam returning nil, a tick makes one
+    drawable request. `nilDrawables` rises by one, nothing commits, and `needsUpdate` stays
+    set. Ticks within the next `presentReportTimeout` make no request, even after a late
+    report of a present made before the nil. A report of a present made after the nil came
+    back then lets the next tick draw. So does the seam returning a drawable once that timeout
+    has passed.
+  - During a nil drawable's hold, `drawFrameNow()` still commits a frame, and so does a
+    live-resize frame.
+  - A hidden or occluded view, with two drawables unreported, makes no drawable request on
+    any tick, and draws once it shows again.
 - **Hold edges, on a real `GhosttyTerminal`:**
   - setting mode 2026 opens one hold, and resetting it ends the hold
   - an in-band RIS (`ESC c`) and `reset()` each end a hold, and so does `resize`
@@ -403,8 +461,13 @@ nil without waiting.
   - a report for one drawable removes every older entry, and no newer one
   - entries younger than `presentReportTimeout` stay, however long reports are delayed
   - with no report for `presentReportTimeout`, the entries clear and the notice logs once
-  - a nil drawable holds the limit until a report arrives, or until `presentReportTimeout`
-    after the next check
+  - a nil drawable holds the limit until a present made after the nil came back is
+    reported, or until `presentReportTimeout` after the next check. Reports of earlier
+    presents, and undated ones, leave the hold in place, and a fresh one reported before the
+    nil is noted sets no hold.
+  - a check tells a nil drawable's hold apart from entries at the limit
+  - a presented handler's report reaches the tracker unless a test has set the seam that
+    ignores them
 - **The engine contract suite** – no new case. Draw timing is not part of the
   `TerminalEngine` seam, and whether SwiftTerm draws at once offscreen was not checked, so
   such a case would hold for one engine only. The suite stays green, and so do
@@ -436,7 +499,8 @@ rounds in the migration record were. The numbers go into that record.
    - **Pass** – libghostty's app CPU stays below SwiftTerm's in every run. Each libghostty ÷
      SwiftTerm app-CPU ratio is at most 10% above the second round's: on CoreGraphics, 0.43
      while streaming, 0.41 per scroll step and 0.79 on the 50 MB stream; on Metal, 0.54,
-     0.44 and 0.49. Paint time on the 50 MB stream still matches.
+     0.44 and 0.49. Paint time and the draw-wait p50 on the 50 MB stream still match, so
+     bulk output still draws one frame per refresh.
 
 Reaching parity removes the draw-wait regression. It is not a win toward graduation, and this
 design does not change the engine spec's graduation rule. Graduation still needs all three
@@ -479,6 +543,12 @@ of these:
 - **An on-glass number from `MTLDrawable.presentedTime` as the gate** – rejected. Only Metal
   renderers report it, so it cannot compare libghostty with SwiftTerm's CoreGraphics
   renderer, the default. It stays a diagnostic.
+- **A drawable limit on the tick** – rejected. Present reports come three or more refreshes
+  late under bulk output (see the "Evidence" section), so the limit decides how often the
+  tick draws. At 2 it draws about one refresh in two. A higher limit does not fix that. At 3
+  the tick draws three refreshes in four, about 90 frames a second on a 120 Hz screen. At 4
+  or more it calls `nextDrawable()` with all three of the layer's drawables unreported, so
+  the limit no longer keeps it from waiting.
 - **Drawing all output at once, with no size check** – rejected. Bulk output would draw a
   frame per chunk, and a redraw split across writes would flash half-drawn screens.
 - **SwiftTerm's resume-tick rule, as it is** – rejected. It ticks at once only when output
@@ -496,8 +566,9 @@ of these:
 - **Reclaiming orphans** – no new kind of durable resource: no files, processes, tmux
   objects, git refs or database rows. No reconciler changes.
 - **Storage** – no migration, no `config` column and no UserDefaults key.
-- **Branch tests** – every branch of `LeadingEdgePolicy` has a test. The engine flag's own
-  branches are already tested by the engine's factory tests.
+- **Branch tests** – every branch of `LeadingEdgePolicy` has a test, and so does what a tick,
+  a leading-edge frame and a waiting frame each do when the GPU is behind. The engine flag's
+  own branches are already tested by the engine's factory tests.
 
 ## Attribution
 
