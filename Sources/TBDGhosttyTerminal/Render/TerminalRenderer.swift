@@ -291,7 +291,7 @@ final class TerminalRenderer {
                 drawable.addPresentedHandler { presented in
                     let reportedAt = timing.hostNow()
                     let presentedTime = presented.presentedTime
-                    tracker.reportPresented(id, presentedTime: presentedTime)
+                    tracker.reportFromPresentedHandler(id, presentedTime: presentedTime)
                     onPresented?()
                     // Last, so the diagnostic delays nothing the report drives.
                     timing.notePresented(

@@ -37,8 +37,9 @@ private struct ViewFixture {
     ///     default.
     ///   - reportsPresents: report each committed frame's drawable presented, through the
     ///     tracker's test seam, as Metal would. An offscreen window's drawables may never be
-    ///     reported, and two unreported ones stop a tick drawing. A test that leaves its frames'
-    ///     drawables unreported passes `false`.
+    ///     reported, and two unreported ones stop a tick drawing. A test that leaves its
+    ///     frames' drawables unreported passes `false`, and the tracker then ignores what Metal
+    ///     reports too, so a drawable stays unreported until the test reports it.
     init(
         clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13, thinStrokes: Bool? = nil,
         reportsPresents: Bool = true
@@ -52,9 +53,11 @@ private struct ViewFixture {
         if let thinStrokes { appearance.thinStrokes = thinStrokes }
         self.appearance = appearance
         view = try GhosttyTerminalView(terminal: terminal, appearance: appearance, clock: clock)
+        let tracker = view.drawableTracker
         if reportsPresents {
-            let tracker = view.drawableTracker
             view.onFrameEncoded = { tracker.reportNewestPresented() }
+        } else {
+            tracker.ignoresPresentedHandlers = true
         }
     }
 }
@@ -1410,6 +1413,60 @@ struct GhosttyTerminalViewBackpressureTests {
         #expect(committed == 2, "with a slot free again the view committed \(committed) frames in all, not 2")
     }
 
+    /// Bulk output keeps the main thread busy, and Metal's present reports reach the tracker more
+    /// than three refreshes after the frame that acquired each drawable. So two or three drawables
+    /// await their report at every tick. The tick draws anyway: fed output before each of 20 ticks
+    /// one refresh apart, every tick commits a frame.
+    ///
+    /// Each drawable is reported through the tracker's own report call three ticks after the tick
+    /// that acquired it, once that later tick has run, as a handler queued behind it would. The
+    /// fixture has the tracker ignore Metal's own reports, which an offscreen window may send at
+    /// once, while the test waits for a ring slot, and which would hide the late ones. Each
+    /// chunk is bulk output, so its render signal's delivery leaves the frame to the tick. Before
+    /// each tick the test waits for the GPU to hand back a ring slot: the ring's limit is real GPU
+    /// work, and a tick still drops at it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func everyTickDrawsWhilePresentReportsComeThreeRefreshesLate() async throws {
+        let fixture = try ViewFixture(reportsPresents: false)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        let start = Duration.seconds(100)
+        let interval = LeadingEdgePolicy.fallbackRefreshInterval
+        let now = ManualNow(start)
+        view.now = { now.value }
+        let tracker = view.drawableTracker
+        let ticks = 20
+        let reportDelay = 3
+        // More than the small-output limit, so no delivery draws a frame of its own.
+        let chunk = String(repeating: "x", count: LeadingEdgePolicy.smallOutputLimit) + "\r\n"
+        var acquiredByTick: [Int: DrawableTracker.DrawableID] = [:]
+        var ticksThatCommittedNothing: [Int] = []
+
+        for tick in 0..<ticks {
+            let tickNow = start + interval * tick
+            now.value = tickNow
+            fixture.terminal.feed(text: chunk)
+            try await waitForAFreeRingSlot(view)
+            let committed = view.framesCommitted
+            let acquired = tracker.acquiredCount
+            view.renderTick(now: tickNow)
+            if view.framesCommitted == committed { ticksThatCommittedNothing.append(tick) }
+            if tracker.acquiredCount > acquired, let id = tracker.newestEntryID { acquiredByTick[tick] = id }
+            // Delivered after this tick's check: the drawable of the tick `reportDelay` before it.
+            if let late = acquiredByTick.removeValue(forKey: tick - reportDelay) {
+                tracker.reportPresented(late, presentedTime: tickNow / .seconds(1))
+            }
+        }
+        let nils = view.renderContext.renderer.stats.nilDrawables
+        #expect(ticksThatCommittedNothing.isEmpty,
+                "with each present reported \(reportDelay) refreshes late, the ticks \(ticksThatCommittedNothing) of \(ticks) committed no frame (nil drawables: \(nils))")
+    }
+
     /// Two drawables unreported and younger than `presentReportTimeout`: a tick asks for no
     /// drawable and keeps `needsUpdate` set. A report for the newer one clears both, and the next
     /// tick draws.
@@ -1693,6 +1750,18 @@ private final class ViewHandle {
     }
 }
 
+/// Waits, bounded, until the GPU has handed back a ring slot. A test that has committed several
+/// frames calls it before the next frame it needs drawn, so that frame is not dropped for a frame
+/// the GPU is still finishing. The wait suspends, so a render signal's delivery queued on main
+/// runs in it.
+@MainActor
+private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
+    let handle = ViewHandle(view)
+    try await waitFor("the GPU to hand back a ring slot") { @Sendable in
+        await MainActor.run { handle.view.surface.frameRing?.hasFreeSlot ?? true }
+    }
+}
+
 /// Which GPU limit a test holds the view at.
 enum GPULimit: Sendable, CaseIterable {
     /// All three of the surface's ring slots in flight.
@@ -1735,16 +1804,6 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         call()
         try await waitFor("the render signal's delivery") {
             await MainActor.run { handle.view.renderSignalDeliveries > before }
-        }
-    }
-
-    /// Waits, bounded, until the GPU has handed back a ring slot. A test that has committed
-    /// several frames calls it before the next frame it needs drawn, so that frame is not left to
-    /// the tick for a frame the GPU is still finishing.
-    private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
-        let handle = ViewHandle(view)
-        try await waitFor("the GPU to hand back a ring slot") {
-            await MainActor.run { handle.view.surface.frameRing?.hasFreeSlot ?? true }
         }
     }
 

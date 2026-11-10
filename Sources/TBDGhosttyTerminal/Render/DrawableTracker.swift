@@ -78,6 +78,8 @@ final class DrawableTracker: Sendable {
         var hold: LimitHold?
         /// Whether this run of unreported presents has logged its notice. A report ends the run.
         var noticeLoggedThisRun = false
+        /// `ignoresPresentedHandlers`.
+        var ignoresPresentedHandlers = false
 
         var acquiredCount = 0
         var timeoutClears = 0
@@ -222,6 +224,13 @@ final class DrawableTracker: Sendable {
 
     // MARK: - Metal's side (any thread)
 
+    /// A drawable's presented handler ran: `reportPresented(_:presentedTime:)`, unless a test has
+    /// set `ignoresPresentedHandlers`.
+    func reportFromPresentedHandler(_ id: DrawableID, presentedTime: CFTimeInterval) {
+        guard !ignoresPresentedHandlers else { return }
+        reportPresented(id, presentedTime: presentedTime)
+    }
+
     /// The drawable `id` was reported presented. Removes it and every older entry, since a layer's
     /// presents reach the screen in order. An id no longer tracked, because a drop or a clear
     /// removed it, removes nothing, but still counts as a report: Metal is reporting this layer's
@@ -266,11 +275,23 @@ final class DrawableTracker: Sendable {
 
     // MARK: - Diagnostics and test seams
 
+    /// Whether the tracker ignores what Metal's presented handlers report. A test seam: an
+    /// offscreen window's presents may be reported at once, late or never, so a view test that
+    /// reports its drawables itself, through `reportPresented(_:presentedTime:)`, sets it, and
+    /// each report then comes when the test sends it.
+    var ignoresPresentedHandlers: Bool {
+        get { state.withLock { $0.ignoresPresentedHandlers } }
+        set { state.withLock { $0.ignoresPresentedHandlers = newValue } }
+    }
+
     /// Every report so far, whatever drawable it named. A frame reads it before it asks for a
     /// drawable, for `noteNoDrawable(reportsBefore:)`.
     var reportCount: UInt64 { state.withLock { $0.reports } }
     /// The entries, as they stand: no recovery is run.
     var entryCount: Int { state.withLock { $0.entries.count } }
+    /// The newest entry's id, or nil with none. A test seam: a view test reports a frame's own
+    /// drawable late through it, as a handler running behind a busy main thread would.
+    var newestEntryID: DrawableID? { state.withLock { $0.entries.last?.id } }
     /// Drawables recorded since the tracker was made.
     var acquiredCount: Int { state.withLock { $0.acquiredCount } }
     /// How many times the entries were cleared for want of a report.
