@@ -32,9 +32,7 @@ struct CreateProfileOptionTests {
         environment: [String: String],
         row: TBDShared.Terminal?
     ) throws -> CreateProfileChoice {
-        let worktreeID = worktreeID
-        let terminalID = terminalID
-        return try CreateProfileOption.resolve(
+        try CreateProfileOption.resolve(
             reference,
             profiles: profiles,
             environment: environment,
