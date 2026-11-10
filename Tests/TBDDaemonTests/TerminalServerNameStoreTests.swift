@@ -80,7 +80,7 @@ struct TerminalServerNameStoreTests {
             id: UUID(), worktreeID: wt.id, label: "Web app", kind: .shell,
             lineCount: 1, serverName: "web", exitCode: 127)
         try await db.writerForTests.write { try TerminalHistoryRecord(from: entry).insert($0) }
-        let row = try await db.writerForTests.read { conn in
+        let row: Row? = try await db.writerForTests.read { conn -> Row? in
             try Row.fetchOne(conn, sql: "SELECT serverName, exitCode FROM terminal_history WHERE id = ?",
                              arguments: [entry.id.uuidString])
         }
