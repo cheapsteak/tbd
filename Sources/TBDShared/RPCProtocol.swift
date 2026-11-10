@@ -281,6 +281,7 @@ public enum RPCMethod {
     public static let repoSetHidden = "repo.setHidden"
     public static let repoSetExpanded = "repo.setExpanded"
     public static let sessionList = "session.list"
+    public static let sessionResume = "session.resume"
     public static let sessionMessages = "session.messages"
     public static let sessionStates = "session.states"
     public static let setMainAreaSize = "app.setMainAreaSize"
@@ -4485,6 +4486,24 @@ public struct SessionListParams: Codable, Sendable {
 
     public init(worktreeID: UUID) {
         self.worktreeID = worktreeID
+    }
+}
+
+/// Resume a provider session in a new terminal in an existing worktree.
+public struct SessionResumeParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let identity: AgentSessionIdentity
+    public let cols: Int?
+    public let rows: Int?
+    public let colorFgBg: String?
+
+    public init(worktreeID: UUID, identity: AgentSessionIdentity, cols: Int? = nil,
+                rows: Int? = nil, colorFgBg: String? = nil) {
+        self.worktreeID = worktreeID
+        self.identity = identity
+        self.cols = cols
+        self.rows = rows
+        self.colorFgBg = colorFgBg
     }
 }
 

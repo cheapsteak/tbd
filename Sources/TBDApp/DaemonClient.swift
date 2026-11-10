@@ -749,10 +749,10 @@ actor DaemonClient {
     /// Revive an archived worktree. Returns the revived worktree as the daemon
     /// sees it when the RPC completes — still `.creating` while a blocking
     /// `preSession` hook runs, `.active` otherwise.
-    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
+    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil, preferredSession: AgentSessionIdentity? = nil) async throws -> Worktree {
         try await callAsync(
             method: RPCMethod.worktreeRevive,
-            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID),
+            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSession?.agentKind == .claude ? preferredSession?.sessionID : preferredSessionID, preferredSession: preferredSession),
             resultType: Worktree.self
         )
     }
@@ -774,6 +774,17 @@ actor DaemonClient {
             ),
             resultType: WorktreeReviveConversationFreshResult.self
         )
+    }
+
+    func reviveConversationOnFreshBranch(
+        worktreeID: UUID, identity: AgentSessionIdentity, cols: Int? = nil, rows: Int? = nil
+    ) async throws -> WorktreeReviveConversationFreshResult {
+        try await callAsync(
+            method: RPCMethod.worktreeReviveConversationFresh,
+            params: WorktreeReviveConversationFreshParams(
+                archivedWorktreeID: worktreeID, sessionID: identity.sessionID,
+                identity: identity, cols: cols, rows: rows),
+            resultType: WorktreeReviveConversationFreshResult.self)
     }
 
     /// Rename a worktree's display name.
@@ -2391,6 +2402,45 @@ actor DaemonClient {
     /// That read runs detached for the same reason `sendRawAsync` detaches its
     /// blocking recv: a multi-megabyte parse must not hold this actor, or every
     /// other RPC call serializes behind it.
+    func sessionMessages(
+        summary: SessionSummary, worktreeID: UUID, tailLimit: Int? = nil
+    ) async throws -> [TranscriptItem] {
+        if TranscriptDetailReader.shouldReadAppSide(summary: summary) {
+            if let tailLimit {
+                return await sessionMessages(filePath: summary.filePath, tailLimit: tailLimit) ?? []
+            }
+            return try await sessionMessages(filePath: summary.filePath)
+        }
+        if summary.identity.agentKind == .claude {
+            // Keep the legacy no-path fallback and its no-tail behavior.
+            if tailLimit != nil { return [] }
+            return try await sessionMessages(filePath: summary.filePath)
+        }
+        return try await callAsync(
+            method: RPCMethod.sessionMessages,
+            params: SessionMessagesParams(worktreeID: worktreeID, identity: summary.identity, tailLimit: tailLimit),
+            resultType: [TranscriptItem].self)
+    }
+
+    /// Older daemons have only terminal.create's Claude resume path. A real
+    /// refusal is never retried through another API, and Codex never falls back.
+    func resumeSession(
+        worktreeID: UUID, identity: AgentSessionIdentity, cols: Int? = nil,
+        rows: Int? = nil, colorFgBg: String? = nil
+    ) async throws -> Terminal {
+        do {
+            return try await callAsync(
+                method: RPCMethod.sessionResume,
+                params: SessionResumeParams(worktreeID: worktreeID, identity: identity,
+                    cols: cols, rows: rows, colorFgBg: colorFgBg),
+                resultType: Terminal.self)
+        } catch DaemonClientError.rpcError(let message, _) where
+            identity.agentKind == .claude && message == "Unknown method: session.resume" {
+            return try await createTerminal(worktreeID: worktreeID,
+                resumeSessionID: identity.sessionID, cols: cols, rows: rows, colorFgBg: colorFgBg)
+        }
+    }
+
     func sessionMessages(filePath: String) async throws -> [TranscriptItem] {
         if TranscriptDetailReader.shouldReadAppSide(path: filePath) {
             return await Task.detached(priority: .userInitiated) {

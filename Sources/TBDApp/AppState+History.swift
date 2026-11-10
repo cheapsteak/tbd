@@ -142,15 +142,15 @@ extension AppState {
 
     /// Select a session and load its transcript (stale-while-revalidate: skip if already loaded).
     func selectSession(_ summary: SessionSummary, worktreeID: UUID) async {
-        selectedSessionIDs[worktreeID] = summary.sessionId
+        selectedSessionIDs[worktreeID] = summary.id
         selectedClosedTerminalIDs.removeValue(forKey: worktreeID)
         let client = daemonClient
-        let path = summary.filePath
+        guard summary.transcriptAvailable else { return }
         let tailLimit = TranscriptTailFirstOpen.tailLimit
         await loadSessionTranscript(
-            sessionID: summary.sessionId,
-            readTail: { await client.sessionMessages(filePath: path, tailLimit: tailLimit) },
-            readFull: { try await client.sessionMessages(filePath: path) })
+            sessionID: summary.id,
+            readTail: { try? await client.sessionMessages(summary: summary, worktreeID: worktreeID, tailLimit: tailLimit) },
+            readFull: { try await client.sessionMessages(summary: summary, worktreeID: worktreeID) })
     }
 
     /// Load a session's transcript into `sessionTranscripts` tail first, as
@@ -161,8 +161,8 @@ extension AppState {
     /// no tail read (the RPC fallback), and the one full read runs under the
     /// spinner; so does an empty one, which has nothing to show.
     ///
-    /// The store is shared with the live pane, which may be streaming this
-    /// same session, so neither publish may overwrite what another writer put
+    /// History entries use provider-qualified keys; live transcript keys stay
+    /// unchanged. Neither publish may overwrite what another history load put
     /// there meanwhile: the tail lands only in an empty slot, and the full
     /// transcript only in a slot that is still empty or still holds exactly
     /// the tail this load wrote (`mayPublishFullTranscript`). An empty full
@@ -206,7 +206,7 @@ extension AppState {
     /// back empty where the tail did not (a file that is not valid UTF-8 as a
     /// whole parses to nothing, while the tail decodes only its last chunk),
     /// and the rows already on screen are worth more than "No messages found".
-    /// Anything else came from another writer, such as a live pane streaming
+    /// Anything else came from another writer, such as another history load of
     /// the session.
     nonisolated static func mayPublishFullTranscript(
         _ full: [TranscriptItem], current: [TranscriptItem]?, publishedTail: [TranscriptItem]?
@@ -223,15 +223,19 @@ extension AppState {
         }
     }
 
-    /// Resume a Claude session in a new terminal tab and switch focus to it.
+    /// Compatibility entry point for callers holding a legacy Claude ID.
     func resumeSession(worktreeID: UUID, sessionId: String) async {
+        await resumeSession(worktreeID: worktreeID, identity: .init(agentKind: .claude, sessionID: sessionId))
+    }
+
+    /// Resume the selected provider session in a new terminal and focus it.
+    func resumeSession(worktreeID: UUID, identity: AgentSessionIdentity) async {
         do {
             let colorFgBg = appearance?.currentColorFgBg
-            let terminal = try await daemonClient.createTerminal(
-                worktreeID: worktreeID,
-                resumeSessionID: sessionId,
-                colorFgBg: colorFgBg
-            )
+            let size = mainAreaTerminalSize()
+            let terminal = try await daemonClient.resumeSession(
+                worktreeID: worktreeID, identity: identity,
+                cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
             mergeCreatedTerminalAndSelect(terminal)
             historyActiveWorktrees.remove(worktreeID)
         } catch {
@@ -260,6 +264,10 @@ extension AppState {
     /// immediately when no blocking preSession hook gates it, otherwise via
     /// `promoteRevivedWorktrees` when the row turns `.active`. Clears on failure.
     func reviveWithSession(worktreeID: UUID, sessionId: String) async {
+        await reviveWithSession(worktreeID: worktreeID, identity: .init(agentKind: .claude, sessionID: sessionId))
+    }
+
+    func reviveWithSession(worktreeID: UUID, identity: AgentSessionIdentity) async {
         // Idempotency: ignore re-entrant calls (e.g. rapid double-click)
         // so a concurrent invocation can't overwrite the .done state with
         // an "already active" error.
@@ -285,7 +293,7 @@ extension AppState {
                 id: worktreeID,
                 cols: size.cols,
                 rows: size.rows,
-                preferredSessionID: sessionId
+                preferredSession: identity
             )
             settleReviveState(id: worktreeID, snapshot: snapshot, revived: revived)
             await refreshWorktrees()
@@ -304,9 +312,13 @@ extension AppState {
     /// Create a new worktree branch from an archived conversation and resume
     /// the selected session there. The archived worktree remains untouched.
     func reviveConversationOnFreshBranch(worktreeID: UUID, sessionId: String) async {
+        await reviveConversationOnFreshBranch(worktreeID: worktreeID, identity: .init(agentKind: .claude, sessionID: sessionId))
+    }
+
+    func reviveConversationOnFreshBranch(worktreeID: UUID, identity: AgentSessionIdentity) async {
         do {
             let size = mainAreaTerminalSize()
-            let result = try await freshConversationReviver(worktreeID, sessionId, size.cols, size.rows)
+            let result = try await freshConversationReviver(worktreeID, identity, size.cols, size.rows)
             if findWorktree(id: result.worktree.id) == nil {
                 await refreshWorktrees()
             }

@@ -37,6 +37,12 @@ enum TranscriptDetailReader {
     /// terminal row has not loaded, or whose session has no JSONL yet, has
     /// nothing to read and must not be handed an empty-file result that the
     /// daemon would have answered properly.
+    /// A Codex path is display metadata. Only the daemon's catalog lookup
+    /// authorizes its read, even when a client has a nonempty local path.
+    static func shouldReadAppSide(summary: SessionSummary) -> Bool {
+        summary.identity.agentKind == .claude && shouldReadAppSide(path: summary.filePath)
+    }
+
     static func shouldReadAppSide(path: String?) -> Bool {
         guard let path, !path.isEmpty else { return false }
         return true

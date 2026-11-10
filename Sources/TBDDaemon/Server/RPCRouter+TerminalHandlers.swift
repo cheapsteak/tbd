@@ -127,7 +127,8 @@ extension RPCRouter {
 
     func handleTerminalCreate(
         _ paramsData: Data, actor: ActuationActor? = nil,
-        requiresCodexHome: Bool = false
+        requiresCodexHome: Bool = false,
+        codexResumeThreadID: String? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
 
@@ -399,7 +400,8 @@ extension RPCRouter {
                         tmuxServer: currentWorktree.tmuxServer,
                         workingDirectory: currentWorktree.path,
                         command: CodexSpawnCommandBuilder.build(
-                            initialPrompt: params.prompt,
+                            initialPrompt: codexResumeThreadID == nil ? params.prompt : nil,
+                            resumeThreadID: codexResumeThreadID,
                             executablePath: codexPreparation.executablePath,
                             model: params.model,
                             disabledFeatures: codexDisabledFeatures),
@@ -408,7 +410,7 @@ extension RPCRouter {
                         cols: resolvedCols,
                         rows: resolvedRows,
                         label: TerminalLabel.codex,
-                        claudeSessionID: nil,
+                        claudeSessionID: codexResumeThreadID,
                         profileID: nil,
                         kind: .codex,
                         transport: decidedTransport,

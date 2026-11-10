@@ -6,6 +6,44 @@ private let perfTranscriptLog = Logger(subsystem: "com.tbd.daemon", category: "p
 
 extension RPCRouter {
 
+    /// Codex resumes require catalog authority; legacy Claude histories retain
+    /// their existing uncataloged resume behavior. Creation owns admission,
+    /// actuation, transport selection and the returned terminal's persistence.
+    func handleSessionResume(_ paramsData: Data, actor: ActuationActor?) async throws -> RPCResponse {
+        let params = try decoder.decode(SessionResumeParams.self, from: paramsData)
+        guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
+            return RPCResponse(error: "Local worktree not found")
+        }
+        guard !params.identity.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return RPCResponse(error: "Session identity must not be empty")
+        }
+        let association = try await db.localAgentSessions.get(worktreeID: worktree.id, identity: params.identity)
+        if params.identity.agentKind == .codex, association == nil {
+            return RPCResponse(error: "Codex session is not associated with this worktree")
+        }
+        // The catalog's terminal reference is only metadata, never authority
+        // to use another worktree's profile or another provider's options.
+        let source = try await db.terminals.list(worktreeID: worktree.id).first {
+            $0.claudeSessionID == params.identity.sessionID
+                && $0.kind?.rawValue == params.identity.agentKind.rawValue
+                && (association?.terminalID == nil || $0.id == association?.terminalID)
+        }
+        let options = association?.codexLaunchOptions
+        let extras = params.identity.agentKind == .claude ? source?.claudeSpawnExtras : nil
+        let create = TerminalCreateParams(
+            worktreeID: worktree.id,
+            type: params.identity.agentKind == .codex ? .codex : .claude,
+            resumeSessionID: params.identity.sessionID,
+            overrideProfileID: params.identity.agentKind == .claude ? source?.profileID : nil,
+            cols: params.cols, rows: params.rows, colorFgBg: params.colorFgBg,
+            claudeSettingsOverlay: extras?.claudeSettingsOverlay,
+            model: options?.model, codexDisabledFeatures: options?.disabledFeatures,
+            pluginDirs: extras?.pluginDirs, codexHome: options?.codexHome)
+        return try await handleTerminalCreate(encoder.encode(create), actor: actor,
+            requiresCodexHome: options?.codexHome != nil,
+            codexResumeThreadID: params.identity.agentKind == .codex ? params.identity.sessionID : nil)
+    }
+
     func handleSessionList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SessionListParams.self, from: paramsData)
 

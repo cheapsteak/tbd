@@ -995,6 +995,8 @@ public final class RPCRouter: Sendable {
                 return try await handleSetMainAreaSize(request.paramsData)
             case RPCMethod.sessionList:
                 return try await handleSessionList(request.paramsData)
+            case RPCMethod.sessionResume:
+                return try await handleSessionResume(request.paramsData, actor: request.actor)
             case RPCMethod.sessionMessages:
                 return try await handleSessionMessages(request.paramsData)
             case RPCMethod.stateSubscribe:
