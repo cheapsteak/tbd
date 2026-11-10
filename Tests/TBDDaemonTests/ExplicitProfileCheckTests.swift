@@ -120,8 +120,35 @@ struct ExplicitProfileRPCTests {
     final class CallCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var _count = 0
-        func bump() { lock.withLock { _count += 1 } }
+        /// Counts one call and returns the count it reached.
+        @discardableResult
+        func bump() -> Int { lock.withLock { _count += 1; return _count } }
         var count: Int { lock.withLock { _count } }
+    }
+
+    /// How a profile's stored key is lost between its check and the spawn's
+    /// own load of the profile.
+    enum KeyLoss: String, CaseIterable, Sendable {
+        /// The key is deleted, so the load finds no key.
+        case deleted
+        /// The key's file fails the store's checks, so the load throws.
+        case unreadable
+
+        /// A read of the store that serves the key to its first read, the
+        /// check's, and meets the loss on every read after it.
+        func reader() -> @Sendable (ModelProfileKeychain.Store, String) throws -> String? {
+            let reads = CallCounter()
+            return { store, id in
+                guard reads.bump() > 1 else { return try store.load(id: id) }
+                switch self {
+                case .deleted:
+                    try store.delete(id: id)
+                    return try store.load(id: id)
+                case .unreadable:
+                    throw ModelProfileKeychainError.permissionMismatch("expected 0600, got 0644")
+                }
+            }
+        }
     }
 
     struct Fixture {
@@ -221,7 +248,13 @@ struct ExplicitProfileRPCTests {
         }
     }
 
-    private func withFixture(_ body: (Fixture) async throws -> Void) async throws {
+    /// `readSecret`, when given, replaces the resolver's read of a stored
+    /// secret. The explicit-profile check and the spawn's own load both read
+    /// through it, so a test can change what the second read finds.
+    private func withFixture(
+        readSecret: (@Sendable (ModelProfileKeychain.Store, String) throws -> String?)? = nil,
+        _ body: (Fixture) async throws -> Void
+    ) async throws {
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-explicit-profile-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -250,7 +283,10 @@ struct ExplicitProfileRPCTests {
         // router (terminal.create), whose balancing pool counts its reads.
         let resolver = ModelProfileResolver(
             profiles: db.modelProfiles, repos: db.repos, config: db.config,
-            keychain: { id in try keychain.load(id: id) },
+            keychain: { id in
+                if let readSecret { return try readSecret(keychain, id) }
+                return try keychain.load(id: id)
+            },
             candidateSource: ProfilePoolCandidateSource(
                 profiles: db.modelProfiles,
                 snapshots: db.oauthUsageSnapshots,
@@ -377,6 +413,32 @@ struct ExplicitProfileRPCTests {
                 #expect(outcome["reason"] as? String == "not-eligible")
                 #expect(outcome["error"] as? String == resp.error)
             }
+            #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
+            #expect(f.recorder.newWindowCount == 0)
+        }
+    }
+
+    /// A profile that passes its check but loses its key before the spawn
+    /// loads it is refused as well, rather than starting the tab on the
+    /// machine's own login: no terminal row, no window, and the request closed
+    /// as a not-eligible refusal.
+    @Test(arguments: KeyLoss.allCases)
+    func terminalCreateRefusesProfileLostAfterItsCheck(loss: KeyLoss) async throws {
+        try await withFixture(readSecret: loss.reader()) { f in
+            let apiKey = try await f.bareProfile(.apiKey, name: "acme-key")
+            try f.keychain.store(id: apiKey.id.uuidString, token: "sk-ant-api-TEST")
+
+            let resp = try await f.createTerminal(TerminalCreateParams(
+                worktreeID: f.worktree.id, type: .claude, overrideProfileID: apiKey.id))
+            #expect(!resp.success)
+            #expect(resp.error == "Model profile \(apiKey.id.uuidString) could not be loaded: it was deleted or lost its credentials after it was checked. Nothing was started.")
+
+            let rows = try f.actuationRows()
+            #expect(rows.count == 2)
+            let outcome = try #require(rows.last)
+            #expect(outcome["result"] as? String == "refused")
+            #expect(outcome["reason"] as? String == "not-eligible")
+            #expect(outcome["error"] as? String == resp.error)
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
             #expect(f.recorder.newWindowCount == 0)
         }

@@ -449,27 +449,38 @@ extension RPCRouter {
         let claudeSessionID: String?
         let label: String?
 
-        // Resolve model profile (repo override → global default → none).
-        // Failure here must NOT break terminal spawn — fall back to keychain login.
         var resolvedProfile: ResolvedModelProfile? = nil
-        if isClaudeType {
+        if isClaudeType, let overrideID = params.overrideProfileID {
+            // An explicit profile passed its check above, but it can still be
+            // deleted, or lose its stored key, before this load reads it. A
+            // profile the caller named is never replaced by the machine's own
+            // login, so a load that finds nothing or fails refuses the call,
+            // a login session's included. Nothing of the tab exists yet.
+            let loaded: ResolvedModelProfile?
             do {
-                if let overrideID = params.overrideProfileID {
-                    resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
-                    // The check above passed, so only a profile deleted or
-                    // emptied since can land here.
-                    if resolvedProfile == nil {
-                        logger.warning("explicit profile \(overrideID, privacy: .public) went missing after its check; starting without it")
-                    }
-                } else {
-                    // A resumed conversation belongs to the account holding its
-                    // transcript, which the history row does not record, so a
-                    // resume keeps the stable pre-balancing resolution.
-                    resolvedProfile = try await modelProfileResolver.resolve(
-                        repoID: worktree.repoID,
-                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
-                        worktreeID: params.worktreeID)
-                }
+                loaded = try await modelProfileResolver.loadByID(overrideID)
+            } catch {
+                logger.warning("explicit profile \(overrideID, privacy: .public) could not be loaded after its check: \(error, privacy: .public)")
+                loaded = nil
+            }
+            guard let loaded else {
+                let message = "Model profile \(overrideID.uuidString) could not be loaded: it was deleted or lost its credentials after it was checked. Nothing was started."
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            resolvedProfile = loaded
+        } else if isClaudeType {
+            // Resolve model profile (repo override → global default → none).
+            // Failure here must NOT break terminal spawn — fall back to
+            // keychain login.
+            do {
+                // A resumed conversation belongs to the account holding its
+                // transcript, which the history row does not record, so a
+                // resume keeps the stable pre-balancing resolution.
+                resolvedProfile = try await modelProfileResolver.resolve(
+                    repoID: worktree.repoID,
+                    balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
+                    worktreeID: params.worktreeID)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
