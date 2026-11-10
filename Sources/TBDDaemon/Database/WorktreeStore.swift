@@ -21,6 +21,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var archivedAt: Date?
     var tmuxServer: String
     var archivedClaudeSessions: String?
+    var archived_agent_tabs: String?
     var sortOrder: Int
     var archivedHeadSHA: String?
     var tabOrder: String  // JSON array of UUID strings, e.g. "[]" or "[\"...\",\"...\"]"
@@ -107,6 +108,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.prObservation = FactColumnJSON.encode(wt.prObservation)
         self.remote_parent_assigned = wt.remoteParentAssigned
         self.archivedClaudeSpawnExtras = ClaudeSpawnExtrasColumn.encodeMap(wt.archivedClaudeSpawnExtras)
+        self.archived_agent_tabs = FactColumnJSON.encode(wt.archivedAgentTabs)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -191,7 +193,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             prObservation: Self.decodePRObservation(prObservation),
             remoteParentAssigned: remote_parent_assigned ?? false,
             archivedClaudeSpawnExtras: ClaudeSpawnExtrasColumn.decodeMap(
-                archivedClaudeSpawnExtras, table: Self.databaseTableName, rowID: id)
+                archivedClaudeSpawnExtras, table: Self.databaseTableName, rowID: id),
+            archivedAgentTabs: FactColumnJSON.decode([ArchivedAgentTab].self, from: archived_agent_tabs)
         )
     }
 
