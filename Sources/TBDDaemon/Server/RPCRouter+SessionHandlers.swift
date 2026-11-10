@@ -18,11 +18,22 @@ extension RPCRouter {
             await reconciler.reconcile(terminalID: terminal.id)
         }
 
-        guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-            return try RPCResponse(result: [SessionSummary]())
+        var byIdentity: [AgentSessionIdentity: SessionSummary] = [:]
+        if let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) {
+            for summary in ClaudeSessionScanner.listSessions(projectDir: projectDir) {
+                if let existing = byIdentity[summary.identity], existing.lastMessageAt > summary.lastMessageAt { continue }
+                byIdentity[summary.identity] = summary
+            }
         }
-
-        let summaries = ClaudeSessionScanner.listSessions(projectDir: projectDir)
+        for session in try await db.localAgentSessions.list(worktreeID: worktree.id)
+            where session.identity.agentKind == .codex {
+            let summary = CodexSessionScanner.summary(session)
+            byIdentity[summary.identity] = summary
+        }
+        let summaries = byIdentity.values.sorted {
+            if $0.lastMessageAt != $1.lastMessageAt { return $0.lastMessageAt > $1.lastMessageAt }
+            return $0.id < $1.id
+        }
         return try RPCResponse(result: summaries)
     }
 
@@ -39,6 +50,24 @@ extension RPCRouter {
 
         let params = try decoder.decode(SessionMessagesParams.self, from: paramsData)
 
+        if let identity = params.identity, identity.agentKind == .codex {
+            guard let worktreeID = params.worktreeID,
+                  try await db.worktrees.getLocal(id: worktreeID) != nil,
+                  let session = try await db.localAgentSessions.get(worktreeID: worktreeID, identity: identity) else {
+                return RPCResponse(error: "Codex session is not associated with this worktree")
+            }
+            let messages = try await CodexSessionScanner.messages(session, tailLimit: params.tailLimit) {
+                try await self.db.localAgentSessions.get(worktreeID: worktreeID, identity: identity)
+            }
+            let response = try RPCResponse(result: messages)
+            responseBytes = response.result?.utf8.count ?? 0
+            itemsCount = messages.count
+            return response
+        }
+        guard let filePath = params.filePath else {
+            return RPCResponse(error: "A Claude transcript path or a Codex session identity is required")
+        }
+
         // Constrain path to ~/.claude/projects/ — same trust boundary as
         // handleTerminalTranscript. The app supplies these via SessionSummary
         // entries that the daemon itself produced, but a crafted RPC could
@@ -54,17 +83,19 @@ extension RPCRouter {
         let projectsBase = ClaudeProfileConfigDirManager.resolveHostBaseDirectory()
             .appendingPathComponent("projects", isDirectory: true)
             .standardizedFileURL.path
-        let candidate = URL(fileURLWithPath: params.filePath).standardizedFileURL.path
+        let candidate = URL(fileURLWithPath: filePath).standardizedFileURL.path
         guard candidate.hasPrefix(projectsBase + "/") else {
-            return RPCResponse(error: "Refusing to read path outside ~/.claude/projects/: \(params.filePath)")
+            return RPCResponse(error: "Refusing to read path outside ~/.claude/projects/: \(filePath)")
         }
 
         let messages: [TranscriptItem]
-        if let cached = await TranscriptParseCache.shared.get(filePath: params.filePath) {
+        if let limit = params.tailLimit {
+            messages = TranscriptParser.parseTail(filePath: filePath, limit: max(0, limit))
+        } else if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
             messages = cached
         } else {
-            messages = TranscriptParser.parse(filePath: params.filePath)
-            await TranscriptParseCache.shared.put(filePath: params.filePath, result: messages)
+            messages = TranscriptParser.parse(filePath: filePath)
+            await TranscriptParseCache.shared.put(filePath: filePath, result: messages)
         }
         let response = try RPCResponse(result: messages)
         responseBytes = response.result?.utf8.count ?? 0

@@ -4488,6 +4488,23 @@ public struct SessionListParams: Codable, Sendable {
     }
 }
 
+/// Codex reads require the worktree-scoped catalog identity. `filePath` is
+/// retained for legacy Claude callers and never authorizes a Codex read.
+public struct SessionMessagesParams: Codable, Sendable {
+    public let filePath: String?
+    public let worktreeID: UUID?
+    public let identity: AgentSessionIdentity?
+    public let tailLimit: Int?
+
+    public init(filePath: String? = nil, worktreeID: UUID? = nil,
+                identity: AgentSessionIdentity? = nil, tailLimit: Int? = nil) {
+        self.filePath = filePath
+        self.worktreeID = worktreeID
+        self.identity = identity
+        self.tailLimit = tailLimit
+    }
+}
+
 // MARK: - Result Structs
 
 public struct DaemonStatusResult: Codable, Sendable {

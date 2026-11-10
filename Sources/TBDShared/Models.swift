@@ -2775,7 +2775,12 @@ public struct PRStatus: Codable, Sendable, Equatable {
 // MARK: - SessionSummary
 
 public struct SessionSummary: Codable, Sendable, Identifiable {
-    public var id: String { sessionId }
+    public var identity: AgentSessionIdentity {
+        AgentSessionIdentity(agentKind: agentKind ?? .claude, sessionID: sessionId)
+    }
+    public var id: String { identity.cacheKey }
+    public let agentKind: LocalAgentKind?
+    public let transcriptAvailable: Bool
     public let sessionId: String
     public let filePath: String
     public let modifiedAt: Date
@@ -2798,8 +2803,12 @@ public struct SessionSummary: Codable, Sendable, Identifiable {
         lastUserMessage: String?,
         cwd: String?,
         gitBranch: String?,
-        lastMessageAt: Date? = nil
+        lastMessageAt: Date? = nil,
+        agentKind: LocalAgentKind? = nil,
+        transcriptAvailable: Bool = true
     ) {
+        self.agentKind = agentKind
+        self.transcriptAvailable = transcriptAvailable
         self.sessionId = sessionId
         self.filePath = filePath
         self.modifiedAt = modifiedAt
@@ -2811,13 +2820,28 @@ public struct SessionSummary: Codable, Sendable, Identifiable {
         self.gitBranch = gitBranch
         self.lastMessageAt = lastMessageAt ?? modifiedAt
     }
-}
 
-// MARK: - Session Messages Params
+    private enum CodingKeys: String, CodingKey {
+        case sessionId, filePath, modifiedAt, fileSize, lineCount, firstUserMessage, lastUserMessage
+        case cwd, gitBranch, lastMessageAt, agentKind, transcriptAvailable
+    }
 
-public struct SessionMessagesParams: Codable, Sendable {
-    public let filePath: String
-    public init(filePath: String) { self.filePath = filePath }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            sessionId: try values.decode(String.self, forKey: .sessionId),
+            filePath: try values.decode(String.self, forKey: .filePath),
+            modifiedAt: try values.decode(Date.self, forKey: .modifiedAt),
+            fileSize: try values.decode(Int64.self, forKey: .fileSize),
+            lineCount: try values.decode(Int.self, forKey: .lineCount),
+            firstUserMessage: try values.decodeIfPresent(String.self, forKey: .firstUserMessage),
+            lastUserMessage: try values.decodeIfPresent(String.self, forKey: .lastUserMessage),
+            cwd: try values.decodeIfPresent(String.self, forKey: .cwd),
+            gitBranch: try values.decodeIfPresent(String.self, forKey: .gitBranch),
+            lastMessageAt: try values.decodeIfPresent(Date.self, forKey: .lastMessageAt),
+            agentKind: try values.decodeIfPresent(LocalAgentKind.self, forKey: .agentKind),
+            transcriptAvailable: try values.decodeIfPresent(Bool.self, forKey: .transcriptAvailable) ?? true)
+    }
 }
 
 // MARK: - Transcript Items (rich rendering)
