@@ -273,15 +273,21 @@ enum LeadingEdgePolicy {
     }
 }
 
-/// What a frame does when the GPU is behind: all three of the surface's ring slots are in flight,
-/// or `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
-/// report.
+/// What a frame does when the GPU is behind. A frame that drops does so before it builds
+/// anything, and keeps the link ticking until the GPU catches up.
 enum GPUBackpressure {
-    /// Drop the frame before building it, and keep the link ticking until the GPU catches up. What
-    /// a display tick does, so main never blocks on the GPU.
-    case drop
+    /// A display tick. Drop when all three of the surface's ring slots are in flight, or while a
+    /// nil drawable's hold lasts. Otherwise ask for a drawable whatever the tracker counts:
+    /// `nextDrawable()` may wait, up to its one-second timeout, for one the compositor still
+    /// holds, and a nil from it starts the hold. Under bulk output the present reports come
+    /// several refreshes late, and a tick that waited for them would draw one refresh in two.
+    case tick
+    /// A leading-edge draw, inside a render signal's delivery. Drop as a tick does, and also while
+    /// `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
+    /// report, so the draw never waits in `nextDrawable()`.
+    case leadingEdge
     /// Build it anyway: wait on the ring for a slot, and ask for a drawable whatever the tracker
-    /// counts. What `drawFrameNow()` and a live resize do.
+    /// says. What `drawFrameNow()` and a live resize do.
     case wait
 }
 
@@ -876,7 +882,8 @@ public final class GhosttyTerminalView: NSView {
     ///
     /// Otherwise the delivery decides once, by `LeadingEdgePolicy`, whether to draw now. It draws
     /// with the tick's own `renderTick(now:)`, inside this delivery, so the leading edge adds no
-    /// main-queue hop. Anything else asks the display link for a frame.
+    /// main-queue hop, and its frame drops at the drawable limit as the policy does. Anything else
+    /// asks the display link for a frame.
     private func renderSignalled(_ hint: RenderHint) {
         guard !terminal.isClosed else {
             stopBlink()
@@ -890,7 +897,7 @@ public final class GhosttyTerminalView: NSView {
         case .drawNow:
             let built = framesBuilt
             let committed = framesCommitted
-            renderTick(now: now)
+            renderTick(now: now, backpressure: .leadingEdge)
             if framesBuilt > built, framesCommitted == committed, !lastBuildFoundNoOutput {
                 lastEmptyLeadingEdgeDrawAt = now
             }
@@ -1177,9 +1184,10 @@ public final class GhosttyTerminalView: NSView {
     /// changed. For a host's instruments and tests, which cannot wait on a display link that an
     /// offscreen window never runs.
     ///
-    /// It waits for the GPU rather than drop the frame, as a live resize does. Those callers draw
-    /// in offscreen windows, whose presents may never be reported, and the drawable limit would
-    /// stop them drawing for longer than they wait. Its drawables still go into the tracker.
+    /// It waits for the GPU rather than drop the frame, as a live resize does: it waits on the ring
+    /// for a slot, and asks for a drawable even while a nil drawable's hold lasts. Those callers
+    /// draw in offscreen windows, whose presents may never be reported, and a frame they ask for
+    /// is one they mean to see drawn. Its drawables still go into the tracker.
     public func drawFrameNow() {
         renderTick(backpressure: .wait)
     }
@@ -1198,8 +1206,9 @@ public final class GhosttyTerminalView: NSView {
     ///   - now: when the frame is due, as a duration since any fixed origin; nil reads the `now`
     ///     seam. The display link passes its own timestamp. The DEC 2026 watchdog and the drawable
     ///     tracker only compare these.
-    ///   - backpressure: what the frame does if the GPU is behind.
-    func renderTick(now: Duration? = nil, backpressure: GPUBackpressure = .drop) {
+    ///   - backpressure: what the frame does if the GPU is behind. A delivery that draws at once
+    ///     passes `.leadingEdge`.
+    func renderTick(now: Duration? = nil, backpressure: GPUBackpressure = .tick) {
         let now = now ?? self.now()
         applyPendingGridResize()
         guard canBuildFrames else {
@@ -1232,7 +1241,7 @@ public final class GhosttyTerminalView: NSView {
     /// - Parameters:
     ///   - now: when the frame is due; nil reads the `now` seam, as the live-resize path does.
     ///   - backpressure: what the frame does if the GPU is behind. A live resize always waits.
-    func renderNow(now: Duration? = nil, backpressure: GPUBackpressure = .drop) {
+    func renderNow(now: Duration? = nil, backpressure: GPUBackpressure = .tick) {
         let now = now ?? self.now()
         // The layer may have been made after the last resize, so its drawable size is set here too.
         updateDrawableSize()
@@ -1243,7 +1252,7 @@ public final class GhosttyTerminalView: NSView {
         }
         // A live resize promised Core Animation a present in this transaction, so it never drops.
         let waits = backpressure == .wait || layer.presentsWithTransaction
-        if !waits, isGPUBehind(now: now) {
+        if !waits, isGPUBehind(now: now, backpressure: backpressure) {
             // Dropped before the build: no lock taken and no dirty state consumed. `needsUpdate`
             // stays set so the link keeps ticking until the GPU catches up. Handed
             // `surface.needsDisplay` instead, the link would park: output nobody built leaves the
@@ -1298,21 +1307,24 @@ public final class GhosttyTerminalView: NSView {
         frameDriver.update { $0.needsUpdate = surface.needsDisplay }
     }
 
-    /// Whether a frame due at `now` would find the GPU behind: the ring has no free slot, or the
+    /// Whether a frame due at `now` would find the GPU behind, by `backpressure`'s rules: the ring
+    /// has no free slot, or a nil drawable's hold lasts, or, for a leading-edge draw alone, the
     /// tracker counts the drawable limit. Main is the only thread that takes slots and drawables,
-    /// so a no here stays true until this frame takes them. The tracker is asked on every tick,
-    /// full ring or not, so its timers run on every frame's `now`, whichever of the two holds the
-    /// frame back.
+    /// so a no here stays true until this frame takes them. The tracker is asked on every frame,
+    /// full ring or not, so its timers run on every frame's `now`, whatever holds the frame back.
     ///
-    /// A frame it holds back is handed to the drawable tracker's `presentTiming`, the diagnostic
-    /// for the bulk-output frame cap, which records what the frame found and changes nothing.
-    private func isGPUBehind(now: Duration) -> Bool {
+    /// A frame it holds back is handed to the drawable tracker's `presentTiming` diagnostic, which
+    /// records what the frame found and changes nothing.
+    private func isGPUBehind(now: Duration, backpressure: GPUBackpressure) -> Bool {
         let ringHasFreeSlot = surface.frameRing?.hasFreeSlot ?? true
-        let awaitingPresent = drawableTracker.awaitingPresent(now: now)
-        let behind = !ringHasFreeSlot || awaitingPresent >= drawableTracker.limit
+        let drawables = drawableTracker.check(now: now)
+        // A hold counts as the limit, so the leading edge's count covers it too.
+        let drawablesBehind = backpressure == .leadingEdge
+            ? drawables.awaitingPresent >= drawableTracker.limit
+            : drawables.nilDrawableHold
+        let behind = !ringHasFreeSlot || drawablesBehind
         if behind {
-            drawableTracker.noteGPUBehind(
-                now: now, ringHasFreeSlot: ringHasFreeSlot, awaitingPresent: awaitingPresent)
+            drawableTracker.noteGPUBehind(now: now, ringHasFreeSlot: ringHasFreeSlot, drawables: drawables)
         }
         return behind
     }

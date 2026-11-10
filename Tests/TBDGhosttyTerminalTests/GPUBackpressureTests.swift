@@ -299,6 +299,23 @@ struct DrawableTrackerTests {
         #expect(after == 0, "a timeout after the hold began the tracker counted \(after)")
     }
 
+    /// The check tells a nil drawable's hold, which a display tick drops for, from entries at the
+    /// limit, which only a leading-edge draw drops for. Both count as the limit.
+    @Test func theCheckTellsANilDrawablesHoldFromEntriesAtTheLimit() {
+        let tracker = DrawableTracker()
+        _ = tracker.add(acquiredAt: .seconds(100))
+        let newer = tracker.add(acquiredAt: .seconds(100.25))
+        let atTheLimit = tracker.check(now: .seconds(100.5))
+        let entries = DrawableTracker.Check(awaitingPresent: tracker.limit, nilDrawableHold: false)
+        #expect(atTheLimit == entries, "two entries awaiting their report checked as \(atTheLimit)")
+
+        tracker.reportPresented(newer, presentedTime: 100.5)
+        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        let inTheHold = tracker.check(now: .seconds(100.75))
+        let held = DrawableTracker.Check(awaitingPresent: tracker.limit, nilDrawableHold: true)
+        #expect(inTheHold == held, "a nil drawable's hold with no entries checked as \(inTheHold)")
+    }
+
     /// A peek answers what the check would, and changes nothing: entries past the timeout are
     /// counted as cleared but stay, no notice logs, and a nil drawable's hold does not start.
     @Test func aPeekAnswersAsTheCheckWouldAndChangesNothing() {
