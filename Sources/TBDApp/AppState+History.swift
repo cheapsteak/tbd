@@ -92,15 +92,27 @@ extension AppState {
 
     /// Fetch sessions from the daemon, keeping stale data visible during the request.
     func fetchSessions(worktreeID: UUID) async {
+        let requestID = UUID()
+        historyRefreshRequests[worktreeID] = requestID
+        defer {
+            if historyRefreshRequests[worktreeID] == requestID {
+                historyRefreshRequests.removeValue(forKey: worktreeID)
+            }
+        }
         let current = historyLoadStates[worktreeID]?.currentSessions ?? []
         historyLoadStates[worktreeID] = current.isEmpty ? .loading : .loadingStale(current)
 
         // Refresh closed-terminal history alongside sessions (metadata only —
         // failures keep whatever was shown before).
-        await fetchClosedTerminals(worktreeID: worktreeID)
+        await fetchClosedTerminals(worktreeID: worktreeID, refreshRequestID: requestID)
+        guard historyRefreshRequests[worktreeID] == requestID else { return }
 
         do {
             let fresh = try await daemonClient.listSessions(worktreeID: worktreeID)
+            // No suspension between ownership validation, invalidation, list
+            // publication and the selected-history retry. A superseded list
+            // cannot cancel a transcript request started by a newer refresh.
+            guard historyRefreshRequests[worktreeID] == requestID else { return }
             let freshIDs = Set(fresh.map(\.id))
             for removed in current where !freshIDs.contains(removed.id) {
                 invalidateHistoryTranscript(removed.id)
@@ -127,17 +139,20 @@ extension AppState {
                 }
             }
         } catch {
+            guard historyRefreshRequests[worktreeID] == requestID else { return }
             historyLoadStates[worktreeID] = .failed(error.localizedDescription)
         }
     }
 
     /// Fetch closed-terminal capture metadata for the Closed Terminals
-    /// section. Best-effort: a failure keeps stale data visible.
-    func fetchClosedTerminals(worktreeID: UUID) async {
+    /// section for the owning refresh. A failure keeps stale data visible.
+    private func fetchClosedTerminals(worktreeID: UUID, refreshRequestID: UUID) async {
         do {
-            closedTerminalHistories[worktreeID] =
-                try await daemonClient.listTerminalHistory(worktreeID: worktreeID)
+            let entries = try await daemonClient.listTerminalHistory(worktreeID: worktreeID)
+            guard historyRefreshRequests[worktreeID] == refreshRequestID else { return }
+            closedTerminalHistories[worktreeID] = entries
         } catch {
+            guard historyRefreshRequests[worktreeID] == refreshRequestID else { return }
             logger.warning("fetchClosedTerminals failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
         }
     }

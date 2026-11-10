@@ -1449,6 +1449,8 @@ final class AppState {
     private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
     var historyActiveWorktrees: Set<UUID> = []
     var historyLoadStates: [UUID: HistoryLoadState] = [:]
+    /// Only the latest refresh for a worktree may publish or invalidate history.
+    @ObservationIgnored var historyRefreshRequests: [UUID: UUID] = [:]
     var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → SessionSummary.id
     var sessionTranscripts: [String: [TranscriptItem]] = [:]  // live native ID or history identity.cacheKey → items
     var sessionTranscriptLoading: Set<String> = []
