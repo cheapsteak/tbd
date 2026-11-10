@@ -1513,6 +1513,68 @@ struct MainToolbarControllerTests {
         #expect(scheduledAfterUninstall == false)
     }
 
+    // MARK: - Full screen
+
+    /// The toolbar shows outside full screen and never in it, and each of the
+    /// three transitions it follows maps to the state it leaves the window in; any other
+    /// notification maps to none.
+    @Test func fullScreenStateFollowsTheTransitions() {
+        #expect(MainToolbarController.toolbarIsVisible(inFullScreen: false))
+        #expect(!MainToolbarController.toolbarIsVisible(inFullScreen: true))
+        #expect(MainToolbarController.fullScreenState(after: NSWindow.willEnterFullScreenNotification) == true)
+        #expect(MainToolbarController.fullScreenState(after: NSWindow.didEnterFullScreenNotification) == true)
+        #expect(MainToolbarController.fullScreenState(after: NSWindow.didExitFullScreenNotification) == false)
+        #expect(MainToolbarController.fullScreenState(after: NSWindow.willExitFullScreenNotification) == nil)
+        #expect(MainToolbarController.fullScreenState(after: NSWindow.didResizeNotification) == nil)
+    }
+
+    /// Entering full screen hides the toolbar, so AppKit's full-screen
+    /// toolbar window covers none of the panes' rows, and the rows fall back
+    /// to their own height and leading inset; leaving shows it again and the
+    /// leading item is measured once more. An uninstall in full screen
+    /// leaves the next install showing the toolbar.
+    @Test func fullScreenHidesTheToolbarUntilItEnds() async throws {
+        let fixture = ToolbarFixture(label: "fullScreenHidesTheToolbarUntilItEnds")
+        defer { fixture.tearDown() }
+        try await fixture.ready()
+        let controller = fixture.controller
+        let chrome = fixture.state.windowChrome
+        #expect(controller.toolbar.isVisible)
+        #expect(!controller.isInFullScreen)
+
+        controller.fullScreenTransition(NSWindow.willEnterFullScreenNotification)
+        #expect(controller.isInFullScreen)
+        #expect(!controller.toolbar.isVisible)
+        controller.publishChromeGeometry()
+        #expect(chrome.leadingItemTrailingEdge == nil)
+        #expect(MainTabRowMetrics.height(topSafeAreaInset: chrome.topSafeAreaInset) >= TabRowMetrics.height)
+        #expect(MainTabRowMetrics.leadingInset(leadingItemTrailingEdge: chrome.leadingItemTrailingEdge)
+            == MainTabRowMetrics.shownSidebarInset)
+
+        // A notification that is not a transition changes nothing.
+        controller.fullScreenTransition(NSWindow.didResizeNotification)
+        #expect(controller.isInFullScreen)
+        #expect(!controller.toolbar.isVisible)
+
+        controller.fullScreenTransition(NSWindow.didExitFullScreenNotification)
+        #expect(!controller.isInFullScreen)
+        #expect(controller.toolbar.isVisible)
+        let remeasured = try await waitForMainActorCondition("the leading item to be measured again") {
+            chrome.leadingItemTrailingEdge != nil
+        }
+        try #require(remeasured)
+
+        controller.fullScreenTransition(NSWindow.willEnterFullScreenNotification)
+        #expect(!controller.toolbar.isVisible)
+        controller.uninstall()
+        #expect(!controller.isInFullScreen)
+        // A toolbar on no window reads not visible whatever it was set to, so
+        // what counts is how it comes back: shown, on a windowed window.
+        controller.install(on: fixture.window)
+        #expect(fixture.window.toolbar === controller.toolbar)
+        #expect(controller.toolbar.isVisible)
+    }
+
     // MARK: - Title
 
     /// The title's overflow row is inert, never hidden, and shows the
