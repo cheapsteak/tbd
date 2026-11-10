@@ -7,6 +7,34 @@ import DaemonTestSupport
 
 @Suite("CodexSessionHistory")
 struct CodexSessionHistoryTests {
+    @Test("unchanged summaries reuse metadata while file changes and unsafe paths invalidate it")
+    func summaryCacheInvalidation() async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let cache = CodexSummaryCache(capacity: 2)
+        var reads = 0
+        let read: (FileHandle) throws -> CodexTranscriptParser.SummaryMetadata = { handle in
+            reads += 1
+            return try CodexTranscriptParser.summary(fileHandle: handle)
+        }
+        #expect(CodexSessionScanner.summary(f.session, cache: cache, readMetadata: read).firstUserMessage == "Sample prompt")
+        #expect(CodexSessionScanner.summary(f.session, cache: cache, readMetadata: read).firstUserMessage == "Sample prompt")
+        #expect(reads == 1)
+        let replacement = try String(contentsOf: f.file, encoding: .utf8).replacingOccurrences(of: "Sample prompt", with: "Edited prompt")
+        try replacement.write(to: f.file, atomically: true, encoding: .utf8)
+        #expect(CodexSessionScanner.summary(f.session, cache: cache, readMetadata: read).firstUserMessage == "Edited prompt")
+        #expect(reads == 2)
+        let handle = try FileHandle(forWritingTo: f.file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((#"{"type":"event_msg","payload":{"type":"user_message","message":"Later prompt"}}"# + "\n").utf8))
+        try handle.close()
+        #expect(CodexSessionScanner.summary(f.session, cache: cache, readMetadata: read).lastUserMessage == "Later prompt")
+        #expect(reads == 3)
+        try FileManager.default.removeItem(at: f.file)
+        try FileManager.default.createSymbolicLink(at: f.file, withDestinationURL: f.home.appendingPathComponent("missing"))
+        #expect(!CodexSessionScanner.summary(f.session, cache: cache, readMetadata: read).transcriptAvailable)
+        #expect(reads == 3)
+    }
     private struct Fixture {
         let root: URL
         let db: TBDDatabase

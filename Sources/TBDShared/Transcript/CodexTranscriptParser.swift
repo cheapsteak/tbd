@@ -155,7 +155,7 @@ public enum CodexTranscriptParser {
             guard payload["type"] as? String == "message",
                   let value = payload["role"] as? String, value == "user" || value == "assistant" else { return nil }
             role = value
-            text = contentText(payload["content"])
+            text = role == "user" ? userContentText(payload["content"]) : contentText(payload["content"])
         case "event_msg":
             switch payload["type"] as? String {
             case "user_message": role = "user"
@@ -173,6 +173,22 @@ public enum CodexTranscriptParser {
         if let text = value as? String { return text }
         guard let blocks = value as? [[String: Any]] else { return nil }
         let text = blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        return text.isEmpty ? nil : text
+    }
+
+    /// Codex writes injected context as its own input-text block. Filter that
+    /// block while retaining user text elsewhere in the same response item.
+    private static func userContentText(_ value: Any?) -> String? {
+        let texts: [String]
+        if let text = value as? String {
+            texts = [text]
+        } else if let blocks = value as? [[String: Any]] {
+            texts = blocks.compactMap { $0["text"] as? String }
+        } else { return nil }
+        let text = texts.filter {
+            let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !(trimmed.hasPrefix("<environment_context>") && trimmed.hasSuffix("</environment_context>"))
+        }.joined(separator: "\n")
         return text.isEmpty ? nil : text
     }
 

@@ -4,6 +4,23 @@ import Testing
 
 @Suite("CodexTranscriptParser")
 struct CodexTranscriptParserTests {
+    @Test("injected environment context does not become a history prompt")
+    func excludesInjectedContext() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        try """
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>machine details</environment_context>"}]}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the sample"}]}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>more context</environment_context>"},{"type":"input_text","text":"Explain environment_context tags"}]}}
+
+        """.write(to: file, atomically: true, encoding: .utf8)
+        let items = CodexTranscriptParser.parse(filePath: file.path)
+        #expect(items.count == 2)
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        #expect(try CodexTranscriptParser.summary(fileHandle: handle).firstUserMessage == "Inspect the sample")
+        #expect(try CodexTranscriptParser.summary(fileHandle: handle).lastUserMessage == "Explain environment_context tags")
+    }
     private var fixture: URL {
         Bundle.module.url(forResource: "codex-rollout", withExtension: "jsonl")!
     }

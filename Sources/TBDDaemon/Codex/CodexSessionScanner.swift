@@ -2,6 +2,39 @@ import Darwin
 import Foundation
 import TBDShared
 
+/// Bounded metadata storage. A cache hit never substitutes for opening and
+/// validating the currently authorized path and its ancestors.
+final class CodexSummaryCache: @unchecked Sendable {
+    static let shared = CodexSummaryCache(capacity: 256)
+    fileprivate struct Key: Hashable {
+        let worktreeID: UUID
+        let identity: AgentSessionIdentity
+        let path: String?
+        let home: String?
+        let version: CodexTranscriptFile.Version
+    }
+    private let lock = NSLock()
+    private let capacity: Int
+    private var values: [Key: CodexTranscriptParser.SummaryMetadata] = [:]
+    private var order: [Key] = []
+
+    init(capacity: Int) { self.capacity = max(1, capacity) }
+
+    fileprivate func get(_ key: Key) -> CodexTranscriptParser.SummaryMetadata? {
+        lock.withLock { values[key] }
+    }
+
+    fileprivate func put(_ value: CodexTranscriptParser.SummaryMetadata, for key: Key) {
+        lock.withLock {
+            if values[key] == nil {
+                if order.count == capacity { values.removeValue(forKey: order.removeFirst()) }
+                order.append(key)
+            }
+            values[key] = value
+        }
+    }
+}
+
 /// History only enumerates durable catalog associations. Neither a rollout's
 /// cwd nor any discovery of files in the shared home grants worktree ownership.
 enum CodexSessionScanner {
@@ -17,7 +50,8 @@ enum CodexSessionScanner {
         }
     }
 
-    static func summary(_ session: LocalAgentSession) -> SessionSummary {
+    static func summary(_ session: LocalAgentSession, cache: CodexSummaryCache = .shared,
+                        readMetadata: (FileHandle) throws -> CodexTranscriptParser.SummaryMetadata = CodexTranscriptParser.summary) -> SessionSummary {
         var metadata = CodexTranscriptParser.SummaryMetadata()
         var modifiedAt = session.lastObservedAt
         var size: Int64 = 0
@@ -25,8 +59,11 @@ enum CodexSessionScanner {
         if let file = try? openTranscript(session) {
             modifiedAt = file.modifiedAt
             size = file.size
-            if let scanned = try? CodexTranscriptParser.summary(fileHandle: file.handle), file.isCurrent() {
+            let key = CodexSummaryCache.Key(worktreeID: session.worktreeID, identity: session.identity,
+                path: session.transcriptPath, home: session.codexLaunchOptions?.codexHome, version: file.version)
+            if let scanned = cache.get(key) ?? (try? readMetadata(file.handle)), file.isCurrent() {
                 metadata = scanned
+                cache.put(scanned, for: key)
                 available = true
             }
         }
@@ -71,6 +108,20 @@ enum CodexSessionScanner {
 /// with NOFOLLOW from /. Checking the original paths again catches replacement
 /// of an ancestor or alias while parsing consumes the held descriptor.
 private final class CodexTranscriptFile {
+    struct Version: Hashable {
+        let device: dev_t
+        let inode: ino_t
+        let size: Int64
+        let seconds: Int
+        let nanoseconds: Int
+        init(_ info: stat) {
+            device = info.st_dev
+            inode = info.st_ino
+            size = info.st_size
+            seconds = info.st_mtimespec.tv_sec
+            nanoseconds = info.st_mtimespec.tv_nsec
+        }
+    }
     private struct Identity: Equatable {
         let device: dev_t
         let inode: ino_t
@@ -109,6 +160,7 @@ private final class CodexTranscriptFile {
     let handle: FileHandle
     let size: Int64
     let modifiedAt: Date
+    let version: Version
     private let path: String
     private let home: String
     private let identities: [Identity]
@@ -118,6 +170,7 @@ private final class CodexTranscriptFile {
                  identities: [Identity], aliases: [PlatformAlias]) {
         handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         size = info.st_size
+        version = Version(info)
         modifiedAt = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec)
                           + Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
         self.path = path
@@ -191,6 +244,6 @@ private final class CodexTranscriptFile {
 
     func isCurrent() -> Bool {
         guard let current = try? Self.open(path: path, home: home) else { return false }
-        return current.identities == identities && current.aliases == aliases
+        return current.identities == identities && current.aliases == aliases && current.version == version
     }
 }
