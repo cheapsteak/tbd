@@ -763,7 +763,8 @@ public struct WorktreeStore: Sendable {
     /// Saves `agentTabs` and its legacy Claude projection with the captured
     /// HEAD SHA in one transaction, before terminal teardown. Passing an empty
     /// snapshot replaces both representations; nil retains the legacy API.
-    /// Refuses to archive worktrees with `.main` status.
+    /// Refuses to archive worktrees with `.main` status. An already archived
+    /// row is a successful no-op, checked inside the write transaction.
     ///
     /// Without `agentTabs`, `claudeSpawnExtras` maps a Claude session id to
     /// the spawn values its terminal carried. It is written whenever a session list is (an empty
@@ -799,6 +800,12 @@ public struct WorktreeStore: Sendable {
             }
             if record.status == WorktreeStatus.creating.rawValue {
                 throw DatabaseError(message: "Cannot archive a worktree that is still being created")
+            }
+            // Another archive may have committed after this caller read the
+            // live terminals. Only the first transition owns the snapshot;
+            // retries remain successful without replacing either representation.
+            if record.status == WorktreeStatus.archived.rawValue {
+                return []
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()

@@ -356,5 +356,53 @@ struct LocalAgentArchiveTests {
         #expect(archived.archivedClaudeSessions == nil)
     }
 
+    @Test func duplicateArchiveRequestsPreserveBothSessionRepresentations() async throws {
+        let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .active)
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let extras = ClaudeSpawnExtras(pluginDirs: ["/tmp/acme-plugin"])
+        _ = try await db.terminals.create(worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "Claude", claudeSessionID: "claude-B", kind: .claude, claudeSpawnExtras: extras)
+        _ = try await db.terminals.create(worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: "Codex", claudeSessionID: "codex-A", kind: .codex,
+            codexLaunchOptions: .init(model: "model-a", disabledFeatures: ["feature-a"]))
+        _ = try await lc.beginArchiveWorktree(worktreeID: wt.id, force: true, discardUncommittedChanges: true)
+        let first = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(first.archivedAgentTabs?.count == 2)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+
+        // The repeated lifecycle request sees no terminals after teardown.
+        _ = try await lc.beginArchiveWorktree(worktreeID: wt.id, force: true, discardUncommittedChanges: true)
+        let repeated = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(repeated.archivedAgentTabs == first.archivedAgentTabs)
+        #expect(repeated.archivedClaudeSessions == ["claude-B"])
+        #expect(repeated.archivedClaudeSpawnExtras == ["claude-B": extras])
+        #expect(repeated.archivedAt == first.archivedAt)
+    }
+
+    @Test(arguments: [false, true])
+    func staleArchiveTransitionCannotOverwriteTheCommittedSnapshot(legacyWriter: Bool) async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .active)
+        defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
+        let tabs = try await seedSnapshot(db, id: wt.id)
+        try await db.worktrees.archive(id: wt.id, archivedHeadSHA: "original-head", agentTabs: tabs, branch: "original-branch")
+        let first = try #require(try await db.worktrees.get(id: wt.id))
+
+        // A second caller already read the active row before the first write
+        // committed. Only the transaction's current status can arbitrate it.
+        let removed = try await db.worktrees.archive(id: wt.id,
+            claudeSessionIDs: ["stale-session"],
+            claudeSpawnExtras: ["stale-session": .init(pluginDirs: ["/tmp/acme-stale"])],
+            archivedHeadSHA: "stale-head", agentTabs: legacyWriter ? nil : [], branch: "stale-branch")
+        #expect(removed.isEmpty)
+        let repeated = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(repeated == first)
+        #expect(repeated.archivedAgentTabs == tabs)
+        #expect(repeated.archivedClaudeSessions == ["claude-B"])
+        #expect(repeated.archivedClaudeSpawnExtras?["claude-B"] == tabs[1].claudeSpawnExtras)
+    }
+
 }
 }
