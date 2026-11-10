@@ -1,5 +1,5 @@
-// Reads a libghostty terminal cell by cell, for the screen projection, the styled capture and the
-// detach handback.
+// Reads a libghostty terminal cell by cell, for the screen projection, the styled capture, the
+// detach handback and the text under a ⌘-click.
 //
 // Everything here runs on the `GhosttyTerminalState` that `GhosttyTerminal.withLocked` hands out,
 // so the terminal cannot change under a walk, and nothing here feeds the terminal. The cell reading
@@ -112,10 +112,32 @@ extension GhosttyTerminalState {
         case active
         /// The scrollback above the screen, row 0 the oldest.
         case history
+        /// The rows on view, row 0 at the top, wherever the user has scrolled to.
+        case viewport
+        /// The scrollback and the screen below it, row 0 the oldest.
+        case screen
+
+        var tag: GhosttyPointTag {
+            switch self {
+            case .active: GHOSTTY_POINT_TAG_ACTIVE
+            case .history: GHOSTTY_POINT_TAG_HISTORY
+            case .viewport: GHOSTTY_POINT_TAG_VIEWPORT
+            case .screen: GHOSTTY_POINT_TAG_SCREEN
+            }
+        }
     }
 
     /// Rows of scrollback above the screen. The alternate screen keeps none.
     var historyRowCount: Int { isAlternateScreen ? 0 : scrollbackRows }
+
+    /// The `.screen` row at the top of the viewport: the scrollbar's offset, which counts in the
+    /// same rows. nil when the scrollbar cannot be read, or reads a viewport of another height.
+    var viewportTopScreenRow: Int? {
+        guard let raw else { return nil }
+        let metrics = TerminalScrollMetrics.read(raw)
+        guard metrics.visible == rows else { return nil }
+        return metrics.offset
+    }
 
     /// True when the cursor sits past a character printed in the last column, so the next one wraps.
     var cursorPendingWrap: Bool {
@@ -159,7 +181,7 @@ extension GhosttyTerminalState {
         guard let raw, row >= 0 else { return nil }
         let width = cols
         var point = GhosttyPoint()
-        point.tag = area == .active ? GHOSTTY_POINT_TAG_ACTIVE : GHOSTTY_POINT_TAG_HISTORY
+        point.tag = area.tag
         point.value.coordinate = GhosttyPointCoordinate(x: 0, y: UInt32(row))
         var ref = GhosttyGridRef()
         guard ghostty_terminal_grid_ref(raw, point, &ref) == GHOSTTY_SUCCESS else { return nil }

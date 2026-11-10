@@ -724,8 +724,10 @@ class TBDTerminalView: TerminalView {
         allowMouseReporting && withTerminal { $0.mouseMode != .off }
     }
 
-    /// Opens the file path or link under a Cmd+click. Returns true when it
-    /// handled the click, which the caller then consumes.
+    /// Opens the file path or link TBD's own matcher (`TerminalCommandClick`)
+    /// finds under a Cmd+click. Returns true when it handled the click, which
+    /// the caller then consumes. SwiftTerm's own link detection, on mouse-up,
+    /// finds the rest.
     private func handleCommandClick(atWindowLocation location: CGPoint) -> Bool {
         // OSC 8 hyperlinks are handled by SwiftTerm's mouseUp path
         // (requestOpenLink). If we also fired here on mouseDown,
@@ -735,26 +737,19 @@ class TBDTerminalView: TerminalView {
             clickLogger.debug("file-click: skipping mouseDown handling — OSC 8 payload present, deferring to requestOpenLink")
             return false
         }
-
-        if let filePath = extractFilePath(atWindowLocation: location) {
-            clickLogger.debug("file-click[mouseDown/path]: \(filePath, privacy: .public)")
-            onFilePathClicked?(filePath)
-            return true
+        guard let pos = gridPosition(atWindowLocation: location),
+              let row = rowText(pos.row),
+              let target = TerminalCommandClick.target(
+                  row: row, column: pos.col, worktreePath: worktreePath, remoteURL: remoteURL)
+        else { return false }
+        switch target {
+        case .file(let path):
+            clickLogger.debug("file-click[mouseDown/path]: \(path, privacy: .public)")
+            onFilePathClicked?(path)
+        case .url(let url):
+            NSWorkspace.shared.open(url)
         }
-        // Fall back to hyperlink detection (PR pattern; OSC 8 was
-        // already short-circuited above).
-        if let urlString = extractHyperlinkURL(atWindowLocation: location) {
-            if let resolved = resolveAsFilePath(urlString) {
-                clickLogger.debug("file-click[mouseDown/hyperlink-as-file]: \(resolved, privacy: .public)")
-                onFilePathClicked?(resolved)
-                return true
-            }
-            if urlString.contains("://"), let url = URL(string: urlString) {
-                NSWorkspace.shared.open(url)
-                return true
-            }
-        }
-        return false
+        return true
     }
 
     override func viewDidMoveToWindow() {
@@ -901,124 +896,19 @@ class TBDTerminalView: TerminalView {
         }
     }
 
-    /// Extracts a file path from the terminal buffer at the given window-coordinate point.
-    func extractFilePath(atWindowLocation windowPoint: CGPoint) -> String? {
-        guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
-        let col = pos.col
-        let row = pos.row
-
-        // Copy the row text out under the lock; all the path resolution and
-        // filesystem checks below run outside it.
-        guard let lineText = withTerminal({ terminal in
-            terminal.getLine(row: row)?.translateToString()
-        }) else { return nil }
-
-        guard col < lineText.count else { return nil }
-
-        // Find word boundaries around click position using path-valid characters
-        let pathChars = ClickedPathResolver.pathTokenCharacters
-        let chars = Array(lineText.unicodeScalars)
-        var start = col
-        var end = col
-
-        while start > 0 && pathChars.contains(chars[start - 1]) {
-            start -= 1
-        }
-        while end < chars.count - 1 && pathChars.contains(chars[end + 1]) {
-            end += 1
-        }
-
-        guard start <= end else { return nil }
-
-        let startIndex = lineText.index(lineText.startIndex, offsetBy: start)
-        let endIndex = lineText.index(lineText.startIndex, offsetBy: end + 1)
-        var candidate = String(lineText[startIndex..<endIndex])
-
-        // Strip trailing :line:col suffix (e.g., "file.swift:10:5")
-        let colonPattern = try? NSRegularExpression(pattern: ":\\d+(:\\d+)?$")
-        if let match = colonPattern?.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)) {
-            candidate = String(candidate[candidate.startIndex..<candidate.index(candidate.startIndex, offsetBy: match.range.location)])
-        }
-
-        // The path-character word boundary includes '.', so a trailing sentence period gets absorbed
-        // into the candidate (e.g., "see design.md."). Strip it before the existence check. Mid-path
-        // dots are preserved — only trailing.
-        while candidate.hasSuffix(".") {
-            candidate.removeLast()
-        }
-
-        guard !candidate.isEmpty else { return nil }
-
-        // Resolve relative paths against worktreePath; expand leading ~ as a home-relative path.
-        let resolvedPath: String
-        if candidate.hasPrefix("/") {
-            resolvedPath = candidate
-        } else if candidate.hasPrefix("~") {
-            resolvedPath = NSString(string: candidate).expandingTildeInPath
-        } else {
-            resolvedPath = URL(fileURLWithPath: worktreePath).appendingPathComponent(candidate).path
-        }
-
-        // Validate it's a regular file (not a directory)
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir), !isDir.boolValue else { return nil }
-
-        return resolvedPath
+    /// The text of the visible row `row`, one character per column, copied out
+    /// under the lock so the matching and the filesystem checks run outside it.
+    private func rowText(_ row: Int) -> String? {
+        withTerminal { $0.getLine(row: row)?.translateToString() }
     }
 
-    /// Resolves a clicked terminal token to an absolute file path.
-    ///
-    /// Shares `ClickedPathResolver` with the transcript's link pass so the two
-    /// click surfaces cannot disagree about what names a file.
-    func resolveAsFilePath(_ link: String) -> String? {
-        ClickedPathResolver.resolve(link, worktreePath: worktreePath)
-    }
-
-    /// Extracts a clickable URL from the terminal buffer at the given window-coordinate point.
-    /// OSC 8 hyperlinks are dispatched by SwiftTerm's `mouseUp` /
-    /// `requestOpenLink` path (see `hasOSC8Payload`); this function handles
-    /// the residual non-OSC-8 patterns we recognize, currently just
-    /// `PR #123`.
+    /// The pull request link a `PR #123` on the row under the given window
+    /// point names (`TerminalCommandClick.pullRequestLink`). OSC 8 hyperlinks
+    /// are dispatched by SwiftTerm's `mouseUp` / `requestOpenLink` path (see
+    /// `hasOSC8Payload`).
     func extractHyperlinkURL(atWindowLocation windowPoint: CGPoint) -> String? {
-        guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
-        let row = pos.row
-
-        // Build visible text from the line under the lock, copy it out, and
-        // pattern-match outside (translateToString may return empty for
-        // status bar lines, hence the per-cell walk).
-        guard let visibleText = withTerminal({ terminal -> String? in
-            guard let line = terminal.getLine(row: row) else { return nil }
-            var text = ""
-            for c in 0..<line.count {
-                let character = line[c].getCharacter()
-                let val = character.unicodeScalars.first?.value ?? 0
-                text.append(val > 0 ? character : " ")
-            }
-            return text
-        }) else { return nil }
-
-        // Look for "PR #123" pattern anywhere on the line.
-        // Wide/emoji chars (e.g. ▶▶) make positional matching unreliable,
-        // so match anywhere on the row rather than checking click position.
-        if let match = Self.prPattern.firstMatch(in: visibleText, range: NSRange(visibleText.startIndex..., in: visibleText)),
-           let numRange = Range(match.range(at: 1), in: visibleText),
-           let repoURL = gitHubBrowserURL() {
-            return "\(repoURL)/pull/\(String(visibleText[numRange]))"
-        }
-
-        return nil
-    }
-
-    private static let prPattern = try! NSRegularExpression(pattern: "PR\\s+#(\\d+)")
-
-    /// Converts the repo's remote URL to a GitHub browser URL.
-    private func gitHubBrowserURL() -> String? {
-        guard var remote = remoteURL, !remote.isEmpty else { return nil }
-        if remote.hasSuffix(".git") { remote = String(remote.dropLast(4)) }
-        if remote.hasPrefix("git@github.com:") {
-            remote = "https://github.com/" + remote.dropFirst("git@github.com:".count)
-        }
-        return remote
+        guard let pos = gridPosition(atWindowLocation: windowPoint), let row = rowText(pos.row) else { return nil }
+        return TerminalCommandClick.pullRequestLink(in: row, remoteURL: remoteURL)
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

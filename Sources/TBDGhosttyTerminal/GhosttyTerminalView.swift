@@ -467,9 +467,17 @@ public final class GhosttyTerminalView: NSView {
 
     /// Called on every left mouse-down, before the view handles it, so the host can move its own
     /// focus to this view. `false` declines the press: something the host draws over the view owns
-    /// its events, so a ⌘-click in that press opens no link. The view still takes first responder
-    /// and handles the rest of the click either way.
+    /// its events, so a ⌘-click in that press opens nothing, and `onCommandClickText` is not asked.
+    /// The view still takes first responder and handles the rest of the click either way.
     public var onMouseDownClaimFocus: (@MainActor () -> Bool)?
+
+    /// Offered a left ⌘-press that landed on no OSC 8 link, with the screen's text around it, read
+    /// once at the press, for the host to look in for what plain text names: a file path, a URL.
+    /// `true` says the host opened something, and the view consumes the press whole: it reaches
+    /// neither the program, even one that reports the mouse, nor the selection, and its drags and
+    /// release go nowhere. `false`, or no hook, lets it go on as an ordinary click. Not asked about
+    /// a press the host declined (`onMouseDownClaimFocus`).
+    public var onCommandClickText: (@MainActor (GhosttyClickedText) -> Bool)?
 
     /// The view became the first responder (`true`) or stopped being it (`false`), however focus
     /// moved. Unlike `onFocusChanged`, a window gaining or losing key status does not call it.
@@ -493,7 +501,8 @@ public final class GhosttyTerminalView: NSView {
     /// Whether the view takes the click that activates its window. On by default. The click it
     /// takes only activates, as in any macOS terminal: the view becomes first responder, and the
     /// press, its drags and its release reach neither the program nor the selection, so the
-    /// selection the user came back to copy stays. A ⌘-click on an OSC 8 link still opens it.
+    /// selection the user came back to copy stays. A ⌘-click on an OSC 8 link still opens it, and
+    /// `onCommandClickText` is still offered a ⌘-click on plain text, told it activates the window.
     public var acceptsActivatingClick = true
 
     /// Whether Option acts as Meta (Option-b sends `ESC b`) rather than typing the layout's
@@ -1524,14 +1533,14 @@ public final class GhosttyTerminalView: NSView {
     /// activating click.
     private var activationClickEventNumber: Int?
 
-    /// Set while the left press under way is the window's activating click, which the view
-    /// consumed: its drags and its release go nowhere either. The mouse controller saw no press
-    /// begin, so it declines them, and without this they would go on up the responder chain as a
-    /// drag and a release of a press nobody saw begin.
+    /// Set while the left press under way was consumed at its mouse-down, as the window's
+    /// activating click or a ⌘-click that opened something: its drags and its release go nowhere
+    /// either. The mouse controller saw no press begin, so it declines them, and without this they
+    /// would go on up the responder chain as a drag and a release of a press nobody saw begin.
     private var pressIsConsumed = false
 
     /// Set while the host declined the left press under way (`onMouseDownClaimFocus` answered
-    /// `false`), from its mouse-down through its mouse-up. A ⌘-click in it opens no link: the
+    /// `false`), from its mouse-down through its mouse-up. A ⌘-click in it opens nothing: the
     /// host has something over the view that owns its events.
     private(set) var hostDeclinedPress = false
 
@@ -1544,18 +1553,33 @@ public final class GhosttyTerminalView: NSView {
         // is not the first responder, so a pane that cannot take focus by being clicked cannot be
         // typed into at all. The activating click focuses the view too.
         if let window, window.firstResponder !== self { window.makeFirstResponder(self) }
-        // The activating click does nothing else (`acceptsActivatingClick`), except open the link
-        // under a ⌘-click this press may open. The link is looked up once, here: the feed thread
-        // can rewrite the screen between two lookups, and a press let through on the first that
-        // found nothing on the second would go on as an ordinary click.
-        if isActivationClick {
-            if let open = onOpenLink, let uri = mouseController.linkToOpen(at: event) {
-                open(uri)
-            }
+        // A ⌘-click that opens something goes no further, and the activating click does nothing
+        // else (`acceptsActivatingClick`). The screen is read once, here: the feed thread can
+        // rewrite it between two reads, and a press let through on the first that found nothing on
+        // the second would go on as an ordinary click.
+        let openedCommandClick = openCommandClick(event, activatesWindow: isActivationClick)
+        if openedCommandClick || isActivationClick {
             pressIsConsumed = true
             return
         }
         if !forward(event) { super.mouseDown(with: event) }
+    }
+
+    /// Opens what the ⌘-press `event` lands on: its OSC 8 link, through `onOpenLink`, or what the
+    /// host finds in its text, through `onCommandClickText`. True when something opened.
+    private func openCommandClick(_ event: NSEvent, activatesWindow: Bool) -> Bool {
+        switch mouseController.commandClickTarget(at: event) {
+        case .link(let uri):
+            guard let onOpenLink else { return false }
+            onOpenLink(uri)
+            return true
+        case .text(var text):
+            guard let onCommandClickText else { return false }
+            text.activatesWindow = activatesWindow
+            return onCommandClickText(text)
+        case nil:
+            return false
+        }
     }
 
     public override func mouseUp(with event: NSEvent) {
