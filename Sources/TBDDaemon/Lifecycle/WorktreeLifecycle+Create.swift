@@ -1861,9 +1861,11 @@ extension WorktreeLifecycle {
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
-                // Per-spawn model override (picker model buttons) wins over
-                // the profile default for this initial spawn only.
-                profileModel: modelOverride ?? resolvedProfile?.model,
+                // The primary's own saved model wins, then the create's
+                // override, then the profile's. A fresh primary's values carry
+                // the create's model; a restored or carried-over session's
+                // carry the model it was started with.
+                profileModel: primarySpawnExtras?.model ?? modelOverride ?? resolvedProfile?.model,
                 profileAwsRegion: resolvedProfile?.awsRegion,
                 profileAwsProfile: resolvedProfile?.awsProfile,
                 profileConfigDir: profileConfigDir,
@@ -2119,10 +2121,11 @@ extension WorktreeLifecycle {
                     profileSecret: resolvedProfile?.secret,
                     profileKind: resolvedProfile?.kind,
                     profileBaseURL: resolvedProfile?.baseURL,
-                    // No per-spawn model override here: archived-session
-                    // restores only happen on revive/recovery, whose callers
-                    // never pass one (create never carries archived sessions).
-                    profileModel: resolvedProfile?.model,
+                    // The session's own saved model, then the profile's. No
+                    // per-spawn override: archived-session restores only
+                    // happen on revive/recovery, whose callers never pass one
+                    // (create never carries archived sessions).
+                    profileModel: restoreSpawnExtras?.model ?? resolvedProfile?.model,
                     profileAwsRegion: resolvedProfile?.awsRegion,
                     profileAwsProfile: resolvedProfile?.awsProfile,
                     profileConfigDir: restoreProfileConfigDir,

@@ -141,10 +141,23 @@ extension RPCRouter {
             return RPCResponse(error: "codexHome requires terminal.createGuardedCodex")
         }
 
-        // A model override is a Codex launch argument. Refuse it for every
-        // other kind rather than silently dropping it: Claude models come from
-        // TBD model profiles, and a shell has no model.
-        if params.model != nil, params.type != .codex {
+        // Which agent this call spawns, decided once: the model and
+        // plugin-folder checks below, the admission gate and the spawn all
+        // read the same answer. Codex wins; otherwise a Claude type or any
+        // resume of a session is Claude; everything else is a shell.
+        let isCodexType = params.type == .codex
+        let isClaudeType = !isCodexType
+            && (params.type == .claude || params.resumeSessionID != nil)
+        // Login sessions are always fresh Claude spawns pinned to a profile:
+        // the whole point is capturing `/login` credentials into that
+        // profile's isolated config dir.
+        let isLoginSession = params.loginSession == true && params.resumeSessionID == nil
+
+        // A model is the agent's: the Codex model for a Codex terminal, the
+        // Claude model for a Claude one, which is saved with its spawn extras
+        // below. A shell has no model, so refuse it there rather than
+        // silently dropping it.
+        if params.model != nil, !isCodexType, !isClaudeType {
             return RPCResponse(error: TerminalCreateParams.modelRequiresAgentMessage)
         }
         // Validate an explicit Codex home before creating any terminal, pane,
@@ -181,18 +194,6 @@ extension RPCRouter {
            let disabledHookFeature = codexDisabledFeatures.first(where: GuardedCodexHome.hookFeatureKeys.contains) {
             return RPCResponse(error: "--codex-disable \(disabledHookFeature) would turn off the guard of a --codex-home terminal.")
         }
-
-        // Which agent this call spawns, decided once: the plugin-folder check
-        // below, the admission gate and the spawn all read the same answer.
-        // Codex wins; otherwise a Claude type or any resume of a session is
-        // Claude; everything else is a shell.
-        let isCodexType = params.type == .codex
-        let isClaudeType = !isCodexType
-            && (params.type == .claude || params.resumeSessionID != nil)
-        // Login sessions are always fresh Claude spawns pinned to a profile:
-        // the whole point is capturing `/login` credentials into that
-        // profile's isolated config dir.
-        let isLoginSession = params.loginSession == true && params.resumeSessionID == nil
 
         // Plugin folders are Claude Code's `--plugin-dir`. Refuse them for
         // every other kind rather than silently dropping them, as a model is
@@ -268,9 +269,11 @@ extension RPCRouter {
 
         // A Claude terminal's own values, kept on its row so later starts of
         // its session can reapply them; a resume honors the ones it is given
-        // and copies none from an older row. Plugin folders are checked here,
-        // before any spawn work, because the starter is there to see a bad
-        // path; a later start that finds one gone skips it instead.
+        // and copies none from an older row. The model among them is passed
+        // as ANTHROPIC_MODEL on this start and every later one. Plugin
+        // folders are checked here, before any spawn work, because the
+        // starter is there to see a bad path; a later start that finds one
+        // gone skips it instead.
         let spawnExtras: ClaudeSpawnExtras?
         if isClaudeType {
             do {
@@ -280,7 +283,8 @@ extension RPCRouter {
                     fileExists: { FileManager.default.fileExists(atPath: $0) })
                 spawnExtras = ClaudeSpawnExtras(
                     claudeSettingsOverlay: params.claudeSettingsOverlay,
-                    pluginDirs: pluginDirs).nonEmpty
+                    pluginDirs: pluginDirs,
+                    model: params.model).nonEmpty
             } catch {
                 let message = "\(error)"
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
@@ -624,7 +628,8 @@ extension RPCRouter {
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
             profileBaseURL: resolvedProfile?.baseURL,
-            profileModel: resolvedProfile?.model,
+            // The terminal's own model wins over its profile's.
+            profileModel: spawnExtras?.model ?? resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
             profileConfigDir: profileConfigDir,
@@ -1238,9 +1243,9 @@ extension RPCRouter {
                 resolvedProfile = nil
             }
             let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
-            // The closed terminal's own plugin folders and settings overlay,
-            // copied onto its history entry when it closed: the reopened
-            // session starts with them and keeps them on its new row.
+            // The closed terminal's own plugin folders, settings overlay and
+            // Claude model, copied onto its history entry when it closed: the
+            // reopened session starts with them and keeps them on its new row.
             let spawnExtras = entry.claudeSpawnExtras
             // Reviving a closed terminal respawns claude in the same worktree,
             // so the same trust argument applies — including the seeder's
@@ -1275,7 +1280,8 @@ extension RPCRouter {
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
-                profileModel: resolvedProfile?.model,
+                // The closed terminal's saved model wins over the profile's.
+                profileModel: spawnExtras?.model ?? resolvedProfile?.model,
                 profileAwsRegion: resolvedProfile?.awsRegion,
                 profileAwsProfile: resolvedProfile?.awsProfile,
                 profileConfigDir: profileConfigDir,
@@ -2823,6 +2829,7 @@ extension RPCRouter {
         let spawn = swapSpawn(
             plan: plan, mode: mode, resolved: resolved,
             overlay: overlay, profileConfigDir: profileConfigDir,
+            savedModel: spawnExtras?.model,
             extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             worktree: worktree, repo: repo, swapConfig: swapConfig,
             claudeEnvOverrides: claudeEnvOverrides,
@@ -3017,6 +3024,9 @@ extension RPCRouter {
 
     /// The spawn a `terminal.swapProfile` will run, composed from its plan.
     ///
+    /// - Parameter savedModel: the switched terminal's own Claude model, which
+    ///   every arm passes ahead of the new profile's model, so the model stays
+    ///   with the tab across the switch.
     /// - Parameter extraPluginDirs: the switched terminal's own plugin folders,
     ///   passed as `--plugin-dir` after TBD's on every arm; one that has gone
     ///   is skipped by the builder.
@@ -3029,6 +3039,7 @@ extension RPCRouter {
         resolved: ResolvedModelProfile?,
         overlay: ReplacementSpawnOverlay,
         profileConfigDir: String?,
+        savedModel: String?,
         extraPluginDirs: [String],
         worktree: LocalWorktree,
         repo: Repo?,
@@ -3049,7 +3060,7 @@ extension RPCRouter {
                 profileSecret: resolved?.secret,
                 profileKind: resolved?.kind,
                 profileBaseURL: resolved?.baseURL,
-                profileModel: resolved?.model,
+                profileModel: savedModel ?? resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
                 profileConfigDir: profileConfigDir,
@@ -3076,7 +3087,7 @@ extension RPCRouter {
                 profileSecret: resolved?.secret,
                 profileKind: resolved?.kind,
                 profileBaseURL: resolved?.baseURL,
-                profileModel: resolved?.model,
+                profileModel: savedModel ?? resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
                 profileConfigDir: profileConfigDir,

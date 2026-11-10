@@ -692,8 +692,11 @@ struct ModelProfileSpawnTests {
         #expect(!recorder.joinedAll.contains("acme-model"))
     }
 
+    /// A Codex terminal's model keeps its Codex meaning: `-c model=` on the
+    /// launch, kept in its launch options, and never `ANTHROPIC_MODEL` or the
+    /// saved Claude values.
     @Test("terminal.create passes a Codex model override to the Codex launch")
-    func terminalCreateCodexModelOverride() async throws {
+    func terminalCreateCodexModelUnchanged() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
@@ -711,6 +714,10 @@ struct ModelProfileSpawnTests {
         #expect(response.success)
         #expect(recorder.shellBodies.contains(
             #"tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
+        #expect(!recorder.joinedAll.contains("ANTHROPIC_MODEL"))
+        let terminal = try response.decodeResult(TBDShared.Terminal.self)
+        #expect(terminal.codexLaunchOptions?.model == "acme-model")
+        #expect(terminal.claudeSpawnExtras == nil)
     }
 
     @Test("terminal.create gives only the requested Codex tab its guarded home")
@@ -912,9 +919,11 @@ struct ModelProfileSpawnTests {
         #expect(recorder.calls.isEmpty)
     }
 
-    @Test("terminal.create refuses a model override for non-Codex terminals",
-          arguments: [TerminalCreateType?.none, .claude, .shell])
-    func terminalCreateRefusesModelForNonCodex(type: TerminalCreateType?) async throws {
+    /// A Claude terminal takes `model` as its Claude model (see
+    /// `ClaudeSpawnExtrasSpawnPathTests`); only a shell has none.
+    @Test("terminal.create refuses a model for a shell terminal",
+          arguments: [TerminalCreateType?.none, .shell])
+    func terminalCreateShellModelRefused(type: TerminalCreateType?) async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)

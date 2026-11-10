@@ -15,13 +15,15 @@ extension RPCRouter {
         let useExistingBranch = params.useExistingBranch ?? false
 
         // The primary Claude terminal's own values, kept on its row so later
-        // starts of its session can reapply them. Plugin folders are checked
-        // here, before phase 1 inserts the row and so before phase 2 adds a git
-        // worktree or a branch, because the starter is there to see a bad path;
-        // a later start that finds one gone skips it instead. They are checked
-        // whatever the primary turns out to be: the lifecycle resolves that,
-        // and ignores these values for a Codex primary. Like the repo lookup
-        // below, this is validation, so it precedes the actuation row.
+        // starts of its session can reapply them — the Claude model among
+        // them, which every later start passes ahead of the profile's model.
+        // Plugin folders are checked here, before phase 1 inserts the row and
+        // so before phase 2 adds a git worktree or a branch, because the
+        // starter is there to see a bad path; a later start that finds one
+        // gone skips it instead. They are checked whatever the primary turns
+        // out to be: the lifecycle resolves that, and ignores these values for
+        // a Codex primary. Like the repo lookup below, this is validation, so
+        // it precedes the actuation row.
         let claudeSpawnExtras: ClaudeSpawnExtras?
         do {
             let pluginDirs = try ClaudePluginDirs.validated(
@@ -30,7 +32,8 @@ extension RPCRouter {
                 fileExists: { FileManager.default.fileExists(atPath: $0) })
             claudeSpawnExtras = ClaudeSpawnExtras(
                 claudeSettingsOverlay: params.claudeSettingsOverlay,
-                pluginDirs: pluginDirs).nonEmpty
+                pluginDirs: pluginDirs,
+                model: params.model).nonEmpty
         } catch {
             return RPCResponse(error: "\(error)")
         }
@@ -155,9 +158,10 @@ extension RPCRouter {
         // Explicit per-creation model-profile override (sidebar `+` picker).
         // nil preserves the repo/scratch/global precedence chain.
         let overrideProfileID = params.profileID
-        // Per-spawn Claude model override (picker model buttons). Initial
-        // spawn only — respawns fall back to the profile default.
-        let modelOverride = params.model
+        // Per-spawn Claude model override (picker model buttons, CLI
+        // --claude-model). It also rides in `claudeSpawnExtras`, which is what
+        // keeps it for later starts; read from there so a blank one is nil.
+        let modelOverride = claudeSpawnExtras?.model
         // Per-spawn Codex model, applied only if the primary resolves to Codex.
         let codexModelOverride = params.codexModel
         // Explicit primary agent for this creation. nil preserves the global
