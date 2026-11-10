@@ -8,6 +8,7 @@ extension WorktreeLifecycle {
     public func reviveConversationOnFreshBranch(
         archivedWorktreeID: UUID,
         sessionID: String,
+        identity: AgentSessionIdentity? = nil,
         cols: Int? = nil,
         rows: Int? = nil,
         date: Date = Date()
@@ -27,38 +28,56 @@ extension WorktreeLifecycle {
                 "Cannot revive a conversation on a fresh branch without a repository."
             )
         }
-        // Validate against the SAME projects root the spawn will sync from.
-        // `spawnPrimaryTerminals` resolves the worktree's model profile and
-        // syncs under that profile's config dir; validating against the
-        // ambient root instead proved nothing — a session present ambiently
-        // but absent from the profile root passed here and then failed inside
-        // Claude with "No conversation found with session ID". Profile
-        // resolution failures fall back to nil (ambient), matching the spawn.
-        var resolvedProfile: ResolvedModelProfile?
-        if let resolver = modelProfileResolver {
-            do {
-                // A resumed conversation belongs to the account holding its
-                // transcript, which the history row does not record, so it
-                // keeps the stable pre-balancing resolution.
-                resolvedProfile = try await resolver.resolve(
-                    repoID: repo.id, override: nil, balance: false)
-            } catch {
-                logger.warning(
-                    "fresh revive: model profile resolution failed; validating against the ambient projects root")
-                resolvedProfile = nil
-            }
-        }
-        let projectsRoot = claudeProjectsRoot(
-            profileConfigDirPath: await configDirManager.resolveConfigDir(
-                for: resolvedProfile)
-        )
-        guard TranscriptProjectDirSync.locateSessionTranscript(
-            sessionID: sessionID,
-            projectsRoot: projectsRoot
-        ) != nil else {
+        let identity = identity ?? AgentSessionIdentity(agentKind: .claude, sessionID: sessionID)
+        guard let association = try await db.localAgentSessions.get(
+            worktreeID: archived.id, identity: identity) else {
             throw WorktreeLifecycleError.invalidOperation(
-                "Cannot revive conversation: no transcript found for session \(sessionID)."
+                "Cannot revive conversation: session is not cataloged in the archived worktree.")
+        }
+        let sessionID = association.identity.sessionID
+        let sourceTab = archived.archivedAgentTabs?.first { $0.identity == identity }
+        let preparedCodexLaunch: CodexLaunchPreparation?
+        if identity.agentKind == .codex {
+            // The native thread ID is resume authority. Rollout files are only
+            // display metadata and need not remain on disk for native resume.
+            preparedCodexLaunch = try CodexLaunchPreparation.prepare(
+                guardedHome: association.codexLaunchOptions?.codexHome,
+                executableResolver: codexExecutableResolver, sharedHomeEnsurer: codexHomeEnsurer)
+        } else {
+            preparedCodexLaunch = nil
+            // Validate against the SAME projects root the spawn will sync from.
+            // `spawnPrimaryTerminals` resolves the worktree's model profile and
+            // syncs under that profile's config dir; validating against the
+            // ambient root instead proved nothing — a session present ambiently
+            // but absent from the profile root passed here and then failed inside
+            // Claude with "No conversation found with session ID". Profile
+            // resolution failures fall back to nil (ambient), matching the spawn.
+            var resolvedProfile: ResolvedModelProfile?
+            if let resolver = modelProfileResolver {
+                do {
+                    // A resumed conversation belongs to the account holding its
+                    // transcript, which the history row does not record, so it
+                    // keeps the stable pre-balancing resolution.
+                    resolvedProfile = try await resolver.resolve(
+                        repoID: repo.id, override: sourceTab?.profileID, balance: false)
+                } catch {
+                    logger.warning(
+                        "fresh revive: model profile resolution failed; validating against the ambient projects root")
+                    resolvedProfile = nil
+                }
+            }
+            let projectsRoot = claudeProjectsRoot(
+                profileConfigDirPath: await configDirManager.resolveConfigDir(
+                    for: resolvedProfile)
             )
+            guard TranscriptProjectDirSync.locateSessionTranscript(
+                sessionID: sessionID,
+                projectsRoot: projectsRoot
+            ) != nil else {
+                throw WorktreeLifecycleError.invalidOperation(
+                    "Cannot revive conversation: no transcript found for session \(sessionID)."
+                )
+            }
         }
 
         var fetchWarning: Error?
@@ -106,20 +125,22 @@ extension WorktreeLifecycle {
 
         Forked from **\(archived.displayName)** on \(operationDate).
 
-        | | |
-        | --- | --- |
-        | Original branch | `\(archived.branch)` @ `\(abbreviatedArchivedSHA)` (archived \(archivedDate)) |
-        | This branch | `\(pending.branch)` |
-        | Branched from | `\(baseRef)` @ `\(abbreviatedBaseSHA)` (\(baseCommitDate)) |
-        | Source session | `\(sessionID)` |
+        - **Original branch** – `\(archived.branch)` @ `\(abbreviatedArchivedSHA)` (archived \(archivedDate))
+        - **This branch** – `\(pending.branch)`
+        - **Branched from** – `\(baseRef)` @ `\(abbreviatedBaseSHA)` (\(baseCommitDate))
+        - **Source agent** – `\(identity.agentKind.rawValue)`
+        - **Source session** – `\(sessionID)`
 
         """
         // The source session's plugin folders and settings overlay, from the
         // map the archive kept beside its session list; nil when it kept none.
         let carryover = ConversationCarryover(
-            sourceSessionID: sessionID,
+            identity: identity,
             notesSeed: notesSeed,
-            claudeSpawnExtras: archived.archivedClaudeSpawnExtras?[sessionID]
+            profileID: sourceTab?.profileID,
+            claudeSpawnExtras: sourceTab?.claudeSpawnExtras ?? archived.archivedClaudeSpawnExtras?[sessionID],
+            codexLaunchOptions: association.codexLaunchOptions,
+            preparedCodexLaunch: preparedCodexLaunch
         )
         let completion = try await completeCreateWorktree(
             worktreeID: pending.id,

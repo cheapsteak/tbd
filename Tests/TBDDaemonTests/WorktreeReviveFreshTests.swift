@@ -128,6 +128,9 @@ struct WorktreeReviveFreshTests {
             claudeSessionIDs: ["missing-session"],
             archivedHeadSHA: "0123456789abcdef"
         )
+        try await db.localAgentSessions.upsert(.init(worktreeID: archived.id,
+            identity: .init(agentKind: .claude, sessionID: "missing-session"),
+            firstObservedAt: operationDate, lastObservedAt: operationDate))
         let rowsBefore = try await db.worktrees.list()
         let worktreeRoot = try #require(repo.worktreeRoot)
         let rootExistedBefore = FileManager.default.fileExists(atPath: worktreeRoot)
@@ -314,12 +317,11 @@ struct WorktreeReviveFreshTests {
 
             Forked from **stale-owl** on 2026-07-27.
 
-            | | |
-            | --- | --- |
-            | Original branch | `tbd/stale-owl` @ `\(String(localSHA.prefix(7)))` (archived 2026-06-01) |
-            | This branch | `\(created.branch)` |
-            | Branched from | `origin/main` @ `\(shortRemoteSHA)` (2026-07-20) |
-            | Source session | `A` |
+            - **Original branch** – `tbd/stale-owl` @ `\(String(localSHA.prefix(7)))` (archived 2026-06-01)
+            - **This branch** – `\(created.branch)`
+            - **Branched from** – `origin/main` @ `\(shortRemoteSHA)` (2026-07-20)
+            - **Source agent** – `claude`
+            - **Source session** – `A`
 
             """
         )
@@ -823,6 +825,160 @@ struct WorktreeReviveFreshTests {
         )
     }
 
+    // These regressions fail if fresh revive treats the provider identity as
+    // Claude, skips worktree-scoped authority, or records a destination early.
+    @Test(arguments: [false, true], [false, true])
+    func codexFreshReviveUsesCatalogAndNativeResume(preSession: Bool, dedicatedHome: Bool) async throws {
+        let (home, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        if preSession { try await installPreSessionHook(repoDir: repoDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let source = try await makeArchivedSource(db: db, repo: repo, tempDir: tempDir,
+            sessions: ["other-claude"], archivedHeadSHA: "old-head")
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "native-thread")
+        let codexHome = home.appendingPathComponent(dedicatedHome ? "dedicated" : "codex")
+        if dedicatedHome {
+            try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+            try #"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}"#
+                .write(to: codexHome.appendingPathComponent("hooks.json"), atomically: true, encoding: .utf8)
+            try "".write(to: codexHome.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+        }
+        let options = CodexLaunchOptions(model: "acme-model", disabledFeatures: ["example_feature"],
+            codexHome: dedicatedHome ? codexHome.path : nil)
+        let association = LocalAgentSession(worktreeID: source.id, identity: identity,
+            transcriptPath: home.appendingPathComponent("absent-rollout.jsonl").path,
+            codexLaunchOptions: options, firstObservedAt: operationDate, lastObservedAt: operationDate)
+        try await db.localAgentSessions.upsert(association)
+        // Advance the default branch after the source was archived.
+        try await shell("git commit --allow-empty -m 'current base'", at: repoDir)
+        let currentSHA = try await GitManager().headSHA(repoPath: repoDir.path)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: lifecycle.tmux,
+            actuationLog: makeTestActuationLog())
+        let admission = StubAdmission(.admit)
+        router.startAdmission = admission
+        try await db.config.setStartAdmissionEnabled(true)
+        let response = await router.handle(try freshRequest(source.id, identity: identity, legacySessionID: "legacy-unselected"))
+        #expect(response.success, "\(response.error ?? "")")
+        guard response.success else { return }
+        let result = try response.decodeResult(WorktreeReviveConversationFreshResult.self)
+        if preSession {
+            try writeMarker(worktreeID: result.worktree.id, exitCode: 0)
+            #expect(try await waitUntil {
+                try await db.worktrees.get(id: result.worktree.id)?.status == .active
+            })
+        }
+        #expect(admission.requests.map(\.agent) == [.codex])
+        #expect(try await GitManager().headSHA(repoPath: result.worktree.localPath) == currentSHA)
+        let terminals = try await db.terminals.list(worktreeID: result.worktree.id)
+        let agents = terminals.filter { $0.kind == .claude || $0.kind == .codex }
+        #expect(agents.count == 1)
+        let terminal = try #require(agents.first)
+        #expect(terminal.kind == .codex)
+        #expect(terminal.claudeSessionID == "native-thread")
+        #expect(terminal.codexLaunchOptions == options)
+        let spawn = try #require(recorder.snapshot().first {
+            $0.contains("new-window") && ($0.last?.contains("resume ") ?? false) && ($0.last?.contains("native-thread") ?? false)
+        })
+        let command = try #require(spawn.last)
+        #expect(command.contains("acme-model"))
+        #expect(command.contains("--disable") && command.contains("example_feature"))
+        #expect(!command.contains("--fork-session"))
+        #expect(!command.contains(" -- "))
+        #expect(spawn.contains("DISABLE_AUTO_UPDATE=true"))
+        #expect(spawn.contains("CODEX_HOME=\(codexHome.path)") || command.contains(codexHome.path))
+        #expect(try await db.localAgentSessions.get(worktreeID: source.id, identity: identity) == association)
+        #expect(try await db.localAgentSessions.list(worktreeID: result.worktree.id).isEmpty)
+        let note = try #require(try await db.notes.list(worktreeID: result.worktree.id).first)
+        let prose = try #require(try await db.notes.get(id: note.id)?.content)
+        #expect(prose.contains("codex"))
+        #expect(prose.contains("native-thread"))
+        #expect(!prose.contains(home.path))
+        #expect(!prose.contains(tempDir.path))
+        let rollout = home.appendingPathComponent("accepted-rollout.jsonl")
+        try (#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n")
+            .write(to: rollout, atomically: true, encoding: .utf8)
+        let accepted = await router.handle(try RPCRequest(method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(terminalID: terminal.id, sessionID: "native-thread",
+                transcriptPath: rollout.path, source: "startup")))
+        #expect(accepted.success)
+        #expect(try await db.localAgentSessions.list(worktreeID: result.worktree.id).map(\.identity) == [identity])
+        #expect(try await db.localAgentSessions.get(worktreeID: source.id, identity: identity) == association)
+    }
+
+    @Test(arguments: [LocalAgentKind.claude, .codex], [false, true])
+    func foreignOrUncatalogedIdentityRefusesBeforeGit(agent: LocalAgentKind, foreign: Bool) async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let source = try await makeArchivedSource(db: db, repo: repo, tempDir: tempDir,
+            sessions: [], archivedHeadSHA: "old-head")
+        let identity = AgentSessionIdentity(agentKind: agent, sessionID: "unowned")
+        if foreign {
+            let other = try await db.worktrees.create(repoID: repo.id, name: "other", branch: "tbd/other",
+                path: tempDir.appendingPathComponent("other").path, tmuxServer: "tbd-test")
+            try await db.localAgentSessions.upsert(.init(worktreeID: other.id, identity: identity,
+                firstObservedAt: operationDate, lastObservedAt: operationDate))
+        }
+        // A discoverable Claude transcript cannot replace catalog authority.
+        try writeSourceTranscript(sessionID: "unowned")
+        let before = try await db.worktrees.list()
+        let refs = try await GitManager().listRefs(repoPath: repoDir.path, prefix: "refs/heads")
+        let checkouts = try await GitManager().worktreeList(repoPath: repoDir.path)
+        let response = await makeReviveFreshRouter(db: db, deltas: FreshReviveDeltas())
+            .handle(try freshRequest(source.id, identity: identity))
+        #expect(!response.success)
+        #expect(try await db.worktrees.list() == before)
+        #expect(try await GitManager().listRefs(repoPath: repoDir.path, prefix: "refs/heads") == refs)
+        #expect(try await GitManager().worktreeList(repoPath: repoDir.path).map(\.path) == checkouts.map(\.path))
+    }
+
+    @Test(arguments: ["missing-home", "corrupt-options"])
+    func codexStrictMetadataRefusesBeforeCreatingBranch(failure: String) async throws {
+        let (home, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let source = try await makeArchivedSource(db: db, repo: repo, tempDir: tempDir,
+            sessions: [], archivedHeadSHA: "old-head")
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "strict-thread")
+        try await db.localAgentSessions.upsert(.init(worktreeID: source.id, identity: identity,
+            codexLaunchOptions: .init(codexHome: home.appendingPathComponent("missing").path),
+            firstObservedAt: operationDate, lastObservedAt: operationDate))
+        if failure == "corrupt-options" {
+            try await db.writerForTests.write { conn in
+                try conn.execute(sql: "UPDATE local_agent_session SET codex_launch_options = 'broken' WHERE worktree_id = ?",
+                    arguments: [source.id.uuidString])
+            }
+        }
+        try writeSourceTranscript(sessionID: identity.sessionID)
+        let before = try await db.worktrees.list()
+        let refs = try await GitManager().listRefs(repoPath: repoDir.path, prefix: "refs/heads")
+        let response = await makeReviveFreshRouter(db: db, deltas: FreshReviveDeltas())
+            .handle(try freshRequest(source.id, identity: identity))
+        #expect(!response.success)
+        #expect(try await db.worktrees.list() == before)
+        #expect(try await GitManager().listRefs(repoPath: repoDir.path, prefix: "refs/heads") == refs)
+    }
+
+    private func freshRequest(_ source: UUID, identity: AgentSessionIdentity,
+                              legacySessionID: String? = nil) throws -> RPCRequest {
+        let object: [String: Any] = ["archivedWorktreeID": source.uuidString,
+            "sessionID": legacySessionID ?? identity.sessionID,
+            "identity": ["agentKind": identity.agentKind.rawValue, "sessionID": identity.sessionID]]
+        return RPCRequest(method: RPCMethod.worktreeReviveConversationFresh,
+            params: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self))
+    }
+
     private func makeReviveFreshLifecycle(
         db: TBDDatabase,
         recorder: PreSessionRecordedCommands? = nil,
@@ -854,7 +1010,9 @@ struct WorktreeReviveFreshTests {
                     baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
                     hostBaseDirectory: claudeHome
                 ),
-            preSessionPollInterval: 0.05
+            preSessionPollInterval: 0.05,
+            codexExecutableResolver: { "/usr/bin/true" },
+            codexHomeEnsurer: { TBDConstants.configDir.appendingPathComponent("codex") }
         )
     }
 
@@ -904,6 +1062,11 @@ struct WorktreeReviveFreshTests {
             claudeSpawnExtras: claudeSpawnExtras,
             archivedHeadSHA: archivedHeadSHA
         )
+        for session in sessions {
+            try await db.localAgentSessions.upsert(.init(worktreeID: source.id,
+                identity: .init(agentKind: .claude, sessionID: session),
+                firstObservedAt: operationDate, lastObservedAt: operationDate))
+        }
         try await db.writerForTests.write { database in
             try database.execute(
                 sql: "UPDATE worktree SET archivedAt = ? WHERE id = ?",

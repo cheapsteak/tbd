@@ -2600,17 +2600,25 @@ public struct WorktreeReviveParams: Codable, Sendable {
 public struct WorktreeReviveConversationFreshParams: Codable, Sendable {
     public let archivedWorktreeID: UUID
     public let sessionID: String
+    /// Provider-qualified selection; absent on legacy Claude-only clients.
+    public let identity: AgentSessionIdentity?
     public let cols: Int?
     public let rows: Int?
+
+    public var resolvedIdentity: AgentSessionIdentity {
+        identity ?? AgentSessionIdentity(agentKind: .claude, sessionID: sessionID)
+    }
 
     public init(
         archivedWorktreeID: UUID,
         sessionID: String,
+        identity: AgentSessionIdentity? = nil,
         cols: Int? = nil,
         rows: Int? = nil
     ) {
         self.archivedWorktreeID = archivedWorktreeID
         self.sessionID = sessionID
+        self.identity = identity
         self.cols = cols
         self.rows = rows
     }

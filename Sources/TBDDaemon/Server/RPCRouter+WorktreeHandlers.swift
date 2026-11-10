@@ -724,9 +724,9 @@ extension RPCRouter {
             .worktreeReviveConversationFresh, actor: actor,
             target: ActuationTarget(worktree: params.archivedWorktreeID.uuidString))
 
-        // Start admission: this brings a Claude conversation back.
+        // Admission follows the selected provider, including the legacy Claude fallback.
         if let held = await holdStartIfDenied(
-            actuationID, actor: actor, agent: .claude, worktreeID: params.archivedWorktreeID) {
+            actuationID, actor: actor, agent: params.resolvedIdentity.agentKind == .claude ? .claude : .codex, worktreeID: params.archivedWorktreeID) {
             return held
         }
 
@@ -744,6 +744,7 @@ extension RPCRouter {
                                 .reviveConversationOnFreshBranch(
                                     archivedWorktreeID: params.archivedWorktreeID,
                                     sessionID: params.sessionID,
+                                    identity: params.resolvedIdentity,
                                     cols: params.cols,
                                     rows: params.rows
                                 )
