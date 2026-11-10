@@ -140,9 +140,9 @@ public enum CodexTranscriptParser {
     }
 
     private static func updateTurn(_ record: [String: Any], offset: UInt64, turn: inout String) {
-        guard record["type"] as? String == "event_msg",
-              let payload = record["payload"] as? [String: Any],
-              payload["type"] as? String == "task_started" else { return }
+        guard let payload = record["payload"] as? [String: Any] else { return }
+        let type = record["type"] as? String
+        guard type == "turn_context" || type == "event_msg" && payload["type"] as? String == "task_started" else { return }
         turn = payload["turn_id"] as? String ?? "codex-turn-byte-\(offset)"
     }
 

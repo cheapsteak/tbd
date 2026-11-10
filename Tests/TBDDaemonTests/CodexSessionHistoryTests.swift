@@ -224,9 +224,78 @@ struct CodexSessionHistoryTests {
         #expect(summary.transcriptAvailable)
     }
 
-    private func replacing(_ session: LocalAgentSession, path: String) -> LocalAgentSession {
+    @Test("a symlink above the recorded home cannot grant access to its target")
+    func rejectsHomeAncestorSymlink() async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let target = f.root.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: f.home, to: target.appendingPathComponent("home"))
+        let link = f.root.appendingPathComponent("redirected")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let home = link.appendingPathComponent("home").path
+        try await f.db.localAgentSessions.upsert(replacing(f.session, path: home + "/rollout.jsonl", home: home))
+        #expect(try await messages(f).success == false)
+        let session = try #require(try await f.db.localAgentSessions.get(worktreeID: f.worktree.id, identity: f.session.identity))
+        #expect(!CodexSessionScanner.summary(session).transcriptAvailable)
+    }
+
+    @Test("replacing an ancestor of the home before or after parsing refuses the held descriptor", arguments: ["directory-before", "directory-after", "symlink-before", "symlink-after"])
+    func rejectsHomeAncestorReplacement(kind: String) async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let ancestor = f.root.appendingPathComponent("ancestor")
+        try FileManager.default.createDirectory(at: ancestor, withIntermediateDirectories: true)
+        let home = ancestor.appendingPathComponent("home")
+        try FileManager.default.moveItem(at: f.home, to: home)
+        let session = replacing(f.session, path: home.appendingPathComponent("rollout.jsonl").path, home: home.path)
+        try await f.db.localAgentSessions.upsert(session)
+        var validationCount = 0
+        await #expect(throws: (any Error).self) {
+            _ = try await CodexSessionScanner.messages(session, currentSession: {
+                validationCount += 1
+                if kind.hasSuffix("after"), validationCount == 1 { return session }
+                let detached = f.root.appendingPathComponent("detached")
+                try FileManager.default.moveItem(at: ancestor, to: detached)
+                if kind.hasPrefix("symlink") {
+                    try FileManager.default.createSymbolicLink(at: ancestor, withDestinationURL: detached)
+                } else {
+                    try FileManager.default.copyItem(at: detached, to: ancestor)
+                }
+                return session
+            })
+        }
+    }
+
+    @Test("macOS home aliases keep a deleted cataloged transcript unavailable", arguments: ["physical-var", "physical-tmp", "mixed-var", "mixed-tmp", "reverse-var", "reverse-tmp"])
+    func missingFileUnderPlatformAlias(spelling: String) async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let alias = spelling.hasSuffix("var") ? "/var/tmp" : "/tmp"
+        let physical = spelling.hasSuffix("var") ? "/private/var/tmp" : "/private/tmp"
+        let name = "/codex-history-alias-" + UUID().uuidString
+        let directory = URL(fileURLWithPath: physical + name)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let home = (spelling.hasPrefix("reverse") ? alias : physical) + name
+        let path = (spelling.hasPrefix("mixed") ? alias : physical) + name + "/rollout.jsonl"
+        try Data(contentsOf: f.file).write(to: URL(fileURLWithPath: path))
+        let session = replacing(f.session, path: path, home: home)
+        try await f.db.localAgentSessions.upsert(session)
+        let existing = try await messages(f)
+        #expect(existing.success)
+        #expect(try existing.decodeResult([TranscriptItem].self).count == 2)
+        try FileManager.default.removeItem(atPath: path)
+        let missing = try await messages(f)
+        #expect(missing.success)
+        #expect(try missing.decodeResult([TranscriptItem].self).isEmpty)
+        #expect(!CodexSessionScanner.summary(session).transcriptAvailable)
+        #expect(try await f.db.localAgentSessions.get(worktreeID: f.worktree.id, identity: f.session.identity) == session)
+    }
+
+    private func replacing(_ session: LocalAgentSession, path: String, home: String? = nil) -> LocalAgentSession {
         LocalAgentSession(id: session.id, worktreeID: session.worktreeID, identity: session.identity,
-                          transcriptPath: path, codexLaunchOptions: session.codexLaunchOptions,
+                          transcriptPath: path, codexLaunchOptions: home.map { CodexLaunchOptions(codexHome: $0) } ?? session.codexLaunchOptions,
                           firstObservedAt: session.firstObservedAt, lastObservedAt: session.lastObservedAt)
     }
 }

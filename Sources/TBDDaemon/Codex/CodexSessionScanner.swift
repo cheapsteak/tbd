@@ -59,36 +59,17 @@ enum CodexSessionScanner {
     private static func openTranscript(_ session: LocalAgentSession) throws -> CodexTranscriptFile? {
         guard session.identity.agentKind == .codex else { throw ReadError.unsafePath }
         guard let path = session.transcriptPath else { return nil }
-        let home = session.codexLaunchOptions?.codexHome.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            ?? CodexHomeManager().codexHome
-        let root = home.standardizedFileURL.path
-        let candidate = URL(fileURLWithPath: path).standardizedFileURL.path
-        guard path.hasPrefix("/"), !path.utf8.contains(0), candidate.hasPrefix(root + "/") else {
-            throw ReadError.unsafePath
-        }
-        // Foundation intentionally preserves macOS aliases such as /var even
-        // after resolvingSymlinksInPath. realpath gives openat a physical root;
-        // only this trusted root is resolved, never the untrusted path below it.
-        var rootInfo = stat()
-        guard lstat(root, &rootInfo) == 0 else {
-            if errno == ENOENT || errno == EACCES { return nil }
-            throw ReadError.unsafePath
-        }
-        guard rootInfo.st_mode & S_IFMT == S_IFDIR else { throw ReadError.unsafePath }
-        guard let resolvedRoot = CodexTranscriptFile.resolveRoot(root) else {
-            if errno == ENOENT || errno == EACCES { return nil }
-            throw ReadError.unsafePath
-        }
-        return try CodexTranscriptFile.open(
-            path: resolvedRoot + candidate.dropFirst(root.count), sourceRoot: root, resolvedRoot: resolvedRoot)
+        let home = session.codexLaunchOptions?.codexHome ?? CodexHomeManager().codexHome.path
+        return try CodexTranscriptFile.open(path: path, home: home)
 
     }
 }
 
-/// A descriptor and the identities of every directory used to reach it.
-/// openat + NOFOLLOW prevents a directory or leaf symlink substitution from
-/// redirecting the read. Checking the chain again catches rename/replacement;
-/// parsing uses the held descriptor, never the path that could be exchanged.
+/// A descriptor and the identities of every directory used to reach it,
+/// including the ancestors of the configured home. Only the verified macOS
+/// /tmp and /var aliases may be rewritten; every physical component is opened
+/// with NOFOLLOW from /. Checking the original paths again catches replacement
+/// of an ancestor or alias while parsing consumes the held descriptor.
 private final class CodexTranscriptFile {
     private struct Identity: Equatable {
         let device: dev_t
@@ -103,42 +84,84 @@ private final class CodexTranscriptFile {
         }
     }
 
+    /// Pin the symbolic link itself as well as its one permitted destination.
+    /// No caller-selected ancestor is resolved through realpath.
+    private struct PlatformAlias: Equatable {
+        let component: String
+        let identity: Identity
+        let destination: String
+
+        static func read(_ component: String) throws -> Self {
+            let path = "/" + component
+            var before = stat()
+            var after = stat()
+            guard lstat(path, &before) == 0, before.st_mode & S_IFMT == S_IFLNK,
+                  let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: path),
+                  destination == "private/" + component || destination == "/private/" + component,
+                  lstat(path, &after) == 0, after.st_mode & S_IFMT == S_IFLNK,
+                  Identity(before) == Identity(after) else {
+                throw CodexSessionScanner.ReadError.unsafePath
+            }
+            return Self(component: component, identity: Identity(after), destination: destination)
+        }
+    }
+
     let handle: FileHandle
     let size: Int64
     let modifiedAt: Date
     private let path: String
+    private let home: String
     private let identities: [Identity]
-    private let sourceRoot: String
-    private let resolvedRoot: String
+    private let aliases: [PlatformAlias]
 
-    private init(descriptor: Int32, info: stat, path: String, identities: [Identity],
-                 sourceRoot: String, resolvedRoot: String) {
+    private init(descriptor: Int32, info: stat, path: String, home: String,
+                 identities: [Identity], aliases: [PlatformAlias]) {
         handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         size = info.st_size
         modifiedAt = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec)
                           + Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
         self.path = path
+        self.home = home
         self.identities = identities
-        self.sourceRoot = sourceRoot
-        self.resolvedRoot = resolvedRoot
+        self.aliases = aliases
     }
 
     deinit { try? handle.close() }
 
-    static func resolveRoot(_ path: String) -> String? {
-        guard let resolved = realpath(path, nil) else { return nil }
-        defer { free(resolved) }
-        return String(cString: resolved)
+    /// Lexical normalization never asks whether the leaf exists. Foundation's
+    /// standardization can change /private prefixes when a leaf is deleted.
+    /// Reject parent traversal instead of erasing a possibly linked component.
+    private static func components(_ path: String, aliases: inout [PlatformAlias]) throws -> [String] {
+        guard path.hasPrefix("/"), !path.utf8.contains(0) else { throw CodexSessionScanner.ReadError.unsafePath }
+        var components = path.split(separator: "/").filter { $0 != "." }.map(String.init)
+        guard !components.contains("..") else { throw CodexSessionScanner.ReadError.unsafePath }
+        if let first = components.first, first == "tmp" || first == "var" {
+            let alias = try PlatformAlias.read(first)
+            if let recorded = aliases.first(where: { $0.component == first }) {
+                guard recorded == alias else { throw CodexSessionScanner.ReadError.changedFile }
+            } else { aliases.append(alias) }
+            components.insert("private", at: 0)
+        }
+        return components
     }
 
-    static func open(path: String, sourceRoot: String, resolvedRoot: String) throws -> CodexTranscriptFile? {
-        let components = path.split(separator: "/").map(String.init)
-        var descriptor = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    static func open(path: String, home: String) throws -> CodexTranscriptFile? {
+        var aliases: [PlatformAlias] = []
+        let root = try components(home, aliases: &aliases)
+        let candidate = try components(path, aliases: &aliases)
+        guard !root.isEmpty, candidate.count > root.count, candidate.starts(with: root) else {
+            throw CodexSessionScanner.ReadError.unsafePath
+        }
+        var descriptor = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else { throw CodexSessionScanner.ReadError.unsafePath }
         defer { if descriptor >= 0 { Darwin.close(descriptor) } }
-        var identities: [Identity] = []
-        for (index, component) in components.enumerated() {
-            let isFile = index == components.count - 1
+        var rootInfo = stat()
+        guard fstat(descriptor, &rootInfo) == 0, rootInfo.st_mode & S_IFMT == S_IFDIR else {
+            throw CodexSessionScanner.ReadError.unsafePath
+        }
+        var identities = [Identity(rootInfo)]
+        for (index, component) in candidate.enumerated() {
+            let isFile = index == candidate.count - 1
             let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (isFile ? 0 : O_DIRECTORY)
             let next = openat(descriptor, component, flags)
             guard next >= 0 else {
@@ -157,8 +180,8 @@ private final class CodexTranscriptFile {
             }
             identities.append(Identity(info))
             if isFile {
-                let file = CodexTranscriptFile(descriptor: descriptor, info: info, path: path, identities: identities,
-                                               sourceRoot: sourceRoot, resolvedRoot: resolvedRoot)
+                let file = CodexTranscriptFile(descriptor: descriptor, info: info, path: path, home: home,
+                                               identities: identities, aliases: aliases)
                 descriptor = -1
                 return file
             }
@@ -167,10 +190,7 @@ private final class CodexTranscriptFile {
     }
 
     func isCurrent() -> Bool {
-        var rootInfo = stat()
-        guard Self.resolveRoot(sourceRoot) == resolvedRoot,
-              lstat(sourceRoot, &rootInfo) == 0, rootInfo.st_mode & S_IFMT == S_IFDIR,
-              let current = try? Self.open(path: path, sourceRoot: sourceRoot, resolvedRoot: resolvedRoot) else { return false }
-        return current.identities == identities
+        guard let current = try? Self.open(path: path, home: home) else { return false }
+        return current.identities == identities && current.aliases == aliases
     }
 }

@@ -92,6 +92,25 @@ struct CodexTranscriptParserTests {
         #expect(CodexTranscriptParser.parseTail(filePath: file.path, limit: 1) == Array(items.suffix(1)))
     }
 
+    @Test("turn_context separates identical fallback messages from the next turn's canonical row", arguments: [false, true])
+    func independentContextTurns(withNativeID: Bool) throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let firstContext = withNativeID ? #"{"turn_id":"one"}"# : "{}"
+        let secondContext = withNativeID ? #"{"turn_id":"two"}"# : "{}"
+        try """
+        {"type":"turn_context","payload":\(firstContext)}
+        {"type":"event_msg","payload":{"type":"agent_message","id":"event-one","message":"answer"}}
+        {"type":"turn_context","payload":\(secondContext)}
+        {"type":"event_msg","payload":{"type":"agent_message","id":"event-two","message":"answer"}}
+        {"type":"response_item","payload":{"type":"message","id":"canonical-two","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}
+
+        """.write(to: file, atomically: true, encoding: .utf8)
+        let items = CodexTranscriptParser.parse(filePath: file.path)
+        #expect(items.map(\.id) == ["event-one", "canonical-two"])
+        #expect(CodexTranscriptParser.parseTail(filePath: file.path, limit: 1) == Array(items.suffix(1)))
+    }
+
     @Test("structured tool output metadata reports nonzero exit status", arguments: [false, true])
     func structuredToolError(encodedOutput: Bool) throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
