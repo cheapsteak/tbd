@@ -1476,6 +1476,8 @@ extension WorktreeLifecycle {
         worktreePath: String? = nil, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
         archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
+        archivedAgentTabs: [ArchivedAgentTab]? = nil,
+        preparedArchivedCodexLaunches: [Int: CodexLaunchPreparation]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil,
         rows: Int? = nil,
@@ -1500,6 +1502,8 @@ extension WorktreeLifecycle {
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
                 archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
+                archivedAgentTabs: archivedAgentTabs,
+                preparedArchivedCodexLaunches: preparedArchivedCodexLaunches,
                 initialPrompt: initialPrompt,
                 cols: cols,
                 rows: rows,
@@ -1523,6 +1527,8 @@ extension WorktreeLifecycle {
         skipClaude: Bool,
         archivedClaudeSessions: [String]?,
         archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]?,
+        archivedAgentTabs: [ArchivedAgentTab]?,
+        preparedArchivedCodexLaunches: [Int: CodexLaunchPreparation]?,
         initialPrompt: String?,
         cols: Int?,
         rows: Int?,
@@ -1540,26 +1546,32 @@ extension WorktreeLifecycle {
         let worktreePath = worktreePath ?? worktree.localPath
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
-        let primaryTerminalKind: TerminalKind = carryover == nil
-            ? resolvePrimaryTerminalKind(
-                skipClaude: skipClaude,
-                archivedClaudeSessions: archivedClaudeSessions,
-                configuredPreference: primaryAgentPreference ?? config.primaryAgentPreference
-            )
-            : .claude
-        let archivedSessions = archivedClaudeSessions ?? []
-        // Resolve Codex before `ensureServer` creates tmux state. `new-window`
-        // can succeed even when its child shell cannot find a bare `codex`
-        // command, which would leave a terminal row whose pane already exited.
+        let archivedTabs = orderedArchivedAgentTabs(archivedAgentTabs ?? (archivedClaudeSessions ?? []).enumerated().map {
+            ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: $0.element),
+                ordinal: $0.offset, isPrimary: $0.offset == 0,
+                claudeSpawnExtras: archivedClaudeSpawnExtras?[$0.element])
+        })
+        let primaryArchivedTab = skipClaude || carryover != nil ? nil : archivedTabs.first
+        let archivedSessions = archivedTabs.filter { $0.identity.agentKind == .claude }.map(\.identity.sessionID)
+        let primaryTerminalKind: TerminalKind
+        if let primaryArchivedTab {
+            primaryTerminalKind = primaryArchivedTab.identity.agentKind == .claude ? .claude : .codex
+        } else {
+            primaryTerminalKind = carryover == nil
+                ? resolvePrimaryTerminalKind(skipClaude: skipClaude, archivedClaudeSessions: nil,
+                    configuredPreference: primaryAgentPreference ?? config.primaryAgentPreference)
+                : .claude
+        }
+        // Each archived Codex tab may have a different dedicated home. A
+        // revive passes this prepared map across the pre-session wait.
+        let archivedCodexLaunches = try preparedArchivedCodexLaunches
+            ?? prepareArchivedCodexLaunches(skipClaude ? [] : archivedTabs)
         let codexLaunch: CodexLaunchPreparation?
-        if primaryTerminalKind == .codex {
-            if let preparedCodexLaunch {
-                codexLaunch = preparedCodexLaunch
-            } else {
-                codexLaunch = try CodexLaunchPreparation.prepare(
-                    executableResolver: codexExecutableResolver,
-                    homeEnsurer: codexHomeEnsurer)
-            }
+        if let tab = primaryArchivedTab, tab.identity.agentKind == .codex {
+            codexLaunch = archivedCodexLaunches[tab.ordinal]
+        } else if primaryTerminalKind == .codex {
+            codexLaunch = try preparedCodexLaunch ?? CodexLaunchPreparation.prepare(
+                executableResolver: codexExecutableResolver, homeEnsurer: codexHomeEnsurer)
         } else {
             codexLaunch = nil
         }
@@ -1626,7 +1638,7 @@ extension WorktreeLifecycle {
                 // they keep the stable pre-balancing resolution. Fresh spawns
                 // balance.
                 resolvedProfile = try await resolver.resolve(
-                    repoID: repo?.id, override: overrideProfileID,
+                    repoID: repo?.id, override: primaryArchivedTab?.profileID ?? overrideProfileID,
                     balance: ModelProfileResolver.balancesWorktreeSpawn(
                         restoringArchivedSessions: !archivedSessions.isEmpty,
                         carryingOver: carryover != nil),
@@ -1695,12 +1707,15 @@ extension WorktreeLifecycle {
                 preconditionFailure(
                     "Codex launch must be prepared before the Codex spawn branch")
             }
+            let options = primaryArchivedTab?.codexLaunchOptions
             primaryCommand = CodexSpawnCommandBuilder.build(
-                initialPrompt: effectivePrompt,
+                initialPrompt: primaryArchivedTab == nil ? effectivePrompt : nil,
+                resumeThreadID: primaryArchivedTab?.identity.sessionID,
                 executablePath: codexLaunch.executablePath,
-                model: codexModelOverride)
-            primaryCodexLaunchOptions = CodexLaunchOptions.recorded(
-                model: codexModelOverride, disabledFeatures: [])
+                model: options?.model ?? codexModelOverride,
+                disabledFeatures: options?.disabledFeatures ?? [])
+            primaryCodexLaunchOptions = primaryArchivedTab == nil
+                ? CodexLaunchOptions.recorded(model: codexModelOverride, disabledFeatures: []) : options
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
@@ -1710,20 +1725,22 @@ extension WorktreeLifecycle {
             // so the update prompt can't block the codex command; FORCED over
             // user overrides (matching the claude path) — agent tabs must
             // never block on the interactive prompt.
-            primarySensitiveEnv = mergedEnvOverrides
-                .merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
-            primarySessionID = nil
+            primarySensitiveEnv = GuardedCodexHome.forcingHome(
+                EnvOverrideResolver.merge(global: config.envOverrides, repo: repo?.envOverrides, profile: nil)
+                    .merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
+                codexLaunch, guarded: options?.codexHome != nil)
+            primarySessionID = primaryArchivedTab?.identity.sessionID
             primaryProfileID = nil
-            primaryLabel = TerminalLabel.codex
+            primaryLabel = primaryArchivedTab?.label ?? TerminalLabel.codex
         case .claude:
-            let archivedSession = carryover == nil ? archivedSessions.first : nil
+            let archivedSession = primaryArchivedTab?.identity.sessionID
             let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
             let isResume = archivedSession != nil || carryover != nil
             if let carryover {
                 primarySpawnExtras = carryover.claudeSpawnExtras
-            } else if let archivedSession {
-                primarySpawnExtras = archivedClaudeSpawnExtras?[archivedSession]
+            } else if archivedSession != nil {
+                primarySpawnExtras = primaryArchivedTab?.claudeSpawnExtras
             } else {
                 primarySpawnExtras = claudeSpawnExtras
             }
@@ -1833,7 +1850,7 @@ extension WorktreeLifecycle {
             // clobber it.
             primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
             primaryProfileID = resolvedProfile?.profileID
-            primaryLabel = TerminalLabel.claudeCode
+            primaryLabel = primaryArchivedTab?.label ?? TerminalLabel.claudeCode
         }
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row. Everything that decided WHAT to run —
@@ -2015,26 +2032,43 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Restore any archived Claude sessions that were not consumed by the
-        // primary terminal.
-        let additionalArchivedClaudeSessions: [String]
-        switch primaryTerminalKind {
-        case .claude:
-            additionalArchivedClaudeSessions = carryover == nil
-                ? Array(archivedSessions.dropFirst())
-                : archivedSessions
-        case .codex:
-            additionalArchivedClaudeSessions = archivedSessions
-        case .shell:
-            additionalArchivedClaudeSessions = []
-        }
+        // Restore the remaining providers in stable ordinal order, after
+        // the primary and setup tab as on the historical revive path.
         if !skipClaude {
-            for sessionID in additionalArchivedClaudeSessions {
+            for tab in archivedTabs.dropFirst(primaryArchivedTab == nil ? 0 : 1) {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
-                // This session's own values from the archive, applied to its
-                // start and kept on its new row.
-                let restoreSpawnExtras = archivedClaudeSpawnExtras?[sessionID]
+                let sessionID = tab.identity.sessionID
+                if tab.identity.agentKind == .codex {
+                    guard let preparation = archivedCodexLaunches[tab.ordinal] else {
+                        throw WorktreeLifecycleError.invalidOperation("Codex archive launch was not prepared")
+                    }
+                    let options = tab.codexLaunchOptions
+                    let terminal = try await spawnTerminal(
+                        id: plannedID, worktreeID: worktreeID, tmuxServer: tmuxServer,
+                        workingDirectory: worktreePath,
+                        command: CodexSpawnCommandBuilder.build(initialPrompt: nil, resumeThreadID: sessionID,
+                            executablePath: preparation.executablePath, model: options?.model,
+                            disabledFeatures: options?.disabledFeatures ?? []),
+                        env: ["TBD_WORKTREE_ID": worktreeID.uuidString,
+                              "TBD_TERMINAL_ID": plannedID.uuidString, "CODEX_HOME": preparation.codexHome.path],
+                        sensitiveEnv: GuardedCodexHome.forcingHome(
+                            EnvOverrideResolver.merge(global: config.envOverrides, repo: repo?.envOverrides, profile: nil)
+                                .merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
+                            preparation, guarded: options?.codexHome != nil),
+                        cols: resolvedCols, rows: resolvedRows, label: tab.label ?? TerminalLabel.codex,
+                        claudeSessionID: sessionID, profileID: nil, kind: .codex, transport: transport,
+                        codexLaunchOptions: options)
+                    createdTerminals.append((id: plannedID, label: terminal.label ?? TerminalLabel.codex))
+                    createdTerminalWindowIDs.insert(terminal.tmuxWindowID)
+                    continue
+                }
+                let restoreSpawnExtras = tab.claudeSpawnExtras
+                let resolvedProfile = try await modelProfileResolver?.resolve(
+                    repoID: repo?.id, override: tab.profileID ?? overrideProfileID,
+                    balance: false, worktreeID: worktreeID)
+                let mergedEnvOverrides = EnvOverrideResolver.merge(
+                    global: config.envOverrides, repo: repo?.envOverrides, profile: resolvedProfile?.envOverrides)
                 let restoreProfileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
                 // Pre-accept the folder-trust dialog so restoring an extra
                 // archived session onto a fresh profile dir doesn't re-prompt.
@@ -2110,7 +2144,7 @@ extension WorktreeLifecycle {
                         sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
                         cols: resolvedCols,
                         rows: resolvedRows,
-                        label: TerminalLabel.claudeCode,
+                        label: tab.label ?? TerminalLabel.claudeCode,
                         claudeSessionID: sessionID,
                         profileID: resolvedProfile?.profileID,
                         kind: .claude,
@@ -2122,7 +2156,7 @@ extension WorktreeLifecycle {
                     throw error
                 }
                 await sessionTitles.confirm(restoreSpawnTitle)
-                createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
+                createdTerminals.append((id: plannedID, label: tab.label ?? TerminalLabel.claudeCode))
                 createdTerminalWindowIDs.insert(archivedTerminal.tmuxWindowID)
             }
         }

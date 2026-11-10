@@ -397,6 +397,8 @@ extension WorktreeLifecycle {
         skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
         archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
+        archivedAgentTabs: [ArchivedAgentTab]? = nil,
+        preparedArchivedCodexLaunches: [Int: CodexLaunchPreparation]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil, rows: Int? = nil,
         completionAction: PreSessionCompletionAction,
@@ -510,6 +512,7 @@ extension WorktreeLifecycle {
             )
         }
 
+        var primarySpawnSucceeded = false
         do {
             let created = try await spawnPrimaryTerminals(
                 worktree: worktree, repo: repo,
@@ -517,6 +520,8 @@ extension WorktreeLifecycle {
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
                 archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
+                archivedAgentTabs: archivedAgentTabs,
+                preparedArchivedCodexLaunches: preparedArchivedCodexLaunches,
                 initialPrompt: initialPrompt,
                 cols: cols, rows: rows,
                 // On success the hook tab is about to be deleted — never splice
@@ -530,6 +535,7 @@ extension WorktreeLifecycle {
                 carryover: carryover,
                 preparedCodexLaunch: preparedCodexLaunch
             )
+            primarySpawnSucceeded = true
             for terminal in created {
                 subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
                     terminalID: terminal.id,
@@ -563,7 +569,7 @@ extension WorktreeLifecycle {
             case .markActive:
                 try await db.worktrees.updateStatus(id: worktree.id, status: .active)
             case .revive(let clearSessions):
-                try await db.worktrees.revive(id: worktree.id, clearSessions: clearSessions)
+                try await db.worktrees.revive(id: worktree.id, clearSessions: clearSessions && primarySpawnSucceeded)
                 // Deliberate revive: disarm auto-archive so a still-merged PR
                 // doesn't immediately re-archive the worktree the user just revived.
                 do {

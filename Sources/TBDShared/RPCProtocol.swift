@@ -2583,15 +2583,17 @@ public struct WorktreeReviveParams: Codable, Sendable {
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    /// When set, the daemon reorders the worktree's stored
-    /// `archivedClaudeSessions` so this ID is first before resuming the
-    /// primary Claude terminal. Optional — nil preserves existing order.
+    /// Legacy Claude preference, used only when `preferredSession` is absent.
+    /// The matching archived identity becomes the first restored agent.
     public let preferredSessionID: String?
-    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) {
+    /// Provider-qualified preference; takes precedence over the Claude fallback.
+    public let preferredSession: AgentSessionIdentity?
+    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil, preferredSession: AgentSessionIdentity? = nil) {
         self.worktreeID = worktreeID
         self.cols = cols
         self.rows = rows
         self.preferredSessionID = preferredSessionID
+        self.preferredSession = preferredSession
     }
 }
 

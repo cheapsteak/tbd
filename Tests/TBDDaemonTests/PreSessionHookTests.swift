@@ -917,7 +917,9 @@ struct PreSessionHookTests {
         try await installPreSessionHook(repoDir: repoDir)
         let wt = try await makeArchivedWorktree(lifecycle: lifecycle, db: db, repo: repo)
         let sessionID = UUID().uuidString
-        try await db.worktrees.setArchivedClaudeSessions(id: wt.id, sessions: [sessionID])
+        try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: [
+            ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: sessionID), ordinal: 0, isPrimary: true)
+        ])
 
         let completion = try await lifecycle.beginReviveWorktree(
             worktreeID: wt.id, skipClaude: false

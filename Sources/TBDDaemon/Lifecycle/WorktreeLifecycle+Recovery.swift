@@ -28,7 +28,7 @@ extension WorktreeLifecycle {
     ///   died mid-wait. The tmux server and the hook process survive daemon
     ///   restarts, so resume the wait: rebuild the `PreSessionSpawn` from the
     ///   terminal record and run phase 3 in a detached task. A row that still
-    ///   carries `archivedClaudeSessions` was mid-REVIVE — resume it with
+    ///   carries either archive representation was mid-REVIVE — resume it with
     ///   revive semantics (restore the sessions, then clear them); otherwise
     ///   resume exactly like the create path. Never blocks startup.
     /// - Checkout exists but no terminals at all → the daemon died after
@@ -193,21 +193,18 @@ extension WorktreeLifecycle {
                 childStartedAt: preSessionTerminal.holderChildStartedAt
                     ?? preSessionTerminal.createdAt
             )
-            // Distinguish an interrupted CREATE from an interrupted REVIVE:
-            // a mid-revive row still carries its archived Claude sessions
-            // (`beginReviveWorktree` only clears them in phase 3 via
-            // `.revive(clearSessions:)`). Resuming such a row with
-            // `.markActive` and no sessions would spawn a FRESH Claude
-            // session, and the next archive would unconditionally overwrite
-            // `archivedClaudeSessions` — silently losing the old transcript.
-            // So: restore the archived sessions, each with the plugin folders
-            // and settings overlay the archive kept for it, and finish with
-            // revive semantics (flip `.active`, clear `archivedAt`, clear the
-            // session list and its values). The other original params (skipClaude,
-            // initialPrompt, cols/rows) died with the previous daemon
-            // process — spawn with defaults.
-            let archivedSessions = worktree.archivedClaudeSessions ?? []
-            let isMidRevive = !archivedSessions.isEmpty
+            // Either archive representation identifies an interrupted revive.
+            // Read strictly before spawning: damaged provider metadata cannot
+            // safely become a fresh configured primary. Ephemeral create
+            // parameters did not survive the previous daemon process.
+            let archivedTabs: [ArchivedAgentTab]
+            do {
+                archivedTabs = try await db.worktrees.archivedAgentTabsForRevive(id: worktree.id)
+            } catch {
+                logger.error("recovery: refusing unreadable archive for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            let isMidRevive = worktree.archivedAgentTabs != nil || !archivedTabs.isEmpty
             if !isMidRevive {
                 archiveLogger.warning(
                     "recovery: resuming ordinary .creating worktree \(worktree.id, privacy: .public); any ephemeral conversation carryover cannot survive a daemon restart. If this create came from a fresh-branch conversation revive, the user can run that action again."
@@ -220,8 +217,7 @@ extension WorktreeLifecycle {
                     worktree: worktree.worktree, repo: repo,
                     worktreePath: worktree.path,
                     skipClaude: false,
-                    archivedClaudeSessions: isMidRevive ? archivedSessions : nil,
-                    archivedClaudeSpawnExtras: isMidRevive ? worktree.archivedClaudeSpawnExtras : nil,
+                    archivedAgentTabs: isMidRevive ? archivedTabs : nil,
                     completionAction: isMidRevive ? .revive(clearSessions: true) : .markActive
                 )
             }

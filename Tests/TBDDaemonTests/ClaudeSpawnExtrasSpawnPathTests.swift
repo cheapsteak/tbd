@@ -910,6 +910,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(Set(archived.archivedClaudeSessions ?? []) == [one.sessionID, two.sessionID, bare])
             #expect(archived.archivedClaudeSpawnExtras
                 == [one.sessionID: one.extras, two.sessionID: two.extras])
+            #expect(archived.archivedAgentTabs?.count == 3)
+            #expect(archived.archivedAgentTabs?.first { $0.identity.sessionID == one.sessionID }?.claudeSpawnExtras == one.extras)
         }
     }
 
@@ -937,6 +939,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(revived.status == .active)
             #expect(revived.archivedClaudeSessions == nil)
             #expect(revived.archivedClaudeSpawnExtras == nil)
+            #expect(revived.archivedAgentTabs == nil)
             try await expectRestored(f, worktreeID: wt.id, one, notWith: two)
             try await expectRestored(f, worktreeID: wt.id, two, notWith: one)
         }

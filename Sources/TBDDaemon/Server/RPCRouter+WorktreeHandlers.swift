@@ -647,24 +647,26 @@ extension RPCRouter {
         // The row names the worktree, not a terminal: revive spawns its
         // primary terminals inside the lifecycle's own (possibly detached,
         // pre-session-gated) phase, so no terminal ID exists to name yet.
+        let archivedTabs = try await db.worktrees.archivedAgentTabsForRevive(id: params.worktreeID)
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
-        // Start admission: revive spawns the primary agent. Archived Claude
-        // sessions mean Claude; otherwise the configured preference decides,
-        // as the lifecycle's own resolution does.
-        let archivedSessions = (try? await db.worktrees.get(id: params.worktreeID))?
-            .archivedClaudeSessions ?? []
-        let reviveAgent: StartAdmissionAgent
-        if !archivedSessions.isEmpty || params.preferredSessionID != nil {
-            reviveAgent = .claude
-        } else {
-            reviveAgent = StartAdmissionAgent(
-                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue)
+        // Admit each distinct provider before the lifecycle mutates git.
+        // An empty archive starts the configured primary, as a fresh create does.
+        var reviveAgents: [StartAdmissionAgent] = []
+        for tab in archivedTabs {
+            let agent: StartAdmissionAgent = tab.identity.agentKind == .claude ? .claude : .codex
+            if !reviveAgents.contains(agent) { reviveAgents.append(agent) }
         }
-        if let held = await holdStartIfDenied(
-            actuationID, actor: actor, agent: reviveAgent, worktreeID: params.worktreeID) {
-            return held
+        if reviveAgents.isEmpty {
+            reviveAgents = [StartAdmissionAgent(
+                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue)]
+        }
+        for agent in reviveAgents {
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, agent: agent, worktreeID: params.worktreeID) {
+                return held
+            }
         }
         // Non-blocking: when a preSession hook gates the primary terminals,
         // this returns promptly with the row in `.creating` (which is what
@@ -678,7 +680,8 @@ extension RPCRouter {
                 worktreeID: params.worktreeID,
                 cols: params.cols,
                 rows: params.rows,
-                preferredSessionID: params.preferredSessionID
+                preferredSessionID: params.preferredSessionID,
+                preferredSession: params.preferredSession
             )
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
