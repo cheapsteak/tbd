@@ -97,7 +97,11 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(), clock: clock,
             sessionTitles: titles, actuationLog: makeTestActuationLog())
         try await db.config.setComposerDraftEnabled(true)
-        let result = await coord.wake(terminalID: terminalID, initialPrompt: "must not be sent")
+        let refused = await coord.wake(terminalID: terminalID, initialPrompt: "must not be sent")
+        #expect(refused == .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session."))
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
+        #expect(!recorded.snapshot().contains { $0.contains("respawn-window") })
+        let result = await coord.wake(terminalID: terminalID)
         #expect(result.isOk)
         let after = try #require(try await db.terminals.get(id: terminalID))
         #expect(!after.isParked)
@@ -194,8 +198,17 @@ struct HibernationCoordinatorTests {
             gate.release(); _ = await wake.value
             Issue.record("wake did not reach Codex preparation"); return
         }
+        let completed = RecordedTmuxCommands()
+        let otherWake = gateHoldingTask {
+            let result = await coord.wake(terminalID: UUID())
+            completed.append(["finished"])
+            return result
+        }
+        let remainedResponsive = await waitUntil({ !completed.snapshot().isEmpty }, timeout: ciSafeDeadline)
         try await db.terminals.updateSessionID(id: terminalID, sessionID: "replacement-thread")
         gate.release()
+        #expect(remainedResponsive, "Codex preparation must not block unrelated coordinator operations")
+        #expect(await otherWake.value == .notFound)
         #expect(await wake.value == .respawnFailed(reason: "terminal changed while wake was preparing; retry"))
         let after = try #require(try await db.terminals.get(id: terminalID))
         #expect(after.isParked)

@@ -1534,7 +1534,9 @@ public final class Daemon: Sendable {
         await performStartupReconciliation(
             mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
             actuationLog: actuationLog)
-        await LocalAgentSessionReconciler(db: database).reconcileAllCodexTerminals()
+        if mockMode == nil {
+            await LocalAgentSessionReconciler(db: database).reconcileAllCodexTerminals()
+        }
 
         // 8d-ii. Un-park a second time, AFTER the reconcile pass. The first run
         // has to precede reconcile so the destructive scratch-server reaping

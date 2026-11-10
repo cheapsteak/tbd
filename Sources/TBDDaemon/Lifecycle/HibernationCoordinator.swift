@@ -1747,6 +1747,9 @@ public actor HibernationCoordinator {
             return .noSessionID
         }
         let sessionID = resumePlan.identity.sessionID
+        if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {
+            return .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session.")
+        }
         // The backstop for a tmux row whose leg cannot serve the wake. Refusing
         // here, before anything is touched, leaves the row parked with its
         // session id, so a wake after `tbd terminal migrate` succeeds on the
@@ -1972,10 +1975,18 @@ public actor HibernationCoordinator {
                 // strictly, or a damaged dedicated-home record could silently
                 // launch this thread on the shared home.
                 let options = try await db.terminals.codexLaunchOptionsForRelaunch(id: terminal.id)
-                let preparation = try CodexLaunchPreparation.prepare(
-                    guardedHome: options?.codexHome,
-                    executableResolver: codexExecutableResolver,
-                    sharedHomeEnsurer: codexHomeEnsurer)
+                let executableResolver = codexExecutableResolver
+                let homeEnsurer = codexHomeEnsurer
+                let preparation: CodexLaunchPreparation = try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        continuation.resume(with: Result {
+                            try CodexLaunchPreparation.prepare(
+                                guardedHome: options?.codexHome,
+                                executableResolver: executableResolver,
+                                sharedHomeEnsurer: homeEnsurer)
+                        })
+                    }
+                }
                 spawnCommand = CodexSpawnCommandBuilder.build(
                     initialPrompt: nil, resumeThreadID: sessionID,
                     executablePath: preparation.executablePath,

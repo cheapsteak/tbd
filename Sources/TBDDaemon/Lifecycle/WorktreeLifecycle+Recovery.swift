@@ -127,7 +127,24 @@ extension WorktreeLifecycle {
                 restoreWithoutHook = await gitListsCheckout(row)
             }
             if pendingRestore, restoreWithoutHook || missingArchivedAgentTabs(restoreTabs, terminals: terminals).isEmpty {
-                guard let repoID = worktree.repoID, let repo = try? await db.repos.get(id: repoID) else { continue }
+                let repo: Repo
+                do {
+                    guard let repoID = worktree.repoID, let resolved = try await db.repos.get(id: repoID) else {
+                        throw WorktreeLifecycleError.invalidOperation("Repository missing during archived restore")
+                    }
+                    repo = resolved
+                } catch {
+                    logger.error("recovery: repository lookup failed for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public); preserving archive for explicit retry")
+                    // Match a failed restore's existing retry contract: expose
+                    // an active checkout with its full unfinished snapshot.
+                    // A subsequent revive retries it after the repo recovers.
+                    do {
+                        try await db.worktrees.revive(id: worktree.id, clearSessions: false)
+                    } catch {
+                        logger.error("recovery: could not expose archived restore retry for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                    continue
+                }
                 let task = Task.detached { [self] in
                     do {
                         _ = try await completeArchivedRestore(worktree: worktree.worktree, repo: repo, tabs: restoreTabs)
