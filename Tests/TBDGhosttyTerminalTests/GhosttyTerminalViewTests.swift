@@ -1591,15 +1591,15 @@ struct GhosttyTerminalViewBackpressureTests {
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice),
           arguments: NilDrawableHoldEnd.allCases)
     func aNilDrawableHoldsTheTickOffForATimeout(end: NilDrawableHoldEnd) throws {
-        let fixture = try ViewFixture()
+        // The test sends every report: one from Metal, dated by real host time, would end the hold.
+        let fixture = try ViewFixture(reportsPresents: false)
         let view = fixture.view
         let window = makeOffscreenWindow()
         defer {
             view.removeFromSuperview()
             window.contentView = nil
         }
-        // No frame before this one: a real drawable's report could arrive at any moment and would
-        // count as the report this test waits for.
+        // No frame before this one, so no real drawable is out when the hold starts.
         place(view, in: try #require(window.contentView))
         let tracker = view.drawableTracker
         let timing = tracker.presentTiming
@@ -1732,7 +1732,8 @@ struct GhosttyTerminalViewBackpressureTests {
     /// lasting.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func aLiveResizeFrameDrawsThroughANilDrawablesHold() throws {
-        let fixture = try ViewFixture()
+        // The test sends every report: one from Metal, dated by real host time, would end the hold.
+        let fixture = try ViewFixture(reportsPresents: false)
         let view = fixture.view
         let window = makeOffscreenWindow()
         defer {

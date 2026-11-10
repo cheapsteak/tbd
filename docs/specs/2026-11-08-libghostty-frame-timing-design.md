@@ -5,8 +5,8 @@ TBD's opt-in libghostty engine
 display-link tick, so output that arrives between ticks waits for the next one. This design
 draws small output at once when the screen has had no output frame for a refresh interval,
 and keeps bulk output at one frame per refresh. It also reads DEC 2026 holds from
-libghostty's own callback. The main thread no longer blocks on the frame ring, and the one
-wait it keeps, a display tick's request for a drawable, is bounded. SwiftTerm does not change.
+libghostty's own callback. A display tick no longer blocks on the frame ring, and every wait
+main keeps for a drawable is bounded. SwiftTerm does not change.
 
 ## Goal
 
@@ -99,8 +99,7 @@ seven of these hold:
    the GPU.
 6. **Fewer than two drawables await present** – so a frame drawn now never waits in
    `nextDrawable()` for a drawable the tracker counts as out. Only the leading edge counts
-   drawables. A tick asks for one whatever the
-   count ("Drop, never block").
+   drawables. A tick asks for one whatever the count ("Drop, never block").
 7. **The output is small, or a hold just ended** – fewer than 1,024 bytes have been fed since
    the last frame was built, or a hold ended in the chunks this delivery covers.
 
@@ -108,8 +107,8 @@ Otherwise the delivery calls `requestFrame()`, as it does today, and the display
 coalesces. The rules limit only the leading edge. It draws only after a full interval with
 no output frame, and rule 7 sends large output to the tick. Sustained output is drawn by
 the tick, once per refresh, as it is today. The tick counts no drawables, so present
-reports that come several refreshes late do not thin it. The one case where two output frames fall
-within an interval is a tick soon after a leading-edge frame. "Risks" covers it.
+reports that come several refreshes late do not thin it. The one case where two output
+frames fall within an interval is a tick soon after a leading-edge frame. "Risks" covers it.
 
 To draw now, the delivery calls the same `renderTick(now:)` that the link calls. That runs
 inside the delivery that already exists, so the design adds no main-queue hop. A frame drawn
@@ -257,8 +256,8 @@ drawable. At a full ring the design drops the frame instead, as termio does, and
 tick draws the newer screen. For drawables the two callers differ. A leading-edge draw never
 waits for a drawable the tracker counts as out: it draws only while fewer than
 `maxDrawablesAwaitingPresent` drawables await their report (rule 6), and its frame checks the
-count again before it builds. A tick asks for a
-drawable whatever the count, and may wait for a bounded time ("The bounded wait", below).
+count again before it builds. A tick asks for a drawable whatever the count, and may wait for
+a bounded time ("The bounded wait", below).
 
 - **The ring** – `FrameRing.tryAcquire()` returns nil rather than waiting
   (`wait(timeout: .now())`). The ring also keeps an atomic count of slots in use. The count
@@ -467,6 +466,8 @@ nil without waiting.
     presents, and undated ones, leave the hold in place, and a fresh one reported before the
     nil is noted sets no hold.
   - a check tells a nil drawable's hold apart from entries at the limit
+  - a presented handler's report reaches the tracker unless a test has set the seam that
+    ignores them
 - **The engine contract suite** – no new case. Draw timing is not part of the
   `TerminalEngine` seam, and whether SwiftTerm draws at once offscreen was not checked, so
   such a case would hold for one engine only. The suite stays green, and so do
@@ -543,11 +544,11 @@ of these:
   renderers report it, so it cannot compare libghostty with SwiftTerm's CoreGraphics
   renderer, the default. It stays a diagnostic.
 - **A drawable limit on the tick** – rejected. Present reports come three or more refreshes
-  late under bulk output (see the "Evidence" section), so the limit decides how often the tick draws. At 2 it
-  draws about one refresh in two. A higher limit does not fix that. At 3 the tick draws three
-  refreshes in four, about 90 frames a second on a 120 Hz screen. At 4 or more it calls
-  `nextDrawable()` with all three of the layer's drawables unreported, so the limit no longer
-  keeps it from waiting.
+  late under bulk output (see the "Evidence" section), so the limit decides how often the
+  tick draws. At 2 it draws about one refresh in two. A higher limit does not fix that. At 3
+  the tick draws three refreshes in four, about 90 frames a second on a 120 Hz screen. At 4
+  or more it calls `nextDrawable()` with all three of the layer's drawables unreported, so
+  the limit no longer keeps it from waiting.
 - **Drawing all output at once, with no size check** – rejected. Bulk output would draw a
   frame per chunk, and a redraw split across writes would flash half-drawn screens.
 - **SwiftTerm's resume-tick rule, as it is** – rejected. It ticks at once only when output

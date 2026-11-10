@@ -5,10 +5,11 @@
 // `CAMetalLayer.nextDrawable()` blocks, for up to a second, when every drawable in the layer's
 // pool is out. A leading-edge draw, which runs inside a render signal's delivery, asks for one only
 // while fewer than `TerminalRenderer.maxDrawablesAwaitingPresent` await their present report, so
-// it never waits for a drawable this tracker counts as out. A display tick does not count them. Under bulk output each report reaches this
-// tracker three or more refreshes after the frame that acquired its drawable, so a tick that
-// waited for the count would draw about one refresh in two. A tick asks for a drawable whatever
-// the count, and may wait in `nextDrawable()` for one the compositor still holds.
+// it never waits for a drawable this tracker counts as out. A display tick does not count them.
+// Under bulk output each report reaches this tracker three or more refreshes after the frame that
+// acquired its drawable, so a tick that waited for the count would draw about one refresh in two.
+// A tick asks for a drawable whatever the count, and may wait in `nextDrawable()` for one the
+// compositor still holds.
 //
 // That count is only as good as the reports, and an offscreen window's drawables may never be
 // reported presented at all. A lost report would hold the count up and stop the leading edge
