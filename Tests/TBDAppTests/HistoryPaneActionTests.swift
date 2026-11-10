@@ -86,6 +86,100 @@ extension HistoryPaneActionTests {
         #expect(params.allSatisfy { $0.identity == codex.identity && $0.filePath == nil })
     }
 
+    @Test("reselection or refresh retries a Codex full read after its tail succeeded", arguments: ["reselect", "refresh", "refresh-closed"])
+    func retriesIncompleteHistory(mode: String) async throws {
+        let suite = TestDefaultsSuite("history-retry-action")
+        defer { suite.tearDown() }
+        let summary = Self.summary(kind: .codex)
+        let claude = Self.summary(kind: .claude)
+        let tail: [TranscriptItem] = [.userPrompt(id: "tail", text: "Recent", timestamp: nil)]
+        let full: [TranscriptItem] = [.userPrompt(id: "older", text: "Older", timestamp: nil)] + tail
+        let fullReads = FireRecorder<Int>()
+        let server = try HistoryRPCServer { request in
+            switch request.method {
+            case RPCMethod.sessionList: return try RPCResponse(result: [summary, claude])
+            case RPCMethod.terminalHistoryList: return try RPCResponse(result: [TerminalHistoryEntry]())
+            case RPCMethod.sessionMessages:
+                let params = try JSONDecoder().decode(SessionMessagesParams.self, from: request.paramsData)
+                if params.tailLimit != nil { return try RPCResponse(result: tail) }
+                fullReads.record(1)
+                return fullReads.values.count == 1
+                    ? RPCResponse(error: "temporarily unavailable") : try RPCResponse(result: full)
+            default: return RPCResponse(error: "unexpected request")
+            }
+        }
+        defer { server.stop() }
+        let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
+        let worktreeID = UUID()
+        state.historyLoadStates[worktreeID] = .loaded([summary, claude])
+        state.sessionTranscripts[claude.id] = []
+        await state.selectSession(summary, worktreeID: worktreeID)
+        #expect(state.sessionTranscripts[summary.id] == tail)
+        if mode == "refresh-closed" {
+            let closedID = UUID()
+            state.selectedClosedTerminalIDs[worktreeID] = closedID
+            await state.fetchSessions(worktreeID: worktreeID)
+            #expect(state.selectedClosedTerminalIDs[worktreeID] == closedID)
+            #expect(state.sessionTranscripts[summary.id] == tail)
+            #expect(fullReads.values.count == 1)
+            await state.selectSession(summary, worktreeID: worktreeID)
+        } else if mode == "refresh" {
+            await state.fetchSessions(worktreeID: worktreeID)
+        } else {
+            await state.selectSession(claude, worktreeID: worktreeID)
+            await state.selectSession(summary, worktreeID: worktreeID)
+        }
+        #expect(state.sessionTranscripts[summary.id] == full)
+        #expect(state.sessionTranscripts[claude.id] == [])
+        #expect(state.selectedSessionIDs[worktreeID] == summary.id)
+        #expect(fullReads.values.count == 2)
+        await state.selectSession(summary, worktreeID: worktreeID)
+        #expect(fullReads.values.count == 2)
+    }
+
+    @Test("refresh invalidates completed history when its summary changes or disappears", arguments: ["changed", "unavailable", "removed"])
+    func refreshInvalidatesCompletedHistory(change: String) async throws {
+        let suite = TestDefaultsSuite("history-refresh-invalidate")
+        defer { suite.tearDown() }
+        let summary = Self.summary(kind: .codex)
+        let changed = SessionSummary(sessionId: summary.sessionId, filePath: "", modifiedAt: summary.modifiedAt,
+            fileSize: 1, lineCount: 1, firstUserMessage: nil, lastUserMessage: nil, cwd: nil, gitBranch: nil,
+            agentKind: .codex, transcriptAvailable: change != "unavailable")
+        let old: [TranscriptItem] = [.userPrompt(id: "old", text: "Old", timestamp: nil)]
+        let fresh: [TranscriptItem] = [.userPrompt(id: "fresh", text: "Fresh", timestamp: nil)]
+        let lists = FireRecorder<[SessionSummary]>()
+        let fullReads = FireRecorder<Int>()
+        lists.record([summary])
+        let server = try HistoryRPCServer { request in
+            switch request.method {
+            case RPCMethod.sessionList: return try RPCResponse(result: lists.values.last ?? [])
+            case RPCMethod.terminalHistoryList: return try RPCResponse(result: [TerminalHistoryEntry]())
+            case RPCMethod.sessionMessages:
+                let params = try JSONDecoder().decode(SessionMessagesParams.self, from: request.paramsData)
+                if params.tailLimit != nil { return try RPCResponse(result: old) }
+                fullReads.record(1)
+                return try RPCResponse(result: fullReads.values.count == 1 ? old : fresh)
+            default: return RPCResponse(error: "unexpected request")
+            }
+        }
+        defer { server.stop() }
+        let state = AppState(userDefaults: suite.defaults, daemonClient: DaemonClient(socketPath: server.path))
+        let worktreeID = UUID()
+        state.historyLoadStates[worktreeID] = .loaded([summary])
+        await state.selectSession(summary, worktreeID: worktreeID)
+        #expect(state.sessionTranscripts[summary.id] == old)
+        lists.record(change == "removed" ? [] : [changed])
+        await state.fetchSessions(worktreeID: worktreeID)
+        if change != "changed" {
+            #expect(state.sessionTranscripts[summary.id] == nil)
+            #expect(!state.sessionTranscriptLoading.contains(summary.id))
+            lists.record([summary])
+            await state.fetchSessions(worktreeID: worktreeID)
+        }
+        #expect(state.sessionTranscripts[summary.id] == fresh)
+        #expect(fullReads.values.count == 2)
+    }
+
     @Test("resume selects a distinct terminal for either provider", arguments: [LocalAgentKind.claude, .codex])
     func selectsResumedTerminal(kind: LocalAgentKind) async throws {
         let suite = TestDefaultsSuite("history-resume-selection")

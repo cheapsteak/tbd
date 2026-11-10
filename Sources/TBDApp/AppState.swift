@@ -1452,6 +1452,11 @@ final class AppState {
     var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → SessionSummary.id
     var sessionTranscripts: [String: [TranscriptItem]] = [:]  // live native ID or history identity.cacheKey → items
     var sessionTranscriptLoading: Set<String> = []
+    /// Cached tails whose full read has not succeeded. Unmarked cache entries
+    /// are complete snapshots; missing entries always need a new read.
+    @ObservationIgnored var incompleteHistoryTranscripts: Set<String> = []
+    /// Request ownership is separate from the spinner, which ends at the tail.
+    @ObservationIgnored var historyTranscriptRequests: [String: UUID] = [:]
     // Closed-terminal history (Session History → Closed Terminals).
     var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
     var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
@@ -1993,7 +1998,21 @@ final class AppState {
         sessionTranscriptOrder.append(sessionID)
         while sessionTranscriptOrder.count > sessionTranscriptCap {
             let evict = sessionTranscriptOrder.removeFirst()
-            sessionTranscripts.removeValue(forKey: evict)
+            invalidateHistoryTranscript(evict)
+        }
+    }
+
+    /// Invalidate pending reads as well as completion. A changed summary may
+    /// retain its visible snapshot until a replacement full read succeeds.
+    func invalidateHistoryTranscript(_ key: String, retainingMessages: Bool = false) {
+        historyTranscriptRequests.removeValue(forKey: key)
+        if sessionTranscriptLoading.contains(key) { sessionTranscriptLoading.remove(key) }
+        if retainingMessages, sessionTranscripts[key] != nil {
+            incompleteHistoryTranscripts.insert(key)
+        } else {
+            incompleteHistoryTranscripts.remove(key)
+            sessionTranscripts.removeValue(forKey: key)
+            sessionTranscriptOrder.removeAll { $0 == key }
         }
     }
 

@@ -101,11 +101,30 @@ extension AppState {
 
         do {
             let fresh = try await daemonClient.listSessions(worktreeID: worktreeID)
+            let freshIDs = Set(fresh.map(\.id))
+            for removed in current where !freshIDs.contains(removed.id) {
+                invalidateHistoryTranscript(removed.id)
+            }
+            let previous = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            for summary in fresh {
+                if !summary.transcriptAvailable {
+                    invalidateHistoryTranscript(summary.id)
+                } else if let old = previous[summary.id],
+                          old.filePath != summary.filePath || old.fileSize != summary.fileSize
+                            || old.modifiedAt != summary.modifiedAt || old.lastMessageAt != summary.lastMessageAt {
+                    invalidateHistoryTranscript(summary.id, retainingMessages: true)
+                }
+            }
             historyLoadStates[worktreeID] = .loaded(fresh)
-            // Auto-select the first session on initial load if nothing is selected yet.
-            // Applies to both active and archived worktrees.
-            if selectedSessionIDs[worktreeID] == nil, let first = fresh.first {
-                await selectSession(first, worktreeID: worktreeID)
+            // Retry an incomplete selected history after refresh without
+            // stealing focus from a selected closed terminal. Completed,
+            // unchanged entries still reuse their cache.
+            if selectedClosedTerminalIDs[worktreeID] == nil {
+                if let selected = fresh.first(where: { $0.id == selectedSessionIDs[worktreeID] }) {
+                    await selectSession(selected, worktreeID: worktreeID)
+                } else if selectedSessionIDs[worktreeID] == nil, let first = fresh.first {
+                    await selectSession(first, worktreeID: worktreeID)
+                }
             }
         } catch {
             historyLoadStates[worktreeID] = .failed(error.localizedDescription)
@@ -145,7 +164,10 @@ extension AppState {
         selectedSessionIDs[worktreeID] = summary.id
         selectedClosedTerminalIDs.removeValue(forKey: worktreeID)
         let client = daemonClient
-        guard summary.transcriptAvailable else { return }
+        guard summary.transcriptAvailable else {
+            invalidateHistoryTranscript(summary.id)
+            return
+        }
         let tailLimit = TranscriptTailFirstOpen.tailLimit
         await loadSessionTranscript(
             sessionID: summary.id,
@@ -165,8 +187,9 @@ extension AppState {
     /// unchanged. Neither publish may overwrite what another history load put
     /// there meanwhile: the tail lands only in an empty slot, and the full
     /// transcript only in a slot that is still empty or still holds exactly
-    /// the tail this load wrote (`mayPublishFullTranscript`). An empty full
-    /// read keeps a tail already on screen.
+    /// the tail this load wrote or retained for a retry (`mayPublishFullTranscript`).
+    /// An empty full read keeps a tail already on screen. A failed full read
+    /// leaves that tail incomplete so another selection can retry it.
     ///
     /// The readers are parameters so a test can run each phase against the
     /// store; `selectSession` passes the daemon client's two reads.
@@ -175,28 +198,51 @@ extension AppState {
         readTail: @Sendable () async -> [TranscriptItem]?,
         readFull: @Sendable () async throws -> [TranscriptItem]
     ) async {
-        guard sessionTranscripts[sessionID] == nil else { return }
-        sessionTranscriptLoading.insert(sessionID)
-        defer { endSessionTranscriptLoading(sessionID) }
-
-        var publishedTail: [TranscriptItem]?
-        if let tail = await readTail(), !tail.isEmpty, sessionTranscripts[sessionID] == nil {
-            sessionTranscripts[sessionID] = tail
+        guard historyTranscriptRequests[sessionID] == nil else { return }
+        guard sessionTranscripts[sessionID] == nil || incompleteHistoryTranscripts.contains(sessionID) else {
             touchSessionTranscript(sessionID)
-            publishedTail = tail
-            endSessionTranscriptLoading(sessionID)
+            return
+        }
+        let requestID = UUID()
+        historyTranscriptRequests[sessionID] = requestID
+        defer {
+            // An eviction or refresh may have replaced this request while it
+            // was suspended. Its completion must not clear a newer spinner.
+            if historyTranscriptRequests[sessionID] == requestID {
+                historyTranscriptRequests.removeValue(forKey: sessionID)
+                endSessionTranscriptLoading(sessionID)
+            }
+        }
+
+        var publishedTail = sessionTranscripts[sessionID]
+        if publishedTail == nil {
+            sessionTranscriptLoading.insert(sessionID)
+            let tail = await readTail()
+            guard historyTranscriptRequests[sessionID] == requestID else { return }
+            if let tail, !tail.isEmpty, sessionTranscripts[sessionID] == nil {
+                sessionTranscripts[sessionID] = tail
+                incompleteHistoryTranscripts.insert(sessionID)
+                touchSessionTranscript(sessionID)
+                publishedTail = tail
+                endSessionTranscriptLoading(sessionID)
+            }
         }
 
         do {
             let messages = try await readFull()
-            guard Self.mayPublishFullTranscript(
+            guard historyTranscriptRequests[sessionID] == requestID else { return }
+            if Self.mayPublishFullTranscript(
                 messages, current: sessionTranscripts[sessionID], publishedTail: publishedTail
-            ) else { return }
-            sessionTranscripts[sessionID] = messages
-            touchSessionTranscript(sessionID)
+            ) {
+                sessionTranscripts[sessionID] = messages
+                touchSessionTranscript(sessionID)
+            }
+            // A successful empty full read still counts as completed while
+            // retaining a useful tail (the legacy Claude parser behavior).
+            incompleteHistoryTranscripts.remove(sessionID)
         } catch {
-            // leave empty, user can try again. Only the RPC read throws, and
-            // it runs with no tail published, so the slot is still empty.
+            // Keep a published tail visible and incomplete, so reselection or
+            // refresh retries the full read. An empty slot needs no marker.
         }
     }
 
