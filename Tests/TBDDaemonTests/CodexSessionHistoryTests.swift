@@ -49,6 +49,32 @@ struct CodexSessionHistoryTests {
                                                                           identity: identity ?? f.session.identity, tailLimit: tailLimit)))
     }
 
+    @Test("legacy list callers see only Claude even when providers share an ID", arguments: [false, true])
+    func legacyHistoryCapability(explicitFalse: Bool) async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let project = ClaudeProjectDirectory.expectedDirectory(worktreePath: f.root.path)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: project) }
+        try #"{"type":"user","sessionId":"same","message":{"role":"user","content":"Legacy prompt"}}"#
+            .write(to: project.appendingPathComponent("same.jsonl"), atomically: true, encoding: .utf8)
+        let capability = explicitFalse ? ",\"providerAware\":false" : ""
+        let request = RPCRequest(method: RPCMethod.sessionList,
+            params: "{\"worktreeID\":\"\(f.worktree.id.uuidString)\"\(capability)}")
+        let summaries = try await f.router.handle(request).decodeResult([SessionSummary].self)
+        #expect(summaries.map(\.identity.agentKind) == [.claude])
+        let claude = try #require(summaries.first { $0.identity.agentKind == .claude })
+        let messages = await f.router.handle(try RPCRequest(method: RPCMethod.sessionMessages,
+            params: SessionMessagesParams(filePath: claude.filePath)))
+        #expect(try messages.decodeResult([TranscriptItem].self).count == 1)
+        // Legacy actions carry only a Claude session ID, never a provider.
+        let resumed = await f.router.handle(try RPCRequest(method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: f.worktree.id, type: .claude, resumeSessionID: claude.sessionId)))
+        let terminal = try resumed.decodeResult(Terminal.self)
+        #expect(terminal.kind == .claude)
+        #expect(terminal.claudeSessionID == "same")
+    }
+
     @Test("list merges legacy Claude scanning with cataloged Codex and sorts by last activity")
     func mergesProviders() async throws {
         let f = try await fixture()
@@ -64,7 +90,7 @@ struct CodexSessionHistoryTests {
         try await f.db.localAgentSessions.upsert(f.session)
         // An uncataloged rollout with a matching cwd is not ownership evidence.
         try Data(contentsOf: f.file).write(to: f.home.appendingPathComponent("uncataloged.jsonl"))
-        let response = await f.router.handle(try RPCRequest(method: RPCMethod.sessionList, params: SessionListParams(worktreeID: f.worktree.id)))
+        let response = await f.router.handle(try RPCRequest(method: RPCMethod.sessionList, params: SessionListParams(worktreeID: f.worktree.id, providerAware: true)))
         let summaries = try response.decodeResult([SessionSummary].self)
         #expect(summaries.count == 2)
         #expect(summaries.map(\.identity.agentKind) == [.codex, .claude])
@@ -101,7 +127,7 @@ struct CodexSessionHistoryTests {
         if unreadable { #expect(chmod(f.file.path, 0) == 0) }
         else { try FileManager.default.removeItem(at: f.file) }
         defer { if unreadable { chmod(f.file.path, 0o600) } }
-        let response = await f.router.handle(try RPCRequest(method: RPCMethod.sessionList, params: SessionListParams(worktreeID: f.worktree.id)))
+        let response = await f.router.handle(try RPCRequest(method: RPCMethod.sessionList, params: SessionListParams(worktreeID: f.worktree.id, providerAware: true)))
         let summaries = try response.decodeResult([SessionSummary].self)
         #expect(summaries.count == 1)
         #expect(summaries.first?.transcriptAvailable == false)

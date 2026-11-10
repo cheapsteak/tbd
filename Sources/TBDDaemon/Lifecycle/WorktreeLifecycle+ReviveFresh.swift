@@ -29,19 +29,19 @@ extension WorktreeLifecycle {
             )
         }
         let identity = identity ?? AgentSessionIdentity(agentKind: .claude, sessionID: sessionID)
-        guard let association = try await db.localAgentSessions.get(
-            worktreeID: archived.id, identity: identity) else {
+        let association = try await db.localAgentSessions.get(worktreeID: archived.id, identity: identity)
+        guard association != nil || legacyClaudeSessionBelongs(identity, to: archived) else {
             throw WorktreeLifecycleError.invalidOperation(
                 "Cannot revive conversation: session is not cataloged in the archived worktree.")
         }
-        let sessionID = association.identity.sessionID
+        let sessionID = identity.sessionID
         let sourceTab = archived.archivedAgentTabs?.first { $0.identity == identity }
         let preparedCodexLaunch: CodexLaunchPreparation?
         if identity.agentKind == .codex {
             // The native thread ID is resume authority. Rollout files are only
             // display metadata and need not remain on disk for native resume.
             preparedCodexLaunch = try CodexLaunchPreparation.prepare(
-                guardedHome: association.codexLaunchOptions?.codexHome,
+                guardedHome: association?.codexLaunchOptions?.codexHome,
                 executableResolver: codexExecutableResolver, sharedHomeEnsurer: codexHomeEnsurer)
         } else {
             preparedCodexLaunch = nil
@@ -139,7 +139,7 @@ extension WorktreeLifecycle {
             notesSeed: notesSeed,
             profileID: sourceTab?.profileID,
             claudeSpawnExtras: sourceTab?.claudeSpawnExtras ?? archived.archivedClaudeSpawnExtras?[sessionID],
-            codexLaunchOptions: association.codexLaunchOptions,
+            codexLaunchOptions: association?.codexLaunchOptions,
             preparedCodexLaunch: preparedCodexLaunch
         )
         let completion = try await completeCreateWorktree(

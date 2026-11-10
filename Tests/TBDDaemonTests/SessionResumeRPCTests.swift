@@ -52,6 +52,39 @@ struct SessionResumeRPCTests {
             identity: .init(agentKind: kind, sessionID: session)))
     }
 
+    @Test("explicit Codex history selection requires catalog authority even inside the snapshot")
+    func selectedReviveRequiresCodexCatalog() async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        try await f.db.worktrees.archive(id: f.worktree.id)
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "selected")
+        try await f.db.worktrees.setArchivedAgentTabs(id: f.worktree.id,
+            tabs: [.init(identity: identity, ordinal: 0, isPrimary: true)])
+        let response = await f.router.handle(try RPCRequest(method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: f.worktree.id, preferredSession: identity)))
+        #expect(!response.success)
+        #expect(response.error?.contains("associated") == true)
+        #expect(f.admission.requests.isEmpty)
+    }
+
+    @Test("selected catalog-only revive admits its provider before checkout mutation")
+    func selectedReviveAdmission() async throws {
+        let f = try await fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        try await f.db.worktrees.archive(id: f.worktree.id)
+        try await f.db.worktrees.setArchivedAgentTabs(id: f.worktree.id, tabs: [])
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "selected")
+        try await f.db.localAgentSessions.upsert(.init(worktreeID: f.worktree.id, identity: identity,
+            firstObservedAt: .distantPast, lastObservedAt: .distantPast))
+        f.admission.setVerdict(.hold(reason: "busy"))
+        let response = await f.router.handle(try RPCRequest(method: RPCMethod.worktreeRevive,
+            params: WorktreeReviveParams(worktreeID: f.worktree.id, preferredSession: identity)))
+        #expect(!response.success)
+        #expect(f.admission.requests.map(\.agent) == [.codex])
+        #expect(try await f.db.worktrees.get(id: f.worktree.id)?.status == .archived)
+        #expect(f.commands.snapshot.isEmpty)
+    }
+
     @Test("provider resumes use native commands, admission, metadata and spawn records", arguments: [LocalAgentKind.claude, .codex])
     func resumes(kind: LocalAgentKind) async throws {
         let f = try await fixture()

@@ -97,7 +97,10 @@ extension HistoryPaneActionTests {
         let fullReads = FireRecorder<Int>()
         let server = try HistoryRPCServer { request in
             switch request.method {
-            case RPCMethod.sessionList: return try RPCResponse(result: [summary, claude])
+            case RPCMethod.sessionList:
+                let params = try JSONDecoder().decode(SessionListParams.self, from: request.paramsData)
+                #expect(params.providerAware == true)
+                return try RPCResponse(result: [summary, claude])
             case RPCMethod.terminalHistoryList: return try RPCResponse(result: [TerminalHistoryEntry]())
             case RPCMethod.sessionMessages:
                 let params = try JSONDecoder().decode(SessionMessagesParams.self, from: request.paramsData)

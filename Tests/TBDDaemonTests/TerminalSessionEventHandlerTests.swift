@@ -117,6 +117,37 @@ struct TerminalSessionEventHandlerTests {
         )
     }
 
+    @Test("malformed terminal options cannot create or weaken catalog authority", arguments: [false, true], [false, true])
+    func strictCatalogLaunchOptions(reconcile: Bool, existing: Bool) async throws {
+        let path = try makeTranscript(#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n", tag: "strict-options")
+        let options = CodexLaunchOptions(model: "acme-model", codexHome: path.deletingLastPathComponent().appendingPathComponent("missing-home").path)
+        let (terminal, worktree) = try await makeTerminal(kind: .codex, codexLaunchOptions: options)
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "strict-session")
+        let prior = LocalAgentSession(worktreeID: worktree.id, terminalID: terminal.id, identity: identity,
+            transcriptPath: path.path, codexLaunchOptions: options, firstObservedAt: .distantPast, lastObservedAt: .distantPast)
+        if existing { try await db.localAgentSessions.upsert(prior) }
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "UPDATE terminal SET codex_launch_options = ?, claudeSessionID = ?, transcriptPath = ? WHERE id = ?",
+                arguments: ["{invalid", reconcile ? identity.sessionID : nil, reconcile ? path.path : nil, terminal.id.uuidString])
+        }
+        if reconcile {
+            await LocalAgentSessionReconciler(db: db).reconcile(terminalID: terminal.id)
+        } else {
+            let response = await router.handle(try RPCRequest(method: RPCMethod.terminalSessionEvent,
+                params: TerminalSessionEventParams(terminalID: terminal.id, sessionID: identity.sessionID,
+                    transcriptPath: path.path, source: "startup")))
+            #expect(!response.success)
+            #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == nil)
+        }
+        let stored = try await db.localAgentSessions.get(worktreeID: worktree.id, identity: identity)
+        #expect(stored == (existing ? prior : nil))
+        let resume = await router.handle(try RPCRequest(method: RPCMethod.sessionResume,
+            params: SessionResumeParams(worktreeID: worktree.id, identity: identity)))
+        #expect(!resume.success)
+        #expect(try await db.terminals.list(worktreeID: worktree.id).count == 1)
+    }
+
     @Test("accepted provider starts catalog persisted identity atomically", arguments: [TerminalKind.claude, .codex])
     func acceptedStartCatalogs(kind: TerminalKind) async throws {
         let options = kind == .codex ? CodexLaunchOptions(model: "acme-model", disabledFeatures: ["example_feature"]) : nil

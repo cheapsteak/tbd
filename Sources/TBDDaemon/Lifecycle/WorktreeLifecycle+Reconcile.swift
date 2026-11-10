@@ -683,7 +683,7 @@ extension WorktreeLifecycle {
     /// Reconcile terminals nothing can reach any more: a tmux row whose window
     /// is gone or no longer belongs to it, and a holder row whose holder is
     /// gone. All of them use the same established outcomes: park resumable
-    /// Claude sessions and delete non-resumable Codex/shell rows.
+    /// identified Claude and Codex sessions and delete non-resumable rows.
     ///
     /// The two transports differ only in what "unreachable" is read off. tmux
     /// rows are judged by their window and pane; holder rows by the holder

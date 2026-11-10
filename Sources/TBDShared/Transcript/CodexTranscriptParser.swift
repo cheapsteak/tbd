@@ -212,9 +212,11 @@ public enum CodexTranscriptParser {
     }
 
     /// Never decodes a whole file or accepts its trailing partial record.
+    /// Both transcript passes share the 1 MiB record bound; drain oversized
+    /// records to their newline without retaining their remaining bytes.
     /// Absolute byte offsets include malformed records and multi-byte UTF-8.
     private static func records(
-        fileHandle: FileHandle, endOffset: UInt64, maxRecordBytes: Int = .max,
+        fileHandle: FileHandle, endOffset: UInt64, maxRecordBytes: Int = 1_048_576,
         onLine: () -> Void = {}, consume: ([String: Any], UInt64) -> Void
     ) throws {
         try fileHandle.seek(toOffset: 0)

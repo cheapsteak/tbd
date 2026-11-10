@@ -42,6 +42,97 @@ struct LocalAgentArchiveTests {
         return tabs
     }
 
+    @Test(arguments: [false, true], [LocalAgentKind.claude, .codex])
+    func selectedHistoryOutsideSnapshot(empty: Bool, kind: LocalAgentKind) async throws {
+        let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (temp, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
+        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let wt = try await lc.beginCreateWorktree(repoID: repo.id)
+        try await db.worktrees.updateStatus(id: wt.id, status: .archived)
+        try await shell("git branch '\(wt.branch)'", at: repoDir)
+        if empty { try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: []) }
+        else { _ = try await seedSnapshot(db, id: wt.id) }
+        let selected = AgentSessionIdentity(agentKind: kind, sessionID: "history-only")
+        if kind == .codex {
+            try await db.localAgentSessions.upsert(.init(worktreeID: wt.id, identity: selected,
+                codexLaunchOptions: .init(model: "selected-model"), firstObservedAt: .distantPast, lastObservedAt: .distantPast))
+        } else {
+            let project = ClaudeProjectDirectory.expectedDirectory(worktreePath: wt.localPath)
+            try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: project) }
+            try #"{"type":"user","sessionId":"history-only","message":{"role":"user","content":"legacy"}}"#
+                .write(to: project.appendingPathComponent("history-only.jsonl"), atomically: true, encoding: .utf8)
+            _ = try await lc.beginReviveWorktree(worktreeID: wt.id, preferredSession: selected)
+        }
+        if kind == .codex { _ = try await lc.beginReviveWorktree(worktreeID: wt.id, preferredSession: selected) }
+        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)
+        let agents = order.compactMap { id in terminals.first { $0.id == id } }.filter { $0.recoveryResumePlan != nil }
+        #expect(agents.map(\.claudeSessionID) == (empty ? ["history-only"] : ["history-only", "codex-A", "claude-B", "codex-C"]))
+        #expect(agents.first?.kind?.rawValue == kind.rawValue)
+        #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == agents.first?.id)
+    }
+
+    @Test(arguments: [LocalAgentKind.claude, .codex], ["retry", "restart", "rearchive", "immediate"])
+    func partialMixedReviveRemainsCompletable(first: LocalAgentKind, recovery: String) async throws {
+        let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (temp, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
+        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home)
+        let wt = try await lc.beginCreateWorktree(repoID: repo.id)
+        try await db.worktrees.updateStatus(id: wt.id, status: .archived)
+        try await shell("git branch '\(wt.branch)'", at: repoDir)
+        let second: LocalAgentKind = first == .claude ? .codex : .claude
+        let tabs = [ArchivedAgentTab(identity: .init(agentKind: first, sessionID: "first"), ordinal: 0, isPrimary: true),
+                    ArchivedAgentTab(identity: .init(agentKind: second, sessionID: "second"), ordinal: 1, isPrimary: false)]
+        try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: tabs)
+        try await db.worktrees.setAutoArchiveOnMerge(id: wt.id, value: true)
+        try await db.worktrees.setAutoHibernateOnMerge(id: wt.id, value: true)
+        let rejected = recovery == "immediate" ? "first" : "second"
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "CREATE TRIGGER reject_second BEFORE INSERT ON terminal WHEN NEW.claudeSessionID = '\(rejected)' BEGIN SELECT RAISE(ABORT, 'spawn refused'); END")
+        }
+        await #expect(throws: (any Error).self) { _ = try await lc.beginReviveWorktree(worktreeID: wt.id) }
+        let partial = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(partial.status == .active)
+        #expect(partial.archivedAgentTabs == tabs)
+        #expect(partial.autoArchiveOnMerge == false)
+        #expect(partial.autoHibernateOnMerge == false)
+        let firstTerminal = try await db.terminals.list(worktreeID: wt.id).first { $0.claudeSessionID == "first" }
+        #expect((firstTerminal == nil) == (recovery == "immediate"))
+        try await db.writerForTests.write { conn in try conn.execute(sql: "DROP TRIGGER reject_second") }
+        if recovery == "rearchive" {
+            // Pre-session failure already exposes an active checkout.
+            try await db.worktrees.updateStatus(id: wt.id, status: .active)
+            _ = try await lc.beginArchiveWorktree(worktreeID: wt.id, force: true, discardUncommittedChanges: true)
+            let archived = try #require(try await db.worktrees.get(id: wt.id))
+            #expect(archived.archivedAgentTabs?.map(\.identity) == tabs.map(\.identity))
+            return
+        }
+        if recovery == "restart" {
+            // Reproduce a crash before the inline failure handler commits status.
+            try await db.worktrees.updateStatus(id: wt.id, status: .creating)
+            let restarted = lifecycle(db, PreSessionRecordedCommands(), home: home)
+            for task in await restarted.recoverCreatingWorktrees() { await task.value }
+        } else {
+            _ = try await lc.beginReviveWorktree(worktreeID: wt.id)
+        }
+        let restored = try #require(try await db.worktrees.get(id: wt.id))
+        let agents = try await db.terminals.list(worktreeID: wt.id).filter { $0.recoveryResumePlan != nil }
+        #expect(agents.count == 2)
+        #expect(Set(agents.compactMap(\.claudeSessionID)) == ["first", "second"])
+        if let firstTerminal { #expect(agents.contains { $0.id == firstTerminal.id }) }
+        #expect(restored.status == .active)
+        #expect(restored.archivedAgentTabs == nil)
+        #expect(restored.archivedClaudeSessions == nil)
+        #expect(restored.archivedClaudeSpawnExtras == nil)
+    }
+
     @Test func archiveCapturesOrderActiveAndMetadataBeforeTeardown() async throws {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .active)
@@ -160,6 +251,15 @@ struct LocalAgentArchiveTests {
             #expect(restored.archivedAgentTabs == tabs)
             #expect(restored.archivedClaudeSessions == ["claude-B"])
             #expect(restored.archivedClaudeSpawnExtras?["claude-B"] == tabs[1].claudeSpawnExtras)
+            let primary = try #require(try await db.terminals.list(worktreeID: wt.id).first { $0.claudeSessionID == "claude-B" })
+            try await db.writerForTests.write { conn in try conn.execute(sql: "DROP TRIGGER reject_agent") }
+            _ = try await lc.beginReviveWorktree(worktreeID: wt.id)
+            let retried = try await db.terminals.list(worktreeID: wt.id).filter { $0.recoveryResumePlan != nil }
+            #expect(retried.count == 3)
+            #expect(retried.contains { $0.id == primary.id })
+            #expect(try await db.worktrees.get(id: wt.id)?.archivedAgentTabs == nil)
+            #expect(try await db.worktrees.get(id: wt.id)?.archivedClaudeSessions == nil)
+            #expect(try await db.worktrees.get(id: wt.id)?.archivedClaudeSpawnExtras == nil)
         } else {
             #expect(restored.archivedAgentTabs == nil)
             let terminals = try await db.terminals.list(worktreeID: wt.id)
@@ -222,6 +322,9 @@ struct LocalAgentArchiveTests {
         #expect(restored.archivedClaudeSessions == before.archivedClaudeSessions)
         #expect(restored.archivedClaudeSpawnExtras == before.archivedClaudeSpawnExtras)
         #expect(try await db.terminals.list(worktreeID: wt.id).allSatisfy { $0.kind == .shell })
+        let existing = try await db.terminals.list(worktreeID: wt.id)
+        _ = try await lc.beginReviveWorktree(worktreeID: wt.id, skipClaude: true)
+        #expect(try await db.terminals.list(worktreeID: wt.id) == existing)
     }
 
     @Test(arguments: [false, true])
@@ -245,7 +348,7 @@ struct LocalAgentArchiveTests {
         let sessions = try await db.terminals.list(worktreeID: wt.id).compactMap(\.claudeSessionID)
         if explicitEmpty {
             #expect(sessions.count == 1)
-            #expect(!sessions.contains("legacy-A") && !sessions.contains("legacy-B"))
+            #expect(sessions == ["legacy-B"])
         } else {
             #expect(sessions == ["legacy-B", "legacy-A"])
         }

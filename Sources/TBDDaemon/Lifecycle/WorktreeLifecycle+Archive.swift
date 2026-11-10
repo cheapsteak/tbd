@@ -199,6 +199,16 @@ extension WorktreeLifecycle {
                     ? try await db.terminals.codexLaunchOptionsForRelaunch(id: id) : nil))
         }
 
+        // A prior restore may have started only part of its snapshot. Keep
+        // every unstarted tab when archiving that still-visible checkout.
+        let pending = try await db.worktrees.archivedAgentTabsForRevive(id: worktreeID)
+        for tab in missingArchivedAgentTabs(worktree.archivedAgentTabs == nil ? [] : pending, terminals: terminals) {
+            agentTabs.append(ArchivedAgentTab(identity: tab.identity, label: tab.label,
+                ordinal: (agentTabs.map(\.ordinal).max() ?? -1) + 1,
+                isPrimary: agentTabs.isEmpty && tab.isPrimary, profileID: tab.profileID,
+                claudeSpawnExtras: tab.claudeSpawnExtras, codexLaunchOptions: tab.codexLaunchOptions))
+        }
+
         // Capture a branch rename without writing ahead of the archive
         // transaction: a snapshot failure must leave the live row unchanged.
         // git canonicalizes paths, so compare resolved-symlink forms.
@@ -522,7 +532,9 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
-        guard worktree.status == .archived else {
+        let pendingTabs = try await db.worktrees.archivedAgentTabsForRevive(id: worktreeID)
+        let isRetry = worktree.status == .active && worktree.archivedAgentTabs != nil && !pendingTabs.isEmpty
+        guard worktree.status == .archived || isRetry else {
             throw WorktreeLifecycleError.worktreeAlreadyActive(worktreeID)
         }
 
@@ -542,14 +554,24 @@ extension WorktreeLifecycle {
         let preferred = preferredSession ?? preferredSessionID.map {
             AgentSessionIdentity(agentKind: .claude, sessionID: $0)
         }
-        let tabs = preferredArchivedAgentTabs(try await db.worktrees.archivedAgentTabsForRevive(id: worktreeID), preferred: preferred)
-        let preparedArchivedCodexLaunches = try prepareArchivedCodexLaunches(skipClaude ? [] : tabs)
+        let tabs = try await archivedRestorePlan(worktreeID: worktreeID, preferred: preferred)
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        let missingTabs = missingArchivedAgentTabs(tabs, terminals: terminals)
+        let preparedArchivedCodexLaunches = try prepareArchivedCodexLaunches(skipClaude ? [] : missingTabs)
         let config = try await db.config.get()
         let preparedCodexLaunch = !skipClaude && tabs.isEmpty && config.primaryAgentPreference == .codex
             ? try CodexLaunchPreparation.prepare(executableResolver: codexExecutableResolver, homeEnsurer: codexHomeEnsurer)
             : nil
-        if preferred != nil {
+        // Materialize legacy input at the restore boundary. A later archive
+        // merges only this explicit unfinished plan, never an old projection.
+        if preferred != nil || worktree.archivedAgentTabs == nil {
             try await db.worktrees.setArchivedAgentTabs(id: worktreeID, tabs: tabs)
+        }
+
+        if isRetry {
+            if skipClaude { return .ready(worktree.worktree) }
+            return try await completeArchivedRestore(worktree: worktree.worktree, repo: repo, tabs: tabs,
+                prepared: preparedArchivedCodexLaunches, cols: cols, rows: rows)
         }
 
         // Create parent directory if needed
@@ -690,35 +712,28 @@ extension WorktreeLifecycle {
             return .preSessionPending(worktree: pending.worktree, phase3: phase3)
         }
 
-        // No preSession hook → spawn all terminals inline (today's behavior).
-        _ = try await spawnPrimaryTerminals(
-            worktree: worktree.worktree, repo: repo,
-            worktreePath: worktree.localPath,
-            skipClaude: skipClaude,
-            archivedAgentTabs: tabs,
-            preparedArchivedCodexLaunches: preparedArchivedCodexLaunches,
-            cols: cols, rows: rows,
-            preSessionTerminalID: nil,
-            preparedCodexLaunch: preparedCodexLaunch
-        )
-
-        // Update status to active.
-        // Skipping agents keeps both representations available for a later restore.
-        try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
+        // Persist the recovery boundary before the first process starts. A
+        // crash after any individual row commit leaves an identifiable revive.
+        try await db.worktrees.updateStatus(id: worktreeID, status: .creating)
+        do {
+            _ = try await spawnPrimaryTerminals(
+                worktree: worktree.worktree, repo: repo,
+                worktreePath: worktree.localPath, skipClaude: skipClaude,
+                archivedAgentTabs: tabs, preparedArchivedCodexLaunches: preparedArchivedCodexLaunches,
+                cols: cols, rows: rows, preSessionTerminalID: nil,
+                preparedCodexLaunch: preparedCodexLaunch)
+            try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
+        } catch {
+            try? await orderArchivedRestore(worktreeID: worktreeID, tabs: tabs)
+            try? await db.worktrees.revive(id: worktreeID, clearSessions: false)
+            await disarmMergeActionsAfterRevive(worktreeID: worktreeID)
+            throw error
+        }
 
         // Deliberate revive: disarm auto-archive AND auto-hibernate so a
         // still-merged PR doesn't immediately re-archive or re-park the
         // worktree the user just revived.
-        do {
-            try await db.worktrees.setAutoArchiveOnMerge(id: worktreeID, value: false)
-        } catch {
-            archiveLogger.warning("failed to disarm auto-archive for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-        }
-        do {
-            try await db.worktrees.setAutoHibernateOnMerge(id: worktreeID, value: false)
-        } catch {
-            archiveLogger.warning("failed to disarm auto-hibernate for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-        }
+        await disarmMergeActionsAfterRevive(worktreeID: worktreeID)
 
         // Return updated worktree
         guard let revived = try await db.worktrees.getLocal(id: worktreeID) else {

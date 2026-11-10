@@ -647,7 +647,10 @@ extension RPCRouter {
         // The row names the worktree, not a terminal: revive spawns its
         // primary terminals inside the lifecycle's own (possibly detached,
         // pre-session-gated) phase, so no terminal ID exists to name yet.
-        let archivedTabs = try await db.worktrees.archivedAgentTabsForRevive(id: params.worktreeID)
+        let preferred = params.preferredSession ?? params.preferredSessionID.map {
+            AgentSessionIdentity(agentKind: .claude, sessionID: $0)
+        }
+        let archivedTabs = try await lifecycle.archivedRestorePlan(worktreeID: params.worktreeID, preferred: preferred)
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))

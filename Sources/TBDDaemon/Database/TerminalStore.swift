@@ -1146,6 +1146,7 @@ public struct TerminalStore: Sendable {
         guard let evidence, let terminal = record.toModel(), let sessionID = terminal.claudeSessionID,
               !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let kind: LocalAgentKind
+        var codexOptions: CodexLaunchOptions?
         switch evidence {
         case .claude:
             guard terminal.kind == .claude else { return }
@@ -1155,6 +1156,15 @@ public struct TerminalStore: Sendable {
                   URL(fileURLWithPath: path).standardizedFileURL.path == proof.path,
                   proof.isCurrent() else { return }
             kind = .codex
+            // SQL NULL is a legacy shared-home launch. Damaged non-NULL
+            // metadata must never acquire that meaning through lenient decoding.
+            if let raw = record.codex_launch_options {
+                guard let data = raw.data(using: .utf8),
+                      let options = try? JSONDecoder().decode(CodexLaunchOptions.self, from: data) else {
+                    throw UnreadableCodexLaunchOptions(terminalID: terminal.id)
+                }
+                codexOptions = options
+            }
         }
         // Construct from the persisted record, not the handler's pre-suspension
         // model. A failed upsert throws through the surrounding identity write;
@@ -1163,7 +1173,7 @@ public struct TerminalStore: Sendable {
         try LocalAgentSessionRecord.upsert(LocalAgentSession(
             worktreeID: terminal.worktreeID, terminalID: terminal.id,
             identity: AgentSessionIdentity(agentKind: kind, sessionID: sessionID),
-            transcriptPath: terminal.transcriptPath, codexLaunchOptions: terminal.codexLaunchOptions,
+            transcriptPath: terminal.transcriptPath, codexLaunchOptions: codexOptions,
             firstObservedAt: timestamp, lastObservedAt: timestamp), in: db)
     }
 

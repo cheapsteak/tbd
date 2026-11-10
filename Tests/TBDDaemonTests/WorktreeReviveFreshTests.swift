@@ -19,6 +19,38 @@ struct WorktreeReviveFreshTests {
     private let archiveDate = ISO8601DateFormatter()
         .date(from: "2026-06-01T12:00:00Z")!
 
+    @Test(arguments: ["owned", "foreign", "unknown"])
+    func legacyScannerFreshRevive(ownership: String) async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let source = try await makeArchivedSource(db: db, repo: repo, tempDir: tempDir, sessions: [],
+            archivedHeadSHA: try await GitManager().headSHA(repoPath: repoDir.path))
+        let project = ClaudeProjectDirectory.expectedDirectory(worktreePath: ownership == "owned" ? source.localPath : tempDir.appendingPathComponent("foreign").path)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: project) }
+        if ownership != "unknown" {
+            try #"{"type":"user","sessionId":"legacy-only","message":{"role":"user","content":"legacy"}}"#
+                .write(to: project.appendingPathComponent("legacy-only.jsonl"), atomically: true, encoding: .utf8)
+        }
+        try writeSourceTranscript(sessionID: "legacy-only")
+        let lc = makeReviveFreshLifecycle(db: db)
+        let before = try await db.worktrees.list()
+        if ownership == "owned" {
+            let revived = try await lc.reviveConversationOnFreshBranch(archivedWorktreeID: source.id, sessionID: "legacy-only")
+            #expect(revived.result.worktree.status == .active)
+            #expect(try await db.terminals.list(worktreeID: revived.result.worktree.id).contains { $0.kind == .claude && $0.claudeSessionID == "legacy-only" })
+        } else {
+            await #expect(throws: (any Error).self) {
+                _ = try await lc.reviveConversationOnFreshBranch(archivedWorktreeID: source.id, sessionID: "legacy-only")
+            }
+            #expect(try await db.worktrees.list() == before)
+        }
+        #expect(try await db.localAgentSessions.list(worktreeID: source.id).isEmpty)
+    }
+
     @Test func rejectsUnknownWorktree() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }

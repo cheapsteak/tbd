@@ -8,6 +8,30 @@ struct CodexTranscriptParserTests {
         Bundle.module.url(forResource: "codex-rollout", withExtension: "jsonl")!
     }
 
+    @Test("oversized records are drained in both passes without hiding later records", arguments: [false, true])
+    func boundedTranscriptRecords(unterminated: Bool) throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let fallback = #"{"type":"event_msg","payload":{"type":"agent_message","id":"fallback","message":"answer"}}"# + "\n"
+        let oversized = #"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"answer"}],"padding":""#
+            + String(repeating: "x", count: 1_048_576) + #""}}"#
+        var bytes = Data(fallback.utf8)
+        bytes.append(Data(oversized.utf8))
+        if !unterminated {
+            bytes.append(0x0A)
+            let offset = bytes.count
+            bytes.append(Data((#"{"type":"event_msg","payload":{"type":"agent_message","message":"later"}}"# + "\n").utf8))
+            try bytes.write(to: file)
+            let expected: [TranscriptItem] = [.assistantText(id: "fallback", text: "answer", timestamp: nil),
+                .assistantText(id: "codex-byte-\(offset)", text: "later", timestamp: nil)]
+            #expect(CodexTranscriptParser.parse(filePath: file.path) == expected)
+            #expect(CodexTranscriptParser.parseTail(filePath: file.path, limit: 1) == Array(expected.suffix(1)))
+        } else {
+            try bytes.write(to: file)
+            #expect(CodexTranscriptParser.parse(filePath: file.path).map(\.id) == ["fallback"])
+        }
+    }
+
     @Test("canonical messages replace duplicate events while unknown and malformed rows preserve later items")
     func canonicalMessagesAndStableIDs() throws {
         let items = CodexTranscriptParser.parse(filePath: fixture.path)

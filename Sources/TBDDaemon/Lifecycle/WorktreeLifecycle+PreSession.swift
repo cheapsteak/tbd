@@ -556,6 +556,9 @@ extension WorktreeLifecycle {
                 await closePreSessionTerminal(worktree: worktree, preSession: preSession)
             }
         } catch {
+            if let archivedAgentTabs {
+                try? await orderArchivedRestore(worktreeID: worktree.id, tabs: archivedAgentTabs)
+            }
             logger.error("phase-3 primary terminal spawn failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             await notifyPreSessionProblem(
                 worktree: worktree, terminalID: preSession.terminalID,

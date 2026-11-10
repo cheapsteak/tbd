@@ -64,7 +64,7 @@ extension RPCRouter {
             }
         }
         for session in try await db.localAgentSessions.list(worktreeID: worktree.id)
-            where session.identity.agentKind == .codex {
+            where params.providerAware == true && session.identity.agentKind == .codex {
             let summary = CodexSessionScanner.summary(session)
             byIdentity[summary.identity] = summary
         }

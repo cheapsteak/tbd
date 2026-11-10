@@ -39,6 +39,9 @@ struct MixedReviveSelectionTests {
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
         _ = try await helper.seedSnapshot(db, id: wt.id)
+        try await db.localAgentSessions.upsert(.init(worktreeID: wt.id,
+            identity: .init(agentKind: .codex, sessionID: "codex-C"),
+            firstObservedAt: .distantPast, lastObservedAt: .distantPast))
         let router = RPCRouter(db: db, lifecycle: lc, tmux: TmuxManager(dryRun: true), startTime: Date(),
             actuationLog: ActuationLog(path: home.appendingPathComponent("actuations.jsonl").path))
         let admission = StubAdmission(.admit)

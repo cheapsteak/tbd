@@ -2388,7 +2388,7 @@ actor DaemonClient {
     func listSessions(worktreeID: UUID) async throws -> [SessionSummary] {
         return try await callAsync(
             method: RPCMethod.sessionList,
-            params: SessionListParams(worktreeID: worktreeID),
+            params: SessionListParams(worktreeID: worktreeID, providerAware: true),
             resultType: [SessionSummary].self
         )
     }

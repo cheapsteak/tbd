@@ -141,8 +141,11 @@ writing the Claude projection to `archivedClaudeSessions` and `archivedClaudeSpa
 rollback build can still revive Claude sessions. New code prefers `archivedAgentTabs`; an older
 archive that lacks it synthesizes Claude entries from the existing fields.
 
-Revive clears both representations only after the requested sessions start successfully. A
-failed or pre-session-gated revive keeps the snapshot until its existing completion boundary.
+Revive clears both representations only after every requested session has a corresponding
+terminal. A failed or pre-session-gated revive keeps the snapshot. A partial spawn leaves the
+checkout active and retryable through `worktree.revive`; retry and startup recovery match each
+saved provider-qualified identity once and start only missing entries. Re-archiving preserves
+entries that never started alongside the currently open tabs.
 
 ## Reboot reconciliation
 
@@ -217,7 +220,9 @@ agent-neutral.
 ### Listing
 
 Extend `SessionSummary` with an optional `agentKind` that decodes an absent value as Claude.
-`session.list` merges:
+`session.list` accepts an optional `providerAware` capability. Missing or false keeps the
+response Claude-only, so legacy actions cannot mistake a Codex thread for a Claude session.
+The new app explicitly opts in. For an opted-in request, the daemon merges:
 
 - Claude summaries from `ClaudeSessionScanner`, including older sessions that predate the catalog.
 - Codex summaries from `local_agent_session` for the requested worktree.
@@ -240,6 +245,8 @@ Add `CodexTranscriptParser`, which maps rollout records into `TranscriptItem`:
   renderer uses for Claude.
 - Unknown record types are ignored.
 - A malformed line is skipped without discarding later records.
+- Both transcript passes cap an individual JSONL record at 1 MiB. Oversized records are
+  drained through their newline, preserving later records and absolute byte offsets.
 
 The parser owns Codex format interpretation; the shared table renderer remains agent-neutral.
 Fixtures cover current Codex records and keep proprietary or machine-specific content out of the
@@ -288,8 +295,9 @@ terminal and worktree starts.
 The database migration, GRDB records, and shared Codable models land in one commit. New fields are
 optional. The migration adds no SQL defaults.
 
-An old app ignores the added summary field and continues to use Claude-only actions. A new app
-talking to an old daemon decodes the absent field as Claude and receives no Codex summaries.
+An old app omits the provider-aware capability and receives only Claude summaries for its
+Claude-only actions. A new app talking to an old daemon decodes the absent summary field as
+Claude and receives no Codex summaries.
 Existing archives without `archivedAgentTabs` revive through synthesized Claude entries. New
 archives retain the old Claude projection for rollback.
 

@@ -4483,9 +4483,12 @@ public struct NoteListParams: Codable, Sendable {
 
 public struct SessionListParams: Codable, Sendable {
     public let worktreeID: UUID
+    /// Only clients with provider-qualified actions may receive Codex history.
+    public let providerAware: Bool?
 
-    public init(worktreeID: UUID) {
+    public init(worktreeID: UUID, providerAware: Bool? = nil) {
         self.worktreeID = worktreeID
+        self.providerAware = providerAware
     }
 }
 

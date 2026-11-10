@@ -21,9 +21,11 @@ extension WorktreeLifecycle {
     /// - Remote row → mark it `.failed`; see the guard below.
     /// - Checkout missing on disk → creation never completed; delete the row
     ///   (and its terminal/tab records).
-    /// - Checkout exists and primary (non-pre-session) terminals exist → the
-    ///   daemon died between the primary spawn and the final status flip;
-    ///   just flip to `.active`.
+    /// - Checkout exists with an unfinished archived snapshot → match each
+    ///   saved identity to its terminal and restore only missing entries. A
+    ///   failure keeps the snapshot on an active, explicitly retryable row.
+    /// - Checkout exists and ordinary primary terminals exist → the daemon
+    ///   died between the primary spawn and final status flip; mark active.
     /// - Checkout exists and ONLY a pre-session terminal exists → the daemon
     ///   died mid-wait. The tmux server and the hook process survive daemon
     ///   restarts, so resume the wait: rebuild the `PreSessionSpawn` from the
@@ -107,7 +109,37 @@ extension WorktreeLifecycle {
                 continue
             }
 
-            if hasPrimaries {
+            // A single primary proves only its own spawn. An interrupted
+            // revive must account for every saved provider-qualified identity.
+            let restoreTabs: [ArchivedAgentTab]
+            do {
+                restoreTabs = try await db.worktrees.archivedAgentTabsForRevive(id: worktree.id)
+                if !restoreTabs.isEmpty, worktree.archivedAgentTabs == nil {
+                    try await db.worktrees.setArchivedAgentTabs(id: worktree.id, tabs: restoreTabs)
+                }
+            } catch {
+                logger.error("recovery: refusing unreadable archive for \(worktree.id, privacy: .public)")
+                continue
+            }
+            let pendingRestore = !restoreTabs.isEmpty
+            var restoreWithoutHook = pendingRestore && preSessionTerminal == nil
+            if restoreWithoutHook && !hasPrimaries {
+                restoreWithoutHook = await gitListsCheckout(row)
+            }
+            if pendingRestore, restoreWithoutHook || missingArchivedAgentTabs(restoreTabs, terminals: terminals).isEmpty {
+                guard let repoID = worktree.repoID, let repo = try? await db.repos.get(id: repoID) else { continue }
+                let task = Task.detached { [self] in
+                    do {
+                        _ = try await completeArchivedRestore(worktree: worktree.worktree, repo: repo, tabs: restoreTabs)
+                    } catch {
+                        logger.error("recovery: archived restore remains retryable for \(worktree.id, privacy: .public)")
+                    }
+                }
+                resumed.append(task)
+                continue
+            }
+
+            if hasPrimaries && !pendingRestore {
                 // Phase 3 already spawned the primary terminals; only the
                 // final status flip was lost. Reconcile's dead-window pass
                 // will clean up any terminals whose windows didn't survive.

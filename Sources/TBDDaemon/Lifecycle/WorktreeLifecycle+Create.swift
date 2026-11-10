@@ -1552,11 +1552,17 @@ extension WorktreeLifecycle {
         let worktreePath = worktreePath ?? worktree.localPath
         let config = try await db.config.get()
         let claudeEnvOverrides = config.envSettingOverrides
-        let archivedTabs = orderedArchivedAgentTabs(archivedAgentTabs ?? (archivedClaudeSessions ?? []).enumerated().map {
+        let requestedArchivedTabs = orderedArchivedAgentTabs(archivedAgentTabs ?? (archivedClaudeSessions ?? []).enumerated().map {
             ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: $0.element),
                 ordinal: $0.offset, isPrimary: $0.offset == 0,
                 claudeSpawnExtras: archivedClaudeSpawnExtras?[$0.element])
         })
+        let existingTerminals = try await db.terminals.list(worktreeID: worktreeID)
+        let archivedTabs = missingArchivedAgentTabs(requestedArchivedTabs, terminals: existingTerminals)
+        if !skipClaude, carryover == nil, !requestedArchivedTabs.isEmpty, archivedTabs.isEmpty {
+            try await orderArchivedRestore(worktreeID: worktreeID, tabs: requestedArchivedTabs)
+            return []
+        }
         let primaryArchivedTab = skipClaude || carryover != nil ? nil : archivedTabs.first
         let archivedSessions = archivedTabs.filter { $0.identity.agentKind == .claude }.map(\.identity.sessionID)
         let primaryTerminalKind: TerminalKind
@@ -1947,6 +1953,7 @@ extension WorktreeLifecycle {
         // regardless and the tab is created unconditionally, as it always has
         // been — the flag must not change what the flag-off path does.
         let wantsSetupTerminal = repo != nil && (!transport.isHolder || setupHookPath != nil)
+            && !existingTerminals.contains { $0.label == TerminalLabel.setup }
         if let repo, wantsSetupTerminal {
             if !transport.isHolder {
                 try await ensureTmuxServerOnce()
@@ -2177,6 +2184,9 @@ extension WorktreeLifecycle {
         }
         try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: tabOrder)
         try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: plannedTerminalID1)
+        if !skipClaude, !requestedArchivedTabs.isEmpty {
+            try await orderArchivedRestore(worktreeID: worktreeID, tabs: requestedArchivedTabs)
+        }
 
         // Kill the untracked initial window that new-session created, but skip
         // if a restarted tmux server reused the window ID for one we just created
