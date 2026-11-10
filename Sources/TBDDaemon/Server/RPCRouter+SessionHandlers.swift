@@ -13,6 +13,11 @@ extension RPCRouter {
             return try RPCResponse(result: [SessionSummary]())
         }
 
+        let reconciler = LocalAgentSessionReconciler(db: db)
+        for terminal in try await db.terminals.list(worktreeID: worktree.id) where terminal.kind == .codex {
+            await reconciler.reconcile(terminalID: terminal.id)
+        }
+
         guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
             return try RPCResponse(result: [SessionSummary]())
         }

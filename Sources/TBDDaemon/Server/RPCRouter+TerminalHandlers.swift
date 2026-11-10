@@ -6065,6 +6065,16 @@ extension RPCRouter {
             ? observedTranscriptBoundary(atAbsolutePath: effectiveTranscriptPath)
             : nil
 
+        let catalogEvidence: AcceptedSessionCatalogEvidence?
+        if terminal.kind == .claude {
+            catalogEvidence = .claude
+        } else if terminal.kind == .codex, let path = effectiveTranscriptPath,
+                  case let .topLevel(proof) = CodexRolloutProvenance.classify(path: path) {
+            catalogEvidence = .codex(proof)
+        } else {
+            catalogEvidence = nil
+        }
+
         // Codex session identity is reconciled on its own ordering rail; other
         // agent kinds keep last-writer session identity. Neither writes
         // activity: the agent reports that itself.
@@ -6075,6 +6085,7 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath,
             observedTranscriptBoundary: observedTranscriptBoundary,
+            catalogEvidence: catalogEvidence,
             observedAt: observedAt
         ) else { return .ok() }
 

@@ -63,7 +63,8 @@ struct TerminalSessionEventHandlerTests {
     private func makeTerminal(
         initialSession: String? = nil,
         label: String = "claude",
-        kind: TerminalKind? = nil
+        kind: TerminalKind? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> (Terminal, Worktree) {
         let repo = try await db.repos.create(
             path: "/tmp/se-repo-\(UUID().uuidString)",
@@ -83,7 +84,8 @@ struct TerminalSessionEventHandlerTests {
             tmuxPaneID: "%1",
             label: label,
             claudeSessionID: initialSession,
-            kind: kind
+            kind: kind,
+            codexLaunchOptions: codexLaunchOptions
         )
         return (terminal, wt)
     }
@@ -113,6 +115,129 @@ struct TerminalSessionEventHandlerTests {
             path: "/tmp/se-foreign-wt-\(UUID().uuidString)",
             tmuxServer: "tbd-se-foreign"
         )
+    }
+
+    @Test("accepted provider starts catalog persisted identity atomically", arguments: [TerminalKind.claude, .codex])
+    func acceptedStartCatalogs(kind: TerminalKind) async throws {
+        let options = kind == .codex ? CodexLaunchOptions(model: "acme-model", disabledFeatures: ["example_feature"]) : nil
+        let (terminal, worktree) = try await makeTerminal(kind: kind, codexLaunchOptions: options)
+        let path = try makeTranscript(#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n", tag: "catalog")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let timestamp = Date(timeIntervalSince1970: 1_800_000_000.000123)
+        let response = await makeRouter(now: { timestamp }).handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(terminalID: terminal.id, sessionID: "accepted-session",
+                                              transcriptPath: path.path, source: "startup")))
+        #expect(response.success)
+        let stored = try #require(try await db.terminals.get(id: terminal.id))
+        let rows = try await db.localAgentSessions.list(worktreeID: worktree.id)
+        let row = try #require(rows.first)
+        #expect(rows.count == 1)
+        #expect(row.identity.sessionID == stored.claudeSessionID)
+        #expect(row.identity.agentKind == (kind == .codex ? .codex : .claude))
+        #expect(row.terminalID == terminal.id)
+        #expect(row.transcriptPath == stored.transcriptPath)
+        #expect(row.codexLaunchOptions == options)
+        #expect(row.firstObservedAt == timestamp)
+        #expect(row.lastObservedAt == timestamp)
+    }
+
+    @Test("unproven and subagent Codex starts preserve identity without cataloging", arguments: [
+        #"{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}"#, "null", "{}", "\"\""
+    ])
+    func ineligibleCodexIsNotCataloged(source: String) async throws {
+        let (terminal, worktree) = try await makeTerminal(kind: .codex)
+        let path = try makeTranscript("{\"type\":\"session_meta\",\"payload\":{\"source\":\(source)}}\n", tag: "ineligible")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(terminalID: terminal.id, sessionID: "accepted-session",
+                                              transcriptPath: path.path, source: "startup")))
+        #expect(response.success)
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == "accepted-session")
+        #expect(try await db.localAgentSessions.list(worktreeID: worktree.id).isEmpty)
+    }
+
+    @Test("catalog insertion failure rolls terminal identity back", arguments: [TerminalKind.claude, .codex])
+    func catalogFailureRollsBack(kind: TerminalKind) async throws {
+        let (terminal, worktree) = try await makeTerminal(initialSession: "prior-session", kind: kind)
+        let path = try makeTranscript(#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n", tag: "rollback")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try await db.writerForTests.write { database in
+            try database.execute(sql: """
+                CREATE TRIGGER reject_catalog BEFORE INSERT ON local_agent_session
+                BEGIN SELECT RAISE(ABORT, 'catalog unavailable'); END
+                """)
+        }
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(terminalID: terminal.id, sessionID: "new-session",
+                                              transcriptPath: path.path, source: "startup")))
+        #expect(!response.success)
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == "prior-session")
+        #expect(try await db.terminals.get(id: terminal.id)?.transcriptPath == nil)
+        #expect(try await db.terminals.get(id: terminal.id)?.sessionOrderObservedAt == nil)
+        #expect(try await db.terminals.get(id: terminal.id)?.codexTranscriptBoundaryOffset == nil)
+        #expect(try await db.localAgentSessions.list(worktreeID: worktree.id).isEmpty)
+    }
+
+    @Test("changed rollout proof commits identity without a stale catalog association", arguments: ["replace", "rewrite", "path"])
+    func changedProofSkipsCatalog(change: String) async throws {
+        let (terminal, worktree) = try await makeTerminal(kind: .codex)
+        let contents = #"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n"
+        let path = try makeTranscript(contents, tag: "changed-proof")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        guard case let .topLevel(proof) = CodexRolloutProvenance.classify(path: path.path) else {
+            Issue.record("expected proof")
+            return
+        }
+        let acceptedPath: URL
+        if change == "path" {
+            acceptedPath = path.deletingLastPathComponent().appendingPathComponent("other.jsonl")
+            try Data(contents.utf8).write(to: acceptedPath)
+        } else {
+            acceptedPath = path
+            let replacement = change == "rewrite" ? contents.replacingOccurrences(of: "cli", with: "exec") : contents
+            try Data(replacement.utf8).write(to: path, options: change == "replace" ? .atomic : [])
+        }
+        let accepted = try await db.terminals.applySessionStart(
+            id: terminal.id, expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+            sessionID: "accepted-session", transcriptPath: acceptedPath.path,
+            catalogEvidence: .codex(proof), observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(accepted != nil)
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == "accepted-session")
+        #expect(try await db.localAgentSessions.list(worktreeID: worktree.id).isEmpty)
+        await LocalAgentSessionReconciler(db: db).reconcile(terminalID: terminal.id)
+        #expect(try await db.localAgentSessions.list(worktreeID: worktree.id).count == 1)
+    }
+
+    @Test("catalog eligibility preserves rejection rails", arguments: ["incarnation", "pending", "cwd", "older", "shell"])
+    func rejectedStartDoesNotCatalog(rail: String) async throws {
+        let kind: TerminalKind = rail == "shell" ? .shell : .codex
+        let (terminal, worktree) = try await makeTerminal(initialSession: "prior-session", label: kind.rawValue, kind: kind)
+        let path = try makeTranscript(#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n", tag: "rails")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        if rail == "pending" {
+            try await db.writerForTests.write { database in
+                try database.execute(sql: "UPDATE terminal SET pendingSessionIncarnationID = ? WHERE id = ?",
+                                     arguments: [UUID().uuidString, terminal.id.uuidString])
+            }
+        }
+        if rail == "older" {
+            _ = try await db.terminals.applySessionStart(
+                id: terminal.id, expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
+                sessionID: "prior-session", transcriptPath: nil, observedAt: timestamp.addingTimeInterval(1))
+        }
+        let response = await makeRouter(now: { timestamp }).handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(terminalID: terminal.id, sessionID: "new-session",
+                transcriptPath: path.path, source: "startup",
+                cwd: rail == "cwd" ? "/tmp/unrelated-\(UUID())" : nil,
+                sessionIncarnationID: rail == "incarnation" ? UUID() : nil)))
+        #expect(response.success)
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == (rail == "shell" ? "new-session" : "prior-session"))
+        #expect(try await db.localAgentSessions.list(worktreeID: worktree.id).isEmpty)
     }
 
     @Test("updates sessionID + transcriptPath in DB on a fresh SessionStart")

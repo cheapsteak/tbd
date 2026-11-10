@@ -82,6 +82,73 @@ struct CodexActivityReconciliationTests {
             kind: kind)
     }
 
+    @Test("catalog reconciler retries unreadable rollout and backfills only proven terminal paths")
+    func catalogReconcilerBackfillsSurvivingRows() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "catalog")
+        let path = try makeTranscript("not metadata\n")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try await db.terminals.updateSession(id: terminal.id, sessionID: "surviving-session", transcriptPath: path.path)
+        let reconciler = LocalAgentSessionReconciler(db: db)
+        await reconciler.reconcileAllCodexTerminals()
+        #expect(try await db.localAgentSessions.list(worktreeID: terminal.worktreeID).isEmpty)
+        try Data((#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n").utf8).write(to: path)
+        await reconciler.reconcileAllCodexTerminals()
+        await reconciler.reconcile(terminalID: terminal.id)
+        let rows = try await db.localAgentSessions.list(worktreeID: terminal.worktreeID)
+        #expect(rows.count == 1)
+        #expect(rows.first?.identity.sessionID == "surviving-session")
+        #expect(rows.first?.identity.agentKind == .codex)
+        #expect(rows.first?.terminalID == terminal.id)
+    }
+
+    @Test("session list retries provenance before assembling sessions")
+    func sessionListReconcilesCatalog() async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "catalog-list")
+        let path = try makeTranscript(#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try await db.terminals.updateSession(id: terminal.id, sessionID: "listed-session", transcriptPath: path.path)
+        let response = await router.handle(try RPCRequest(method: RPCMethod.sessionList,
+            params: SessionListParams(worktreeID: terminal.worktreeID)))
+        #expect(response.success)
+        #expect(try await db.localAgentSessions.list(worktreeID: terminal.worktreeID).first?.identity.sessionID == "listed-session")
+    }
+
+    @Test("catalog reconciliation compare-and-set rejects changed terminal identity", arguments: ["kind", "session", "path", "order", "pending", "deleted"])
+    func catalogReconcilerRejectsStaleSnapshot(change: String) async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "catalog-race")
+        let path = try makeTranscript(#"{"type":"session_meta","payload":{"source":"cli"}}"# + "\n")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try await db.terminals.updateSession(id: terminal.id, sessionID: "source-session", transcriptPath: path.path)
+        let snapshot = try #require(try await db.terminals.get(id: terminal.id))
+        guard case let .topLevel(proof) = CodexRolloutProvenance.classify(path: path.path) else {
+            Issue.record("expected proof")
+            return
+        }
+        try await db.writerForTests.write { database in
+            let changes = ["kind": "kind = 'shell'", "session": "claudeSessionID = 'successor-session'",
+                           "path": "transcriptPath = '/tmp/successor.jsonl'", "order": "sessionOrderObservedAt = 1800000000",
+                           "pending": "pendingSessionIncarnationID = 'pending-replacement'"]
+            if let assignment = changes[change] {
+                try database.execute(sql: "UPDATE terminal SET \(assignment) WHERE id = ?", arguments: [terminal.id.uuidString])
+            } else {
+                try database.execute(sql: "DELETE FROM terminal WHERE id = ?", arguments: [terminal.id.uuidString])
+            }
+        }
+        try await db.terminals.catalogProvenCodexSession(expectedTerminal: snapshot, proof: proof)
+        #expect(try await db.localAgentSessions.list(worktreeID: terminal.worktreeID).isEmpty)
+    }
+
+    @Test("catalog reconciliation rejects subagents and shell terminals", arguments: [TerminalKind.codex, .shell])
+    func catalogReconcilerExcludesIneligibleRows(kind: TerminalKind) async throws {
+        let terminal = try await makeBoundaryTerminal(tag: "catalog-ineligible", kind: kind)
+        let source = kind == .codex ? #"{"subagent":"review"}"# : #""cli""#
+        let path = try makeTranscript("{\"type\":\"session_meta\",\"payload\":{\"source\":\(source)}}\n")
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        try await db.terminals.updateSession(id: terminal.id, sessionID: "ineligible-session", transcriptPath: path.path)
+        await LocalAgentSessionReconciler(db: db).reconcile(terminalID: terminal.id)
+        #expect(try await db.localAgentSessions.list(worktreeID: terminal.worktreeID).isEmpty)
+    }
+
     private func seedBoundary(_ offset: Int64, terminalID: UUID) async throws {
         try await db.writerForTests.write { database in
             try database.execute(

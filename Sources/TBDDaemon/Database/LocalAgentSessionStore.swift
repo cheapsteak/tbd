@@ -82,6 +82,8 @@ struct LocalAgentSessionRecord: Codable, FetchableRecord, PersistableRecord, Sen
     /// Join the caller's accepted SessionStart transaction without nesting a write.
     static func upsert(_ model: LocalAgentSession, in db: GRDB.Database) throws {
         let record = try LocalAgentSessionRecord(from: model)
+        // Raw SQL bindings bypass record date strategies. Numeric epochs retain
+        // the accepted SessionStart's sub-millisecond ordering precision.
         try db.execute(sql: """
             INSERT INTO local_agent_session
                 (id, worktree_id, terminal_id, agent_kind, session_id, transcript_path,
@@ -94,7 +96,9 @@ struct LocalAgentSessionRecord: Codable, FetchableRecord, PersistableRecord, Sen
                 last_observed_at = excluded.last_observed_at
             """, arguments: [record.id, record.worktree_id, record.terminal_id,
                              record.agent_kind, record.session_id, record.transcript_path,
-                             record.codex_launch_options, record.first_observed_at, record.last_observed_at])
+                             record.codex_launch_options,
+                             record.first_observed_at.timeIntervalSince1970,
+                             record.last_observed_at.timeIntervalSince1970])
     }
 
     /// Decode independently: one corrupt timestamp or column must cost only its row.
@@ -116,10 +120,15 @@ public struct LocalAgentSessionStore: Sendable {
     }
 
     public func list(worktreeID: UUID) async throws -> [LocalAgentSession] {
+        // The migration retains legacy text dates; live observations use numeric
+        // epochs. Normalize text for ordering without rewriting existing rows.
         try await writer.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT * FROM local_agent_session WHERE worktree_id = ?
-                ORDER BY first_observed_at, id
+                ORDER BY CASE typeof(first_observed_at)
+                    WHEN 'text' THEN CAST(strftime('%s', first_observed_at) AS REAL)
+                        + CAST(substr(strftime('%f', first_observed_at), 3) AS REAL)
+                    ELSE first_observed_at END, id
                 """, arguments: [worktreeID.uuidString]).compactMap(LocalAgentSessionRecord.decode)
         }
     }

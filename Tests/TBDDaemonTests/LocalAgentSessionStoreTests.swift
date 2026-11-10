@@ -93,6 +93,23 @@ import Testing
             identity: AgentSessionIdentity(agentKind: .codex, sessionID: "bad-options")) == nil)
     }
 
+    @Test func listsLegacyTextAndNumericObservationDatesChronologically() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let worktree = try await makeWorktree(db)
+        try await db.writerForTests.write { database in
+            try database.execute(sql: """
+                INSERT INTO local_agent_session
+                    (id, worktree_id, agent_kind, session_id, first_observed_at, last_observed_at)
+                VALUES (?, ?, 'claude', 'legacy', '2023-11-14 22:13:20.000', '2023-11-14 22:13:20.000'),
+                       (?, ?, 'codex', 'numeric', 1800000000.000123, 1800000000.000123)
+                """, arguments: [UUID().uuidString, worktree.id.uuidString, UUID().uuidString, worktree.id.uuidString])
+        }
+        let rows = try await db.localAgentSessions.list(worktreeID: worktree.id)
+        #expect(rows.map(\.identity.sessionID) == ["legacy", "numeric"])
+        #expect(rows.first?.firstObservedAt == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(rows.last?.lastObservedAt == Date(timeIntervalSince1970: 1_800_000_000.000123))
+    }
+
     @Test func archiveSnapshotSurvivesWorktreeRecordAndDatabase() async throws {
         let db = try TBDDatabase(inMemory: true)
         var worktree = try await makeWorktree(db)
