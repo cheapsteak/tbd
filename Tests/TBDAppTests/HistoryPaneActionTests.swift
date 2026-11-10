@@ -99,7 +99,9 @@ extension HistoryPaneActionTests {
             switch request.method {
             case RPCMethod.sessionList:
                 let params = try JSONDecoder().decode(SessionListParams.self, from: request.paramsData)
-                #expect(params.providerAware == true)
+                guard params.providerAware == true else {
+                    return RPCResponse(error: "provider-aware history capability missing")
+                }
                 return try RPCResponse(result: [summary, claude])
             case RPCMethod.terminalHistoryList: return try RPCResponse(result: [TerminalHistoryEntry]())
             case RPCMethod.sessionMessages:
@@ -534,7 +536,7 @@ private final class HistoryRPCServer: @unchecked Sendable {
             }
         }
         precondition(result == 0 && listen(fd, 8) == 0)
-        Thread { [self] in serve() }.start()
+        _ = gateHoldingTask { [self] in serve() }
     }
 
     func stop() { lock.withLock { stopped = true } }
@@ -546,10 +548,10 @@ private final class HistoryRPCServer: @unchecked Sendable {
             guard poll(&pollFD, 1, 100) > 0 else { continue }
             let connection = accept(fd, nil, nil)
             guard connection >= 0 else { continue }
-            Thread { [self] in
+            _ = gateHoldingTask { [self] in
                 defer { close(connection) }
                 answerConnection(connection)
-            }.start()
+            }
         }
     }
 

@@ -7,6 +7,8 @@ import TestSupport
 @testable import TBDShared
 
 extension TBDHomeSerialized {
+/// Tier 2 integration coverage using an in-memory database, dry-run tmux,
+/// and real Git repositories created under scratch directories.
 @Suite("Mixed local agent archive and revive")
 struct LocalAgentArchiveTests {
     func lifecycle(_ db: TBDDatabase, _ recorder: PreSessionRecordedCommands,
@@ -76,7 +78,7 @@ struct LocalAgentArchiveTests {
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == agents.first?.id)
     }
 
-    @Test(arguments: [LocalAgentKind.claude, .codex], ["retry", "restart", "rearchive", "immediate"])
+    @Test(arguments: [LocalAgentKind.claude, .codex], ["retry", "restart", "rearchive", "immediate", "repo-error"])
     func partialMixedReviveRemainsCompletable(first: LocalAgentKind, recovery: String) async throws {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (temp, repoDir) = try await createTestRepo()
@@ -114,7 +116,22 @@ struct LocalAgentArchiveTests {
             #expect(archived.archivedAgentTabs?.map(\.identity) == tabs.map(\.identity))
             return
         }
-        if recovery == "restart" {
+        if recovery == "repo-error" {
+            try await db.worktrees.updateStatus(id: wt.id, status: .creating)
+            try await db.writerForTests.write { conn in
+                try conn.execute(sql: "ALTER TABLE repo RENAME TO recovery_repo")
+                try conn.execute(sql: "CREATE VIEW repo AS SELECT *, abs(-9223372036854775808) AS failure FROM recovery_repo")
+            }
+            for task in await lc.recoverCreatingWorktrees() { await task.value }
+            let retryable = try #require(try await db.worktrees.get(id: wt.id))
+            #expect(retryable.status == .active)
+            #expect(retryable.archivedAgentTabs == tabs)
+            try await db.writerForTests.write { conn in
+                try conn.execute(sql: "DROP VIEW repo")
+                try conn.execute(sql: "ALTER TABLE recovery_repo RENAME TO repo")
+            }
+            _ = try await lc.beginReviveWorktree(worktreeID: wt.id)
+        } else if recovery == "restart" {
             // Reproduce a crash before the inline failure handler commits status.
             try await db.worktrees.updateStatus(id: wt.id, status: .creating)
             let restarted = lifecycle(db, PreSessionRecordedCommands(), home: home)
