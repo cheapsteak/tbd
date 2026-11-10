@@ -919,7 +919,7 @@ extension HibernationCoordinator {
         // `wakeTmux`'s is: the command already names a per-session file that
         // only `settle` writes, so a caller must not be able to launch it
         // without settling.
-        overlay: ReplacementSpawnOverlay
+        overlay: ReplacementSpawnOverlay?
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
         // `.respawnFailed` directly, because each one is a spawn that did not
@@ -984,14 +984,14 @@ extension HibernationCoordinator {
         // `sessionID` is the session `spawnCommand` runs — the resume, or the
         // fresh session an in-place swap planned — so it names the directory
         // the replacement's mod writes under.
-        let sessionMod = SessionModSpawn.prepare(
+        let sessionMod = overlay == nil ? nil : SessionModSpawn.prepare(
             config: try? await db.config.get(),
             claudeSessionID: sessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
         // Written here and not when the overlay was planned: the adopting
         // branch above launches nothing, and must leave the running process's
         // overlay as it is.
-        let launchCommand = overlay.settle(command: spawnCommand)
+        let launchCommand = overlay?.settle(command: spawnCommand) ?? spawnCommand
 
         let handle: HolderHandle
         do {

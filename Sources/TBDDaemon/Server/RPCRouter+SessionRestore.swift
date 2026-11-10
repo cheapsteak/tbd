@@ -46,11 +46,11 @@ extension RPCRouter {
     static let sessionRestoreBatchSize = 3
 
     /// The wait between batches. A wake returns once the process has started,
-    /// not once Claude has loaded its transcript, so batches with no gap would
+    /// not once the agent has loaded its transcript, so batches with no gap would
     /// start every session within seconds.
     static let sessionRestoreBatchGap: Duration = .seconds(10)
 
-    /// Restart the Claude sessions this startup parked, newest first and a few
+    /// Restart the agent sessions this startup parked, newest first and a few
     /// at a time. Design: `docs/specs/2026-11-06-session-restore-after-restart-design.md`.
     ///
     /// Each wake is an ordinary `terminal.wake`, with its actuation row,
@@ -124,7 +124,7 @@ extension RPCRouter {
                 .filter { terminal in
                     guard let status = worktreeStatuses[terminal.worktreeID] else { return false }
                     return condition.isMet(by: terminal, worktreeStatus: status)
-                        && terminal.claudeResumeDecision.resumableSessionID != nil
+                        && terminal.recoveryResumePlan != nil
                 }
                 .map { (id: $0.id, modified: Self.transcriptModified($0.transcriptPath)) }
                 .sorted { $0.modified > $1.modified }

@@ -76,10 +76,10 @@ struct StartAdmissionRouterTests {
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
     }
 
-    private func makeParkedClaude(in db: TBDDatabase, worktree: Worktree) async throws -> Terminal {
+    private func makeParkedClaude(in db: TBDDatabase, worktree: Worktree, kind: TerminalKind = .claude) async throws -> Terminal {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: TerminalLabel.claudeCode, claudeSessionID: "session-1", kind: .claude)
+            label: TerminalLabel.claudeCode, claudeSessionID: "session-1", kind: kind)
         try await db.terminals.setHibernated(id: terminal.id, sessionID: "session-1")
         return terminal
     }
@@ -239,11 +239,11 @@ struct StartAdmissionRouterTests {
 
     // MARK: - Wakes
 
-    @Test("a held terminal.wake records the reason and time, and starts nothing")
-    func heldWakeIsRecordedOnTheRow() async throws {
+    @Test("a held terminal.wake records the reason and time, and starts nothing", arguments: [TerminalKind.claude, .codex])
+    func heldWakeIsRecordedOnTheRow(kind: TerminalKind) async throws {
         let fixture = try await makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await makeParkedClaude(in: fixture.db, worktree: worktree)
+        let terminal = try await makeParkedClaude(in: fixture.db, worktree: worktree, kind: kind)
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalWake,
@@ -255,6 +255,8 @@ struct StartAdmissionRouterTests {
         #expect(row.startHeldReason == Self.holdReason)
         #expect(row.startHeldAt != nil)
         // Still parked, still on the window it had: nothing was respawned.
+        #expect(fixture.stub.requests.first?.agent == (kind == .codex ? .codex : .claude))
+        #expect(row.claudeSessionID == "session-1")
         #expect(row.isParked)
         #expect(row.tmuxWindowID == "@1")
         let outcome = try #require(try rows(at: fixture.logPath).last)
@@ -341,8 +343,8 @@ struct StartAdmissionRouterTests {
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .claude, session: "s")) == .claude)
         // A row written before kinds were recorded, with a Claude session id.
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: nil, session: "s")) == .claude)
-        // The wake path refuses a parked Codex tab, so its wake starts nothing.
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .codex, session: "t")) == nil)
+        // An explicit Codex kind resumes its native thread.
+        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .codex, session: "t")) == .codex)
         // Nothing to resume, so the wake starts nothing; and a shell is no agent.
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .claude, session: nil)) == nil)
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .shell, session: "s")) == nil)

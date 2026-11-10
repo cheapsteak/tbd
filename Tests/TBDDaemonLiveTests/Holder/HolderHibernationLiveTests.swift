@@ -305,6 +305,79 @@ struct HolderHibernationLiveTests {
     /// pinned `SHELL`, which is a two-line script that ignores its argv. That
     /// is the same lever `HolderSpawnGateTests` uses, and it is what keeps a
     /// live-process test off both the developer's login shell and a real agent.
+    @Test func codexWakeResumesThroughARealHolder() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let home = fixture.sessionsDir.deletingLastPathComponent().appendingPathComponent("codex-home").resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try Data("".utf8).write(to: home.appendingPathComponent("config.toml"))
+        try Data(#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}"#.utf8)
+            .write(to: home.appendingPathComponent("hooks.json"))
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.codex, claudeSessionID: "acme-thread", kind: .codex,
+            transport: .holder, codexLaunchOptions: CodexLaunchOptions(
+                model: "acme-model", disabledFeatures: ["acme-feature"], codexHome: home.path))
+        try await fixture.db.terminals.setHibernated(id: terminal.id, sessionID: "acme-thread", reason: .recovery)
+        let before = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        try await fixture.db.config.setEnvOverrides(["GLOBAL_ONLY": "global", "CODEX_HOME": "/tmp/acme-wrong-home", "COLLISION": "global"])
+        try await fixture.db.repos.setEnvOverrides(id: try #require(fixture.worktree.repoID), overrides: ["REPO_ONLY": "repo", "COLLISION": "repo"])
+        try await fixture.db.config.setComposerDraftEnabled(true)
+        let result = await fixture.coordinator.wake(terminalID: terminal.id, initialPrompt: "must not be sent")
+        try #require(result.isOk, "Codex wake refused: \(result)")
+        let awake = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!awake.isParked)
+        #expect(awake.sessionIncarnationID != before.sessionIncarnationID)
+        #expect(awake.claudeSessionID == "acme-thread")
+        #expect(awake.sessionOrderObservedAt == nil)
+        let launched = await pollUntil("Codex resume to write its launch environment") {
+            (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?.contains("TBD_TERMINAL_ID=") ?? false
+        }
+        #expect(launched)
+        let argv = try String(contentsOfFile: fixture.launchArgvPath, encoding: .utf8).split(separator: "\n").map(String.init)
+        #expect(Array(argv.suffix(2)) == ["resume", "acme-thread"])
+        #expect(argv.contains("model=\"acme-model\""))
+        #expect(argv.contains("acme-feature"))
+        #expect(!argv.contains("--settings"))
+        #expect(!argv.contains("--name"))
+        let env = try String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8)
+        #expect(env.contains("CODEX_HOME=\(home.path)"))
+        #expect(env.contains("GLOBAL_ONLY=global"))
+        #expect(env.contains("REPO_ONLY=repo"))
+        #expect(env.contains("COLLISION=repo"))
+        #expect(env.contains("TBD_WORKTREE_ID=\(fixture.worktree.id.uuidString)"))
+        #expect(env.contains("TBD_TERMINAL_ID=\(terminal.id.uuidString)"))
+        #expect(env.contains("TBD_TERMINAL_INCARNATION_ID=\(try #require(awake.sessionIncarnationID).uuidString)"))
+        #expect(!env.contains("TBD_MOD_FEATURES="))
+        #expect(!FileManager.default.fileExists(atPath: fixture.sessionsDir.appendingPathComponent("acme-thread/spawn.json").path))
+        #expect(await fixture.registry.reader(for: terminal.id) != nil)
+        _ = await fixture.registry.abandon(terminal: awake)
+        try await fixture.db.terminals.setHolderProcess(id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+    }
+
+    @Test func codexHolderSpawnFailureLeavesTheThreadParked() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: fixture.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.codex, claudeSessionID: "acme-thread", kind: .codex,
+            transport: .holder)
+        try await fixture.db.terminals.setHibernated(id: terminal.id, sessionID: "acme-thread", reason: .recovery)
+        // Preparation succeeds, but the holder cannot exec the recorded shell.
+        try FileManager.default.removeItem(at: fixture.sessionsDir.deletingLastPathComponent().appendingPathComponent("gate-shell"))
+        let result = await fixture.coordinator.wake(terminalID: terminal.id)
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("holder launch should fail: \(result)"); return
+        }
+        #expect(reason.contains("starting a holder for this session failed"))
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked)
+        #expect(after.claudeSessionID == "acme-thread")
+        #expect(after.holderPID == nil)
+        #expect(await fixture.registry.reader(for: terminal.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath))
+    }
+
     @Test func wakeStartsAFreshHolderAndUnparksTheRow() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -1009,11 +1082,12 @@ private final class HibernationFixture {
         #!/bin/sh
         printf '%s\\n' "$@" > "\(home)/launch-argv"
         printf 'WOKE-OK\\n'
-        env | grep '^TBD_' > "\(home)/launch-env"
+        env | grep -E '^(TBD_|CODEX_HOME=|GLOBAL_ONLY=|REPO_ONLY=|COLLISION=)' > "\(home)/launch-env"
         """.write(toFile: "\(binDir)/claude", atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: "\(binDir)/claude")
 
+        try FileManager.default.copyItem(atPath: "\(binDir)/claude", toPath: "\(binDir)/codex")
         let path = "\(home)/gate-shell"
         // The command is the LAST argument whatever flags precede it, which is
         // what keeps this shell honest about a `shellFlags` change.
@@ -1110,7 +1184,9 @@ private final class HibernationFixture {
             signaller: signaller,
             sessionsDir: URL(fileURLWithPath: home).appendingPathComponent("sessions", isDirectory: true),
             sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            codexExecutableResolver: { "\(home)/bin/codex" },
+            codexHomeEnsurer: { URL(fileURLWithPath: home).appendingPathComponent("codex-shared") })
         await coordinator.setHolderRegistry(registry)
 
         return HibernationFixture(

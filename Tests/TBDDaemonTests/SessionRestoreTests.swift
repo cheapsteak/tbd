@@ -152,14 +152,14 @@ struct SessionRestoreTests {
 
     /// A parked row whose transcript last changed `age` seconds before startup.
     private func parkWithTranscript(
-        in fixture: Fixture, age: Int, worktree: Worktree? = nil
+        in fixture: Fixture, age: Int, worktree: Worktree? = nil, kind: TerminalKind = .claude
     ) async throws -> UUID {
         let url = fixture.directory.appendingPathComponent("\(UUID().uuidString).jsonl")
         try Data("{}\n".utf8).write(to: url)
         try FileManager.default.setAttributes(
             [.modificationDate: Self.thisStartup.addingTimeInterval(Double(-age))],
             ofItemAtPath: url.path)
-        return try await park(in: fixture, worktree: worktree, transcriptPath: url.path)
+        return try await park(in: fixture, worktree: worktree, kind: kind, transcriptPath: url.path)
     }
 
     /// The user wakes the row and it parks again, stamped after this startup so
@@ -180,7 +180,7 @@ struct SessionRestoreTests {
     private func parkRows(_ count: Int, in fixture: Fixture) async throws -> [UUID] {
         var ids: [UUID] = []
         for age in 0..<count {
-            ids.append(try await parkWithTranscript(in: fixture, age: age))
+            ids.append(try await parkWithTranscript(in: fixture, age: age, kind: age.isMultiple(of: 2) ? .claude : .codex))
         }
         return ids
     }
@@ -264,12 +264,13 @@ struct SessionRestoreTests {
         let fixture = try await makeFixture(flag: flag, tmux: Self.rebootedTmux())
         defer { fixture.cleanUp() }
         let startup = try await startupThatParks(fixture, repoDir: repoDir)
+        let codex = try await park(in: fixture, kind: .codex, parkedAt: startup.parkedSince)
 
         let summary = await fixture.router.restoreSessionsAfterStartup(
             parkedSince: startup.parkedSince)
 
         #expect(summary == SessionRestoreSummary())
-        #expect(try await awake([startup.terminalID], in: fixture.db).isEmpty)
+        #expect(try await awake([startup.terminalID, codex], in: fixture.db).isEmpty)
         #expect(try wakeRequests(at: fixture.logPath).isEmpty)
     }
 
@@ -280,13 +281,14 @@ struct SessionRestoreTests {
         let fixture = try await makeFixture(flag: true, tmux: Self.rebootedTmux())
         defer { fixture.cleanUp() }
         let startup = try await startupThatParks(fixture, repoDir: repoDir)
+        let codex = try await park(in: fixture, kind: .codex, parkedAt: startup.parkedSince)
 
         let summary = await fixture.router.restoreSessionsAfterStartup(
             parkedSince: startup.parkedSince)
 
-        #expect(summary == SessionRestoreSummary(selected: 1, woken: 1))
-        #expect(try await awake([startup.terminalID], in: fixture.db) == [startup.terminalID])
-        #expect(try wakeRequests(at: fixture.logPath).count == 1)
+        #expect(summary == SessionRestoreSummary(selected: 2, woken: 2))
+        #expect(try await awake([startup.terminalID, codex], in: fixture.db) == [startup.terminalID, codex])
+        #expect(try wakeRequests(at: fixture.logPath).count == 2)
     }
 
     // MARK: - Which sessions
@@ -370,8 +372,8 @@ struct SessionRestoreTests {
         #expect(try await awake([row], in: fixture.db) == [row])
     }
 
-    @Test("a tab that is not Claude's stays parked, even carrying a session id",
-          arguments: [TerminalKind.shell, .codex])
+    @Test("a shell tab stays parked, even carrying a session id",
+          arguments: [TerminalKind.shell])
     func otherTabKindsAreLeftOut(kind: TerminalKind) async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
@@ -489,12 +491,12 @@ struct SessionRestoreTests {
         let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
         let missingFile = fixture.directory.appendingPathComponent("gone.jsonl").path
-        let unreadable = try await park(in: fixture, transcriptPath: missingFile)
+        let unreadable = try await park(in: fixture, kind: .codex, transcriptPath: missingFile)
         let noPath = try await park(in: fixture)
         let third = try await parkWithTranscript(in: fixture, age: 3)
         let sixth = try await parkWithTranscript(in: fixture, age: 6)
-        let first = try await parkWithTranscript(in: fixture, age: 1)
-        let fourth = try await parkWithTranscript(in: fixture, age: 4)
+        let first = try await parkWithTranscript(in: fixture, age: 1, kind: .codex)
+        let fourth = try await parkWithTranscript(in: fixture, age: 4, kind: .codex)
         let second = try await parkWithTranscript(in: fixture, age: 2)
         let fifth = try await parkWithTranscript(in: fixture, age: 5)
         let ids = [unreadable, noPath, third, sixth, first, fourth, second, fifth]

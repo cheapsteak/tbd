@@ -585,7 +585,8 @@ public final class RPCRouter: Sendable {
             subscriptions: subscriptions, configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
-            actuationLog: actuationLog, programStatus: resolvedProgramStatus
+            actuationLog: actuationLog, programStatus: resolvedProgramStatus,
+            codexExecutableResolver: codexExecutableResolver, codexHomeEnsurer: codexHomeEnsurer
         )
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the
