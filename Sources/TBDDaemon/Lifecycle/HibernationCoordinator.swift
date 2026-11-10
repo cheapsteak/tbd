@@ -1983,7 +1983,8 @@ public actor HibernationCoordinator {
                 preparedEnv["CODEX_HOME"] = preparation.codexHome.path
                 sensitiveEnv = GuardedCodexHome.forcingHome(
                     EnvOverrideResolver.merge(global: config?.envOverrides,
-                        repo: repo?.envOverrides, profile: nil),
+                        repo: repo?.envOverrides, profile: nil)
+                        .merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
                     preparation, guarded: options?.codexHome != nil)
                 spawnTitle = nil
                 overlay = nil

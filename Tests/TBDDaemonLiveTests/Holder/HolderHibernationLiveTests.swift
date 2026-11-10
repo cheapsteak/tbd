@@ -320,8 +320,8 @@ struct HolderHibernationLiveTests {
                 model: "acme-model", disabledFeatures: ["acme-feature"], codexHome: home.path))
         try await fixture.db.terminals.setHibernated(id: terminal.id, sessionID: "acme-thread", reason: .recovery)
         let before = try #require(try await fixture.db.terminals.get(id: terminal.id))
-        try await fixture.db.config.setEnvOverrides(["GLOBAL_ONLY": "global", "CODEX_HOME": "/tmp/acme-wrong-home", "COLLISION": "global"])
-        try await fixture.db.repos.setEnvOverrides(id: try #require(fixture.worktree.repoID), overrides: ["REPO_ONLY": "repo", "COLLISION": "repo"])
+        try await fixture.db.config.setEnvOverrides(["DISABLE_AUTO_UPDATE": "false", "GLOBAL_ONLY": "global", "CODEX_HOME": "/tmp/acme-wrong-home", "COLLISION": "global"])
+        try await fixture.db.repos.setEnvOverrides(id: try #require(fixture.worktree.repoID), overrides: ["DISABLE_AUTO_UPDATE": "false", "REPO_ONLY": "repo", "COLLISION": "repo"])
         try await fixture.db.config.setComposerDraftEnabled(true)
         let result = await fixture.coordinator.wake(terminalID: terminal.id, initialPrompt: "must not be sent")
         try #require(result.isOk, "Codex wake refused: \(result)")
@@ -345,6 +345,8 @@ struct HolderHibernationLiveTests {
         #expect(env.contains("GLOBAL_ONLY=global"))
         #expect(env.contains("REPO_ONLY=repo"))
         #expect(env.contains("COLLISION=repo"))
+        #expect(env.contains("DISABLE_AUTO_UPDATE=true"))
+        #expect(!env.contains("DISABLE_AUTO_UPDATE=false"))
         #expect(env.contains("TBD_WORKTREE_ID=\(fixture.worktree.id.uuidString)"))
         #expect(env.contains("TBD_TERMINAL_ID=\(terminal.id.uuidString)"))
         #expect(env.contains("TBD_TERMINAL_INCARNATION_ID=\(try #require(awake.sessionIncarnationID).uuidString)"))
@@ -1082,7 +1084,7 @@ private final class HibernationFixture {
         #!/bin/sh
         printf '%s\\n' "$@" > "\(home)/launch-argv"
         printf 'WOKE-OK\\n'
-        env | grep -E '^(TBD_|CODEX_HOME=|GLOBAL_ONLY=|REPO_ONLY=|COLLISION=)' > "\(home)/launch-env"
+        env | grep -E '^(TBD_|CODEX_HOME=|GLOBAL_ONLY=|REPO_ONLY=|COLLISION=|DISABLE_AUTO_UPDATE=)' > "\(home)/launch-env"
         """.write(toFile: "\(binDir)/claude", atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: "\(binDir)/claude")
