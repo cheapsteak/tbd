@@ -22,9 +22,10 @@
 //     runs this, so the entries stay bounded while a tick draws past them.
 //
 // The tick's wait is bounded: a nil drawable proves the pool full, and the tracker then holds off
-// every tick and leading-edge draw until a report arrives or another `presentReportTimeout`
-// passes. So a stalled compositor costs main one wait of up to a second, and then at least a
-// second with none.
+// every tick and leading-edge draw until a present made after the nil came back is reported, or
+// another `presentReportTimeout` passes. A late report of an earlier present, which bulk output
+// leaves queued, proves nothing about the pool since and ends nothing. So a stalled compositor
+// costs main one wait of up to a second, and then at least a second with none.
 //
 // One per view, because the drawables belong to the view's layer and outlive a surface detach.
 
@@ -56,11 +57,14 @@ final class DrawableTracker: Sendable {
     }
 
     /// A nil drawable's hold on the limit.
-    private enum LimitHold {
-        /// Set by the nil drawable. The next check starts the timer.
-        case awaitingFirstCheck
-        /// Started at the `now` of the first check after the nil drawable.
-        case since(Duration)
+    private struct LimitHold {
+        /// The earliest the nil could have come back: the `now` of the frame that asked, plus
+        /// `presentReportTimeout`, since `nextDrawable()` returns nil for a full pool only once
+        /// it has waited that long. Only a present dated from then on shows a drawable freed since.
+        let freshPresentsFrom: Duration
+        /// The `now` of the first check after the nil drawable, which starts the timer; nil until
+        /// that check.
+        var startedAt: Duration?
     }
 
     private struct State {
@@ -169,16 +173,14 @@ final class DrawableTracker: Sendable {
             state.lastReportAt = max(state.lastReportAt ?? now, now)
         }
         let held = Check(awaitingPresent: limit, nilDrawableHold: true)
-        switch state.hold {
-        case nil:
-            break
-        case .awaitingFirstCheck:
-            // Timed from the first check after the nil drawable, not from that frame's own
-            // `now`: its `nextDrawable()` waited up to a second before returning nil, so that
-            // `now` is already old, and timing from it would let the next wait follow at once.
-            state.hold = .since(now)
-            return (held, nil)
-        case .since(let started):
+        if let hold = state.hold {
+            guard let started = hold.startedAt else {
+                // Timed from the first check after the nil drawable, not from that frame's own
+                // `now`: its `nextDrawable()` waited up to a second before returning nil, so that
+                // `now` is already old, and timing from it would let the next wait follow at once.
+                state.hold?.startedAt = now
+                return (held, nil)
+            }
             guard now - started >= presentReportTimeout else { return (held, nil) }
             state.hold = nil
         }
@@ -217,17 +219,23 @@ final class DrawableTracker: Sendable {
         }
     }
 
-    /// The layer gave the frame no drawable: the pool is full, whatever the entries say. Holds the
-    /// limit until a report arrives, or until `presentReportTimeout` has passed from the next
-    /// check.
+    /// The layer gave the frame due at `now` no drawable: the pool is full, whatever the entries
+    /// say. Holds the limit until a present made after the nil came back is reported, or until
+    /// `presentReportTimeout` has passed from the next check.
     ///
-    /// - Parameter reportsBefore: `reportCount` from before the frame asked for its drawable. A
-    ///   report since then freed a drawable, so the pool is no longer proven full and no hold is
-    ///   set. Set anyway, the hold would outlast the report that should have ended it.
-    func noteNoDrawable(reportsBefore: UInt64) {
+    /// For a full pool, `nextDrawable()` returns nil only after waiting `presentReportTimeout`, so
+    /// a present is fresh from `now` plus that timeout. A present dated earlier was made before
+    /// the nil: had it freed a drawable no frame took, the request would have had it. Bulk output
+    /// leaves several such reports queued, and were they to end the hold, the next tick would wait
+    /// again at once. A fresh present already reported, which a handler on another thread can
+    /// deliver before the frame notes the nil, means no hold is set: set, it would outlast the
+    /// report that should have ended it. A nil that came back sooner, as one for a layer with no
+    /// usable size can, holds until the timeout.
+    func noteNoDrawable(requestedAt now: Duration) {
         state.withLock { state in
-            guard state.reports == reportsBefore else { return }
-            state.hold = .awaitingFirstCheck
+            let freshPresentsFrom = now + Self.presentReportTimeout
+            if let presented = state.lastPresentedAt, presented >= freshPresentsFrom { return }
+            state.hold = LimitHold(freshPresentsFrom: freshPresentsFrom)
         }
     }
 
@@ -261,7 +269,8 @@ final class DrawableTracker: Sendable {
     /// The drawable `id` was reported presented. Removes it and every older entry, since a layer's
     /// presents reach the screen in order. An id no longer tracked, because a drop or a clear
     /// removed it, removes nothing, but still counts as a report: Metal is reporting this layer's
-    /// presents, and a present frees a drawable.
+    /// presents, and a present frees a drawable. A present made after a nil drawable came back
+    /// ends its hold; an earlier or undated one does not (`noteNoDrawable(requestedAt:)`).
     ///
     /// - Parameter presentedTime: the drawable's `presentedTime`, which dates the report. Zero is a
     ///   frame that "has not been presented or has been skipped": it is counted, and the next
@@ -271,12 +280,14 @@ final class DrawableTracker: Sendable {
         let skippedForNotice = state.withLock { state -> Int? in
             state.reports &+= 1
             state.noticeLoggedThisRun = false
-            state.hold = nil
             var countToLog: Int?
             if presentedTime > 0 {
                 let presentedAt = Duration.seconds(presentedTime)
                 state.lastReportAt = max(state.lastReportAt ?? presentedAt, presentedAt)
                 state.lastPresentedAt = max(state.lastPresentedAt ?? presentedAt, presentedAt)
+                if let hold = state.hold, presentedAt >= hold.freshPresentsFrom {
+                    state.hold = nil
+                }
             } else {
                 state.skippedPresents += 1
                 state.undatedReportPending = true
@@ -305,15 +316,13 @@ final class DrawableTracker: Sendable {
     /// Whether the tracker ignores what Metal's presented handlers report. A test seam: an
     /// offscreen window's presents may be reported at once, late or never, so a view test that
     /// reports its drawables itself, through `reportPresented(_:presentedTime:)`, sets it, and
-    /// each report then comes when the test sends it.
+    /// each report then comes when the test sends it. The present-timing log and the view's
+    /// `onFramePresented` still hear Metal's reports.
     var ignoresPresentedHandlers: Bool {
         get { state.withLock { $0.ignoresPresentedHandlers } }
         set { state.withLock { $0.ignoresPresentedHandlers = newValue } }
     }
 
-    /// Every report so far, whatever drawable it named. A frame reads it before it asks for a
-    /// drawable, for `noteNoDrawable(reportsBefore:)`.
-    var reportCount: UInt64 { state.withLock { $0.reports } }
     /// The entries, as they stand: no recovery is run.
     var entryCount: Int { state.withLock { $0.entries.count } }
     /// The newest entry's id, or nil with none. A test seam: a view test reports a frame's own

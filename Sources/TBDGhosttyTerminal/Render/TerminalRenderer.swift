@@ -277,19 +277,16 @@ final class TerminalRenderer {
             // The transaction must end with a present, so a live resize may not drop its frame.
             waitsForSlot: waitsForSlot || synchronous,
             acquire: { [weak self] in
-                // Read before the wait: a report that lands during it, or just after it returns
-                // nil, keeps the nil from setting a hold.
-                let reportsBefore = tracker.reportCount
                 guard let drawable = nextDrawable(layer) else {
                     // The pool is full, whatever the tracker counted.
-                    tracker.noteNoDrawable(reportsBefore: reportsBefore)
+                    tracker.noteNoDrawable(requestedAt: now)
                     return (nil, nil)
                 }
                 self?.stats.drawablesAcquired += 1
                 let id = tracker.add(acquiredAt: now)
-                // The diagnostic for the bulk-output frame cap times the present from here, in
-                // host time, rather than from the frame's `now`: a tick's `now` is its vsync,
-                // which comes before the frame is built.
+                // The present-timing diagnostic times the present from here, in host time,
+                // rather than from the frame's `now`: a tick's `now` is its vsync, which comes
+                // before the frame is built.
                 let timing = tracker.presentTiming
                 let acquiredAt = timing.hostNow()
                 // Always installed: the tracker needs every report, whether or not the view

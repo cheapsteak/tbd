@@ -1585,8 +1585,9 @@ struct GhosttyTerminalViewBackpressureTests {
     /// and younger than `presentReportTimeout`. The seam returns nil, as a full pool would after
     /// `nextDrawable()`'s one-second wait: `nilDrawables` rises by one, nothing commits, and
     /// `needsUpdate` stays set. The ticks within the next `presentReportTimeout` drop before they
-    /// build, ask for no drawable, and are noted as held. Then a report, or the end of that timeout
-    /// with the seam handing out drawables again, lets the next tick draw.
+    /// build, ask for no drawable, and are noted as held, a late report of a present made before
+    /// the nil notwithstanding. Then a report of a later present, or the end of that timeout with
+    /// the seam handing out drawables again, lets the next tick draw.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice),
           arguments: NilDrawableHoldEnd.allCases)
     func aNilDrawableHoldsTheTickOffForATimeout(end: NilDrawableHoldEnd) throws {
@@ -1602,7 +1603,7 @@ struct GhosttyTerminalViewBackpressureTests {
         place(view, in: try #require(window.contentView))
         let tracker = view.drawableTracker
         let timing = tracker.presentTiming
-        _ = tracker.add(acquiredAt: .seconds(100.5))
+        let older = tracker.add(acquiredAt: .seconds(100.5))
         let newer = tracker.add(acquiredAt: .seconds(100.75))
         fixture.terminal.feed(text: "a stalled screen")
         view.nextDrawable = { _ in nil }
@@ -1619,9 +1620,11 @@ struct GhosttyTerminalViewBackpressureTests {
         let tickingAtNil = view.frameDriver.demand.needsUpdate
         #expect(tickingAtNil, "a frame with no drawable let the link park")
 
-        // The hold is timed from the next check, at 101.25 s.
+        // The hold is timed from the next check, at 101.25 s. A late report of a present made
+        // before the nil, as bulk output leaves queued, does not end it.
         let notedBeforeHold = timing.gpuBehindNoted
         view.renderTick(now: .seconds(101.25))
+        tracker.reportPresented(older, presentedTime: 100.875)
         view.renderTick(now: .seconds(102))
         let askedInHold = view.renderContext.renderer.stats.drawableRequests - afterNil.drawableRequests
         #expect(askedInHold == 0, "ticks within a timeout of the nil drawable asked for \(askedInHold) drawables")
@@ -1638,9 +1641,10 @@ struct GhosttyTerminalViewBackpressureTests {
         view.nextDrawable = { $0.nextDrawable() }
         switch end {
         case .report:
-            // A present freed a drawable. The tick is still within the hold's timeout, so only
-            // the report can end it.
-            tracker.reportPresented(newer, presentedTime: 101.5)
+            // A present made after the nil came back, a second after the tick that asked, freed
+            // a drawable. The tick is still within the hold's timeout, so only the report can
+            // end it.
+            tracker.reportPresented(newer, presentedTime: 102)
             view.renderTick(now: .seconds(102))
         case .timeout:
             view.renderTick(now: .seconds(102.25))
@@ -1706,7 +1710,7 @@ struct GhosttyTerminalViewBackpressureTests {
         let tracker = view.drawableTracker
         _ = tracker.add(acquiredAt: .seconds(100))
         _ = tracker.add(acquiredAt: .seconds(100.25))
-        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
         fixture.terminal.feed(text: "an instrumented frame")
 
         // Control, first, while no real drawable is out to be reported: a tick in the hold drops.
@@ -1740,7 +1744,7 @@ struct GhosttyTerminalViewBackpressureTests {
         let tracker = view.drawableTracker
         _ = tracker.add(acquiredAt: .seconds(100))
         _ = tracker.add(acquiredAt: .seconds(100.25))
-        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
 
         // Control: outside the resize the same frame is dropped.
         view.renderNow()
