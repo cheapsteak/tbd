@@ -284,7 +284,8 @@ enum GPUBackpressure {
     case tick
     /// A leading-edge draw, inside a render signal's delivery. Drop as a tick does, and also while
     /// `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
-    /// report, so the draw never waits in `nextDrawable()`.
+    /// report, so the draw never waits in `nextDrawable()` for a drawable the tracker counts as
+    /// out.
     case leadingEdge
     /// Build it anyway: wait on the ring for a slot, and ask for a drawable whatever the tracker
     /// says. What `drawFrameNow()` and a live resize do.

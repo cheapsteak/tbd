@@ -32,7 +32,7 @@
 // `nextDrawable()` may wait, up to its own one-second timeout, for a drawable the compositor
 // still holds. A nil from it makes the tracker hold every later tick off for a while, so the wait
 // is bounded. Only a leading-edge draw, which runs inside a render signal's delivery, drops at the
-// drawable limit, so it never waits. Every drawable acquired goes into the tracker, and its
+// drawable limit, so it never waits for a drawable the tracker counts as out. Every drawable acquired goes into the tracker, and its
 // presented handler, always installed, takes it out.
 
 import CoreGraphics

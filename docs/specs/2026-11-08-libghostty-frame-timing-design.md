@@ -98,7 +98,8 @@ seven of these hold:
 5. **The ring has a free slot** – fewer than three of the surface's frames are in flight on
    the GPU.
 6. **Fewer than two drawables await present** – so a frame drawn now never waits in
-   `nextDrawable()`. Only the leading edge counts drawables. A tick asks for one whatever the
+   `nextDrawable()` for a drawable the tracker counts as out. Only the leading edge counts
+   drawables. A tick asks for one whatever the
    count ("Drop, never block").
 7. **The output is small, or a hold just ended** – fewer than 1,024 bytes have been fed since
    the last frame was built, or a hold ended in the chunks this delivery covers.
@@ -254,8 +255,9 @@ Today a tick can block the main thread in two places. `FrameRing.acquire()` wait
 semaphore until the GPU frees a slot, and `nextDrawable()` can wait up to a second for a
 drawable. At a full ring the design drops the frame instead, as termio does, and the next
 tick draws the newer screen. For drawables the two callers differ. A leading-edge draw never
-waits: it draws only while fewer than `maxDrawablesAwaitingPresent` drawables await their
-report (rule 6), and its frame checks the count again before it builds. A tick asks for a
+waits for a drawable the tracker counts as out: it draws only while fewer than
+`maxDrawablesAwaitingPresent` drawables await their report (rule 6), and its frame checks the
+count again before it builds. A tick asks for a
 drawable whatever the count, and may wait for a bounded time ("The bounded wait", below).
 
 - **The ring** – `FrameRing.tryAcquire()` returns nil rather than waiting
@@ -289,7 +291,8 @@ drawable whatever the count, and may wait for a bounded time ("The bounded wait"
       whether reports go missing. Every frame's check runs this recovery, a tick's included,
       so the entries stay bounded while ticks draw past them.
   - **The bounded wait.** A tick calls `nextDrawable()` with no proof that a drawable is
-    free, and the call may wait for the compositor to release one. This is the design's one
+    free, and the call may wait for the compositor to release one. So does a leading-edge
+    draw after a clear, and the same hold bounds its wait. This is the design's one
     exception to "never block", and it is deliberate. Metal has no way to ask for a drawable
     without waiting, and the wait is acceptable:
     - Today's tick asks on every refresh too, and still draws one frame per refresh, so its
@@ -380,6 +383,12 @@ frame path is less to maintain than two.
   real stall one `nextDrawable()` call waits up to its one-second timeout and returns nil.
   The nil starts the hold, and the next such wait comes at least a second later. Today every
   tick of a stall waits.
+- **A slow compositor or GPU** – a pool that frees each drawable late but within the
+  timeout never returns nil, so no hold starts, and every tick waits in `nextDrawable()`
+  for as long as the pool takes. Today's tick waits the same way. The wait falls inside the
+  paint span, so the done test's paint time on the 50 MB stream would show it. If it shows,
+  the fix is a short hold after a slow request, timed on the host clock, during which a tick
+  drops at the drawable limit as the leading edge does.
 - **Several panes flooding at once** – every visible pane's tick may wait in `nextDrawable()`
   on main, so with several panes under bulk output the waits add up. Today's tick asks the
   same way on every refresh. The done test measures one pane, so it does not show this case;

@@ -5,7 +5,7 @@
 // `CAMetalLayer.nextDrawable()` blocks, for up to a second, when every drawable in the layer's
 // pool is out. A leading-edge draw, which runs inside a render signal's delivery, asks for one only
 // while fewer than `TerminalRenderer.maxDrawablesAwaitingPresent` await their present report, so
-// it never waits. A display tick does not count them. Under bulk output each report reaches this
+// it never waits for a drawable this tracker counts as out. A display tick does not count them. Under bulk output each report reaches this
 // tracker three or more refreshes after the frame that acquired its drawable, so a tick that
 // waited for the count would draw about one refresh in two. A tick asks for a drawable whatever
 // the count, and may wait in `nextDrawable()` for one the compositor still holds.
@@ -19,13 +19,17 @@
 //     for one drawable also removes every older entry. One lost report clears at the next report.
 //   * **Time.** Only when no report has arrived for `presentReportTimeout`, by the frames' own
 //     `now`, are the entries cleared. The first clear in a run logs a notice. Each frame's check
-//     runs this, so the entries stay bounded while a tick draws past them.
+//     runs this, so the entries stay bounded while a tick draws past them. After a clear, a
+//     leading-edge draw too asks for a drawable with no proof that one is free, and the hold
+//     below bounds its wait as it does a tick's.
 //
 // The tick's wait is bounded: a nil drawable proves the pool full, and the tracker then holds off
 // every tick and leading-edge draw until a present made after the nil came back is reported, or
 // another `presentReportTimeout` passes. A late report of an earlier present, which bulk output
-// leaves queued, proves nothing about the pool since and ends nothing. So a stalled compositor
-// costs main one wait of up to a second, and then at least a second with none.
+// leaves queued, proves nothing about the pool since and ends nothing. So a compositor that stalls
+// costs main one wait of up to a second, and then at least a second with none. One that is slow
+// but alive, freeing each drawable within the timeout, makes every tick wait for it, and starts no
+// hold.
 //
 // One per view, because the drawables belong to the view's layer and outlive a surface detach.
 
@@ -119,8 +123,8 @@ final class DrawableTracker: Sendable {
         /// drawable's hold lasts, and the entries otherwise. A leading-edge draw drops at the
         /// limit.
         var awaitingPresent: Int
-        /// A nil drawable's hold lasts: the pool is full, whatever the entries say. A display
-        /// tick drops while it lasts, and only then.
+        /// A nil drawable's hold lasts: the pool is full, whatever the entries say. The only
+        /// drawable reason a display tick drops.
         var nilDrawableHold: Bool
 
         fileprivate static func entries(_ count: Int) -> Check {

@@ -411,6 +411,24 @@ struct DrawableTrackerTests {
         let held = tracker.awaitingPresent(now: .seconds(101))
         #expect(held == tracker.limit, "reporting the newest of no drawables ended a nil drawable's hold: \(held)")
     }
+
+    /// A presented handler's report reaches the tracker unless a test has set
+    /// `ignoresPresentedHandlers`. The view tests that time their own reports rely on the seam:
+    /// were it to let Metal's reports through, they would clear the entries those tests keep, and
+    /// the late-report repro would pass whatever the tick does.
+    @Test func aPresentedHandlersReportIsIgnoredOnlyWhileTheSeamIsSet() {
+        let tracker = DrawableTracker()
+        let out = tracker.add(acquiredAt: .seconds(100))
+        tracker.ignoresPresentedHandlers = true
+        tracker.reportFromPresentedHandler(out, presentedTime: 100.25)
+        let whileIgnoring = tracker.entryCount
+        #expect(whileIgnoring == 1, "a handler's report reached a tracker that ignores them: \(whileIgnoring) entries")
+
+        tracker.ignoresPresentedHandlers = false
+        tracker.reportFromPresentedHandler(out, presentedTime: 100.5)
+        let heard = tracker.entryCount
+        #expect(heard == 0, "a handler's report did not reach a tracker that hears them: \(heard) entries")
+    }
 }
 
 /// The renderer's half of "drop, never block": the slot it takes after the build, the nil

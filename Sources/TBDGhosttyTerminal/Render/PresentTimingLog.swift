@@ -28,7 +28,8 @@
 //     - `reportms` is acquire to the handler, for every report.
 //     - `drops` frames dropped for the GPU, `ringfull` of them with the ring full, `held` of them
 //       during a nil drawable's hold, and `oldestagems` the age of each drop's oldest unreported
-//       drawable. A drop that is neither is a leading-edge draw at the drawable limit.
+//       drawable. A drop that is neither is a leading-edge frame at the drawable limit, which
+//       its delivery's own peek at the tracker should already have caught.
 //     - `spanms` is the window's first report or drop to its last.
 //   * **`gpubehind`** is `.debug`, one per dropped frame: whether the ring was full, whether a nil
 //     drawable's hold lasted, the count the tracker gave the frame, its entries and each one's age
