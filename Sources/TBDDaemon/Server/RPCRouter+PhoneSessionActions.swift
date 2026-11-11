@@ -12,8 +12,9 @@ import TBDShared
 /// `phoneWake`, `phoneCreateWorktree`, `phoneRemoteCreate` and
 /// `phoneRemoteSendMessage`, the phone message rule the send rail applies
 /// (`PhoneMessageText`) to the phone's message, whose refusal answers before
-/// the handler runs, with its code (`CodedRefusal.response`). Past that, each runs the checks of the RPC it mirrors,
-/// in that RPC's order, and returns that RPC's response.
+/// the handler runs, with its code (`CodedRefusal.response`). Past that, each
+/// runs the checks of the RPC it mirrors, in that RPC's order, and returns that
+/// RPC's response.
 ///
 /// **The rebuild names what a phone keeps, never what it loses.** Every params
 /// value the bridge passes is rebuilt field by field into fresh params holding
