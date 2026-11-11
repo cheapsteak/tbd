@@ -17,6 +17,10 @@ names its job `claude-review-legacy` and triggers only on `workflow_dispatch`.
 Dispatching it reviews nothing — see [below](#the-legacy-single-session-workflow) for
 why, and for what reviving it actually takes.
 
+**The gate also depends on a repository Actions policy.** Without it, GitHub's
+default policy blocks `pull_request_target`. See
+[below](#githubs-default-policy-blocks-pull_request_target-unless-a-repo-policy-allows-it).
+
 ## How a PR is gated
 
 1. **Trigger.** The workflow runs on `pull_request_target`, so it executes in the
@@ -433,6 +437,42 @@ the *trigger event itself* therefore matches neither the old nor the new trigger
 and gets no `claude-review` run — which leaves the required check unreported and
 the PR blocked. That is a one-time bootstrap gap: land such a PR with an admin
 merge, after which every subsequent PR is gated normally.
+
+## GitHub's default policy blocks `pull_request_target` unless a repo policy allows it
+
+GitHub adds a default event policy to public repositories that have no Actions
+event policy of their own. The default blocks `pull_request_target`. GitHub runs
+scheduled brownouts of it now and enforces it for good on 2026-12-02. See
+[Default policy for `pull_request_target`](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+
+**The symptom.** During a brownout, every `pull_request_target` run ends in
+`startup_failure`. `gh run view` only says the run "likely failed because of a
+workflow file issue". The real reason is in the run page's "Annotations" block.
+A public repo shows that block without login, for example with
+`curl -sL https://github.com/acme/widgets/actions/runs/<id>`. The annotation
+names the brownout and says when its window ends.
+
+**The fix is a repository policy.** This repo has one under Settings, Actions,
+Policies. Read it with `GET /repos/cheapsteak/tbd/actions/policies`. It is named
+"Allow pull_request_target for the review gate and preflight cleanup".
+- **Targets** – `conditions.workflow_path.include` lists exactly two workflow
+  paths: `claude-code-review.yml` and `preflight-cleanup.yml`. Those are the only
+  workflows on `main` that trigger on `pull_request_target`.
+- **Rule** – `restrict_action_events` allows `pull_request_target`, `schedule`
+  and `workflow_dispatch`. That is every event the two workflows use.
+
+The rule is an allowlist for the workflows it targets. Three changes therefore
+need a policy edit first:
+- **Renaming either workflow file** – the workflow leaves the policy and falls
+  back to GitHub's default block. Update the path in `include`.
+- **Adding a trigger event to either workflow** – add the event to
+  `allowed_events`, or GitHub blocks it.
+- **A new workflow that triggers on `pull_request_target`** – add its path to
+  `include`.
+
+Edit the policy in the Settings UI, or with
+`PUT /repos/cheapsteak/tbd/actions/policies/{policy_id}`. Get the id from the
+GET above.
 
 ## Reading a review comment
 
