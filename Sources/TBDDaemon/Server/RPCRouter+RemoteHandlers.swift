@@ -915,7 +915,7 @@ extension RPCRouter {
                 "remote.transcriptSync provider=\(params.provider, privacy: .public) timed out")
             response = RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
         } catch let error as RemoteTranscriptSyncError {
-            response = RPCResponse(error: error.localizedDescription)
+            response = Self.transcriptSyncFailureResponse(error)
         }
         // Checked again once the sync has written. A dismiss that landed after
         // the check above — its discard finding no lane to mark yet, because
@@ -980,7 +980,7 @@ extension RPCRouter {
                 "remote.transcriptLoadEarlier provider=\(params.provider, privacy: .public) timed out")
             response = RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
         } catch let error as RemoteTranscriptSyncError {
-            response = RPCResponse(error: error.localizedDescription)
+            response = Self.transcriptSyncFailureResponse(error)
         }
         // Checked again once the page is written, for the same race
         // `handleRemoteTranscriptSync` closes: a dismiss landing after the
@@ -1003,6 +1003,21 @@ extension RPCRouter {
 
     private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
         try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
+    }
+
+    /// What a transcript sync or earlier-history load answers when it stops
+    /// with a `RemoteTranscriptSyncError`. `discarded` is TBD's own sentence
+    /// and carries `remoteSessionRemoved`. `providerFailed` holds a provider's
+    /// message, and `cursorExpired` is reported as an outcome rather than
+    /// thrown by these paths, so neither carries a code.
+    static func transcriptSyncFailureResponse(_ error: RemoteTranscriptSyncError) -> RPCResponse {
+        switch error {
+        case .discarded:
+            return CodedRefusal(
+                text: error.localizedDescription, code: .remoteSessionRemoved).response
+        case .providerFailed, .cursorExpired:
+            return RPCResponse(error: error.localizedDescription)
+        }
     }
 
     /// What `remote.transcriptSync` answers for a dismissed session.

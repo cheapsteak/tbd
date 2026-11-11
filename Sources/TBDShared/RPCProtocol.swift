@@ -199,6 +199,10 @@ public enum RPCErrorCode: String, Sendable {
     /// A remote session's transcript sync or earlier history load was refused
     /// because the session is dismissed, so its transcript is no longer kept.
     case remoteSessionDismissed
+    /// A remote session's transcript sync or earlier history load was refused
+    /// because the session was removed while it ran, so the page it fetched
+    /// was dropped.
+    case remoteSessionRemoved
 
     // MARK: Remote transcript history
 

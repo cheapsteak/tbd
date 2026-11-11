@@ -694,6 +694,8 @@ struct RPCRouterPhoneSessionActionsTests {
             RemoteSendMessageRefusal.waitingInputAnswerOnCard,
             RemoteTranscriptRefusal.dismissed, RemoteTranscriptRefusal.loadEarlierOff,
             RemoteTranscriptRefusal.nothingEarlier,
+            CodedRefusal(
+                text: RemoteTranscriptSyncError.discarded.localizedDescription, code: .remoteSessionRemoved),
             PromptAnswerRefusal.disabled, PromptAnswerRefusal.settingUnread, PromptAnswerRefusal.notMirrored,
         ]
 

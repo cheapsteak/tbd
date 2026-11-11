@@ -231,6 +231,24 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
                 "a sync that raced a dismiss left its cache behind")
     }
 
+    /// A sync or load that stops because its session was removed answers with
+    /// TBD's own sentence and `remoteSessionRemoved`; a provider's failure
+    /// carries its message and no code.
+    @Test func aDiscardedSyncAnswersWithItsCodeAndAProviderFailureWithNone() throws {
+        let discarded = RPCRouter.transcriptSyncFailureResponse(.discarded)
+        #expect(discarded.success == false)
+        #expect(discarded.error == "the session was removed; its transcript cache was discarded")
+        #expect(discarded.errorCode == RPCErrorCode.remoteSessionRemoved.rawValue)
+
+        let failed = RPCRouter.transcriptSyncFailureResponse(.providerFailed(message: "transport dropped"))
+        #expect(failed.error == "transport dropped")
+        #expect(failed.errorCode == nil)
+
+        let expired = RPCRouter.transcriptSyncFailureResponse(.cursorExpired)
+        #expect(expired.error == "earlier history is no longer available")
+        #expect(expired.errorCode == nil)
+    }
+
     /// The other branch: the same mirror row, not dismissed, syncs.
     @Test func syncProceedsForAMirroredSessionThatIsNotDismissed() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
