@@ -6,13 +6,6 @@ import os
 private let remoteLogger = Logger(subsystem: "com.tbd.app", category: "remote")
 
 extension AppState {
-    /// The exact string every `remote.*` RPC returns when
-    /// `config.remoteBackendsEnabled` is off (or the daemon booted before the
-    /// flag was turned on) — see `RPCRouter+RemoteHandlers.remoteBackendsDisabledResponse`.
-    /// There's no dedicated `RPCErrorCode` for this refusal, so it's matched
-    /// by exact message text.
-    nonisolated static let remoteBackendsDisabledMessage = "remote backends disabled"
-
     /// How a failed `remote.*` fetch should be handled. Pure classification,
     /// separated from `refreshRemote()` itself so it's directly testable —
     /// mirrors the existing `MacNotificationManager.shouldPost`-style pure
@@ -24,17 +17,21 @@ extension AppState {
         case error
     }
 
+    /// Reads the refusal's code, never its words: the daemon refuses every
+    /// `remote.*` verb with `RPCErrorCode.remoteBackendsOff` when
+    /// `config.remoteBackendsEnabled` is off (or the daemon booted before the
+    /// flag was turned on). The same words with no code are an error.
     nonisolated static func classifyRemoteRefreshFailure(_ error: Error) -> RemoteRefreshFailure {
         if let daemonError = error as? DaemonClientError,
-           case .rpcError(let message, _) = daemonError,
-           message == remoteBackendsDisabledMessage {
+           case .rpcError(_, let code) = daemonError,
+           code == RPCErrorCode.remoteBackendsOff.rawValue {
             return .unavailable
         }
         return .error
     }
 
     /// Fetch the remote-provider roster + session mirror. The daemon refuses
-    /// every `remote.*` verb with `remoteBackendsDisabledMessage` when the
+    /// every `remote.*` verb with `RPCErrorCode.remoteBackendsOff` when the
     /// feature is off — that refusal means "not available", not an error, so
     /// both arrays are cleared silently. Any other failure is logged and the
     /// last-known arrays are left in place (best-effort, mirrors

@@ -331,7 +331,7 @@ struct SidebarWorkflowGroupsToggleTests {
         state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: []) }
 
         state.remoteProvidersFetcher = {
-            throw DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
+            throw DaemonClientError.rpcError("remote backends disabled", code: RPCErrorCode.remoteBackendsOff.rawValue)
         }
         await state.refreshRemote()
         #expect(state.expandedSidebarGroups == [retired])
