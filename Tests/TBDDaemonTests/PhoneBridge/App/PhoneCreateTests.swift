@@ -365,13 +365,13 @@ struct PhoneCreateTests {
     @Test func aRefusedCreateReturnsTheDaemonsReason() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
-        h.actions.respond(to: .createWorktree, with: RPCResponse(error: PhoneMessageText.controlCharacterRefusal))
+        h.actions.respond(to: .createWorktree, with: PhoneMessageText.controlCharacterRefusal.response)
         let outbox = await h.connect()
 
         let (reply, _) = try await h.request(
             .worktreeCreate, params: PhoneWorktreeCreateParams(repoID: repo.id, message: "fix\u{1b}[201~it"), on: outbox)
 
-        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal.text))
         #expect(h.subscriptions.subscriberCount == 0)
     }
 
@@ -695,7 +695,7 @@ struct PhoneCreateTests {
         for message in ["fix\u{1b}[201~it", "fix\u{0}it", "fix\rit"] {
             let (reply, _) = try await h.request(
                 .remoteCreate, params: Self.createParams(repoID: repo.id, message: message), on: outbox)
-            #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
+            #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal.text))
         }
         #expect(h.actions.remoteCreates.isEmpty)
     }
@@ -713,7 +713,7 @@ struct PhoneCreateTests {
         for value in ["main\u{1b}[201~", "ma\u{0}in", "ma\rin", "main\u{7f}", "ma\u{85}in"] {
             let (reply, _) = try await h.request(
                 .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["branch": value]), on: outbox)
-            #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
+            #expect(reply.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal.text))
         }
         #expect(h.actions.remoteCreates.isEmpty)
 
@@ -743,7 +743,7 @@ struct PhoneCreateTests {
             .remoteCreate, params: Self.createParams(repoID: repo.id, strings: ["branch": "main\u{1b}[201~"]),
             on: outbox)
 
-        #expect(refused.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal))
+        #expect(refused.error == PhoneAppError(code: .refused, message: PhoneMessageText.controlCharacterRefusal.text))
         #expect(h.actions.remoteCreates.isEmpty)
 
         let (created, _) = try await h.request(.remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
@@ -913,31 +913,36 @@ struct PhoneCreateTests {
         #expect(!h.actions.calls.contains(FakeSessionActions.Call(method: .cachedRemoteProviders, deviceID: nil)))
     }
 
-    /// A remote create's refusal reaches the phone only in words TBD wrote:
-    /// the phone message rule's, the remote gates' and the router's own
-    /// (`RemoteCreateRefusal`) pass as they are, and a provider's own words,
-    /// which can quote a token, become `remoteRefusedReason`.
+    /// A remote create's refusal reaches the phone only in words TBD wrote,
+    /// told by its code: the phone message rule's, the remote gates' and the
+    /// router's own (`RemoteCreateRefusal`) carry codes and pass as they are.
+    /// A refusal with no code becomes `remoteRefusedReason`: a provider's own
+    /// words, which can quote a token, and TBD's own words sent with no code,
+    /// which the phone cannot tell from a provider's.
     @Test func aRefusedRemoteCreateKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
         try Self.offer(h, [Self.status()])
         let outbox = await h.connect()
-        let cases: [(daemon: String, phone: String)] = [
-            (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
-            ("acme-cloud: quota reached", PhoneAppService.remoteRefusedReason),
-            (PhoneMessageText.emptyRefusal, PhoneMessageText.emptyRefusal),
-            (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
-            (RemoteGateRefusal.claudeCloudDisabled, RemoteGateRefusal.claudeCloudDisabled),
-            (RemoteCreateRefusal.promptNotString, RemoteCreateRefusal.promptNotString),
-            (RemoteCreateRefusal.formNotWritable, RemoteCreateRefusal.formNotWritable),
+        let cases: [(daemon: RPCResponse, phone: String)] = [
+            (RPCResponse(error: PhoneProviderSecret.error), PhoneAppService.remoteRefusedReason),
+            (RPCResponse(error: "acme-cloud: quota reached"), PhoneAppService.remoteRefusedReason),
+            (PhoneMessageText.emptyRefusal.response, PhoneMessageText.emptyRefusal.text),
+            (PhoneMessageText.controlCharacterRefusal.response, PhoneMessageText.controlCharacterRefusal.text),
+            (RemoteGateRefusal.backendsDisabled.response, RemoteGateRefusal.backendsDisabled.text),
+            (RemoteGateRefusal.claudeCloudDisabled.response, RemoteGateRefusal.claudeCloudDisabled.text),
+            (RemoteCreateRefusal.promptNotString.response, RemoteCreateRefusal.promptNotString.text),
+            (RemoteCreateRefusal.formNotWritable.response, RemoteCreateRefusal.formNotWritable.text),
+            (RPCResponse(error: RemoteCreateRefusal.formNotWritable.text), PhoneAppService.remoteRefusedReason),
         ]
 
         for (daemon, phone) in cases {
-            h.actions.respond(to: .remoteCreate, with: RPCResponse(error: daemon))
+            let said = "the daemon said \(daemon.error ?? "nothing") with code \(daemon.errorCode ?? "none")"
+            h.actions.respond(to: .remoteCreate, with: daemon)
             let (reply, bytes) = try await h.request(
                 .remoteCreate, params: Self.createParams(repoID: repo.id), on: outbox)
-            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
-            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "\(said)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "\(said)")
         }
     }
 }

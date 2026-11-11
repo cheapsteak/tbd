@@ -150,7 +150,7 @@ final class PromptAnswerController {
         } catch {
             guard finish(promptID, token: token) else { return }
             let message = Self.message(for: error)
-            states[promptID] = .failed(message: message, retryable: Self.isRetryable(message))
+            states[promptID] = .failed(message: message, retryable: Self.isRetryable(error))
         }
     }
 
@@ -261,14 +261,28 @@ final class PromptAnswerController {
         return error.localizedDescription
     }
 
-    /// False for refusals a retry cannot change: the flag being off and an
-    /// answer that does not fit the prompt. Everything else — the hook
-    /// reconnecting, a dropped connection, a provider failure — may succeed
-    /// on a second try.
-    static func isRetryable(_ message: String) -> Bool {
-        if message.hasPrefix("invalid_params") { return false }
-        if message.contains("transcript_prompt_answer_enabled") { return false }
-        return true
+    /// False for refusals a retry cannot change, which the daemon names by
+    /// code (`DaemonClientError.rpcError`'s `code`): an answer that does not
+    /// fit the prompt (`RPCErrorCode.answerDoesNotFit`) and the setting for
+    /// answering prompts being off (`RPCErrorCode.promptAnswerOff`).
+    /// Everything else may succeed on a second try: the setting that could
+    /// not be read (`RPCErrorCode.promptAnswerSettingUnread`), the hook
+    /// reconnecting, a provider failure, a dropped connection, and any
+    /// refusal with no code. That last group includes a remote provider's own
+    /// refusal of an answer (its `invalid_params` too), which carries no code
+    /// and so keeps "Try again", and every refusal from a daemon that sends
+    /// no codes. The message is never read, so a retry of those may be
+    /// refused again, which is harmless.
+    static func isRetryable(_ error: any Error) -> Bool {
+        guard let clientError = error as? DaemonClientError,
+              let raw = clientError.rpcCode,
+              let code = RPCErrorCode(rawValue: raw) else { return true }
+        switch code {
+        case .answerDoesNotFit, .promptAnswerOff:
+            return false
+        default:
+            return true
+        }
     }
 }
 

@@ -585,27 +585,34 @@ struct PhoneSendTests {
         #expect(try Self.outcome(bytes) == "unknown")
     }
 
-    /// A remote send's refusal reaches the phone only in words TBD wrote:
-    /// the phone message rule's and a session state's pass as they are, and
-    /// a provider's own words, which can quote a token, become
-    /// `remoteRefusedReason`.
+    /// A remote send's refusal reaches the phone only in words TBD wrote,
+    /// told by its code: the phone message rule's and a session state's
+    /// carry codes and pass as they are. A refusal with no code becomes
+    /// `remoteRefusedReason`: a provider's own words, which can quote a
+    /// token, and TBD's own words sent with no code, which the phone cannot
+    /// tell from a provider's.
     @Test func aRefusedRemoteSendKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.sendSubmit])
         try h.actions.listRemoteSession("acme-cloud", "rs-1")
         let outbox = await h.connect()
-        let cases: [(daemon: String, phone: String)] = [
-            (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
-            (PhoneMessageText.controlCharacterRefusal, PhoneMessageText.controlCharacterRefusal),
-            (RemoteSendMessageRefusal.waitingInput, RemoteSendMessageRefusal.waitingInput),
+        let cases: [(daemon: RPCResponse, phone: String)] = [
+            (RPCResponse(error: PhoneProviderSecret.error), PhoneAppService.remoteRefusedReason),
+            (PhoneMessageText.controlCharacterRefusal.response, PhoneMessageText.controlCharacterRefusal.text),
+            (PhoneMessageText.emptyRefusal.response, PhoneMessageText.emptyRefusal.text),
+            (RemoteSendMessageRefusal.waitingInput.response, RemoteSendMessageRefusal.waitingInput.text),
+            (RemoteSendMessageRefusal.exited.response, RemoteSendMessageRefusal.exited.text),
+            (RemoteGateRefusal.claudeCloudDisabled.response, RemoteGateRefusal.claudeCloudDisabled.text),
+            (RPCResponse(error: RemoteSendMessageRefusal.exited.text), PhoneAppService.remoteRefusedReason),
         ]
 
         for (daemon, phone) in cases {
-            h.actions.respond(to: .remoteSendMessage, with: RPCResponse(error: daemon))
+            let said = "the daemon said \(daemon.error ?? "nothing") with code \(daemon.errorCode ?? "none")"
+            h.actions.respond(to: .remoteSendMessage, with: daemon)
             let (reply, bytes) = try await h.request(
                 .messageSend, params: Self.message(Self.remoteSession, "hi"), on: outbox)
-            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
-            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "\(said)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "\(said)")
         }
     }
 

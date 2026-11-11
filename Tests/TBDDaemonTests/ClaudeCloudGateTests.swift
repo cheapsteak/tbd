@@ -82,6 +82,7 @@ struct ClaudeCloudGateTests: ~Copyable {
         for method in gatedMethods {
             let response = await call(r, method, cloudParams)
             #expect(response.error == "remote backends disabled", "\(method)")
+            #expect(response.errorCode == RPCErrorCode.remoteBackendsOff.rawValue, "\(method)")
         }
         #expect(cloud.calls.isEmpty)
     }
@@ -95,6 +96,7 @@ struct ClaudeCloudGateTests: ~Copyable {
         for method in gatedMethods {
             let response = await call(r, method, cloudParams)
             #expect(response.error == "remote backends disabled", "\(method)")
+            #expect(response.errorCode == RPCErrorCode.remoteBackendsOff.rawValue, "\(method)")
         }
         #expect(cloud.calls.isEmpty)
     }
@@ -108,6 +110,7 @@ struct ClaudeCloudGateTests: ~Copyable {
         for method in gatedMethods {
             let response = await call(r, method, cloudParams)
             #expect(response.error == "claude cloud sessions disabled", "\(method)")
+            #expect(response.errorCode == RPCErrorCode.claudeCloudOff.rawValue, "\(method)")
         }
         #expect(cloud.calls.isEmpty, "no cloud verb may be invoked while the inner flag is off")
     }
@@ -159,10 +162,10 @@ struct ClaudeCloudGateTests: ~Copyable {
     /// may reach the provider, and the refusal is the inner gate's message,
     /// not a capability refusal or a not-yet-known-provider error.
     ///
-    /// The refusal carries no error code, because no retry gets past a gate
-    /// `force` does not lift, and each gesture's request row is confirmed
-    /// `refused` with the gate's sentence, like every other refusal on these
-    /// routes.
+    /// The refusal carries the gate's own code, `claudeCloudOff`, never one
+    /// that offers `force`, because no retry gets past a gate `force` does not
+    /// lift, and each gesture's request row is confirmed `refused` with the
+    /// gate's sentence, like every other refusal on these routes.
     @Test func worktreeAddressedArchiveAndReviveAreAlsoCloudGated() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let cloud = FakeProviderInvoker(script: [])
@@ -173,12 +176,12 @@ struct ClaudeCloudGateTests: ~Copyable {
         let archiveResponse = await r.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive, params: WorktreeArchiveParams(worktreeID: lane.id)))
         #expect(archiveResponse.error == "claude cloud sessions disabled")
-        #expect(archiveResponse.errorCode == nil)
+        #expect(archiveResponse.errorCode == RPCErrorCode.claudeCloudOff.rawValue)
 
         let reviveResponse = await r.handle(try RPCRequest(
             method: RPCMethod.worktreeRevive, params: WorktreeReviveParams(worktreeID: lane.id)))
         #expect(reviveResponse.error == "claude cloud sessions disabled")
-        #expect(reviveResponse.errorCode == nil)
+        #expect(reviveResponse.errorCode == RPCErrorCode.claudeCloudOff.rawValue)
 
         #expect(cloud.calls.isEmpty, "no cloud verb, and no describe probe, may run while the inner flag is off")
 
@@ -210,6 +213,7 @@ struct ClaudeCloudGateTests: ~Copyable {
             method: RPCMethod.worktreeArchive, params: WorktreeArchiveParams(worktreeID: lane.id)))
 
         #expect(response.error == "remote backends disabled")
+        #expect(response.errorCode == RPCErrorCode.remoteBackendsOff.rawValue)
         #expect(cloud.calls.isEmpty)
     }
 }

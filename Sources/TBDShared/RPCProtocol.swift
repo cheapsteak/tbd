@@ -55,6 +55,12 @@ public struct RPCResponse: Codable, Sendable {
     /// Optional on the wire — nil for errors that carry no code.
     public let errorCode: String?
 
+    /// `errorCode` as an `RPCErrorCode`. A value this build does not know
+    /// counts as none, so a newer peer's code reads as an uncoded refusal.
+    public var knownErrorCode: RPCErrorCode? {
+        errorCode.flatMap(RPCErrorCode.init(rawValue:))
+    }
+
     public init<R: Encodable>(result: R) throws {
         self.success = true
         let data = try JSONEncoder().encode(result)
@@ -106,6 +112,16 @@ public enum RPCError: LocalizedError, Sendable {
 /// Machine-readable code carried alongside `RPCResponse.error`'s human string,
 /// so the app can branch on a specific failure (e.g. offer a fallback) without
 /// matching message text. Optional on the wire — nil for errors that carry no code.
+///
+/// A code goes only on a refusal whose text holds no words a remote provider
+/// wrote (its error messages or output). The text is TBD's fixed words, which
+/// may name things TBD keeps, such as a worktree or a registered provider, or
+/// the caller's own text quoted back to it. A refusal that quotes a provider
+/// carries no code. So a client may show the text of a refusal that carries a
+/// code. The one exception is `answerDoesNotFit`, whose text can name a
+/// question a remote provider wrote, so a client must not show it on the
+/// phone. A remote provider's own refusal of an answer carries no code.
+/// Design: `docs/specs/2026-11-11-structured-refusal-codes-design.md`.
 public enum RPCErrorCode: String, Sendable {
     /// A parked terminal's pinned model profile no longer resolves; the wake was
     /// refused. The app offers a default-account fallback retry
@@ -150,6 +166,84 @@ public enum RPCErrorCode: String, Sendable {
     /// the app offers to archive anyway with
     /// `WorktreeArchiveParams.discardUncommittedChanges`.
     case worktreeArchiveUncommitted
+
+    // MARK: Remote gates
+
+    /// A remote verb was refused because remote backends are off
+    /// (`remote_backends_enabled`), or the daemon started without them:
+    /// "remote backends disabled".
+    case remoteBackendsOff
+    /// A remote verb aimed at the compiled cloud provider was refused because
+    /// `claude_cloud_enabled` is off: "claude cloud sessions disabled".
+    case claudeCloudOff
+
+    // MARK: The phone message rule
+
+    /// A paired phone's message was refused because it is blank: empty, or
+    /// only whitespace and invisible format characters.
+    case messageEmpty
+    /// A paired phone's message, or a value of its remote create form, was
+    /// refused because it holds a control character.
+    case messageControlCharacter
+
+    // MARK: Creating a remote session
+
+    /// A phone's remote session create was refused because its form's
+    /// `prompt` value is there and is not a string.
+    case remotePromptNotText
+    /// A phone's remote session create was refused because its form could not
+    /// be written out again around its first message.
+    case remoteFormNotWritable
+
+    // MARK: A remote session's state
+
+    /// A message or an answer to a remote session was refused because the
+    /// session has exited, or its provider stopped reporting it.
+    case remoteSessionExited
+    /// A message to a remote session was refused because its agent is waiting
+    /// on a prompt. The text says where to answer it: in the terminal, or on
+    /// the card in the transcript.
+    case remoteSessionWaitingInput
+    /// A remote session's transcript sync or earlier history load was refused
+    /// because the session is dismissed, so its transcript is no longer kept.
+    case remoteSessionDismissed
+    /// A remote session's transcript sync or earlier history load was refused
+    /// because the session was removed while it ran, so the page it fetched
+    /// was dropped.
+    case remoteSessionRemoved
+
+    // MARK: Remote transcript history
+
+    /// Loading a remote session's earlier transcript history was refused
+    /// because it is turned off (`remote_transcript_live_sync_enabled`).
+    case loadEarlierOff
+    /// Loading a remote session's earlier transcript history was refused
+    /// because there is no earlier history to load.
+    case nothingEarlier
+
+    // MARK: Answering a prompt
+
+    /// A remote answer was refused because TBD holds no mirror row for the
+    /// session, so there is no prompt to match the answer against.
+    case promptNotMirrored
+    /// An answer, local or remote, was refused because it does not fit the
+    /// prompt (`PromptAnswerValidation`): its kind does not match, a question
+    /// has no answer, it names a question the prompt does not have, or it asks
+    /// for "allow always" when the prompt offered no suggestions. A retry
+    /// cannot change it.
+    ///
+    /// The one code whose text TBD did not wholly write: for a remote
+    /// session, the text can name a question the provider wrote. A client
+    /// that must not show a provider's words shows its own sentence for it.
+    /// A remote provider's own refusal of an answer carries no code.
+    case answerDoesNotFit
+    /// An answer was refused because the setting for answering prompts from
+    /// the transcript (`transcript_prompt_answer_enabled`) is off. A retry
+    /// cannot change it.
+    case promptAnswerOff
+    /// An answer was refused because TBD could not read the setting for
+    /// answering prompts from the transcript. A later read can succeed.
+    case promptAnswerSettingUnread
 }
 
 // MARK: - RPC Method Names

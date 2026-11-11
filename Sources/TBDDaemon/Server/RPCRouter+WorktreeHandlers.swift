@@ -398,8 +398,10 @@ extension RPCRouter {
     /// The three guard refusals — the ones `force` lifts — carry
     /// `RPCErrorCode.remoteLaneArchiveGuarded`, so the CLI can append its
     /// `--force` hint and the app can offer Archive anyway without reading the
-    /// sentence. Every other refusal carries no code, because no retry would
-    /// get past it.
+    /// sentence. No other refusal carries that code, because no retry would
+    /// get past it. The two gates' refusals carry the gates' own codes
+    /// (`RPCErrorCode.remoteBackendsOff`, `RPCErrorCode.claudeCloudOff`),
+    /// which offer nothing; every other refusal carries none.
     ///
     /// `stop` is never reached from here. A provider declaring only `stop` is
     /// refused, because ending compute and retiring a record are different
@@ -416,7 +418,7 @@ extension RPCRouter {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
                     actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
-                    Self.remoteBackendsDisabledResponse)
+                    RemoteGateRefusal.backendsDisabled.response)
             }
             // Same inner gate `remote.archive` goes through — this route
             // reaches the identical provider verb, addressed by worktree row
@@ -457,8 +459,10 @@ extension RPCRouter {
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Revive").
     /// Same record shape as `archiveRemoteLane`: the request row first, every
     /// refusal confirmed `refused`/`not-eligible` with its sentence, and an act
-    /// confirmed by its outcome. No refusal here carries an error code, because
-    /// revive has no `force` to lift one. Returns the refreshed worktree,
+    /// confirmed by its outcome. Revive has no `force` to lift a refusal, so
+    /// none carries a code that offers one: the two gates' refusals carry the
+    /// gates' own codes (`RPCErrorCode.remoteBackendsOff`,
+    /// `RPCErrorCode.claudeCloudOff`), and every other refusal carries none. Returns the refreshed worktree,
     /// exactly as the local path does, so the caller sees the row it asked for
     /// rather than the archived snapshot it passed in.
     private func reviveRemoteLane(
@@ -472,7 +476,7 @@ extension RPCRouter {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
                     actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive,
-                    Self.remoteBackendsDisabledResponse)
+                    RemoteGateRefusal.backendsDisabled.response)
             }
             // See `archiveRemoteLane`'s matching comment: same inner gate as
             // `remote.unarchive`, same worktree-addressed route to the same

@@ -183,13 +183,14 @@ struct RemoteTranscriptFeedTests {
     /// A load that fails leaves the cache as it was: the phone gets the
     /// cache's page, whose cursor still asks for more, and with nothing left
     /// in the cache the load's refusal is the error, only in words TBD wrote:
-    /// a provider's error, which can quote a token, is `remoteRefusedReason`,
-    /// and TBD's own refusal passes as it is. A later try loads.
+    /// a refusal with no code, which can quote a provider's token, is
+    /// `remoteRefusedReason`, and TBD's own refusal, which carries its code,
+    /// passes as it is. A later try loads.
     @Test func aFailedLoadShowsTheCacheThenRefuses() async throws {
         let cache = try FakeCache(
             CacheLine.conversation("m", messages: 6), earlier: [[CacheLine.prompt("e1", "placeholder earlier 1")]])
         defer { cache.remove() }
-        cache.failLoads(PhoneProviderSecret.error)
+        cache.failLoads(RPCResponse(error: PhoneProviderSecret.error))
         let d = RemoteDirectFeed(cache: cache)
         let page = try await d.feed.open()
         let cursor = try #require(page.cursor)
@@ -207,9 +208,9 @@ struct RemoteTranscriptFeedTests {
         #expect(!PhoneProviderSecret.leaks(PhoneAppCoding.errorReply(requestID: "page", providerRefusal)))
         #expect(d.actions.remoteLoadEarliers.count == 2)
 
-        cache.failLoads(RemoteTranscriptRefusal.loadEarlierOff)
+        cache.failLoads(RemoteTranscriptRefusal.loadEarlierOff.response)
         let tbdRefusal = try await Self.olderPageError(d.feed, cursor: top)
-        #expect(tbdRefusal == PhoneAppError(code: .refused, message: RemoteTranscriptRefusal.loadEarlierOff))
+        #expect(tbdRefusal == PhoneAppError(code: .refused, message: RemoteTranscriptRefusal.loadEarlierOff.text))
         #expect(d.actions.remoteLoadEarliers.count == 3)
 
         cache.failLoads(nil)
@@ -311,7 +312,7 @@ struct RemoteTranscriptFeedTests {
         let d = RemoteDirectFeed(cache: cache)
         _ = try await d.feed.open()
         await d.feed.start()
-        cache.failSyncs(Self.unreachable)
+        cache.failSyncs(RPCResponse(error: Self.unreachable))
         cache.queueAppend([CacheLine.prompt("m3", "placeholder prompt 3")])
 
         try await d.clock.requireAdvanceWhenArmed(by: .seconds(3))
@@ -397,33 +398,41 @@ struct RemoteTranscriptFeedTests {
     }
 
     /// A sync that fails at open is the reply's error, only in words TBD
-    /// wrote, and leaves nothing open: a provider's error, which can quote a
-    /// token (`RemoteTranscriptSyncError.providerFailed`), is
-    /// `remoteRefusedReason`, and TBD's own refusals pass as they are.
+    /// wrote, and leaves nothing open. A refusal with a code is TBD's own and
+    /// passes as it is. A refusal with no code is `remoteRefusedReason`: a
+    /// provider's error, which can quote a token
+    /// (`RemoteTranscriptSyncError.providerFailed`); TBD's own words sent
+    /// with no code, which the phone cannot tell from a provider's; and a
+    /// refusal whose code this build does not know.
     @Test func aFailedOpenSyncIsRefused() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider(Self.provider, capabilities: [RemoteCapability.transcriptRead])
         try Self.listSession(h)
         let outbox = try await Self.liveConnection(h)
         let discarded = RemoteTranscriptSyncError.discarded.localizedDescription
-        let cases: [(daemon: String, phone: String)] = [
-            (PhoneProviderSecret.error, PhoneAppService.remoteRefusedReason),
-            ("transcript read failed (exit 1)", PhoneAppService.remoteRefusedReason),
-            (RemoteTranscriptRefusal.dismissed, RemoteTranscriptRefusal.dismissed),
-            (RPCRouter.transcriptSyncDismissedRefusal, RPCRouter.transcriptSyncDismissedRefusal),
-            (discarded, discarded),
-            (RemoteGateRefusal.backendsDisabled, RemoteGateRefusal.backendsDisabled),
+        let cases: [(daemon: RPCResponse, phone: String)] = [
+            (RPCResponse(error: PhoneProviderSecret.error), PhoneAppService.remoteRefusedReason),
+            (RPCResponse(error: "transcript read failed (exit 1)"), PhoneAppService.remoteRefusedReason),
+            (RemoteTranscriptRefusal.dismissed.response, RemoteTranscriptRefusal.dismissed.text),
+            (RemoteTranscriptRefusal.dismissed.response, RemoteTranscriptRefusal.dismissed.text),
+            (RemoteGateRefusal.backendsDisabled.response, RemoteGateRefusal.backendsDisabled.text),
+            (RPCResponse(error: RemoteTranscriptRefusal.dismissed.text), PhoneAppService.remoteRefusedReason),
+            (RPCResponse(error: discarded), PhoneAppService.remoteRefusedReason),
+            (RemoteTranscriptRefusal.removed.response, RemoteTranscriptRefusal.removed.text),
+            (RPCRouter.transcriptSyncFailureResponse(.discarded), discarded),
+            (RPCResponse(error: PhoneProviderSecret.error, code: "acmeUnknownCode"), PhoneAppService.remoteRefusedReason),
         ]
 
         for (index, (daemon, phone)) in cases.enumerated() {
-            h.actions.respond(to: .remoteTranscriptSync, with: RPCResponse(error: daemon))
+            let said = "the daemon said \(daemon.error ?? "nothing") with code \(daemon.errorCode ?? "none")"
+            h.actions.respond(to: .remoteTranscriptSync, with: daemon)
             let bytes = try await Self.ask(
                 h, .transcriptOpen, id: "open-\(index)", Self.openParams(Self.session), on: outbox)
 
-            #expect(try Self.error(bytes) == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
-            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
+            #expect(try Self.error(bytes) == PhoneAppError(code: .refused, message: phone), "\(said)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "\(said)")
             let feed = await h.service.transcriptFeed(for: h.peer.deviceID)
-            #expect(feed == nil, "the daemon said \(daemon)")
+            #expect(feed == nil, "\(said)")
         }
         #expect(h.actions.remoteSyncs.count == cases.count)
         await h.service.phoneRevoked(deviceID: h.peer.deviceID)
@@ -880,8 +889,8 @@ private final class FakeCache: @unchecked Sendable {
     private var replacement: Data?
     /// Earlier history, oldest batch first.
     private var earlier: [Data]
-    private var syncFailure: String?
-    private var loadFailure: String?
+    private var syncFailure: RPCResponse?
+    private var loadFailure: RPCResponse?
     private var expired = false
     private var replacementBeforeLoad: Data?
 
@@ -924,14 +933,16 @@ private final class FakeCache: @unchecked Sendable {
         lock.withLock { replacementBeforeLoad = bytes }
     }
 
-    /// Every later sync is refused with `reason`; nil lets them through.
-    func failSyncs(_ reason: String?) {
-        lock.withLock { syncFailure = reason }
+    /// Every later sync is refused with `refusal`, its text and any code;
+    /// nil lets them through.
+    func failSyncs(_ refusal: RPCResponse?) {
+        lock.withLock { syncFailure = refusal }
     }
 
-    /// Every later load is refused with `reason`; nil lets them through.
-    func failLoads(_ reason: String?) {
-        lock.withLock { loadFailure = reason }
+    /// Every later load is refused with `refusal`, its text and any code;
+    /// nil lets them through.
+    func failLoads(_ refusal: RPCResponse?) {
+        lock.withLock { loadFailure = refusal }
     }
 
     /// Every later load finds the history expired.
@@ -942,7 +953,7 @@ private final class FakeCache: @unchecked Sendable {
     private func sync() -> RPCResponse {
         lock.withLock { () -> RPCResponse in
             if let syncFailure {
-                return RPCResponse(error: syncFailure)
+                return syncFailure
             }
             do {
                 if let replacement {
@@ -966,7 +977,7 @@ private final class FakeCache: @unchecked Sendable {
     private func loadEarlier() -> RPCResponse {
         lock.withLock { () -> RPCResponse in
             if let loadFailure {
-                return RPCResponse(error: loadFailure)
+                return loadFailure
             }
             do {
                 if let replacementBeforeLoad {
