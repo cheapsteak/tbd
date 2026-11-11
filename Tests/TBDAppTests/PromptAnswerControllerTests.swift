@@ -40,15 +40,10 @@ struct PromptAnswerControllerTests {
     ) -> Controller {
         recorder.localOutcomes = local
         recorder.remoteOutcomes = remote
-        let failure = localError.map { PromptAnswerController.message(for: $0) }
-        let isRPC = localError is DaemonClientError
         return Controller(
             local: { terminalID, promptID, answer in
                 recorder.localCalls.append((terminalID, promptID, answer))
-                if let failure {
-                    if isRPC { throw DaemonClientError.rpcError(failure, code: nil) }
-                    throw HookReconnecting()
-                }
+                if let localError { throw localError }
                 let outcome = recorder.localOutcomes.isEmpty ? .delivered : recorder.localOutcomes.removeFirst()
                 return PromptAnswerResult(outcome: outcome)
             },
@@ -170,12 +165,48 @@ struct PromptAnswerControllerTests {
                 == .failed(message: "the prompt's hook is reconnecting; try again", retryable: true))
     }
 
+    /// A refusal's code, never its words, decides whether "Try again" shows:
+    /// an answer that does not fit and the setting being off cannot change on
+    /// a retry, and everything else may, including the setting that could not
+    /// be read, a code this build does not know, a refusal with no code in
+    /// the very words of one that has a code, and a dropped connection.
     @Test func refusalsARetryCannotChangeAreNotRetryable() {
-        #expect(!Controller.isRetryable("invalid_params: no answer for the question \"Which?\""))
-        #expect(!Controller.isRetryable(
-            "answering prompts from the transcript is off (config.transcript_prompt_answer_enabled)"))
-        #expect(Controller.isRetryable("the prompt's hook is reconnecting; try again"))
-        #expect(Controller.isRetryable("Connection failed: refused"))
+        let doesNotFit = "invalid_params: no answer for the question \"Which?\""
+        let off = "answering prompts from the transcript is off (config.transcript_prompt_answer_enabled)"
+        let notRetryable: [any Error] = [
+            DaemonClientError.rpcError(doesNotFit, code: RPCErrorCode.answerDoesNotFit.rawValue),
+            DaemonClientError.rpcError(off, code: RPCErrorCode.promptAnswerOff.rawValue),
+        ]
+        let retryable: [any Error] = [
+            DaemonClientError.rpcError(
+                "the setting for answering prompts could not be read",
+                code: RPCErrorCode.promptAnswerSettingUnread.rawValue),
+            DaemonClientError.rpcError("the remote session has exited", code: RPCErrorCode.remoteSessionExited.rawValue),
+            DaemonClientError.rpcError(doesNotFit, code: "acmeUnknownCode"),
+            DaemonClientError.rpcError(doesNotFit, code: nil),
+            DaemonClientError.rpcError(off, code: nil),
+            DaemonClientError.rpcError("the prompt's hook is reconnecting; try again", code: nil),
+            DaemonClientError.connectionFailed("refused"),
+            HookReconnecting(),
+        ]
+
+        for error in notRetryable {
+            #expect(!Controller.isRetryable(error), "\(error)")
+        }
+        for error in retryable {
+            #expect(Controller.isRetryable(error), "\(error)")
+        }
+    }
+
+    /// A submit the daemon refuses with a code a retry cannot change fails
+    /// with the refusal's words and no "Try again".
+    @Test func aSubmitRefusedWithACodeARetryCannotChangeIsNotRetryable() async {
+        let message = "invalid_params: no answer for the question \"Which?\""
+        let controller = makeController(
+            Recorder(),
+            localError: DaemonClientError.rpcError(message, code: RPCErrorCode.answerDoesNotFit.rawValue))
+        await controller.submit(permission, answer: allow)
+        #expect(controller.state(for: "p1") == .failed(message: message, retryable: false))
     }
 
     @Test func remoteDeliveryRequestsATranscriptSync() async {
