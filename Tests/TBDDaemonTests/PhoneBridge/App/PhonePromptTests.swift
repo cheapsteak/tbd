@@ -573,6 +573,20 @@ struct PhonePromptTests {
         #expect(h.actions.remoteAnswers.count == cases.count)
     }
 
+    /// A code from the laptop's own verbs is decided too: the start-admission
+    /// hold's reason is the user's own command's words and is shown, and a
+    /// code this build does not know counts as none.
+    @Test func aPreExistingCodeIsShownByItsOwnWordsAndAnUnknownOneIsNot() {
+        let held = RPCResponse(error: "held: freeze until noon", code: RPCErrorCode.startHeld.rawValue)
+        #expect(PhoneAppService.refusalWording(for: .startHeld) == .text)
+        #expect(PhoneAppService.remoteRefusal(held, method: "remote.create")
+            == PhoneAppError(code: .refused, message: "held: freeze until noon"))
+        let unknown = RPCResponse(error: PhoneProviderSecret.error, code: "a_code_from_a_newer_build")
+        #expect(unknown.knownErrorCode == nil)
+        #expect(PhoneAppService.remoteRefusal(unknown, method: "remote.create")
+            == PhoneAppError(code: .refused, message: PhoneAppService.remoteRefusedReason))
+    }
+
     /// A local answer's refusal is told by its code too: the setting's codes
     /// get the words the sessions list shows for them, and `answerDoesNotFit`
     /// gets the phone's own sentence, whichever question its text names.

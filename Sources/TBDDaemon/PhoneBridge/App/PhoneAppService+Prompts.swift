@@ -964,40 +964,18 @@ extension PhoneAppService {
     ///   refusal's words reach the phone only when it carries a code.
     /// - **A local answer** is refused by TBD alone, so no provider can have
     ///   written its words. The three answer codes get the phone's own
-    ///   sentences, as a remote answer's do (`answerCodeReason(_:)`); any
+    ///   sentences, as a remote answer's do (`refusalWording(for:)`); any
     ///   other refusal reaches the phone as `refusal(_:)` sends it, or
     ///   `answerRefusedReason` when it gave no text.
     static func answerRefusal(_ response: RPCResponse, remote: Bool) -> PhoneAppError {
         if remote {
             return Self.remoteRefusal(response, method: "remote.answer")
         }
-        if let code = Self.refusalCode(response), let reason = Self.answerCodeReason(code) {
-            return Self.refusal(reason)
+        if let code = response.knownErrorCode,
+           case .phoneSentence(let sentence) = Self.refusalWording(for: code) {
+            return Self.refusal(sentence)
         }
         return Self.refusal(response.error.flatMap { $0.isEmpty ? nil : $0 } ?? Self.answerRefusedReason)
-    }
-
-    /// The phone's own sentence for an answer refused with `code`, or nil
-    /// for any other code:
-    /// - `answerDoesNotFit` gets `answerDoesNotFitReason`, since the
-    ///   refusal's text can name a question a remote provider wrote;
-    /// - `promptAnswerOff` and `promptAnswerSettingUnread`, written for a
-    ///   developer, get the words the sessions list shows for the same two
-    ///   states: `PhoneSessionStatus.answerTurnedOffReason` for the setting
-    ///   turned off after the phone's own check read it on, and
-    ///   `PhoneSessionStatus.answerSettingUnreadReason` for the core's own
-    ///   read of the config row failing after the phone's check passed.
-    static func answerCodeReason(_ code: RPCErrorCode) -> String? {
-        switch code {
-        case .answerDoesNotFit:
-            return Self.answerDoesNotFitReason
-        case .promptAnswerOff:
-            return PhoneSessionStatus.answerTurnedOffReason
-        case .promptAnswerSettingUnread:
-            return PhoneSessionStatus.answerSettingUnreadReason
-        default:
-            return nil
-        }
     }
 
     // MARK: - The ledger

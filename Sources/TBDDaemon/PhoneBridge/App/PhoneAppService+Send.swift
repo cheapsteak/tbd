@@ -299,32 +299,85 @@ extension PhoneAppService {
     ///
     /// **It decides from the response's code, never from its words.** A code
     /// goes only on a refusal whose text holds no words a provider wrote
-    /// (`RPCErrorCode`):
-    /// - `answerDoesNotFit`, `promptAnswerOff` and `promptAnswerSettingUnread`
-    ///   get the phone's own sentences (`answerCodeReason(_:)`);
-    /// - any other code gets the response's text, as `refusal(_:)` sends it;
+    /// (`RPCErrorCode`), and `refusalWording(for:)` states, for every code,
+    /// what the phone gets:
+    /// - a `phoneSentence` for the three answer codes;
+    /// - the response's text for a code whose text is TBD's own words, as
+    ///   `refusal(_:)` sends it;
     /// - no code gets `remoteRefusedReason`, and the text goes to the log as
     ///   private data. A refusal with no code can be a provider's own error
     ///   message, or its raw stderr, which can quote a URL with an access
     ///   token in it, and cutting it short does not make it safe. A code this
     ///   build does not know counts as none.
     static func remoteRefusal(_ response: RPCResponse, method: String) -> PhoneAppError {
-        guard let code = Self.refusalCode(response) else {
+        guard let code = response.knownErrorCode else {
             Self.logger.notice(
                 "Phone \(method, privacy: .public): refused with no code, in words the phone is not sent: \(response.error ?? "<none>", privacy: .private)")
             return PhoneAppError(code: .refused, message: Self.remoteRefusedReason)
         }
-        if let reason = Self.answerCodeReason(code) {
-            return Self.refusal(reason)
+        switch Self.refusalWording(for: code) {
+        case .phoneSentence(let sentence):
+            return Self.refusal(sentence)
+        case .text:
+            return Self.refusal(response.error)
+        case .generalLine:
+            Self.logger.notice(
+                "Phone \(method, privacy: .public): refused with \(code.rawValue, privacy: .public), in words the phone is not sent: \(response.error ?? "<none>", privacy: .private)")
+            return PhoneAppError(code: .refused, message: Self.remoteRefusedReason)
         }
-        return Self.refusal(response.error)
     }
 
-    /// The code `response` carries (`RPCResponse.errorCode`), or nil when it
-    /// carries none or one this build does not know.
-    static func refusalCode(_ response: RPCResponse) -> RPCErrorCode? {
-        guard let raw = response.errorCode else { return nil }
-        return RPCErrorCode(rawValue: raw)
+    /// What the phone is told of a refusal that carries a code.
+    enum RefusalWording: Equatable {
+        /// The phone's own sentence, because the refusal's text is written
+        /// for a developer or can hold a provider's words.
+        case phoneSentence(String)
+        /// The refusal's text: TBD's fixed words, with names TBD keeps or the
+        /// caller's own text quoted back, and no provider's words.
+        case text
+        /// `remoteRefusedReason`; the text goes to the log only.
+        case generalLine
+    }
+
+    /// The decision for each code, as a `switch` over every case with no
+    /// `default`: a new `RPCErrorCode` does not compile until it says what the
+    /// phone gets.
+    static func refusalWording(for code: RPCErrorCode) -> RefusalWording {
+        switch code {
+        // The three answer codes: a sentence of the phone's own.
+        // `answerDoesNotFit`'s text can name a question a remote provider
+        // wrote; the other two are written for a developer.
+        case .answerDoesNotFit:
+            return .phoneSentence(Self.answerDoesNotFitReason)
+        case .promptAnswerOff:
+            return .phoneSentence(PhoneSessionStatus.answerTurnedOffReason)
+        case .promptAnswerSettingUnread:
+            return .phoneSentence(PhoneSessionStatus.answerSettingUnreadReason)
+
+        // Codes the phone's calls can reach, each with fixed TBD wording.
+        case .remoteBackendsOff, .claudeCloudOff,
+             .messageEmpty, .messageControlCharacter,
+             .remotePromptNotText, .remoteFormNotWritable,
+             .remoteSessionExited, .remoteSessionWaitingInput,
+             .remoteSessionDismissed, .remoteSessionRemoved,
+             .loadEarlierOff, .nothingEarlier, .promptNotMirrored:
+            return .text
+
+        // Codes from the laptop's own terminal and worktree verbs. The phone
+        // does not call those verbs, but a code that arrives is shown by the
+        // wording of the one that carries it: fixed TBD words, with the
+        // terminal ids, pane ids, worktree names and registered provider
+        // names TBD keeps, and no provider's words.
+        case .profileMissing, .terminalBusy, .terminalHasComposerDraft,
+             .terminalSessionGone, .terminalWrongProvider,
+             .remoteLaneArchiveGuarded, .worktreeArchiveUncommitted:
+            return .text
+
+        // The text is the user's own start-admission command's reason: their
+        // own hook, not a provider's, so it is shown.
+        case .startHeld:
+            return .text
+        }
     }
 
     /// `response`'s result as `R`. One that does not decode is `internal`:
