@@ -398,14 +398,20 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(await m.providerStatuses().first(where: { $0.config.name == "agentbox" })?.health == .error)
     }
 
-    @Test(arguments: ["invalid_params", "not_found"])
-    func providerErrorsAreRPCErrorsCarryingTheCode(code: String) async throws {
+    /// A provider's `invalid_params` answer error carries `answerDoesNotFit`
+    /// with the provider's own text; any other provider error carries no code.
+    @Test(arguments: [
+        ("invalid_params", RPCErrorCode.answerDoesNotFit.rawValue),
+        ("not_found", nil),
+        ("internal", nil),
+    ] as [(String, String?)])
+    func providerErrorsAreRPCErrorsCarryingTheCode(code: String, expectedCode: String?) async throws {
         try await enable()
         let (invoker, r) = await primed([.result(failure(code: code, message: "provider says no"))])
         let response = try await answer(r)
         #expect(response.success == false)
         #expect(response.error == "\(code): provider says no")
-        #expect(response.errorCode == nil, "the provider's own words carry no code, even its invalid_params")
+        #expect(response.errorCode == expectedCode)
         #expect(Self.answers(invoker).count == 1)
         #expect(try actuationRows().count == 2)
     }

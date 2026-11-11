@@ -224,9 +224,12 @@ public enum RPCErrorCode: String, Sendable {
     /// for "allow always" when the prompt offered no suggestions. A retry
     /// cannot change it.
     ///
-    /// The one code whose text TBD did not wholly write: for a remote
-    /// session, the text can name a question the provider wrote. A client
-    /// that must not show a provider's words shows its own sentence for it.
+    /// A remote provider's own `invalid_params` refusal of an answer carries
+    /// it too, with the provider's message as the text. So this is the one
+    /// code whose text can hold a provider's words: for a remote session, the
+    /// text can name a question the provider wrote, or be the provider's
+    /// message. A client must never show its text on the phone; it shows its
+    /// own sentence for it.
     case answerDoesNotFit
     /// An answer was refused because the setting for answering prompts from
     /// the transcript (`transcript_prompt_answer_enabled`) is off. A retry

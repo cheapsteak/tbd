@@ -553,6 +553,8 @@ struct PhonePromptTests {
             (Self.refusing(.kindMismatch), Self.allow, PhoneAppService.answerDoesNotFitReason),
             (Self.refusing(.unknownQuestion("Which branch?")), question, PhoneAppService.answerDoesNotFitReason),
             (Self.refusing(.missingAnswer(question: "Which repo?")), question, PhoneAppService.answerDoesNotFitReason),
+            (RPCResponse(error: "invalid_params: provider says no", code: RPCErrorCode.answerDoesNotFit.rawValue),
+             Self.allow, PhoneAppService.answerDoesNotFitReason),
             (RPCResponse(error: PromptAnswerRefusal.notMirrored.text), Self.allow, PhoneAppService.remoteRefusedReason),
             (RPCResponse(error: PromptAnswerValidation.kindMismatch.message), Self.allow,
              PhoneAppService.remoteRefusedReason),

@@ -212,6 +212,11 @@ extension RPCRouter {
             let outcome: ActuationOutcome = providerError?.code == "not_found"
                 ? .refused(.notFound) : .transportFailed
             await finishActuation(actuationID, outcome, error: message)
+            // The provider's own refusal of an answer that does not fit
+            // carries the code; its text is still the provider's words.
+            if providerError?.code == "invalid_params" {
+                return RPCResponse(error: message, code: RPCErrorCode.answerDoesNotFit.rawValue)
+            }
             return RPCResponse(error: message)
         }
         await finishActuation(actuationID, .dispatched)
