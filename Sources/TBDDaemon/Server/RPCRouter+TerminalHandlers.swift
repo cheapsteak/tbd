@@ -3863,7 +3863,7 @@ extension RPCRouter {
     /// passes none.
     private func sendOnInternalRail(
         _ params: TerminalSendParams, actor: ActuationActor,
-        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> RPCResponse?)? = nil
+        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> PhoneSendRefusal?)? = nil
     ) async throws -> RPCResponse {
         try await terminalSendSerializer.run(terminalID: params.terminalID) {
             try await self.performTerminalSend(
@@ -4030,8 +4030,8 @@ extension RPCRouter {
     }
 
     /// The phone rail's refusal of a send of `payload` to the terminal `row`,
-    /// as the error response that answers it, or nil to let the send core go
-    /// on.
+    /// as a `PhoneSendRefusal` (which builds the error response that answers
+    /// it), or nil to let the send core go on.
     ///
     /// Pure: the send core calls it with the row and the payload it resolved
     /// itself (see `sendFromPairedPhone`), so it reads nothing and checks no
@@ -4042,9 +4042,9 @@ extension RPCRouter {
     /// codes (`PhoneMessageText`).
     private static func phoneSendRefusal(
         row: TBDShared.Terminal, payload: TerminalSendPayload
-    ) -> RPCResponse? {
+    ) -> PhoneSendRefusal? {
         if Self.effectiveKind(kind: row.kind, claudeSessionID: row.claudeSessionID) == .shell {
-            return RPCResponse(error: Self.phoneShellSendRefusal)
+            return PhoneSendRefusal(text: Self.phoneShellSendRefusal)
         }
         let texts: [String]
         switch payload {
@@ -4054,7 +4054,7 @@ extension RPCRouter {
             var partTexts: [String] = []
             for part in parts {
                 guard case .text(let value) = part else {
-                    return RPCResponse(error: Self.phoneNonTextPartRefusal)
+                    return PhoneSendRefusal(text: Self.phoneNonTextPartRefusal)
                 }
                 partTexts.append(value)
             }
@@ -4062,13 +4062,13 @@ extension RPCRouter {
         case .keys:
             // `sendFromPairedPhone` drops keys, so no phone payload is keys.
             // Refused rather than passed, should one ever arrive.
-            return RPCResponse(error: Self.phoneNonTextPartRefusal)
+            return PhoneSendRefusal(text: Self.phoneNonTextPartRefusal)
         }
         if texts.allSatisfy({ text in PhoneMessageText.isBlank(text) }) {
-            return PhoneMessageText.emptyRefusal.response
+            return PhoneSendRefusal(PhoneMessageText.emptyRefusal)
         }
         if texts.contains(where: { text in PhoneMessageText.hasControlCharacter(text) }) {
-            return PhoneMessageText.controlCharacterRefusal.response
+            return PhoneSendRefusal(PhoneMessageText.controlCharacterRefusal)
         }
         return nil
     }
@@ -4098,7 +4098,7 @@ extension RPCRouter {
         _ params: TerminalSendParams, actor: ActuationActor?,
         envelope: DispatchEnvelopeDisposition = .attached,
         connection: RPCConnectionContext? = nil,
-        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> RPCResponse?)? = nil
+        phoneCheck: (@Sendable (TBDShared.Terminal, TerminalSendPayload) -> PhoneSendRefusal?)? = nil
     ) async throws -> RPCResponse {
         // ─── The first of two refusal lines, and the reason they differ ───
         //
@@ -4156,8 +4156,9 @@ extension RPCRouter {
             verify: payload.recordedVerify)
 
         if let phoneRefusal {
-            await finishActuation(actuationID, response: phoneRefusal, refusedAs: .notEligible)
-            return phoneRefusal
+            let response = phoneRefusal.response
+            await finishActuation(actuationID, response: response, refusedAs: .notEligible)
+            return response
         }
 
         // ─── The transport's own declining rail ───
