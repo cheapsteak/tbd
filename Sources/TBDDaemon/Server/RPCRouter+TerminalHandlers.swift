@@ -4156,7 +4156,7 @@ extension RPCRouter {
             verify: payload.recordedVerify)
 
         if let phoneRefusal {
-            await finishActuation(actuationID, .refused(.notEligible), error: phoneRefusal.error)
+            await finishActuation(actuationID, response: phoneRefusal, refusedAs: .notEligible)
             return phoneRefusal
         }
 
