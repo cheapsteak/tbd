@@ -85,10 +85,10 @@ struct RemoteAppStateTests {
                                    gone: false, dismissed: false, lastSeen: Date()),
             ]
             state.remoteProvidersFetcher = {
-                throw DaemonClientError.rpcError("remote backends disabled", code: RPCErrorCode.remoteBackendsOff.rawValue)
+                throw DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
             }
             state.remoteSessionsFetcher = {
-                throw DaemonClientError.rpcError("remote backends disabled", code: RPCErrorCode.remoteBackendsOff.rawValue)
+                throw DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
             }
 
             await state.refreshRemote()
@@ -164,10 +164,10 @@ struct RemoteAppStateTests {
             state.renameRemoteSession(provider: "acme", sessionID: "s1", displayName: "keep me")
 
             state.remoteProvidersFetcher = {
-                throw DaemonClientError.rpcError("remote backends disabled", code: RPCErrorCode.remoteBackendsOff.rawValue)
+                throw DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
             }
             state.remoteSessionsFetcher = {
-                throw DaemonClientError.rpcError("remote backends disabled", code: RPCErrorCode.remoteBackendsOff.rawValue)
+                throw DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
             }
 
             await state.refreshRemote()
@@ -211,14 +211,9 @@ struct RemoteAppStateTests {
         }
     }
 
-    @Test func classifyRemoteRefreshFailure_backendsOffCode_isUnavailable() {
-        let error = DaemonClientError.rpcError("remote backends disabled", code: RPCErrorCode.remoteBackendsOff.rawValue)
+    @Test func classifyRemoteRefreshFailure_disabledMessage_isUnavailable() {
+        let error = DaemonClientError.rpcError(AppState.remoteBackendsDisabledMessage, code: nil)
         #expect(AppState.classifyRemoteRefreshFailure(error) == .unavailable)
-    }
-
-    @Test func classifyRemoteRefreshFailure_sameWordsWithNoCode_isError() {
-        let error = DaemonClientError.rpcError("remote backends disabled", code: nil)
-        #expect(AppState.classifyRemoteRefreshFailure(error) == .error)
     }
 
     @Test func classifyRemoteRefreshFailure_otherRPCError_isError() {
