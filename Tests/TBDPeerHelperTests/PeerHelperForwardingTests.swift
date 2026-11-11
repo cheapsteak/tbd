@@ -268,6 +268,15 @@ struct CrossSessionWrapperStrippingTests {
         #expect(Array(stripped.unicodeScalars) == Array((mark + "the body").unicodeScalars))
     }
 
+    /// The trailing closing tag is matched by scalar. A prepended mark right
+    /// before its `<` joins that `<` into one `Character`, so a `Character`
+    /// suffix check misses the tag and forwards it inside the body.
+    @Test func aPrependedMarkBeforeTheClosingTagStillRemovesIt() throws {
+        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\">\nthe body\u{600}</cross-session-message>"
+        let stripped = try #require(PeerHelper.strippedOfSenderAttribution(content))
+        #expect(Array(stripped.unicodeScalars) == Array("the body\u{600}".unicodeScalars))
+    }
+
     /// The three scan outcomes, named. `.absent` and `.unterminated` shared one
     /// `nil` before, which is exactly how the leak above got in.
     @Test func scanDistinguishesNoWrapperFromAnUnterminatedOne() {

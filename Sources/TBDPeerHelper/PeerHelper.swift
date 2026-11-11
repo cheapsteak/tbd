@@ -689,8 +689,14 @@ final class PeerHelper {
         // the one before the closing tag. Removed only when present, and only
         // one each: they are framing, not content.
         if stripped.hasPrefix("\n") { stripped.removeFirst() }
-        if stripped.hasSuffix(Self.crossSessionCloseTag) {
-            stripped.removeLast(Self.crossSessionCloseTag.count)
+        // The trailing closing tag is matched by scalar too. A prepended mark
+        // (U+0600) right before its `<` joins that `<` into one `Character`,
+        // so `hasSuffix` would miss a tag the receiver still reads.
+        let closeTag = Self.crossSessionCloseTag.unicodeScalars
+        let strippedScalars = stripped.unicodeScalars
+        let tail = strippedScalars.suffix(closeTag.count)
+        if tail.elementsEqual(closeTag) {
+            stripped = String(strippedScalars[..<tail.startIndex])
             if stripped.hasSuffix("\n") { stripped.removeLast() }
         }
         return stripped
