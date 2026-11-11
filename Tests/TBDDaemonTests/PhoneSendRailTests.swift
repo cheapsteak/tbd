@@ -257,7 +257,7 @@ struct PhoneSendRailTests {
 
         #expect(response.error == PhoneMessageText.emptyRefusal.text)
 
-        #expect(response.errorCode == PhoneMessageText.emptyRefusal.code.rawValue)
+        #expect(response.errorCode == RPCErrorCode.messageEmpty.rawValue)
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
         try await harness.expectRecordedRefusal(
@@ -289,7 +289,7 @@ struct PhoneSendRailTests {
 
         #expect(textResponse.error == PhoneMessageText.emptyRefusal.text)
 
-        #expect(textResponse.errorCode == PhoneMessageText.emptyRefusal.code.rawValue)
+        #expect(textResponse.errorCode == RPCErrorCode.messageEmpty.rawValue)
         #expect(partsResponse.error == blankPartsRefusal, "blank parts get the core's refusal")
         #expect(
             textBesidePartsResponse.error == textBesidePartsRefusal,
@@ -328,7 +328,7 @@ struct PhoneSendRailTests {
 
         let coreSeesNoContent = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         #expect(textResponse.error == PhoneMessageText.emptyRefusal.text)
-        #expect(textResponse.errorCode == PhoneMessageText.emptyRefusal.code.rawValue)
+        #expect(textResponse.errorCode == RPCErrorCode.messageEmpty.rawValue)
         try await textHarness.expectRecordedRefusal(
             device: device, message: text, error: PhoneMessageText.emptyRefusal.text)
         #expect(textHarness.tmux.pastedBodies.isEmpty, "nothing may be typed")
@@ -346,7 +346,7 @@ struct PhoneSendRailTests {
             #expect(requests.isEmpty, "a malformed send writes no request row")
         } else {
             #expect(partsResponse.error == PhoneMessageText.emptyRefusal.text)
-            #expect(partsResponse.errorCode == PhoneMessageText.emptyRefusal.code.rawValue)
+            #expect(partsResponse.errorCode == RPCErrorCode.messageEmpty.rawValue)
             try await partsHarness.expectRecordedRefusal(
                 device: device, message: text, error: PhoneMessageText.emptyRefusal.text)
         }
@@ -393,7 +393,7 @@ struct PhoneSendRailTests {
 
         #expect(response.error == PhoneMessageText.controlCharacterRefusal.text)
 
-        #expect(response.errorCode == PhoneMessageText.controlCharacterRefusal.code.rawValue)
+        #expect(response.errorCode == RPCErrorCode.messageControlCharacter.rawValue)
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
         try await harness.expectRecordedRefusal(
@@ -412,7 +412,7 @@ struct PhoneSendRailTests {
 
         #expect(response.error == PhoneMessageText.controlCharacterRefusal.text)
 
-        #expect(response.errorCode == PhoneMessageText.controlCharacterRefusal.code.rawValue)
+        #expect(response.errorCode == RPCErrorCode.messageControlCharacter.rawValue)
         #expect(harness.tmux.pastedBodies.isEmpty, "nothing may be typed")
         #expect(harness.tmux.sentKeys.isEmpty, "no key may be pressed")
     }
