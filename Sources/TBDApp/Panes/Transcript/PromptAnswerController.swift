@@ -267,15 +267,12 @@ final class PromptAnswerController {
     /// answering prompts being off (`RPCErrorCode.promptAnswerOff`).
     /// Everything else may succeed on a second try: the setting that could
     /// not be read (`RPCErrorCode.promptAnswerSettingUnread`), the hook
-    /// reconnecting, a provider failure, any refusal with no code and a
-    /// dropped connection. The message is never read: a daemon that sends no
-    /// codes gets "Try again" on every refusal, and its retry is refused
-    /// again.
-    ///
-    /// A refusal with no code keeps "Try again" on purpose. That includes a
-    /// remote provider's own refusal of an answer (its `invalid_params`
-    /// too) and any refusal from a daemon that sends no codes. A retry of
-    /// those is refused again, which is harmless.
+    /// reconnecting, a provider failure, a dropped connection, and any
+    /// refusal with no code. That last group includes a remote provider's own
+    /// refusal of an answer (its `invalid_params` too), which carries no code
+    /// and so keeps "Try again", and every refusal from a daemon that sends
+    /// no codes. The message is never read, so a retry of those may be
+    /// refused again, which is harmless.
     static func isRetryable(_ error: any Error) -> Bool {
         guard let clientError = error as? DaemonClientError,
               let raw = clientError.rpcCode,
