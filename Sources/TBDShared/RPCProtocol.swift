@@ -119,7 +119,8 @@ public enum RPCError: LocalizedError, Sendable {
 /// the caller's own text quoted back to it. A refusal that quotes a provider
 /// carries no code. So a client may show the text of a refusal that carries a
 /// code. The one exception is `answerDoesNotFit`, whose text can name a
-/// question a remote provider wrote, or be the provider's own message.
+/// question a remote provider wrote, so a client must not show it on the
+/// phone. A remote provider's own refusal of an answer carries no code.
 /// Design: `docs/specs/2026-11-11-structured-refusal-codes-design.md`.
 public enum RPCErrorCode: String, Sendable {
     /// A parked terminal's pinned model profile no longer resolves; the wake was
@@ -234,6 +235,7 @@ public enum RPCErrorCode: String, Sendable {
     /// The one code whose text TBD did not wholly write: for a remote
     /// session, the text can name a question the provider wrote. A client
     /// that must not show a provider's words shows its own sentence for it.
+    /// A remote provider's own refusal of an answer carries no code.
     case answerDoesNotFit
     /// An answer was refused because the setting for answering prompts from
     /// the transcript (`transcript_prompt_answer_enabled`) is off. A retry
