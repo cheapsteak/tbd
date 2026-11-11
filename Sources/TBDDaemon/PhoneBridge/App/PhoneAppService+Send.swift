@@ -320,10 +320,6 @@ extension PhoneAppService {
             return Self.refusal(sentence)
         case .text:
             return Self.refusal(response.error)
-        case .generalLine:
-            Self.logger.notice(
-                "Phone \(method, privacy: .public): refused with \(code.rawValue, privacy: .public), in words the phone is not sent: \(response.error ?? "<none>", privacy: .private)")
-            return PhoneAppError(code: .refused, message: Self.remoteRefusedReason)
         }
     }
 
@@ -335,8 +331,6 @@ extension PhoneAppService {
         /// The refusal's text: TBD's fixed words, with names TBD keeps or the
         /// caller's own text quoted back, and no provider's words.
         case text
-        /// `remoteRefusedReason`; the text goes to the log only.
-        case generalLine
     }
 
     /// The decision for each code, as a `switch` over every case with no
