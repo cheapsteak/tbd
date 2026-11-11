@@ -25,9 +25,12 @@ output never carries a code. On the remote answer path, the refusals for a stale
 a verb the provider does not declare also stay without one.
 
 A client may therefore show the text of a refusal that carries a code. The one exception is
-`answerDoesNotFit`, whose text can name a question a remote provider wrote, or be the provider's
-own message when the provider itself rejects the answer. Its doc comment says so, and the phone
-shows its own sentence for it instead.
+`answerDoesNotFit`, whose text can name a question a remote provider wrote. Its doc comment says
+so, and the phone shows its own sentence for it instead.
+
+A remote provider's own refusal of an answer, whatever its error code, carries no code. The
+provider's `invalid_params` can mean a malformed request or a verb it does not implement as well
+as an answer that does not fit, so TBD cannot say which kind of refusal it is.
 
 ## The codes
 
@@ -60,8 +63,7 @@ The value on the wire is the case name, as it is for the existing codes.
   - `answerDoesNotFit` – every `PromptAnswerValidation` refusal: the answer's kind does not match
     the prompt, a question has no answer, the answer names a question the prompt does not have,
     or it asks for "allow always" when the prompt offered no suggestions. Local and remote answers
-    both use it. A remote provider's own `invalid_params` refusal of an answer carries it too,
-    with the provider's message as its text.
+    both use it.
   - `promptAnswerOff` – the setting for answering prompts from the transcript is off.
   - `promptAnswerSettingUnread` – TBD could not read that setting.
 
@@ -80,9 +82,6 @@ The value on the wire is the case name, as it is for the existing codes.
 - **`RemoteTranscriptSyncError.discarded`** becomes `RemoteTranscriptRefusal.removed`, which
   pairs the error's text with `remoteSessionRemoved`, when the transcript handlers turn it into a
   response. `providerFailed` holds a provider's message and carries no code.
-- **A remote provider's `invalid_params` answer error** goes back with `answerDoesNotFit` and the
-  provider's message unchanged, so the laptop's card hides "Try again" and the phone shows its
-  own sentence. Every other provider error on that path carries no code.
 - **A refusal made before its response** carries the pair, not bare text, until it becomes a
   response. The phone message rule is the case in point: `PhoneMessageText.Vetted.refused` holds
   the pair, so a refusal raised while a remote create is vetted reaches the response with its
@@ -93,7 +92,8 @@ The value on the wire is the case name, as it is for the existing codes.
 ## The phone service
 
 Every remote path reads a refusal through one helper, `remoteRefusal`, which decides from the
-response's code:
+response's code. The decision is a switch over every `RPCErrorCode` case with no default, so a new
+code does not compile until it says what the phone gets:
 
 - `answerDoesNotFit` gets the phone's sentence: "That answer no longer fits this prompt. Check the
   questions and try again."
@@ -120,12 +120,8 @@ sentence, and the codes never leave the daemon.
 already carries it, and never reads the message:
 
 - `answerDoesNotFit` and `promptAnswerOff` hide "Try again", since a retry cannot change them.
-- Every other refusal keeps "Try again": `promptAnswerSettingUnread`, a refusal with no code, and
-  a dropped connection.
-
-The remote sessions refresh (`AppState.classifyRemoteRefreshFailure`) reads `remoteBackendsOff`
-the same way: a refusal with that code means remote sessions are turned off, not that the fetch
-failed.
+- Every other refusal keeps "Try again": `promptAnswerSettingUnread`, a refusal with no code
+  (a remote provider's own refusal of an answer among them), and a dropped connection.
 
 ## Compatibility
 
@@ -153,10 +149,9 @@ failed.
   - `answerDoesNotFit`, `promptAnswerOff` and `promptAnswerSettingUnread` get the phone's
     sentences, on the local and the remote path.
 - **The laptop app:** `isRetryable` is checked for each answer code and for a refusal with no
-  code, and the remote refresh treats `remoteBackendsOff` as turned off and a refusal with the
-  same words but no code as a failure.
-- **A provider's answer error:** the remote answer handler answers a provider's `invalid_params`
-  with `answerDoesNotFit` and its message, and any other provider error with no code.
+  code.
+- **A provider's answer error:** the remote answer handler answers any provider error, its
+  `invalid_params` included, with no code.
 
 ## Rejected alternatives
 
