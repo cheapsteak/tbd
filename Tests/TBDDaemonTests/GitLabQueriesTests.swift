@@ -99,6 +99,51 @@ struct GitLabQueriesTests {
         #expect(Self.normalized(q).contains("nodes { \(Self.expectedNodeFields) }"))
     }
 
+    /// Plain ASCII branch names come out exactly as before: `"`, `\` and a
+    /// newline escaped, everything else as it is.
+    @Test("the branch query's plain-ASCII literals are pinned")
+    func branchQueryPlainASCII() {
+        let q = GitLabQueries.mergeRequestsByBranchQuery(
+            branches: ["feat/a", "q\"x", "b\\y", "n\nz", "it's"])
+        #expect(Self.normalized(q).contains(
+            #"sourceBranches: ["feat/a", "q\"x", "b\\y", "n\nz", "it's"], state: opened"#))
+    }
+
+    /// Git allows `"` in a branch name. A mark after it joins it into one
+    /// `Character`, but GraphQL reads code points, so the escape has to catch
+    /// it or the rest of the name becomes query text. The literal is matched
+    /// scalar for scalar.
+    @Test("the branch query escapes a quote or backslash that a mark joins")
+    func branchQueryEscapesByScalar() {
+        let marks = ["\u{301}", "\u{FE0F}", "\u{20E3}"]
+        for (character, escape) in [("\"", #"\""#), ("\\", #"\\"#)] {
+            for mark in marks {
+                let q = GitLabQueries.mergeRequestsByBranchQuery(
+                    branches: ["a" + character + mark + "b"])
+                let literal = "\"a" + escape + mark + "b\""
+                #expect(
+                    Self.containsScalars(q, literal),
+                    "\(character) then U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+                // The literal's own two quotes, plus the escaped one if any.
+                let quotes = q.unicodeScalars.filter { $0 == "\"" }.count
+                #expect(quotes == (character == "\"" ? 3 : 2))
+            }
+        }
+    }
+
+    /// Whether `needle`'s scalars appear, in order and next to each other, in
+    /// `haystack`'s. `String.contains` compares `Character`s, which is the
+    /// comparison under test.
+    static func containsScalars(_ haystack: String, _ needle: String) -> Bool {
+        let hay = Array(haystack.unicodeScalars)
+        let pin = Array(needle.unicodeScalars)
+        guard !pin.isEmpty else { return true }
+        guard pin.count <= hay.count else { return false }
+        return (0...(hay.count - pin.count)).contains { start in
+            hay[start..<(start + pin.count)].elementsEqual(pin)
+        }
+    }
+
     @Test("parses a node into a PRNode tagged gitlab")
     func parsesNode() throws {
         let (nodes, gated) = try #require(Self.answered(Self.response(Self.oneNode)))

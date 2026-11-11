@@ -34,6 +34,21 @@ struct ScratchpadCollectorTests: ~Copyable {
         #expect(slug == "-Users-me-tbd-worktrees-some-wt")
     }
 
+    /// A combining acute accent, an emoji variation selector and a combining
+    /// enclosing keycap each join the `/` before them into one `Character`.
+    /// The filesystem reads bytes, so a `/` left in the slug would make it two
+    /// path components. Compared scalar for scalar.
+    @Test("slug replaces a slash that a mark joins, so it stays one path component")
+    func slugReplacesAJoinedSlash() {
+        for mark in ["\u{301}", "\u{FE0F}", "\u{20E3}"] {
+            let slug = ScratchpadCollector.slug(forWorktreePath: "/Users/me/acme/" + mark + "wt")
+            #expect(!slug.unicodeScalars.contains("/"))
+            #expect(
+                Array(slug.unicodeScalars) == Array(("-Users-me-acme-" + mark + "wt").unicodeScalars),
+                "U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+        }
+    }
+
     @Test("slug with single component")
     func testSlugSingleComponent() {
         let slug = ScratchpadCollector.slug(forWorktreePath: "somepath")

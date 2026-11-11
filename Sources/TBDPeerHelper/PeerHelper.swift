@@ -681,7 +681,10 @@ final class PeerHelper {
         case .end(let index):
             end = index
         }
-        var stripped = String(body[body.index(after: end)...])
+        // Sliced by scalar: a mark after the `>` belongs to the body, and a
+        // `Character` step past `end` would drop it.
+        let scalars = body.unicodeScalars
+        var stripped = String(scalars[scalars.index(after: end)...])
         // The newline Claude Code's composer writes after the opening tag, and
         // the one before the closing tag. Removed only when present, and only
         // one each: they are framing, not content.
@@ -718,24 +721,33 @@ final class PeerHelper {
     /// of the sender's tag — socket path included — into the body this function
     /// exists to clean. An unbalanced quote therefore reads as `.unterminated`
     /// rather than as a place to split.
+    ///
+    /// Scans Unicode scalars, not `Character`s, so it agrees with the receiving
+    /// Claude about where the tag ends. A `"` or `>` that a combining mark or a
+    /// prepended mark joins into one `Character` is still a quote or a tag end
+    /// to a reader of code points. A `Character` scan skips it and can stop at
+    /// a `>` inside the next attribute value, which would leave the rest of
+    /// the sender's socket path in the body. The index in `.end` is a scalar
+    /// index into `content.unicodeScalars`.
     static func openTagEnd(in content: String) -> OpenTagScan {
-        guard content.hasPrefix(Self.crossSessionOpenTagName) else { return .absent }
-        var index = content.index(
-            content.startIndex, offsetBy: Self.crossSessionOpenTagName.count)
+        let scalars = content.unicodeScalars
+        let name = Self.crossSessionOpenTagName.unicodeScalars
+        guard scalars.starts(with: name) else { return .absent }
+        var index = scalars.index(scalars.startIndex, offsetBy: name.count)
         // The element name and nothing else: a tag with no `>` anywhere.
-        guard index < content.endIndex else { return .unterminated }
-        let following = content[index]
+        guard index < scalars.endIndex else { return .unterminated }
+        let following = scalars[index]
         // `<cross-session-messageX` is a different element, not this one.
-        guard following == ">" || following.isWhitespace else { return .absent }
+        guard following == ">" || following.properties.isWhitespace else { return .absent }
         var quoted = false
-        while index < content.endIndex {
-            let character = content[index]
-            if character == "\"" {
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            if scalar == "\"" {
                 quoted.toggle()
-            } else if character == ">" && !quoted {
+            } else if scalar == ">" && !quoted {
                 return .end(index)
             }
-            index = content.index(after: index)
+            index = scalars.index(after: index)
         }
         return .unterminated
     }

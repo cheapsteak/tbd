@@ -20,8 +20,18 @@ public struct ScratchpadCollector: Sendable {
 
     /// Computes the slug for a worktree path by replacing all forward slashes
     /// with hyphens. For example: `/Users/me/tbd` → `-Users-me-tbd`.
+    ///
+    /// Replaces by Unicode scalar. A `/` followed by a combining mark is one
+    /// `Character` with it, so `replacingOccurrences(of:with:)` would leave it
+    /// in place. The filesystem reads bytes, so that `/` would make the slug
+    /// two path components, and `cleanUp` could delete a directory inside
+    /// another worktree's scratchpad.
     public static func slug(forWorktreePath path: String) -> String {
-        path.replacingOccurrences(of: "/", with: "-")
+        var slug = String.UnicodeScalarView()
+        for scalar in path.unicodeScalars {
+            slug.append(scalar == "/" ? "-" : scalar)
+        }
+        return String(slug)
     }
 
     /// Event-driven: delete the scratchpad for one known, just-removed worktree

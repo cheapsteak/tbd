@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// A YAML front-matter block lifted off the top of a markdown source.
 ///
@@ -141,13 +142,11 @@ struct MarkdownFrontMatter: Equatable, Sendable {
         return #"<dl class="tbd-front-matter">"# + rows.joined() + "</dl>"
     }
 
+    /// `text` with `&`, `<`, `>`, `"` and `'` written as entities, by Unicode
+    /// scalar (`HTMLEscaping`), so a mark joined to a `<` cannot hide it from
+    /// the escape.
     static func escape(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
+        HTMLEscaping.escaped(text, includingApostrophe: true)
     }
 
     // MARK: - Reading the block

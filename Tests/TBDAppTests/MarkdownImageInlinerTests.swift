@@ -57,6 +57,53 @@ struct MarkdownImageInlinerTests {
         #expect(out.contains("big.png"))
     }
 
+    /// Each scalar joins the character before it into one `Character`: a
+    /// combining acute accent, an emoji variation selector and a combining
+    /// enclosing keycap. The webview reads code points, so the joined
+    /// character is still markup to it.
+    private static let joiningMarks = ["\u{301}", "\u{FE0F}", "\u{20E3}"]
+
+    @Test("the placeholder escapes a markup character that a mark joins")
+    func placeholderEscapesByScalar() {
+        let entities = [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ("\"", "&quot;")]
+        for (character, entity) in entities {
+            for mark in Self.joiningMarks {
+                let name = "a" + character + mark + "b.png"
+                let escaped = "a" + entity + mark + "b.png"
+                let expected = #"<span class="tbd-oversized-image" title=""# + escaped + #"">"#
+                    + escaped + "</span>"
+                #expect(
+                    Array(MarkdownImageInliner.placeholder(filename: name).unicodeScalars)
+                        == Array(expected.unicodeScalars),
+                    "\(character) then U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+            }
+        }
+    }
+
+    @Test("the placeholder's plain-ASCII output is pinned")
+    func placeholderPlainASCII() {
+        #expect(MarkdownImageInliner.placeholder(filename: #"a"b<c>&d'e.png"#)
+            == #"<span class="tbd-oversized-image" title="a&quot;b&lt;c&gt;&amp;d'e.png">"#
+            + #"a&quot;b&lt;c&gt;&amp;d'e.png</span>"#)
+    }
+
+    /// End to end: the oversized file's real name has a `"` that a mark joins.
+    /// comrak percent-encodes it in the `src`, the inliner decodes it, and the
+    /// placeholder must still carry only its own four quotes.
+    @Test("an oversized image whose name has a joined quote cannot add attributes")
+    func placeholderForAJoinedQuoteInTheFilename() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let big = Data(repeating: 0x41, count: MarkdownImageInliner.perImageLimit + 1)
+        try big.write(to: dir.appendingPathComponent("a\"\u{301} onclick=\"x.png"))
+
+        var inliner = MarkdownImageInliner(documentDirectory: dir, worktreeRoot: dir)
+        let out = inliner.inline(html: #"<img src="a%22%CC%81%20onclick%3D%22x.png" />"#)
+
+        #expect(out.contains("tbd-oversized-image"))
+        #expect(out.unicodeScalars.filter { $0 == "\"" }.count == 4)
+    }
+
     @Test("stops inlining once the document budget is exhausted")
     func respectsDocumentBudget() throws {
         let dir = try makeTempDir()

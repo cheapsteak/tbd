@@ -627,6 +627,42 @@ import TBDShared
         #expect(backslashHits.isEmpty)
     }
 
+    /// The pattern for plain ASCII is exactly what it was: trimmed, each `\`,
+    /// `%` and `_` escaped, wrapped in `%…%`.
+    @Test func likePatternPlainASCIIIsPinned() {
+        #expect(WorktreeStore.likePattern(for: #"  a%b_c\d  "#) == #"%a\%b\_c\\d%"#)
+        #expect(WorktreeStore.likePattern(for: "plain") == "%plain%")
+        #expect(WorktreeStore.likePattern(for: "  \n") == nil)
+        #expect(WorktreeStore.likePattern(for: nil) == nil)
+    }
+
+    /// SQLite matches a LIKE pattern code point by code point. A mark after a
+    /// `%`, `_` or `\` joins it into one `Character`, but the escape must
+    /// still catch it, compared scalar for scalar.
+    @Test func likePatternEscapesAMetacharacterThatAMarkJoins() throws {
+        for character in ["%", "_", "\\"] {
+            for mark in ["\u{301}", "\u{FE0F}", "\u{20E3}"] {
+                let pattern = try #require(WorktreeStore.likePattern(for: "a" + character + mark))
+                #expect(
+                    Array(pattern.unicodeScalars)
+                        == Array(("%a\\" + character + mark + "%").unicodeScalars),
+                    "\(character) then U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+            }
+        }
+    }
+
+    /// Against the database: `_` with a mark after it is a literal `_`, not a
+    /// wildcard for any character before that mark.
+    @Test func aMetacharacterThatAMarkJoinsMatchesLiterally() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let literal = try await makeArchived(db: db, repoID: repo.id, name: "snake_\u{301}case")
+        _ = try await makeArchived(db: db, repoID: repo.id, name: "cafe\u{301}")
+
+        let hits = try await db.worktrees.list(repoID: repo.id, status: .archived, nameQuery: "_\u{301}")
+        #expect(hits.map(\.id) == [literal.id])
+    }
+
     /// Composes with `status` and `repoID`: an active row with a matching name,
     /// and an archived row in another repo, are both excluded.
     @Test func nameQueryComposesWithStatusAndRepoFilters() async throws {

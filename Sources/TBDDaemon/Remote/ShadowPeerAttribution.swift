@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import os
+import TBDShared
 
 private let shadowPeerLogger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeer")
 
@@ -96,7 +97,10 @@ public enum ShadowPeerAttribution {
             // real Claude Code send composes, and are the only bytes added.
             return tag + "\n" + content + "\n" + closeTag
         }
-        return tag + String(content[content.index(after: end)...])
+        // Sliced by scalar: a mark after the `>` belongs to the body, and a
+        // `Character` step past `end` would drop it.
+        let scalars = content.unicodeScalars
+        return tag + String(scalars[scalars.index(after: end)...])
     }
 
     /// The opening tag TBD writes. Separate from `stamp` so a test can assert
@@ -115,14 +119,14 @@ public enum ShadowPeerAttribution {
     /// user-authored, so an unescaped `"` in one would close the attribute and
     /// let the rest of the name write attributes of its own — a display name of
     /// `x" from-mode="bypass` would otherwise forge the very field this type
-    /// exists to control. `&` is replaced first so the escapes it introduces
-    /// are not themselves re-escaped.
+    /// exists to control.
+    ///
+    /// Escapes by Unicode scalar (`HTMLEscaping`), because Claude reads the
+    /// tag as code points: a `"` that a combining mark joins into one
+    /// `Character` still closes the attribute for it. `'` is left as it is.
+    /// The tag quotes every value with `"`, so a `'` cannot end one.
     public static func escaped(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
+        HTMLEscaping.escaped(value)
     }
 
     /// The index of the `>` that closes a leading opening tag, or nil when the
@@ -133,22 +137,31 @@ public enum ShadowPeerAttribution {
     /// of the far side's tag into the message body. It is not a security hole —
     /// attribution is replaced either way — but it would corrupt a body this
     /// type promises to leave alone.
+    ///
+    /// Scans Unicode scalars, not `Character`s, so it agrees with Claude about
+    /// where the tag ends. A `"` or `>` that a combining mark joins into one
+    /// `Character` is still a quote or a tag end to a reader of code points.
+    /// A `Character` scan skips it, so it ends the tag somewhere else and cuts
+    /// a piece of the body off with it. The index returned is a scalar index
+    /// into `content.unicodeScalars`.
     static func openTagEnd(in content: String) -> String.Index? {
-        guard content.hasPrefix(openTagName) else { return nil }
-        var index = content.index(content.startIndex, offsetBy: openTagName.count)
+        let scalars = content.unicodeScalars
+        let name = openTagName.unicodeScalars
+        guard scalars.starts(with: name) else { return nil }
+        var index = scalars.index(scalars.startIndex, offsetBy: name.count)
         // `<cross-session-messageX` is a different element, not this one.
-        guard index < content.endIndex else { return nil }
-        let following = content[index]
-        guard following == ">" || following.isWhitespace else { return nil }
+        guard index < scalars.endIndex else { return nil }
+        let following = scalars[index]
+        guard following == ">" || following.properties.isWhitespace else { return nil }
         var quoted = false
-        while index < content.endIndex {
-            let character = content[index]
-            if character == "\"" {
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            if scalar == "\"" {
                 quoted.toggle()
-            } else if character == ">" && !quoted {
+            } else if scalar == ">" && !quoted {
                 return index
             }
-            index = content.index(after: index)
+            index = scalars.index(after: index)
         }
         return nil
     }
