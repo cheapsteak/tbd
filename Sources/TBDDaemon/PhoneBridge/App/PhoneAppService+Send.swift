@@ -298,7 +298,8 @@ extension PhoneAppService {
     /// transcript sync and an earlier history load.
     ///
     /// **It decides from the response's code, never from its words.** A code
-    /// goes only on a refusal whose whole text TBD wrote (`RPCErrorCode`):
+    /// goes only on a refusal whose text holds no words a provider wrote
+    /// (`RPCErrorCode`):
     /// - `answerDoesNotFit`, `promptAnswerOff` and `promptAnswerSettingUnread`
     ///   get the phone's own sentences (`answerCodeReason(_:)`);
     /// - any other code gets the response's text, as `refusal(_:)` sends it;

@@ -107,12 +107,13 @@ public enum RPCError: LocalizedError, Sendable {
 /// so the app can branch on a specific failure (e.g. offer a fallback) without
 /// matching message text. Optional on the wire — nil for errors that carry no code.
 ///
-/// A code goes only on a refusal whose whole text TBD wrote: TBD's fixed
-/// words, or the caller's own text quoted back to it. A refusal that quotes a
-/// remote provider — its error message, a name it wrote, or anything TBD
-/// builds from its details — carries no code. So a client may show the text
-/// of a refusal that carries a code. The one exception is `answerDoesNotFit`,
-/// whose text can name a question a remote provider wrote.
+/// A code goes only on a refusal whose text holds no words a remote provider
+/// wrote (its error messages or output). The text is TBD's fixed words, which
+/// may name things TBD keeps, such as a worktree or a registered provider, or
+/// the caller's own text quoted back to it. A refusal that quotes a provider
+/// carries no code. So a client may show the text of a refusal that carries a
+/// code. The one exception is `answerDoesNotFit`, whose text can name a
+/// question a remote provider wrote, or be the provider's own message.
 /// Design: `docs/specs/2026-11-11-structured-refusal-codes-design.md`.
 public enum RPCErrorCode: String, Sendable {
     /// A parked terminal's pinned model profile no longer resolves; the wake was

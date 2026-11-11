@@ -5,9 +5,9 @@ import TBDShared
 ///
 /// A handler answers with `response`, so it cannot send the text without the
 /// code. The code never changes the text, so a client that reads no codes
-/// shows the same words. A refusal gets a code only when TBD wrote all of its
-/// text (`RPCErrorCode`), so one that can quote a provider is never a
-/// `CodedRefusal`.
+/// shows the same words. A refusal gets a code only when its text holds no words
+/// a remote provider wrote (`RPCErrorCode`), so one that can quote a provider
+/// is never a `CodedRefusal`.
 ///
 /// It lives in `Base` because the router (`Server`) answers with these and
 /// the phone app service (`PhoneBridge`) holds the phone message rule's.
