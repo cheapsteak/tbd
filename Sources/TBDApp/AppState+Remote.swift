@@ -9,9 +9,8 @@ extension AppState {
     /// The exact string every `remote.*` RPC returns when
     /// `config.remoteBackendsEnabled` is off (or the daemon booted before the
     /// flag was turned on) — see `RemoteGateRefusal.backendsDisabled`.
-    /// The daemon sends `RPCErrorCode.remoteBackendsOff` with it, and the
-    /// refresh matches the refusal's words, so a daemon that sends no codes is
-    /// read the same way.
+    /// The daemon sends `RPCErrorCode.remoteBackendsOff` with it; the refresh
+    /// accepts the code or these words.
     nonisolated static let remoteBackendsDisabledMessage = "remote backends disabled"
 
     /// How a failed `remote.*` fetch should be handled. Pure classification,
@@ -25,18 +24,22 @@ extension AppState {
         case error
     }
 
+    /// A refusal is `.unavailable` when it carries
+    /// `RPCErrorCode.remoteBackendsOff` or when its message is
+    /// `remoteBackendsDisabledMessage`; the words keep a daemon that sends no
+    /// codes working. Every other failure, RPC or not, is `.error`.
     nonisolated static func classifyRemoteRefreshFailure(_ error: Error) -> RemoteRefreshFailure {
         if let daemonError = error as? DaemonClientError,
-           case .rpcError(let message, _) = daemonError,
-           message == remoteBackendsDisabledMessage {
+           case .rpcError(let message, let code) = daemonError,
+           code == RPCErrorCode.remoteBackendsOff.rawValue || message == remoteBackendsDisabledMessage {
             return .unavailable
         }
         return .error
     }
 
     /// Fetch the remote-provider roster + session mirror. The daemon refuses
-    /// every `remote.*` verb with `remoteBackendsDisabledMessage` when the
-    /// feature is off — that refusal means "not available", not an error, so
+    /// every `remote.*` verb with `remoteBackendsDisabledMessage` (and
+    /// `RPCErrorCode.remoteBackendsOff`) when the feature is off — that refusal means "not available", not an error, so
     /// both arrays are cleared silently. Any other failure is logged and the
     /// last-known arrays are left in place (best-effort, mirrors
     /// `loadHibernationConfig`'s keep-last-known-value semantics).
