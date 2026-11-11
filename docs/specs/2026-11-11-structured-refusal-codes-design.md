@@ -42,12 +42,15 @@ The value on the wire is the case name, as it is for the existing codes.
 - **Creating a remote session** (`RemoteCreateRefusal`)
   - `remotePromptNotText` – the form's prompt is not a string.
   - `remoteFormNotWritable` – the form could not be written out again.
-- **A remote session's state** (`RemoteSendMessageRefusal`, `RemoteTranscriptRefusal`)
+- **A remote session's state** (`RemoteSendMessageRefusal`, `RemoteTranscriptRefusal`,
+  `RemoteTranscriptSyncError`)
   - `remoteSessionExited` – the session has exited. Sending a message and answering a prompt
     both use it.
   - `remoteSessionWaitingInput` – the agent is waiting on a prompt. It covers both sentences,
     the one that says to answer in the terminal and the one that says to answer on the card.
   - `remoteSessionDismissed` – the session is dismissed, so its transcript is no longer kept.
+  - `remoteSessionRemoved` – the session was removed while its transcript was syncing, so the
+    page fetched meanwhile was dropped (`RemoteTranscriptSyncError.discarded`).
 - **Remote transcript history** (`RemoteTranscriptRefusal`)
   - `loadEarlierOff` – loading earlier history is turned off.
   - `nothingEarlier` – there is no earlier history to load.
@@ -62,14 +65,19 @@ The value on the wire is the case name, as it is for the existing codes.
 
 ## The daemon
 
-- **Text and code are written once, together.** Each refusal type in `Sources/TBDDaemon/Base/`
-  defines its refusals as a pair of text and code, and the pair builds its own error response. A
-  handler sends the pair, so it cannot send the text without the code. A code never changes its
+- **Text and code are written once, together.** `CodedRefusal` (`Sources/TBDDaemon/Base/`)
+  holds a refusal's text and code and builds its error response. Each refusal type above defines
+  its refusals as `CodedRefusal` values, and a handler sends the pair, so it cannot send the text
+  without the code. The refusal types the router alone sends live in `Sources/TBDDaemon/Server/`;
+  `PhoneMessageText`, which the phone service also uses, stays in `Base`. A code never changes its
   refusal's words, so the CLI and the laptop app show the same text whether or not they read
   codes.
 - **`PromptAnswerValidation`** (`Sources/TBDShared/PromptAnswer.swift`) has a code, always
   `answerDoesNotFit`. The local and remote answer handlers attach it to the response they build
   from a validation error.
+- **`RemoteTranscriptSyncError.discarded`** carries `remoteSessionRemoved` when the transcript
+  handlers turn it into a response. `providerFailed` holds a provider's message and carries no
+  code.
 - **A refusal made before its response** carries the pair, not bare text, until it becomes a
   response. The phone message rule is the case in point: `PhoneMessageText.Vetted.refused` holds
   the pair, so a refusal raised while a remote create is vetted reaches the response with its
