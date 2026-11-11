@@ -108,5 +108,21 @@
     "name": "drop_column_is_declined",
     "sql": "ALTER TABLE t DROP COLUMN a;",
     "target": null
+  },
+  {
+    "name": "a_quote_pair_whose_second_quote_carries_a_combining_mark_collapses",
+    "sql": "ALTER TABLE \"a\"\"\u0301b\" ADD COLUMN c TEXT;",
+    "target": [
+      "a\"\u0301b",
+      "c"
+    ]
+  },
+  {
+    "name": "an_opening_quote_that_carries_a_combining_mark_is_still_removed",
+    "sql": "ALTER TABLE t ADD COLUMN \"\u0301c\" TEXT;",
+    "target": [
+      "t",
+      "\u0301c"
+    ]
   }
 ]

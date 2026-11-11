@@ -30,6 +30,17 @@ enum PasteExecutor {
         }
     }
 
+    /// Whether `path` can go between single quotes in a tmux command: it holds
+    /// no `'` and no newline.
+    ///
+    /// Checked by Unicode scalar. `String.contains` compares `Character`s,
+    /// and a `'` followed by a combining mark is one `Character` with it, as
+    /// is the `\n` of a CRLF, so neither would be found. tmux reads bytes and
+    /// would end the quoted path at that `'`.
+    static func isSafelyQuotable(_ path: String) -> Bool {
+        !path.unicodeScalars.contains { $0 == "'" || $0 == "\n" }
+    }
+
     /// Write `bytes` to a temp file, load it into a unique buffer, paste it into
     /// `paneID`, and delete the buffer. Both commands tolerate errors (a failed
     /// paste must not tear down the repo's `-CC` connection) but a failure is
@@ -43,7 +54,7 @@ enum PasteExecutor {
         // tmux single-quote rules: everything inside '…' is literal except '.
         // A FileManager temp path never contains a quote or newline; guard
         // defensively rather than attempt clever escaping.
-        guard !path.contains("'"), !path.contains("\n") else {
+        guard isSafelyQuotable(path) else {
             throw PasteError.unsafeTempPath(path)
         }
 

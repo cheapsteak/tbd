@@ -404,6 +404,42 @@ struct MarkdownFrontMatterTests {
         #expect(html.contains("<pre>- &lt;img src=x onerror=alert(1)&gt;</pre>"))
     }
 
+    /// Each scalar joins the character before it into one `Character`: a
+    /// combining acute accent, an emoji variation selector and a combining
+    /// enclosing keycap. The webview reads code points, so the joined
+    /// character is still markup to it.
+    private static let joiningMarks = ["\u{301}", "\u{FE0F}", "\u{20E3}"]
+
+    @Test("escape catches a markup character that a mark joins")
+    func escapeIsByScalar() {
+        let entities = [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ("\"", "&quot;"), ("'", "&#39;")]
+        for (character, entity) in entities {
+            for mark in Self.joiningMarks {
+                let escaped = MarkdownFrontMatter.escape("a" + character + mark + "b")
+                #expect(
+                    Array(escaped.unicodeScalars) == Array(("a" + entity + mark + "b").unicodeScalars),
+                    "\(character) then U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+            }
+        }
+    }
+
+    @Test("escape's plain-ASCII output is pinned")
+    func escapePlainASCII() {
+        #expect(MarkdownFrontMatter.escape(#"<b class="x">Tom & Jerry's</b>"#)
+            == "&lt;b class=&quot;x&quot;&gt;Tom &amp; Jerry&#39;s&lt;/b&gt;")
+    }
+
+    @Test("html escapes a tag whose angle bracket a mark joins")
+    func htmlEscapesAJoinedTag() throws {
+        for mark in Self.joiningMarks {
+            let source = "---\ntitle: <" + mark + "img src=x onerror=alert(1)>\n---\n"
+            let html = try #require(MarkdownFrontMatter.split(source).frontMatter).html
+            let expected = #"<dl class="tbd-front-matter"><dt>title</dt><dd>&lt;"# + mark
+                + "img src=x onerror=alert(1)&gt;</dd></dl>"
+            #expect(Array(html.unicodeScalars) == Array(expected.unicodeScalars))
+        }
+    }
+
     @Test("the raw-YAML fallback is escaped too")
     func htmlFallbackEscapes() throws {
         let block = try #require(MarkdownFrontMatter.split("---\n# <script>alert(1)</script>\ntitle: Acme\n---\n").frontMatter)

@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDShared
 import UniformTypeIdentifiers
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
@@ -114,12 +115,13 @@ struct MarkdownImageInliner {
         return #"<img\#(prefix)src="data:\#(mime);base64,\#(data.base64EncodedString())"\#(suffix)>"#
     }
 
-    private static func placeholder(filename: String) -> String {
-        let escaped = filename
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
+    /// The span shown instead of an image too big to inline. The filename is
+    /// the file's real name on disk, decoded from the `src`, so it is escaped
+    /// by Unicode scalar (`HTMLEscaping`): a `"` followed by a combining mark
+    /// would otherwise end the `title` value and turn the rest of the name
+    /// into attributes.
+    static func placeholder(filename: String) -> String {
+        let escaped = HTMLEscaping.escaped(filename)
         return #"<span class="tbd-oversized-image" title="\#(escaped)">\#(escaped)</span>"#
     }
 }

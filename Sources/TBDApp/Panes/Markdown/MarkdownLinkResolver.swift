@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 
@@ -203,11 +204,9 @@ struct MarkdownLinkResolver {
         return value[value.index(after: colon)...].hasPrefix("//")
     }
 
-    private static func escapeAttribute(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
+    /// `value` escaped for the `href="…"` it is written into, by Unicode
+    /// scalar (`HTMLEscaping`), so no mark next to a `"` can hide it.
+    static func escapeAttribute(_ value: String) -> String {
+        HTMLEscaping.escaped(value)
     }
 }
