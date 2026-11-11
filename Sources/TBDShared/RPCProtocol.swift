@@ -55,6 +55,12 @@ public struct RPCResponse: Codable, Sendable {
     /// Optional on the wire — nil for errors that carry no code.
     public let errorCode: String?
 
+    /// `errorCode` as an `RPCErrorCode`. A value this build does not know
+    /// counts as none, so a newer peer's code reads as an uncoded refusal.
+    public var knownErrorCode: RPCErrorCode? {
+        errorCode.flatMap(RPCErrorCode.init(rawValue:))
+    }
+
     public init<R: Encodable>(result: R) throws {
         self.success = true
         let data = try JSONEncoder().encode(result)
