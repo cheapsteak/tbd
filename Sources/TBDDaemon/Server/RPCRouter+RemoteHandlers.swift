@@ -76,19 +76,21 @@ struct RemoteDeletionWatermark {
 /// the same "remote backends disabled" error rather than crashing or
 /// silently no-oping.
 extension RPCRouter {
-    /// The refusal response every gated `remote.*` handler returns. Kept as
-    /// a single shared value (rather than re-typed at each call site) so the
-    /// exact string — which tests assert equality against — can't drift if
-    /// one call site is edited and the others aren't.
+    /// The refusal response every gated `remote.*` handler returns, with its
+    /// code (`RPCErrorCode.remoteBackendsOff`). Kept as a single shared value
+    /// (rather than re-typed at each call site) so the exact string — which
+    /// tests assert equality against — can't drift if one call site is edited
+    /// and the others aren't.
     /// Internal rather than private because `worktree.archive` /
     /// `worktree.revive` branch into the remote path too and must refuse with
     /// the same words when the subsystem is off.
-    static let remoteBackendsDisabledResponse = RPCResponse(error: RemoteGateRefusal.backendsDisabled)
+    static let remoteBackendsDisabledResponse = RemoteGateRefusal.backendsDisabled.response
 
-    /// The inner gate's refusal. A separate string from the outer one because
-    /// they are separate conditions: the outer flag says remote backends are
-    /// off entirely, this says the compiled cloud provider is.
-    private static let claudeCloudDisabledResponse = RPCResponse(error: RemoteGateRefusal.claudeCloudDisabled)
+    /// The inner gate's refusal, with its code
+    /// (`RPCErrorCode.claudeCloudOff`). A separate string from the outer one
+    /// because they are separate conditions: the outer flag says remote
+    /// backends are off entirely, this says the compiled cloud provider is.
+    private static let claudeCloudDisabledResponse = RemoteGateRefusal.claudeCloudDisabled.response
 
     /// `remote.delete`'s own refusal, and the only feature-flag refusal in this
     /// file. It names the flag and how to lift it, because a refusal that only
@@ -902,7 +904,7 @@ extension RPCRouter {
         // A dismissed session's cache is discarded and reclaimed by the orphan
         // sweep; syncing it would rebuild a directory nothing will show.
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
-            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+            return Self.transcriptSyncDismissedRefusal.response
         }
         let response: RPCResponse
         do {
@@ -924,7 +926,7 @@ extension RPCRouter {
         // discards them here.
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
             await sync.discard(provider: params.provider, sessionID: params.sessionID)
-            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+            return Self.transcriptSyncDismissedRefusal.response
         }
         return response
     }
@@ -950,7 +952,7 @@ extension RPCRouter {
         let params = try decoder.decode(RemoteTranscriptLoadEarlierParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         guard try await db.config.get().remoteTranscriptLiveSyncEnabled else {
-            return RPCResponse(error: Self.loadEarlierFlagOffRefusal)
+            return Self.loadEarlierFlagOffRefusal.response
         }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.transcriptTail) else {
@@ -959,11 +961,11 @@ extension RPCRouter {
                 section: "transcript read --tail and --before")
         }
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
-            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+            return Self.transcriptSyncDismissedRefusal.response
         }
         let cache = sync.cache(provider: params.provider, sessionID: params.sessionID)
         guard let state = cache.peekState(), state.before != nil, !state.pendingPrepend else {
-            return RPCResponse(error: Self.loadEarlierNothingAboveRefusal)
+            return Self.loadEarlierNothingAboveRefusal.response
         }
         let response: RPCResponse
         do {
@@ -985,7 +987,7 @@ extension RPCRouter {
         // check above must not leave a prepended page behind.
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
             await sync.discard(provider: params.provider, sessionID: params.sessionID)
-            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+            return Self.transcriptSyncDismissedRefusal.response
         }
         return response
     }
@@ -1009,7 +1011,7 @@ extension RPCRouter {
     /// Why `remote.sendMessage` declines a session in its mirrored state, or
     /// nil when it may send. Separate from the handler so the wording lives in
     /// one place the tests can pin: `RemoteSendMessageRefusal`, whose words
-    /// the phone app service lets through to a phone.
+    /// carry their code, so a paired phone hears them as they are.
     ///
     /// A session with no mirror row is not refused: the provider is the source
     /// of truth, and a session it has not reported yet is not known to be in
@@ -1020,7 +1022,7 @@ extension RPCRouter {
     /// blocked on can be answered from its transcript card: the
     /// transcript-prompt-answer flag is on and the provider declares `answer`.
     /// It picks which way the refusal points — at the card, or at the terminal.
-    static func sendMessageStateRefusal(_ row: RemoteSessionRow?, promptAnswerable: Bool) -> String? {
+    static func sendMessageStateRefusal(_ row: RemoteSessionRow?, promptAnswerable: Bool) -> CodedRefusal? {
         guard let row else { return nil }
         if row.gone
             || row.state == RemoteProcessState.exited.rawValue
@@ -1113,7 +1115,7 @@ extension RPCRouter {
             answerable = try await remotePromptAnswerable(manager, provider: params.provider)
         }
         if let refusal = Self.sendMessageStateRefusal(row, promptAnswerable: answerable) {
-            return RPCResponse(error: refusal)
+            return refusal.response
         }
         let actuationID = try await beginActuation(
             .remoteSendMessage, actor: actor,

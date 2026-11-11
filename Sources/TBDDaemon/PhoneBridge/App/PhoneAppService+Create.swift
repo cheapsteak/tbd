@@ -15,9 +15,9 @@ import TBDShared
 /// pairing, `context.peer.deviceID`: `phoneCreateWorktree`, which keeps only
 /// the repo and the first message, and `phoneRemoteCreate`, which keeps only
 /// the provider and the form values. A refusal is `refused`: a worktree
-/// create's with the daemon's reason, and a remote create's only in words TBD
-/// wrote (`remoteRefusal(_:method:tbdRefusals:)`), since a provider's own can
-/// quote a secret. A success whose result does not decode is `internal`,
+/// create's with the daemon's reason, and a remote create's in its own words
+/// only when it carries a code (`remoteRefusal(_:method:)`), since a
+/// provider's own words can quote a secret. A success whose result does not decode is `internal`,
 /// never a success. Both creates are in the request memory (`remembersReplies(of:)`),
 /// so a resend creates once and gets the first reply. Their records name the
 /// repo or the provider, never the message or a form value.
@@ -364,8 +364,8 @@ extension PhoneAppService {
     /// 3. **The form** (`remoteCreateParamsJSON`): the values, the message
     ///    and the provider's readiness.
     /// 4. **`phoneRemoteCreate`** with the provider and the form's JSON. A
-    ///    refusal reaches the phone only in words TBD wrote
-    ///    (`remoteRefusal(_:method:tbdRefusals:)`).
+    ///    refusal's words reach the phone only when it carries a code
+    ///    (`remoteRefusal(_:method:)`).
     nonisolated func remoteCreate(_ params: PhoneRemoteCreateParams, _ context: DeviceContext) async throws -> SessionRefResult {
         try Self.checkFormSize(params)
         let repo = try await visibleRepo(params.repoID)
@@ -487,8 +487,8 @@ extension PhoneAppService {
             switch PhoneMessageText.vettedFormValue(value) {
             case .deliver(let text):
                 normalized[name] = text
-            case .refused(let reason):
-                throw PhoneAppError(code: .refused, message: reason)
+            case .refused(let refusal):
+                throw PhoneAppError(code: .refused, message: refusal.text)
             }
         }
         for (name, value) in normalized {
@@ -519,8 +519,8 @@ extension PhoneAppService {
         switch PhoneMessageText.vetted(message) {
         case .deliver(let text):
             return text
-        case .refused(let reason):
-            throw PhoneAppError(code: .refused, message: reason)
+        case .refused(let refusal):
+            throw PhoneAppError(code: .refused, message: refusal.text)
         }
     }
 

@@ -30,10 +30,11 @@ enum AnswerAuthority: Sendable {
 /// once the mod has receipted the decision, the terminal has answered first,
 /// or the wait for either ran out.
 extension RPCRouter {
-    /// In `Base` (`PromptAnswerRefusal`), so the phone app service can let it
-    /// through to a phone as TBD's own words.
+    /// The setting for answering prompts is off. TBD's own words with its
+    /// code (`RPCErrorCode.promptAnswerOff`).
     static let promptAnswerDisabledRefusal = PromptAnswerRefusal.disabled
-    /// The setting could not be read. In `Base` for the same reason.
+    /// The setting could not be read. TBD's own words with its code
+    /// (`RPCErrorCode.promptAnswerSettingUnread`).
     static let promptAnswerSettingUnreadRefusal = PromptAnswerRefusal.settingUnread
     /// No wait request picked the decision up within the pickup window, as
     /// when the session's mod is reconnecting. The prompt stays open.
@@ -70,7 +71,7 @@ extension RPCRouter {
     /// read (`configForAnswer(method:)`).
     func promptAnswerSettingRefusal(method: String) async throws -> RPCResponse? {
         guard let config = try await configForAnswer(method: method) else {
-            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+            return Self.promptAnswerSettingUnreadRefusal.response
         }
         return Self.promptAnswerSettingRefusal(config)
     }
@@ -78,7 +79,7 @@ extension RPCRouter {
     /// Nil while `config` has the setting for answering prompts on,
     /// otherwise `promptAnswerDisabledRefusal`.
     static func promptAnswerSettingRefusal(_ config: Config) -> RPCResponse? {
-        config.transcriptPromptAnswerEnabled ? nil : RPCResponse(error: promptAnswerDisabledRefusal)
+        config.transcriptPromptAnswerEnabled ? nil : promptAnswerDisabledRefusal.response
     }
 
     /// The config row an answer's checks read, before the answer acts; nil,
@@ -119,7 +120,9 @@ extension RPCRouter {
     /// could not be read (`promptAnswerSettingUnreadRefusal`, retryable), the
     /// caller is not the TBD app (`promptAnswerNotFromAppRefusal`), no wait request
     /// picked the decision up in time (`promptHookDetachedRefusal`,
-    /// retryable), or the answer does not fit the prompt (`invalid_params: …`).
+    /// retryable), or the answer does not fit the prompt (`invalid_params: …`,
+    /// with `RPCErrorCode.answerDoesNotFit`). The flag's two refusals carry
+    /// their codes too (`PromptAnswerRefusal`).
     func handlePromptAnswer(
         _ paramsData: Data, actor: ActuationActor?, connection: RPCConnectionContext?
     ) async throws -> RPCResponse {
@@ -185,7 +188,7 @@ extension RPCRouter {
             return RPCResponse(error: Self.promptHookDetachedRefusal)
         case .invalid(let validation):
             await finishActuation(actuationID, .refused(.notEligible), error: validation.message)
-            return RPCResponse(error: validation.message)
+            return RPCResponse(error: validation.message, code: validation.code.rawValue)
         }
     }
 }

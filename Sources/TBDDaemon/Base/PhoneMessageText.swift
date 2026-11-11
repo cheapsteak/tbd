@@ -1,11 +1,12 @@
 import Foundation
+import TBDShared
 
 /// The one rule for a paired phone's message text, wherever the text goes:
 /// the send rail (`sendFromPairedPhone`), a wake's prompt, a remote session's
 /// message, a new worktree's first message and a new remote session's first
 /// message. Every path that carries a phone's text holds it to this rule and
-/// answers with these refusals, so the phone hears the same words for the
-/// same text whichever path it took.
+/// answers with these refusals, so the phone hears the same words, with the
+/// same code, for the same text whichever path it took.
 ///
 /// `vetted(_:)` applies the whole rule: every CRLF becomes a bare LF
 /// (`lineEndingsNormalized`), then a blank message is refused (`isBlank`),
@@ -33,16 +34,19 @@ enum PhoneMessageText {
         /// Deliver this: the text with every CRLF made a bare LF, or what
         /// was built from it.
         case deliver(Value)
-        /// Deliver nothing, and answer with this refusal.
-        case refused(String)
+        /// Deliver nothing, and answer with this refusal, its text and its
+        /// code, so a refusal raised before its response reaches the response
+        /// with its code (`CodedRefusal.response`).
+        case refused(CodedRefusal)
     }
 
     /// What a paired phone hears when its message is blank: empty, or only
     /// whitespace and invisible format characters.
-    static let emptyRefusal = "a phone message cannot be empty"
+    static let emptyRefusal = CodedRefusal(text: "a phone message cannot be empty", code: .messageEmpty)
 
     /// What a paired phone hears when its message holds a control character.
-    static let controlCharacterRefusal = "a phone message cannot contain control characters"
+    static let controlCharacterRefusal = CodedRefusal(
+        text: "a phone message cannot contain control characters", code: .messageControlCharacter)
 
     /// The field of a remote session's create form that TBD fills with a
     /// phone's first message.
@@ -81,8 +85,8 @@ enum PhoneMessageText {
         switch vetted(text) {
         case .deliver(let normalized):
             return .deliver(normalized)
-        case .refused(let reason):
-            return .refused(reason)
+        case .refused(let refusal):
+            return .refused(refusal)
         }
     }
 

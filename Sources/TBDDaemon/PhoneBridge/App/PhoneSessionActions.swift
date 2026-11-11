@@ -12,9 +12,10 @@ import TBDShared
 /// **Each method is an existing RPC, minus its socket edge**, except
 /// `phoneSpawnsOnHolder`, which answers the question every spawn path asks.
 /// It returns the
-/// `RPCResponse` that RPC returns, refusal text included, so the phone hears a
-/// refusal in the words the app hears. It runs exactly the checks the matching
-/// core function or handler runs, in the same order. The only checks it adds
+/// `RPCResponse` that RPC returns, refusal text and code included, so the
+/// phone service decides from the code the app reads (`RPCErrorCode`), and a
+/// refusal the phone hears is in the words the app hears. It runs exactly
+/// the checks the matching core function or handler runs, in the same order. The only checks it adds
 /// keep shells, which spec section 6 hides from the phone, out of its reach,
 /// and keep its messages to text: `phoneSessionStates` drops every report on
 /// a shell; the send rail refuses a shell, a message part that is not text,
@@ -82,10 +83,10 @@ protocol PhoneSessionActions: Sendable {
     /// (`PhoneMessageText.vetted`) first: every CRLF becomes LF, then a blank
     /// message is refused with `PhoneMessageText.emptyRefusal` and one
     /// holding a control character with
-    /// `PhoneMessageText.controlCharacterRefusal`. These refusals return
-    /// before the handler runs, so they record no actuation row; the phone
-    /// action recorder has already logged the action. A nil or empty prompt
-    /// is no message and goes to the handler as it came.
+    /// `PhoneMessageText.controlCharacterRefusal`, each with its code. These
+    /// refusals return before the handler runs, so they record no actuation
+    /// row; the phone action recorder has already logged the action. A nil or
+    /// empty prompt is no message and goes to the handler as it came.
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `terminal.swapProfile` with only the terminal, the new profile and the
@@ -99,11 +100,11 @@ protocol PhoneSessionActions: Sendable {
     /// (`PhoneMessageText.vetted`) first, because it rides the first agent's
     /// spawn command: every CRLF becomes LF, then a blank message is refused
     /// with `PhoneMessageText.emptyRefusal` and one holding a control
-    /// character with `PhoneMessageText.controlCharacterRefusal`. These
-    /// refusals return before the handler runs, so they create nothing and
-    /// record no actuation row; the phone action recorder has already logged
-    /// the action. A nil or empty first message is no message and goes to the
-    /// handler as it came.
+    /// character with `PhoneMessageText.controlCharacterRefusal`, each with
+    /// its code. These refusals return before the handler runs, so they
+    /// create nothing and record no actuation row; the phone action recorder
+    /// has already logged the action. A nil or empty first message is no
+    /// message and goes to the handler as it came.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// Whether a session spawned now goes onto the pty-holder transport, as
@@ -138,11 +139,11 @@ protocol PhoneSessionActions: Sendable {
     /// first, because the provider pastes it into the new session: every
     /// CRLF becomes LF, then a blank message is refused with
     /// `PhoneMessageText.emptyRefusal` and one holding a control character
-    /// with `PhoneMessageText.controlCharacterRefusal`. These refusals return
-    /// before the handler runs, so they create nothing, reach no provider and
-    /// record no actuation row; the phone action recorder has already logged
-    /// the action. Form values with no such `prompt` go to the handler as
-    /// they came.
+    /// with `PhoneMessageText.controlCharacterRefusal`, each with its code.
+    /// These refusals return before the handler runs, so they create nothing,
+    /// reach no provider and record no actuation row; the phone action
+    /// recorder has already logged the action. Form values with no such
+    /// `prompt` go to the handler as they came.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.sendMessage` with only the provider, the session and the text.
@@ -152,10 +153,10 @@ protocol PhoneSessionActions: Sendable {
     /// first, because the provider pastes it into its session: every CRLF
     /// becomes LF, then a blank message is refused with
     /// `PhoneMessageText.emptyRefusal` and one holding a control character
-    /// with `PhoneMessageText.controlCharacterRefusal`. These refusals return
-    /// before the handler runs, so they reach no provider and record no
-    /// actuation row; the phone action recorder has already logged the
-    /// action.
+    /// with `PhoneMessageText.controlCharacterRefusal`, each with its code.
+    /// These refusals return before the handler runs, so they reach no
+    /// provider and record no actuation row; the phone action recorder has
+    /// already logged the action.
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse
 
     /// `remote.transcriptSync` with only the provider and the session.

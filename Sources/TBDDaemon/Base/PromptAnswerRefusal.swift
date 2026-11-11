@@ -1,26 +1,28 @@
 import Foundation
+import TBDShared
 
 /// TBD's own refusals of an answer to a prompt from the transcript, local or
 /// remote.
 ///
-/// They live in `Base` because the router (`Server`) writes them and the
-/// phone app service (`PhoneBridge`) tells them from a provider's own words:
-/// a phone hears these as they are, and never a provider's text, which can
-/// quote a secret.
+/// Each is TBD's fixed words with its code (`CodedRefusal`), so a client may
+/// show it. Clients decide from the code: the laptop's prompt card offers
+/// "Try again" for every one but `disabled` (`PromptAnswerController.isRetryable`),
+/// and a paired phone hears its own sentences for `disabled` and
+/// `settingUnread`.
 enum PromptAnswerRefusal {
     /// `transcript_prompt_answer_enabled` is off.
-    static let disabled =
-        "answering prompts from the transcript is off (config.transcript_prompt_answer_enabled)"
+    static let disabled = CodedRefusal(
+        text: "answering prompts from the transcript is off (config.transcript_prompt_answer_enabled)",
+        code: .promptAnswerOff)
 
     /// `transcript_prompt_answer_enabled` could not be read, so the answer
-    /// was refused before anything acted on it. A later read can succeed, so
-    /// the text leaves out the column's name: the app takes a refusal that
-    /// names it for the setting being off, which a retry cannot change
-    /// (`PromptAnswerController.isRetryable`).
-    static let settingUnread =
-        "could not read the setting for answering prompts from the transcript; try again"
+    /// was refused before anything acted on it. A later read can succeed.
+    static let settingUnread = CodedRefusal(
+        text: "could not read the setting for answering prompts from the transcript; try again",
+        code: .promptAnswerSettingUnread)
 
     /// The remote session has no mirror row, so there is no prompt to match
     /// the answer against.
-    static let notMirrored = "session is not in the mirror; refresh and try again"
+    static let notMirrored = CodedRefusal(
+        text: "session is not in the mirror; refresh and try again", code: .promptNotMirrored)
 }

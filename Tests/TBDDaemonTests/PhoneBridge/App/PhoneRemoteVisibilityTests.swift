@@ -33,7 +33,7 @@ struct PhoneRemoteVisibilityTests {
             to: .answerRemotePrompt, with: try RPCResponse(result: PromptAnswerResult(outcome: .delivered)))
         // A sync TBD itself refuses, so an open that gets past the check
         // shows it in `remoteSyncs` and ends there.
-        h.actions.respond(to: .remoteTranscriptSync, with: RPCResponse(error: RemoteGateRefusal.backendsDisabled))
+        h.actions.respond(to: .remoteTranscriptSync, with: RemoteGateRefusal.backendsDisabled.response)
         return h
     }
 
@@ -99,7 +99,7 @@ struct PhoneRemoteVisibilityTests {
         let errors = try await Self.actOnEveryPath(h)
 
         #expect(errors == [
-            nil, nil, nil, PhoneAppError(code: .refused, message: RemoteGateRefusal.backendsDisabled),
+            nil, nil, nil, PhoneAppError(code: .refused, message: RemoteGateRefusal.backendsDisabled.text),
         ])
         let texts = h.actions.remoteSends.map { $0.text }
         #expect(texts == ["hi", "/model opus"])

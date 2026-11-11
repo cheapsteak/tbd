@@ -17,10 +17,11 @@ import Testing
 /// claims no act, only that the daemon declined.
 ///
 /// The three guard refusals — the ones `force` lifts — carry
-/// `RPCErrorCode.remoteLaneArchiveGuarded`, and every other refusal carries no
-/// code. Both surfaces branch on that code to decide whether to offer force, so
-/// a refusal that carried it wrongly would offer a button that can only fail
-/// again.
+/// `RPCErrorCode.remoteLaneArchiveGuarded`. The remote gates' refusals carry
+/// the gates' own codes (`remoteBackendsOff`, `claudeCloudOff`), which offer
+/// nothing, and every other refusal carries no code. Both surfaces branch on
+/// `remoteLaneArchiveGuarded` to decide whether to offer force, so a refusal
+/// that carried it wrongly would offer a button that can only fail again.
 ///
 /// The local arms are here for the same reason they always were: this is a
 /// shared handler, and a run that showed the remote path working while
@@ -404,7 +405,8 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(!response.success)
         #expect(response.error == "remote backends disabled")
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(response.errorCode == nil)
+        // The gate's own code, which offers nothing: force does not lift the gate.
+        #expect(response.errorCode == RPCErrorCode.remoteBackendsOff.rawValue)
         try expectRefusalRecorded(fixture, response)
     }
 

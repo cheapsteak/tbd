@@ -100,10 +100,10 @@ struct RPCRouterPhoneSessionActionsTests {
 
     // MARK: - A phone's message outside the send rail
 
-    /// Messages the send rail refuses, each with the refusal it gets: a NUL,
-    /// the bracketed-paste end marker, and a message of zero-width characters
-    /// only.
-    private static let refusedMessages: [(text: String, refusal: String)] = [
+    /// Messages the send rail refuses, each with the refusal it gets, its
+    /// text and its code: a NUL, the bracketed-paste end marker, and a
+    /// message of zero-width characters only.
+    private static let refusedMessages: [(text: String, refusal: CodedRefusal)] = [
         ("\u{0}", PhoneMessageText.controlCharacterRefusal),
         ("\u{1b}[201~", PhoneMessageText.controlCharacterRefusal),
         ("\u{200B}\u{2060}", PhoneMessageText.emptyRefusal),
@@ -140,7 +140,8 @@ struct RPCRouterPhoneSessionActionsTests {
             let response = try await f.actions.phoneCreateWorktree(
                 WorktreeCreateParams(repoID: UUID(), prompt: text), deviceID: UUID())
             #expect(response.success == false)
-            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+            #expect(response.error == refusal.text, "refusal for \(text.debugDescription)")
+            #expect(response.errorCode == refusal.code.rawValue, "code for \(text.debugDescription)")
         }
         let worktrees = try await f.db.worktrees.list()
         #expect(worktrees.isEmpty, "a refused message creates no worktree row")
@@ -191,7 +192,8 @@ struct RPCRouterPhoneSessionActionsTests {
             let response = try await f.actions.phoneWake(
                 TerminalWakeParams(terminalID: terminal.id, prompt: text), deviceID: UUID())
             #expect(response.success == false)
-            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+            #expect(response.error == refusal.text, "refusal for \(text.debugDescription)")
+            #expect(response.errorCode == refusal.code.rawValue, "code for \(text.debugDescription)")
         }
         let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
         #expect(wakeRows.isEmpty, "a refused message never reaches the wake handler")
@@ -222,7 +224,7 @@ struct RPCRouterPhoneSessionActionsTests {
         let response = try await f.actions.phoneWake(
             TerminalWakeParams(terminalID: terminal.id, prompt: ""), deviceID: UUID())
 
-        #expect(response.error != PhoneMessageText.emptyRefusal)
+        #expect(response.error != PhoneMessageText.emptyRefusal.text)
         let wakeRows = f.actuationRows().filter { $0.method == RPCMethod.terminalWake }
         #expect(wakeRows.count == 1)
     }
@@ -585,7 +587,8 @@ struct RPCRouterPhoneSessionActionsTests {
                 RemoteCreateParams(provider: "agentbox", paramsJSON: try Self.promptForm(text)),
                 deviceID: UUID())
             #expect(response.success == false)
-            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+            #expect(response.error == refusal.text, "refusal for \(text.debugDescription)")
+            #expect(response.errorCode == refusal.code.rawValue, "code for \(text.debugDescription)")
         }
         #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused message never reaches the provider")
         let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
@@ -669,11 +672,39 @@ struct RPCRouterPhoneSessionActionsTests {
             let response = try await f.actions.phoneRemoteCreate(
                 RemoteCreateParams(provider: "agentbox", paramsJSON: paramsJSON), deviceID: UUID())
             #expect(response.success == false)
-            #expect(response.error == RemoteCreateRefusal.promptNotString, "form \(paramsJSON)")
+            #expect(response.error == RemoteCreateRefusal.promptNotString.text, "form \(paramsJSON)")
+            #expect(response.errorCode == RPCErrorCode.remotePromptNotText.rawValue, "form \(paramsJSON)")
         }
         #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused prompt never reaches the provider")
         let createRows = f.actuationRows().filter { $0.method == RPCMethod.remoteCreate }
         #expect(createRows.isEmpty)
+    }
+
+    /// Every one of TBD's coded refusals answers with its words and its code,
+    /// and keeps both across the wire. `RemoteCreateRefusal.formNotWritable`
+    /// is checked only here: the form it would refuse came out of
+    /// `JSONSerialization`, which always writes it out again, so no request
+    /// reaches it.
+    @Test func everyCodedRefusalAnswersWithItsTextAndItsCode() throws {
+        let refusals: [CodedRefusal] = [
+            RemoteGateRefusal.backendsDisabled, RemoteGateRefusal.claudeCloudDisabled,
+            PhoneMessageText.emptyRefusal, PhoneMessageText.controlCharacterRefusal,
+            RemoteCreateRefusal.promptNotString, RemoteCreateRefusal.formNotWritable,
+            RemoteSendMessageRefusal.exited, RemoteSendMessageRefusal.waitingInput,
+            RemoteSendMessageRefusal.waitingInputAnswerOnCard,
+            RemoteTranscriptRefusal.dismissed, RemoteTranscriptRefusal.loadEarlierOff,
+            RemoteTranscriptRefusal.nothingEarlier,
+            PromptAnswerRefusal.disabled, PromptAnswerRefusal.settingUnread, PromptAnswerRefusal.notMirrored,
+        ]
+
+        for refusal in refusals {
+            let sent = try JSONEncoder().encode(refusal.response)
+            let received = try JSONDecoder().decode(RPCResponse.self, from: sent)
+            #expect(received.success == false, "\(refusal.text)")
+            #expect(received.error == refusal.text, "\(refusal.text)")
+            #expect(received.errorCode == refusal.code.rawValue, "\(refusal.text)")
+        }
+        #expect(RemoteCreateRefusal.formNotWritable.code == .remoteFormNotWritable)
     }
 
     /// Only the first message is held to the phone message rule. Every other
@@ -791,7 +822,8 @@ struct RPCRouterPhoneSessionActionsTests {
                 RemoteSendMessageParams(provider: "agentbox", sessionID: "s-1", text: text),
                 deviceID: UUID())
             #expect(response.success == false)
-            #expect(response.error == refusal, "refusal for \(text.debugDescription)")
+            #expect(response.error == refusal.text, "refusal for \(text.debugDescription)")
+            #expect(response.errorCode == refusal.code.rawValue, "code for \(text.debugDescription)")
         }
         #expect(f.invoker.callsSnapshot() == [["describe"]], "a refused message never reaches the provider")
         let sendRows = f.actuationRows().filter { $0.method == RPCMethod.remoteSendMessage }

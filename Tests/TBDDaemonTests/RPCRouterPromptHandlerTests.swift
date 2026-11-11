@@ -151,7 +151,8 @@ struct RPCRouterPromptHandlerTests {
         try await f.db.config.setTranscriptPromptAnswerEnabled(false)
         let response = try await answer(f, promptID: id)
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(response.error == RPCRouter.promptAnswerDisabledRefusal.text)
+        #expect(response.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
     }
 
@@ -171,7 +172,8 @@ struct RPCRouterPromptHandlerTests {
             JSONEncoder().encode(params), actor: nil, connection: SendHarness.AuthenticatedApp.connection)
 
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.promptAnswerSettingUnreadRefusal)
+        #expect(response.error == RPCRouter.promptAnswerSettingUnreadRefusal.text)
+        #expect(response.errorCode == RPCErrorCode.promptAnswerSettingUnread.rawValue)
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
         let rows = ActuationRecordReader(activePath: f.logPath).readRows()
         let recorded = rows.first { $0.method == RPCMethod.promptAnswer }
@@ -279,6 +281,7 @@ struct RPCRouterPromptHandlerTests {
         #expect(response.success == false)
         #expect(response.error == PromptAnswerValidation.allowAlwaysWithoutSuggestions.message)
         #expect(response.error?.hasPrefix("invalid_params:") == true)
+        #expect(response.errorCode == RPCErrorCode.answerDoesNotFit.rawValue)
         #expect(await isOpen(f, id), "an invalid answer leaves the prompt open")
     }
 
@@ -383,7 +386,8 @@ struct RPCRouterPromptHandlerTests {
         let r = try await f.router.answerPrompt(
             params, actor: .phone(deviceID: d), authority: .pairedPhone(deviceID: d))
         #expect(r.success == false)
-        #expect(r.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(r.error == RPCRouter.promptAnswerDisabledRefusal.text)
+        #expect(r.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
     }
 
@@ -428,7 +432,8 @@ struct RPCRouterPromptHandlerTests {
         try await f.db.config.setTranscriptPromptAnswerEnabled(false)
         let whileOff = try await answer(f, promptID: id)
         #expect(whileOff.success == false)
-        #expect(whileOff.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(whileOff.error == RPCRouter.promptAnswerDisabledRefusal.text)
+        #expect(whileOff.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
 
         #expect(await isOpen(f, id), "neither refusal touches the prompt")
     }

@@ -68,6 +68,12 @@ struct PhonePromptTests {
         try RPCResponse(result: PromptAnswerResult(outcome: outcome))
     }
 
+    /// The core's refusal of an answer that does not fit its prompt, as the
+    /// answer handlers build it: the validation's message and its code.
+    private static func refusing(_ validation: PromptAnswerValidation) -> RPCResponse {
+        RPCResponse(error: validation.message, code: validation.code.rawValue)
+    }
+
     private static func outcome(_ bytes: Data) throws -> PromptAnswerOutcome {
         try JSONDecoder().decode(PhoneReplyEnvelope<PromptAnswerResult>.self, from: bytes).result.outcome
     }
@@ -201,14 +207,15 @@ struct PhonePromptTests {
 
     /// The core refuses while `transcript_prompt_answer_enabled` is off, in
     /// words written for a developer, and the phone gets the words its
-    /// sessions list shows for the same thing instead. The phone's own check
-    /// reads the setting first, so this is the answer whose setting was
-    /// turned off between the two reads: the setting here is on, and the
-    /// fake core refuses as the real one would after the change.
-    /// `PhonePromptAnswerRouterTests` runs the setting through the real core.
+    /// sessions list shows for the same thing instead, told by the refusal's
+    /// code. The phone's own check reads the setting first, so this is the
+    /// answer whose setting was turned off between the two reads: the setting
+    /// here is on, and the fake core refuses as the real one would after the
+    /// change. `PhonePromptAnswerRouterTests` runs the setting through the
+    /// real core.
     @Test func theSettingsRefusalReachesThePhone() async throws {
         let h = try await PhoneServiceHarness.make()
-        h.actions.respond(to: .answerPrompt, with: RPCResponse(error: RPCRouter.promptAnswerDisabledRefusal))
+        h.actions.respond(to: .answerPrompt, with: RPCRouter.promptAnswerDisabledRefusal.response)
         let outbox = await h.connect()
 
         let terminalID = try await h.seedTerminal().id
@@ -516,53 +523,82 @@ struct PhonePromptTests {
         #expect(h.actions.remoteAnswers.isEmpty)
     }
 
-    /// A remote answer's refusal reaches the phone only in words TBD wrote:
-    /// the setting's in the words the sessions list shows for it, and a
-    /// session state's, the remote gates' and a validation message about the
-    /// phone's own answer as they are, and a
-    /// provider's own words, which can quote a token, become
-    /// `remoteRefusedReason`, as does a validation message naming a question
-    /// the answer did not name.
+    /// A remote answer's refusal reaches the phone only in words TBD wrote,
+    /// told by its code and never by its words. The setting's codes get the
+    /// words the sessions list shows for them, and `answerDoesNotFit` gets
+    /// the phone's own sentence, whichever question its text names. A session
+    /// state's and the remote gates' codes pass their text as it is. A
+    /// refusal with no code becomes `remoteRefusedReason`: a provider's own
+    /// words, which can quote a token, even ones shaped like TBD's
+    /// `invalid_params` text, and TBD's own words sent with no code, which
+    /// the phone cannot tell from a provider's.
     @Test func aRefusedRemoteAnswerKeepsOnlyTBDsOwnWords() async throws {
         let h = try await PhoneServiceHarness.make()
         try h.actions.registerProvider("acme-cloud", capabilities: [RemoteCapability.answer])
         try h.actions.listRemoteSession("acme-cloud", "rs-1")
         let outbox = await h.connect()
         let question = PromptAnswer.question(answers: ["Which branch?": "main"])
-        let cases: [(daemon: String, answer: PromptAnswer, phone: String)] = [
-            (PhoneProviderSecret.error, Self.allow, PhoneAppService.remoteRefusedReason),
-            ("invalid_params: \(PhoneProviderSecret.error)", Self.allow, PhoneAppService.remoteRefusedReason),
-            ("", Self.allow, PhoneAppService.remoteRefusedReason),
-            (PromptAnswerRefusal.disabled, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
-            (RPCRouter.promptAnswerDisabledRefusal, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
-            (PromptAnswerRefusal.settingUnread, Self.allow, PhoneSessionStatus.answerSettingUnreadReason),
-            (PromptAnswerRefusal.notMirrored, Self.allow, PromptAnswerRefusal.notMirrored),
-            (RemoteSendMessageRefusal.exited, Self.allow, RemoteSendMessageRefusal.exited),
-            (RemoteGateRefusal.backendsDisabled, Self.allow, RemoteGateRefusal.backendsDisabled),
-            (PromptAnswerValidation.kindMismatch.message, Self.allow, PromptAnswerValidation.kindMismatch.message),
-            (PromptAnswerValidation.unknownQuestion("Which branch?").message, question,
-             PromptAnswerValidation.unknownQuestion("Which branch?").message),
-            (PromptAnswerValidation.missingAnswer(question: "Which repo?").message, question,
+        let cases: [(daemon: RPCResponse, answer: PromptAnswer, phone: String)] = [
+            (RPCResponse(error: PhoneProviderSecret.error), Self.allow, PhoneAppService.remoteRefusedReason),
+            (RPCResponse(error: "invalid_params: \(PhoneProviderSecret.error)"), Self.allow,
+             PhoneAppService.remoteRefusedReason),
+            (RPCResponse(error: ""), Self.allow, PhoneAppService.remoteRefusedReason),
+            (PromptAnswerRefusal.disabled.response, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (RPCRouter.promptAnswerDisabledRefusal.response, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (PromptAnswerRefusal.settingUnread.response, Self.allow, PhoneSessionStatus.answerSettingUnreadReason),
+            (PromptAnswerRefusal.notMirrored.response, Self.allow, PromptAnswerRefusal.notMirrored.text),
+            (RemoteSendMessageRefusal.exited.response, Self.allow, RemoteSendMessageRefusal.exited.text),
+            (RemoteGateRefusal.backendsDisabled.response, Self.allow, RemoteGateRefusal.backendsDisabled.text),
+            (RemoteGateRefusal.claudeCloudDisabled.response, Self.allow, RemoteGateRefusal.claudeCloudDisabled.text),
+            (Self.refusing(.kindMismatch), Self.allow, PhoneAppService.answerDoesNotFitReason),
+            (Self.refusing(.unknownQuestion("Which branch?")), question, PhoneAppService.answerDoesNotFitReason),
+            (Self.refusing(.missingAnswer(question: "Which repo?")), question, PhoneAppService.answerDoesNotFitReason),
+            (RPCResponse(error: PromptAnswerRefusal.notMirrored.text), Self.allow, PhoneAppService.remoteRefusedReason),
+            (RPCResponse(error: PromptAnswerValidation.kindMismatch.message), Self.allow,
              PhoneAppService.remoteRefusedReason),
         ]
 
         for (daemon, answer, phone) in cases {
-            h.actions.respond(to: .answerRemotePrompt, with: RPCResponse(error: daemon))
+            let said = "the daemon said \(daemon.error ?? "nothing") with code \(daemon.errorCode ?? "none")"
+            h.actions.respond(to: .answerRemotePrompt, with: daemon)
             let (reply, bytes) = try await h.request(
                 .promptAnswer,
                 params: PhonePromptAnswerParams(session: Self.remoteSession, promptID: "rp-1", answer: answer),
                 on: outbox)
-            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "the daemon said \(daemon)")
-            #expect(!PhoneProviderSecret.leaks(bytes), "the daemon said \(daemon)")
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "\(said)")
+            #expect(!PhoneProviderSecret.leaks(bytes), "\(said)")
         }
         #expect(h.actions.remoteAnswers.count == cases.count)
     }
 
+    /// A local answer's refusal is told by its code too: the setting's codes
+    /// get the words the sessions list shows for them, and `answerDoesNotFit`
+    /// gets the phone's own sentence, whichever question its text names.
+    @Test func aLocalAnswersCodedRefusalGetsThePhonesSentence() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let outbox = await h.connect()
+        let terminalID = try await h.seedTerminal().id
+        let cases: [(daemon: RPCResponse, phone: String)] = [
+            (Self.refusing(.allowAlwaysWithoutSuggestions), PhoneAppService.answerDoesNotFitReason),
+            (Self.refusing(.unknownQuestion("Which branch?")), PhoneAppService.answerDoesNotFitReason),
+            (RPCRouter.promptAnswerDisabledRefusal.response, PhoneSessionStatus.answerTurnedOffReason),
+            (RPCRouter.promptAnswerSettingUnreadRefusal.response, PhoneSessionStatus.answerSettingUnreadReason),
+        ]
+
+        for (index, (daemon, phone)) in cases.enumerated() {
+            let said = "the daemon said \(daemon.error ?? "nothing") with code \(daemon.errorCode ?? "none")"
+            h.actions.respond(to: .answerPrompt, with: daemon)
+            let (reply, _) = try await h.request(
+                .promptAnswer, params: Self.local(terminalID, "toolu-\(index)"), on: outbox)
+            #expect(reply.error == PhoneAppError(code: .refused, message: phone), "\(said)")
+        }
+    }
+
     /// Answering one of a remote prompt's two questions is refused by TBD's
-    /// validator, naming the question the phone left out. The phone was sent
-    /// that question in `prompt.changed`, so the refusal reaches it verbatim,
-    /// not as the generic provider line.
-    @Test func answeringOneOfTwoQuestionsGetsTBDsRefusalVerbatim() async throws {
+    /// validator, naming the question the phone left out. The refusal carries
+    /// `answerDoesNotFit`, so the phone gets its own sentence for an answer
+    /// that does not fit, not the generic provider line.
+    @Test func answeringOneOfTwoQuestionsGetsThePhonesSentence() async throws {
         let h = try await PhoneServiceHarness.make()
         let deviceID = h.peer.deviceID
         let session = Self.remoteSession
@@ -576,8 +612,8 @@ struct PhonePromptTests {
         let first = try await Self.promptEvent(0, in: outbox)
         let sentIDs = first.data.prompts.map(\.id)
         #expect(sentIDs == ["rp-1"])
-        let missing = PromptAnswerValidation.missingAnswer(question: "Which repo?").message
-        h.actions.respond(to: .answerRemotePrompt, with: RPCResponse(error: missing))
+        h.actions.respond(
+            to: .answerRemotePrompt, with: Self.refusing(.missingAnswer(question: "Which repo?")))
 
         let (reply, bytes) = try await h.request(
             .promptAnswer,
@@ -585,13 +621,14 @@ struct PhonePromptTests {
                 session: session, promptID: "rp-1", answer: .question(answers: ["Which branch?": "main"])),
             on: outbox)
 
-        #expect(reply.error == PhoneAppError(code: .refused, message: missing))
+        #expect(reply.error == PhoneAppError(code: .refused, message: PhoneAppService.answerDoesNotFitReason))
         #expect(!PhoneProviderSecret.leaks(bytes))
         await h.service.phoneRevoked(deviceID: deviceID)
     }
 
-    /// A local answer's refusal is TBD's own, so any text the core sends
-    /// reaches the phone as it is: the filter is the remote path's alone.
+    /// A local answer's refusal is TBD's own, so the text of one with no code
+    /// reaches the phone as it is: `remoteRefusedReason` is the remote path's
+    /// alone.
     @Test func aLocalAnswersRefusalIsNotFiltered() async throws {
         let h = try await PhoneServiceHarness.make()
         h.actions.respond(to: .answerPrompt, with: RPCResponse(error: "invalid_params: the prompt has no question \"x\""))

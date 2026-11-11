@@ -14,8 +14,8 @@ extension RPCRouter {
     static let remoteAnswerTimeout: TimeInterval = 30
 
     /// The session has no mirror row, so there is no prompt to match the
-    /// answer against. In `Base` (`PromptAnswerRefusal`), so the phone app
-    /// service can let it through to a phone as TBD's own words.
+    /// answer against. TBD's own words with its code
+    /// (`RPCErrorCode.promptNotMirrored`), so a paired phone hears it as it is.
     static let remoteAnswerNotMirroredRefusal = PromptAnswerRefusal.notMirrored
 
     /// Answers a remote session's open prompt through
@@ -39,7 +39,14 @@ extension RPCRouter {
     ///   undeclared verb;
     /// - when the provider's snapshot is stale;
     /// - when the session has no mirror row, or has exited;
-    /// - when the answer does not fit the mirrored prompt (`invalid_params: …`).
+    /// - when the answer does not fit the mirrored prompt (`invalid_params: …`,
+    ///   with `RPCErrorCode.answerDoesNotFit`).
+    ///
+    /// The gates', the setting's, the mirror's and the answer's refusals carry
+    /// their codes (`RPCErrorCode`). The peer check's carries none, and
+    /// neither does any refusal that quotes a provider: its own errors, and
+    /// those TBD builds from its details (an undeclared verb, a stale
+    /// snapshot).
     ///
     /// A prompt id that no longer matches the mirrored prompt answers
     /// `already_resolved` without a provider call: the dialog it named has
@@ -64,7 +71,7 @@ extension RPCRouter {
         // The gate runs before the decode, so an undecodable request still
         // answers `remote backends disabled` while remote backends are off.
         guard let config = try await configForAnswer(method: RPCMethod.remoteAnswer) else {
-            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+            return Self.promptAnswerSettingUnreadRefusal.response
         }
         guard let manager = remoteGate(config: config) else {
             return Self.remoteBackendsDisabledResponse
@@ -89,7 +96,7 @@ extension RPCRouter {
         _ params: RemoteAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
         guard let config = try await configForAnswer(method: RPCMethod.remoteAnswer) else {
-            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+            return Self.promptAnswerSettingUnreadRefusal.response
         }
         guard let manager = remoteGate(config: config) else {
             return Self.remoteBackendsDisabledResponse
@@ -144,18 +151,18 @@ extension RPCRouter {
         }
         guard let row = try await db.remoteSessions.row(
             provider: params.provider, sessionID: params.sessionID) else {
-            return RPCResponse(error: Self.remoteAnswerNotMirroredRefusal)
+            return Self.remoteAnswerNotMirroredRefusal.response
         }
         if row.gone
             || row.state == RemoteProcessState.exited.rawValue
             || row.agentState == RemoteAgentState.exited.rawValue {
-            return RPCResponse(error: Self.sendMessageExitedRefusal)
+            return Self.sendMessageExitedRefusal.response
         }
         guard let prompt = row.decodedPayload?.effectivePendingPrompt, prompt.id == params.promptID else {
             return try RPCResponse(result: PromptAnswerResult(outcome: .alreadyResolved))
         }
         if let invalid = Self.validationFailure(params.answer, against: prompt) {
-            return RPCResponse(error: invalid.message)
+            return RPCResponse(error: invalid.message, code: invalid.code.rawValue)
         }
 
         let stdin = try Self.answerJSON(params.answer)
