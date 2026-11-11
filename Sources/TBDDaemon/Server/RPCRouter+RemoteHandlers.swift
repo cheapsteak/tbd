@@ -1013,8 +1013,7 @@ extension RPCRouter {
     static func transcriptSyncFailureResponse(_ error: RemoteTranscriptSyncError) -> RPCResponse {
         switch error {
         case .discarded:
-            return CodedRefusal(
-                text: error.localizedDescription, code: .remoteSessionRemoved).response
+            return RemoteTranscriptRefusal.removed.response
         case .providerFailed, .cursorExpired:
             return RPCResponse(error: error.localizedDescription)
         }

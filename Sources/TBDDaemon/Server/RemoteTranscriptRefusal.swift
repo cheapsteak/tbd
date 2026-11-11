@@ -17,6 +17,11 @@ enum RemoteTranscriptRefusal {
         text: "loading earlier transcript history is off (remote_transcript_live_sync_enabled)",
         code: .loadEarlierOff)
 
+    /// The session was removed while its transcript synced, so its cache was
+    /// discarded. The words are `RemoteTranscriptSyncError.discarded`'s own.
+    static let removed = CodedRefusal(
+        text: RemoteTranscriptSyncError.discarded.localizedDescription, code: .remoteSessionRemoved)
+
     /// The cache has no `before`: nothing above it to load.
     static let nothingEarlier = CodedRefusal(text: "no earlier transcript history to load", code: .nothingEarlier)
 }

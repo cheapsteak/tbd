@@ -418,6 +418,7 @@ struct RemoteTranscriptFeedTests {
             (RemoteGateRefusal.backendsDisabled.response, RemoteGateRefusal.backendsDisabled.text),
             (RPCResponse(error: RemoteTranscriptRefusal.dismissed.text), PhoneAppService.remoteRefusedReason),
             (RPCResponse(error: discarded), PhoneAppService.remoteRefusedReason),
+            (RemoteTranscriptRefusal.removed.response, RemoteTranscriptRefusal.removed.text),
             (RPCRouter.transcriptSyncFailureResponse(.discarded), discarded),
             (RPCResponse(error: PhoneProviderSecret.error, code: "acmeUnknownCode"), PhoneAppService.remoteRefusedReason),
         ]
