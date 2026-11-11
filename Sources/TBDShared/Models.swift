@@ -1823,9 +1823,8 @@ public struct Config: Codable, Sendable, Equatable {
     public var phoneRelayURL: String?
     /// Loader URL override; nil means `Config.phoneLoaderURLDefault`.
     public var phoneLoaderURL: String?
-    /// The loader URL in effect: the override, else the default. Nil while
-    /// neither is set, and then pairing a phone is refused.
-    public var resolvedPhoneLoaderURL: String? { Config.resolvePhoneLoaderURL(override: phoneLoaderURL) }
+    /// The loader URL in effect: the override, else the default.
+    public var resolvedPhoneLoaderURL: String { Config.resolvePhoneLoaderURL(override: phoneLoaderURL) }
     /// Balancing's usage ceiling, in percent, as stored: nil when never set.
     /// Act on `profileBalancingPolicy`, which resolves it.
     public var profileBalancingUsageCeilingPercent: Int?
@@ -1986,17 +1985,16 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Ships off; the backing column has no SQL default, so graduation
     /// is a change to this constant.
     public static let phoneControlEnabledDefault = false
-    /// The loader org's Pages URL, recorded once the maintainer has created
-    /// the org (spec section 11). Nil until then: with no default, pairing a
-    /// phone needs the loader URL set in Settings → Phone → Advanced. Never a
-    /// guessed name: whoever registers an unclaimed name would serve the page
-    /// that receives every pairing secret.
-    public static let phoneLoaderURLDefault: String? = nil
+    /// The loader's public URL: the Pages site of the `tbd-phone` org (spec
+    /// section 11). It keeps the trailing slash, as the loader URL field's
+    /// placeholder and the pairing link tests do; `PhoneURLValidation.loader`
+    /// keeps a URL's path as given, so the pairing link is this text plus
+    /// `#p=...`.
+    public static let phoneLoaderURLDefault = "https://tbd-phone.github.io/"
 
     /// The loader URL in effect for a stored `override`: the override, else
-    /// `phoneLoaderURLDefault`. The daemon pairs with it, and the app reads
-    /// it to tell whether pairing can start.
-    public static func resolvePhoneLoaderURL(override: String?) -> String? {
+    /// `phoneLoaderURLDefault`. The daemon pairs with it, and the CLI prints it.
+    public static func resolvePhoneLoaderURL(override: String?) -> String {
         override ?? phoneLoaderURLDefault
     }
 

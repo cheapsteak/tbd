@@ -44,16 +44,17 @@ to the relay.
 
 ## Set the loader URL
 
-The loader is the web page your phone opens from the pairing QR code. TBD has no default loader
-yet, so you enter its address yourself, once:
+The loader is the web page your phone opens from the pairing QR code. TBD uses
+`https://tbd-phone.github.io/` unless you set another, so most people skip this step. To use your
+own:
 
 1. Open Settings → Phone → Advanced.
 2. Type the loader's address in "Loader URL", for example `https://acme-loader.github.io/`, and
-   press Return.
+   press Return. Leave the field blank to go back to the default.
 
 Use a loader you trust, such as your own copy published from a fork, as
 `docs/phone-control-loader-repo.md` describes: whoever controls the loader controls the page that
-receives the pairing secret. Until a loader URL is set, "Pair a Phone…" is disabled and says so.
+receives the pairing secret.
 
 ## Pair a phone
 
