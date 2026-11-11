@@ -8,7 +8,7 @@ private let remoteLogger = Logger(subsystem: "com.tbd.app", category: "remote")
 extension AppState {
     /// The exact string every `remote.*` RPC returns when
     /// `config.remoteBackendsEnabled` is off (or the daemon booted before the
-    /// flag was turned on) — see `RPCRouter+RemoteHandlers.remoteBackendsDisabledResponse`.
+    /// flag was turned on) — see `RemoteGateRefusal.backendsDisabled`.
     /// There's no dedicated `RPCErrorCode` for this refusal, so it's matched
     /// by exact message text.
     nonisolated static let remoteBackendsDisabledMessage = "remote backends disabled"

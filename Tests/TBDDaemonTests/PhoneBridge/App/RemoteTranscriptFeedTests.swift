@@ -414,7 +414,7 @@ struct RemoteTranscriptFeedTests {
             (RPCResponse(error: PhoneProviderSecret.error), PhoneAppService.remoteRefusedReason),
             (RPCResponse(error: "transcript read failed (exit 1)"), PhoneAppService.remoteRefusedReason),
             (RemoteTranscriptRefusal.dismissed.response, RemoteTranscriptRefusal.dismissed.text),
-            (RPCRouter.transcriptSyncDismissedRefusal.response, RPCRouter.transcriptSyncDismissedRefusal.text),
+            (RemoteTranscriptRefusal.dismissed.response, RemoteTranscriptRefusal.dismissed.text),
             (RemoteGateRefusal.backendsDisabled.response, RemoteGateRefusal.backendsDisabled.text),
             (RPCResponse(error: RemoteTranscriptRefusal.dismissed.text), PhoneAppService.remoteRefusedReason),
             (RPCResponse(error: discarded), PhoneAppService.remoteRefusedReason),

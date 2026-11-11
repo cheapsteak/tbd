@@ -215,7 +215,7 @@ struct PhonePromptTests {
     /// real core.
     @Test func theSettingsRefusalReachesThePhone() async throws {
         let h = try await PhoneServiceHarness.make()
-        h.actions.respond(to: .answerPrompt, with: RPCRouter.promptAnswerDisabledRefusal.response)
+        h.actions.respond(to: .answerPrompt, with: PromptAnswerRefusal.disabled.response)
         let outbox = await h.connect()
 
         let terminalID = try await h.seedTerminal().id
@@ -544,7 +544,7 @@ struct PhonePromptTests {
              PhoneAppService.remoteRefusedReason),
             (RPCResponse(error: ""), Self.allow, PhoneAppService.remoteRefusedReason),
             (PromptAnswerRefusal.disabled.response, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
-            (RPCRouter.promptAnswerDisabledRefusal.response, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
+            (PromptAnswerRefusal.disabled.response, Self.allow, PhoneSessionStatus.answerTurnedOffReason),
             (PromptAnswerRefusal.settingUnread.response, Self.allow, PhoneSessionStatus.answerSettingUnreadReason),
             (PromptAnswerRefusal.notMirrored.response, Self.allow, PromptAnswerRefusal.notMirrored.text),
             (RemoteSendMessageRefusal.exited.response, Self.allow, RemoteSendMessageRefusal.exited.text),
@@ -597,8 +597,8 @@ struct PhonePromptTests {
         let cases: [(daemon: RPCResponse, phone: String)] = [
             (Self.refusing(.allowAlwaysWithoutSuggestions), PhoneAppService.answerDoesNotFitReason),
             (Self.refusing(.unknownQuestion("Which branch?")), PhoneAppService.answerDoesNotFitReason),
-            (RPCRouter.promptAnswerDisabledRefusal.response, PhoneSessionStatus.answerTurnedOffReason),
-            (RPCRouter.promptAnswerSettingUnreadRefusal.response, PhoneSessionStatus.answerSettingUnreadReason),
+            (PromptAnswerRefusal.disabled.response, PhoneSessionStatus.answerTurnedOffReason),
+            (PromptAnswerRefusal.settingUnread.response, PhoneSessionStatus.answerSettingUnreadReason),
         ]
 
         for (index, (daemon, phone)) in cases.enumerated() {

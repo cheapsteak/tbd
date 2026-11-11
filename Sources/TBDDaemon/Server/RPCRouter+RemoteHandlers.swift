@@ -76,30 +76,14 @@ struct RemoteDeletionWatermark {
 /// the same "remote backends disabled" error rather than crashing or
 /// silently no-oping.
 extension RPCRouter {
-    /// The refusal response every gated `remote.*` handler returns, with its
-    /// code (`RPCErrorCode.remoteBackendsOff`). Kept as a single shared value
-    /// (rather than re-typed at each call site) so the exact string — which
-    /// tests assert equality against — can't drift if one call site is edited
-    /// and the others aren't.
-    /// Internal rather than private because `worktree.archive` /
-    /// `worktree.revive` branch into the remote path too and must refuse with
-    /// the same words when the subsystem is off.
-    static let remoteBackendsDisabledResponse = RemoteGateRefusal.backendsDisabled.response
-
-    /// The inner gate's refusal, with its code
-    /// (`RPCErrorCode.claudeCloudOff`). A separate string from the outer one
-    /// because they are separate conditions: the outer flag says remote
-    /// backends are off entirely, this says the compiled cloud provider is.
-    private static let claudeCloudDisabledResponse = RemoteGateRefusal.claudeCloudDisabled.response
 
     /// `remote.delete`'s own refusal, and the only feature-flag refusal in this
     /// file. It names the flag and how to lift it, because a refusal that only
     /// says "disabled" leaves a soak participant guessing which of three gates
     /// stopped them — the subsystem, the cloud gate, or this one.
     ///
-    /// Kept as a shared value for the same reason
-    /// `remoteBackendsDisabledResponse` is: tests assert equality against the
-    /// exact string.
+    /// Kept as a shared value so tests assert equality against the exact
+    /// string.
     static let remoteDeleteDisabledResponse = RPCResponse(error:
         "remote delete is disabled (config remote_delete_enabled); " +
         "turn it on with `tbd remote allow-delete on`")
@@ -144,14 +128,14 @@ extension RPCRouter {
     /// for a verb that reads the row once for all its gates (`remote.answer`).
     func cloudGate(provider: String, config: Config) -> RPCResponse? {
         guard provider == ClaudeCloudProvider.name, !config.claudeCloudEnabled else { return nil }
-        return Self.claudeCloudDisabledResponse
+        return RemoteGateRefusal.claudeCloudDisabled.response
     }
 
     static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
         RPCResponse(error: "provider '\(provider)' inventory is stale; refresh must recover before changing remote sessions")
     }
 
-    /// Internal for the same reason as `remoteBackendsDisabledResponse` above:
+    /// Internal because tests assert against it, and because
     /// the worktree handlers' remote branches pass through the same gate.
     func remoteGate() async throws -> RemoteProviderManager? {
         remoteGate(config: try await db.config.get())
@@ -196,7 +180,7 @@ extension RPCRouter {
     /// capability checks use (`phoneCachedRemoteProviders`).
     func handleRemoteProviders(refreshingRegistry: Bool = true) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         // Re-read the registry first, so a provider added to
         // `agent-providers.json` while the daemon runs is registered and
@@ -209,7 +193,7 @@ extension RPCRouter {
 
     func handleRemoteSessions() async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let staleProviders = Set(
             await manager.providerStatuses()
@@ -233,7 +217,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteCreateParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -334,7 +318,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteStopParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -423,7 +407,7 @@ extension RPCRouter {
         now: @Sendable () -> Date = { Date() }
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteArchiveParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -440,7 +424,7 @@ extension RPCRouter {
         now: @Sendable () -> Date = { Date() }
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteUnarchiveParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -559,7 +543,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteSendParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -594,7 +578,7 @@ extension RPCRouter {
 
     func handleRemoteLog(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteLogParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -633,7 +617,7 @@ extension RPCRouter {
     /// simply exits non-2 and this surfaces that as an ordinary failure.
     func handleRemoteRename(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteRenameParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -692,7 +676,7 @@ extension RPCRouter {
     /// failure is logged and the receipt is still returned.
     func handleRemoteRetain(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteRetainParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -734,7 +718,7 @@ extension RPCRouter {
     /// records first would be a second, divergent one.
     func handleRemoteImport(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteImportParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -778,7 +762,7 @@ extension RPCRouter {
     /// The caller gets the bytes and the log says what was missing.
     func handleRemoteRecall(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteRecallParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -837,7 +821,7 @@ extension RPCRouter {
     /// for the other, so this verb exists rather than `remote.log` being reused.
     func handleRemoteTranscript(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteTranscriptParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -891,7 +875,7 @@ extension RPCRouter {
     /// cadence; the daemon runs no transcript timers.
     func handleRemoteTranscriptSync(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate(), let sync = remoteTranscriptSync else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteTranscriptSyncParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -904,7 +888,7 @@ extension RPCRouter {
         // A dismissed session's cache is discarded and reclaimed by the orphan
         // sweep; syncing it would rebuild a directory nothing will show.
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
-            return Self.transcriptSyncDismissedRefusal.response
+            return RemoteTranscriptRefusal.dismissed.response
         }
         let response: RPCResponse
         do {
@@ -926,7 +910,7 @@ extension RPCRouter {
         // discards them here.
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
             await sync.discard(provider: params.provider, sessionID: params.sessionID)
-            return Self.transcriptSyncDismissedRefusal.response
+            return RemoteTranscriptRefusal.dismissed.response
         }
         return response
     }
@@ -947,12 +931,12 @@ extension RPCRouter {
     /// `reachedStart` false — the pane handles it as any generation change.
     func handleRemoteTranscriptLoadEarlier(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate(), let sync = remoteTranscriptSync else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteTranscriptLoadEarlierParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
         guard try await db.config.get().remoteTranscriptLiveSyncEnabled else {
-            return Self.loadEarlierFlagOffRefusal.response
+            return RemoteTranscriptRefusal.loadEarlierOff.response
         }
         guard await declaredCapabilities(manager, provider: params.provider)
             .contains(RemoteCapability.transcriptTail) else {
@@ -961,11 +945,11 @@ extension RPCRouter {
                 section: "transcript read --tail and --before")
         }
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
-            return Self.transcriptSyncDismissedRefusal.response
+            return RemoteTranscriptRefusal.dismissed.response
         }
         let cache = sync.cache(provider: params.provider, sessionID: params.sessionID)
         guard let state = cache.peekState(), state.before != nil, !state.pendingPrepend else {
-            return Self.loadEarlierNothingAboveRefusal.response
+            return RemoteTranscriptRefusal.nothingEarlier.response
         }
         let response: RPCResponse
         do {
@@ -987,19 +971,10 @@ extension RPCRouter {
         // check above must not leave a prepended page behind.
         if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
             await sync.discard(provider: params.provider, sessionID: params.sessionID)
-            return Self.transcriptSyncDismissedRefusal.response
+            return RemoteTranscriptRefusal.dismissed.response
         }
         return response
     }
-
-    /// What `remote.transcriptLoadEarlier` answers while
-    /// `remote_transcript_live_sync_enabled` is off.
-    static let loadEarlierFlagOffRefusal = RemoteTranscriptRefusal.loadEarlierOff
-
-    /// What `remote.transcriptLoadEarlier` answers for a cache with no
-    /// `before`: one built by forward reads, one that already reached the
-    /// conversation's beginning, or none at all.
-    static let loadEarlierNothingAboveRefusal = RemoteTranscriptRefusal.nothingEarlier
 
     private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
         try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
@@ -1018,9 +993,6 @@ extension RPCRouter {
             return RPCResponse(error: error.localizedDescription)
         }
     }
-
-    /// What `remote.transcriptSync` answers for a dismissed session.
-    static let transcriptSyncDismissedRefusal = RemoteTranscriptRefusal.dismissed
 
     /// Why `remote.sendMessage` declines a session in its mirrored state, or
     /// nil when it may send. Separate from the handler so the wording lives in
@@ -1041,22 +1013,13 @@ extension RPCRouter {
         if row.gone
             || row.state == RemoteProcessState.exited.rawValue
             || row.agentState == RemoteAgentState.exited.rawValue {
-            return sendMessageExitedRefusal
+            return RemoteSendMessageRefusal.exited
         }
         if row.agentState == RemoteAgentState.waitingInput.rawValue {
-            return promptAnswerable ? sendMessageWaitingInputAnswerOnCardRefusal : sendMessageWaitingInputRefusal
+            return promptAnswerable ? RemoteSendMessageRefusal.waitingInputAnswerOnCard : RemoteSendMessageRefusal.waitingInput
         }
         return nil
     }
-
-    static let sendMessageExitedRefusal = RemoteSendMessageRefusal.exited
-
-    static let sendMessageWaitingInputRefusal = RemoteSendMessageRefusal.waitingInput
-
-    /// The `waiting_input` refusal when the prompt can be answered from its
-    /// transcript card (`remote.answer`): the session mirrors a pending
-    /// prompt, and the provider can answer it.
-    static let sendMessageWaitingInputAnswerOnCardRefusal = RemoteSendMessageRefusal.waitingInputAnswerOnCard
 
     /// Whether a prompt on `provider`'s sessions can be answered from the
     /// transcript: the flag is on and the provider declares `answer`.
@@ -1095,7 +1058,7 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteSendMessageParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -1184,7 +1147,7 @@ extension RPCRouter {
     /// which is the same reason `handleRemoteSetPin` does.
     func handleRemoteRetainedList(_ paramsData: Data) async throws -> RPCResponse {
         guard try await remoteGate() != nil else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteRetainedListParams.self, from: paramsData)
         let transcripts: [RetainedTranscript]
@@ -1337,7 +1300,7 @@ extension RPCRouter {
         now: @Sendable () -> Date = { Date() }
     ) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteDeleteParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -1479,7 +1442,7 @@ extension RPCRouter {
 
     func handleRemoteDismiss(_ paramsData: Data) async throws -> RPCResponse {
         guard try await remoteGate() != nil else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteDismissParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -1505,7 +1468,7 @@ extension RPCRouter {
     /// whether a pane exists to reconnect is known only to the app.
     func handleRemoteReconnect(_ paramsData: Data) async throws -> RPCResponse {
         guard try await remoteGate() != nil else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteReconnectParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -1527,7 +1490,7 @@ extension RPCRouter {
     /// `handleWorktreeSetPin` follows.
     func handleRemoteSetPin(_ paramsData: Data) async throws -> RPCResponse {
         guard try await remoteGate() != nil else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteSetPinParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }
@@ -1554,7 +1517,7 @@ extension RPCRouter {
     /// handlers above.
     func handleRemoteReportAttachExit(_ paramsData: Data) async throws -> RPCResponse {
         guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteReportAttachExitParams.self, from: paramsData)
         if let refusal = try await cloudGate(provider: params.provider) { return refusal }

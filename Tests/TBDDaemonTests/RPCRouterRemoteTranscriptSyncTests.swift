@@ -190,7 +190,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let response = await sync(r)
 
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal.text)
+        #expect(response.error == RemoteTranscriptRefusal.dismissed.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionDismissed.rawValue)
         #expect(invoker.callsSnapshot() == [["describe"]])
         let directory = TBDConstants.remoteTranscriptDir(
@@ -222,7 +222,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let response = await sync(r)
 
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal.text)
+        #expect(response.error == RemoteTranscriptRefusal.dismissed.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionDismissed.rawValue)
         #expect(invoker.callsSnapshot() == [["describe"], RemoteVerb.transcriptRead(sessionID: "s-1")])
         let directory = TBDConstants.remoteTranscriptDir(
@@ -402,7 +402,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let response = await loadEarlier(r)
 
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.loadEarlierFlagOffRefusal.text)
+        #expect(response.error == RemoteTranscriptRefusal.loadEarlierOff.text)
         #expect(response.errorCode == RPCErrorCode.loadEarlierOff.rawValue)
         #expect(invoker.callsSnapshot() == [["describe"]])
     }
@@ -447,7 +447,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let response = await loadEarlier(r)
 
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.transcriptSyncDismissedRefusal.text)
+        #expect(response.error == RemoteTranscriptRefusal.dismissed.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionDismissed.rawValue)
         #expect(invoker.callsSnapshot() == [["describe"]])
     }
@@ -461,11 +461,11 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let r = router(await manager(invoker))
 
         let noCache = await loadEarlier(r)
-        #expect(noCache.error == RPCRouter.loadEarlierNothingAboveRefusal.text)
+        #expect(noCache.error == RemoteTranscriptRefusal.nothingEarlier.text)
         #expect(noCache.errorCode == RPCErrorCode.nothingEarlier.rawValue)
         try seedTailCache(before: nil)
         let forwardCache = await loadEarlier(r)
-        #expect(forwardCache.error == RPCRouter.loadEarlierNothingAboveRefusal.text)
+        #expect(forwardCache.error == RemoteTranscriptRefusal.nothingEarlier.text)
         #expect(forwardCache.errorCode == RPCErrorCode.nothingEarlier.rawValue)
         #expect(invoker.callsSnapshot() == [["describe"]])
     }
@@ -701,7 +701,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         await poll(m)
         let r = router(m)
         let response = try await send(r)
-        #expect(response.error == RPCRouter.sendMessageWaitingInputRefusal.text)
+        #expect(response.error == RemoteSendMessageRefusal.waitingInput.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionWaitingInput.rawValue)
         #expect(response.error?.contains("answer it in the terminal") == true)
         #expect(Self.sends(invoker).isEmpty)
@@ -719,7 +719,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let m = await manager(invoker)
         await poll(m)
         let response = try await send(router(m))
-        #expect(response.error == RPCRouter.sendMessageWaitingInputAnswerOnCardRefusal.text)
+        #expect(response.error == RemoteSendMessageRefusal.waitingInputAnswerOnCard.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionWaitingInput.rawValue)
         #expect(response.error?.contains("on the card in the transcript") == true)
         #expect(Self.sends(invoker).isEmpty)
@@ -737,7 +737,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let m = await manager(invoker)
         await poll(m)
         let response = try await send(router(m))
-        #expect(response.error == RPCRouter.sendMessageWaitingInputRefusal.text)
+        #expect(response.error == RemoteSendMessageRefusal.waitingInput.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionWaitingInput.rawValue)
         #expect(Self.sends(invoker).isEmpty)
     }
@@ -755,7 +755,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         let m = await manager(invoker)
         await poll(m)
         let response = try await send(router(m))
-        #expect(response.error == RPCRouter.sendMessageWaitingInputRefusal.text)
+        #expect(response.error == RemoteSendMessageRefusal.waitingInput.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionWaitingInput.rawValue)
         #expect(Self.sends(invoker).isEmpty)
     }
@@ -774,7 +774,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         await poll(m)
         let r = router(m)
         let response = try await send(r)
-        #expect(response.error == RPCRouter.sendMessageExitedRefusal.text)
+        #expect(response.error == RemoteSendMessageRefusal.exited.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionExited.rawValue)
         #expect(Self.sends(invoker).isEmpty)
     }
@@ -789,7 +789,7 @@ struct RPCRouterRemoteTranscriptSyncTests: ~Copyable {
         try await db.remoteSessions.markGone(provider: "agentbox", sessionID: "s-1")
         let r = router(m)
         let response = try await send(r)
-        #expect(response.error == RPCRouter.sendMessageExitedRefusal.text)
+        #expect(response.error == RemoteSendMessageRefusal.exited.text)
         #expect(response.errorCode == RPCErrorCode.remoteSessionExited.rawValue)
         #expect(Self.sends(invoker).isEmpty)
     }

@@ -151,7 +151,7 @@ struct RPCRouterPromptHandlerTests {
         try await f.db.config.setTranscriptPromptAnswerEnabled(false)
         let response = try await answer(f, promptID: id)
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.promptAnswerDisabledRefusal.text)
+        #expect(response.error == PromptAnswerRefusal.disabled.text)
         #expect(response.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
     }
@@ -172,7 +172,7 @@ struct RPCRouterPromptHandlerTests {
             JSONEncoder().encode(params), actor: nil, connection: SendHarness.AuthenticatedApp.connection)
 
         #expect(response.success == false)
-        #expect(response.error == RPCRouter.promptAnswerSettingUnreadRefusal.text)
+        #expect(response.error == PromptAnswerRefusal.settingUnread.text)
         #expect(response.errorCode == RPCErrorCode.promptAnswerSettingUnread.rawValue)
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
         let rows = ActuationRecordReader(activePath: f.logPath).readRows()
@@ -386,7 +386,7 @@ struct RPCRouterPromptHandlerTests {
         let r = try await f.router.answerPrompt(
             params, actor: .phone(deviceID: d), authority: .pairedPhone(deviceID: d))
         #expect(r.success == false)
-        #expect(r.error == RPCRouter.promptAnswerDisabledRefusal.text)
+        #expect(r.error == PromptAnswerRefusal.disabled.text)
         #expect(r.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
         #expect(await isOpen(f, id), "a refused answer leaves the prompt open")
     }
@@ -432,7 +432,7 @@ struct RPCRouterPromptHandlerTests {
         try await f.db.config.setTranscriptPromptAnswerEnabled(false)
         let whileOff = try await answer(f, promptID: id)
         #expect(whileOff.success == false)
-        #expect(whileOff.error == RPCRouter.promptAnswerDisabledRefusal.text)
+        #expect(whileOff.error == PromptAnswerRefusal.disabled.text)
         #expect(whileOff.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
 
         #expect(await isOpen(f, id), "neither refusal touches the prompt")

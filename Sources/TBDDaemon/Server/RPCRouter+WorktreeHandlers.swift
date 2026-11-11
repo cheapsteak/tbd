@@ -418,7 +418,7 @@ extension RPCRouter {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
                     actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
-                    Self.remoteBackendsDisabledResponse)
+                    RemoteGateRefusal.backendsDisabled.response)
             }
             // Same inner gate `remote.archive` goes through — this route
             // reaches the identical provider verb, addressed by worktree row
@@ -476,7 +476,7 @@ extension RPCRouter {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
                     actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive,
-                    Self.remoteBackendsDisabledResponse)
+                    RemoteGateRefusal.backendsDisabled.response)
             }
             // See `archiveRemoteLane`'s matching comment: same inner gate as
             // `remote.unarchive`, same worktree-addressed route to the same

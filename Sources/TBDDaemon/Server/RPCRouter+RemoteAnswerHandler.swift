@@ -13,11 +13,6 @@ extension RPCRouter {
     /// The contract's budget for `answer`.
     static let remoteAnswerTimeout: TimeInterval = 30
 
-    /// The session has no mirror row, so there is no prompt to match the
-    /// answer against. TBD's own words with its code
-    /// (`RPCErrorCode.promptNotMirrored`), so a paired phone hears it as it is.
-    static let remoteAnswerNotMirroredRefusal = PromptAnswerRefusal.notMirrored
-
     /// Answers a remote session's open prompt through
     /// `answer <session_id> <prompt_id>`, the `PromptAnswer` JSON on stdin
     /// (`docs/remote-provider-contract.md` § `answer`). Returns a
@@ -25,7 +20,7 @@ extension RPCRouter {
     ///
     /// Refused, without invoking anything:
     /// - when the config row cannot be read
-    ///   (`promptAnswerSettingUnreadRefusal`). It is read once, before the
+    ///   (`PromptAnswerRefusal.settingUnread`). It is read once, before the
     ///   decode (`configForAnswer(method:)`), and the remote backends gate,
     ///   the cloud gate and the setting below are all checked against it, so
     ///   a failed read is a refusal and never an error from a gate;
@@ -71,10 +66,10 @@ extension RPCRouter {
         // The gate runs before the decode, so an undecodable request still
         // answers `remote backends disabled` while remote backends are off.
         guard let config = try await configForAnswer(method: RPCMethod.remoteAnswer) else {
-            return Self.promptAnswerSettingUnreadRefusal.response
+            return PromptAnswerRefusal.settingUnread.response
         }
         guard let manager = remoteGate(config: config) else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         let params = try decoder.decode(RemoteAnswerParams.self, from: paramsData)
         return try await answerGatedRemotePrompt(
@@ -83,7 +78,7 @@ extension RPCRouter {
 
     /// The core of `remote.answer` for a caller with no socket edge, such as
     /// the phone bridge. It reads the config row once itself, refusing with
-    /// `promptAnswerSettingUnreadRefusal` when it cannot, runs the remote
+    /// `PromptAnswerRefusal.settingUnread` when it cannot, runs the remote
     /// backends gate against it, then the same checks as
     /// `handleRemoteAnswer` in the same order. Same results and errors as
     /// `handleRemoteAnswer`, except that it never throws a decode error (the
@@ -96,10 +91,10 @@ extension RPCRouter {
         _ params: RemoteAnswerParams, actor: ActuationActor?, authority: AnswerAuthority
     ) async throws -> RPCResponse {
         guard let config = try await configForAnswer(method: RPCMethod.remoteAnswer) else {
-            return Self.promptAnswerSettingUnreadRefusal.response
+            return PromptAnswerRefusal.settingUnread.response
         }
         guard let manager = remoteGate(config: config) else {
-            return Self.remoteBackendsDisabledResponse
+            return RemoteGateRefusal.backendsDisabled.response
         }
         return try await answerGatedRemotePrompt(
             params, manager: manager, config: config, actor: actor, authority: authority)
@@ -151,12 +146,12 @@ extension RPCRouter {
         }
         guard let row = try await db.remoteSessions.row(
             provider: params.provider, sessionID: params.sessionID) else {
-            return Self.remoteAnswerNotMirroredRefusal.response
+            return PromptAnswerRefusal.notMirrored.response
         }
         if row.gone
             || row.state == RemoteProcessState.exited.rawValue
             || row.agentState == RemoteAgentState.exited.rawValue {
-            return Self.sendMessageExitedRefusal.response
+            return RemoteSendMessageRefusal.exited.response
         }
         guard let prompt = row.decodedPayload?.effectivePendingPrompt, prompt.id == params.promptID else {
             return try RPCResponse(result: PromptAnswerResult(outcome: .alreadyResolved))
