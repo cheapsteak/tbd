@@ -271,6 +271,11 @@ final class PromptAnswerController {
     /// dropped connection. The message is never read: a daemon that sends no
     /// codes gets "Try again" on every refusal, and its retry is refused
     /// again.
+    ///
+    /// A refusal with no code keeps "Try again" on purpose. That includes a
+    /// remote provider's own refusal of an answer (its `invalid_params`
+    /// too) and any refusal from a daemon that sends no codes. A retry of
+    /// those is refused again, which is harmless.
     static func isRetryable(_ error: any Error) -> Bool {
         guard let clientError = error as? DaemonClientError,
               let raw = clientError.rpcCode,

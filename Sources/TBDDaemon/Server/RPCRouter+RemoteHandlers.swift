@@ -984,7 +984,10 @@ extension RPCRouter {
     /// with a `RemoteTranscriptSyncError`. `discarded` is TBD's own sentence
     /// and carries `remoteSessionRemoved`. `providerFailed` holds a provider's
     /// message, and `cursorExpired` is reported as an outcome rather than
-    /// thrown by these paths, so neither carries a code.
+    /// thrown by these paths, so neither carries a code. Neither caller
+    /// receives `cursorExpired` (the load-earlier path reports it as the
+    /// `expired` outcome), so its branch carries no code only to keep the
+    /// switch exhaustive.
     static func transcriptSyncFailureResponse(_ error: RemoteTranscriptSyncError) -> RPCResponse {
         switch error {
         case .discarded:
