@@ -18,15 +18,16 @@ message that happens to match TBD's words is never mistaken for TBD's.
 
 ## The rule
 
-A refusal carries a code only when TBD wrote all of its text: TBD's fixed words, or the phone's
-own text quoted back to it. A refusal that quotes a remote provider never carries a code. That
-covers a provider's error message, the name of a question the provider wrote, and the refusals
-TBD builds from a provider's details, such as a stale provider's or one for a verb the provider
-does not declare.
+A refusal carries a code only when its text holds no words a remote provider wrote: it is TBD's
+fixed words, which may name things TBD itself keeps, such as a worktree or a registered provider,
+or the phone's own text quoted back to it. A refusal that quotes a provider's error message or
+output never carries a code. On the remote answer path, the refusals for a stale provider and for
+a verb the provider does not declare also stay without one.
 
 A client may therefore show the text of a refusal that carries a code. The one exception is
-`answerDoesNotFit`, whose text can name a question a remote provider wrote. Its doc comment says
-so, and the phone shows its own sentence for it instead.
+`answerDoesNotFit`, whose text can name a question a remote provider wrote, or be the provider's
+own message when the provider itself rejects the answer. Its doc comment says so, and the phone
+shows its own sentence for it instead.
 
 ## The codes
 
@@ -59,7 +60,8 @@ The value on the wire is the case name, as it is for the existing codes.
   - `answerDoesNotFit` – every `PromptAnswerValidation` refusal: the answer's kind does not match
     the prompt, a question has no answer, the answer names a question the prompt does not have,
     or it asks for "allow always" when the prompt offered no suggestions. Local and remote answers
-    both use it.
+    both use it. A remote provider's own `invalid_params` refusal of an answer carries it too,
+    with the provider's message as its text.
   - `promptAnswerOff` – the setting for answering prompts from the transcript is off.
   - `promptAnswerSettingUnread` – TBD could not read that setting.
 
@@ -75,9 +77,12 @@ The value on the wire is the case name, as it is for the existing codes.
 - **`PromptAnswerValidation`** (`Sources/TBDShared/PromptAnswer.swift`) has a code, always
   `answerDoesNotFit`. The local and remote answer handlers attach it to the response they build
   from a validation error.
-- **`RemoteTranscriptSyncError.discarded`** carries `remoteSessionRemoved` when the transcript
-  handlers turn it into a response. `providerFailed` holds a provider's message and carries no
-  code.
+- **`RemoteTranscriptSyncError.discarded`** becomes `RemoteTranscriptRefusal.removed`, which
+  pairs the error's text with `remoteSessionRemoved`, when the transcript handlers turn it into a
+  response. `providerFailed` holds a provider's message and carries no code.
+- **A remote provider's `invalid_params` answer error** goes back with `answerDoesNotFit` and the
+  provider's message unchanged, so the laptop's card hides "Try again" and the phone shows its
+  own sentence. Every other provider error on that path carries no code.
 - **A refusal made before its response** carries the pair, not bare text, until it becomes a
   response. The phone message rule is the case in point: `PhoneMessageText.Vetted.refused` holds
   the pair, so a refusal raised while a remote create is vetted reaches the response with its
@@ -118,6 +123,10 @@ already carries it, and never reads the message:
 - Every other refusal keeps "Try again": `promptAnswerSettingUnread`, a refusal with no code, and
   a dropped connection.
 
+The remote sessions refresh (`AppState.classifyRemoteRefreshFailure`) reads `remoteBackendsOff`
+the same way: a refusal with that code means remote sessions are turned off, not that the fetch
+failed.
+
 ## Compatibility
 
 - **No new field.** `errorCode` is already optional, so every client decodes a response with or
@@ -144,7 +153,10 @@ already carries it, and never reads the message:
   - `answerDoesNotFit`, `promptAnswerOff` and `promptAnswerSettingUnread` get the phone's
     sentences, on the local and the remote path.
 - **The laptop app:** `isRetryable` is checked for each answer code and for a refusal with no
-  code.
+  code, and the remote refresh treats `remoteBackendsOff` as turned off and a refusal with the
+  same words but no code as a failure.
+- **A provider's answer error:** the remote answer handler answers a provider's `invalid_params`
+  with `answerDoesNotFit` and its message, and any other provider error with no code.
 
 ## Rejected alternatives
 
