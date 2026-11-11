@@ -364,6 +364,12 @@ public final class Daemon: Sendable {
            configDir.isEmpty || SpawnBaseEnvironment.isTBDMintedProfileDir(configDir, base: environment) {
             unsetenv("CLAUDE_CONFIG_DIR")
         }
+        // Children spawned by plain inheritance, and the tmux server's global
+        // environment, must carry this account's `USER` and `LOGNAME`.
+        let identity = SpawnBaseEnvironment.withLoginIdentity(environment)
+        for name in ["USER", "LOGNAME"] where environment[name] != identity[name] {
+            if let value = identity[name] { setenv(name, value, 1) }
+        }
     }
 
     /// Raise the process's `RLIMIT_NOFILE` soft limit so every tmux server the
