@@ -341,12 +341,11 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("phone-relay: https://acme-relay.acme.workers.dev"))
     }
 
-    /// No loader is recorded as a default, so an unset loader URL reads "not
-    /// set" rather than naming a page nobody controls.
-    @Test func configGetPrintsTheLoaderURLOrNotSet() {
+    /// An unset loader URL reads as the default loader; a saved override wins.
+    @Test func configGetPrintsTheLoaderURLInEffect() {
         var config = Config()
-        #expect(Config.phoneLoaderURLDefault == nil)
-        #expect(ConfigGet.render(config).contains("phone-loader: not set"))
+        #expect(Config.phoneLoaderURLDefault == "https://tbd-phone.github.io/")
+        #expect(ConfigGet.render(config).contains("phone-loader: https://tbd-phone.github.io/"))
         config.phoneLoaderURL = "https://acme-loader.github.io/"
         #expect(ConfigGet.render(config).contains("phone-loader: https://acme-loader.github.io/"))
     }

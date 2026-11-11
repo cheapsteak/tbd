@@ -10,7 +10,7 @@ import TestSupport
 
 private let relayAddress = "https://acme-relay.acme.workers.dev"
 private let otherRelayAddress = "https://other-relay.acme.workers.dev"
-/// The loader URL the harness saves, because this build has no default.
+/// The loader URL override the harness saves, to tell it from the default.
 private let loaderAddress = "https://acme-loader.github.io/"
 
 /// What a TBD relay of this build answers `GET /v1/info` with.
@@ -302,8 +302,8 @@ private struct PhoneBridgeHarness: Sendable {
 ///   pairing notification goes.
 /// - `holdSends`: true puts a ``HoldingTransport`` between the bridge and the
 ///   relay, as `holdingTransport`.
-/// - `loaderURL`: the loader URL override to save; nil saves none, which
-///   leaves no loader URL, since this build records no default.
+/// - `loaderURL`: the loader URL override to save; nil saves none, so
+///   pairing uses `Config.phoneLoaderURLDefault`.
 /// - `bundleLoader`: how the bridge loads the phone app bundle; nil loads the
 ///   shipped one.
 private func withBridge(enabled: Bool = true, relayURL: String? = relayAddress,
@@ -418,23 +418,23 @@ struct PhoneBridgeTests {
         }
     }
 
-    @Test func withNoLoaderURLPairingIsRefusedAndOpensNoRoom() async throws {
+    @Test func withNoLoaderOverridePairingUsesTheDefaultLoader() async throws {
         try await withBridge(loaderURL: nil) { h in
             await h.bridge.reconcile()
-            await #expect(throws: PhoneBridgeError.loaderNotSetUp) { try await h.bridge.pairStart() }
-            let refused = try await h.bridge.status()
-            #expect(refused.pairing == nil)
-            #expect(refused.loaderURLOverride == nil)
-            #expect(h.relay.connectAttempts.isEmpty)
+            let started = try await h.bridge.pairStart()
+            let text = try #require(started.link)
+            #expect(text.hasPrefix(Config.phoneLoaderURLDefault + "#"))
+            #expect(try await h.bridge.status().loaderURLOverride == nil)
+        }
+    }
 
-            // Saving an override is all pairing needs.
-            try await h.db.config.setPhoneLoaderURL(loaderAddress)
+    @Test func aLoaderOverrideWinsOverTheDefaultInThePairingLink() async throws {
+        try await withBridge { h in
+            await h.bridge.reconcile()
             let started = try await h.bridge.pairStart()
             let text = try #require(started.link)
             #expect(text.hasPrefix(loaderAddress + "#"))
-            let paired = try await h.pairAPhone(named: "iPhone")
-            let rowIDs = try await h.db.phoneDevices.list().map(\.id)
-            #expect(rowIDs == [paired.device.id])
+            #expect(!text.hasPrefix(Config.phoneLoaderURLDefault))
         }
     }
 

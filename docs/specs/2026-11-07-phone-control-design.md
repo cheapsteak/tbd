@@ -829,9 +829,9 @@ Merging to `main` deploys the loader, and the loader holds the keys.
   - "Pair a Phone…", which opens a sheet with the QR code, the link as text, and a 5-minute
     countdown, then the Allow or Deny step with the code;
   - paired phones: name, date paired, last seen, and Revoke;
-  - an advanced field for the loader URL. Pairing needs a loader URL: the field's value, or the
-    default once `Config.phoneLoaderURLDefault` records one (section 11). With neither, "Pair a
-    Phone…" is disabled and says to set the field.
+  - an advanced field for the loader URL. Pairing uses the field's value, or
+    `Config.phoneLoaderURLDefault` while the field is blank (section 11). The field's placeholder
+    shows that default.
 - **App menu item** "Set Up Phone Relay…".
 - **Status-bar chip** "Phone connected", shown while any phone is connected, so the user always
   sees when a phone is in.
@@ -844,18 +844,19 @@ One `.sql` migration, the GRDB record changes, and the `TBDShared` model changes
   - `phone_control_enabled INTEGER` – resolved as `?? Config.phoneControlEnabledDefault`, which is
     `false`.
   - `phone_relay_url TEXT` – NULL means not set up.
-  - `phone_loader_url TEXT` – NULL resolves to `Config.phoneLoaderURLDefault`, the loader org's URL,
-    which is nil until the maintainer records it.
+  - `phone_loader_url TEXT` – NULL resolves to `Config.phoneLoaderURLDefault`, `https://tbd-phone.github.io/`,
+    the Pages site of the `tbd-phone` org.
 - **New table `phone_device`:** `id` (text, primary key), `name`, `public_key` (blob), `room_id`,
   `paired_at`, and `last_seen_at`. Revoke deletes the row. The shared model's fields are optional or
   have defaults, so older rows and payloads still decode.
 - **File:** `~/tbd/phone/laptop.key`, mode 0600 (section 2).
 
-The loader org's name is chosen when the maintainer creates it, and `Config.phoneLoaderURLDefault`
-records its URL. Until then there is no default: `phone.pairStart` refuses with "Set a loader URL in
-Settings → Phone → Advanced before pairing a phone.", and pairing needs the advanced field set. The
-default is never a name nobody holds, because whoever registered that name would serve the page
-that receives every pairing secret and the laptop's key.
+`Config.phoneLoaderURLDefault` is the URL of the loader org's Pages site, `https://tbd-phone.github.io/`,
+with the trailing slash. `PhoneURLValidation.loader` keeps a path as given, and the pairing link is
+that text plus `#p=...`. The default is always a name the project holds, never a guess, because
+whoever held an unclaimed name would serve the page that receives every pairing secret and the
+laptop's key. A user override replaces it, and clearing the override restores it, so a loader URL
+always resolves and `phone.pairStart` has no "no loader" refusal.
 
 ## 12. Who reclaims orphans
 

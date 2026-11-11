@@ -55,24 +55,19 @@ enum PhonePresentation {
         }
     }
 
-    /// The loader URL field's placeholder: an example address, never a real
-    /// loader's.
-    static let loaderURLPlaceholder = "https://acme-loader.github.io/"
+    /// The loader URL field's placeholder: the address used while the field
+    /// is blank.
+    static let loaderURLPlaceholder = Config.phoneLoaderURLDefault
     /// The loader URL field's help text.
-    static let loaderURLHelp = "The page your phone opens from the QR code. Pairing a phone needs one. "
-        + "Leave blank to clear it. Press Return to save."
-
-    /// The help text of a disabled "Pair a Phone…" when no loader URL
-    /// resolves. It matches the daemon's refusal of the same case.
-    static let loaderNotSetUpReason = "Set a loader URL in Settings → Phone → Advanced before pairing a phone."
+    static let loaderURLHelp = "The page your phone opens from the QR code. Leave blank to use TBD's default. "
+        + "Press Return to save."
 
     /// Whether "Pair a Phone…" can start an offer: phone control is on, the
-    /// bridge runs, a relay is set, the relay is usable, and a loader URL
-    /// resolves.
+    /// bridge runs, a relay is set, and the relay is usable.
     static func canPair(_ status: PhoneStatusResult?) -> Bool {
         guard let status else { return false }
         return status.enabled && status.running && status.relayURL != nil
-            && status.relay.state != .incompatible && hasLoaderURL(status)
+            && status.relay.state != .incompatible
     }
 
     /// Why "Pair a Phone…" is disabled, for its help text; nil when it is not.
@@ -80,18 +75,11 @@ enum PhonePresentation {
         guard let status else { return "Phone control's status is not available yet." }
         if !status.enabled { return "Turn on phone control first." }
         if status.relayURL == nil { return "Set up a phone relay first." }
-        if !hasLoaderURL(status) { return loaderNotSetUpReason }
         if status.relay.state == .incompatible {
             return "This relay is not usable. Set up a phone relay again."
         }
         if !status.running { return status.problem ?? "Phone control is not running." }
         return nil
-    }
-
-    /// Whether a loader URL resolves for `status`: the saved override, else
-    /// this build's default, which is nil until the loader org is recorded.
-    private static func hasLoaderURL(_ status: PhoneStatusResult) -> Bool {
-        Config.resolvePhoneLoaderURL(override: status.loaderURLOverride) != nil
     }
 
     /// The time an offer has left, as "m:ss", floored at "0:00".
