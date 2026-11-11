@@ -22,6 +22,7 @@
 
 import type { AppClient } from '../client/client.ts';
 import type { HostLink } from '../host.ts';
+import type { RouteHistory } from '../state/history.ts';
 import type { Store } from '../state/store.ts';
 import { promptActions } from './prompts.ts';
 import { sheetActions } from './sheets.ts';
@@ -32,6 +33,11 @@ export interface ActionContext {
   store: Store;
   client: Pick<AppClient, 'request' | 'stream' | 'lastSeq'>;
   link: Pick<HostLink, 'openLink'>;
+  /**
+   * The app's entries in the browser's history. The shell's navigation adds and rewrites them,
+   * and `main.tsx` passes the browser's moves between them to `onPopState`.
+   */
+  routeHistory: Pick<RouteHistory, 'push' | 'replace' | 'stepBack'>;
   /** The time in milliseconds, for anything that ages. */
   now: () => number;
 }

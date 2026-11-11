@@ -297,7 +297,7 @@ test('a session whose row has not arrived yet shows the back button, which goes 
     stream: null, lastSeq: null,
     request: (/** @type {string} */ method) => new Promise((resolve) => { sent.push({ method, resolve }); }),
   };
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: { push() {}, replace() {}, stepBack: () => false }, now: () => 0 });
   for (const name of ['openTranscript', 'closeTranscript', 'resumeTranscriptOnUp']) actions[name] = () => {};
 
   // The user opens W1's session. The channel drops, and the next snapshot, a new stream's, holds

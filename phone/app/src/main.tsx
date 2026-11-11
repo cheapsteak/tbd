@@ -16,6 +16,7 @@ import { AppClient } from './client/client.ts';
 import { applyTheme } from './env.ts';
 import { HostLink, readHost } from './host.ts';
 import { AppContext } from './state/context.tsx';
+import { RouteHistory, windowHistory } from './state/history.ts';
 import { createStore } from './state/store.ts';
 import { applyStyles } from './styles/apply.ts';
 
@@ -27,6 +28,8 @@ root.id = 'app';
 document.body.append(root);
 
 const store = createStore();
+// The frame's current history entry becomes the app's first, showing the route the app starts on.
+const routeHistory = new RouteHistory(windowHistory(window), store.get().ui.route);
 
 // The client, the actions and the link each need another of them. The link goes last, because
 // its constructor starts the port, and messages the loader queued begin to arrive then. So the
@@ -47,9 +50,13 @@ actions = createActions({
   store,
   client,
   link: { openLink: (url) => link.openLink(url) },
+  routeHistory,
   // Wall time, because the ages the app shows are measured from the laptop's Unix timestamps.
   now: () => Date.now(),
 });
+
+// The browser's back and forward buttons, and `back`, move between the app's entries.
+routeHistory.onPop((route) => actions.onPopState(route));
 
 link = new HostLink(host.port, {
   onApp: (body) => client.handle({ t: 'app', body }),

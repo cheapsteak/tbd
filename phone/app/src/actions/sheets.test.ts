@@ -21,6 +21,10 @@ import {
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState, SheetState } from '../state/store.ts';
 import { createActions } from './index.ts';
+import type { ActionContext } from './index.ts';
+
+/** A browser history that records nothing: these tests never move between its entries. */
+const NO_HISTORY: ActionContext['routeHistory'] = { push() {}, replace() {}, stepBack: () => false };
 
 const CAN: PhoneCapability = { available: true };
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
@@ -71,7 +75,7 @@ async function harness(options: { sessions?: PhoneSession[]; profiles?: PhonePro
     },
   };
   const store = createStore({ ...initialState(), sessions: applySnapshot(snapshot(options.sessions)) });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: NO_HISTORY, now: () => 0 });
   const of = (method: Method): Sent[] => sent.filter((s) => s.method === method);
   const last = (method: Method): Sent => {
     const found = of(method).at(-1);

@@ -24,6 +24,8 @@
 // - `setReply(method, reply | (params, state) => reply | null)`, `hold(name)`,
 //   `release(name)`: see fake-laptop-app.js. `state`: what the laptop holds.
 // - `setChannel(up)`: the channel comes up (a new connection) or goes down.
+// - `replaceFrame()`: a new app frame takes the old one's place on a new connection, as the
+//   loader's does when a new bundle arrives.
 // - `setSendResult('sent' | 'tooLarge')`: what the loader answers each later send that fits a
 //   frame while the channel is up. It refuses `offline`, which the loader answers only while the
 //   channel is down, to every send: a test takes the channel down with `setChannel(false)`.
@@ -84,19 +86,7 @@ if (!bundle.ok) throw new Error(`TBD app host: app.js answered ${bundle.status}`
 const bundleBytes = new Uint8Array(await bundle.arrayBuffer());
 const sha256 = await sha256Hex(bundleBytes);
 const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bundleBytes);
-frame = new AppFrame({
-  host: frameHost,
-  runnerURL: `${location.origin}/runner.html`,
-  text,
-  sha256,
-  sendApp,
-  onOpenLink: (url) => links.push(url),
-  onFault: (reason) => {
-    faults.push(reason);
-    console.error(`TBD app host: the app frame failed: ${reason}`);
-  },
-  visibility: alwaysVisible,
-});
+frame = makeFrame();
 drawStrip();
 postEnv();
 
@@ -121,6 +111,7 @@ Object.defineProperty(window, '__host', {
     hold: laptop.hold,
     release: laptop.release,
     setChannel,
+    replaceFrame,
     setSendResult,
     sendEnv,
     loadScenario,
@@ -150,6 +141,38 @@ function sendApp(body) {
     laptop.handle(sent, connection);
   }, 0);
   return 'sent';
+}
+
+/** A new app frame in `#frame-host`, running the bundle, as the loader makes one (`#onBundle`). */
+function makeFrame() {
+  return new AppFrame({
+    host: frameHost,
+    runnerURL: `${location.origin}/runner.html`,
+    text,
+    sha256,
+    sendApp,
+    onOpenLink: (url) => links.push(url),
+    onFault: (reason) => {
+      faults.push(reason);
+      console.error(`TBD app host: the app frame failed: ${reason}`);
+    },
+    visibility: alwaysVisible,
+  });
+}
+
+/**
+ * Replaces the app frame with a new one, as the loader does when a new bundle arrives
+ * (`#onBundle` in phone/loader/main.js): the old frame and its connection end, and the new
+ * frame starts the bundle and comes up on a new connection.
+ */
+function replaceFrame() {
+  if (frame === null) return;
+  setChannel(false);
+  frame.destroy();
+  frame = makeFrame();
+  lastEnvKey = null;
+  postEnv();
+  setChannel(true);
 }
 
 /** @param {boolean} next */
