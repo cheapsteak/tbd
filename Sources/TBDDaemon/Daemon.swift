@@ -1028,11 +1028,18 @@ public final class Daemon: Sendable {
         let tmux = TmuxManager()
         let hooks = HookResolver()
         let configDirManager = ClaudeProfileConfigDirManager()
+        // On-demand Fable availability: probes run only when a Fable spawn or
+        // `tbd profile fable-check` asks, never on a timer.
+        let fableAvailability = FableAvailabilityStore(
+            probe: FableProbeRunner.live(
+                profiles: database.modelProfiles, repos: database.repos,
+                config: database.config, configDirManager: configDirManager))
         let profilePoolCandidateSource = ProfilePoolCandidateSource(
             profiles: database.modelProfiles,
             snapshots: database.oauthUsageSnapshots,
             terminals: database.terminals,
-            loginIdentity: { configDirManager.loginIdentity(forProfileID: $0) }
+            loginIdentity: { configDirManager.loginIdentity(forProfileID: $0) },
+            fable: fableAvailability
         )
         // One reservation ledger for the whole daemon: the lifecycle and the
         // router hold copies of this resolver, and a balanced pick is only
@@ -1048,7 +1055,8 @@ public final class Daemon: Sendable {
             staleAlerts: StaleAccountAlerts(
                 notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs)),
             fallbackAlerts: BalancingFallbackAlerts(
-                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
+                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs)),
+            fable: fableAvailability
         )
         let pendingQuestions = PendingPromptStore()
 

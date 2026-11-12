@@ -442,4 +442,53 @@ struct ModelProfileResolverTests {
         #expect(result?.profileID == global.id)
         #expect(result?.secret == "secret-global")
     }
+
+    // MARK: - Fable
+
+    private func fableHarness(
+        out: Bool
+    ) async throws -> (ModelProfileResolver, ModelProfile) {
+        let db = try TBDDatabase(inMemory: true)
+        let profile = try await db.modelProfiles.create(name: "Acct", kind: .oauth)
+        try await db.config.setDefaultProfileID(profile.id)
+        let probes = Probes()
+        let store = FableAvailabilityStore(probe: { id in
+            probes.count += 1
+            return FableAvailability(
+                state: out ? .out : .available, reason: nil, checkedAt: Date(), source: .probe)
+        })
+        let resolver = ModelProfileResolver(
+            profiles: db.modelProfiles, repos: db.repos, config: db.config,
+            keychain: { _ in nil }, fable: store)
+        return (resolver, profile)
+    }
+
+    final class Probes: @unchecked Sendable { var count = 0 }
+
+    @Test func fableRequest_defaultProfileOut_throwsNamingIt_notFallingBack() async throws {
+        let (resolver, profile) = try await fableHarness(out: true)
+        await #expect(throws: FableUnavailableError(profileNames: [profile.name])) {
+            _ = try await resolver.resolve(repoID: nil, model: "fable")
+        }
+        await #expect(throws: FableUnavailableError.self) {
+            _ = try await resolver.resolve(repoID: nil, model: "claude-fable-5-2")
+        }
+    }
+
+    @Test func nonFableRequest_defaultProfileOut_isUnaffected() async throws {
+        let (resolver, profile) = try await fableHarness(out: true)
+        #expect(try await resolver.resolve(repoID: nil, model: "opus")?.profileID == profile.id)
+        #expect(try await resolver.resolve(repoID: nil)?.profileID == profile.id)
+    }
+
+    @Test func fableRequest_defaultProfileAvailable_resolves() async throws {
+        let (resolver, profile) = try await fableHarness(out: false)
+        #expect(try await resolver.resolve(repoID: nil, model: "fable")?.profileID == profile.id)
+    }
+
+    @Test func fableError_namesProfiles_andDoesNotOfferAnotherModel() {
+        let text = FableUnavailableError(profileNames: ["A", "B"]).localizedDescription
+        #expect(text.contains("A, B"))
+        #expect(text.contains("did not start the session on another model"))
+    }
 }

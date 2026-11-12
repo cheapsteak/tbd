@@ -61,6 +61,23 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     }
 }
 
+/// A Fable spawn found no account it may run on: every profile balancing
+/// could have used is out of Fable usage credits. The spawn fails with this
+/// rather than quietly running another model or an out account.
+public struct FableUnavailableError: LocalizedError, Sendable, Equatable {
+    /// The profiles that were out, by name.
+    public let profileNames: [String]
+
+    public init(profileNames: [String]) { self.profileNames = profileNames }
+
+    public var errorDescription: String? {
+        let tried = profileNames.isEmpty ? "no profile" : profileNames.joined(separator: ", ")
+        return "Fable is out of usage credits on every account tried (\(tried)). "
+            + "TBD did not start the session on another model. Add usage credits, wait for "
+            + "them to renew, or choose another model."
+    }
+}
+
 public struct ModelProfileResolver: Sendable {
     let profiles: ModelProfileStore
     let repos: RepoStore
@@ -80,6 +97,14 @@ public struct ModelProfileResolver: Sendable {
     /// single shared instance, so the per-episode latch holds across spawns.
     let fallbackAlerts: BalancingFallbackAlerts?
     let now: @Sendable () -> Date
+    /// Latest Fable readings and the on-demand probe. Nil means a Fable spawn
+    /// is balanced like any other (nothing is known to be out).
+    let fable: FableAvailabilityStore?
+
+    /// How long a Fable spawn waits for probes of unchecked profiles before it
+    /// places the session on what it knows. A profile still unchecked then is
+    /// eligible but unverified.
+    static let fableProbeDeadline: TimeInterval = 45
 
     public init(
         profiles: ModelProfileStore,
@@ -90,8 +115,10 @@ public struct ModelProfileResolver: Sendable {
         reservations: ProfilePickReservations? = nil,
         staleAlerts: StaleAccountAlerts? = nil,
         fallbackAlerts: BalancingFallbackAlerts? = nil,
-        now: @Sendable @escaping () -> Date = { Date() }
+        now: @Sendable @escaping () -> Date = { Date() },
+        fable: FableAvailabilityStore? = nil
     ) {
+        self.fable = fable
         self.profiles = profiles
         self.repos = repos
         self.config = config
@@ -110,11 +137,14 @@ public struct ModelProfileResolver: Sendable {
     /// profiles carry no TBD-stored secret and always succeed if the row
     /// exists; an .oauthToken profile carries one but still resolves without
     /// it (see `loadResolved`).
-    public func loadByID(_ id: UUID) async throws -> ResolvedModelProfile? {
-        try await loadResolved(id: id)
+    ///
+    /// `touchLastUsed: false` is for a read that is not a use of the profile
+    /// (a Fable probe), so it does not move the profile's last-used time.
+    public func loadByID(_ id: UUID, touchLastUsed: Bool = true) async throws -> ResolvedModelProfile? {
+        try await loadResolved(id: id, touchLastUsed: touchLastUsed)
     }
 
-    private func loadResolved(id: UUID) async throws -> ResolvedModelProfile? {
+    private func loadResolved(id: UUID, touchLastUsed: Bool = true) async throws -> ResolvedModelProfile? {
         guard let row = try await profiles.get(id: id) else { return nil }
 
         let secret: String?
@@ -143,7 +173,7 @@ public struct ModelProfileResolver: Sendable {
             secret = nil   // no TBD-stored secret
         }
 
-        try await profiles.touchLastUsed(id: row.id)
+        if touchLastUsed { try await profiles.touchLastUsed(id: row.id) }
         return ResolvedModelProfile(
             profileID: row.id,
             name: row.name,
@@ -207,8 +237,15 @@ public struct ModelProfileResolver: Sendable {
         repoID: UUID?,
         override overrideID: UUID? = nil,
         balance: Bool = true,
-        worktreeID: UUID? = nil
+        worktreeID: UUID? = nil,
+        model: String? = nil
     ) async throws -> ResolvedModelProfile? {
+        // A spawn that asks for a Fable model (`model` is the per-spawn
+        // request) is never balanced onto a profile known to be out of Fable
+        // credits, and throws `FableUnavailableError` rather than land on one.
+        // An explicit pin (steps 0 to 1.5) is the person's choice and is not
+        // second-guessed.
+        let requiresFable = FableModel.isFable(model) && fable != nil
         // Step 0: explicit per-creation override — highest priority. If the
         // row/keychain is missing we log and fall through to the normal chain
         // rather than fail the spawn.
@@ -248,6 +285,7 @@ public struct ModelProfileResolver: Sendable {
             do {
                 let candidates: [ProfilePoolCandidate]
                 let decision: ProfilePoolDecision
+                if requiresFable { await probeFablePool(source: source, defaultProfileID: cfg.defaultProfileID) }
                 let pickTime = now()
                 if let reservations {
                     // Every read happens first, and then one non-suspending
@@ -256,7 +294,8 @@ public struct ModelProfileResolver: Sendable {
                     // terminal row exists.
                     let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
                     let outcome = await reservations.pickAndReserve(
-                        candidates: stored, pickTime: pickTime, policy: policy)
+                        candidates: stored, pickTime: pickTime, policy: policy,
+                        requiresFable: requiresFable)
                     candidates = outcome.candidates
                     decision = outcome.decision
                     reservationID = outcome.reservationID
@@ -266,8 +305,24 @@ public struct ModelProfileResolver: Sendable {
                         candidates: candidates,
                         excludingAccountKeys: [],
                         now: pickTime,
-                        policy: policy
+                        policy: policy,
+                        requiresFable: requiresFable
                     )
+                }
+
+                // Every candidate the pick could use is out of Fable credits:
+                // fail plainly, naming them.
+                if requiresFable, decision.chosen == nil, decision.fallback == nil {
+                    var names: [String] = []
+                    for candidate in candidates where decision.verdicts[candidate.profileID] == .fableOut {
+                        if let name = try? await profiles.get(id: candidate.profileID)?.name {
+                            names.append(name)
+                        }
+                    }
+                    if !names.isEmpty {
+                        if let reservationID, let reservations { await reservations.release(reservationID) }
+                        throw FableUnavailableError(profileNames: names.sorted())
+                    }
                 }
 
                 // Tell the person about any account skipped for a stale
@@ -328,6 +383,8 @@ public struct ModelProfileResolver: Sendable {
                                     reason = "noFreshReading"
                                 case .exhausted:
                                     reason = "exhausted"
+                                case .fableOut:
+                                    reason = "fableOut"
                                 }
                                 logger.debug("rejected candidate \(candidate.profileID, privacy: .public): \(reason)")
                             }
@@ -351,6 +408,8 @@ public struct ModelProfileResolver: Sendable {
                 } else {
                     logger.info("balancing found no candidate in the pool; falling back to default")
                 }
+            } catch let error as FableUnavailableError {
+                throw error
             } catch {
                 // Either the candidate source or loading the chosen profile
                 // (its keychain read) can throw here; the log names both.
@@ -365,6 +424,15 @@ public struct ModelProfileResolver: Sendable {
 
         // Fallback to step 2 / step 3: global default or nothing.
         if let defaultID = cfg.defaultProfileID {
+            if requiresFable, let fable {
+                // The default is a place the session may land too; it is not
+                // exempt from the Fable rule. Probe it if it is unchecked.
+                _ = await fable.refresh([defaultID], deadline: Self.fableProbeDeadline)
+                if let reading = await fable.current(defaultID), reading.isOut(now: now()) {
+                    let name = (try? await profiles.get(id: defaultID)?.name) ?? defaultID.uuidString
+                    throw FableUnavailableError(profileNames: [name])
+                }
+            }
             if let resolved = try await loadResolved(id: defaultID) {
                 return resolved
             }
@@ -374,5 +442,18 @@ public struct ModelProfileResolver: Sendable {
 
         // Step 3: nothing applies.
         return nil
+    }
+
+    /// Probe every pool profile whose Fable reading is missing or past its
+    /// TTL, waiting at most `fableProbeDeadline`. Best effort: a profile still
+    /// unchecked afterwards stays eligible, unverified.
+    private func probeFablePool(source: ProfilePoolCandidateSource, defaultProfileID: UUID?) async {
+        guard let fable,
+              let candidates = try? await source.candidates(defaultProfileID: defaultProfileID)
+        else { return }
+        let ids = candidates
+            .filter { ($0.kind == .oauth || $0.kind == .oauthToken) && $0.hasCredential && !$0.poolOptOut }
+            .map(\.profileID)
+        await fable.refresh(ids, deadline: Self.fableProbeDeadline)
     }
 }

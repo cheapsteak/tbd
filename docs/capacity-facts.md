@@ -18,6 +18,14 @@ are public, documented, and stable. That is what this document states.
 
 - **`tbd profile list --json`** – the versioned capacity envelope: every model
   profile, its login identity, and its usage snapshot. This is the contract.
+- **`tbd profile list --json`, `fable`** – per profile, when the daemon has
+  ever checked: `fable: {state, reason, checkedAt, source}`, where `state` is
+  `available`, `out` or `unknown`. Absent means never checked. Additive: the
+  schema version is unchanged. Fable has its own meter, so a profile with
+  window headroom can still be `out`; see
+  [`specs/2026-11-11-fable-availability-design.md`](specs/2026-11-11-fable-availability-design.md).
+  `tbd profile fable-check [NAME...]` and `tbd profile list --refresh-fable`
+  force a fresh probe.
 - **`tbd profile list --json --refresh`** – the same, after asking the daemon
   to refresh usage for stale logged-in OAuth profiles first. Fresh profiles
   and rate-limited ones are skipped, so `--refresh` is not a way to force a
