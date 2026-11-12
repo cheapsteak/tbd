@@ -652,6 +652,7 @@ public final class GhosttyTerminalView: NSView {
         inputController.view = self
         mouseController.attach(to: self)
         terminal.apply(appearance)
+        surface.selectionColor = appearance.selectionTint
         updateDrawableSize()
     }
 
@@ -705,13 +706,15 @@ public final class GhosttyTerminalView: NSView {
     // MARK: - Appearance
 
     /// Applies new colours, cursor, font and stroke weight. What is on screen stays; the terminal's
-    /// default colours change under any a program set, and a new font or stroke weight rebuilds the
-    /// glyph atlas and re-fits the grid.
+    /// default colours change under any a program set, a new selection colour repaints the
+    /// selected cells, and a new font or stroke weight rebuilds the glyph atlas and re-fits the
+    /// grid.
     public func apply(_ appearance: GhosttyAppearance) {
         let glyphsChanged = appearance.font != terminalAppearance.font
             || appearance.thinStrokes != terminalAppearance.thinStrokes
         terminalAppearance = appearance
         terminal.apply(appearance)
+        surface.selectionColor = appearance.selectionTint
         if glyphsChanged {
             useRenderContext(font: appearance.font, thicken: !appearance.thinStrokes, scale: renderContext.scale)
         }

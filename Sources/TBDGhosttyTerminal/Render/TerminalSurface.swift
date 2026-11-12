@@ -149,7 +149,20 @@ final class TerminalSurface {
     /// `FrameBuilder.update`. `.max` until the first update, so the first tick always rebuilds.
     private(set) var atlasRebuildStamp = SIMD2<UInt64>(repeating: .max)
 
+    /// The `selectionColor` the row caches were built with. A difference means every selected
+    /// cell is painted in an old tint and every row must be rebuilt — see `FrameBuilder.update`.
+    /// Nil until the first update.
+    private(set) var rowsSelectionColor: UInt32?
+
     // MARK: Overlay state (owned by the view, not by libghostty)
+
+    /// The tint composited over each selected cell's background, packed RGBA with straight alpha:
+    /// the appearance's selection colour at full alpha, or `FrameBuilder.defaultSelectionColor`.
+    /// The one colour the terminal cannot carry, so the view sets it here, and a change rebuilds
+    /// every row on the next frame.
+    var selectionColor: UInt32 = FrameBuilder.defaultSelectionColor {
+        didSet { if selectionColor != oldValue { markNeedsDisplay() } }
+    }
 
     /// Cursor blink phase. `false` hides the cursor without touching a single row cache.
     var cursorBlinkOn: Bool = true {
@@ -233,6 +246,7 @@ final class TerminalSurface {
         scrollMetrics = .empty
         metrics = nil
         atlasRebuildStamp = SIMD2<UInt64>(repeating: .max)
+        rowsSelectionColor = nil
         needsDisplay = false
         lastDirty = .none
         lastRowsRebuilt = 0
@@ -283,6 +297,7 @@ final class TerminalSurface {
     func setCursor(_ value: SurfaceCursorState) { cursor = value }
     func setMetrics(_ value: CellMetrics) { metrics = value }
     func setAtlasRebuildStamp(_ value: SIMD2<UInt64>) { atlasRebuildStamp = value }
+    func setRowsSelectionColor(_ value: UInt32) { rowsSelectionColor = value }
 
     /// Takes a rebuilt row's instances.
     ///
