@@ -3,9 +3,9 @@ import SwiftTerm
 import TBDGhosttyTerminal
 
 /// The libghostty appearance that matches what `TBDTerminalView` draws from the same settings:
-/// the font, the thin-strokes choice, the scheme's foreground, background, cursor and sixteen ANSI
-/// colours, and the cursor style. Entries 16 to 255 of the palette stay libghostty's xterm colours,
-/// as SwiftTerm keeps its own.
+/// the font, the thin-strokes choice, the scheme's foreground, background, cursor, selection and
+/// sixteen ANSI colours, and the cursor style. Entries 16 to 255 of the palette stay libghostty's
+/// xterm colours, as SwiftTerm keeps its own.
 ///
 /// `thinStrokes` is the same switch on both engines. SwiftTerm turns CoreGraphics font smoothing
 /// off for it; libghostty, which rasterizes its own glyphs, leaves out the stem darkening that
@@ -24,6 +24,7 @@ extension GhosttyAppearance {
             foreground: RGB(scheme.foreground),
             background: RGB(scheme.background),
             cursor: RGB(scheme.cursor),
+            selection: RGB(scheme.selection),
             palette: palette,
             cursorStyle: cursor.style,
             cursorBlink: cursor.blinks,

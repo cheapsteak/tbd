@@ -91,12 +91,6 @@ final class TerminalRenderer {
     let glyphCache: GlyphCache
     let frameBuilder: FrameBuilder
 
-    /// The selection tint, packed RGBA with straight alpha. See `FrameBuilder.selectionColor`.
-    var selectionColor: UInt32 {
-        get { frameBuilder.selectionColor }
-        set { frameBuilder.selectionColor = newValue }
-    }
-
     /// `TkzUniforms.minContrast`: the WCAG contrast ratio a program-coloured glyph is pushed to.
     /// 1 turns the fix off.
     var minimumContrast: Float = 1

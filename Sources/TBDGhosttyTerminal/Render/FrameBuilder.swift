@@ -60,13 +60,10 @@ struct FrameUpdate: Sendable, Hashable {
 /// One per renderer (it owns the shared `GlyphCache`); not `Sendable`, lives on the main thread.
 final class FrameBuilder {
     let glyphCache: GlyphCache
-    /// The selection tint, packed RGBA with straight alpha, composited over each selected cell's
-    /// background. The one colour the terminal itself cannot express: every other colour comes
-    /// from the render state, which already carries the appearance the terminal was given plus
-    /// anything OSC changed at runtime.
-    var selectionColor: UInt32 = FrameBuilder.defaultSelectionColor
 
-    /// White at 20%.
+    /// The selection tint of an appearance with no selection colour: white at 20%, packed RGBA
+    /// with straight alpha. Each surface carries its own tint (`TerminalSurface.selectionColor`),
+    /// because views that share this builder need not share a theme.
     static let defaultSelectionColor: UInt32 = 0x33FF_FFFF
 
     /// When true, glyphs coloured by the *program* opt into the shader's min-contrast fix.
@@ -147,7 +144,10 @@ final class FrameBuilder {
         // been packed there since, and its next frame — a blink, a cursor move — would draw that. So
         // a stale stamp falls through to the full rebuild below instead of returning here.
         let atlasIsStale = surface.atlasRebuildStamp != atlasRebuildStamp
-        guard dirty != .none || atlasIsStale else {
+        // Selected cells keep the tint their row was built with. libghostty does not know the tint,
+        // so a new one, from a theme change, dirties nothing there, and every row is rebuilt here.
+        let selectionTintIsStale = surface.rowsSelectionColor != surface.selectionColor
+        guard dirty != .none || atlasIsStale || selectionTintIsStale else {
             // libghostty's dirty flag tracks *cells*. A cursor that only moved — a space echoed
             // onto a blank cell, a bare cursor-motion sequence — leaves every row clean, and the
             // cursor would stay drawn where it was until the next real change (GUI pass
@@ -195,7 +195,7 @@ final class FrameBuilder {
         // check compares with the stamp the loop started from, not the surface's: the surface's is
         // still the stale one when the first check forced the loop, and would force a second pass.
         var effectiveDirty = dirty
-        if atlasIsStale {
+        if atlasIsStale || selectionTintIsStale {
             effectiveDirty = .full
         }
         let stampBeforeRows = atlasRebuildStamp
@@ -208,6 +208,7 @@ final class FrameBuilder {
             rowsRebuilt += try iterateRows(rs, surface: surface, colors: colors, forceFull: true)
         }
         surface.setAtlasRebuildStamp(atlasRebuildStamp)
+        surface.setRowsSelectionColor(surface.selectionColor)
 
         // (5) Both dirty layers, consumed in one call.
         try renderCheck(ghostty_render_state_clean(rs), "ghostty_render_state_clean")
@@ -414,7 +415,7 @@ final class FrameBuilder {
         }
 
         if selected {
-            background = composite(selectionColor, over: background ?? colors.background)
+            background = composite(surface.selectionColor, over: background ?? colors.background)
         }
 
         surface.setBackground(column: column, row: row, color: background ?? 0)
