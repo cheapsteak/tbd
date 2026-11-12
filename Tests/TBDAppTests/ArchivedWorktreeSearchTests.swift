@@ -502,3 +502,30 @@ struct SearchQueryDebouncerTests {
         #expect(fired.values == ["wolv", "otter"])
     }
 }
+
+/// Tier 1: archive snapshots outrank transient Claude-only file counts.
+@Suite struct ArchivedAgentSessionCountTests {
+    @Test(arguments: [0, 1, 2])
+    func providerSnapshotIsAuthoritative(count: Int) {
+        var worktree = Worktree(repoID: nil, name: "acme", displayName: "Acme",
+            branch: "main", path: "/tmp/acme", tmuxServer: "srv")
+        worktree.liveClaudeSessionCount = 9
+        worktree.archivedClaudeSessions = ["legacy"]
+        worktree.archivedAgentTabs = (0..<count).map {
+            ArchivedAgentTab(identity: .init(agentKind: .codex, sessionID: "thread-\($0)"),
+                ordinal: $0, isPrimary: $0 == 0)
+        }
+        #expect(ArchivedRow(worktree: worktree, reviveState: nil).effectiveSessionCount == count)
+    }
+
+    @Test func oldArchivesRetainLiveAndStoredClaudeFallbacks() {
+        var worktree = Worktree(repoID: nil, name: "acme", displayName: "Acme",
+            branch: "main", path: "/tmp/acme", tmuxServer: "srv")
+        worktree.archivedClaudeSessions = ["first", "second"]
+        #expect(ArchivedRow(worktree: worktree, reviveState: nil).effectiveSessionCount == 2)
+        worktree.liveClaudeSessionCount = 3
+        #expect(ArchivedRow(worktree: worktree, reviveState: nil).effectiveSessionCount == 3)
+        worktree.liveClaudeSessionCount = 0
+        #expect(ArchivedRow(worktree: worktree, reviveState: nil).effectiveSessionCount == 0)
+    }
+}

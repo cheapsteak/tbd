@@ -127,7 +127,8 @@ extension RPCRouter {
 
     func handleTerminalCreate(
         _ paramsData: Data, actor: ActuationActor? = nil,
-        requiresCodexHome: Bool = false
+        requiresCodexHome: Bool = false,
+        codexResumeThreadID: String? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
 
@@ -421,7 +422,8 @@ extension RPCRouter {
                         tmuxServer: currentWorktree.tmuxServer,
                         workingDirectory: currentWorktree.path,
                         command: CodexSpawnCommandBuilder.build(
-                            initialPrompt: params.prompt,
+                            initialPrompt: codexResumeThreadID == nil ? params.prompt : nil,
+                            resumeThreadID: codexResumeThreadID,
                             executablePath: codexPreparation.executablePath,
                             model: params.model,
                             disabledFeatures: codexDisabledFeatures),
@@ -430,7 +432,7 @@ extension RPCRouter {
                         cols: resolvedCols,
                         rows: resolvedRows,
                         label: TerminalLabel.codex,
-                        claudeSessionID: nil,
+                        claudeSessionID: codexResumeThreadID,
                         profileID: nil,
                         kind: .codex,
                         transport: decidedTransport,
@@ -6112,6 +6114,16 @@ extension RPCRouter {
             ? observedTranscriptBoundary(atAbsolutePath: effectiveTranscriptPath)
             : nil
 
+        let catalogEvidence: AcceptedSessionCatalogEvidence?
+        if terminal.kind == .claude {
+            catalogEvidence = .claude
+        } else if terminal.kind == .codex, let path = effectiveTranscriptPath,
+                  case let .topLevel(proof) = CodexRolloutProvenance.classify(path: path) {
+            catalogEvidence = .codex(proof)
+        } else {
+            catalogEvidence = nil
+        }
+
         // Codex session identity is reconciled on its own ordering rail; other
         // agent kinds keep last-writer session identity. Neither writes
         // activity: the agent reports that itself.
@@ -6122,6 +6134,7 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath,
             observedTranscriptBoundary: observedTranscriptBoundary,
+            catalogEvidence: catalogEvidence,
             observedAt: observedAt
         ) else { return .ok() }
 

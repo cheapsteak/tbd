@@ -75,7 +75,7 @@ struct HistoryPaneView: View {
 
     private var selectedSummary: SessionSummary? {
         guard let sid = selectedSessionID else { return nil }
-        return loadState.currentSessions.first { $0.sessionId == sid }
+        return loadState.currentSessions.first { $0.id == sid }
     }
 
     private var closedTerminals: [TerminalHistoryEntry] {
@@ -121,7 +121,6 @@ struct HistoryPaneView: View {
                 ClosedTerminalDetailView(entry: entry, worktreeID: worktreeID)
             } else if let summary = selectedSummary {
                 SessionTranscriptView(
-                    sessionId: summary.sessionId,
                     worktreeID: worktreeID,
                     summary: summary,
                     action: transcriptAction
@@ -148,7 +147,7 @@ struct HistoryPaneView: View {
         } else {
             List {
                 ForEach(sessions) { summary in
-                    SessionRowView(summary: summary, isSelected: selectedSessionID == summary.sessionId)
+                    SessionRowView(summary: summary, isSelected: selectedSessionID == summary.id)
                         .contentShape(Rectangle())
                         .onTapGesture {
                             Task { await appState.selectSession(summary, worktreeID: worktreeID) }
@@ -161,7 +160,7 @@ struct HistoryPaneView: View {
                         }
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                         .listRowBackground(
-                            selectedSessionID == summary.sessionId
+                            selectedSessionID == summary.id
                                 ? Color.accentColor.opacity(0.15)
                                 : Color.clear
                         )
@@ -273,8 +272,8 @@ private struct HistoryHeaderRow: View {
         default: wasRefresh = false
         }
         if wasRefresh {
-            let existingIDs = Set(oldState.currentSessions.map(\.sessionId))
-            let newCount = fresh.filter { !existingIDs.contains($0.sessionId) }.count
+            let existingIDs = Set(oldState.currentSessions.map(\.id))
+            let newCount = fresh.filter { !existingIDs.contains($0.id) }.count
             statusMessage = newCount > 0
                 ? "↑ \(newCount) new session\(newCount == 1 ? "" : "s")"
                 : "Up to date"
@@ -327,6 +326,13 @@ private struct SessionRowView: View {
     @ViewBuilder
     private var metadataLine: some View {
         HStack(spacing: 4) {
+            if summary.identity.agentKind == .codex {
+                Text("Codex")
+                    .font(.system(size: 9, weight: .medium))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+            }
             Text("\(summary.lineCount.formatted()) events")
             separator
             Text(summary.fileSize.formattedFileSize)
@@ -353,7 +359,7 @@ private struct SessionRowView: View {
 // MARK: - SessionTranscriptView
 
 struct SessionTranscriptView: View {
-    let sessionId: String
+    private var sessionId: String { summary.id }
     let worktreeID: UUID
     let summary: SessionSummary
     let action: TranscriptAction
@@ -414,22 +420,8 @@ struct SessionTranscriptView: View {
     /// One resolution memo per pane. See `TableTranscriptPaneView.linkCache`.
     @State private var historyLinkCache = TranscriptLinkResolverCache()
 
-    /// Session History never shows the session mod's provisional rows.
-    ///
-    /// It reads the same `AppState.sessionTranscripts` store the live pane
-    /// publishes into, and a session listed here can be the very one a live
-    /// pane is streaming — the history list enumerates the worktree's JSONL
-    /// files, the current session's included, and `selectSession` deliberately
-    /// reuses whatever the store already holds rather than refetching. So the
-    /// rows are excluded here rather than merely absent by construction: this
-    /// is a record of what the session *was*, and an unconfirmed row that may
-    /// still be withdrawn does not belong in it.
-    ///
-    /// The transcript overlay needs no equivalent: it resolves an item by the
-    /// id a row handed it, and neither an assistant chat bubble nor a
-    /// provisional thinking row offers the overlay (see
-    /// `TableTranscriptView.bubbleView` and `ActivityRowFormatter`), so no
-    /// gesture can name a provisional row.
+    /// History uses provider-qualified cache entries. Provisional live rows
+    /// are excluded if another producer has included them in a snapshot.
     private var messages: [TranscriptItem] {
         ProvisionalRowComposer.settledOnly(appState.sessionTranscripts[sessionId] ?? [])
     }
@@ -464,7 +456,7 @@ struct SessionTranscriptView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
-                    Text(String(sessionId.prefix(8)))
+                    Text(String(summary.sessionId.prefix(8)))
                         .font(.system(.subheadline, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -492,12 +484,12 @@ struct SessionTranscriptView: View {
             if isLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if messages.isEmpty {
+            } else if !summary.transcriptAvailable || messages.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 32))
                         .foregroundStyle(.tertiary)
-                    Text("No messages found")
+                    Text(summary.transcriptAvailable ? "No messages found" : "Transcript unavailable")
                         .foregroundStyle(.secondary)
                         .font(.callout)
                 }
@@ -650,13 +642,13 @@ struct SessionTranscriptView: View {
         Task {
             switch kind {
             case .resume:
-                await appState.resumeSession(worktreeID: worktreeID, sessionId: sessionId)
+                await appState.resumeSession(worktreeID: worktreeID, identity: summary.identity)
             case .reviveOriginal:
-                await appState.reviveWithSession(worktreeID: worktreeID, sessionId: sessionId)
+                await appState.reviveWithSession(worktreeID: worktreeID, identity: summary.identity)
             case .reviveFresh:
                 isFreshBranchReviveInFlight = true
                 defer { isFreshBranchReviveInFlight = false }
-                await appState.reviveConversationOnFreshBranch(worktreeID: worktreeID, sessionId: sessionId)
+                await appState.reviveConversationOnFreshBranch(worktreeID: worktreeID, identity: summary.identity)
             }
         }
     }

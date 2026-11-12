@@ -154,10 +154,9 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         #expect(try String(contentsOfFile: saved, encoding: .utf8) == "kept across a restart\n")
     }
 
-    /// A terminal-less row that was mid-revive keeps its archived Claude
-    /// sessions (there is no terminal to restore them into) and drops its
-    /// archive stamp, the same outcome as a revive with `skipClaude`.
-    @Test func activatingATerminalLessMidReviveRowKeepsItsArchivedSessions() async throws {
+    /// An interrupted revive restores its saved conversations before clearing
+    /// the archive snapshot and exposing the active checkout.
+    @Test func activatingATerminalLessMidReviveRowRestoresItsArchivedSessions() async throws {
         let (lifecycle, db) = try makeLifecycle()
         let (repo, checkout, cleanup) = try await makeRepoWithCheckout(db)
         defer { cleanup() }
@@ -168,12 +167,14 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
         try await db.worktrees.updateStatus(id: row.id, status: .creating)
         #expect(try await db.worktrees.get(id: row.id)?.archivedAt != nil)
 
-        await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir)
+        for task in await lifecycle.recoverCreatingWorktrees(unsentPromptsReposDir: reposDir) { await task.value }
 
         let after = try #require(try await db.worktrees.get(id: row.id))
         #expect(after.status == .active)
         #expect(after.archivedAt == nil)
-        #expect(after.archivedClaudeSessions == ["session-a", "session-b"])
+        #expect(after.archivedClaudeSessions == nil)
+        let terminals = try await db.terminals.list(worktreeID: row.id)
+        #expect(Set(terminals.compactMap(\.claudeSessionID)) == ["session-a", "session-b"])
     }
 
     // MARK: - A recovered PR row is never activated with trust pre-answerable

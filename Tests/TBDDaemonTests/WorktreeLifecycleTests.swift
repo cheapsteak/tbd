@@ -751,18 +751,22 @@ import Testing
 
 // MARK: - Reconcile and the pane consultation's two negative answers
 
-/// Both arms below share this: a main worktree on a live (dryRun) server with
-/// one live window, holding one resumable Claude terminal. The only variable is
-/// what the pane consultation answers.
+/// A main worktree with one resumable Claude terminal. Transport observations
+/// default to a live server and window and can be pinned independently.
 private func makeReconcileFixture(
-    tempDir: URL, repoDir: URL, paneTarget: @escaping @Sendable (String, String) throws -> PaneSendTarget
+    tempDir: URL, repoDir: URL, serverPresence: TmuxPresence = .alive,
+    windowPresence: TmuxPresence = .alive,
+    paneTarget: @escaping @Sendable (String, String) throws -> PaneSendTarget
 ) async throws -> (TBDDatabase, WorktreeLifecycle, Repo, Terminal) {
     let db = try TBDDatabase(inMemory: true)
     let server = TmuxManager.serverName(forRepoPath: repoDir.path)
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: TmuxManager(dryRun: true, dryRunPaneSendTarget: paneTarget),
+        tmux: TmuxManager(
+            dryRun: true, dryRunPaneSendTarget: paneTarget,
+            dryRunServerPresence: { _ in serverPresence },
+            dryRunWindowPresence: { _, _ in windowPresence }),
         hooks: HookResolver())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let main = try await db.worktrees.createMain(
@@ -941,6 +945,7 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
         label: "Codex", claudeSessionID: "sess-codex", kind: .codex
     )
     try await db.terminals.setHibernated(id: codex.id, sessionID: "sess-codex")
+    let codexBefore = try #require(try await db.terminals.get(id: codex.id))
 
     try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(), reapSharedScratchTmuxResources: true)
 
@@ -953,6 +958,7 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     let codexAfter = try await db.terminals.get(id: codex.id)
     #expect(codexAfter != nil, "a parked non-Claude-resumable row must be skipped, not deleted")
     #expect(codexAfter?.hibernatedAt != nil)
+    #expect(try encodedRow(try #require(codexAfter)) == encodedRow(codexBefore))
 }
 
 /// Server gone path (reboot): in dryRun mode serverExists → true, so this path
@@ -1075,4 +1081,57 @@ private final class LockedInt: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return storage
     }
+}
+
+@Test(arguments: ["pane", "window", "server", "reassigned"])
+func testReconcileParksIdentifiedCodexWhenPaneIsAbsent(absence: String) async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let (db, lifecycle, repo, claude) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir,
+        serverPresence: absence == "server" ? .absent : .alive,
+        windowPresence: absence == "window" ? .absent : .alive,
+        paneTarget: { _, _ in absence == "reassigned" ? .live(terminalID: UUID().uuidString) : .absent })
+    let codex = try await seedRecoveryTerminal(db: db, worktreeID: claude.worktreeID, transport: .tmux)
+    let unidentified = try await db.terminals.create(
+        worktreeID: claude.worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .codex)
+    let logPath = tempDir.appendingPathComponent("recovery.jsonl").path
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: ActuationLog(path: logPath),
+                                  reapSharedScratchTmuxResources: true)
+    try await expectRecoveryPark(db: db, before: codex, logPath: logPath)
+    #expect(try await db.terminals.get(id: unidentified.id) == nil)
+}
+
+@Test(arguments: ["server", "window", "pane"])
+func testReconcileLeavesCodexUntouchedWhenOwnershipIsUnknown(unknown: String) async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let (db, lifecycle, repo, claude) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir,
+        serverPresence: unknown == "server" ? .unknown : .alive,
+        windowPresence: unknown == "window" ? .unknown : .alive,
+        paneTarget: { _, _ in .unreachable })
+    let codex = try await seedRecoveryTerminal(db: db, worktreeID: claude.worktreeID, transport: .tmux)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(),
+                                  reapSharedScratchTmuxResources: true)
+    #expect(try encodedRow(try #require(try await db.terminals.get(id: codex.id))) == encodedRow(codex))
+}
+
+
+@Test func testReconcilePreservesPendingCodexRecoveryHandoff() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let (db, lifecycle, repo, claude) = try await makeReconcileFixture(
+        tempDir: tempDir, repoDir: repoDir, paneTarget: { _, _ in .absent })
+    let codex = try await seedRecoveryTerminal(db: db, worktreeID: claude.worktreeID, transport: .tmux)
+    let pendingID = UUID()
+    try await db.writerForTests.write { db in
+        try db.execute(sql: "UPDATE terminal SET pendingSessionIncarnationID = ? WHERE id = ?",
+                       arguments: [pendingID.uuidString, codex.id.uuidString])
+    }
+    let before = try #require(try await db.terminals.get(id: codex.id))
+    #expect(before.pendingSessionIncarnationID == pendingID)
+    try await lifecycle.reconcile(repoID: repo.id, actuationLog: makeTestActuationLog(),
+                                  reapSharedScratchTmuxResources: true)
+    #expect(try encodedRow(try #require(try await db.terminals.get(id: codex.id))) == encodedRow(before))
 }

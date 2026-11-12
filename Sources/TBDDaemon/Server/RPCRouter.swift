@@ -602,7 +602,8 @@ public final class RPCRouter: Sendable {
             subscriptions: subscriptions, configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
-            actuationLog: actuationLog, programStatus: resolvedProgramStatus
+            actuationLog: actuationLog, programStatus: resolvedProgramStatus,
+            codexExecutableResolver: codexExecutableResolver, codexHomeEnsurer: codexHomeEnsurer
         )
         self.usageFetcher = usageFetcher
         // Captures the `db` / `prManager` parameters rather than `self`, so the
@@ -1013,6 +1014,8 @@ public final class RPCRouter: Sendable {
                 return try await handleSetMainAreaSize(request.paramsData)
             case RPCMethod.sessionList:
                 return try await handleSessionList(request.paramsData)
+            case RPCMethod.sessionResume:
+                return try await handleSessionResume(request.paramsData, actor: request.actor)
             case RPCMethod.sessionMessages:
                 return try await handleSessionMessages(request.paramsData)
             case RPCMethod.stateSubscribe:

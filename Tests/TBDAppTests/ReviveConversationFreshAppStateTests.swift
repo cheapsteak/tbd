@@ -59,7 +59,7 @@ struct ReviveConversationFreshAppStateTests {
             state.mainAreaSize = CGSize(width: 1200, height: 800)
             defaults.set(true, forKey: AppState.terminalAutoResizeKey)
             let expectedSize = state.mainAreaTerminalSize()
-            var received: (UUID, String, Int?, Int?)?
+            var received: (UUID, AgentSessionIdentity, Int?, Int?)?
             state.freshConversationReviver = { worktreeID, receivedSessionID, cols, rows in
                 received = (worktreeID, receivedSessionID, cols, rows)
                 return WorktreeReviveConversationFreshResult(
@@ -75,9 +75,26 @@ struct ReviveConversationFreshAppStateTests {
             #expect(state.alertMessage == "Created from cached origin/main at def5678.")
             #expect(state.alertIsError == false)
             #expect(received?.0 == archived.id)
-            #expect(received?.1 == sessionID)
+            #expect(received?.1 == AgentSessionIdentity(agentKind: .claude, sessionID: sessionID))
             #expect(received?.2 == expectedSize.cols)
             #expect(received?.3 == expectedSize.rows)
+        }
+    }
+
+    @Test("fresh revive carries Codex identity through the state action")
+    func codexIdentity() async {
+        await withAppState { state, _ in
+            let fresh = makeWorktree(repoID: UUID(), status: .active)
+            let identity = AgentSessionIdentity(agentKind: .codex, sessionID: "same")
+            var received: AgentSessionIdentity?
+            state.worktrees = [fresh.repoID!: [fresh]]
+            state.freshConversationReviver = { _, selected, _, _ in
+                received = selected
+                return WorktreeReviveConversationFreshResult(worktree: fresh, warning: nil)
+            }
+            await state.reviveConversationOnFreshBranch(worktreeID: UUID(), identity: identity)
+            #expect(received == identity)
+            #expect(state.selectedWorktreeIDs == [fresh.id])
         }
     }
 

@@ -907,6 +907,45 @@ struct PeerListTests {
         #expect(row.joinedBy == .holderDescent)
     }
 
+    @Test func codexNativeIDCannotJoinAClaudePeerWithTheSameID() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, kind: .codex,
+            holderPID: 9000, childPID: 9001, claudeSessionID: "S-collision")
+        let entry = PeerRegistryEntry(pid: 9500, record: try Self.record(Self.liveSessionFields(
+            sessionID: "S-collision", cwd: "/opt/peertest/elsewhere", name: "external",
+            pane: nil, socket: "/opt/peertest/socks/9500.sock")))
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [entry]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: Self.table([9000: 1, 9001: 9000, 9500: 1]))
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external)
+        #expect(row.terminalID == nil)
+        #expect(row.joinedBy == nil)
+    }
+
+    @Test(arguments: ["thread-native", "", "   "])
+    func codexCapturedIdentityDoesNotBecomeAClaudePeer(sessionID: String) throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, kind: .codex,
+            holderPID: 9000, childPID: 9001, claudeSessionID: sessionID)
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9002)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: Self.table([9000: 1, 9001: 9000, 9002: 9001]))
+        let row = try #require(result.peers.first)
+        if sessionID == "thread-native" {
+            #expect(row.kind == .external)
+            #expect(row.terminalID == nil)
+            #expect(row.unjoinedReason == .terminalCapturedAnotherSession)
+        } else {
+            #expect(row.kind == .local)
+            #expect(row.joinedBy == .holderDescent)
+        }
+        #expect(!tab.isManuallyHibernatable())
+        #expect(!tab.isAutoHibernationEligible())
+    }
+
     @Test func aSessionNoHolderTabsJobIsAnAncestorOfStaysExternal() throws {
         let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
         let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)

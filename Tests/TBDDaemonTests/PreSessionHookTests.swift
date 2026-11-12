@@ -917,7 +917,9 @@ struct PreSessionHookTests {
         try await installPreSessionHook(repoDir: repoDir)
         let wt = try await makeArchivedWorktree(lifecycle: lifecycle, db: db, repo: repo)
         let sessionID = UUID().uuidString
-        try await db.worktrees.setArchivedClaudeSessions(id: wt.id, sessions: [sessionID])
+        try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: [
+            ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: sessionID), ordinal: 0, isPrimary: true)
+        ])
 
         let completion = try await lifecycle.beginReviveWorktree(
             worktreeID: wt.id, skipClaude: false
@@ -1465,7 +1467,8 @@ struct PreSessionHookTests {
     /// A terminal-less `.creating` row whose path holds a directory git does not
     /// list as a worktree is not a checkout TBD can vouch for: the row is
     /// deleted, not activated, and the directory is not touched.
-    @Test func recoveryDeletesTerminalLessRowWhosePathIsAPlainDirectory() async throws {
+    @Test(arguments: [false, true])
+    func recoveryDeletesTerminalLessRowWhosePathIsAPlainDirectory(pendingRestore: Bool) async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
@@ -1485,7 +1488,13 @@ struct PreSessionHookTests {
             path: plain, tmuxServer: "tbd-test", status: .creating
         )
 
+        if pendingRestore {
+            try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: [
+                .init(identity: .init(agentKind: .claude, sessionID: "unfinished"), ordinal: 0, isPrimary: true)
+            ])
+        }
         let resumed = await lifecycle.recoverCreatingWorktrees()
+        for task in resumed { await task.value }
         #expect(resumed.isEmpty)
         #expect(try await db.worktrees.get(id: wt.id) == nil,
                 "a row whose path git does not list must not be activated")

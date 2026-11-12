@@ -555,7 +555,7 @@ struct GeneralSettingsTab: View {
             .foregroundStyle(.secondary)
     }
 
-    static let sessionRestoreCaption = "When TBD starts, Claude sessions that were running come back, "
+    static let sessionRestoreCaption = "When TBD starts, agent sessions that were running come back, "
         + "a few at a time. Hibernated sessions stay asleep."
 
     /// Record each Claude session's context window, rate limits and cost

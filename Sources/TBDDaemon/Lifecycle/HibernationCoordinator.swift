@@ -100,10 +100,9 @@ public enum WakeResult: Equatable, Sendable {
     case paneUnreadable(paneID: String, server: String)
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
-    /// The parked row names a session, but its tab is a shell or Codex tab
-    /// (`Terminal.claudeResumeDecision`). Refused before anything is touched,
-    /// exactly as a shell tab with no session id is: nothing is respawned and
-    /// the row stays as it was.
+    /// The parked row has no provider-qualified recovery plan, such as a
+    /// shell tab carrying an incidental session ID. Nothing is respawned and
+    /// the row stays as it was. Kept for compatibility with Claude-only callers.
     case notAClaudeTab(kind: TerminalKind)
     case inFlight        // a wake for this terminal is already respawning
     /// The respawn (or window recreate) failed in tmux. The row stays parked
@@ -223,6 +222,8 @@ public actor HibernationCoordinator {
     let db: TBDDatabase
     private let tmux: TmuxManager
     private let modelProfileResolver: ModelProfileResolver?
+    private let codexExecutableResolver: @Sendable () throws -> String
+    private let codexHomeEnsurer: @Sendable () throws -> URL
     private let subscriptions: StateSubscriptionManager?
     /// Routes ambient claude-projects-root resolution for the wake transcript
     /// sync — injectable (mirroring `RPCRouter.configDirManager`) so tests
@@ -448,7 +449,9 @@ public actor HibernationCoordinator {
         sessionsDir: URL = TBDConstants.sessionsDir(),
         sessionTitles: ClaudeSessionTitleStore,
         actuationLog: ActuationLog,
-        programStatus: ProgramStatusStore? = nil
+        programStatus: ProgramStatusStore? = nil,
+        codexExecutableResolver: (@Sendable () throws -> String)? = nil,
+        codexHomeEnsurer: (@Sendable () throws -> URL)? = nil
     ) {
         self.db = db
         self.tmux = tmux
@@ -467,6 +470,16 @@ public actor HibernationCoordinator {
         self.sessionTitles = sessionTitles
         self.actuationLog = actuationLog
         self.programStatus = programStatus
+        self.codexExecutableResolver = codexExecutableResolver ?? {
+            if tmux.dryRun { return "/opt/tbd-test/bin/codex" }
+            return try CodexExecutableResolver.resolve()
+        }
+        self.codexHomeEnsurer = codexHomeEnsurer ?? {
+            if tmux.dryRun {
+                return URL(fileURLWithPath: "/tmp/tbd-dry-run-codex-home", isDirectory: true)
+            }
+            return try CodexHomeManager().ensureProfilePlugin()
+        }
     }
 
     /// Projects root for a wake spawn's resolved profile config dir path,
@@ -1725,19 +1738,17 @@ public actor HibernationCoordinator {
             }
             return await classifyUnparkedHolderWake(terminal)
         }
-        // The tab's kind decides whether a Claude session may be resumed in
-        // it, not the session id on its row — see
-        // `Terminal.claudeResumeDecision`. Asked before the transport branch,
-        // so neither mechanic can be reached for a tab that is not Claude's.
-        let sessionID: String
-        switch terminal.claudeResumeDecision {
-        case .resume(let resumable):
-            sessionID = resumable
-        case .noSession:
+        // Recovery and wake share provider identity; parking a live process
+        // continues to use the stricter Claude-only eligibility policy.
+        guard let resumePlan = terminal.recoveryResumePlan else {
+            if case .notAClaudeTab(let kind) = terminal.claudeResumeDecision {
+                return .notAClaudeTab(kind: kind)
+            }
             return .noSessionID
-        case .notAClaudeTab(let kind):
-            logger.notice("wake: terminal \(terminal.id, privacy: .public) is a \(kind.rawValue, privacy: .public) tab carrying a session id; refusing to resume a Claude session in it")
-            return .notAClaudeTab(kind: kind)
+        }
+        let sessionID = resumePlan.identity.sessionID
+        if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {
+            return .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session.")
         }
         // The backstop for a tmux row whose leg cannot serve the wake. Refusing
         // here, before anything is touched, leaves the row parked with its
@@ -1829,141 +1840,180 @@ public actor HibernationCoordinator {
             logger.warning("wake: pane cwd \(paneCwd, privacy: .public) != worktree path \(worktree.path, privacy: .public) for terminal \(terminal.id, privacy: .public); respawn will -c into the worktree path")
         }
 
-        // Honor the exact profile persisted on the terminal (loadByID, not
-        // re-resolve) so wake lands on the same account the session used.
-        //
-        // Pre-wake profile check: if the pinned profile no longer resolves (row
-        // deleted, or an .apiKey profile whose keychain secret is gone), the OLD
-        // behavior silently fell back to the ambient keychain login — resuming on
-        // the WRONG account, which reads to the user as "the session won't wake".
-        // Refuse and surface `.profileMissing` so the app can offer an explicit
-        // default-profile fallback (mirrors how `.worktreeMissing` fails loudly
-        // just above rather than resuming into $HOME). This is BEFORE the tmux
-        // mutation section, so a refusal never disturbs the pane. Pass
-        // `allowDefaultProfileFallback` to opt back into the ambient-login resume.
-        var resolvedProfile: ResolvedModelProfile? = nil
-        if let profileID = terminal.profileID, let resolver = modelProfileResolver {
-            resolvedProfile = try? await resolver.loadByID(profileID)
-            if resolvedProfile == nil {
-                if allowDefaultProfileFallback {
-                    logger.warning("wake: profile \(profileID, privacy: .public) missing for terminal \(terminal.id, privacy: .public); explicit default-profile fallback → ambient keychain login")
-                } else {
-                    logger.error("wake: profile \(profileID, privacy: .public) no longer resolves for terminal \(terminal.id, privacy: .public); refusing wake — retry with the default-profile fallback to resume on the default account")
-                    return .profileMissing(profileID: profileID)
-                }
-            }
-        }
-
         let config = try? await db.config.get()
-        let claudeEnvOverrides = config?.envSettingOverrides ?? [:]
         let repo: Repo?
         if let rid = worktree.repoID {
             repo = try? await db.repos.get(id: rid)
         } else {
             repo = nil
         }
-        let mergedEnvOverrides = EnvOverrideResolver.merge(
-            global: config?.envOverrides,
-            repo: repo?.envOverrides,
-            profile: resolvedProfile?.envOverrides
-        )
-        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
-        // The terminal's own plugin folders, settings overlay and Claude
-        // model, kept on its row so every start of its session reapplies
-        // them — a wake included.
-        // A folder that has gone since is skipped by the builder, with a
-        // warning, and the wake goes on: a wake can run with nobody watching.
-        let spawnExtras = terminal.claudeSpawnExtras
-        // Planned, not written: a wake that adopts a holder still running
-        // launches nothing at all, and must leave the running process's overlay
-        // alone. Each launch writes the overlay just before it starts
-        // (`ReplacementSpawnOverlay.settle`).
-        let overlay = ReplacementSpawnOverlay.plan(
-            fallbackModels: resolvedProfile?.fallbackModels,
-            sessionKey: terminal.id.uuidString,
-            // Repo fragment is file-backed config, read fresh — reapplied on wake.
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
-        )
-        // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
-        // isolated profile dir (never seeded before) doesn't re-prompt — the
-        // dialog blocks before SessionStart, so the stalled wake would be
-        // machine-invisible. Cheap no-op once already trusted. `config` is a
-        // `try?` read; fall back to the shipped default.
-        await ClaudeTrustSeeder.ensureTrusted(
-            worktree: worktree.worktree,
-            autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
-            profileConfigDir: profileConfigDir)
-        // Pre-resume freshness: if the worktree was moved/promoted while this
-        // session was parked, its transcript still lives under the OLD munged
-        // project dir; the cwd-scoped `claude --resume` below only checks the
-        // dir derived from the CURRENT path. Mirror the jsonl (+ subagents)
-        // there first — copy-if-newer, best-effort, never rewrites the row's
-        // transcriptPath. Detached variant: the recursive copy must not run on
-        // this actor's serial executor; the await still completes before the
-        // respawn below.
-        await TranscriptProjectDirSync.ensureSessionResumableDetached(
-            sessionID: sessionID,
-            worktreePath: worktree.path,
-            projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
-            storedTranscriptPath: terminal.transcriptPath
-        )
-        // Reserved here; confirmed only once the wake has launched a session
-        // under it — even when a later step fails, since that session carries
-        // the name — and released on every other outcome.
-        let spawnTitle = await ClaudeSessionTitle.forSpawn(
-            db: db, store: sessionTitles,
-            worktreeID: worktree.id, displayName: worktree.displayName,
-            terminalID: terminal.id)
-        let spawn = ClaudeSpawnCommandBuilder.build(
-            resumeID: sessionID,
-            freshSessionID: nil,
-            appendSystemPrompt: nil,
-            // Delivered as a trailing argv to `claude --resume` — atomic with
-            // the respawn, so it reaches ONLY a session this call actually
-            // woke (an already-awake terminal returns .notHibernated above
-            // and the prompt is never delivered anywhere).
-            initialPrompt: initialPrompt,
-            profileSecret: resolvedProfile?.secret,
-            profileKind: resolvedProfile?.kind,
-            profileBaseURL: resolvedProfile?.baseURL,
-            // The terminal's saved model wins over the profile's.
-            profileModel: spawnExtras?.model ?? resolvedProfile?.model,
-            profileAwsRegion: resolvedProfile?.awsRegion,
-            profileAwsProfile: resolvedProfile?.awsProfile,
-            profileConfigDir: profileConfigDir,
-            cmd: nil,
-            shellFallback: defaultShell,
-            settingsOverlayPath: overlay.path,
-            pluginDirPath: PluginDirWriter.pluginDirPath,
-            extraPluginDirs: spawnExtras?.pluginDirs ?? [],
-            envSettingOverrides: claudeEnvOverrides,
-            sessionName: spawnTitle.name,
-            // The overlay is written at launch, so its path counts as present.
-            fileExists: overlay.commandFileExists
-        )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.
-        let env: [String: String] = [
+        var preparedEnv: [String: String] = [
             "TBD_WORKTREE_ID": worktree.id.uuidString,
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
-        // The free-form overrides, with the builder's auth env layered on top
-        // so auth wins — the same merge the create path makes.
-        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+        let spawnCommand: String
+        let sensitiveEnv: [String: String]
+        let spawnTitle: ClaudeSpawnTitle?
+        let overlay: ReplacementSpawnOverlay?
+        switch resumePlan {
+        case .claude:
+            // Honor the exact profile persisted on the terminal (loadByID, not
+            // re-resolve) so wake lands on the same account the session used.
+            //
+            // Pre-wake profile check: if the pinned profile no longer resolves (row
+            // deleted, or an .apiKey profile whose keychain secret is gone), the OLD
+            // behavior silently fell back to the ambient keychain login — resuming on
+            // the WRONG account, which reads to the user as "the session won't wake".
+            // Refuse and surface `.profileMissing` so the app can offer an explicit
+            // default-profile fallback (mirrors how `.worktreeMissing` fails loudly
+            // just above rather than resuming into $HOME). This is BEFORE the tmux
+            // mutation section, so a refusal never disturbs the pane. Pass
+            // `allowDefaultProfileFallback` to opt back into the ambient-login resume.
+            var resolvedProfile: ResolvedModelProfile? = nil
+            if let profileID = terminal.profileID, let resolver = modelProfileResolver {
+                resolvedProfile = try? await resolver.loadByID(profileID)
+                if resolvedProfile == nil {
+                    if allowDefaultProfileFallback {
+                        logger.warning("wake: profile \(profileID, privacy: .public) missing for terminal \(terminal.id, privacy: .public); explicit default-profile fallback → ambient keychain login")
+                    } else {
+                        logger.error("wake: profile \(profileID, privacy: .public) no longer resolves for terminal \(terminal.id, privacy: .public); refusing wake — retry with the default-profile fallback to resume on the default account")
+                        return .profileMissing(profileID: profileID)
+                    }
+                }
+            }
 
-        // The transports diverge again, and for the last time. Everything above
-        // — profile, env, overlay, trust seed, transcript sync, the resume
-        // argv with its queued prompt — is shared verbatim, because it decides
-        // WHAT to resume and that is transport-independent. Below is the tmux
-        // mechanic.
+            let mergedEnvOverrides = EnvOverrideResolver.merge(
+                global: config?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: resolvedProfile?.envOverrides
+            )
+            let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
+            // The terminal's own plugin folders and settings overlay, kept on its
+            // row so every start of its session reapplies them — a wake included.
+            // A folder that has gone since is skipped by the builder, with a
+            // warning, and the wake goes on: a wake can run with nobody watching.
+            let spawnExtras = terminal.claudeSpawnExtras
+            // Planned, not written: a wake that adopts a holder still running
+            // launches nothing at all, and must leave the running process's overlay
+            // alone. Each launch writes the overlay just before it starts
+            // (`ReplacementSpawnOverlay.settle`).
+            let claudeOverlay = ReplacementSpawnOverlay.plan(
+                fallbackModels: resolvedProfile?.fallbackModels,
+                sessionKey: terminal.id.uuidString,
+                // Repo fragment is file-backed config, read fresh — reapplied on wake.
+                repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
+            )
+            // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
+            // isolated profile dir (never seeded before) doesn't re-prompt — the
+            // dialog blocks before SessionStart, so the stalled wake would be
+            // machine-invisible. Cheap no-op once already trusted. `config` is a
+            // `try?` read; fall back to the shipped default.
+            await ClaudeTrustSeeder.ensureTrusted(
+                worktree: worktree.worktree,
+                autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
+                profileConfigDir: profileConfigDir)
+            // Pre-resume freshness: if the worktree was moved/promoted while this
+            // session was parked, its transcript still lives under the OLD munged
+            // project dir; the cwd-scoped `claude --resume` below only checks the
+            // dir derived from the CURRENT path. Mirror the jsonl (+ subagents)
+            // there first — copy-if-newer, best-effort, never rewrites the row's
+            // transcriptPath. Detached variant: the recursive copy must not run on
+            // this actor's serial executor; the await still completes before the
+            // respawn below.
+            await TranscriptProjectDirSync.ensureSessionResumableDetached(
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
+                storedTranscriptPath: terminal.transcriptPath
+            )
+            // Reserved here; confirmed only once the wake has launched a session
+            // under it — even when a later step fails, since that session carries
+            // the name — and released on every other outcome.
+            let claudeTitle = await ClaudeSessionTitle.forSpawn(
+                db: db, store: sessionTitles,
+                worktreeID: worktree.id, displayName: worktree.displayName,
+                terminalID: terminal.id)
+            let spawn = ClaudeSpawnCommandBuilder.build(
+                resumeID: sessionID,
+                freshSessionID: nil,
+                appendSystemPrompt: nil,
+                // Delivered as a trailing argv to `claude --resume` — atomic with
+                // the respawn, so it reaches ONLY a session this call actually
+                // woke (an already-awake terminal returns .notHibernated above
+                // and the prompt is never delivered anywhere).
+                initialPrompt: initialPrompt,
+                profileSecret: resolvedProfile?.secret,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                profileModel: spawnExtras?.model ?? resolvedProfile?.model,
+                profileAwsRegion: resolvedProfile?.awsRegion,
+                profileAwsProfile: resolvedProfile?.awsProfile,
+                profileConfigDir: profileConfigDir,
+                cmd: nil,
+                shellFallback: defaultShell,
+                settingsOverlayPath: claudeOverlay.path,
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: spawnExtras?.pluginDirs ?? [],
+                envSettingOverrides: config?.envSettingOverrides ?? [:],
+                sessionName: claudeTitle.name,
+                // The overlay is written at launch, so its path counts as present.
+                fileExists: claudeOverlay.commandFileExists
+            )
+            // The free-form overrides, with the builder's auth env layered on top
+            // so auth wins — the same merge the create path makes.
+            sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+            spawnCommand = spawn.command
+            spawnTitle = claudeTitle
+            overlay = claudeOverlay
+
+        case .codex:
+            do {
+                // The row model is lenient on corrupt JSON. Relaunch must read
+                // strictly, or a damaged dedicated-home record could silently
+                // launch this thread on the shared home.
+                let options = try await db.terminals.codexLaunchOptionsForRelaunch(id: terminal.id)
+                let executableResolver = codexExecutableResolver
+                let homeEnsurer = codexHomeEnsurer
+                let preparation: CodexLaunchPreparation = try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        continuation.resume(with: Result {
+                            try CodexLaunchPreparation.prepare(
+                                guardedHome: options?.codexHome,
+                                executableResolver: executableResolver,
+                                sharedHomeEnsurer: homeEnsurer)
+                        })
+                    }
+                }
+                spawnCommand = CodexSpawnCommandBuilder.build(
+                    initialPrompt: nil, resumeThreadID: sessionID,
+                    executablePath: preparation.executablePath,
+                    model: options?.model, disabledFeatures: options?.disabledFeatures ?? [])
+                preparedEnv["CODEX_HOME"] = preparation.codexHome.path
+                sensitiveEnv = GuardedCodexHome.forcingHome(
+                    EnvOverrideResolver.merge(global: config?.envOverrides,
+                        repo: repo?.envOverrides, profile: nil)
+                        .merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
+                    preparation, guarded: options?.codexHome != nil)
+                spawnTitle = nil
+                overlay = nil
+            } catch {
+                return .respawnFailed(reason: "preparing Codex resume failed: \(error.localizedDescription)")
+            }
+        }
+
+        let env = preparedEnv
+        // Both transports consume the same provider-prepared command. Only
+        // Claude carries a title, overlay, and session-mod preparation.
         if terminal.transport == .holder {
             return await wakeHolderSection(
                 terminal: terminal,
                 worktree: worktree,
                 sessionID: sessionID,
                 expectedReplacementState: expectedReplacementState,
-                spawnCommand: spawn.command,
+                spawnCommand: spawnCommand,
                 env: env,
                 sensitiveEnv: sensitiveEnv,
                 cols: cols,
@@ -1998,12 +2048,12 @@ public actor HibernationCoordinator {
                 }
                 return await self.wakeTmuxSection(
                     terminal: currentTerminal,
-                    claudeSessionID: sessionID,
+                    sessionID: sessionID,
                     worktree: currentWorktree.worktree,
                     server: currentWorktree.tmuxServer,
                     windowID: currentTerminal.tmuxWindowID,
                     paneID: currentTerminal.tmuxPaneID,
-                    spawnCommand: spawn.command,
+                    spawnCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     cols: cols,
@@ -2048,11 +2098,13 @@ public actor HibernationCoordinator {
 
         // `claude --resume <id>` forks into a NEW session file; re-capture the
         // fresh id so subsequent hibernate/wake reference the live session.
-        SessionRecaptureScheduler(db: db, tmux: tmux, clock: clock).schedule(
-            terminalID: terminal.id,
-            paneID: livePaneID,
-            server: liveServer,
-            expectedIncarnationID: liveIncarnationID)
+        if case .claude = resumePlan {
+            SessionRecaptureScheduler(db: db, tmux: tmux, clock: clock).schedule(
+                terminalID: terminal.id,
+                paneID: livePaneID,
+                server: liveServer,
+                expectedIncarnationID: liveIncarnationID)
+        }
         logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
         return .ok(sessionIncarnationID: liveIncarnationID)
     }
@@ -2080,7 +2132,7 @@ public actor HibernationCoordinator {
     /// interleave across the awaits below and hijack each other's windows.
     private func wakeTmuxSection(
         terminal: Terminal,
-        claudeSessionID: String,
+        sessionID: String,
         worktree: Worktree,
         server: String,
         windowID: String,
@@ -2092,7 +2144,7 @@ public actor HibernationCoordinator {
         rows: Int?,
         // The overlay `spawnCommand` was composed with, written by each launch
         // below from the session mod that launch is actually given.
-        overlay: ReplacementSpawnOverlay
+        overlay: ReplacementSpawnOverlay?
     ) async -> WakeTmuxOutcome {
         // Post-reboot a fresh tmux server reissues window ids from @1 again,
         // so a stale parked row's window id can equal a window that ANOTHER
@@ -2136,11 +2188,11 @@ public actor HibernationCoordinator {
                 }
                 let replacementEnv = AgentProcessEnvironment.replacement(
                     base: env, incarnationID: incarnationID)
-                let sessionMod = SessionModSpawn.prepare(
+                let sessionMod = overlay == nil ? nil : SessionModSpawn.prepare(
                     config: try? await db.config.get(),
-                    claudeSessionID: claudeSessionID, incarnationID: incarnationID,
+                    claudeSessionID: sessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
-                let launchCommand = overlay.settle(command: spawnCommand)
+                let launchCommand = overlay?.settle(command: spawnCommand) ?? spawnCommand
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
@@ -2168,8 +2220,8 @@ public actor HibernationCoordinator {
                     incarnationID: incarnationID)
             } catch {
                 // Leave the row hibernated so the next focus/menu retry can wake it.
-                logger.warning("wake: respawn-to-claude failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                return .failed(.respawnFailed(reason: "failed to respawn claude in window \(windowID): \(error.localizedDescription)"))
+                logger.warning("wake: respawn-agent failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return .failed(.respawnFailed(reason: "failed to respawn agent in window \(windowID): \(error.localizedDescription)"))
             }
         } else {
             // The window is GONE — killed, the whole tmux server died (a
@@ -2256,11 +2308,11 @@ public actor HibernationCoordinator {
                     base: env, incarnationID: incarnationID)
                 // Only the agent launch carries the mod; the inert staging
                 // pane above is not a Claude spawn.
-                let sessionMod = SessionModSpawn.prepare(
+                let sessionMod = overlay == nil ? nil : SessionModSpawn.prepare(
                     config: try? await db.config.get(),
-                    claudeSessionID: claudeSessionID, incarnationID: incarnationID,
+                    claudeSessionID: sessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
-                let launchCommand = overlay.settle(command: spawnCommand)
+                let launchCommand = overlay?.settle(command: spawnCommand) ?? spawnCommand
                 do {
                     try await tmux.respawnWindow(
                         server: server,

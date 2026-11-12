@@ -379,6 +379,7 @@ public enum RPCMethod {
     public static let repoSetHidden = "repo.setHidden"
     public static let repoSetExpanded = "repo.setExpanded"
     public static let sessionList = "session.list"
+    public static let sessionResume = "session.resume"
     public static let sessionMessages = "session.messages"
     public static let sessionStates = "session.states"
     public static let setMainAreaSize = "app.setMainAreaSize"
@@ -2704,32 +2705,42 @@ public struct WorktreeReviveParams: Codable, Sendable {
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    /// When set, the daemon reorders the worktree's stored
-    /// `archivedClaudeSessions` so this ID is first before resuming the
-    /// primary Claude terminal. Optional — nil preserves existing order.
+    /// Legacy Claude preference, used only when `preferredSession` is absent.
+    /// The matching archived identity becomes the first restored agent.
     public let preferredSessionID: String?
-    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) {
+    /// Provider-qualified preference; takes precedence over the Claude fallback.
+    public let preferredSession: AgentSessionIdentity?
+    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil, preferredSession: AgentSessionIdentity? = nil) {
         self.worktreeID = worktreeID
         self.cols = cols
         self.rows = rows
         self.preferredSessionID = preferredSessionID
+        self.preferredSession = preferredSession
     }
 }
 
 public struct WorktreeReviveConversationFreshParams: Codable, Sendable {
     public let archivedWorktreeID: UUID
     public let sessionID: String
+    /// Provider-qualified selection; absent on legacy Claude-only clients.
+    public let identity: AgentSessionIdentity?
     public let cols: Int?
     public let rows: Int?
+
+    public var resolvedIdentity: AgentSessionIdentity {
+        identity ?? AgentSessionIdentity(agentKind: .claude, sessionID: sessionID)
+    }
 
     public init(
         archivedWorktreeID: UUID,
         sessionID: String,
+        identity: AgentSessionIdentity? = nil,
         cols: Int? = nil,
         rows: Int? = nil
     ) {
         self.archivedWorktreeID = archivedWorktreeID
         self.sessionID = sessionID
+        self.identity = identity
         self.cols = cols
         self.rows = rows
     }
@@ -4602,9 +4613,47 @@ public struct NoteListParams: Codable, Sendable {
 
 public struct SessionListParams: Codable, Sendable {
     public let worktreeID: UUID
+    /// Only clients with provider-qualified actions may receive Codex history.
+    public let providerAware: Bool?
 
-    public init(worktreeID: UUID) {
+    public init(worktreeID: UUID, providerAware: Bool? = nil) {
         self.worktreeID = worktreeID
+        self.providerAware = providerAware
+    }
+}
+
+/// Resume a provider session in a new terminal in an existing worktree.
+public struct SessionResumeParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let identity: AgentSessionIdentity
+    public let cols: Int?
+    public let rows: Int?
+    public let colorFgBg: String?
+
+    public init(worktreeID: UUID, identity: AgentSessionIdentity, cols: Int? = nil,
+                rows: Int? = nil, colorFgBg: String? = nil) {
+        self.worktreeID = worktreeID
+        self.identity = identity
+        self.cols = cols
+        self.rows = rows
+        self.colorFgBg = colorFgBg
+    }
+}
+
+/// Codex reads require the worktree-scoped catalog identity. `filePath` is
+/// retained for legacy Claude callers and never authorizes a Codex read.
+public struct SessionMessagesParams: Codable, Sendable {
+    public let filePath: String?
+    public let worktreeID: UUID?
+    public let identity: AgentSessionIdentity?
+    public let tailLimit: Int?
+
+    public init(filePath: String? = nil, worktreeID: UUID? = nil,
+                identity: AgentSessionIdentity? = nil, tailLimit: Int? = nil) {
+        self.filePath = filePath
+        self.worktreeID = worktreeID
+        self.identity = identity
+        self.tailLimit = tailLimit
     }
 }
 

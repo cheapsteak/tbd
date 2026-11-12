@@ -86,7 +86,7 @@ enum AdjectiveList {
         "gay", "general", "generous", "genetic", "gentle",
         "genuine", "geographical", "giant", "gigantic", "given",
         "glad", "glamorous", "gleaming", "global", "glorious",
-        "golden", "good", "gorgeous", "gothic", "governing",
+        "good", "gorgeous", "gothic", "governing",
         "graceful", "gradual", "grand", "grateful", "greasy",
         "great", "grieving", "grim", "gross", "growing",
         "grubby", "grumpy", "guilty", "handsome", "happy",

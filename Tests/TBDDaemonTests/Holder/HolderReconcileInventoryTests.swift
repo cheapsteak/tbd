@@ -224,6 +224,41 @@ struct HolderReconcileInventoryTests {
             "the sweep deleted the row that is the only record of a running job's pid")
     }
 
+    @Test("an identified Codex holder row parks with its launch metadata")
+    func anIdentifiedCodexHolderRowParks() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()))
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let codex = try await seedRecoveryTerminal(db: db, worktreeID: main.id, transport: .holder)
+        let unidentified = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "", kind: .codex,
+            transport: .holder, holderPID: 4244, childPID: 4245)
+        let logPath = tempDir.appendingPathComponent("recovery.jsonl").path
+        try await lifecycle.reconcile(
+            repoID: repo.id, actuationLog: ActuationLog(path: logPath),
+            reapSharedScratchTmuxResources: true)
+        try await expectRecoveryPark(db: db, before: codex, logPath: logPath)
+        #expect(try await db.terminals.get(id: unidentified.id) == nil)
+    }
+
+    @Test("unknown holder ownership leaves identified Codex unchanged")
+    func unknownHolderOwnershipKeepsCodex() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db, signaller: deadJobs([4243]), registry: nil)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let codex = try await seedRecoveryTerminal(db: db, worktreeID: main.id, transport: .holder)
+        try await lifecycle.reconcile(
+            repoID: repo.id, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+        #expect(try await db.terminals.get(id: codex.id) == codex)
+    }
+
     // MARK: - The classification
 
     @Test("nothing at the rendezvous is an exit nobody observed, never a clean one")

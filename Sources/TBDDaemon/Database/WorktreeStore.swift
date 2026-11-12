@@ -21,6 +21,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var archivedAt: Date?
     var tmuxServer: String
     var archivedClaudeSessions: String?
+    var archived_agent_tabs: String?
     var sortOrder: Int
     var archivedHeadSHA: String?
     var tabOrder: String  // JSON array of UUID strings, e.g. "[]" or "[\"...\",\"...\"]"
@@ -107,6 +108,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.prObservation = FactColumnJSON.encode(wt.prObservation)
         self.remote_parent_assigned = wt.remoteParentAssigned
         self.archivedClaudeSpawnExtras = ClaudeSpawnExtrasColumn.encodeMap(wt.archivedClaudeSpawnExtras)
+        self.archived_agent_tabs = FactColumnJSON.encode(wt.archivedAgentTabs)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -191,7 +193,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             prObservation: Self.decodePRObservation(prObservation),
             remoteParentAssigned: remote_parent_assigned ?? false,
             archivedClaudeSpawnExtras: ClaudeSpawnExtrasColumn.decodeMap(
-                archivedClaudeSpawnExtras, table: Self.databaseTableName, rowID: id)
+                archivedClaudeSpawnExtras, table: Self.databaseTableName, rowID: id),
+            archivedAgentTabs: FactColumnJSON.decode([ArchivedAgentTab].self, from: archived_agent_tabs)
         )
     }
 
@@ -767,12 +770,14 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Archive a worktree (set status to archived and record the timestamp).
-    /// Optionally saves Claude session IDs and the captured HEAD SHA in the
-    /// same transaction so they survive terminal deletion and crashes.
-    /// Refuses to archive worktrees with `.main` status.
+    /// Saves `agentTabs` and its legacy Claude projection with the captured
+    /// HEAD SHA in one transaction, before terminal teardown. Passing an empty
+    /// snapshot replaces both representations; nil retains the legacy API.
+    /// Refuses to archive worktrees with `.main` status. An already archived
+    /// row is a successful no-op, checked inside the write transaction.
     ///
-    /// `claudeSpawnExtras` maps a Claude session id to the spawn values its
-    /// terminal carried. It is written whenever a session list is (an empty
+    /// Without `agentTabs`, `claudeSpawnExtras` maps a Claude session id to
+    /// the spawn values its terminal carried. It is written whenever a session list is (an empty
     /// map then stores NULL, so no entry from an earlier archive outlives the
     /// list it described), and on its own when it is non-empty. When neither
     /// is passed, both columns keep what they hold — the state a revive that
@@ -792,7 +797,9 @@ public struct WorktreeStore: Sendable {
         id: UUID,
         claudeSessionIDs: [String]? = nil,
         claudeSpawnExtras: [String: ClaudeSpawnExtras] = [:],
-        archivedHeadSHA: String? = nil
+        archivedHeadSHA: String? = nil,
+        agentTabs: [ArchivedAgentTab]? = nil,
+        branch: String? = nil
     ) async throws -> [UUID] {
         try await writer.write { db -> [UUID] in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
@@ -804,8 +811,15 @@ public struct WorktreeStore: Sendable {
             if record.status == WorktreeStatus.creating.rawValue {
                 throw DatabaseError(message: "Cannot archive a worktree that is still being created")
             }
+            // Another archive may have committed after this caller read the
+            // live terminals. Only the first transition owns the snapshot;
+            // retries remain successful without replacing either representation.
+            if record.status == WorktreeStatus.archived.rawValue {
+                return []
+            }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()
+            if let branch { record.branch = branch }
             let writesSessions = !(claudeSessionIDs ?? []).isEmpty
             if let sessions = claudeSessionIDs, writesSessions {
                 record.archivedClaudeSessions = try String(
@@ -813,6 +827,9 @@ public struct WorktreeStore: Sendable {
             }
             if writesSessions || !claudeSpawnExtras.isEmpty {
                 record.archivedClaudeSpawnExtras = ClaudeSpawnExtrasColumn.encodeMap(claudeSpawnExtras)
+            }
+            if let agentTabs {
+                try Self.writeArchivedAgentTabs(agentTabs, to: &record)
             }
             if let sha = archivedHeadSHA {
                 record.archivedHeadSHA = sha
@@ -862,9 +879,9 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Revive an archived worktree (set status back to active, clear archivedAt).
-    /// When `clearSessions` is true (default), also clears archived Claude
-    /// sessions and their spawn values. Pass false to preserve both when the
-    /// primary agent wasn't restored (e.g. skipClaude).
+    /// When `clearSessions` is true (default), clears the mixed-agent snapshot
+    /// and legacy Claude projection. Pass false when requested agents have not
+    /// all been restored (skipClaude or a failed spawn).
     public func revive(id: UUID, clearSessions: Bool = true) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
@@ -873,6 +890,7 @@ public struct WorktreeStore: Sendable {
             record.status = WorktreeStatus.active.rawValue
             record.archivedAt = nil
             if clearSessions {
+                record.archived_agent_tabs = nil
                 record.archivedClaudeSessions = nil
                 record.archivedClaudeSpawnExtras = nil
             }
@@ -908,9 +926,46 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Relaunch reads strictly: corrupt new metadata must never silently
+    /// downgrade to the legacy projection or lose a dedicated Codex home.
+    public func archivedAgentTabsForRevive(id: UUID) async throws -> [ArchivedAgentTab] {
+        try await writer.read { db in
+            guard let record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else { return [] }
+            if let raw = record.archived_agent_tabs {
+                return try JSONDecoder().decode([ArchivedAgentTab].self, from: Data(raw.utf8))
+            }
+            return record.toModel()?.resolvedArchivedAgentTabs ?? []
+        }
+    }
+
+    /// Persist the source snapshot and the rollback projection together.
+    public func setArchivedAgentTabs(id: UUID, tabs: [ArchivedAgentTab]) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            try Self.writeArchivedAgentTabs(tabs, to: &record)
+            try record.update(db)
+        }
+    }
+
+    private static func writeArchivedAgentTabs(_ tabs: [ArchivedAgentTab], to record: inout WorktreeRecord) throws {
+        let encoder = JSONEncoder()
+        record.archived_agent_tabs = String(bytes: try encoder.encode(tabs), encoding: .utf8)
+        let claude = tabs.filter { $0.identity.agentKind == .claude }
+        record.archivedClaudeSessions = claude.isEmpty ? nil
+            : String(bytes: try encoder.encode(claude.map(\.identity.sessionID)), encoding: .utf8)
+        let extras = Dictionary(claude.compactMap { tab -> (String, ClaudeSpawnExtras)? in
+            guard let extras = tab.claudeSpawnExtras?.nonEmpty else { return nil }
+            return (tab.identity.sessionID, extras)
+        }, uniquingKeysWith: { first, _ in first })
+        record.archivedClaudeSpawnExtras = extras.isEmpty ? nil
+            : String(bytes: try encoder.encode(extras), encoding: .utf8)
+    }
+
     /// Replace the archivedClaudeSessions list with `sessions` (re-encoded as JSON).
-    /// Used by the revive path when a `preferredSessionID` is supplied so the
-    /// last-resumed-first ordering is persisted across re-archive.
+    /// Compatibility writer for legacy archives. A provider-neutral snapshot,
+    /// when present, remains authoritative.
     public func setArchivedClaudeSessions(id: UUID, sessions: [String]) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else { return }

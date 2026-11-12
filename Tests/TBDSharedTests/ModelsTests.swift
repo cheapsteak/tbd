@@ -737,3 +737,52 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     // …and putting the original stamp back yields the original value, whole.
     #expect(restamped.withObservedAt(base.observedAt) == base)
 }
+
+/// Tier 1: pre-provider wire payloads keep their Claude interpretation.
+@Suite struct ModelsTests {
+    @Test func legacySessionSummaryDefaultsToClaudeAndReadableTranscript() throws {
+        let data = Data(#"{"sessionId":"legacy","filePath":"/tmp/acme/session.jsonl","modifiedAt":0,"fileSize":12,"lineCount":1}"#.utf8)
+        let summary = try JSONDecoder().decode(SessionSummary.self, from: data)
+        #expect(summary.identity == .init(agentKind: .claude, sessionID: "legacy"))
+        #expect(summary.transcriptAvailable)
+        #expect(summary.lastMessageAt == Date(timeIntervalSinceReferenceDate: 0))
+    }
+
+    @Test func legacyReviveAndMessagesPayloadsDecode() throws {
+        let id = "11111111-1111-1111-1111-111111111111"
+        let revive = try JSONDecoder().decode(WorktreeReviveParams.self,
+            from: Data("{\"worktreeID\":\"\(id)\",\"preferredSessionID\":\"legacy\"}".utf8))
+        #expect(revive.preferredSession == nil)
+        #expect(revive.preferredSessionID == "legacy")
+        let fresh = try JSONDecoder().decode(WorktreeReviveConversationFreshParams.self,
+            from: Data("{\"archivedWorktreeID\":\"\(id)\",\"sessionID\":\"legacy\"}".utf8))
+        #expect(fresh.resolvedIdentity == .init(agentKind: .claude, sessionID: "legacy"))
+        let messages = try JSONDecoder().decode(SessionMessagesParams.self,
+            from: Data(#"{"filePath":"/tmp/acme/session.jsonl","tailLimit":4}"#.utf8))
+        #expect(messages.filePath == "/tmp/acme/session.jsonl")
+        #expect(messages.identity == nil)
+        #expect(messages.worktreeID == nil)
+        #expect(messages.tailLimit == 4)
+    }
+
+    @Test func mixedArchiveWireKeepsLegacyClaudeProjection() throws {
+        var worktree = Worktree(repoID: nil, name: "acme", displayName: "Acme",
+            branch: "main", path: "/tmp/acme", tmuxServer: "srv")
+        worktree.archivedClaudeSessions = ["claude-native"]
+        worktree.archivedClaudeSpawnExtras = ["claude-native": .init(pluginDirs: ["/tmp/acme-plugin"])]
+        worktree.archivedAgentTabs = [
+            .init(identity: .init(agentKind: .codex, sessionID: "thread-native"), ordinal: 0, isPrimary: true),
+            .init(identity: .init(agentKind: .claude, sessionID: "claude-native"), ordinal: 1, isPrimary: false)
+        ]
+        let data = try JSONEncoder().encode(worktree)
+        var payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["archivedClaudeSessions"] as? [String] == ["claude-native"])
+        #expect((payload["archivedClaudeSpawnExtras"] as? [String: Any])?["claude-native"] != nil)
+        let current = try JSONDecoder().decode(Worktree.self, from: data)
+        #expect(current.resolvedArchivedAgentTabs.map(\.identity.agentKind) == [.codex, .claude])
+        payload.removeValue(forKey: "archivedAgentTabs")
+        let legacy = try JSONDecoder().decode(Worktree.self,
+            from: JSONSerialization.data(withJSONObject: payload))
+        #expect(legacy.resolvedArchivedAgentTabs.map(\.identity) == [.init(agentKind: .claude, sessionID: "claude-native")])
+    }
+}

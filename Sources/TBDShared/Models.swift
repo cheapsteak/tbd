@@ -211,6 +211,46 @@ public extension WorktreeLocation {
     }
 }
 
+/// A local provider and its native session ID form one durable identity.
+public enum LocalAgentKind: String, Codable, Sendable, Equatable, Hashable {
+    case claude, codex
+}
+
+public struct AgentSessionIdentity: Codable, Sendable, Equatable, Hashable {
+    public let agentKind: LocalAgentKind
+    public let sessionID: String
+    public var cacheKey: String { "local-agent:\(agentKind.rawValue):\(sessionID)" }
+
+    public init(agentKind: LocalAgentKind, sessionID: String) {
+        self.agentKind = agentKind
+        self.sessionID = sessionID
+    }
+}
+
+/// The tab order and launch values needed to restore an archived agent.
+public struct ArchivedAgentTab: Codable, Sendable, Equatable {
+    public let identity: AgentSessionIdentity
+    public let label: String?
+    public let ordinal: Int
+    public let isPrimary: Bool
+    public let profileID: UUID?
+    public let claudeSpawnExtras: ClaudeSpawnExtras?
+    public let codexLaunchOptions: CodexLaunchOptions?
+
+    public init(identity: AgentSessionIdentity, label: String? = nil, ordinal: Int,
+                isPrimary: Bool, profileID: UUID? = nil,
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil,
+                codexLaunchOptions: CodexLaunchOptions? = nil) {
+        self.identity = identity
+        self.label = label
+        self.ordinal = ordinal
+        self.isPrimary = isPrimary
+        self.profileID = profileID
+        self.claudeSpawnExtras = claudeSpawnExtras
+        self.codexLaunchOptions = codexLaunchOptions
+    }
+}
+
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     /// nil for scratch spaces (repo-less worktrees).
@@ -234,6 +274,18 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var archivedAt: Date?
     public var tmuxServer: String
     public var archivedClaudeSessions: [String]?
+    public var archivedAgentTabs: [ArchivedAgentTab]?
+
+    /// Prefer the provider-neutral snapshot, including an explicitly empty one.
+    /// Older archives retain the order and per-session extras of their Claude list.
+    public var resolvedArchivedAgentTabs: [ArchivedAgentTab] {
+        archivedAgentTabs ?? (archivedClaudeSessions ?? []).enumerated().map { ordinal, sessionID in
+            ArchivedAgentTab(
+                identity: AgentSessionIdentity(agentKind: .claude, sessionID: sessionID),
+                ordinal: ordinal, isPrimary: ordinal == 0,
+                claudeSpawnExtras: archivedClaudeSpawnExtras?[sessionID])
+        }
+    }
     /// The Claude spawn values each archived session's terminal carried, keyed
     /// by Claude session id. Written in the archive transaction beside
     /// `archivedClaudeSessions` and cleared with it on revive, so a revived
@@ -398,7 +450,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 pendingPromptSubmit: Bool? = nil,
                 prObservation: PRObservation? = nil,
                 remoteParentAssigned: Bool = false,
-                archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil) {
+                archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
+                archivedAgentTabs: [ArchivedAgentTab]? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -411,6 +464,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.archivedAt = archivedAt
         self.tmuxServer = tmuxServer
         self.archivedClaudeSessions = archivedClaudeSessions
+        self.archivedAgentTabs = archivedAgentTabs
         self.sortOrder = sortOrder
         self.archivedHeadSHA = archivedHeadSHA
         self.liveClaudeSessionCount = liveClaudeSessionCount
@@ -438,7 +492,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, repoID, name, displayName, branch, path, status
         case hasConflicts, createdAt, archivedAt, tmuxServer
-        case archivedClaudeSessions, sortOrder, archivedHeadSHA
+        case archivedClaudeSessions, archivedAgentTabs, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
         case autoHibernateOnMerge
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
@@ -461,6 +515,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
         tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
         archivedClaudeSessions = try c.decodeIfPresent([String].self, forKey: .archivedClaudeSessions)
+        archivedAgentTabs = try c.decodeIfPresent([ArchivedAgentTab].self, forKey: .archivedAgentTabs)
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         archivedHeadSHA = try c.decodeIfPresent(String.self, forKey: .archivedHeadSHA)
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
@@ -534,6 +589,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
         try c.encode(tmuxServer, forKey: .tmuxServer)
         try c.encodeIfPresent(archivedClaudeSessions, forKey: .archivedClaudeSessions)
+        try c.encodeIfPresent(archivedAgentTabs, forKey: .archivedAgentTabs)
         try c.encode(sortOrder, forKey: .sortOrder)
         try c.encodeIfPresent(archivedHeadSHA, forKey: .archivedHeadSHA)
         try c.encodeIfPresent(liveClaudeSessionCount, forKey: .liveClaudeSessionCount)
@@ -2727,7 +2783,12 @@ public struct PRStatus: Codable, Sendable, Equatable {
 // MARK: - SessionSummary
 
 public struct SessionSummary: Codable, Sendable, Identifiable {
-    public var id: String { sessionId }
+    public var identity: AgentSessionIdentity {
+        AgentSessionIdentity(agentKind: agentKind ?? .claude, sessionID: sessionId)
+    }
+    public var id: String { identity.cacheKey }
+    public let agentKind: LocalAgentKind?
+    public let transcriptAvailable: Bool
     public let sessionId: String
     public let filePath: String
     public let modifiedAt: Date
@@ -2750,8 +2811,12 @@ public struct SessionSummary: Codable, Sendable, Identifiable {
         lastUserMessage: String?,
         cwd: String?,
         gitBranch: String?,
-        lastMessageAt: Date? = nil
+        lastMessageAt: Date? = nil,
+        agentKind: LocalAgentKind? = nil,
+        transcriptAvailable: Bool = true
     ) {
+        self.agentKind = agentKind
+        self.transcriptAvailable = transcriptAvailable
         self.sessionId = sessionId
         self.filePath = filePath
         self.modifiedAt = modifiedAt
@@ -2763,13 +2828,28 @@ public struct SessionSummary: Codable, Sendable, Identifiable {
         self.gitBranch = gitBranch
         self.lastMessageAt = lastMessageAt ?? modifiedAt
     }
-}
 
-// MARK: - Session Messages Params
+    private enum CodingKeys: String, CodingKey {
+        case sessionId, filePath, modifiedAt, fileSize, lineCount, firstUserMessage, lastUserMessage
+        case cwd, gitBranch, lastMessageAt, agentKind, transcriptAvailable
+    }
 
-public struct SessionMessagesParams: Codable, Sendable {
-    public let filePath: String
-    public init(filePath: String) { self.filePath = filePath }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            sessionId: try values.decode(String.self, forKey: .sessionId),
+            filePath: try values.decode(String.self, forKey: .filePath),
+            modifiedAt: try values.decode(Date.self, forKey: .modifiedAt),
+            fileSize: try values.decode(Int64.self, forKey: .fileSize),
+            lineCount: try values.decode(Int.self, forKey: .lineCount),
+            firstUserMessage: try values.decodeIfPresent(String.self, forKey: .firstUserMessage),
+            lastUserMessage: try values.decodeIfPresent(String.self, forKey: .lastUserMessage),
+            cwd: try values.decodeIfPresent(String.self, forKey: .cwd),
+            gitBranch: try values.decodeIfPresent(String.self, forKey: .gitBranch),
+            lastMessageAt: try values.decodeIfPresent(Date.self, forKey: .lastMessageAt),
+            agentKind: try values.decodeIfPresent(LocalAgentKind.self, forKey: .agentKind),
+            transcriptAvailable: try values.decodeIfPresent(Bool.self, forKey: .transcriptAvailable) ?? true)
+    }
 }
 
 // MARK: - Transcript Items (rich rendering)

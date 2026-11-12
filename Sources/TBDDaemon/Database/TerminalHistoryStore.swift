@@ -262,14 +262,17 @@ public struct TerminalHistoryStore: Sendable {
     /// archived: sessions a person can still resume through
     /// `terminalHistory.revive`. Raw columns, so a row whose other columns fail
     /// to decode still counts; `OrphanGC`'s session-directory arm reclaims
-    /// whatever is NOT referenced.
+    /// whatever is NOT referenced. Codex native thread IDs never own a Claude
+    /// session directory, including rows identified by the legacy Codex label.
     public func claudeSessionReferencesInUnarchivedWorktrees() async throws -> Set<String> {
         try await writer.read { db in
             Set(try String.fetchAll(db, sql: """
                 SELECT h.claudeSessionID FROM terminal_history h
                 JOIN worktree w ON w.id = h.worktreeID
                 WHERE h.claudeSessionID IS NOT NULL AND w.status != ?
-                """, arguments: [WorktreeStatus.archived.rawValue]))
+                AND h.kind IS NOT ? AND h.label IS NOT ?
+                """, arguments: [WorktreeStatus.archived.rawValue,
+                    TerminalKind.codex.rawValue, TerminalLabel.codex]))
         }
     }
 

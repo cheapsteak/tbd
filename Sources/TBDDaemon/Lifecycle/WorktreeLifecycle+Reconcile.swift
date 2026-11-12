@@ -683,7 +683,7 @@ extension WorktreeLifecycle {
     /// Reconcile terminals nothing can reach any more: a tmux row whose window
     /// is gone or no longer belongs to it, and a holder row whose holder is
     /// gone. All of them use the same established outcomes: park resumable
-    /// Claude sessions and delete non-resumable Codex/shell rows.
+    /// identified Claude and Codex sessions and delete non-resumable rows.
     ///
     /// The two transports differ only in what "unreachable" is read off. tmux
     /// rows are judged by their window and pane; holder rows by the holder
@@ -887,14 +887,11 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
-                // **What a finished session's row becomes is one rule, on every
-                // transport.** A resumable Claude row is PARKED, preserving its
-                // session id for a later wake; anything else is deleted,
-                // because there is nothing to preserve. A parked row is only
-                // worth having if something can wake it, and every transport
-                // has a wake path: tmux respawns the window, holder spawns a
-                // fresh holder running `claude --resume`.
-                if let sessionID = terminal.claudeResumeDecision.resumableSessionID {
+                // An identified agent row is parked with its provider's native
+                // session ID. Only this positively-unreachable recovery fork
+                // accepts Codex; manual and automatic parking remain Claude-only.
+                if let resumePlan = terminal.recoveryResumePlan {
+                    let sessionID = resumePlan.identity.sessionID
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
                     // Fail closed if that authoritative record cannot be made.

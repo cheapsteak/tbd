@@ -13,6 +13,7 @@ public final class TBDDatabase: Sendable {
     public let repos: RepoStore
     public let worktrees: WorktreeStore
     public let terminals: TerminalStore
+    public let localAgentSessions: LocalAgentSessionStore
     public let notifications: NotificationStore
     public let notes: NoteStore
     public let modelProfiles: ModelProfileStore
@@ -67,6 +68,7 @@ public final class TBDDatabase: Sendable {
         self.repos = RepoStore(writer: pool, terminalDeletions: terminals.deletions)
         self.worktrees = WorktreeStore(writer: pool, terminalDeletions: terminals.deletions)
         self.terminals = terminals
+        self.localAgentSessions = LocalAgentSessionStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
         self.notes = NoteStore(writer: pool, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: pool)
@@ -145,6 +147,7 @@ public final class TBDDatabase: Sendable {
         self.repos = RepoStore(writer: queue, terminalDeletions: terminals.deletions)
         self.worktrees = WorktreeStore(writer: queue, terminalDeletions: terminals.deletions)
         self.terminals = terminals
+        self.localAgentSessions = LocalAgentSessionStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
         self.notes = NoteStore(writer: queue, notesDir: notesDir)
         self.modelProfiles = ModelProfileStore(writer: queue)

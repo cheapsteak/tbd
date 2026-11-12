@@ -341,7 +341,9 @@ private final class TmuxArgvRecorder: @unchecked Sendable {
     // Seed an archived Claude session ID so the revive path believes there's
     // a conversation to resume.
     let sessionID = "AAAAAAAA-1111-2222-3333-444444444444"
-    try await db.worktrees.setArchivedClaudeSessions(id: wt.id, sessions: [sessionID])
+    try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs: [
+        ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: sessionID), ordinal: 0, isPrimary: true)
+    ])
 
     // Revive with skipClaude=false so setupTerminals actually spawns claude.
     _ = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
@@ -375,8 +377,11 @@ private final class TmuxArgvRecorder: @unchecked Sendable {
     let sessionA = "AAAAAAAA-1111-2222-3333-444444444444"
     let sessionB = "BBBBBBBB-1111-2222-3333-444444444444"
     let sessionC = "CCCCCCCC-1111-2222-3333-444444444444"
-    try await db.worktrees.setArchivedClaudeSessions(
-        id: wt.id, sessions: [sessionA, sessionB, sessionC]
+    try await db.worktrees.setArchivedAgentTabs(id: wt.id, tabs:
+        [sessionA, sessionB, sessionC].enumerated().map { ordinal, sessionID in
+            ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: sessionID),
+                ordinal: ordinal, isPrimary: ordinal == 0)
+        }
     )
 
     _ = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)

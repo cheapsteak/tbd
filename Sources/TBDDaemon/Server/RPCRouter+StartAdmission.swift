@@ -10,14 +10,14 @@ extension RPCRouter {
     /// no agent and so is not checked.
     ///
     /// Only a parked row can start anything: a wake of a live one is answered
-    /// as a no-op and must stay that way. Of the parked rows, the wake path
-    /// resumes a Claude session only, when the tab is Claude's by kind (a nil
-    /// kind counts, as `Terminal.claudeResumeDecision` reads it) and has a
-    /// session to resume. It refuses a parked Codex tab, so that wake starts
-    /// nothing and is not checked.
+    /// as a no-op and must stay that way. A parked row names the provider
+    /// through its recovery resume plan, just as the wake itself does.
     static func startAdmissionAgent(forWaking terminal: Terminal) -> StartAdmissionAgent? {
-        guard terminal.isParked, case .resume = terminal.claudeResumeDecision else { return nil }
-        return .claude
+        guard terminal.isParked, let plan = terminal.recoveryResumePlan else { return nil }
+        switch plan {
+        case .claude: return .claude
+        case .codex: return .codex
+        }
     }
 
     /// Which agent a transport migration of this row would start again, or nil

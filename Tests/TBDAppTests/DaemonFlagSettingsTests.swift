@@ -131,7 +131,7 @@ struct DaemonFlagSettingsTests {
     /// that a hibernated session stays asleep.
     @Test("the session restore caption says who comes back and who stays asleep")
     func sessionRestoreCaptionStatesItsPromise() {
-        #expect(GeneralSettingsTab.sessionRestoreCaption == "When TBD starts, Claude sessions that were "
+        #expect(GeneralSettingsTab.sessionRestoreCaption == "When TBD starts, agent sessions that were "
             + "running come back, a few at a time. Hibernated sessions stay asleep.")
     }
 

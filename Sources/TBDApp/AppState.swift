@@ -1449,9 +1449,16 @@ final class AppState {
     private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
     var historyActiveWorktrees: Set<UUID> = []
     var historyLoadStates: [UUID: HistoryLoadState] = [:]
-    var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
-    var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
+    /// Only the latest refresh for a worktree may publish or invalidate history.
+    @ObservationIgnored var historyRefreshRequests: [UUID: UUID] = [:]
+    var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → SessionSummary.id
+    var sessionTranscripts: [String: [TranscriptItem]] = [:]  // live native ID or history identity.cacheKey → items
     var sessionTranscriptLoading: Set<String> = []
+    /// Cached tails whose full read has not succeeded. Unmarked cache entries
+    /// are complete snapshots; missing entries always need a new read.
+    @ObservationIgnored var incompleteHistoryTranscripts: Set<String> = []
+    /// Request ownership is separate from the spinner, which ends at the tail.
+    @ObservationIgnored var historyTranscriptRequests: [String: UUID] = [:]
     // Closed-terminal history (Session History → Closed Terminals).
     var closedTerminalHistories: [UUID: [TerminalHistoryEntry]] = [:]  // worktreeID → entries
     var selectedClosedTerminalIDs: [UUID: UUID] = [:]                  // worktreeID → entry id
@@ -1993,7 +2000,21 @@ final class AppState {
         sessionTranscriptOrder.append(sessionID)
         while sessionTranscriptOrder.count > sessionTranscriptCap {
             let evict = sessionTranscriptOrder.removeFirst()
-            sessionTranscripts.removeValue(forKey: evict)
+            invalidateHistoryTranscript(evict)
+        }
+    }
+
+    /// Invalidate pending reads as well as completion. A changed summary may
+    /// retain its visible snapshot until a replacement full read succeeds.
+    func invalidateHistoryTranscript(_ key: String, retainingMessages: Bool = false) {
+        historyTranscriptRequests.removeValue(forKey: key)
+        if sessionTranscriptLoading.contains(key) { sessionTranscriptLoading.remove(key) }
+        if retainingMessages, sessionTranscripts[key] != nil {
+            incompleteHistoryTranscripts.insert(key)
+        } else {
+            incompleteHistoryTranscripts.remove(key)
+            sessionTranscripts.removeValue(forKey: key)
+            sessionTranscriptOrder.removeAll { $0 == key }
         }
     }
 
@@ -2077,7 +2098,7 @@ final class AppState {
 
     let themeStore = ThemeStore()
 
-    let daemonClient = DaemonClient()
+    let daemonClient: DaemonClient
     let tmuxExecutableResolver: TmuxExecutableResolver
     let tmuxBridge: TmuxBridge
     /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
@@ -2251,11 +2272,11 @@ final class AppState {
     /// destination worktree and resume its selected session. Injectable so
     /// AppState tests can exercise the action without a live daemon.
     @ObservationIgnored lazy var freshConversationReviver:
-        @MainActor (UUID, String, Int?, Int?) async throws
-            -> WorktreeReviveConversationFreshResult = { [daemonClient] worktreeID, sessionID, cols, rows in
+        @MainActor (UUID, AgentSessionIdentity, Int?, Int?) async throws
+            -> WorktreeReviveConversationFreshResult = { [daemonClient] worktreeID, identity, cols, rows in
                 try await daemonClient.reviveConversationOnFreshBranch(
                     worktreeID: worktreeID,
-                    sessionID: sessionID,
+                    identity: identity,
                     cols: cols,
                     rows: rows
                 )
@@ -2931,8 +2952,10 @@ final class AppState {
         userDefaults: UserDefaults = .standard,
         tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
         onEngineNotice: @escaping @MainActor (TerminalEngineNotice) -> Void = TerminalEngineNotice.log,
-        phoneRetryClock: any Clock<Duration> = ContinuousClock()
+        phoneRetryClock: any Clock<Duration> = ContinuousClock(),
+        daemonClient: DaemonClient = DaemonClient()
     ) {
+        self.daemonClient = daemonClient
         self.userDefaults = userDefaults
         self.onEngineNotice = onEngineNotice
         self.phoneRetryClock = phoneRetryClock

@@ -5,6 +5,11 @@ import TBDShared
 
 private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
+enum AcceptedSessionCatalogEvidence: Sendable {
+    case claude
+    case codex(CodexRolloutProof)
+}
+
 /// GRDB Record type for the `terminal` table. The unused
 /// `transcript_stream_path` column is not named here; GRDB ignores it.
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -832,12 +837,14 @@ public struct TerminalStore: Sendable {
     /// Every Claude session ID any terminal row names, as raw column text.
     /// Read through SQL rather than `list()` so a row whose other columns fail
     /// to decode still counts as a reference: `OrphanGC`'s session-directory
-    /// arm reclaims whatever is NOT referenced.
+    /// arm reclaims whatever is NOT referenced. Codex kinds and legacy Codex
+    /// labels carry native thread IDs in this same column, not Claude IDs.
     public func claudeSessionReferences() async throws -> Set<String> {
         try await writer.read { db in
             Set(try String.fetchAll(db, sql: """
                 SELECT claudeSessionID FROM terminal WHERE claudeSessionID IS NOT NULL
-                """))
+                AND kind IS NOT ? AND label IS NOT ?
+                """, arguments: [TerminalKind.codex.rawValue, TerminalLabel.codex]))
         }
     }
 
@@ -1025,6 +1032,7 @@ public struct TerminalStore: Sendable {
         sessionID: String,
         transcriptPath: String?,
         observedTranscriptBoundary: ObservedTranscriptBoundary? = nil,
+        catalogEvidence: AcceptedSessionCatalogEvidence? = nil,
         observedAt: Date
     ) async throws -> AppliedTerminalSessionStart? {
         try await writer.write { db in
@@ -1055,6 +1063,11 @@ public struct TerminalStore: Sendable {
                 }
                 record.sessionOrderObservedAt = nil
                 try record.update(db)
+                guard let persistedRecord = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                    throw DatabaseError(message: "Terminal disappeared after SessionStart")
+                }
+                try Self.catalogAcceptedSession(persistedRecord, evidence: catalogEvidence,
+                                                observedAt: observedAt, in: db)
                 return AppliedTerminalSessionStart(
                     sessionID: sessionID,
                     transcriptPath: record.transcriptPath,
@@ -1097,6 +1110,8 @@ public struct TerminalStore: Sendable {
             ) else {
                 throw DatabaseError(message: "Terminal disappeared after SessionStart")
             }
+            try Self.catalogAcceptedSession(persistedRecord, evidence: catalogEvidence,
+                                            observedAt: observedAt, in: db)
             return AppliedTerminalSessionStart(
                 sessionID: sessionID,
                 transcriptPath: persistedRecord.transcriptPath,
@@ -1106,6 +1121,60 @@ public struct TerminalStore: Sendable {
                 transcriptBoundaryOffset: persistedRecord.codexTranscriptBoundaryOffset,
                 isInitialAttachment: isInitialAttachment)
         }
+    }
+
+    /// Compare the re-read terminal with the snapshot whose rollout was proven.
+    /// A changed generation or replacement is retried from a fresh snapshot.
+    func catalogProvenCodexSession(expectedTerminal: Terminal, proof: CodexRolloutProof) async throws {
+        try await writer.write { db in
+            guard let record = try TerminalRecord.fetchOne(db, key: expectedTerminal.id.uuidString),
+                  expectedTerminal.kind == .codex, record.kind == TerminalKind.codex.rawValue,
+                  record.worktreeID == expectedTerminal.worktreeID.uuidString,
+                  record.claudeSessionID == expectedTerminal.claudeSessionID,
+                  record.transcriptPath == expectedTerminal.transcriptPath,
+                  record.sessionOrderObservedAt == expectedTerminal.sessionOrderObservedAt,
+                  record.pendingSessionIncarnationID == nil,
+                  TerminalSessionIncarnation(terminal: expectedTerminal).matches(record) else { return }
+            try Self.catalogAcceptedSession(record, evidence: .codex(proof),
+                                            observedAt: record.sessionOrderObservedAt ?? record.createdAt, in: db)
+        }
+    }
+
+    private static func catalogAcceptedSession(
+        _ record: TerminalRecord, evidence: AcceptedSessionCatalogEvidence?, observedAt: Date, in db: GRDB.Database
+    ) throws {
+        guard let evidence, let terminal = record.toModel(), let sessionID = terminal.claudeSessionID,
+              !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let kind: LocalAgentKind
+        var codexOptions: CodexLaunchOptions?
+        switch evidence {
+        case .claude:
+            guard terminal.kind == .claude else { return }
+            kind = .claude
+        case let .codex(proof):
+            guard terminal.kind == .codex, let path = terminal.transcriptPath,
+                  URL(fileURLWithPath: path).standardizedFileURL.path == proof.path,
+                  proof.isCurrent() else { return }
+            kind = .codex
+            // SQL NULL is a legacy shared-home launch. Damaged non-NULL
+            // metadata must never acquire that meaning through lenient decoding.
+            if let raw = record.codex_launch_options {
+                guard let data = raw.data(using: .utf8),
+                      let options = try? JSONDecoder().decode(CodexLaunchOptions.self, from: data) else {
+                    throw UnreadableCodexLaunchOptions(terminalID: terminal.id)
+                }
+                codexOptions = options
+            }
+        }
+        // Construct from the persisted record, not the handler's pre-suspension
+        // model. A failed upsert throws through the surrounding identity write;
+        // a changed file proof above merely defers its association.
+        let timestamp = kind == .codex ? (terminal.sessionOrderObservedAt ?? observedAt) : observedAt
+        try LocalAgentSessionRecord.upsert(LocalAgentSession(
+            worktreeID: terminal.worktreeID, terminalID: terminal.id,
+            identity: AgentSessionIdentity(agentKind: kind, sessionID: sessionID),
+            transcriptPath: terminal.transcriptPath, codexLaunchOptions: codexOptions,
+            firstObservedAt: timestamp, lastObservedAt: timestamp), in: db)
     }
 
     /// Clear Claude-specific metadata after window recreation.
