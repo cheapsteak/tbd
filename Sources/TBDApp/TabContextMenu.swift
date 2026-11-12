@@ -104,10 +104,14 @@ final class TabContextMenuRegistry {
             matching: [.rightMouseDown, .leftMouseDown]
         ) { [weak self] event in
             // NSEvent is not Sendable; the monitor runs on the main thread.
-            nonisolated(unsafe) let unsafeEvent = event
-            return MainActor.assumeIsolated {
-                self?.handle(unsafeEvent) ?? unsafeEvent
+            let boxed = MainThreadEvent(event: event)
+            let result: MainThreadEvent? = MainActor.assumeIsolated {
+                // handle returns nil when it consumed the click; a released
+                // registry passes the click through.
+                guard let self else { return boxed }
+                return self.handle(boxed.event).map(MainThreadEvent.init(event:))
             }
+            return result?.event
         }
     }
 
@@ -126,6 +130,12 @@ final class TabContextMenuRegistry {
         NSMenu.popUpContextMenu(menu, with: event, for: view)
         return nil
     }
+}
+
+/// Carries an `NSEvent` into `MainActor.assumeIsolated`. Safe because local
+/// event monitors only run on the main thread.
+private struct MainThreadEvent: @unchecked Sendable {
+    let event: NSEvent
 }
 
 // MARK: - Anchor view
