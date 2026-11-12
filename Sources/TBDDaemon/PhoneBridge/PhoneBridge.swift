@@ -43,9 +43,6 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
     case disabled
     /// No relay URL is saved.
     case relayNotSetUp
-    /// No loader URL resolves: none is saved, and this build records no
-    /// default loader. A pairing link must name the page the phone opens.
-    case loaderNotSetUp
     /// Phone control is on and a relay is set, but the bridge is not running.
     /// The payload says why: the laptop key file or the app bundle cannot be
     /// used, or TBD is stopping.
@@ -93,8 +90,6 @@ enum PhoneBridgeError: Error, Equatable, LocalizedError {
             return "Phone control is off. Turn it on in Settings → Phone."
         case .relayNotSetUp:
             return "Set up a phone relay first."
-        case .loaderNotSetUp:
-            return "Set a loader URL in Settings → Phone → Advanced before pairing a phone."
         case .notRunning(let reason):
             return "Phone control is not running: \(reason)"
         case .noSuchDevice:
@@ -387,8 +382,7 @@ actor PhoneBridge: PhoneBridgeControlling {
     }
 
     /// Starts a pairing offer. Throws `.disabled` with phone control off,
-    /// `.relayNotSetUp` with no relay, `.loaderNotSetUp` when no loader URL
-    /// resolves, `.notRunning` when the bridge cannot run, and the relay
+    /// `.relayNotSetUp` with no relay, `.notRunning` when the bridge cannot run, and the relay
     /// check's error when the relay was last found not usable and no check
     /// has found it usable since. A refusal opens no pairing room.
     func pairStart() async throws -> PhonePairingStatus {
@@ -636,9 +630,6 @@ actor PhoneBridge: PhoneBridgeControlling {
             let config = try await db.config.get()
             guard config.phoneControlEnabled else { throw PhoneBridgeError.disabled }
             guard let relayText = config.phoneRelayURL else { throw PhoneBridgeError.relayNotSetUp }
-            // Checked before anything starts: with no loader, no link can
-            // name the page the phone opens.
-            guard let loaderText = config.resolvedPhoneLoaderURL else { throw PhoneBridgeError.loaderNotSetUp }
             if running?.relayURL.absoluteString != relayText {
                 // Not started yet, or started on another relay.
                 await reconcileAndAnnounce()
@@ -651,7 +642,7 @@ actor PhoneBridge: PhoneBridgeControlling {
             if let refusal {
                 throw refusal
             }
-            let loaderURL = try PhoneURLValidation.loader(loaderText)
+            let loaderURL = try PhoneURLValidation.loader(config.resolvedPhoneLoaderURL)
             return .success(try await current.pairing.start(loaderURL: loaderURL))
         } catch {
             return .failure(error)

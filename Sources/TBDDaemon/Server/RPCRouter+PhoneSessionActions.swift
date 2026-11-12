@@ -12,8 +12,9 @@ import TBDShared
 /// `phoneWake`, `phoneCreateWorktree`, `phoneRemoteCreate` and
 /// `phoneRemoteSendMessage`, the phone message rule the send rail applies
 /// (`PhoneMessageText`) to the phone's message, whose refusal answers before
-/// the handler runs. Past that, each runs the checks of the RPC it mirrors,
-/// in that RPC's order, and returns that RPC's response.
+/// the handler runs, with its code (`CodedRefusal.response`). Past that, each
+/// runs the checks of the RPC it mirrors, in that RPC's order, and returns that
+/// RPC's response.
 ///
 /// **The rebuild names what a phone keeps, never what it loses.** Every params
 /// value the bridge passes is rebuilt field by field into fresh params holding
@@ -72,8 +73,8 @@ extension RPCRouter: PhoneSessionActions {
     func phoneWake(_ p: TerminalWakeParams, deviceID: UUID) async throws -> RPCResponse {
         let narrowed = Self.phoneWakeParams(p)
         switch PhoneMessageText.vettedFirstMessage(narrowed.prompt) {
-        case .refused(let reason):
-            return RPCResponse(error: reason)
+        case .refused(let refusal):
+            return refusal.response
         case .deliver(let prompt):
             return try await handleTerminalWake(
                 encoder.encode(TerminalWakeParams(terminalID: narrowed.terminalID, prompt: prompt)),
@@ -93,8 +94,8 @@ extension RPCRouter: PhoneSessionActions {
     /// it came.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
         switch Self.phoneWorktreeCreateVetted(p) {
-        case .refused(let reason):
-            return RPCResponse(error: reason)
+        case .refused(let refusal):
+            return refusal.response
         case .deliver(let params):
             return try await handleWorktreeCreate(encoder.encode(params), actor: .phone(deviceID: deviceID))
         }
@@ -125,8 +126,8 @@ extension RPCRouter: PhoneSessionActions {
     /// service's to vet, which alone knows which of them the phone set.
     func phoneRemoteCreate(_ p: RemoteCreateParams, deviceID: UUID) async throws -> RPCResponse {
         switch Self.phoneRemoteCreateVetted(p) {
-        case .refused(let reason):
-            return RPCResponse(error: reason)
+        case .refused(let refusal):
+            return refusal.response
         case .deliver(let params):
             return try await handleRemoteCreate(encoder.encode(params), actor: .phone(deviceID: deviceID))
         }
@@ -140,8 +141,8 @@ extension RPCRouter: PhoneSessionActions {
     func phoneRemoteSendMessage(_ p: RemoteSendMessageParams, deviceID: UUID) async throws -> RPCResponse {
         let params = Self.phoneRemoteSendMessageParams(p)
         switch PhoneMessageText.vetted(params.text) {
-        case .refused(let reason):
-            return RPCResponse(error: reason)
+        case .refused(let refusal):
+            return refusal.response
         case .deliver(let text):
             return try await handleRemoteSendMessage(
                 encoder.encode(RemoteSendMessageParams(
@@ -180,8 +181,8 @@ extension RPCRouter: PhoneSessionActions {
     ) -> PhoneMessageText.Vetted<WorktreeCreateParams> {
         let narrowed = phoneWorktreeCreateParams(p)
         switch PhoneMessageText.vettedFirstMessage(narrowed.prompt) {
-        case .refused(let reason):
-            return .refused(reason)
+        case .refused(let refusal):
+            return .refused(refusal)
         case .deliver(let prompt):
             return .deliver(WorktreeCreateParams(repoID: narrowed.repoID, prompt: prompt))
         }
@@ -229,8 +230,8 @@ extension RPCRouter: PhoneSessionActions {
     ///   came; otherwise they pass byte for byte.
     ///
     /// Either the params, or the refusal that answers in place of the create:
-    /// `RemoteCreateRefusal`'s or `PhoneMessageText`'s, which reach the phone
-    /// as they are.
+    /// `RemoteCreateRefusal`'s or `PhoneMessageText`'s, each with its code,
+    /// which reach the phone as they are.
     static func phoneRemoteCreateVetted(
         _ p: RemoteCreateParams
     ) -> PhoneMessageText.Vetted<RemoteCreateParams> {
@@ -248,8 +249,8 @@ extension RPCRouter: PhoneSessionActions {
             return .deliver(narrowed)
         }
         switch PhoneMessageText.vetted(prompt) {
-        case .refused(let reason):
-            return .refused(reason)
+        case .refused(let refusal):
+            return .refused(refusal)
         case .deliver(let normalized):
             guard normalized != prompt else { return .deliver(narrowed) }
             form[field] = normalized

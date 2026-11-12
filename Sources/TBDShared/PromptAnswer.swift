@@ -89,6 +89,10 @@ public enum PromptAnswerValidation: LocalizedError, Equatable, Sendable {
     }
 
     public var errorDescription: String? { message }
+
+    /// The code a refusal of this answer carries beside `message`: always
+    /// `RPCErrorCode.answerDoesNotFit`, whichever way the answer does not fit.
+    public var code: RPCErrorCode { .answerDoesNotFit }
 }
 
 extension PromptAnswer {

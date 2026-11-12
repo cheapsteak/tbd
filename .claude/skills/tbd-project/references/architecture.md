@@ -165,7 +165,7 @@ Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH age
 JSON-RPC style over the Unix socket (newline-delimited). Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
 
 - **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, `repo.listBranches`, hidden/expanded toggles
-- **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.suspend`, `.resume`, `.setAutoArchive`
+- **Worktree**: `worktree.create`, `.createFailure` (why a recent create failed; in-memory, for the CLI), `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.suspend`, `.resume`, `.setAutoArchive`
 - **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.focus`, `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`, `.sessionTitle` (internal — fired by the `UserPromptSubmit` hook), `.programStatusReport` / `.programStatusList` (OSC 7501 reports forwarded by the app, and the store's snapshots)
 - **Tab**: `tab.setLabel`, `tab.setOrder`, `tab.list`, `worktree.setActiveTab`
 - **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus `terminal.sessionEvent` (SessionStart hook bridge)

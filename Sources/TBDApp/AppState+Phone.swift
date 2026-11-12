@@ -167,8 +167,8 @@ extension AppState {
         }
     }
 
-    /// Saves the loader URL override; nil or blank clears it, leaving the
-    /// default, which is none until the loader org is recorded.
+    /// Saves the loader URL override; nil or blank clears it, leaving
+    /// `Config.phoneLoaderURLDefault`.
     /// Returns nil on success, or the reason for the pane to show inline.
     func setPhoneLoaderURL(_ raw: String?) async -> String? {
         await performPhoneAction(RPCMethod.configSetPhoneLoaderURL) {

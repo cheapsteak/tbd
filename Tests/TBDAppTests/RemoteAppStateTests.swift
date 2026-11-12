@@ -216,6 +216,18 @@ struct RemoteAppStateTests {
         #expect(AppState.classifyRemoteRefreshFailure(error) == .unavailable)
     }
 
+    @Test func classifyRemoteRefreshFailure_codeAlone_isUnavailable() {
+        let error = DaemonClientError.rpcError(
+            "different words", code: RPCErrorCode.remoteBackendsOff.rawValue)
+        #expect(AppState.classifyRemoteRefreshFailure(error) == .unavailable)
+    }
+
+    @Test func classifyRemoteRefreshFailure_otherCodeOtherWords_isError() {
+        let error = DaemonClientError.rpcError(
+            "something else went wrong", code: RPCErrorCode.promptAnswerOff.rawValue)
+        #expect(AppState.classifyRemoteRefreshFailure(error) == .error)
+    }
+
     @Test func classifyRemoteRefreshFailure_otherRPCError_isError() {
         let error = DaemonClientError.rpcError("something else went wrong", code: nil)
         #expect(AppState.classifyRemoteRefreshFailure(error) == .error)

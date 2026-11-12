@@ -120,7 +120,7 @@ actor TranscriptDeltaRelay {
 /// sessions list shows (`not_found` otherwise, `checkPhoneCapableRemoteSession`);
 /// its transcript is the daemon's cache, whose path comes from a sync
 /// (`RemoteTranscriptFollower`), and a sync that fails is the reply's error,
-/// only in words TBD wrote (`tbdRemoteTranscriptRefusals`).
+/// in its own words only when it carries a code (`remoteRefusal(_:method:)`).
 /// The reply goes out through `.onQueue`, so the stream's
 /// `seq` it names is where the session's events start, and the feed and the
 /// prompt feed start only once the connection is live
@@ -162,20 +162,6 @@ extension PhoneAppService {
     static let noTranscriptReadReason = "This provider does not support reading transcripts."
     static let transcriptNotOpenReason = "That transcript is not open. Open it again."
     static let transcriptChangedReason = "The transcript changed while it was opened. Try again."
-    /// The refusals TBD itself writes on a remote transcript sync or earlier
-    /// history load, which reach a phone as they are: the gates'
-    /// (`tbdRemoteGateRefusals`), the router's (`RemoteTranscriptRefusal`),
-    /// and a sync whose session was removed while it ran
-    /// (`RemoteTranscriptSyncError.discarded`). Anything else, such as a
-    /// failed read's provider error (`RemoteTranscriptSyncError.providerFailed`),
-    /// a timeout or an undeclared verb, is `remoteRefusedReason`
-    /// (`remoteRefusal(_:method:tbdRefusals:)`).
-    static let tbdRemoteTranscriptRefusals: Set<String> = tbdRemoteGateRefusals.union([
-        RemoteTranscriptRefusal.dismissed,
-        RemoteTranscriptRefusal.loadEarlierOff,
-        RemoteTranscriptRefusal.nothingEarlier,
-        RemoteTranscriptSyncError.discarded.localizedDescription,
-    ])
 
     // MARK: - transcript.open
 

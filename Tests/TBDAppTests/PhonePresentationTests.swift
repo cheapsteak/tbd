@@ -54,7 +54,6 @@ struct PhonePresentationTests {
             status(relayURL: nil, relayState: .notSetUp),
             status(running: false, problem: "The laptop key file is missing."),
             status(relayState: .incompatible),
-            status(loaderURL: nil),
         ]
         for candidate in blocked {
             #expect(!PhonePresentation.canPair(candidate))
@@ -66,16 +65,18 @@ struct PhonePresentationTests {
             == "The laptop key file is missing.")
     }
 
-    /// This build records no default loader, so with no override saved the
-    /// button is disabled and says what to set.
-    @Test func pairingNeedsALoaderURL() {
-        #expect(Config.phoneLoaderURLDefault == nil)
+    /// This build records a default loader, so a phone can be paired with no
+    /// override saved, and with one.
+    @Test func pairingDoesNotNeedALoaderOverride() {
+        #expect(Config.phoneLoaderURLDefault == "https://tbd-phone.github.io/")
         let unset = status(loaderURL: nil)
-        #expect(!PhonePresentation.canPair(unset))
-        #expect(PhonePresentation.pairDisabledReason(unset)
-            == "Set a loader URL in Settings → Phone → Advanced before pairing a phone.")
-        // The placeholder is an example, never a loader someone could claim.
-        #expect(PhonePresentation.loaderURLPlaceholder == "https://acme-loader.github.io/")
+        #expect(PhonePresentation.canPair(unset))
+        #expect(PhonePresentation.pairDisabledReason(unset) == nil)
+        let overridden = status(loaderURL: "https://acme-loader.github.io/")
+        #expect(PhonePresentation.canPair(overridden))
+        #expect(PhonePresentation.pairDisabledReason(overridden) == nil)
+        // The blank field shows the address it falls back to.
+        #expect(PhonePresentation.loaderURLPlaceholder == Config.phoneLoaderURLDefault)
     }
 
     @Test func countdownAndCode() {

@@ -33,9 +33,8 @@ struct ConfigGet: AsyncParsableCommand {
             "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
             "phone-control: \(config.phoneControlEnabled ? "on" : "off")",
             "phone-relay: \(config.phoneRelayURL ?? "not set")",
-            // The loader in effect: the override, else this build's default,
-            // which is none until the loader org is recorded.
-            "phone-loader: \(config.resolvedPhoneLoaderURL ?? "not set")",
+            // The loader in effect: the override, else this build's default.
+            "phone-loader: \(config.resolvedPhoneLoaderURL)",
         ].joined(separator: "\n")
     }
 

@@ -3751,10 +3751,13 @@ final class AppState {
         _ worktree: Worktree?, delta: WorktreeIDDelta, composer: QueuedPromptTarget?
     ) -> (text: String, revealPath: String?)? {
         guard delta.creationFailed else { return nil }
-        let named = Self.creationFailureMessage(worktree, creationFailed: true)
+        let named = Self.creationFailureMessage(
+            worktree, creationFailed: true, reason: delta.failureReason)
+        let unnamed = delta.failureReason.map { "Worktree creation failed: \($0)" }
+            ?? "Worktree creation failed."
         guard let failure = named
             ?? ((composer != nil || delta.unsentPromptPath != nil || delta.unsentPromptLost)
-                ? "Worktree creation failed." : nil)
+                ? unnamed : nil)
         else { return nil }
         if let composer {
             composer.failAfterCreate(reason: failure)
@@ -3781,13 +3784,20 @@ final class AppState {
     /// archived on purpose from the CLI and the two are indistinguishable by
     /// status alone.
     ///
+    /// `reason` is the delta's `failureReason`: git's verdict, with a hint
+    /// where one applies. When it is there the alert says it. A daemon that
+    /// predates it sends none, and the alert points at the daemon's log.
+    ///
     /// Pure static helper for testability — every branch is unit-testable
     /// without a daemon or SwiftUI, following the pattern of `archiveFailureSurface`.
     nonisolated static func creationFailureMessage(
-        _ worktree: Worktree?, creationFailed: Bool
+        _ worktree: Worktree?, creationFailed: Bool, reason: String? = nil
     ) -> String? {
         guard creationFailed, let worktree else {
             return nil
+        }
+        if let reason {
+            return "Couldn't create worktree \"\(worktree.displayName)\": \(reason)"
         }
         return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
                // Absolute path deliberately: `log` is a zsh builtin that eats

@@ -23,6 +23,34 @@ struct MarkdownLinkResolverTests {
 
     // MARK: - Rewriting
 
+    /// Each scalar joins the character before it into one `Character`: a
+    /// combining acute accent, an emoji variation selector and a combining
+    /// enclosing keycap. The webview reads code points, so the joined
+    /// character still ends the `href` value.
+    private static let joiningMarks = ["\u{301}", "\u{FE0F}", "\u{20E3}"]
+
+    /// `URL.absoluteString` percent-encodes all of these before the escape
+    /// sees them today, so the escape is tested directly: it must hold on its
+    /// own rather than lean on that.
+    @Test("the href escape catches a markup character that a mark joins")
+    func escapeAttributeIsByScalar() {
+        let entities = [("&", "&amp;"), ("<", "&lt;"), (">", "&gt;"), ("\"", "&quot;")]
+        for (character, entity) in entities {
+            for mark in Self.joiningMarks {
+                let escaped = MarkdownLinkResolver.escapeAttribute("a" + character + mark + "b")
+                #expect(
+                    Array(escaped.unicodeScalars) == Array(("a" + entity + mark + "b").unicodeScalars),
+                    "\(character) then U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+            }
+        }
+    }
+
+    @Test("the href escape's plain-ASCII output is pinned")
+    func escapeAttributePlainASCII() {
+        #expect(MarkdownLinkResolver.escapeAttribute(#"file:///a&b"c<d>e'f.md"#)
+            == "file:///a&amp;b&quot;c&lt;d&gt;e'f.md")
+    }
+
     @Test("rewrites a document-relative link to an absolute file URL")
     func rewritesRelativeLink() throws {
         let dir = try makeTempDir()

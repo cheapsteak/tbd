@@ -1948,7 +1948,7 @@ public actor HibernationCoordinator {
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
                 profileBaseURL: resolvedProfile?.baseURL,
-                profileModel: resolvedProfile?.model,
+                profileModel: spawnExtras?.model ?? resolvedProfile?.model,
                 profileAwsRegion: resolvedProfile?.awsRegion,
                 profileAwsProfile: resolvedProfile?.awsProfile,
                 profileConfigDir: profileConfigDir,

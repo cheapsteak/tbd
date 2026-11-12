@@ -213,6 +213,9 @@ final class GhosttyEngine: TerminalEngine {
             guard let self else { return }
             self.delegate?.engine(self, openLink: link, params: [:])
         }
+        terminalView.onCommandClickText = { [weak self] clicked in
+            self?.openCommandClick(on: clicked) ?? false
+        }
         terminalView.onCloseTab = { [weak self] in
             guard let self else { return }
             self.delegate?.engineRequestsCloseTab(self)
@@ -277,7 +280,42 @@ final class GhosttyEngine: TerminalEngine {
         reportGrid(current)
     }
 
+    /// Whether click routing is on (`setClickRouting(enabled:)`), which is what makes this a
+    /// panel's terminal, one whose ⌘-clicks TBD's own matcher reads.
+    private var routesClicks = false
+
+    /// Opens what a ⌘-click on plain text names, as the SwiftTerm engine finds it and in the same
+    /// order: TBD's own matcher on the pressed row first, while click routing is on, then
+    /// SwiftTerm's link detection, which the SwiftTerm engine runs on the release. A file goes to
+    /// `filePathClicked` and the rest to `openLink`, the calls the SwiftTerm engine makes; its view
+    /// opens a pull request link itself, where this engine hands it to the delegate, which opens it
+    /// the same way. True when something opened, and the view then consumes the press.
+    ///
+    /// The SwiftTerm view consumes the click that activates its window unless TBD's matcher opened
+    /// something or an OSC 8 link is under it, so SwiftTerm's detection never sees that click, and
+    /// it is not run here either.
+    private func openCommandClick(on clicked: GhosttyClickedText) -> Bool {
+        guard let delegate, clicked.rows.indices.contains(clicked.row) else { return false }
+        if routesClicks, let target = TerminalCommandClick.target(
+            row: clicked.rows[clicked.row].text, column: clicked.column,
+            worktreePath: configuration.worktreePath, remoteURL: configuration.remoteURL) {
+            switch target {
+            case .file(let path):
+                ghosttyEngineLog.debug("file-click[mouseDown/path]: \(path, privacy: .public)")
+                delegate.engine(self, filePathClicked: path)
+            case .url(let url):
+                delegate.engine(self, openLink: url.absoluteString, params: [:])
+            }
+            return true
+        }
+        guard !clicked.activatesWindow, let link = SwiftTermLinkDetector.link(in: clicked) else { return false }
+        ghosttyEngineLog.debug("file-click[mouseDown/detected]: \(link, privacy: .public)")
+        delegate.engine(self, openLink: link, params: [:])
+        return true
+    }
+
     func setClickRouting(enabled: Bool) {
+        routesClicks = enabled
         terminalView.acceptsActivatingClick = enabled
         guard enabled else {
             terminalView.onMouseDownClaimFocus = nil

@@ -259,11 +259,11 @@ struct DrawableTrackerTests {
     }
 
     /// A nil drawable proves the pool full, so the tracker reports the limit, whatever its
-    /// entries say, until a report arrives.
+    /// entries say, until a present made after the nil came back is reported.
     @Test func aNilDrawableHoldsTheLimitUntilAReportArrives() {
         let tracker = DrawableTracker()
         let out = tracker.add(acquiredAt: .seconds(100))
-        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
         for now in [101.0, 101.5] {
             let awaiting = tracker.awaitingPresent(now: .seconds(now))
             #expect(awaiting == tracker.limit, "at \(now) s after a nil drawable the tracker counted \(awaiting)")
@@ -273,30 +273,74 @@ struct DrawableTrackerTests {
         #expect(afterReport == 0, "a report left the nil drawable's hold in place: \(afterReport) awaiting")
     }
 
-    /// A report that lands while `nextDrawable()` waits, or just after it returns nil, freed a
-    /// drawable. The nil then sets no hold: set, it would outlast the report meant to end it.
-    @Test func aReportDuringTheNilDrawablesWaitSetsNoHold() {
+    /// A present made after the nil came back, reported before the frame notes the nil, as a
+    /// handler on another thread can, freed a drawable. The nil then sets no hold: set, it would
+    /// outlast the report meant to end it.
+    @Test func aFreshReportBeforeTheNilIsNotedSetsNoHold() {
         let tracker = DrawableTracker()
         let out = tracker.add(acquiredAt: .seconds(100))
-        let reportsBefore = tracker.reportCount
-        tracker.reportPresented(out, presentedTime: 101)
-        tracker.noteNoDrawable(reportsBefore: reportsBefore)
+        tracker.reportPresented(out, presentedTime: 101.5)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
         let awaiting = tracker.awaitingPresent(now: .seconds(101.25))
         #expect(awaiting == 0, "a nil drawable after a report set a hold: \(awaiting) awaiting")
     }
 
+    /// Under bulk output reports run several refreshes late, so a few are still queued when a
+    /// request comes back nil. Their presents were made before the nil, and prove nothing about
+    /// the pool since: reported before the nil, they leave it to set its hold, and reported after
+    /// it, they leave the hold in place, even one dated at the request's own `now`. So does an
+    /// undated report. A present dated a `presentReportTimeout` after the request, the earliest
+    /// the nil could have come back, ends it.
+    @Test func aReportOfAPresentMadeBeforeTheRequestLeavesTheHold() {
+        let tracker = DrawableTracker()
+        let first = tracker.add(acquiredAt: .seconds(100))
+        let second = tracker.add(acquiredAt: .seconds(100.25))
+        let third = tracker.add(acquiredAt: .seconds(100.375))
+        let fourth = tracker.add(acquiredAt: .seconds(100.4375))
+        tracker.reportPresented(first, presentedTime: 100.25)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
+        let atFirstCheck = tracker.check(now: .seconds(101.5))
+        #expect(atFirstCheck.nilDrawableHold, "a report of an earlier present kept the nil from setting a hold: \(atFirstCheck)")
+
+        tracker.reportPresented(second, presentedTime: 100.5)
+        tracker.reportPresented(third, presentedTime: 0)
+        let kept = tracker.check(now: .seconds(101.75))
+        #expect(kept.nilDrawableHold, "late reports of earlier presents ended the hold: \(kept)")
+
+        tracker.reportPresented(fourth, presentedTime: 101.5)
+        let ended = tracker.check(now: .seconds(102))
+        #expect(!ended.nilDrawableHold, "a present made after the nil left the hold in place: \(ended)")
+    }
+
     /// With no report, the hold lasts `presentReportTimeout` from the first check after the nil
     /// drawable. That frame's own `now` is a second old by the time `nextDrawable()` returns nil,
-    /// so it cannot start the hold; `noteNoDrawable(reportsBefore:)` takes no time.
+    /// so it cannot start the hold; `noteNoDrawable(requestedAt:)` only dates the request.
     @Test func aNilDrawableHoldsTheLimitForTheTimeoutFromTheNextCheck() {
         let tracker = DrawableTracker()
-        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.25))
         let first = tracker.awaitingPresent(now: .seconds(101.25))
         #expect(first == tracker.limit, "the first check after a nil drawable counted \(first)")
         let within = tracker.awaitingPresent(now: .seconds(102.125))
         #expect(within == tracker.limit, "0.875 s into the hold the tracker counted \(within)")
         let after = tracker.awaitingPresent(now: .seconds(102.25))
         #expect(after == 0, "a timeout after the hold began the tracker counted \(after)")
+    }
+
+    /// The check tells a nil drawable's hold, which a display tick drops for, from entries at the
+    /// limit, which only a leading-edge draw drops for. Both count as the limit.
+    @Test func theCheckTellsANilDrawablesHoldFromEntriesAtTheLimit() {
+        let tracker = DrawableTracker()
+        _ = tracker.add(acquiredAt: .seconds(100))
+        let newer = tracker.add(acquiredAt: .seconds(100.25))
+        let atTheLimit = tracker.check(now: .seconds(100.5))
+        let entries = DrawableTracker.Check(awaitingPresent: tracker.limit, nilDrawableHold: false)
+        #expect(atTheLimit == entries, "two entries awaiting their report checked as \(atTheLimit)")
+
+        tracker.reportPresented(newer, presentedTime: 100.5)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.625))
+        let inTheHold = tracker.check(now: .seconds(100.75))
+        let held = DrawableTracker.Check(awaitingPresent: tracker.limit, nilDrawableHold: true)
+        #expect(inTheHold == held, "a nil drawable's hold with no entries checked as \(inTheHold)")
     }
 
     /// A peek answers what the check would, and changes nothing: entries past the timeout are
@@ -315,7 +359,7 @@ struct DrawableTrackerTests {
         #expect(checked == pastTimeout, "the check counted \(checked) where the peek counted \(pastTimeout)")
 
         // A peek is not the first check after a nil drawable: the hold starts at the next real one.
-        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        tracker.noteNoDrawable(requestedAt: .seconds(101.5))
         let peekedHold = tracker.peekAwaitingPresent(now: .seconds(102))
         #expect(peekedHold == tracker.limit, "a peek during a nil drawable's hold counted \(peekedHold)")
         let firstCheck = tracker.awaitingPresent(now: .seconds(103.25))
@@ -362,10 +406,28 @@ struct DrawableTrackerTests {
         let afterReport = tracker.entryCount
         #expect(afterReport == 0, "reporting the newest drawable left \(afterReport)")
 
-        tracker.noteNoDrawable(reportsBefore: tracker.reportCount)
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
         tracker.reportNewestPresented()
         let held = tracker.awaitingPresent(now: .seconds(101))
         #expect(held == tracker.limit, "reporting the newest of no drawables ended a nil drawable's hold: \(held)")
+    }
+
+    /// A presented handler's report reaches the tracker unless a test has set
+    /// `ignoresPresentedHandlers`. The view tests that time their own reports rely on the seam:
+    /// were it to let Metal's reports through, they would clear the entries those tests keep, and
+    /// the late-report repro would pass whatever the tick does.
+    @Test func aPresentedHandlersReportIsIgnoredOnlyWhileTheSeamIsSet() {
+        let tracker = DrawableTracker()
+        let out = tracker.add(acquiredAt: .seconds(100))
+        tracker.ignoresPresentedHandlers = true
+        tracker.reportFromPresentedHandler(out, presentedTime: 100.25)
+        let whileIgnoring = tracker.entryCount
+        #expect(whileIgnoring == 1, "a handler's report reached a tracker that ignores them: \(whileIgnoring) entries")
+
+        tracker.ignoresPresentedHandlers = false
+        tracker.reportFromPresentedHandler(out, presentedTime: 100.5)
+        let heard = tracker.entryCount
+        #expect(heard == 0, "a handler's report did not reach a tracker that hears them: \(heard) entries")
     }
 }
 

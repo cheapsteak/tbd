@@ -138,7 +138,7 @@ import Testing
         let cases = try #require(
             try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
             "add-column-targets.json must be a JSON array of objects")
-        #expect(cases.count >= 16, "the shared ADD COLUMN fixture is missing cases")
+        #expect(cases.count >= 18, "the shared ADD COLUMN fixture is missing cases")
 
         for testCase in cases {
             let name = testCase["name"] as? String ?? "<unnamed>"
@@ -237,6 +237,40 @@ import Testing
                 sql: "ALTER TABLE t ADD COLUMN existing TEXT;", identifier: "test", to: db)
         }
         #expect(try Self.columnNames(queue, table: "t") == ["id", "existing"])
+    }
+
+    /// The table name is quoted for the guard's `PRAGMA` by doubling each `"`.
+    /// Plain ASCII comes out as before.
+    @Test func quotedIdentifierPlainASCIIIsPinned() {
+        #expect(SQLMigrationLoader.quotedIdentifier("config") == #""config""#)
+        #expect(SQLMigrationLoader.quotedIdentifier(#"a"b"#) == #""a""b""#)
+        #expect(SQLMigrationLoader.quotedIdentifier("") == #""""#)
+    }
+
+    /// SQLite reads code points, so a `"` that a mark joins into one
+    /// `Character` still ends the identifier. It is doubled like any other,
+    /// compared scalar for scalar.
+    @Test func quotedIdentifierDoublesAQuoteThatAMarkJoins() {
+        for mark in ["\u{301}", "\u{FE0F}", "\u{20E3}"] {
+            #expect(
+                Array(SQLMigrationLoader.quotedIdentifier("a\"" + mark + "b").unicodeScalars)
+                    == Array(("\"a\"\"" + mark + "b\"").unicodeScalars),
+                "U+\(String(mark.unicodeScalars.first!.value, radix: 16))")
+        }
+    }
+
+    /// End to end through the guard: the table's quoted name holds a `""` pair
+    /// whose second quote carries a mark. The guard unquotes it, quotes it
+    /// again for its `PRAGMA`, finds the column, and skips the statement.
+    @Test func addColumnGuardSkipsOnATableWhoseNameHasAJoinedQuote() throws {
+        let table = "\"t\"\"\u{301}x\""
+        let queue = try DatabaseQueue()
+        try queue.write { db in
+            try db.execute(sql: "CREATE TABLE \(table) (id INTEGER PRIMARY KEY, existing TEXT)")
+            try SQLMigrationLoader.apply(
+                sql: "ALTER TABLE \(table) ADD COLUMN existing TEXT;", identifier: "test", to: db)
+        }
+        #expect(try Self.columnNames(queue, table: table) == ["id", "existing"])
     }
 
     /// Case-insensitively, because SQLite identifiers are.

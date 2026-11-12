@@ -29,7 +29,7 @@ The design is in [`docs/specs/2026-11-07-phone-control-design.md`](specs/2026-11
    - Add the App's private key as the environment secret `PHONE_LOADER_APP_PRIVATE_KEY`: `gh secret set PHONE_LOADER_APP_PRIVATE_KEY --env phone-loader < acme-loader-app.private-key.pem`.
    - Add the repository variables `PHONE_LOADER_APP_ID` (the App ID), `PHONE_LOADER_OWNER` (`acme-loader`) and `PHONE_LOADER_REPO` (`acme-loader.github.io`), each with `gh variable set <name> --body <value>`.
 5. **Turn deploys on and check one.** Once `phone/loader/` is on `main`, set `PHONE_LOADER_DEPLOY_ENABLED` to `true` (`gh variable set PHONE_LOADER_DEPLOY_ENABLED --body true`), run `gh workflow run phone-loader-deploy.yml --ref main`, and check that `https://acme-loader.github.io/version.json` shows the commit.
-6. **Record the loader URL** in `Config.phoneLoaderURLDefault` (spec, section 11). Until it is recorded, TBD has no default loader, and each user sets the loader URL in Settings → Phone → Advanced before pairing.
+6. **Record the loader URL** in `Config.phoneLoaderURLDefault` (spec, section 11). A fork that publishes its own loader records its URL there, or each user sets it in Settings → Phone → Advanced.
 
 ## Turning deploys off
 

@@ -69,17 +69,26 @@ enum GitLabQueries {
         """
     }
 
+    /// `s` as a GraphQL string literal, quotes included.
+    ///
+    /// Iterates Unicode scalars, not `Character`s. Git allows `"` in a branch
+    /// name, and a `"` followed by a combining mark is one `Character` with it,
+    /// so a `Character` comparison leaves it raw. GraphQL reads code points,
+    /// so that `"` would end the string and the rest of the name would become
+    /// query text.
     private static func jsonQuoted(_ s: String) -> String {
-        var out = "\""
-        for ch in s {
-            switch ch {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\n": out += "\\n"
-            default: out.append(ch)
+        var out = String.UnicodeScalarView()
+        out.append("\"")
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\"": out.append(contentsOf: #"\""#.unicodeScalars)
+            case "\\": out.append(contentsOf: #"\\"#.unicodeScalars)
+            case "\n": out.append(contentsOf: #"\n"#.unicodeScalars)
+            default: out.append(scalar)
             }
         }
-        return out + "\""
+        out.append("\"")
+        return String(out)
     }
 
     /// What one GraphQL response settled.

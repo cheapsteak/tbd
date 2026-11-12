@@ -141,7 +141,9 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         try await db.config.setTranscriptPromptAnswerEnabled(true)
         let invoker = FakeProviderInvoker(script: [])
         let r = router(await manager(invoker, describe: false))
-        #expect(try await answer(r).error == "remote backends disabled")
+        let response = try await answer(r)
+        #expect(response.error == "remote backends disabled")
+        #expect(response.errorCode == RPCErrorCode.remoteBackendsOff.rawValue)
         #expect(invoker.callsSnapshot().isEmpty)
     }
 
@@ -152,7 +154,8 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         let m = await manager(invoker)
         await poll(m)
         let response = try await answer(router(m))
-        #expect(response.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(response.error == PromptAnswerRefusal.disabled.text)
+        #expect(response.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }
@@ -174,8 +177,10 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
             JSONEncoder().encode(params), connection: SendHarness.AuthenticatedApp.connection)
         let fromAPhone = try await r.phoneAnswerRemotePrompt(params, deviceID: UUID())
 
-        #expect(fromTheApp.error == RPCRouter.promptAnswerSettingUnreadRefusal)
-        #expect(fromAPhone.error == RPCRouter.promptAnswerSettingUnreadRefusal)
+        #expect(fromTheApp.error == PromptAnswerRefusal.settingUnread.text)
+        #expect(fromTheApp.errorCode == RPCErrorCode.promptAnswerSettingUnread.rawValue)
+        #expect(fromAPhone.error == PromptAnswerRefusal.settingUnread.text)
+        #expect(fromAPhone.errorCode == RPCErrorCode.promptAnswerSettingUnread.rawValue)
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }
@@ -212,6 +217,7 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(response.success == false)
         #expect(response.error?.contains("has not declared capability '\(RemoteCapability.answer)'") == true)
         #expect(response.error?.contains("answer <session_id> <prompt_id>") == true)
+        #expect(response.errorCode == nil, "a refusal built from a provider's details carries no code")
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }
@@ -231,6 +237,7 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         let response = try await answer(router(m))
         #expect(response.success == false)
         #expect(response.error?.contains("inventory is stale") == true)
+        #expect(response.errorCode == nil, "a refusal built from a provider's details carries no code")
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }
@@ -239,8 +246,26 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         try await enable()
         let invoker = FakeProviderInvoker(script: [describeDeclaring([RemoteCapability.answer])])
         let response = try await answer(router(await manager(invoker)))
-        #expect(response.error == RPCRouter.remoteAnswerNotMirroredRefusal)
+        #expect(response.error == PromptAnswerRefusal.notMirrored.text)
+        #expect(response.errorCode == RPCErrorCode.promptNotMirrored.rawValue)
         #expect(Self.answers(invoker).isEmpty)
+    }
+
+    /// A session whose agent has exited is refused with the words and code
+    /// `remote.sendMessage` uses for it, before anything is invoked.
+    @Test func refusedWhenTheSessionHasExited() async throws {
+        try await enable()
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(describeDeclaring([RemoteCapability.answer])),
+            .result(listing(agentState: .exited)),
+        ])
+        let m = await manager(invoker)
+        await poll(m)
+        let response = try await answer(router(m))
+        #expect(response.error == RemoteSendMessageRefusal.exited.text)
+        #expect(response.errorCode == RPCErrorCode.remoteSessionExited.rawValue)
+        #expect(Self.answers(invoker).isEmpty)
+        #expect(try actuationRows().isEmpty)
     }
 
     /// The prompt named was replaced or answered elsewhere: already resolved,
@@ -263,6 +288,7 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         let response = try await answer(r, .question(answers: ["Which?": "A"]))
         #expect(response.success == false)
         #expect(response.error == PromptAnswerValidation.kindMismatch.message)
+        #expect(response.errorCode == RPCErrorCode.answerDoesNotFit.rawValue)
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }
@@ -286,6 +312,7 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         let (invoker, r) = await primed([])
         let response = try await answer(r, .permission(decision: .allowAlways, message: nil))
         #expect(response.error == PromptAnswerValidation.allowAlwaysWithoutSuggestions.message)
+        #expect(response.errorCode == RPCErrorCode.answerDoesNotFit.rawValue)
         #expect(Self.answers(invoker).isEmpty)
     }
 
@@ -371,13 +398,15 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         #expect(await m.providerStatuses().first(where: { $0.config.name == "agentbox" })?.health == .error)
     }
 
-    @Test(arguments: ["invalid_params", "not_found"])
-    func providerErrorsAreRPCErrorsCarryingTheCode(code: String) async throws {
+    /// A provider's answer error, `invalid_params` included, carries no code.
+    @Test(arguments: ["invalid_params", "not_found", "internal"])
+    func providerErrorsAreRPCErrorsCarryingNoCode(code: String) async throws {
         try await enable()
         let (invoker, r) = await primed([.result(failure(code: code, message: "provider says no"))])
         let response = try await answer(r)
         #expect(response.success == false)
         #expect(response.error == "\(code): provider says no")
+        #expect(response.errorCode == nil, "the provider's own words carry no code, even its invalid_params")
         #expect(Self.answers(invoker).count == 1)
         #expect(try actuationRows().count == 2)
     }
@@ -481,7 +510,9 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         try await db.config.setTranscriptPromptAnswerEnabled(true)
         let invoker = FakeProviderInvoker(script: [])
         let r = router(await manager(invoker, describe: false))
-        #expect(try await phoneAnswer(r, device: UUID()).error == "remote backends disabled")
+        let response = try await phoneAnswer(r, device: UUID())
+        #expect(response.error == "remote backends disabled")
+        #expect(response.errorCode == RPCErrorCode.remoteBackendsOff.rawValue)
         #expect(invoker.callsSnapshot().isEmpty)
     }
 
@@ -491,7 +522,8 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
         try await db.config.setTranscriptPromptAnswerEnabled(false)
         let (invoker, r) = await primed([])
         let response = try await phoneAnswer(r, device: UUID())
-        #expect(response.error == RPCRouter.promptAnswerDisabledRefusal)
+        #expect(response.error == PromptAnswerRefusal.disabled.text)
+        #expect(response.errorCode == RPCErrorCode.promptAnswerOff.rawValue)
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)
     }

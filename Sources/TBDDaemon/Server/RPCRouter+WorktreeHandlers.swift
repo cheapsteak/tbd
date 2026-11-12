@@ -15,13 +15,15 @@ extension RPCRouter {
         let useExistingBranch = params.useExistingBranch ?? false
 
         // The primary Claude terminal's own values, kept on its row so later
-        // starts of its session can reapply them. Plugin folders are checked
-        // here, before phase 1 inserts the row and so before phase 2 adds a git
-        // worktree or a branch, because the starter is there to see a bad path;
-        // a later start that finds one gone skips it instead. They are checked
-        // whatever the primary turns out to be: the lifecycle resolves that,
-        // and ignores these values for a Codex primary. Like the repo lookup
-        // below, this is validation, so it precedes the actuation row.
+        // starts of its session can reapply them — the Claude model among
+        // them, which every later start passes ahead of the profile's model.
+        // Plugin folders are checked here, before phase 1 inserts the row and
+        // so before phase 2 adds a git worktree or a branch, because the
+        // starter is there to see a bad path; a later start that finds one
+        // gone skips it instead. They are checked whatever the primary turns
+        // out to be: the lifecycle resolves that, and ignores these values for
+        // a Codex primary. Like the repo lookup below, this is validation, so
+        // it precedes the actuation row.
         let claudeSpawnExtras: ClaudeSpawnExtras?
         do {
             let pluginDirs = try ClaudePluginDirs.validated(
@@ -30,9 +32,20 @@ extension RPCRouter {
                 fileExists: { FileManager.default.fileExists(atPath: $0) })
             claudeSpawnExtras = ClaudeSpawnExtras(
                 claudeSettingsOverlay: params.claudeSettingsOverlay,
-                pluginDirs: pluginDirs).nonEmpty
+                pluginDirs: pluginDirs,
+                model: params.model).nonEmpty
         } catch {
             return RPCResponse(error: "\(error)")
+        }
+
+        // An explicit profile that is missing or has no credentials is refused
+        // here, for the same reason: phase 2 runs detached, so a caller that
+        // does not wait would never see a refusal from there. The profile is
+        // checked whatever the primary turns out to be.
+        if let profileID = params.profileID,
+           let refusal = try await explicitProfileCheck.refusal(
+               for: profileID, requireCredentials: true) {
+            return RPCResponse(error: refusal)
         }
 
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
@@ -130,6 +143,7 @@ extension RPCRouter {
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
         let db = self.db
+        let createFailures = self.worktreeCreateFailures
         let initialPrompt = params.prompt
         let userSpecifiedFolder = params.folder != nil
         let userSpecifiedBranch = params.branch != nil
@@ -144,9 +158,10 @@ extension RPCRouter {
         // Explicit per-creation model-profile override (sidebar `+` picker).
         // nil preserves the repo/scratch/global precedence chain.
         let overrideProfileID = params.profileID
-        // Per-spawn Claude model override (picker model buttons). Initial
-        // spawn only — respawns fall back to the profile default.
-        let modelOverride = params.model
+        // Per-spawn Claude model override (picker model buttons, CLI
+        // --claude-model). It also rides in `claudeSpawnExtras`, which is what
+        // keeps it for later starts; read from there so a blank one is nil.
+        let modelOverride = claudeSpawnExtras?.model
         // Per-spawn Codex model, applied only if the primary resolves to Codex.
         let codexModelOverride = params.codexModel
         // Explicit primary agent for this creation. nil preserves the global
@@ -182,20 +197,26 @@ extension RPCRouter {
                     break
                 }
             } catch {
+                // The reason goes on record BEFORE the row is deleted: the CLI
+                // asks for it once it sees the row gone, so recording it after
+                // would let that question arrive first and find nothing.
+                let reason = WorktreeLifecycle.creationFailureReason(error)
+                await createFailures.record(worktreeID: pending.id, reason: reason)
                 // Delete the row (saving any first message parked in it) and
                 // broadcast an archive delta so clients remove the pending
                 // entry. `creationFailed: true` is set ONLY here — this is the
                 // single path where a row disappears because its creation
                 // actually failed, so it's the only place that can tell
                 // clients apart from a deliberate archive of a still-`.creating`
-                // row.
+                // row. The delta carries the reason for the app's alert.
                 subs.broadcast(delta: .worktreeArchived(
-                    await lifecycle.rollBackFailedCreate(worktreeID: pending.id)))
+                    await lifecycle.rollBackFailedCreate(worktreeID: pending.id, reason: reason)))
                 // `String(describing:)` rather than `localizedDescription`:
-                // this line is the only record of the failure — the create runs
-                // detached, so nothing about it returns down the RPC. An error
-                // type that carries a payload but is not bridged as a localized
-                // error renders through `localizedDescription` as
+                // this line is the only lasting record of the failure — the
+                // create runs detached, the delta is gone once broadcast, and
+                // the record above holds only a few and not past a restart.
+                // An error type that carries a payload but is not bridged as a
+                // localized error renders through `localizedDescription` as
                 // "<Module>.<Type> error <caseIndex>", which names neither the
                 // command that failed nor what it said; `String(describing:)`
                 // prints the type's own `description` and falls back to the
@@ -210,6 +231,15 @@ extension RPCRouter {
         // the daemon handed it off.
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: pending)
+    }
+
+    /// `worktree.createFailure`: why a recent background creation failed, from
+    /// `worktreeCreateFailures`. Read-only. A nil reason means none is on
+    /// record, which `WorktreeCreateFailureResult` spells out.
+    func handleWorktreeCreateFailure(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeCreateFailureParams.self, from: paramsData)
+        let reason = await worktreeCreateFailures.reason(for: params.worktreeID)
+        return try RPCResponse(result: WorktreeCreateFailureResult(reason: reason))
     }
 
     func handleWorktreeList(_ paramsData: Data) async throws -> RPCResponse {
@@ -368,8 +398,10 @@ extension RPCRouter {
     /// The three guard refusals — the ones `force` lifts — carry
     /// `RPCErrorCode.remoteLaneArchiveGuarded`, so the CLI can append its
     /// `--force` hint and the app can offer Archive anyway without reading the
-    /// sentence. Every other refusal carries no code, because no retry would
-    /// get past it.
+    /// sentence. No other refusal carries that code, because no retry would
+    /// get past it. The two gates' refusals carry the gates' own codes
+    /// (`RPCErrorCode.remoteBackendsOff`, `RPCErrorCode.claudeCloudOff`),
+    /// which offer nothing; every other refusal carries none.
     ///
     /// `stop` is never reached from here. A provider declaring only `stop` is
     /// refused, because ending compute and retiring a record are different
@@ -386,7 +418,7 @@ extension RPCRouter {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
                     actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
-                    Self.remoteBackendsDisabledResponse)
+                    RemoteGateRefusal.backendsDisabled.response)
             }
             // Same inner gate `remote.archive` goes through — this route
             // reaches the identical provider verb, addressed by worktree row
@@ -427,8 +459,10 @@ extension RPCRouter {
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Revive").
     /// Same record shape as `archiveRemoteLane`: the request row first, every
     /// refusal confirmed `refused`/`not-eligible` with its sentence, and an act
-    /// confirmed by its outcome. No refusal here carries an error code, because
-    /// revive has no `force` to lift one. Returns the refreshed worktree,
+    /// confirmed by its outcome. Revive has no `force` to lift a refusal, so
+    /// none carries a code that offers one: the two gates' refusals carry the
+    /// gates' own codes (`RPCErrorCode.remoteBackendsOff`,
+    /// `RPCErrorCode.claudeCloudOff`), and every other refusal carries none. Returns the refreshed worktree,
     /// exactly as the local path does, so the caller sees the row it asked for
     /// rather than the archived snapshot it passed in.
     private func reviveRemoteLane(
@@ -442,7 +476,7 @@ extension RPCRouter {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
                     actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive,
-                    Self.remoteBackendsDisabledResponse)
+                    RemoteGateRefusal.backendsDisabled.response)
             }
             // See `archiveRemoteLane`'s matching comment: same inner gate as
             // `remote.unarchive`, same worktree-addressed route to the same

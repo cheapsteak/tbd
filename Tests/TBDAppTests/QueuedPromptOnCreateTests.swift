@@ -541,11 +541,13 @@ struct QueuedPromptOnCreateTests {
 
     private func archive(
         _ state: AppState, _ id: UUID, creationFailed: Bool = true,
-        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false
+        unsentPromptPath: String? = nil, unsentPromptLost: Bool = false,
+        failureReason: String? = nil
     ) {
         state.handleDelta(.worktreeArchived(WorktreeIDDelta(
             worktreeID: id, creationFailed: creationFailed,
-            unsentPromptPath: unsentPromptPath, unsentPromptLost: unsentPromptLost)))
+            unsentPromptPath: unsentPromptPath, unsentPromptLost: unsentPromptLost,
+            failureReason: failureReason)))
     }
 
     @Test("The failure alert names the file the daemon saved a parked message to")
@@ -614,6 +616,51 @@ struct QueuedPromptOnCreateTests {
 
             #expect(state.alertMessage?.contains("Couldn't create worktree") == true)
             #expect(state.alertRevealPath == nil)
+        }
+    }
+
+    /// What git said reaches the alert, in place of the pointer at the
+    /// daemon's log that an older daemon's reasonless delta still gets.
+    @Test("The failure alert carries the daemon's reason")
+    func failureAlertCarriesTheReason() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (_, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            state.dismissPresentedPromptSheet()
+            let reason = "git worktree add failed — the disk is full; free space and try again\n"
+                + "Details: fatal: Could not reset index file to revision 'HEAD'."
+
+            archive(state, created.id, failureReason: reason)
+
+            let message = try #require(state.alertMessage)
+            #expect(message.hasPrefix("Couldn't create worktree \"late-fail\": "))
+            #expect(message.hasSuffix(": \(reason)"))
+            #expect(!message.contains("/usr/bin/log show"))
+            #expect(state.alertIsError)
+        }
+    }
+
+    @Test("Without a reason the failure alert points at the daemon's log")
+    func failureAlertWithoutAReasonPointsAtTheLog() async throws {
+        try await withAppState { state in
+            let harness = Harness()
+            let (_, created) = try await createdAndAwaitingGit(state, harness, repoID: UUID())
+            state.dismissPresentedPromptSheet()
+
+            archive(state, created.id)
+
+            #expect(state.alertMessage?.contains("Couldn't create worktree \"late-fail\"") == true)
+            #expect(state.alertMessage?.contains("/usr/bin/log show") == true)
+        }
+    }
+
+    @Test("A worktree the app never knew still gets the reason")
+    func unknownWorktreeFailureCarriesTheReason() async {
+        await withAppState { state in
+            archive(state, UUID(), unsentPromptLost: true, failureReason: "the disk is full")
+
+            #expect(state.alertMessage?.hasPrefix("Worktree creation failed: the disk is full") == true)
+            #expect(state.alertMessage?.contains("could not be saved") == true)
         }
     }
 

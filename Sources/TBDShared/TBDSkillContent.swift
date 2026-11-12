@@ -55,7 +55,7 @@ that the new session can make judgment calls rather than follow narrow steps.
 EOF
 ```
 
-Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` does the same for a new worktree whose primary agent is Codex. Add `--codex-disable <feature>` (repeatable, e.g. `--codex-disable computer_use`) to turn a Codex feature off for that one terminal; TBD passes it to Codex as `--disable <feature>` and leaves the user's own Codex config untouched. `tbd worktree create` has no equivalent yet. TBD keeps a terminal's `--model` and `--codex-disable` choices with that terminal, so if its window dies and is recreated, Codex relaunches with them. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
+`--model` follows `--type`: with `--type claude` it is the Claude model, and with `--type codex` it is the Codex model. Add `--model <id>` to start that one Codex terminal on a specific model (TBD passes it to Codex as `-c model="<id>"`; Codex validates the name). `tbd worktree create --codex-model <id>` is the Codex form for a new worktree whose primary agent is Codex. Add `--codex-disable <feature>` (repeatable, e.g. `--codex-disable computer_use`) to turn a Codex feature off for that one terminal; TBD passes it to Codex as `--disable <feature>` and leaves the user's own Codex config untouched. `tbd worktree create` has no equivalent yet. TBD keeps a terminal's `--model` and `--codex-disable` choices with that terminal, so if its window dies and is recreated, Codex relaunches with them. Inside a running Codex session, Codex's own `/model` switches the model, but it also saves the choice to the shared `tbd` Codex profile, so it becomes the default for every later TBD Codex terminal.
 
 ### Create a new worktree with an initial task
 
@@ -65,7 +65,18 @@ briefing here
 EOF
 ```
 
+**Wait for it to finish:** `tbd worktree create` blocks until git has checked the worktree out and its agent is starting — seconds, or minutes on a large repo, with a heartbeat line on stderr every 2 s. Run it so you see its exit status: in Claude Code, run it through Bash with `run_in_background: true` and wait for the completion notification; in Codex, if the command yields before it exits, keep polling that same session until it exits. Never start a second create for the same branch while the first is running, and never re-run with `--no-wait` to get unstuck: `--no-wait` returns before git runs, so it cannot report a failure. A non-zero exit means the creation failed and was rolled back, and the message carries git's reason (a full disk, for example): fix that before retrying.
+
 **Where the new branch starts:** `tbd worktree create` always bases the new branch on the repo's **default branch from origin**, never on the caller's branch. It best-effort `git fetch`es, then branches off `origin/<default>` (e.g. `origin/main`), falling back to the local `<default>` only if the remote ref is missing. `--position` (child/sibling/root) controls only where the worktree sits in the UI tree — never the git base. So a worker spawned from a feature branch still starts clean off `origin/main`; to build on unmerged work, land that work on the default branch first (then rebase the new worktree onto it).
+
+### Start on a chosen account or Claude model
+
+Choose the account and the Claude model when you create the session:
+
+- To start on a specific account, pass `--profile <name>` to `tbd worktree create`, or to `tbd terminal create --type claude`. `tbd profile list` shows the names. `--profile caller` uses the account you run on.
+- To choose a Claude model, pass `--claude-model opus` to `tbd worktree create`, or `--model opus` to `tbd terminal create --type claude`. TBD keeps that model for every later start of the session.
+- On `tbd worktree create`, either flag makes the first tab Claude, so neither goes with `--codex-model`.
+- Do not create on the default account and then run `tbd terminal swap-profile`: a swap restarts Claude and can kill its background agents.
 
 ### Spawn worker worktrees from an orchestrator (most common fan-out)
 

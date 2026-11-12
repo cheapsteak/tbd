@@ -71,6 +71,14 @@ private let toolbarLogger = Logger(subsystem: "com.tbd.app", category: "window-c
 ///   main-actor turn after the split lays out, the window's content layout
 ///   rect changes, the sidebar collapses or expands, or an apply runs, and
 ///   writes them to `appState.windowChrome` (`publishChromeGeometry()`).
+/// - **Full screen.** In full screen AppKit moves the toolbar into a window
+///   of its own over the top of the screen, which is opaque and takes the
+///   clicks over its frame, so it would cover the panes' rows and their tabs.
+///   So while the window is in full screen, from `willEnterFullScreen` until
+///   `didExitFullScreen`, the toolbar is
+///   hidden, and the rows take the top of the screen at their own height and
+///   leading inset; leaving full screen shows it again
+///   (`toolbarIsVisible(inFullScreen:)`).
 ///
 /// Spec: docs/specs/2026-11-01-appkit-window-chrome-design.md, "The toolbar"
 /// and "Width"; docs/specs/2026-11-02-tabs-in-toolbar-design.md, "Who draws
@@ -161,6 +169,12 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuItemValida
     /// KVO on the window's `contentLayoutRect`, which moves with the
     /// toolbar's height, so the panes' top rows follow it.
     private var contentLayoutObservation: NSKeyValueObservation?
+    /// The watches on the window's full-screen transitions, registered at
+    /// install and removed at uninstall (see "Full screen").
+    private var fullScreenObservers: [any NSObjectProtocol] = []
+    /// Whether the installed window is in full screen, or entering it, as its
+    /// transitions last reported. Readable for tests.
+    private(set) var isInFullScreen = false
     /// Whether a chrome geometry measurement is queued
     /// (`scheduleChromeGeometryPublish()`). Readable for tests.
     private(set) var chromeGeometryPublishScheduled = false
@@ -291,10 +305,13 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuItemValida
         // Each install tries every item again, including one an earlier
         // layout could not get.
         layoutSync.reset()
+        isInFullScreen = window.styleMask.contains(.fullScreen)
         if cooldown == nil, window.toolbar !== toolbar {
             attach(to: window)
         }
         isInstalled = true
+        observeFullScreen(of: window)
+        showToolbarForFullScreenState()
         windowShowsOurToolbar = window.toolbar === toolbar
         // Both handlers are `@Sendable`; AppKit sets both values on the main
         // thread, and `performOnMain` covers any other. Neither reads its
@@ -324,6 +341,14 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuItemValida
         toolbarObservation = nil
         contentLayoutObservation?.invalidate()
         contentLayoutObservation = nil
+        for observer in fullScreenObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        fullScreenObservers.removeAll()
+        if isInFullScreen {
+            toolbar.isVisible = true
+        }
+        isInFullScreen = false
         cooldown?.cancel()
         cooldown = nil
         recentReplacements.removeAll()
@@ -344,6 +369,66 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuItemValida
         window.toolbar = toolbar
         window.toolbarStyle = .unified
         window.titleVisibility = .hidden
+        showToolbarForFullScreenState()
+    }
+
+    // MARK: Full screen
+
+    /// Whether the toolbar shows: never in full screen, where AppKit's own
+    /// toolbar window would cover the panes' rows (see "Full screen").
+    nonisolated static func toolbarIsVisible(inFullScreen: Bool) -> Bool {
+        !inFullScreen
+    }
+
+    /// Whether the window is in full screen once the transition `name`
+    /// reports has begun or ended, or nil for a notification that is not one
+    /// of the three this follows. Entering counts from its start, so the
+    /// toolbar is gone before AppKit moves it; leaving counts from its end.
+    /// A failed entry has no notification, only a delegate call, and the
+    /// window's delegate is SwiftUI's; the next install or exit restores
+    /// the toolbar then.
+    nonisolated static func fullScreenState(after name: Notification.Name) -> Bool? {
+        switch name {
+        case NSWindow.willEnterFullScreenNotification, NSWindow.didEnterFullScreenNotification:
+            true
+        case NSWindow.didExitFullScreenNotification:
+            false
+        default:
+            nil
+        }
+    }
+
+    private func observeFullScreen(of window: NSWindow) {
+        let names: [Notification.Name] = [
+            NSWindow.willEnterFullScreenNotification,
+            NSWindow.didEnterFullScreenNotification,
+            NSWindow.didExitFullScreenNotification,
+        ]
+        fullScreenObservers = names.map { name in
+            // Only the name is carried to the main actor: a `Notification`
+            // is not `Sendable`.
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: nil) { [weak self] _ in
+                MainToolbarController.performOnMain { self?.fullScreenTransition(name) }
+            }
+        }
+    }
+
+    /// The window reported the full-screen transition `name`. Internal so a
+    /// test can drive it without a real transition.
+    func fullScreenTransition(_ name: Notification.Name) {
+        guard isInstalled, let state = Self.fullScreenState(after: name) else { return }
+        isInFullScreen = state
+        showToolbarForFullScreenState()
+        scheduleChromeGeometryPublish()
+    }
+
+    /// Shows or hides the toolbar for the window's full-screen state, setting
+    /// it only when it differs.
+    private func showToolbarForFullScreenState() {
+        let visible = Self.toolbarIsVisible(inFullScreen: isInFullScreen)
+        if toolbar.isVisible != visible {
+            toolbar.isVisible = visible
+        }
     }
 
     func sidebarCollapsedChanged(_ collapsed: Bool) {
@@ -581,7 +666,9 @@ final class MainToolbarController: NSObject, NSToolbarDelegate, NSMenuItemValida
         let pane = split.contentItem.viewController.view
         let paneLeading = pane.convert(pane.bounds, to: nil).minX
         var leadingEdge: CGFloat?
-        if let leading = item(MainToolbarItemID.leadingButtons)?.view, leading.window === window {
+        // A hidden toolbar, as in full screen, shows no leading item.
+        if toolbar.isVisible, let leading = item(MainToolbarItemID.leadingButtons)?.view,
+           leading.window === window {
             leadingEdge = leading.convert(leading.bounds, to: nil).maxX - paneLeading
         }
         appState.windowChrome.update(

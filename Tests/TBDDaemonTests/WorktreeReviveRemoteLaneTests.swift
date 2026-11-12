@@ -17,8 +17,10 @@ import Testing
 ///
 /// Same record shape as archive: an act confirms its request row `dispatched`
 /// or `transport-failed`, and a refusal confirms it `refused` with the reason
-/// `not-eligible` and the refusal sentence as its detail. No revive refusal
-/// carries an error code, because revive has no `force` to lift one.
+/// `not-eligible` and the refusal sentence as its detail. Revive has no `force`
+/// to lift a refusal, so no refusal carries a code that offers one: the remote
+/// gates' refusals carry the gates' own codes (`remoteBackendsOff`,
+/// `claudeCloudOff`), and every other refusal carries none.
 @Suite("worktree.revive: remote lanes")
 struct WorktreeReviveRemoteLaneTests {
 
@@ -30,13 +32,14 @@ struct WorktreeReviveRemoteLaneTests {
     }
 
     /// The record a refused revive leaves: its `worktree.revive` request,
-    /// confirmed `refused` with the response's own sentence — and no error
-    /// code on the response, since nothing a caller could resend lifts it.
+    /// confirmed `refused` with the response's own sentence. The response
+    /// carries `code`, which is nil unless a remote gate refused: nothing a
+    /// caller could resend lifts a revive refusal.
     private func expectRefusalRecorded(
-        _ fixture: RemoteLaneFixture, _ response: RPCResponse,
+        _ fixture: RemoteLaneFixture, _ response: RPCResponse, code: RPCErrorCode? = nil,
         sourceLocation: SourceLocation = #_sourceLocation
     ) throws {
-        #expect(response.errorCode == nil, sourceLocation: sourceLocation)
+        #expect(response.errorCode == code?.rawValue, sourceLocation: sourceLocation)
         let (request, outcome) = try fixture.refusalRecord(sourceLocation: sourceLocation)
         #expect(request["method"] as? String == RPCMethod.worktreeRevive, sourceLocation: sourceLocation)
         #expect(response.error != nil, "a refusal must say why", sourceLocation: sourceLocation)
@@ -243,7 +246,7 @@ struct WorktreeReviveRemoteLaneTests {
         #expect(!response.success)
         #expect(response.error == "remote backends disabled")
         #expect(try await fixture.status(of: lane) == .archived)
-        try expectRefusalRecorded(fixture, response)
+        try expectRefusalRecorded(fixture, response, code: .remoteBackendsOff)
     }
 
     // MARK: - The stale-snapshot gate

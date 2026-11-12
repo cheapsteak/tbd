@@ -36,6 +36,23 @@ import Foundation
     #expect(body.contains("--help"))
 }
 
+/// An agent once ran `tbd worktree create` on a full disk, re-ran it with
+/// `--no-wait` to get past the wait, and read the "created" that came back as
+/// success. The guidance that prevents that has to survive an edit: wait for
+/// the exit status in each harness this body is fed to, never fall back to
+/// `--no-wait`, and read a non-zero exit as a rolled-back failure with a reason.
+@Test func bodyTellsAgentsToWaitForWorktreeCreate() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("`tbd worktree create` blocks until git has checked the worktree out"))
+    #expect(body.contains("heartbeat line on stderr every 2 s"))
+    // Both harnesses: Claude Code's background Bash, Codex's yielding session.
+    #expect(body.contains("`run_in_background: true` and wait for the completion notification"))
+    #expect(body.contains("keep polling that same session until it exits"))
+    #expect(body.contains("Never start a second create for the same branch"))
+    #expect(body.contains("`--no-wait` returns before git runs, so it cannot report a failure"))
+    #expect(body.contains("the creation failed and was rolled back, and the message carries git's reason"))
+}
+
 /// The screen paragraph tells an agent which store answered its read, and all
 /// three sources have to survive an edit of it.
 ///
@@ -165,4 +182,22 @@ import Foundation
     #expect(body.contains("`tbd note`"))
     #expect(body.contains("a note or Changes panel closes in every tab, and the note is kept"))
     #expect(body.contains("It does not apply to a note or Changes panel"))
+}
+
+/// Agents that were told to use an account used to create the session on the
+/// default one and then swap, and the swap's restart can kill the background
+/// agents the session launched. The text has to teach the create-time flags
+/// and say why not to swap.
+@Test func skillTeachesProfileAndModelFlags() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("--profile"))
+    #expect(body.contains("--claude-model"))
+    #expect(body.contains("--profile caller"))
+    #expect(body.contains("swap-profile"))
+    #expect(body.contains("`--profile caller` uses the account you run on"))
+    #expect(body.contains("`--claude-model opus` to `tbd worktree create`"))
+    #expect(body.contains("`--model opus` to `tbd terminal create --type claude`"))
+    #expect(body.contains("can kill its background agents"))
+    // `--model` on `terminal create` is no longer Codex-only.
+    #expect(body.contains("`--model` follows `--type`"))
 }

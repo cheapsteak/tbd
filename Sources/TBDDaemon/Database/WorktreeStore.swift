@@ -657,18 +657,28 @@ public struct WorktreeStore: Sendable {
     ///
     /// The escaping is the load-bearing part: without it a typed `%` is a
     /// wildcard that matches every row, and `_` matches any single character.
-    /// The escape character itself must be escaped first, otherwise a trailing
-    /// `\` would escape the closing `%` we append. `internal` so it is directly
+    /// The escape character itself is escaped too, otherwise a trailing `\`
+    /// would escape the closing `%` we append. `internal` so it is directly
     /// unit-testable.
+    ///
+    /// The escaping runs over Unicode scalars. SQLite matches a LIKE pattern
+    /// code point by code point, but a `%` followed by a combining mark is one
+    /// `Character` with it, so `replacingOccurrences(of:with:)` would leave it
+    /// raw and SQLite would read it as a wildcard.
     static func likePattern(for nameQuery: String?) -> String? {
         guard let raw = nameQuery else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let escaped = trimmed
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "%", with: "\\%")
-            .replacingOccurrences(of: "_", with: "\\_")
-        return "%\(escaped)%"
+        var pattern = String.UnicodeScalarView()
+        pattern.append("%")
+        for scalar in trimmed.unicodeScalars {
+            if scalar == "\\" || scalar == "%" || scalar == "_" {
+                pattern.append("\\")
+            }
+            pattern.append(scalar)
+        }
+        pattern.append("%")
+        return String(pattern)
     }
 
     /// Get a worktree by ID.

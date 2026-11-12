@@ -86,11 +86,11 @@ struct PhoneControlFlagTests {
         try await db.config.setPhoneRelayURL(nil)
         #expect(try await db.config.get().phoneRelayURL == nil)
 
-        #expect(try await db.config.get().resolvedPhoneLoaderURL == Config.phoneLoaderURLDefault)
+        #expect(try await db.config.get().resolvedPhoneLoaderURL == "https://tbd-phone.github.io/")
         try await db.config.setPhoneLoaderURL("https://acme.github.io/loader/")
         #expect(try await db.config.get().resolvedPhoneLoaderURL == "https://acme.github.io/loader/")
         try await db.config.setPhoneLoaderURL(nil)
-        #expect(try await db.config.get().resolvedPhoneLoaderURL == Config.phoneLoaderURLDefault)
+        #expect(try await db.config.get().resolvedPhoneLoaderURL == "https://tbd-phone.github.io/")
     }
 
     @Test func modelDecodesWithoutTheKeys() throws {

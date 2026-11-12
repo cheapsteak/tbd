@@ -30,11 +30,6 @@ enum AnswerAuthority: Sendable {
 /// once the mod has receipted the decision, the terminal has answered first,
 /// or the wait for either ran out.
 extension RPCRouter {
-    /// In `Base` (`PromptAnswerRefusal`), so the phone app service can let it
-    /// through to a phone as TBD's own words.
-    static let promptAnswerDisabledRefusal = PromptAnswerRefusal.disabled
-    /// The setting could not be read. In `Base` for the same reason.
-    static let promptAnswerSettingUnreadRefusal = PromptAnswerRefusal.settingUnread
     /// No wait request picked the decision up within the pickup window, as
     /// when the session's mod is reconnecting. The prompt stays open.
     static let promptHookDetachedRefusal = "the prompt's session is not picking up answers right now; try again"
@@ -65,25 +60,25 @@ extension RPCRouter {
 
     /// Nil while `config.transcriptPromptAnswerEnabled` is on, otherwise the
     /// refusal `method` returns before it acts on the answer:
-    /// `promptAnswerDisabledRefusal` while the setting is off, and
-    /// `promptAnswerSettingUnreadRefusal` when the config row could not be
+    /// `PromptAnswerRefusal.disabled` while the setting is off, and
+    /// `PromptAnswerRefusal.settingUnread` when the config row could not be
     /// read (`configForAnswer(method:)`).
     func promptAnswerSettingRefusal(method: String) async throws -> RPCResponse? {
         guard let config = try await configForAnswer(method: method) else {
-            return RPCResponse(error: Self.promptAnswerSettingUnreadRefusal)
+            return PromptAnswerRefusal.settingUnread.response
         }
         return Self.promptAnswerSettingRefusal(config)
     }
 
     /// Nil while `config` has the setting for answering prompts on,
-    /// otherwise `promptAnswerDisabledRefusal`.
+    /// otherwise `PromptAnswerRefusal.disabled`.
     static func promptAnswerSettingRefusal(_ config: Config) -> RPCResponse? {
-        config.transcriptPromptAnswerEnabled ? nil : RPCResponse(error: promptAnswerDisabledRefusal)
+        config.transcriptPromptAnswerEnabled ? nil : PromptAnswerRefusal.disabled.response
     }
 
     /// The config row an answer's checks read, before the answer acts; nil,
     /// logged, when the read failed, which the caller refuses with
-    /// `promptAnswerSettingUnreadRefusal`. So a failed read refuses the
+    /// `PromptAnswerRefusal.settingUnread`. So a failed read refuses the
     /// answer, as the setting being off does, rather than failing the call,
     /// which a caller cannot tell from a failure after the answer went out.
     /// Only this read becomes a refusal, and a cancelled read still throws.
@@ -115,11 +110,13 @@ extension RPCRouter {
     /// - `unknown` – no receipt within the store's ack timeout; the decision
     ///   may have reached Claude.
     ///
-    /// Errors: the flag is off (`promptAnswerDisabledRefusal`), the flag
-    /// could not be read (`promptAnswerSettingUnreadRefusal`, retryable), the
+    /// Errors: the flag is off (`PromptAnswerRefusal.disabled`), the flag
+    /// could not be read (`PromptAnswerRefusal.settingUnread`, retryable), the
     /// caller is not the TBD app (`promptAnswerNotFromAppRefusal`), no wait request
     /// picked the decision up in time (`promptHookDetachedRefusal`,
-    /// retryable), or the answer does not fit the prompt (`invalid_params: …`).
+    /// retryable), or the answer does not fit the prompt (`invalid_params: …`,
+    /// with `RPCErrorCode.answerDoesNotFit`). The flag's two refusals carry
+    /// their codes too (`PromptAnswerRefusal`).
     func handlePromptAnswer(
         _ paramsData: Data, actor: ActuationActor?, connection: RPCConnectionContext?
     ) async throws -> RPCResponse {
@@ -185,7 +182,7 @@ extension RPCRouter {
             return RPCResponse(error: Self.promptHookDetachedRefusal)
         case .invalid(let validation):
             await finishActuation(actuationID, .refused(.notEligible), error: validation.message)
-            return RPCResponse(error: validation.message)
+            return RPCResponse(error: validation.message, code: validation.code.rawValue)
         }
     }
 }

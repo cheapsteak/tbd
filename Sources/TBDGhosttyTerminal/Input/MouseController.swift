@@ -11,8 +11,10 @@
 //   * It never writes to a pty. Report and paste bytes go out on the view's `onSend`. The one
 //     thing ⌘V sends that is neither is the Ctrl-V chord for an image-only pasteboard, and that
 //     goes through the input controller's key path — it is a keystroke, not a paste.
-//   * It never opens a link. A ⌘-click on an OSC 8 link hands the URI to the view's `onOpenLink`,
-//     and the host decides what a program-supplied URI may open.
+//   * It never opens a link, and never sees the ⌘-click that opens one. The view reads that press
+//     first (`commandClickTarget`): an OSC 8 URI goes to its `onOpenLink`, and the host decides
+//     what a program-supplied URI may open; plain text goes to its `onCommandClickText`, and the
+//     host decides what the text names.
 //   * It never clears `surface.needsDisplay`; it only ever asks the view for a frame.
 
 import AppKit
@@ -346,26 +348,22 @@ final class MouseController: NSObject {
 
     // MARK: Press
 
-    /// The URI the left mouse-down `event` opens: the OSC 8 link under a ⌘-click, when the view
-    /// has a host to hand links to (`onOpenLink`) and the host has not declined the press
-    /// (`hostDeclinedPress`). nil for any other press.
-    func linkToOpen(at event: NSEvent) -> String? {
-        guard let view, view.onOpenLink != nil, !view.hostDeclinedPress,
+    /// What the left mouse-down `event` may open: under a ⌘-click, the OSC 8 link of its cell or,
+    /// with none there and a host that reads plain text (`onCommandClickText`), the text around it.
+    /// nil for any other press, for a view with neither host hook, and for a press the host
+    /// declined (`hostDeclinedPress`). The view acts on it before the press goes anywhere else.
+    func commandClickTarget(at event: NSEvent) -> CommandClickTarget? {
+        guard let view, view.onOpenLink != nil || view.onCommandClickText != nil, !view.hostDeclinedPress,
               event.type == .leftMouseDown, event.modifierFlags.contains(.command) else { return nil }
         syncGeometry()
-        return view.terminal.hyperlinkRun(at: surfacePoint(of: event, in: view))?.uri
+        return view.terminal.commandClickTarget(
+            at: surfacePoint(of: event, in: view), readsText: view.onCommandClickText != nil)
     }
 
     private func mouseDown(_ event: NSEvent, in view: GhosttyTerminalView) -> Bool {
         let terminal = view.terminal
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
-
-        // ⌘-click on an OSC 8 link opens it and never reaches the terminal or the selection.
-        if let open = view.onOpenLink, let uri = linkToOpen(at: event) {
-            open(uri)
-            return true
-        }
 
         let route = terminalMouseRoute(trackingEnabled: terminal.isMouseReporting, shiftHeld: mods.contains(.shift))
         lastRoute = route

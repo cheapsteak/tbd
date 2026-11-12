@@ -40,8 +40,11 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Extra Claude Code settings as a JSON object, deep-merged into TBD's per-session --settings overlay for the spawned agent (Claude only). Example: '{\"skillOverrides\":{\"some-skill\":\"off\"}}'")
     var claudeSettings: String?
 
-    @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
+    @Option(name: .long, help: "Model for this terminal: the Claude model with --type claude, the Codex model with --type codex (passed as -c model=<id>).")
     var model: String?
+
+    @Option(name: .long, help: "Model profile (account) for this Claude terminal: a name, a UUID, or \"caller\" for the profile this tab runs on (requires --type claude).")
+    var profile: String?
 
     @Option(name: .customLong("codex-disable"), help: "Codex feature to turn off for this terminal only, passed to Codex as --disable <feature> (repeatable; requires --type codex). Example: --codex-disable computer_use")
     var codexDisable: [String] = []
@@ -59,13 +62,15 @@ struct TerminalCreate: AsyncParsableCommand {
     /// relative `--codex-home` made absolute against `cwd`, or none sent when
     /// the flag was not given. `codexDisabledFeatures` is the
     /// already-normalized `--codex-disable` list, nil when the flag was not
-    /// given.
+    /// given. `overrideProfileID` is `--profile` already resolved to an ID.
     func createParams(
         worktreeID: UUID, prompt: String?, cwd: String,
-        codexDisabledFeatures: [String]? = nil
+        codexDisabledFeatures: [String]? = nil,
+        overrideProfileID: UUID? = nil
     ) -> TerminalCreateParams {
         TerminalCreateParams(
             worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
+            overrideProfileID: overrideProfileID,
             claudeSettingsOverlay: claudeSettings, model: model,
             codexDisabledFeatures: codexDisabledFeatures,
             pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd),
@@ -95,9 +100,14 @@ struct TerminalCreate: AsyncParsableCommand {
             }
             try CLIPluginDirs.validateNotBlank(pluginDirs)
         }
+        if profile != nil, type != .claude {
+            throw ValidationError("--profile requires --type claude: profiles are Claude accounts.")
+        }
         guard let model else { return }
-        guard type == .codex else {
-            throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)
+        // `--model` follows `--type`: the Claude model for Claude, the Codex
+        // model for Codex. No type is a shell, which has no model.
+        guard type == .claude || type == .codex else {
+            throw ValidationError(TerminalCreateParams.modelRequiresAgentMessage)
         }
         if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ValidationError("--model must not be empty.")
@@ -111,11 +121,14 @@ struct TerminalCreate: AsyncParsableCommand {
         let disabledFeatures: [String]? = try codexDisable.isEmpty
             ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
 
+        let profileChoice = try profile.map { try CreateProfileOption.resolve($0, client: client) }
+
         let params = createParams(
             worktreeID: worktreeID,
             prompt: try resolvePrompt(inline: prompt, file: promptFile),
             cwd: FileManager.default.currentDirectoryPath,
-            codexDisabledFeatures: disabledFeatures)
+            codexDisabledFeatures: disabledFeatures,
+            overrideProfileID: profileChoice?.id)
         let terminal: Terminal = try client.call(
             method: params.rpcMethod,
             params: params,
@@ -129,6 +142,9 @@ struct TerminalCreate: AsyncParsableCommand {
             print("  ID:     \(terminal.id)")
             print("  Window: \(terminal.tmuxWindowID)")
             print("  Pane:   \(terminal.tmuxPaneID)")
+            if let profileChoice {
+                print("  Profile: \(profileChoice.name)")
+            }
         }
     }
 

@@ -59,6 +59,12 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for the primary terminal when it is Codex, passed as -c model=<id>. Ignored for Claude and shell primaries.")
     var codexModel: String?
 
+    @Option(name: .long, help: "Model profile (account) for the first tab: a name, a UUID, or \"caller\" for the profile this tab runs on. Makes the first tab Claude. See tbd profile list.")
+    var profile: String?
+
+    @Option(name: .customLong("claude-model"), help: "Claude model for the first tab, such as opus or an exact model ID. Makes the first tab Claude. Kept for every later start of that tab.")
+    var claudeModel: String?
+
     @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) for the primary Claude terminal to load on every start. Repeatable. Relative paths resolve against the current folder. Ignored when the primary is Codex.")
     var pluginDirs: [String] = []
 
@@ -75,7 +81,7 @@ struct WorktreeCreate: AsyncParsableCommand {
     )
     var position: WorktreePosition = .child
 
-    @Flag(name: .long, help: "Return immediately without waiting for the worktree to become active")
+    @Flag(name: .long, help: "Return before git runs, without waiting for the worktree to become active. A creation that then fails is not reported here.")
     var noWait = false
 
     @Flag(name: .long, help: "Output JSON")
@@ -90,10 +96,50 @@ struct WorktreeCreate: AsyncParsableCommand {
         pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd)
     }
 
+    /// The params this invocation sends. `profileID` is `--profile` already
+    /// resolved to an ID, `callerEnvID` is the caller's `TBD_WORKTREE_ID`, and
+    /// each `--plugin-dir` is made absolute against `cwd`.
+    ///
+    /// `--profile` or `--claude-model` asks for a Claude first tab, so either
+    /// one sends `primaryAgentPreference: claude`, as the app's account picker
+    /// does. Without them no preference is sent and the daemon picks the agent.
+    func createParams(
+        repoID: UUID, prompt: String?, cwd: String,
+        callerEnvID: UUID?, profileID: UUID? = nil
+    ) -> WorktreeCreateParams {
+        let parentingFields = position.rpcFields(callerEnvID: callerEnvID)
+        return WorktreeCreateParams(
+            repoID: repoID,
+            folder: folder,
+            branch: branch,
+            displayName: name,
+            prompt: prompt,
+            parentWorktreeID: nil,
+            siblingOfWorktreeID: parentingFields.siblingOfWorktreeID,
+            callerWorktreeID: parentingFields.callerWorktreeID,
+            suppressAutoParent: parentingFields.suppressAutoParent,
+            profileID: profileID,
+            model: claudeModel,
+            primaryAgentPreference: (profile != nil || claudeModel != nil) ? .claude : nil,
+            claudeSettingsOverlay: claudeSettings,
+            autoArchiveOnMerge: archiveOnMerge ? true : nil,
+            codexModel: codexModel,
+            pluginDirs: pluginDirsParam(cwd: cwd)
+        )
+    }
+
     mutating func validate() throws {
         if let codexModel,
            codexModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ValidationError("--codex-model must not be empty.")
+        }
+        if let claudeModel,
+           claudeModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ValidationError("--claude-model must not be empty.")
+        }
+        if codexModel != nil, profile != nil || claudeModel != nil {
+            throw ValidationError(
+                "--profile and --claude-model ask for a Claude first tab, and --codex-model asks for Codex. Use one or the other.")
         }
         // No agent check: the primary's agent is settled by the daemon (a
         // configured preference may make it Codex), which ignores plugin
@@ -131,6 +177,10 @@ struct WorktreeCreate: AsyncParsableCommand {
             repoID = try resolver.resolveRepoID()
         }
 
+        // Resolved before anything is created, so a bad name is refused with
+        // nothing left behind.
+        let profileChoice = try profile.map { try CreateProfileOption.resolve($0, client: client) }
+
         let resolvedPrompt = try resolvePrompt(inline: prompt, file: promptFile)
 
         let callerEnvID = ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"]
@@ -138,24 +188,15 @@ struct WorktreeCreate: AsyncParsableCommand {
         if let warning = position.unmetIntentWarning(callerEnvID: callerEnvID) {
             FileHandle.standardError.write(Data("\(warning)\n".utf8))
         }
-        let parentingFields = position.rpcFields(callerEnvID: callerEnvID)
 
         let pending: Worktree = try client.call(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(
+            params: createParams(
                 repoID: repoID,
-                folder: folder,
-                branch: branch,
-                displayName: name,
                 prompt: resolvedPrompt,
-                parentWorktreeID: nil,
-                siblingOfWorktreeID: parentingFields.siblingOfWorktreeID,
-                callerWorktreeID: parentingFields.callerWorktreeID,
-                suppressAutoParent: parentingFields.suppressAutoParent,
-                claudeSettingsOverlay: claudeSettings,
-                autoArchiveOnMerge: archiveOnMerge ? true : nil,
-                codexModel: codexModel,
-                pluginDirs: pluginDirsParam(cwd: FileManager.default.currentDirectoryPath)
+                cwd: FileManager.default.currentDirectoryPath,
+                callerEnvID: callerEnvID,
+                profileID: profileChoice?.id
             ),
             resultType: Worktree.self
         )
@@ -170,11 +211,62 @@ struct WorktreeCreate: AsyncParsableCommand {
         if json {
             printJSON(worktree)
         } else {
-            print("Created worktree: \(worktree.displayName)")
-            print("  ID:     \(worktree.id)")
-            print("  Branch: \(worktree.branch)")
-            print("  Path:   \(worktree.localPath)")
+            for line in Self.textOutput(worktree, waited: !noWait, profileName: profileChoice?.name) {
+                print(line)
+            }
         }
+    }
+
+    /// The text `create` prints. After waiting, the worktree is active and
+    /// the first line says it was created. Under `--no-wait` the command
+    /// returned before git ran, so it says the worktree is being created and
+    /// that a failure will not be reported here: the creation can still fail
+    /// and be rolled back, and nothing would tell the caller.
+    static func textOutput(_ worktree: Worktree, waited: Bool, profileName: String? = nil) -> [String] {
+        var lines = [
+            "\(waited ? "Created" : "Creating") worktree: \(worktree.displayName)",
+            "  ID:     \(worktree.id)",
+            "  Branch: \(worktree.branch)",
+            "  Path:   \(worktree.localPath)",
+        ]
+        if let profileName {
+            lines.append("  Profile: \(profileName)")
+        }
+        if !waited {
+            lines.append(
+                "--no-wait returned before git ran, so a failure will not be reported here. "
+                    + "Check `tbd worktree list`: a creation that fails is rolled back and drops out of it.")
+        }
+        return lines
+    }
+
+    /// The error `create` reports when the worktree's row disappears while it
+    /// waits: the daemon's background create failed and rolled it back.
+    ///
+    /// `reason` is what `worktree.createFailure` answered — git's verdict, with
+    /// a hint where one applies. It is nil when the daemon has none on record
+    /// or predates the method, and the message then names where the daemon
+    /// logged the reason instead.
+    static func rolledBackMessage(reason: String?) -> String {
+        if let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+            return "Worktree creation failed and was rolled back:\n\n\(reason)"
+        }
+        // The old "(see daemon logs)" named nothing, and the two obvious
+        // guesses are both wrong: ~/Library/Logs/TBD/exceptions.log is the
+        // app's crash log, and predicating on TBDApp searches the wrong
+        // process entirely.
+        //
+        // The absolute path is load-bearing: `log` is a zsh builtin that
+        // consumes the arguments and prints nothing, so a bare `log show`
+        // reads as "the daemon logged nothing".
+        return """
+            Worktree creation failed and was rolled back. The daemon logged why:
+
+              /usr/bin/log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
+
+            (Common cause: the branch already exists and is checked out in \
+            another worktree — git's error names that directory.)
+            """
     }
 
     private func waitForActive(pending: Worktree, client: SocketClient) throws -> Worktree {
@@ -193,27 +285,18 @@ struct WorktreeCreate: AsyncParsableCommand {
                 }
             } else {
                 // The row vanished, so the daemon's background create failed and
-                // rolled it back. The reason exists — the daemon logs it with
-                // git's stderr embedded — but it goes to os_log, not down this
-                // RPC, because `worktreeCreate` returns the pending row and does
-                // the work in a detached lane.
-                //
-                // So the message has to name WHERE. The old "(see daemon logs)"
-                // named nothing, and the two obvious guesses are both wrong:
-                // ~/Library/Logs/TBD/exceptions.log is the app's crash log, and
-                // predicating on TBDApp searches the wrong process entirely.
-                //
-                // The absolute path is load-bearing: `log` is a zsh builtin
-                // that consumes the arguments and prints nothing, so a bare
-                // `log show` reads as "the daemon logged nothing".
-                throw CLIError.invalidArgument("""
-                    Worktree creation failed and was rolled back. The daemon logged why:
-
-                      /usr/bin/log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
-
-                    (Common cause: the branch already exists and is checked out in \
-                    another worktree — git's error names that directory.)
-                    """)
+                // rolled it back. `worktree.create` returned the pending row and
+                // ran git in a detached lane, so the reason never came down that
+                // RPC; the daemon records it before deleting the row, and
+                // `worktree.createFailure` hands it over. `try?`: a daemon that
+                // predates the method answers "Unknown method", and the message
+                // then names where the daemon logged the reason instead.
+                let failure = try? client.call(
+                    method: RPCMethod.worktreeCreateFailure,
+                    params: WorktreeCreateFailureParams(worktreeID: pending.id),
+                    resultType: WorktreeCreateFailureResult.self
+                )
+                throw CLIError.invalidArgument(Self.rolledBackMessage(reason: failure?.reason))
             }
             let elapsed = Date().timeIntervalSince(start)
             if elapsed >= nextHeartbeat {

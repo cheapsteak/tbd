@@ -234,6 +234,49 @@ struct CrossSessionWrapperStrippingTests {
         #expect(PeerHelper.strippedOfSenderAttribution(content) == nil)
     }
 
+    /// **The scalar discriminator.** The receiving Claude reads code points,
+    /// so the scan must too. A prepended concatenation mark (U+0600) joins
+    /// the quote after it into one `Character`. A `Character` scan misses that
+    /// quote, reads the next attribute's opening quote as a closing one, and
+    /// stops at the `>` inside the socket path, so `b.sock` goes out in the
+    /// body.
+    @Test func aPrependedMarkBeforeAClosingQuoteDoesNotLeakTheSocketPath() throws {
+        let content = "<cross-session-message from-name=\"x\u{600}\" from=\"uds:/tmp/cc-socks/a>b.sock\" from-mode=\"bypass\">\nthe body\n</cross-session-message>"
+        let stripped = try #require(PeerHelper.strippedOfSenderAttribution(content))
+        #expect(Array(stripped.unicodeScalars) == Array("the body".unicodeScalars))
+        #expect(!stripped.contains(".sock"))
+    }
+
+    /// A combining acute accent, an emoji variation selector and a combining
+    /// enclosing keycap each join the quote before them into one `Character`.
+    /// A `Character` scan misses that closing quote, never finds an unquoted
+    /// `>`, and drops a well-formed message as unterminated.
+    @Test(arguments: ["\u{301}", "\u{FE0F}", "\u{20E3}"])
+    func aMarkAfterAClosingQuoteStillStrips(_ mark: String) throws {
+        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" from-name=\"x\""
+            + mark + " from-mode=\"bypass\">\nthe body\n</cross-session-message>"
+        let stripped = try #require(PeerHelper.strippedOfSenderAttribution(content))
+        #expect(Array(stripped.unicodeScalars) == Array("the body".unicodeScalars))
+    }
+
+    /// A mark straight after the tag's `>` is the body's first scalar, kept as
+    /// it is, rather than half of a `>` the scan cannot see.
+    @Test(arguments: ["\u{301}", "\u{FE0F}", "\u{20E3}"])
+    func aMarkAfterTheTagEndStaysInTheBody(_ mark: String) throws {
+        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\">" + mark + "the body"
+        let stripped = try #require(PeerHelper.strippedOfSenderAttribution(content))
+        #expect(Array(stripped.unicodeScalars) == Array((mark + "the body").unicodeScalars))
+    }
+
+    /// The trailing closing tag is matched by scalar. A prepended mark right
+    /// before its `<` joins that `<` into one `Character`, so a `Character`
+    /// suffix check misses the tag and forwards it inside the body.
+    @Test func aPrependedMarkBeforeTheClosingTagStillRemovesIt() throws {
+        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\">\nthe body\u{600}</cross-session-message>"
+        let stripped = try #require(PeerHelper.strippedOfSenderAttribution(content))
+        #expect(Array(stripped.unicodeScalars) == Array("the body\u{600}".unicodeScalars))
+    }
+
     /// The three scan outcomes, named. `.absent` and `.unterminated` shared one
     /// `nil` before, which is exactly how the leak above got in.
     @Test func scanDistinguishesNoWrapperFromAnUnterminatedOne() {

@@ -18,6 +18,10 @@ private final class ViewRecorder {
     var openedLinks: [String] = []
     /// What `onMouseDownClaimFocus` answers.
     var claimsPress = true
+    /// Every text `onCommandClickText` was offered.
+    var clickedTexts: [GhosttyClickedText] = []
+    /// What `onCommandClickText` answers: whether the host opened something.
+    var opensText = false
 }
 
 /// An 80×24 terminal and a view over it in a monospaced font, 13 pt unless a test needs a render
@@ -33,8 +37,9 @@ private struct ViewFixture {
     ///     default.
     ///   - reportsPresents: report each committed frame's drawable presented, through the
     ///     tracker's test seam, as Metal would. An offscreen window's drawables may never be
-    ///     reported, and two unreported ones stop a tick drawing. A test that leaves its frames'
-    ///     drawables unreported passes `false`.
+    ///     reported, and two unreported ones stop output drawing at once. A test that leaves its
+    ///     frames' drawables unreported passes `false`, and the tracker then ignores what Metal
+    ///     reports too, so a drawable stays unreported until the test reports it.
     init(
         clock: any Clock<Duration> = ContinuousClock(), fontSize: CGFloat = 13, thinStrokes: Bool? = nil,
         reportsPresents: Bool = true
@@ -48,9 +53,11 @@ private struct ViewFixture {
         if let thinStrokes { appearance.thinStrokes = thinStrokes }
         self.appearance = appearance
         view = try GhosttyTerminalView(terminal: terminal, appearance: appearance, clock: clock)
+        let tracker = view.drawableTracker
         if reportsPresents {
-            let tracker = view.drawableTracker
             view.onFrameEncoded = { tracker.reportNewestPresented() }
+        } else {
+            tracker.ignoresPresentedHandlers = true
         }
     }
 }
@@ -1063,6 +1070,281 @@ struct GhosttyShellQuotingTests {
     }
 }
 
+/// A ⌘-click on plain text. The view reads the screen once, at the press, offers it to the host's
+/// `onCommandClickText`, and consumes the press whole when the host says it opened something. An
+/// OSC 8 link under the press comes first, and its text is never offered; nor is a press the host
+/// declined.
+@Suite(.fastPassBounded)
+@MainActor
+struct GhosttyCommandClickTextTests {
+    /// The window point at the centre of the cell at `column`, `row`.
+    private func point(column: Int, row: Int, in view: GhosttyTerminalView) -> NSPoint {
+        let cell = view.cellSize
+        return view.convert(
+            NSPoint(x: (CGFloat(column) + 0.5) * cell.width, y: (CGFloat(row) + 0.5) * cell.height), to: nil)
+    }
+
+    /// Hands `view`'s hooks to `recorder`.
+    private func record(_ view: GhosttyTerminalView, into recorder: ViewRecorder) {
+        view.onSend = { recorder.sent.append($0) }
+        view.onOpenLink = { recorder.openedLinks.append($0) }
+        view.onMouseDownClaimFocus = { recorder.claimsPress }
+        view.onCommandClickText = { text in
+            recorder.clickedTexts.append(text)
+            return recorder.opensText
+        }
+    }
+
+    /// One SGR mouse report ending in `final`, whatever the button and modifier bits.
+    private func isReport(_ bytes: [UInt8], final: Character) -> Bool {
+        bytes.starts(with: Array("\u{1b}[<".utf8)) && bytes.last == final.asciiValue
+    }
+
+    /// A line that runs off the viewport is read on past both its edges, as SwiftTerm reads a line
+    /// on its whole buffer, so a link on it is not cut where the view ends; and no further than the
+    /// line runs.
+    @Test func aLineRunningOffTheViewportIsReadOnPastBothEdges() throws {
+        let terminal = try GhosttyTerminal(cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
+        defer { terminal.close() }
+        // Screen rows: 0 "go", 1 to 6 one soft-wrapped line of 52 "y"s, the last row holding two of
+        // them, and 7 "end". A page back from the bottom shows rows 2 to 4, all inside the line.
+        terminal.feed(text: "go\r\n" + String(repeating: "y", count: 52) + "\r\nend")
+        let scrolled = terminal.scrollViewportByPage(up: true)
+        try #require(scrolled, "the viewport did not scroll back")
+        let top = terminal.withLocked { $0.viewportTopScreenRow }
+        let startsOnRowTwo = top == 2
+        try #require(startsOnRowTwo, "the viewport starts on screen row \(String(describing: top)), not 2")
+
+        let clicked = terminal.withLocked { GhosttyClickedText(viewportOf: $0, column: 3, row: 0) }
+
+        let full = String(repeating: "y", count: 10)
+        let expectedRows = [GhosttyClickedText.Row(text: full, isWrapContinuation: false)]
+            + Array(repeating: GhosttyClickedText.Row(text: full, isWrapContinuation: true), count: 4)
+            + [GhosttyClickedText.Row(text: "yy" + String(repeating: "\0", count: 8), isWrapContinuation: true)]
+        let rows = clicked.rows
+        #expect(rows == expectedRows, "the line read as \(rows.map(\.text.debugDescription))")
+        let pressed = [clicked.column, clicked.row]
+        #expect(pressed == [3, 1], "the pressed cell is column, row \(pressed) of the rows read")
+    }
+
+    /// Rows past the viewport are read on while SwiftTerm could join them: across a soft wrap, or
+    /// under a row with text at or past its middle column, which its hard-wrap heuristic needs.
+    @Test func aRowIsReadOnIntoWhileSwiftTermCouldJoinIt() {
+        func row(_ text: String, wraps: Bool = false) -> GhosttyClickedText.Row {
+            GhosttyClickedText.Row(text: text + String(repeating: "\0", count: 10 - text.count), isWrapContinuation: wraps)
+        }
+        let acrossASoftWrap = GhosttyClickedText.Row.mayJoin(row("go"), row("on", wraps: true), columns: 10)
+        #expect(acrossASoftWrap, "a soft wrap does not join")
+        let underTextAtTheMiddle = GhosttyClickedText.Row.mayJoin(row("aaaaa"), row("on"), columns: 10)
+        #expect(underTextAtTheMiddle, "text reaching the middle column does not join")
+        let underTextShortOfIt = GhosttyClickedText.Row.mayJoin(row("aaaa"), row("on"), columns: 10)
+        #expect(!underTextShortOfIt, "text short of the middle column joins")
+        let underTrailingSpaces = GhosttyClickedText.Row.mayJoin(row("aa        "), row("on"), columns: 10)
+        #expect(!underTrailingSpaces, "spaces past the text count as text")
+    }
+
+    /// The rows come over as SwiftTerm reads its own: one character per column, `"\0"` for a cell
+    /// with no text, and the row a soft wrap continues marked.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theHostIsOfferedTheViewportThePressedCellAndTheSoftWraps() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        _ = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        let grid = view.gridSize
+        let full = String(repeating: "a", count: grid.cols)
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2J\(full)bc\r\n\u{65E5}x")
+        let pressed = point(column: 1, row: 1, in: view)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: pressed, in: window, flags: .command))
+        // The host opened nothing, so the press goes on as an ordinary click, which selects.
+        let selects = view.mouseController.isSelecting
+        #expect(selects, "a ⌘-press the host opened nothing for started no selection")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: pressed, in: window, flags: .command))
+
+        let offered = recorder.clickedTexts
+        try #require(offered.count == 1, "the host was offered \(offered.count) texts")
+        let text = offered[0]
+        let shape = [text.column, text.row, text.columns, text.rows.count]
+        #expect(shape == [1, 1, grid.cols, grid.rows], "column, row, columns and rows: \(shape)")
+        let activates = text.activatesWindow
+        #expect(!activates, "an ordinary ⌘-press was offered as the activating click")
+        try #require(text.rows.count >= 3, "\(text.rows.count) rows")
+        let top = text.rows[0]
+        let topText = top.text
+        #expect(topText == full, "row 0 reads \(topText.debugDescription)")
+        let topWraps = top.isWrapContinuation
+        #expect(!topWraps, "row 0 continues a row above it")
+        let wrapped = text.rows[1]
+        let wrappedText = wrapped.text
+        let expectedWrapped = "bc" + String(repeating: "\0", count: grid.cols - 2)
+        #expect(wrappedText == expectedWrapped, "row 1 reads \(wrappedText.debugDescription)")
+        let wrappedWraps = wrapped.isWrapContinuation
+        #expect(wrappedWraps, "row 1 does not continue row 0")
+        // The second half of a wide character holds no text.
+        let wideText = text.rows[2].text
+        let wideStart = wideText.hasPrefix("\u{65E5}\0x")
+        #expect(wideStart, "row 2 reads \(wideText.debugDescription)")
+
+        // Control: a press without ⌘ is never offered.
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: pressed, in: window))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: pressed, in: window))
+        let offeredAfterPlainClick = recorder.clickedTexts.count
+        #expect(offeredAfterPlainClick == 1, "a press without ⌘ was offered to the host")
+    }
+
+    /// A program reporting the mouse gets none of a ⌘-press the host opened something for: not the
+    /// press, not its drag, not its release, and neither does the selection or the responder chain.
+    /// The same press the host opens nothing for is an ordinary click, and is reported.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aPressTheHostOpensIsConsumedWholeEvenWhileTheProgramReportsTheMouse() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let counter = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2Jsee notes.txt\u{1b}[?1002h\u{1b}[?1006h")
+        try #require(fixture.terminal.isMouseReporting, "the program did not take the mouse")
+        let onText = point(column: 5, row: 0, in: view)
+        let dragTo = point(column: 9, row: 0, in: view)
+
+        recorder.opensText = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
+        let selecting = view.mouseController.isSelecting
+        #expect(!selecting, "a ⌘-press the host opened something for started a selection")
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: dragTo, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: dragTo, in: window, flags: .command))
+        let offered = recorder.clickedTexts.count
+        #expect(offered == 1, "the press was offered \(offered) times")
+        let sentByOpened = recorder.sent
+        #expect(sentByOpened.isEmpty, "a ⌘-press the host opened something for reached the program: \(sentByOpened)")
+        let passedOn = [counter.draggedCount, counter.upCount]
+        #expect(passedOn == [0, 0], "its drag and release went up the responder chain: \(passedOn)")
+        let pending = view.mouseController.pendingReportReleases
+        #expect(pending.isEmpty, "\(pending) wait for a release")
+
+        // Control: the host opens nothing, so the same ⌘-press is an ordinary, reported click.
+        recorder.opensText = false
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command))
+        let reports = recorder.sent
+        let pressAndRelease = reports.count == 2
+            && reports.first.map { isReport($0, final: "M") } == true
+            && reports.last.map { isReport($0, final: "m") } == true
+        #expect(pressAndRelease, "control: a ⌘-press the host opened nothing for sent \(reports)")
+    }
+
+    /// The link is looked up first and opens alone: the host is not offered the text a link shows,
+    /// so one ⌘-click never opens two things. The press is consumed, release and all.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func anOSC8LinkOpensOnceAndItsTextIsNeverOffered() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let counter = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        recorder.opensText = true
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
+        let link = "https://example.com/acme"
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2J\u{1b}]8;;\(link)\u{1b}\\notes.txt\u{1b}]8;;\u{1b}\\")
+        let onLink = point(column: 1, row: 0, in: view)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command))
+
+        let opened = recorder.openedLinks
+        #expect(opened == [link], "the ⌘-click on the link opened \(opened)")
+        let offered = recorder.clickedTexts.count
+        #expect(offered == 0, "the host was also offered the link's text")
+        let ups = counter.upCount
+        #expect(ups == 0, "the release of the ⌘-click that opened the link went up the responder chain")
+    }
+
+    /// A press the host declined has something drawn over the view that owns it, so its text is not
+    /// offered, whether or not it activates the window. Claimed, the same ⌘-press is.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aPressTheHostDeclinedIsNeverOffered() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        _ = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        recorder.opensText = true
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2Jsee notes.txt")
+        let onText = point(column: 5, row: 0, in: view)
+
+        recorder.claimsPress = false
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
+        let selects = view.mouseController.isSelecting
+        #expect(selects, "a declined ⌘-press did not go on as an ordinary click")
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command))
+        let activating = try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: 11)
+        let takesIt = view.acceptsFirstMouse(for: activating)
+        #expect(takesIt)
+        view.mouseDown(with: activating)
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: 11))
+        let offeredWhenDeclined = recorder.clickedTexts.count
+        #expect(offeredWhenDeclined == 0, "a declined ⌘-press was offered to the host")
+
+        // Control: claimed, the same ⌘-press is offered.
+        recorder.claimsPress = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: 12))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: 12))
+        let offeredWhenClaimed = recorder.clickedTexts.count
+        #expect(offeredWhenClaimed == 1, "a claimed ⌘-press was offered \(offeredWhenClaimed) times")
+    }
+
+    /// The click that brings the window forward is offered too, marked as that click, and is
+    /// consumed whichever way the host answers: it only activates unless the host opened something.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func theActivatingCommandClickIsOfferedAndConsumedWhicheverWayTheHostAnswers() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        let counter = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2Jsee notes.txt\u{1b}[?1002h\u{1b}[?1006h")
+        let onText = point(column: 5, row: 0, in: view)
+
+        for (offset, opens) in [false, true].enumerated() {
+            recorder.opensText = opens
+            let number = 21 + offset
+            let down = try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: number)
+            let takesIt = view.acceptsFirstMouse(for: down)
+            #expect(takesIt)
+            view.mouseDown(with: down)
+            let selecting = view.mouseController.isSelecting
+            #expect(!selecting, "the activating ⌘-click started a selection, the host opening \(opens)")
+            view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: number))
+        }
+        let markedActivating = recorder.clickedTexts.map(\.activatesWindow)
+        #expect(markedActivating == [true, true], "the activating ⌘-clicks were offered as \(markedActivating)")
+        let sent = recorder.sent
+        #expect(sent.isEmpty, "the activating ⌘-clicks reached the program: \(sent)")
+        let ups = counter.upCount
+        #expect(ups == 0, "the activating ⌘-clicks' releases went up the responder chain")
+
+        // Control: a ⌘-press in the active window is offered as an ordinary one.
+        recorder.opensText = true
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command, eventNumber: 30))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command, eventNumber: 30))
+        let lastActivates = recorder.clickedTexts.last?.activatesWindow
+        #expect(lastActivates == false, "an ordinary ⌘-press was offered as \(String(describing: lastActivates))")
+    }
+}
+
 /// How a nil drawable's hold on the drawable limit ends.
 enum NilDrawableHoldEnd: Sendable, CaseIterable {
     /// A present report arrives.
@@ -1071,9 +1353,10 @@ enum NilDrawableHoldEnd: Sendable, CaseIterable {
     case timeout
 }
 
-/// A display tick never blocks main on the GPU: at either limit, a full ring or the layer's
-/// drawables all awaiting their present report, it drops the frame before building it and keeps
-/// the link ticking. `drawFrameNow()` and a live resize wait instead.
+/// A display tick never waits on the ring, and waits for a drawable only within a bound. With the
+/// ring full, or while a nil drawable's hold lasts, it drops the frame before building it and
+/// keeps the link ticking. With the layer's drawables awaiting their present report it draws
+/// anyway; only a leading-edge draw drops there. `drawFrameNow()` and a live resize wait instead.
 ///
 /// The unreported drawables are entries put into the view's tracker by hand. Real ones would do,
 /// but Metal may report them at any moment, and a report would end the state under test.
@@ -1131,11 +1414,66 @@ struct GhosttyTerminalViewBackpressureTests {
         #expect(committed == 2, "with a slot free again the view committed \(committed) frames in all, not 2")
     }
 
-    /// Two drawables unreported and younger than `presentReportTimeout`: a tick asks for no
-    /// drawable and keeps `needsUpdate` set. A report for the newer one clears both, and the next
-    /// tick draws.
+    /// Bulk output keeps the main thread busy, and Metal's present reports reach the tracker more
+    /// than three refreshes after the frame that acquired each drawable. So two or three drawables
+    /// await their report at every tick. The tick draws anyway: fed output before each of 20 ticks
+    /// one refresh apart, every tick commits a frame.
+    ///
+    /// Each drawable is reported through the tracker's own report call three ticks after the tick
+    /// that acquired it, once that later tick has run, as a handler queued behind it would. The
+    /// fixture has the tracker ignore Metal's own reports, which an offscreen window may send at
+    /// once, while the test waits for a ring slot, and which would hide the late ones. Each
+    /// chunk is bulk output, so its render signal's delivery leaves the frame to the tick. Before
+    /// each tick the test waits for the GPU to hand back a ring slot: the ring's limit is real GPU
+    /// work, and a tick still drops at it.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
-    func twoDrawablesUnreportedStopATickUntilTheNewerIsReported() throws {
+    func everyTickDrawsWhilePresentReportsComeThreeRefreshesLate() async throws {
+        let fixture = try ViewFixture(reportsPresents: false)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        let start = Duration.seconds(100)
+        let interval = LeadingEdgePolicy.fallbackRefreshInterval
+        let now = ManualNow(start)
+        view.now = { now.value }
+        let tracker = view.drawableTracker
+        let ticks = 20
+        let reportDelay = 3
+        // More than the small-output limit, so no delivery draws a frame of its own.
+        let chunk = String(repeating: "x", count: LeadingEdgePolicy.smallOutputLimit) + "\r\n"
+        var acquiredByTick: [Int: DrawableTracker.DrawableID] = [:]
+        var ticksThatCommittedNothing: [Int] = []
+
+        for tick in 0..<ticks {
+            let tickNow = start + interval * tick
+            now.value = tickNow
+            fixture.terminal.feed(text: chunk)
+            try await waitForAFreeRingSlot(view)
+            let committed = view.framesCommitted
+            let acquired = tracker.acquiredCount
+            view.renderTick(now: tickNow)
+            if view.framesCommitted == committed { ticksThatCommittedNothing.append(tick) }
+            if tracker.acquiredCount > acquired, let id = tracker.newestEntryID { acquiredByTick[tick] = id }
+            // Delivered after this tick's check: the drawable of the tick `reportDelay` before it.
+            if let late = acquiredByTick.removeValue(forKey: tick - reportDelay) {
+                tracker.reportPresented(late, presentedTime: tickNow / .seconds(1))
+            }
+        }
+        let nils = view.renderContext.renderer.stats.nilDrawables
+        #expect(ticksThatCommittedNothing.isEmpty,
+                "with each present reported \(reportDelay) refreshes late, the ticks \(ticksThatCommittedNothing) of \(ticks) committed no frame (nil drawables: \(nils))")
+    }
+
+    /// Two drawables unreported and younger than `presentReportTimeout`: a leading-edge draw
+    /// builds nothing, asks for no drawable and keeps `needsUpdate` set. A tick at the same `now`
+    /// asks for a drawable anyway and commits its frame, and the present-timing log notes no drop
+    /// for it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aTickDrawsWithTwoDrawablesUnreportedWhereTheLeadingEdgeDrops() throws {
         let fixture = try ViewFixture()
         let view = fixture.view
         let window = makeOffscreenWindow()
@@ -1146,38 +1484,42 @@ struct GhosttyTerminalViewBackpressureTests {
         try placeWithAFirstFrame(fixture, in: window)
 
         let tracker = view.drawableTracker
+        let timing = tracker.presentTiming
         _ = tracker.add(acquiredAt: .seconds(100.25))
-        let newer = tracker.add(acquiredAt: .seconds(100.5))
+        _ = tracker.add(acquiredAt: .seconds(100.5))
         fixture.terminal.feed(text: "waiting on the screen")
         view.requestFrame()
         let built = view.framesBuilt
         let requests = view.renderContext.renderer.stats.drawableRequests
+        let notedBefore = timing.gpuBehindNoted
 
         // 0.75 s after the older drawable: younger than the timeout, so nothing is cleared.
-        view.renderTick(now: .seconds(101))
-        let builtAtLimit = view.framesBuilt - built
-        #expect(builtAtLimit == 0, "a tick with two drawables unreported built \(builtAtLimit) frames")
-        let askedAtLimit = view.renderContext.renderer.stats.drawableRequests - requests
-        #expect(askedAtLimit == 0, "a tick with two drawables unreported asked for \(askedAtLimit) drawables")
+        view.renderTick(now: .seconds(101), backpressure: .leadingEdge)
+        let builtByEdge = view.framesBuilt - built
+        #expect(builtByEdge == 0, "a leading-edge draw with two drawables unreported built \(builtByEdge) frames")
+        let askedByEdge = view.renderContext.renderer.stats.drawableRequests - requests
+        #expect(askedByEdge == 0, "a leading-edge draw with two drawables unreported asked for \(askedByEdge) drawables")
         let ticking = view.frameDriver.demand.needsUpdate
-        #expect(ticking, "a tick with two drawables unreported let the link park")
+        #expect(ticking, "a leading-edge draw with two drawables unreported let the link park")
+        let notedByEdge = timing.gpuBehindNoted - notedBefore
+        #expect(notedByEdge == 1, "the leading edge's drop was noted \(notedByEdge) times")
 
-        tracker.reportPresented(newer, presentedTime: 101)
-        let left = tracker.entryCount
-        #expect(left == 0, "a report for the newer drawable left \(left) entries")
-        view.renderTick(now: .seconds(101.25))
+        view.renderTick(now: .seconds(101))
+        let askedByTick = view.renderContext.renderer.stats.drawableRequests - requests
+        #expect(askedByTick == 1, "a tick with two drawables unreported asked for \(askedByTick) drawables")
         let committed = view.framesCommitted
-        #expect(committed == 2, "after the report the view committed \(committed) frames in all, not 2")
+        #expect(committed == 2,
+                "a tick with two drawables unreported left the view at \(committed) frames committed, not 2 (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+        let notedByTick = timing.gpuBehindNoted - notedBefore - notedByEdge
+        #expect(notedByTick == 0, "a tick that drew was noted as dropped \(notedByTick) times")
     }
 
-    /// Two drawables unreported for `presentReportTimeout`: the tracker clears them, and the tick
-    /// makes the one bounded drawable request. The seam returns nil, as a full pool would after a
-    /// second's wait: `nilDrawables` rises by one, nothing commits, and `needsUpdate` stays set.
-    /// The ticks within the next `presentReportTimeout` make no request. Then a report, or the
-    /// end of that timeout with the seam handing out drawables again, lets the next tick draw.
-    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice),
-          arguments: NilDrawableHoldEnd.allCases)
-    func aNilDrawableAfterTheTimeoutHoldsTheLimit(end: NilDrawableHoldEnd) throws {
+    /// A frame dropped at a GPU limit hands the present-timing log what it found: whether the
+    /// ring was full, whether a nil drawable's hold lasted, and the age of each unreported drawable
+    /// by the frame's `now`. A tick drops at the full ring, and a leading-edge draw at the drawable
+    /// limit, where a tick draws. A frame that draws hands it nothing.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: GPULimit.allCases)
+    func aDroppedFrameHandsThePresentTimingLogWhatItFound(_ limit: GPULimit) throws {
         let fixture = try ViewFixture()
         let view = fixture.view
         let window = makeOffscreenWindow()
@@ -1185,12 +1527,84 @@ struct GhosttyTerminalViewBackpressureTests {
             view.removeFromSuperview()
             window.contentView = nil
         }
-        // No frame before this one: a real drawable's report could arrive at any moment and would
-        // count as the report this test waits for.
+        try placeWithAFirstFrame(fixture, in: window)
+
+        let tracker = view.drawableTracker
+        let timing = tracker.presentTiming
+        var held: HeldRingSlots?
+        defer { held?.releaseAll() }
+        var newer: DrawableTracker.DrawableID?
+        let expectedAges: [String]
+        let backpressure: GPUBackpressure
+        switch limit {
+        case .ringFull:
+            let slots = HeldRingSlots(on: view.surface)
+            held = slots
+            try #require(slots.held == FrameRing.depth, "only \(slots.held) of the ring's slots could be taken")
+            expectedAges = []
+            backpressure = .tick
+        case .drawablesBehind:
+            // Younger than `presentReportTimeout`, so the tracker clears neither.
+            _ = tracker.add(acquiredAt: .seconds(100.25))
+            newer = tracker.add(acquiredAt: .seconds(100.5))
+            expectedAges = ["750.000", "500.000"]
+            backpressure = .leadingEdge
+        }
+        fixture.terminal.feed(text: "behind the GPU")
+        view.requestFrame()
+        let notedBefore = timing.gpuBehindNoted
+
+        view.renderTick(now: .seconds(101), backpressure: backpressure)
+        let noted = timing.gpuBehindNoted - notedBefore
+        try #require(noted == 1, "a frame dropped at the \(limit) limit was noted \(noted) times")
+        let found = try #require(timing.lastGPUBehind, "a frame dropped at the \(limit) limit left no sample")
+        let ringFree = found.ringHasFreeSlot
+        let expectedRingFree = limit != .ringFull
+        #expect(ringFree == expectedRingFree, "a frame dropped at the \(limit) limit read the ring free: \(ringFree)")
+        let heldFound = found.nilDrawableHold
+        #expect(!heldFound, "a frame dropped at the \(limit) limit read a nil drawable's hold")
+        let ages = found.entryAges.map(PresentTimingLog.milliseconds)
+        #expect(ages == expectedAges, "a frame dropped at the \(limit) limit read the ages \(ages)")
+
+        switch limit {
+        case .ringFull:
+            held?.releaseOne()
+        case .drawablesBehind:
+            if let newer { tracker.reportPresented(newer, presentedTime: 101) }
+        }
+        let notedBeforeDraw = timing.gpuBehindNoted
+        view.renderTick(now: .seconds(101.25), backpressure: backpressure)
+        let committed = view.framesCommitted
+        try #require(committed == 2,
+                     "once the \(limit) limit cleared the view committed \(committed) frames in all, not 2")
+        let notedByDraw = timing.gpuBehindNoted - notedBeforeDraw
+        #expect(notedByDraw == 0, "a frame that drew was noted as dropped \(notedByDraw) times")
+    }
+
+    /// A tick asks for a drawable whatever the tracker counts, here with two drawables unreported
+    /// and younger than `presentReportTimeout`. The seam returns nil, as a full pool would after
+    /// `nextDrawable()`'s one-second wait: `nilDrawables` rises by one, nothing commits, and
+    /// `needsUpdate` stays set. The ticks within the next `presentReportTimeout` drop before they
+    /// build, ask for no drawable, and are noted as held, a late report of a present made before
+    /// the nil notwithstanding. Then a report of a later present, or the end of that timeout with
+    /// the seam handing out drawables again, lets the next tick draw.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice),
+          arguments: NilDrawableHoldEnd.allCases)
+    func aNilDrawableHoldsTheTickOffForATimeout(end: NilDrawableHoldEnd) throws {
+        // The test sends every report: one from Metal, dated by real host time, would end the hold.
+        let fixture = try ViewFixture(reportsPresents: false)
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        // No frame before this one, so no real drawable is out when the hold starts.
         place(view, in: try #require(window.contentView))
         let tracker = view.drawableTracker
-        _ = tracker.add(acquiredAt: .seconds(100))
-        let newer = tracker.add(acquiredAt: .seconds(100.25))
+        let timing = tracker.presentTiming
+        let older = tracker.add(acquiredAt: .seconds(100.5))
+        let newer = tracker.add(acquiredAt: .seconds(100.75))
         fixture.terminal.feed(text: "a stalled screen")
         view.nextDrawable = { _ in nil }
 
@@ -1198,30 +1612,39 @@ struct GhosttyTerminalViewBackpressureTests {
         view.renderTick(now: .seconds(101))
         let afterNil = view.renderContext.renderer.stats
         let asked = afterNil.drawableRequests - before.drawableRequests
-        #expect(asked == 1, "the tick a timeout after the last report asked for \(asked) drawables")
+        #expect(asked == 1, "a tick with two drawables unreported asked for \(asked) drawables")
         let nils = afterNil.nilDrawables - before.nilDrawables
         #expect(nils == 1, "the full pool's nil drawable counted \(nils) times")
-        let clears = tracker.timeoutClears
-        #expect(clears == 1, "the tracker cleared its entries \(clears) times")
         let committedAtNil = view.framesCommitted
         #expect(committedAtNil == 0, "a frame with no drawable was committed")
         let tickingAtNil = view.frameDriver.demand.needsUpdate
         #expect(tickingAtNil, "a frame with no drawable let the link park")
 
-        // The hold is timed from the next check, at 101.25 s.
+        // The hold is timed from the next check, at 101.25 s. A late report of a present made
+        // before the nil, as bulk output leaves queued, does not end it.
+        let notedBeforeHold = timing.gpuBehindNoted
         view.renderTick(now: .seconds(101.25))
+        tracker.reportPresented(older, presentedTime: 100.875)
         view.renderTick(now: .seconds(102))
         let askedInHold = view.renderContext.renderer.stats.drawableRequests - afterNil.drawableRequests
         #expect(askedInHold == 0, "ticks within a timeout of the nil drawable asked for \(askedInHold) drawables")
         let tickingInHold = view.frameDriver.demand.needsUpdate
-        #expect(tickingInHold, "a tick held at the limit let the link park")
+        #expect(tickingInHold, "a tick held off by a nil drawable let the link park")
+        let notedInHold = timing.gpuBehindNoted - notedBeforeHold
+        #expect(notedInHold == 2, "the two held ticks were noted as dropped \(notedInHold) times")
+        let found = timing.lastGPUBehind
+        let heldFound = found?.nilDrawableHold ?? false
+        let ringFreeFound = found?.ringHasFreeSlot ?? false
+        #expect(heldFound && ringFreeFound,
+                "a held tick was noted with the hold \(heldFound) and the ring free \(ringFreeFound)")
 
         view.nextDrawable = { $0.nextDrawable() }
         switch end {
         case .report:
-            // A late report for a drawable the clear removed: a present freed one. The tick is
-            // still within the hold's timeout, so only the report can end it.
-            tracker.reportPresented(newer, presentedTime: 101.5)
+            // A present made after the nil came back, a second after the tick that asked, freed
+            // a drawable. The tick is still within the hold's timeout, so only the report can
+            // end it.
+            tracker.reportPresented(newer, presentedTime: 102)
             view.renderTick(now: .seconds(102))
         case .timeout:
             view.renderTick(now: .seconds(102.25))
@@ -1269,10 +1692,12 @@ struct GhosttyTerminalViewBackpressureTests {
         #expect(left == 0, "the drawable dropped unpresented left \(left) entries")
     }
 
-    /// `drawFrameNow()` skips the drawable limit, because the instruments that call it draw in
-    /// offscreen windows whose presents may never be reported. Its drawable is still tracked.
+    /// `drawFrameNow()` skips both GPU checks, because the instruments that call it draw in
+    /// offscreen windows whose presents may never be reported, and a frame they ask for is one
+    /// they mean to see drawn. With two drawables unreported and a nil drawable's hold lasting, a
+    /// tick drops, and `drawFrameNow()` still commits. Its drawable is still tracked.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
-    func drawFrameNowDrawsWithTwoDrawablesUnreported() throws {
+    func drawFrameNowDrawsThroughANilDrawablesHold() throws {
         let fixture = try ViewFixture(reportsPresents: false)
         let view = fixture.view
         let window = makeOffscreenWindow()
@@ -1285,27 +1710,30 @@ struct GhosttyTerminalViewBackpressureTests {
         let tracker = view.drawableTracker
         _ = tracker.add(acquiredAt: .seconds(100))
         _ = tracker.add(acquiredAt: .seconds(100.25))
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
         fixture.terminal.feed(text: "an instrumented frame")
 
-        // Control, first, while no real drawable is out to be reported: a tick at the limit drops.
+        // Control, first, while no real drawable is out to be reported: a tick in the hold drops.
         view.renderTick()
         let builtByTick = view.framesBuilt
-        #expect(builtByTick == 0, "control: a tick with two drawables unreported built \(builtByTick) frames")
+        #expect(builtByTick == 0, "control: a tick in a nil drawable's hold built \(builtByTick) frames")
 
         let acquired = tracker.acquiredCount
         view.drawFrameNow()
         let committed = view.framesCommitted
         #expect(committed == 1,
-                "drawFrameNow committed \(committed) frames with two drawables unreported (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+                "drawFrameNow committed \(committed) frames in a nil drawable's hold (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
         let tracked = tracker.acquiredCount - acquired
         #expect(tracked == 1, "drawFrameNow's drawable went into the tracker \(tracked) times")
     }
 
-    /// A live resize promised Core Animation a present in its transaction, so its frame skips the
-    /// limits and is drawn.
+    /// A live resize promised Core Animation a present in its transaction, so its frame skips both
+    /// GPU checks and is drawn, here with two drawables unreported and a nil drawable's hold
+    /// lasting.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
-    func aLiveResizeFrameDrawsWithTwoDrawablesUnreported() throws {
-        let fixture = try ViewFixture()
+    func aLiveResizeFrameDrawsThroughANilDrawablesHold() throws {
+        // The test sends every report: one from Metal, dated by real host time, would end the hold.
+        let fixture = try ViewFixture(reportsPresents: false)
         let view = fixture.view
         let window = makeOffscreenWindow()
         defer {
@@ -1317,6 +1745,7 @@ struct GhosttyTerminalViewBackpressureTests {
         let tracker = view.drawableTracker
         _ = tracker.add(acquiredAt: .seconds(100))
         _ = tracker.add(acquiredAt: .seconds(100.25))
+        tracker.noteNoDrawable(requestedAt: .seconds(100.5))
 
         // Control: outside the resize the same frame is dropped.
         view.renderNow()
@@ -1329,6 +1758,54 @@ struct GhosttyTerminalViewBackpressureTests {
         let committed = view.framesCommitted
         #expect(committed == 1,
                 "a live resize's frame was committed \(committed) times (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
+    }
+
+    /// A tick asks for a drawable whatever the tracker counts, so only rule 1 keeps a view the
+    /// screen does not show from asking. Hidden or in an occluded window, with two drawables
+    /// unreported as bulk output leaves them, a tick builds nothing and asks for no drawable. Shown
+    /// again, the next tick draws.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice), arguments: Concealment.allCases)
+    func aViewTheScreenDoesNotShowAsksForNoDrawable(_ concealment: Concealment) throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let window = makeOffscreenWindow()
+        defer {
+            view.removeFromSuperview()
+            window.contentView = nil
+        }
+        place(view, in: try #require(window.contentView))
+        let tracker = view.drawableTracker
+        _ = tracker.add(acquiredAt: .seconds(100))
+        _ = tracker.add(acquiredAt: .seconds(100.25))
+        switch concealment {
+        case .hidden:
+            view.isHidden = true
+        case .occluded:
+            view.windowVisibility = { _ in false }
+            view.refreshOcclusion()
+        }
+        let requests = view.renderContext.renderer.stats.drawableRequests
+
+        for index in 0..<10 {
+            fixture.terminal.feed(text: "line \(index)\r\n")
+            view.renderTick(now: Duration.seconds(100.5) + LeadingEdgePolicy.fallbackRefreshInterval * index)
+        }
+        let built = view.framesBuilt
+        #expect(built == 0, "a view \(concealment) built \(built) frames")
+        let asked = view.renderContext.renderer.stats.drawableRequests - requests
+        #expect(asked == 0, "a view \(concealment) asked for \(asked) drawables")
+
+        switch concealment {
+        case .hidden:
+            view.isHidden = false
+        case .occluded:
+            view.windowVisibility = { _ in true }
+            view.refreshOcclusion()
+        }
+        view.renderTick(now: .seconds(100.75))
+        let committed = view.framesCommitted
+        #expect(committed == 1,
+                "a view shown again committed \(committed) frames, not 1 (nil drawables so far: \(view.renderContext.renderer.stats.nilDrawables))")
     }
 }
 
@@ -1351,6 +1828,26 @@ private final class ViewHandle {
     init(_ view: GhosttyTerminalView) {
         self.view = view
     }
+}
+
+/// Waits, bounded, until the GPU has handed back a ring slot. A test that has committed several
+/// frames calls it before the next frame it needs drawn, so that frame is not dropped for a frame
+/// the GPU is still finishing. The wait suspends, so a render signal's delivery queued on main
+/// runs in it.
+@MainActor
+private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
+    let handle = ViewHandle(view)
+    try await waitFor("the GPU to hand back a ring slot") { @Sendable in
+        await MainActor.run { handle.view.surface.frameRing?.hasFreeSlot ?? true }
+    }
+}
+
+/// How a view is kept off the screen.
+enum Concealment: Sendable, CaseIterable {
+    /// The view itself is hidden.
+    case hidden
+    /// The view's window is occluded.
+    case occluded
 }
 
 /// Which GPU limit a test holds the view at.
@@ -1395,16 +1892,6 @@ struct GhosttyTerminalViewLeadingEdgeTests {
         call()
         try await waitFor("the render signal's delivery") {
             await MainActor.run { handle.view.renderSignalDeliveries > before }
-        }
-    }
-
-    /// Waits, bounded, until the GPU has handed back a ring slot. A test that has committed
-    /// several frames calls it before the next frame it needs drawn, so that frame is not left to
-    /// the tick for a frame the GPU is still finishing.
-    private func waitForAFreeRingSlot(_ view: GhosttyTerminalView) async throws {
-        let handle = ViewHandle(view)
-        try await waitFor("the GPU to hand back a ring slot") {
-            await MainActor.run { handle.view.surface.frameRing?.hasFreeSlot ?? true }
         }
     }
 

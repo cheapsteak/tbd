@@ -436,11 +436,30 @@ public enum SQLMigrationLoader {
         return (unquote(String(body[tableRange])), unquote(rawColumn))
     }
 
+    /// A double-quoted identifier without its quotes, each `""` in it
+    /// collapsed to `"`; any other identifier as it is.
+    ///
+    /// Reads Unicode scalars, as the regex that captured the identifier and
+    /// the lint's `unquote` both do. A `"` that a combining mark joins into
+    /// one `Character` is still a quote to SQLite, and a `Character` reading
+    /// would keep the quotes or leave a `""` uncollapsed.
     private static func unquote(_ identifier: String) -> String {
-        guard identifier.hasPrefix("\""), identifier.hasSuffix("\""), identifier.count >= 2 else {
+        let scalars = identifier.unicodeScalars
+        guard scalars.count >= 2, scalars.first == "\"", scalars.last == "\"" else {
             return identifier
         }
-        return String(identifier.dropFirst().dropLast()).replacingOccurrences(of: "\"\"", with: "\"")
+        var unquoted = String.UnicodeScalarView()
+        var previousKeptQuote = false
+        for scalar in scalars.dropFirst().dropLast() {
+            // Keep the first `"` of each pair and drop the second.
+            if scalar == "\"" && previousKeptQuote {
+                previousKeptQuote = false
+                continue
+            }
+            unquoted.append(scalar)
+            previousKeptQuote = scalar == "\""
+        }
+        return String(unquoted)
     }
 
     // MARK: - Applying
@@ -465,9 +484,25 @@ public enum SQLMigrationLoader {
     }
 
     static func columnExists(_ column: String, in table: String, db: GRDB.Database) throws -> Bool {
-        let quoted = "\"" + table.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-        let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(\(quoted))")
+        let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(\(quotedIdentifier(table)))")
         let names = rows.compactMap { ($0["name"] as String?)?.lowercased() }
         return names.contains(column.lowercased())
+    }
+
+    /// `name` as a double-quoted SQL identifier, each `"` in it doubled.
+    ///
+    /// Doubles by Unicode scalar. SQLite reads code points, so a `"` followed
+    /// by a combining mark still ends the identifier for it, while
+    /// `replacingOccurrences(of:with:)` sees one `Character` and leaves it
+    /// single.
+    static func quotedIdentifier(_ name: String) -> String {
+        var quoted = String.UnicodeScalarView()
+        quoted.append("\"")
+        for scalar in name.unicodeScalars {
+            if scalar == "\"" { quoted.append("\"") }
+            quoted.append(scalar)
+        }
+        quoted.append("\"")
+        return String(quoted)
     }
 }

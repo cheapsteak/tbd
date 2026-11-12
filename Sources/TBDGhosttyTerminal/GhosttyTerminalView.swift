@@ -273,15 +273,22 @@ enum LeadingEdgePolicy {
     }
 }
 
-/// What a frame does when the GPU is behind: all three of the surface's ring slots are in flight,
-/// or `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
-/// report.
+/// What a frame does when the GPU is behind. A frame that drops does so before it builds
+/// anything, and keeps the link ticking until the GPU catches up.
 enum GPUBackpressure {
-    /// Drop the frame before building it, and keep the link ticking until the GPU catches up. What
-    /// a display tick does, so main never blocks on the GPU.
-    case drop
+    /// A display tick. Drop when all three of the surface's ring slots are in flight, or while a
+    /// nil drawable's hold lasts. Otherwise ask for a drawable whatever the tracker counts:
+    /// `nextDrawable()` may wait, up to its one-second timeout, for one the compositor still
+    /// holds, and a nil from it starts the hold. Under bulk output the present reports come
+    /// several refreshes late, and a tick that waited for them would draw one refresh in two.
+    case tick
+    /// A leading-edge draw, inside a render signal's delivery. Drop as a tick does, and also while
+    /// `TerminalRenderer.maxDrawablesAwaitingPresent` of the layer's drawables await their present
+    /// report, so the draw never waits in `nextDrawable()` for a drawable the tracker counts as
+    /// out.
+    case leadingEdge
     /// Build it anyway: wait on the ring for a slot, and ask for a drawable whatever the tracker
-    /// counts. What `drawFrameNow()` and a live resize do.
+    /// says. What `drawFrameNow()` and a live resize do.
     case wait
 }
 
@@ -467,9 +474,17 @@ public final class GhosttyTerminalView: NSView {
 
     /// Called on every left mouse-down, before the view handles it, so the host can move its own
     /// focus to this view. `false` declines the press: something the host draws over the view owns
-    /// its events, so a ⌘-click in that press opens no link. The view still takes first responder
-    /// and handles the rest of the click either way.
+    /// its events, so a ⌘-click in that press opens nothing, and `onCommandClickText` is not asked.
+    /// The view still takes first responder and handles the rest of the click either way.
     public var onMouseDownClaimFocus: (@MainActor () -> Bool)?
+
+    /// Offered a left ⌘-press that landed on no OSC 8 link, with the screen's text around it, read
+    /// once at the press, for the host to look in for what plain text names: a file path, a URL.
+    /// `true` says the host opened something, and the view consumes the press whole: it reaches
+    /// neither the program, even one that reports the mouse, nor the selection, and its drags and
+    /// release go nowhere. `false`, or no hook, lets it go on as an ordinary click. Not asked about
+    /// a press the host declined (`onMouseDownClaimFocus`).
+    public var onCommandClickText: (@MainActor (GhosttyClickedText) -> Bool)?
 
     /// The view became the first responder (`true`) or stopped being it (`false`), however focus
     /// moved. Unlike `onFocusChanged`, a window gaining or losing key status does not call it.
@@ -493,7 +508,8 @@ public final class GhosttyTerminalView: NSView {
     /// Whether the view takes the click that activates its window. On by default. The click it
     /// takes only activates, as in any macOS terminal: the view becomes first responder, and the
     /// press, its drags and its release reach neither the program nor the selection, so the
-    /// selection the user came back to copy stays. A ⌘-click on an OSC 8 link still opens it.
+    /// selection the user came back to copy stays. A ⌘-click on an OSC 8 link still opens it, and
+    /// `onCommandClickText` is still offered a ⌘-click on plain text, told it activates the window.
     public var acceptsActivatingClick = true
 
     /// Whether Option acts as Meta (Option-b sends `ESC b`) rather than typing the layout's
@@ -867,7 +883,8 @@ public final class GhosttyTerminalView: NSView {
     ///
     /// Otherwise the delivery decides once, by `LeadingEdgePolicy`, whether to draw now. It draws
     /// with the tick's own `renderTick(now:)`, inside this delivery, so the leading edge adds no
-    /// main-queue hop. Anything else asks the display link for a frame.
+    /// main-queue hop, and its frame drops at the drawable limit as the policy does. Anything else
+    /// asks the display link for a frame.
     private func renderSignalled(_ hint: RenderHint) {
         guard !terminal.isClosed else {
             stopBlink()
@@ -881,7 +898,7 @@ public final class GhosttyTerminalView: NSView {
         case .drawNow:
             let built = framesBuilt
             let committed = framesCommitted
-            renderTick(now: now)
+            renderTick(now: now, backpressure: .leadingEdge)
             if framesBuilt > built, framesCommitted == committed, !lastBuildFoundNoOutput {
                 lastEmptyLeadingEdgeDrawAt = now
             }
@@ -1168,9 +1185,10 @@ public final class GhosttyTerminalView: NSView {
     /// changed. For a host's instruments and tests, which cannot wait on a display link that an
     /// offscreen window never runs.
     ///
-    /// It waits for the GPU rather than drop the frame, as a live resize does. Those callers draw
-    /// in offscreen windows, whose presents may never be reported, and the drawable limit would
-    /// stop them drawing for longer than they wait. Its drawables still go into the tracker.
+    /// It waits for the GPU rather than drop the frame, as a live resize does: it waits on the ring
+    /// for a slot, and asks for a drawable even while a nil drawable's hold lasts. Those callers
+    /// draw in offscreen windows, whose presents may never be reported, and a frame they ask for
+    /// is one they mean to see drawn. Its drawables still go into the tracker.
     public func drawFrameNow() {
         renderTick(backpressure: .wait)
     }
@@ -1189,8 +1207,9 @@ public final class GhosttyTerminalView: NSView {
     ///   - now: when the frame is due, as a duration since any fixed origin; nil reads the `now`
     ///     seam. The display link passes its own timestamp. The DEC 2026 watchdog and the drawable
     ///     tracker only compare these.
-    ///   - backpressure: what the frame does if the GPU is behind.
-    func renderTick(now: Duration? = nil, backpressure: GPUBackpressure = .drop) {
+    ///   - backpressure: what the frame does if the GPU is behind. A delivery that draws at once
+    ///     passes `.leadingEdge`.
+    func renderTick(now: Duration? = nil, backpressure: GPUBackpressure = .tick) {
         let now = now ?? self.now()
         applyPendingGridResize()
         guard canBuildFrames else {
@@ -1223,7 +1242,7 @@ public final class GhosttyTerminalView: NSView {
     /// - Parameters:
     ///   - now: when the frame is due; nil reads the `now` seam, as the live-resize path does.
     ///   - backpressure: what the frame does if the GPU is behind. A live resize always waits.
-    func renderNow(now: Duration? = nil, backpressure: GPUBackpressure = .drop) {
+    func renderNow(now: Duration? = nil, backpressure: GPUBackpressure = .tick) {
         let now = now ?? self.now()
         // The layer may have been made after the last resize, so its drawable size is set here too.
         updateDrawableSize()
@@ -1234,7 +1253,7 @@ public final class GhosttyTerminalView: NSView {
         }
         // A live resize promised Core Animation a present in this transaction, so it never drops.
         let waits = backpressure == .wait || layer.presentsWithTransaction
-        if !waits, isGPUBehind(now: now) {
+        if !waits, isGPUBehind(now: now, backpressure: backpressure) {
             // Dropped before the build: no lock taken and no dirty state consumed. `needsUpdate`
             // stays set so the link keeps ticking until the GPU catches up. Handed
             // `surface.needsDisplay` instead, the link would park: output nobody built leaves the
@@ -1289,15 +1308,26 @@ public final class GhosttyTerminalView: NSView {
         frameDriver.update { $0.needsUpdate = surface.needsDisplay }
     }
 
-    /// Whether a frame due at `now` would find the GPU behind: the ring has no free slot, or the
+    /// Whether a frame due at `now` would find the GPU behind, by `backpressure`'s rules: the ring
+    /// has no free slot, or a nil drawable's hold lasts, or, for a leading-edge draw alone, the
     /// tracker counts the drawable limit. Main is the only thread that takes slots and drawables,
-    /// so a no here stays true until this frame takes them. The tracker is asked on every tick,
-    /// full ring or not, so its timers run on every frame's `now`, whichever of the two holds the
-    /// frame back.
-    private func isGPUBehind(now: Duration) -> Bool {
+    /// so a no here stays true until this frame takes them. The tracker is asked on every frame,
+    /// full ring or not, so its timers run on every frame's `now`, whatever holds the frame back.
+    ///
+    /// A frame it holds back is handed to the drawable tracker's `presentTiming` diagnostic, which
+    /// records what the frame found and changes nothing.
+    private func isGPUBehind(now: Duration, backpressure: GPUBackpressure) -> Bool {
         let ringHasFreeSlot = surface.frameRing?.hasFreeSlot ?? true
-        let awaitingPresent = drawableTracker.awaitingPresent(now: now)
-        return !ringHasFreeSlot || awaitingPresent >= drawableTracker.limit
+        let drawables = drawableTracker.check(now: now)
+        // A hold counts as the limit, so the leading edge's count covers it too.
+        let drawablesBehind = backpressure == .leadingEdge
+            ? drawables.awaitingPresent >= drawableTracker.limit
+            : drawables.nilDrawableHold
+        let behind = !ringHasFreeSlot || drawablesBehind
+        if behind {
+            drawableTracker.noteGPUBehind(now: now, ringHasFreeSlot: ringHasFreeSlot, drawables: drawables)
+        }
+        return behind
     }
 
     // MARK: - Cursor blink
@@ -1516,14 +1546,14 @@ public final class GhosttyTerminalView: NSView {
     /// activating click.
     private var activationClickEventNumber: Int?
 
-    /// Set while the left press under way is the window's activating click, which the view
-    /// consumed: its drags and its release go nowhere either. The mouse controller saw no press
-    /// begin, so it declines them, and without this they would go on up the responder chain as a
-    /// drag and a release of a press nobody saw begin.
+    /// Set while the left press under way was consumed at its mouse-down, as the window's
+    /// activating click or a ⌘-click that opened something: its drags and its release go nowhere
+    /// either. The mouse controller saw no press begin, so it declines them, and without this they
+    /// would go on up the responder chain as a drag and a release of a press nobody saw begin.
     private var pressIsConsumed = false
 
     /// Set while the host declined the left press under way (`onMouseDownClaimFocus` answered
-    /// `false`), from its mouse-down through its mouse-up. A ⌘-click in it opens no link: the
+    /// `false`), from its mouse-down through its mouse-up. A ⌘-click in it opens nothing: the
     /// host has something over the view that owns its events.
     private(set) var hostDeclinedPress = false
 
@@ -1536,18 +1566,33 @@ public final class GhosttyTerminalView: NSView {
         // is not the first responder, so a pane that cannot take focus by being clicked cannot be
         // typed into at all. The activating click focuses the view too.
         if let window, window.firstResponder !== self { window.makeFirstResponder(self) }
-        // The activating click does nothing else (`acceptsActivatingClick`), except open the link
-        // under a ⌘-click this press may open. The link is looked up once, here: the feed thread
-        // can rewrite the screen between two lookups, and a press let through on the first that
-        // found nothing on the second would go on as an ordinary click.
-        if isActivationClick {
-            if let open = onOpenLink, let uri = mouseController.linkToOpen(at: event) {
-                open(uri)
-            }
+        // A ⌘-click that opens something goes no further, and the activating click does nothing
+        // else (`acceptsActivatingClick`). The screen is read once, here: the feed thread can
+        // rewrite it between two reads, and a press let through on the first that found nothing on
+        // the second would go on as an ordinary click.
+        let openedCommandClick = openCommandClick(event, activatesWindow: isActivationClick)
+        if openedCommandClick || isActivationClick {
             pressIsConsumed = true
             return
         }
         if !forward(event) { super.mouseDown(with: event) }
+    }
+
+    /// Opens what the ⌘-press `event` lands on: its OSC 8 link, through `onOpenLink`, or what the
+    /// host finds in its text, through `onCommandClickText`. True when something opened.
+    private func openCommandClick(_ event: NSEvent, activatesWindow: Bool) -> Bool {
+        switch mouseController.commandClickTarget(at: event) {
+        case .link(let uri):
+            guard let onOpenLink else { return false }
+            onOpenLink(uri)
+            return true
+        case .text(var text):
+            guard let onCommandClickText else { return false }
+            text.activatesWindow = activatesWindow
+            return onCommandClickText(text)
+        case nil:
+            return false
+        }
     }
 
     public override func mouseUp(with event: NSEvent) {
