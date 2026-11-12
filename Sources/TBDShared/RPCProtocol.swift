@@ -304,6 +304,7 @@ public enum RPCMethod {
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
     public static let claudeRateLimitDetected = "claude.rateLimitDetected"
     public static let claudeTransientApiErrorDetected = "claude.transientApiErrorDetected"
+    public static let claudeFableCreditsOut = "claude.fableCreditsOut"
     public static let terminalSuspend = "terminal.suspend"
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
@@ -349,6 +350,7 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
+    public static let modelProfileFableCheck = "modelProfile.fableCheck"
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
@@ -1226,6 +1228,43 @@ public struct ModelProfilePrepareConfigDirResult: Codable, Sendable {
     /// (`~/tbd/profiles/<lowercased-uuid>/claude`).
     public let configDirPath: String
     public init(configDirPath: String) { self.configDirPath = configDirPath }
+}
+
+/// Params for `modelProfile.fableCheck` — force a Fable probe now.
+/// `ids` nil means every profile a Fable spawn could use (the balancing pool's
+/// signed-in and token profiles).
+public struct ModelProfileFableCheckParams: Codable, Sendable {
+    public let ids: [UUID]?
+    public init(ids: [UUID]? = nil) { self.ids = ids }
+}
+
+/// One profile's outcome from `modelProfile.fableCheck`.
+public struct ModelProfileFableCheckEntry: Codable, Sendable, Equatable {
+    public let profileID: UUID
+    public let name: String
+    public let fable: FableAvailability
+    public init(profileID: UUID, name: String, fable: FableAvailability) {
+        self.profileID = profileID
+        self.name = name
+        self.fable = fable
+    }
+}
+
+public struct ModelProfileFableCheckResult: Codable, Sendable {
+    public let profiles: [ModelProfileFableCheckEntry]
+    public init(profiles: [ModelProfileFableCheckEntry]) { self.profiles = profiles }
+}
+
+/// Params for `claude.fableCreditsOut` — sent by `tbd hooks stop-failure` when
+/// the turn died on the out-of-usage-credits message. The daemon marks the
+/// terminal's profile out only when the terminal's model is a Fable model.
+public struct FableCreditsOutParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let rawMessage: String
+    public init(terminalID: UUID, rawMessage: String) {
+        self.terminalID = terminalID
+        self.rawMessage = rawMessage
+    }
 }
 
 /// Params for `modelProfile.execEnvironment` — the environment a process run

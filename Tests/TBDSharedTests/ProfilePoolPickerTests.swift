@@ -988,3 +988,83 @@ struct ProfilePoolCandidateHasCredentialTests {
         #expect(!ProfilePoolCandidate.hasCredential(kind: kind, hasLoginIdentity: false, snapshotStatus: nil))
     }
 }
+
+// MARK: - Fable availability
+
+@Suite("ProfilePoolPicker Fable requests")
+struct ProfilePoolPickerFableTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private func fableReading(_ state: FableAvailability.State, ageSeconds: TimeInterval = 60) -> FableAvailability {
+        FableAvailability(state: state, reason: nil, checkedAt: now.addingTimeInterval(-ageSeconds), source: .probe)
+    }
+
+    private func candidate(
+        percent: Double?, fetchedAgo: TimeInterval = 10, fable: FableAvailability?,
+        sortOrder: Int = 0
+    ) -> ProfilePoolCandidate {
+        let snapshot = percent.map {
+            ProfileUsageSnapshot(
+                buckets: [ClaudeUsageLimitBucket(kind: "session", percent: $0, isActive: nil)],
+                fetchedAt: now.addingTimeInterval(-fetchedAgo), lastAttemptAt: now,
+                status: "ok", statusKind: .ok, organizationID: nil)
+        }
+        let id = UUID()
+        return ProfilePoolCandidate(
+            profileID: id, kind: .oauth, hasCredential: true, poolOptOut: false,
+            accountKey: id.uuidString, snapshot: snapshot, liveSessions: 0,
+            sortOrder: sortOrder, isConfiguredDefault: false, fable: fable)
+    }
+
+    @Test func fableRequest_neverChoosesAnOutProfile_evenWithMoreHeadroom() {
+        let out = candidate(percent: 5, fable: fableReading(.out))
+        let ok = candidate(percent: 60, fable: fableReading(.available))
+        let d = ProfilePoolPicker.pick(candidates: [out, ok], now: now, requiresFable: true)
+        #expect(d.chosen == ok.profileID)
+        #expect(d.verdicts[out.profileID] == .fableOut)
+    }
+
+    @Test func nonFableRequest_isUnaffected() {
+        let out = candidate(percent: 5, fable: fableReading(.out))
+        let ok = candidate(percent: 60, fable: fableReading(.available))
+        let d = ProfilePoolPicker.pick(candidates: [out, ok], now: now)
+        #expect(d.chosen == out.profileID)
+        #expect(d.verdicts[out.profileID] != .fableOut)
+    }
+
+    @Test func allOut_choosesNothing_andNoFallbackNamesOne() {
+        // Each tier a fallback could use: over the ceiling, stale, at 100%.
+        let above = candidate(percent: 90, fable: fableReading(.out))
+        let stale = candidate(percent: 10, fetchedAgo: 3600, fable: fableReading(.out))
+        let never = candidate(percent: nil, fable: fableReading(.out))
+        let full = candidate(percent: 100, fable: fableReading(.out))
+        let d = ProfilePoolPicker.pick(candidates: [above, stale, never, full], now: now, requiresFable: true)
+        #expect(d.chosen == nil)
+        #expect(d.fallback == nil)
+        for c in [above, stale, never, full] { #expect(d.verdicts[c.profileID] == .fableOut) }
+    }
+
+    @Test func fallbackTiers_skipOutProfiles_butUseOthers() {
+        let outAbove = candidate(percent: 90, fable: fableReading(.out))
+        let unknownAbove = candidate(percent: 95, fable: fableReading(.unknown))
+        let d = ProfilePoolPicker.pick(candidates: [outAbove, unknownAbove], now: now, requiresFable: true)
+        #expect(d.chosen == nil)
+        #expect(d.fallback?.profileID == unknownAbove.profileID)
+    }
+
+    @Test func staleOutReading_neverCheckedAndUnknown_areNotRefused() {
+        let staleOut = candidate(percent: 10, fable: fableReading(.out, ageSeconds: 31 * 60))
+        let never = candidate(percent: 10, fable: nil)
+        let unknown = candidate(percent: 10, fable: fableReading(.unknown))
+        let d = ProfilePoolPicker.pick(candidates: [staleOut, never, unknown], now: now, requiresFable: true)
+        for c in [staleOut, never, unknown] {
+            if case .eligible = d.verdicts[c.profileID] {} else { Issue.record("expected eligible") }
+        }
+    }
+
+    @Test func ranked_alsoExcludesOutProfiles() {
+        let out = candidate(percent: 1, fable: fableReading(.out))
+        let ok = candidate(percent: 50, fable: nil)
+        #expect(ProfilePoolPicker.ranked(candidates: [out, ok], now: now, requiresFable: true) == [ok.profileID])
+    }
+}
