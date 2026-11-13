@@ -795,6 +795,42 @@ public final class GhosttyTerminal: @unchecked Sendable {
         }
     }
 
+    /// `feed(_:)`, with `underLock` run in the same hold of the lock as the parse, just before it,
+    /// for an owner that keeps state of its own beside the terminal's and must change it in the
+    /// same step: the daemon's holder emulator stamps when it last took in bytes there, so a
+    /// reading of the screen and its age is always of one moment.
+    ///
+    /// With `muted`, the terminal is muted for exactly this parse, inside the same hold: `writePty`
+    /// and the effect callbacks drop what the bytes produce, and the queries are not asked. The
+    /// previous mute is put back before the lock drops, so a feed on another thread is never
+    /// muted by this one. For replaying a screen whose replies and reports must not reach the
+    /// program. `isMuted` is the setting for a mute that spans several calls.
+    ///
+    /// `underLock` must not call back into this terminal: the lock is not recursive. It runs even
+    /// for an empty `bytes`, and not at all once the terminal is closed. The bytes count toward
+    /// `TerminalCore.outputBytesSinceFrame`, muted or not, as `feed(_:)`'s do.
+    package func feed(_ bytes: ArraySlice<UInt8>, muted: Bool = false, underLock: () -> Void) {
+        withCore(signalsRender: true, changesModes: true) { core, raw in
+            underLock()
+            guard !bytes.isEmpty else { return }
+            let wasMuted = core.context.muted
+            if muted { core.context.muted = true }
+            defer { core.context.muted = wasMuted }
+            bytes.withUnsafeBufferPointer { buffer in
+                ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
+            }
+            core.outputBytesSinceFrame += bytes.count
+        }
+    }
+
+    /// Whether this terminal's lock is held right now, by any thread, the calling one included.
+    /// A test seam: from inside `feed(_:muted:underLock:)`'s closure it reads true.
+    var isLockHeldForTesting: Bool {
+        guard lock.try() else { return true }
+        lock.unlock()
+        return false
+    }
+
     /// A full reset (RIS): screens, scrollback, modes and the cursor go back to their initial
     /// state. The size is kept. Use before replaying a snapshot into a terminal that was used
     /// before, so nothing from its earlier life (an alternate screen, a colour) survives.
@@ -879,7 +915,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
     }
 
     /// While true, `writePty` and the effect callbacks are dropped, and the queries are not asked.
-    /// For replaying a snapshot, whose replies must not reach the program.
+    /// For replaying a snapshot, whose replies must not reach the program. A mute for one parse
+    /// only is `feed(_:muted:underLock:)`, which sets and restores it inside the parse's hold.
     public var isMuted: Bool {
         get { locked { $0.context.muted } }
         set { locked { $0.context.muted = newValue } }

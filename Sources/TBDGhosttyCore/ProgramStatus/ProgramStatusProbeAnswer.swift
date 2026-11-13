@@ -16,11 +16,22 @@ package enum ProgramStatusProbeAnswer {
     /// `bytes` with every probe answer replaced by `replacement`, or removed
     /// when it is nil. Everything else is kept, in order.
     package static func replacingLibghosttyAnswers(in bytes: [UInt8], with replacement: [UInt8]?) -> [UInt8] {
+        swappingLibghosttyAnswers(in: bytes, with: replacement).bytes
+    }
+
+    /// `replacingLibghosttyAnswers(in:with:)`, and how many answers it found.
+    /// libghostty has no event for a probe it saw, so the count is how an
+    /// owner learns that one arrived: the daemon records each probe it
+    /// answers.
+    package static func swappingLibghosttyAnswers(
+        in bytes: [UInt8], with replacement: [UInt8]?
+    ) -> (bytes: [UInt8], answers: Int) {
         guard bytes.count >= introducer.count, let first = introducerIndex(in: bytes, from: 0) else {
-            return bytes
+            return (bytes, 0)
         }
         var out: [UInt8] = []
         out.reserveCapacity(bytes.count)
+        var answers = 0
         var cursor = 0
         var start: Int? = first
         while let answerStart = start {
@@ -32,11 +43,12 @@ package enum ProgramStatusProbeAnswer {
                 break
             }
             if let replacement { out.append(contentsOf: replacement) }
+            answers += 1
             cursor = end
             start = introducerIndex(in: bytes, from: end)
         }
         out.append(contentsOf: bytes[cursor...])
-        return out
+        return (out, answers)
     }
 
     private static func introducerIndex(in bytes: [UInt8], from index: Int) -> Int? {

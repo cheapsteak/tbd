@@ -158,6 +158,19 @@ public struct GhosttyTerminalState {
         return line
     }
 
+    /// The active area as text, one line per row through `lineText(_:)`, with trailing empty rows
+    /// dropped: the libghostty twin of `TerminalScreenProjection.viewportLines(of:)`, which the
+    /// daemon's holder emulator renders a session's screen with. Empty when closed.
+    ///
+    /// `lineText(_:)` trims trailing spaces, written ones included, where SwiftTerm's projection
+    /// keeps a space a program wrote.
+    package func viewportLines() -> [String] {
+        guard raw != nil else { return [] }
+        var lines = (0..<rows).map { lineText($0) }
+        while let last = lines.last, last.isEmpty { lines.removeLast() }
+        return lines
+    }
+
     /// True when the cell has a foreground or background colour of its own, set by SGR or by an
     /// erase in a background colour. A cell in the default colours reads false.
     public func cellHasColor(column: Int, row: Int) -> Bool {

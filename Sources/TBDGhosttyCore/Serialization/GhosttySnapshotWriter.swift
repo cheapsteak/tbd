@@ -63,7 +63,11 @@ public enum GhosttySnapshotWriter {
     /// Supersedes whatever state the receiver was in, so a receiver that was used before reads the
     /// handback as a fresh one would. `TerminalSnapshotWriter.resetPrelude`, plus the modes,
     /// charsets and protection the formatter can set but the SwiftTerm writer never does.
-    static let resetPrelude: [UInt8] = Array([
+    ///
+    /// Package-visible for the daemon's holder emulator, which hands it to an attaching viewer
+    /// alone when a snapshot cannot be written: it is how every snapshot opens, so the viewer is
+    /// left as a blank, reset terminal rather than holding whatever it showed before.
+    package static let resetPrelude: [UInt8] = Array([
         "\(esc)[?1049l",   // leave the alternate screen: everything after starts on the primary
         "\(esc)[?69l",     // no left and right margins, so the region reset below is full width
         "\(esc)[r",        // full-screen scrolling region; also homes the cursor
