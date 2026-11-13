@@ -1,6 +1,5 @@
 import Foundation
 import TBDShared
-import TBDTerminalSerialization
 import os
 
 /// The headless terminal behind one holder-backed session, as `HolderReader`
