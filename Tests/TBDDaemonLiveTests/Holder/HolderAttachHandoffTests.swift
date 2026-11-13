@@ -27,6 +27,9 @@ import TBDKernel
 /// is in the snapshot, everything after it is still queued on the tty for the
 /// viewer to read, and nothing falls between the two.
 ///
+/// Each test runs once per emulator the daemon can build, chosen through the
+/// registry's flag closure as the daemon chooses it.
+///
 /// **Tier 3.** A real `TBDHolder`, a real pty, and a real job.
 @Suite(.serialized)
 struct HolderAttachHandoffTests {
@@ -37,10 +40,41 @@ struct HolderAttachHandoffTests {
     /// test would then be measuring backpressure instead of the hand-over.
     private static let echoJob = "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done"
 
+    // MARK: - The emulator the flag names
+
+    /// A spawn reads the flag closure before the fork, so a new session runs
+    /// the emulator the flag names at that moment, and that emulator drains the
+    /// job. The adoption half of the same read is asserted by `AttachFixture`,
+    /// which every test here starts with.
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aSpawnedSessionRunsTheEmulatorTheFlagNames(emulator: HolderEmulatorKind) async throws {
+        let home = HolderProcessFixture.scratchHome()
+        let executable = try #require(
+            HolderProcessFixture.locateExecutable(), "TBDHolder must be built beside the test bundle")
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: HolderProcessFixture.environment(home: home),
+            listTerminals: { [] },
+            spawner: HolderSpawner(executableURL: executable),
+            emulatorKind: { emulator })
+        let terminalID = UUID()
+        let handle = try await registry.spawn(
+            terminalID: terminalID, launch: HolderProcessFixture.launch(command: Self.echoJob))
+        defer { tearDownSpawned(registry: registry, handle: handle, home: home) }
+
+        let reader = try #require(await registry.reader(for: terminalID), "the spawn published no reader")
+        #expect(reader.emulatorKind == emulator, "the spawned session runs \(reader.emulatorKind)")
+        try await reader.write(Data("SPAWNED\n".utf8))
+        #expect(await pollUntil("the job's answer on the spawned session's screen") {
+            await reader.renderScreen().contains("GOT:SPAWNED")
+        })
+    }
+
     // MARK: - The screen goes with the descriptor
 
-    @Test func anAttachingViewerReceivesAPreambleThatReproducesTheScreen() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func anAttachingViewerReceivesAPreambleThatReproducesTheScreen(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         try await fixture.reader.write(Data("BEFORE-ATTACH\n".utf8))
@@ -78,8 +112,9 @@ struct HolderAttachHandoffTests {
     /// reading it. The second must pick it up on its way past; without the
     /// drain-the-remainder step the emulator has never seen those bytes and the
     /// preamble cannot contain them.
-    @Test func theQuiesceStrandsNoByteThatWasAlreadyQueued() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func theQuiesceStrandsNoByteThatWasAlreadyQueued(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let first = try await fixture.reader.suspendDraining()
@@ -111,8 +146,9 @@ struct HolderAttachHandoffTests {
 
     /// The vend is the edge. Once the descriptor exists outside this process
     /// the daemon must be off the pty, because the viewer may already be on it.
-    @Test func theDaemonStopsReadingWhenItHandsTheDescriptorOver() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func theDaemonStopsReadingWhenItHandsTheDescriptorOver(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
@@ -145,8 +181,9 @@ struct HolderAttachHandoffTests {
     /// viewer has the descriptor either way. So an unacknowledged attach does
     /// **not** license a resume: the daemon stays off the pty until something
     /// establishes that the viewer is gone.
-    @Test func anUnacknowledgedAttachDoesNotPutTheDaemonBackOnThePty() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func anUnacknowledgedAttachDoesNotPutTheDaemonBackOnThePty(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
@@ -174,8 +211,9 @@ struct HolderAttachHandoffTests {
     /// Not an optimisation — a session left unread is a session whose job
     /// cannot finish exiting, so a failure that says nothing about the viewer
     /// must not cost that.
-    @Test func aVendThatNeverReachedAViewerPutsTheDaemonBackOnThePty() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aVendThatNeverReachedAViewerPutsTheDaemonBackOnThePty(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
@@ -211,8 +249,9 @@ struct HolderAttachHandoffTests {
     /// because it is the only place the state is real: a suspended reader
     /// holding the screen it had at the attach, answering a machine read that
     /// used to get an error saying the session was gone.
-    @Test func acknowledgingAnAttachHandsTheSessionToTheViewer() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func acknowledgingAnAttachHandsTheSessionToTheViewer(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         // Something on the screen before the hand-over, so "the emulator was
@@ -284,12 +323,14 @@ struct HolderAttachHandoffTests {
     /// reach the screen is the job printing what it actually read. Echo would
     /// otherwise put the same bytes there without the child ever seeing them,
     /// and the assertion could not tell the two apart.
-    @Test func capturingModeStateDoesNotTypeIntoTheChild() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func capturingModeStateDoesNotTypeIntoTheChild(emulator: HolderEmulatorKind) async throws {
         let interpreter = try #require(
             Self.locateInterpreter(), "no python3 to run the raw-mode probe with")
         let fixture = try await AttachFixture.start(
             launch: HolderProcessFixture.launch(
-                executable: interpreter, arguments: ["-u", "-c", Self.rawStdinProbe]))
+                executable: interpreter, arguments: ["-u", "-c", Self.rawStdinProbe]),
+            emulator: emulator)
         defer { fixture.tearDown() }
 
         #expect(await pollUntil("the probe to put its tty in raw mode") {
@@ -331,8 +372,9 @@ struct HolderAttachHandoffTests {
     /// than raced: the real window is a suspension inside `beginAttach`, and a
     /// test that reproduced it by timing would pass by luck and stop
     /// reproducing it the day the scheduler changed.
-    @Test func aSecondAttachIsRefusedWhileTheFirstIsStillInFlight() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aSecondAttachIsRefusedWhileTheFirstIsStillInFlight(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let barrier = ReentryBarrier()
@@ -373,8 +415,9 @@ struct HolderAttachHandoffTests {
     /// unrecoverable outcome on this path. Forced through the barrier for the
     /// same reason as above; the acknowledgement names the generation the
     /// in-flight call claimed before it suspended.
-    @Test func anAttachAcknowledgedWhileInFlightVendsNothing() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func anAttachAcknowledgedWhileInFlightVendsNothing(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let barrier = ReentryBarrier()
@@ -422,8 +465,9 @@ struct HolderAttachHandoffTests {
     ///
     /// Parked through the cancel barrier rather than raced: the window is a
     /// single `await` on an actor.
-    @Test func anAttachIsRefusedWhileACancelledOneIsResuming() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func anAttachIsRefusedWhileACancelledOneIsResuming(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
         let registry = fixture.registry
         let terminalID = fixture.terminalID
@@ -471,8 +515,9 @@ struct HolderAttachHandoffTests {
     /// reader, so handing that reader back would answer "adopted and reading"
     /// about a session nobody is reading — and, once the attach completes,
     /// about one a viewer owns.
-    @Test func adoptingASessionWithAnAttachInFlightIsRefused() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func adoptingASessionWithAnAttachInFlightIsRefused(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let barrier = ReentryBarrier()
@@ -498,8 +543,9 @@ struct HolderAttachHandoffTests {
 
     /// After an acknowledgement, a further attach is refused rather than
     /// vending a second descriptor for a pty the viewer owns.
-    @Test func attachingAnAlreadyAttachedSessionIsRefused() async throws {
-        let fixture = try await AttachFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func attachingAnAlreadyAttachedSessionIsRefused(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
@@ -523,10 +569,12 @@ struct HolderAttachHandoffTests {
     /// Mouse tracking rather than, say, cursor visibility: its default is off,
     /// so a capture that answered nothing at all would emit nothing, while the
     /// default-on modes would coincidentally emit the right escape for the
-    /// wrong reason.
-    @Test func theSnapshotCarriesModeStateItHadToAskTheTerminalFor() async throws {
+    /// wrong reason. The libghostty emulator reads the mode from its terminal
+    /// instead of asking, and owes the viewer the same escape.
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func theSnapshotCarriesModeStateItHadToAskTheTerminalFor(emulator: HolderEmulatorKind) async throws {
         let fixture = try await AttachFixture.start(
-            command: "printf '\\033[?1000hMOUSE-ON\\n'; " + Self.echoJob)
+            command: "printf '\\033[?1000hMOUSE-ON\\n'; " + Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         #expect(await pollUntil("the job to turn mouse tracking on") {
@@ -589,11 +637,11 @@ private struct AttachFixture {
             transport: .holder)
     }
 
-    static func start(command: String) async throws -> AttachFixture {
-        try await start(launch: HolderProcessFixture.launch(command: command))
+    static func start(command: String, emulator: HolderEmulatorKind) async throws -> AttachFixture {
+        try await start(launch: HolderProcessFixture.launch(command: command), emulator: emulator)
     }
 
-    static func start(launch request: HolderLaunchRequest) async throws -> AttachFixture {
+    static func start(launch request: HolderLaunchRequest, emulator: HolderEmulatorKind) async throws -> AttachFixture {
         let process = try await HolderProcessFixture.start(launch: request)
         // The spawner's handshake connection has to go before anything else can
         // be served: a holder serves one client at a time, and the adoption
@@ -605,7 +653,8 @@ private struct AttachFixture {
             owner: process.owner,
             environment: HolderProcessFixture.environment(home: process.home),
             listTerminals: { [] },
-            attachGenerationBase: 0)
+            attachGenerationBase: 0,
+            emulatorKind: { emulator })
         let fixture = AttachFixture(
             process: process,
             registry: registry,
@@ -613,6 +662,9 @@ private struct AttachFixture {
                 terminal: TBDShared.Terminal(
                     id: process.sessionID, worktreeID: UUID(), tmuxWindowID: "",
                     tmuxPaneID: "", transport: .holder)))
+        // The adoption read the flag closure: the reader runs the emulator it
+        // named.
+        #expect(fixture.reader.emulatorKind == emulator, "the adopted reader runs \(fixture.reader.emulatorKind)")
         return fixture
     }
 
@@ -639,6 +691,30 @@ private struct AttachFixture {
         }
         process.tearDown()
     }
+}
+
+/// Releases the registry's readers, then kills a holder the registry spawned
+/// AND its job, and removes the scratch root. The release is waited for,
+/// bounded, as `AttachFixture.tearDown` waits for it. The holder is this
+/// process's own child, `posix_spawn`ed by the spawner, so it is reaped here.
+private func tearDownSpawned(registry: HolderRegistry, handle: HolderHandle, home: String) {
+    let released = DispatchSemaphore(value: 0)
+    Task.detached {
+        await registry.releaseAll()
+        released.signal()
+    }
+    if released.wait(timeout: .now() + 10) == .timedOut {
+        Issue.record("the registry's readers were still releasing 10s after the test ended")
+    }
+    kill(handle.holderPID, SIGKILL)
+    var ignored: Int32 = 0
+    _ = waitpid(handle.holderPID, &ignored, 0)
+    if holderProcessIsAlive(handle.childPID) { kill(handle.childPID, SIGKILL) }
+    let deadline = Date().addingTimeInterval(5.0)
+    while Date() < deadline, holderProcessIsAlive(handle.childPID) {
+        usleep(20_000)
+    }
+    try? FileManager.default.removeItem(atPath: home)
 }
 
 /// Whether the daemon's own screen shows `needle` within a short budget.

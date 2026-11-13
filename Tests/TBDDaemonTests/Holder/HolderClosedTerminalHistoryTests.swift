@@ -58,23 +58,25 @@ import Testing
     /// A reader over one end of a socketpair, seeded with coloured output
     /// before it starts — `ingest` must run with nothing else feeding the
     /// emulator, which before `start()` is guaranteed.
-    private func makeSeededReader(sessionID: UUID) throws -> (HolderReader, Int32) {
+    private func makeSeededReader(
+        sessionID: UUID, emulator: HolderEmulatorKind = .swiftTerm
+    ) throws -> (HolderReader, Int32) {
         var pair: [Int32] = [-1, -1]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
         let reader = HolderReader(
             sessionID: sessionID, ptyFD: pair[0], columns: 80, rows: 24,
-            scrollbackLines: 200, observedChildFromStart: true)
+            scrollbackLines: 200, emulator: emulator, observedChildFromStart: true)
         return (reader, pair[1])
     }
 
     private static let seed =
         "first plain line\r\n\(esc)[31mred marker line\(esc)[0m\r\nlast line"
 
-    @Test("a draining reader's screen is captured into the entry")
-    func liveReaderCapturesScrollbackAndViewport() async throws {
+    @Test("a draining reader's screen is captured into the entry", arguments: HolderEmulatorKind.allCases)
+    func liveReaderCapturesScrollbackAndViewport(emulator: HolderEmulatorKind) async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        let (reader, ours) = try makeSeededReader(sessionID: fx.terminal.id)
+        let (reader, ours) = try makeSeededReader(sessionID: fx.terminal.id, emulator: emulator)
         defer { close(ours) }
         await reader.ingest(preamble: Data(Self.seed.utf8))
         try await reader.start()
@@ -103,11 +105,11 @@ import Testing
         #expect(!captured.contains("\r\n"), "the capture keeps CRLF line endings")
     }
 
-    @Test("a suspended reader writes the entry without a capture")
-    func suspendedReaderWritesEntryWithoutCapture() async throws {
+    @Test("a suspended reader writes the entry without a capture", arguments: HolderEmulatorKind.allCases)
+    func suspendedReaderWritesEntryWithoutCapture(emulator: HolderEmulatorKind) async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        let (reader, ours) = try makeSeededReader(sessionID: fx.terminal.id)
+        let (reader, ours) = try makeSeededReader(sessionID: fx.terminal.id, emulator: emulator)
         defer { close(ours) }
         await reader.ingest(preamble: Data(Self.seed.utf8))
         try await reader.start()

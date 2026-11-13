@@ -27,6 +27,14 @@ import TestSupport
 /// the rest on the socket, which is a child finishing its write just after
 /// the attach looked. A reader that does not wait has taken its snapshot
 /// before reading again, so the rest reaches whoever reads the pty next.
+///
+/// The two emulators meet this differently, and the screen tests run against
+/// both. The SwiftTerm emulator's snapshot feeds its own terminal, so the
+/// quiesce waits for the sequence to end first. The libghostty emulator's
+/// snapshot only reads its terminal and ends with the open sequence's bytes,
+/// so its quiesce does not wait: the viewer's parser is left where the
+/// daemon's was, and the rest, read from the pty, finishes the sequence there.
+/// The bounded-wait tests are the SwiftTerm emulator's.
 @Suite(.fastPassBounded) struct HolderAttachSequenceBoundaryTests {
 
     /// One kind of sequence a child can be part-way through, split where an
@@ -87,9 +95,11 @@ import TestSupport
     /// What a viewer paints: the snapshot, then whatever is still on the pty
     /// for it to read. Cut short, the sequence's rest is the first thing the
     /// viewer reads, and its parser has no way to know a sequence was open.
-    @Test("a viewer that attaches mid-sequence never prints the sequence's rest", arguments: openSequences)
-    func theViewerNeverPrintsTheRest(sequence: OpenSequence) async throws {
-        let harness = try Harness(deliveringOnFirstRead: sequence.rest)
+    @Test(
+        "a viewer that attaches mid-sequence never prints the sequence's rest",
+        arguments: openSequences, HolderEmulatorKind.allCases)
+    func theViewerNeverPrintsTheRest(sequence: OpenSequence, emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(deliveringOnFirstRead: sequence.rest, emulator: emulator)
         defer { harness.tearDown() }
         await harness.reader.feedChildOutputForTesting(Data(Array("BEFORE\r\n".utf8) + sequence.opened))
 
@@ -118,9 +128,11 @@ import TestSupport
     /// while a viewer holds the pty and goes back to reading it when an attach
     /// is cancelled. A second quiesce is that next read: it drains what has
     /// arrived since, as a resumed drain would.
-    @Test("the daemon's screen keeps a sequence an attach found half-written", arguments: openSequences)
-    func theDaemonsScreenKeepsTheSequence(sequence: OpenSequence) async throws {
-        let harness = try Harness(deliveringOnFirstRead: sequence.rest)
+    @Test(
+        "the daemon's screen keeps a sequence an attach found half-written",
+        arguments: openSequences, HolderEmulatorKind.allCases)
+    func theDaemonsScreenKeepsTheSequence(sequence: OpenSequence, emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(deliveringOnFirstRead: sequence.rest, emulator: emulator)
         defer { harness.tearDown() }
         await harness.reader.feedChildOutputForTesting(Data(Array("BEFORE\r\n".utf8) + sequence.opened))
 
@@ -139,7 +151,35 @@ import TestSupport
             """)
     }
 
-    // MARK: - The wait is bounded
+    // MARK: - libghostty does not wait
+
+    /// The libghostty emulator's snapshot carries an open sequence instead of
+    /// waiting for it: the quiesce hands the pty over at once, logs no
+    /// abandoned wait, and the viewer that replays the snapshot shows the
+    /// screen and none of the sequence's payload.
+    @Test("a libghostty attach hands the pty over without waiting for an open sequence")
+    func libghosttyDoesNotWaitForTheSequence() async throws {
+        let budget: Duration = .milliseconds(20)
+        let harness = try Harness(reads: [], waitingAtMost: budget, emulator: .ghostty)
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("BEFORE\r\n\(Self.esc)]0;never-ends".utf8))
+
+        let vended = try await harness.reader.suspendDraining()
+        defer { close(vended) }
+        let waited = harness.elapsed
+        let abandoned = await harness.reader.abandonedSequenceBoundaryWaits
+        let preamble = await harness.reader.snapshotPreamble()
+
+        #expect(waited == .zero, "the libghostty attach waited \(waited) for the child's sequence")
+        #expect(abandoned == 0, "the libghostty attach logged a wait it should never have started")
+        let viewer = ViewerTerminal(columns: 40, rows: 8)
+        viewer.feed(preamble)
+        let painted = viewer.screenText()
+        #expect(painted.contains("BEFORE"), "the viewer painted: \(painted.debugDescription)")
+        #expect(!painted.contains("never-ends"), "the viewer printed the open title: \(painted.debugDescription)")
+    }
+
+    // MARK: - The wait is bounded (SwiftTerm)
 
     /// A child can leave a sequence open for good. The attach waits a bounded
     /// time for it and then hands the pty over anyway, because an attach that
@@ -374,19 +414,22 @@ import TestSupport
         var elapsed: Duration { measure() }
 
         /// The child finishes its sequence just after the quiesce looks.
-        init(deliveringOnFirstRead rest: [UInt8]) throws {
-            try self.init(reads: [.deliver(rest)])
+        init(deliveringOnFirstRead rest: [UInt8], emulator: HolderEmulatorKind = .swiftTerm) throws {
+            try self.init(reads: [.deliver(rest)], emulator: emulator)
         }
 
         init(
             reads: [ReadScript.Step],
-            waitingAtMost budget: Duration = HolderReader.defaultSequenceBoundaryBudget
+            waitingAtMost budget: Duration = HolderReader.defaultSequenceBoundaryBudget,
+            emulator: HolderEmulatorKind = .swiftTerm
         ) throws {
-            try self.init(reads: reads, waitingAtMost: budget, on: ImmediateClock<Duration>())
+            try self.init(
+                reads: reads, waitingAtMost: budget, on: ImmediateClock<Duration>(), emulator: emulator)
         }
 
         init<C: Clock>(
-            reads: [ReadScript.Step], waitingAtMost budget: Duration, on clock: C
+            reads: [ReadScript.Step], waitingAtMost budget: Duration, on clock: C,
+            emulator: HolderEmulatorKind = .swiftTerm
         ) throws where C.Duration == Duration {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
@@ -405,6 +448,7 @@ import TestSupport
                 scrollbackLines: 200,
                 sequenceBoundaryBudget: budget,
                 readFault: HolderReadFault(nextErrno: { readScript.nextErrno() }),
+                emulator: emulator,
                 observedChildFromStart: true,
                 clock: clock)
         }

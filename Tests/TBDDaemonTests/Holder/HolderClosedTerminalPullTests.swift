@@ -95,12 +95,14 @@ struct HolderClosedTerminalPullTests {
     /// A reader over one end of a socketpair, seeded with coloured output
     /// before it starts — `ingest` must run with nothing else feeding the
     /// emulator, which before `start()` is guaranteed.
-    private func makeSeededReader(sessionID: UUID) async throws -> (HolderReader, Int32) {
+    private func makeSeededReader(
+        sessionID: UUID, emulator: HolderEmulatorKind = .swiftTerm
+    ) async throws -> (HolderReader, Int32) {
         var pair: [Int32] = [-1, -1]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
         let reader = HolderReader(
             sessionID: sessionID, ptyFD: pair[0], columns: 80, rows: 24,
-            scrollbackLines: 200, observedChildFromStart: true)
+            scrollbackLines: 200, emulator: emulator, observedChildFromStart: true)
         await reader.ingest(preamble: Data(Self.seed.utf8))
         try await reader.start()
         return (reader, pair[1])
@@ -222,11 +224,11 @@ struct HolderClosedTerminalPullTests {
     /// The ordinary fleet case. The negative assertion is the point: a resolver
     /// that pulled for every disposal would work, and would put a sidecar round
     /// trip inside every one of a thousand detached sessions' closes.
-    @Test("a detached session captures from the daemon's reader and sends no frame")
-    func detachedSessionCapturesLocallyWithNoFrame() async throws {
+    @Test("a detached session captures from the daemon's reader and sends no frame", arguments: HolderEmulatorKind.allCases)
+    func detachedSessionCapturesLocallyWithNoFrame(emulator: HolderEmulatorKind) async throws {
         let fx = try await makeFixture()
         defer { fx.cleanup() }
-        let (reader, ours) = try await makeSeededReader(sessionID: fx.terminal.id)
+        let (reader, ours) = try await makeSeededReader(sessionID: fx.terminal.id, emulator: emulator)
         defer { close(ours) }
 
         let sidecar = Sidecar()
@@ -352,11 +354,12 @@ struct HolderClosedTerminalPullTests {
     /// pins the receiving half, which is the one that could reshape: the file
     /// written from a viewer's answer is byte-identical to the file written
     /// from the daemon's own reader over the same bytes.
-    @Test("the entry's shape is the same whichever store answered")
-    func captureShapeIsIdenticalWhicheverStoreAnswered() async throws {
+    @Test("the entry's shape is the same whichever store answered", arguments: HolderEmulatorKind.allCases)
+    func captureShapeIsIdenticalWhicheverStoreAnswered(emulator: HolderEmulatorKind) async throws {
         let detached = try await makeFixture()
         defer { detached.cleanup() }
-        let (draining, drainingOurs) = try await makeSeededReader(sessionID: detached.terminal.id)
+        let (draining, drainingOurs) = try await makeSeededReader(
+            sessionID: detached.terminal.id, emulator: emulator)
         defer { close(drainingOurs) }
         let sidecar = Sidecar()
 
@@ -371,7 +374,8 @@ struct HolderClosedTerminalPullTests {
 
         let viewed = try await makeFixture()
         defer { viewed.cleanup() }
-        let (suspended, suspendedOurs) = try await makeSeededReader(sessionID: viewed.terminal.id)
+        let (suspended, suspendedOurs) = try await makeSeededReader(
+            sessionID: viewed.terminal.id, emulator: emulator)
         defer { close(suspendedOurs) }
         try await suspend(suspended)
         let pull = sidecar.makePull(clock: EventDrivenTestClock())

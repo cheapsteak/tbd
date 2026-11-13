@@ -7,10 +7,16 @@ import TBDShared
 /// The daemon's headless emulator and the Program Status Protocol (OSC 7501).
 ///
 /// Two obligations, both from the spec ("Answering the probe"): the `?` probe
-/// is answered **synchronously, inside the parse**, so the reply reaches the
-/// child ahead of the DA1 answer to a query queued behind it; and a handback
-/// preamble — a replay — never answers a probe or delivers a report. Reports
-/// the child writes reach the tap's `deliver` with their payload intact.
+/// is answered **before the feed that carried it returns, in parse order**, so
+/// the reply reaches the child ahead of the DA1 answer to a query queued behind
+/// it; and a handback preamble — a replay — never answers a probe or delivers
+/// a report. Reports the child writes reach the tap's `deliver` with their
+/// payload intact.
+///
+/// Every test runs against both emulators. The SwiftTerm emulator answers
+/// inside its parse; the libghostty emulator answers once the parse's lock has
+/// dropped, still before the feed returns, with libghostty's own probe answer
+/// swapped for TBD's and each report rebuilt in TBD's wire form.
 ///
 /// Driven against a real `HolderReader` over a socketpair, never started:
 /// `feedChildOutputForTesting` feeds the same emulator the drain loop feeds, on
@@ -27,8 +33,9 @@ import TBDShared
 
     // MARK: - Probe
 
-    @Test func answersProbeTerminatedByBEL() async throws {
-        let harness = try Harness()
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func answersProbeTerminatedByBEL(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(Data(Self.probeBEL.utf8))
@@ -37,8 +44,9 @@ import TBDShared
         #expect(harness.delivered.isEmpty, "a probe is answered, never delivered as a report")
     }
 
-    @Test func answersProbeTerminatedByST() async throws {
-        let harness = try Harness()
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func answersProbeTerminatedByST(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(Data(Self.probeST.utf8))
@@ -47,8 +55,9 @@ import TBDShared
         #expect(harness.delivered.isEmpty)
     }
 
-    @Test func noTapLeavesOSC7501Unhandled() async throws {
-        let harness = try Harness(tap: false)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func noTapLeavesOSC7501Unhandled(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(tap: false, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(Data(Self.probeBEL.utf8))
@@ -56,8 +65,9 @@ import TBDShared
         #expect(harness.readReplies().isEmpty)
     }
 
-    @Test func probeReplyPrecedesDA1Reply() async throws {
-        let harness = try Harness()
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func probeReplyPrecedesDA1Reply(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(emulator: emulator)
         defer { harness.tearDown() }
 
         // One feed, probe first: the order Claude Code writes them in.
@@ -74,8 +84,9 @@ import TBDShared
 
     // MARK: - Reports
 
-    @Test func reportIsDeliveredWithExactPayloadAndNotAnswered() async throws {
-        let harness = try Harness()
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func reportIsDeliveredWithExactPayloadAndNotAnswered(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.feedChildOutputForTesting(
@@ -85,8 +96,9 @@ import TBDShared
         #expect(harness.readReplies().isEmpty, "a report gets no reply")
     }
 
-    @Test func reportsAreDeliveredInParseOrder() async throws {
-        let harness = try Harness()
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func reportsAreDeliveredInParseOrder(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(emulator: emulator)
         defer { harness.tearDown() }
 
         let first = "state=working:app=claude-code"
@@ -99,8 +111,9 @@ import TBDShared
 
     // MARK: - Preamble (replay)
 
-    @Test func preambleNeitherAnswersNorDelivers() async throws {
-        let harness = try Harness()
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func preambleNeitherAnswersNorDelivers(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Data(
@@ -115,11 +128,26 @@ import TBDShared
         #expect(harness.readReplies() == Array(ProgramStatusProtocol.probeReply.utf8))
     }
 
+    /// The libghostty emulator mutes a preamble's whole parse, so a query a
+    /// replayed screen happens to carry draws no reply either. The SwiftTerm
+    /// emulator silences only OSC 7501 there.
+    @Test func aLibghosttyPreambleDrawsNoReplyAtAll() async throws {
+        let harness = try Harness(emulator: .ghostty)
+        defer { harness.tearDown() }
+
+        await harness.reader.ingest(preamble: Data("\(Self.esc)[c\(Self.esc)[6n".utf8))
+        #expect(harness.readReplies().isEmpty, "a muted preamble drew a reply")
+
+        // The mute ends with the preamble.
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)[c".utf8))
+        #expect(!harness.readReplies().isEmpty, "the child's own DA1 query after the preamble went unanswered")
+    }
+
     // MARK: - Harness
 
-    /// What the tap's `deliver` received, in order. `deliver` runs inside the
-    /// parse on the feeding thread, so the box is lock-guarded like the real
-    /// store's inbox is thread-safe.
+    /// What the tap's `deliver` received, in order. `deliver` runs before the
+    /// feed returns, on the feeding thread here, so the box is lock-guarded
+    /// like the real store's inbox is thread-safe.
     private final class DeliveryBox: @unchecked Sendable {
         private let lock = NSLock()
         private var payloads: [[UInt8]] = []
@@ -170,9 +198,9 @@ import TBDShared
         var delivered: [[UInt8]] { box.all }
 
         /// Everything the emulator has written back to the "child" so far. The
-        /// replies are written synchronously inside the feed, so they are
-        /// already queued when the feed returns; a non-blocking read drains
-        /// them, and `EAGAIN` means there are none.
+        /// replies are written before the feed returns, so they are already
+        /// queued when it does; a non-blocking read drains them, and `EAGAIN`
+        /// means there are none.
         func readReplies() -> [UInt8] {
             var out: [UInt8] = []
             var buffer = [UInt8](repeating: 0, count: 4096)
