@@ -1587,15 +1587,15 @@ public final class GhosttyTerminalView: NSView {
     /// What the left press under way opens at its release, read at its mouse-down: the OSC 8 link
     /// under it, or a link the host found in its text (`GhosttyCommandClickOutcome.opensOnRelease`).
     /// It opens only if the press ends as a click with ⌘ still held, as in SwiftTerm. A drag drops
-    /// it: the first drag of a selection, or, for a press that reached no selection, a move of more
-    /// than `commandDragThreshold` from where it went down.
+    /// it: any drag of a press the view passed on, which selects text, or a move of more than
+    /// `commandDragThreshold` from where a press the view consumed went down.
     private var opensOnRelease: (@MainActor () -> Void)?
 
     /// Where the left press under way went down, in the view's coordinates.
     private var pressLocation: CGPoint = .zero
 
-    /// How far, in points, the pointer may move during a ⌘-press that reached no selection before
-    /// the press counts as a drag and opens nothing. The SwiftTerm panel view uses the same.
+    /// How far, in points, the pointer may move during a ⌘-press the view consumed before the
+    /// press counts as a drag and opens nothing. The SwiftTerm panel view uses the same.
     private static let commandDragThreshold: CGFloat = 3
 
     public override func mouseDown(with event: NSEvent) {
@@ -1661,12 +1661,14 @@ public final class GhosttyTerminalView: NSView {
 
     public override func mouseDragged(with event: NSEvent) {
         guard !pressIsConsumed else {
-            // This press reached no selection, so it counts as a drag once it moves far enough.
+            // This press went nowhere, so it counts as a drag once it moves far enough.
             if hasMovedPastCommandDragThreshold(event) { opensOnRelease = nil }
             return
         }
-        // This drag extends a selection, so the press selects text and opens nothing.
-        if mouseController.isSelecting { opensOnRelease = nil }
+        // Only a ⌘-press holds an opener, and the view passes a ⌘-press on to the selection, so any
+        // drag here ends the click and opens nothing, as a selection drag does in SwiftTerm, even
+        // once focus loss has ended the selection.
+        opensOnRelease = nil
         if !forward(event) { super.mouseDragged(with: event) }
     }
 

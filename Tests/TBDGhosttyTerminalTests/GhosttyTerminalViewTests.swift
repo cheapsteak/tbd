@@ -1280,6 +1280,46 @@ struct GhosttyCommandClickTextTests {
         #expect(ups == 0, "the release of the ⌘-click that opened the link went up the responder chain")
     }
 
+    /// Any drag of a ⌘-press the view passed on ends it as a click, so the link under it opens
+    /// nothing, even once the selection the press began is no longer under way: here losing focus
+    /// ended it before the drag. Control: the same press, released where it went down, opens it.
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
+    func aDragOfAPressPassedOnOpensNoLinkOnceItsSelectionEnded() throws {
+        let fixture = try ViewFixture()
+        let view = fixture.view
+        let recorder = ViewRecorder()
+        let window = makeOffscreenWindow()
+        defer { window.contentView = nil }
+        _ = try placeInCounter(view, in: window)
+        record(view, into: recorder)
+        // First responder before the focus. Otherwise the press's click-to-focus takes the focus
+        // from the window, which is never key, and the `setFocused(false)` below changes nothing.
+        try #require(window.makeFirstResponder(view), "the window did not take the view as first responder")
+        view.setFocused(true)
+        let link = "https://example.com/acme"
+        fixture.terminal.feed(text: "\u{1b}[H\u{1b}[2J\u{1b}]8;;\(link)\u{1b}\\open the acme page\u{1b}]8;;\u{1b}\\")
+        let onLink = point(column: 1, row: 0, in: view)
+        let alongLink = point(column: 9, row: 0, in: view)
+
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command))
+        let selecting = view.mouseController.isSelecting
+        try #require(selecting, "the ⌘-press on the link started no selection")
+        view.setFocused(false)
+        let stillSelecting = view.mouseController.isSelecting
+        try #require(!stillSelecting, "losing focus left the selection under way")
+        view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: alongLink, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: alongLink, in: window, flags: .command))
+        let openedByDrag = recorder.openedLinks
+        #expect(openedByDrag.isEmpty, "the ⌘-drag opened \(openedByDrag)")
+
+        // Control: released where it went down, the same press opens the link.
+        view.setFocused(true)
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onLink, in: window, flags: .command))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onLink, in: window, flags: .command))
+        let openedByClick = recorder.openedLinks
+        #expect(openedByClick == [link], "control: the ⌘-click on the link opened \(openedByClick)")
+    }
+
     /// A press the host declined has something drawn over the view that owns it, so its text is not
     /// offered, whether or not it activates the window. Claimed, the same ⌘-press is.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
