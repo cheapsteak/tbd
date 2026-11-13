@@ -94,7 +94,7 @@ window.harness = {
       request: (method, params) => new Promise((resolve, reject) => sent.push({ method, params, resolve, reject, settled: false })),
     };
     const store = createStore({ ...initialState(), sessions: applySnapshot(snapshot) });
-    actions = createActions({ store, client, link: { openLink() {} }, now: () => Date.now() });
+    actions = createActions({ store, client, link: { openLink() {} }, routeHistory: { push() {}, replace() {}, stepBack: () => false }, now: () => Date.now() });
     actions.onChannelUp();
     waiting('sessions.subscribe').resolve({ ...snapshot, replayed: true });
     actions.openSession(ref);

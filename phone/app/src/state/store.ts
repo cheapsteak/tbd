@@ -37,8 +37,9 @@ export type MenuState = { name: 'account'; askProfileID: string | null } | { nam
  *   opens its first one. `toast` is a template: when it is not null, opening shows it with
  *   every `{name}` replaced by the row's name, so `'Created {name}'` reads "Created fix-login".
  *
- * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`
- * (`actions/shell.ts`), so a fork or create the user has moved away from never takes them to it.
+ * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession`, `back` or
+ * a browser move between the app's history entries, `onPopState` (`actions/shell.ts`), so a
+ * fork or create the user has moved away from never takes them to it.
  * A navigation made while the fork or create is still in flight counts too, though no open waits
  * yet: its action takes a mark (`navMark`) when it sends the request and passes it to
  * `openPending` with the reply, which drops the open when the user has navigated since (`nav`).
@@ -58,8 +59,9 @@ export interface UIState {
   toast: { id: number; text: string } | null;
   pendingOpen: PendingOpen | null;
   /**
-   * How many navigations the user has made: each `openSession` or `back` that changed the
-   * route. A route change an event or a pending open makes does not count. `navMark` reads it.
+   * How many navigations the user has made: each `openSession`, `back` or `onPopState` that
+   * changed the route. A route change an event or a pending open makes does not count.
+   * `navMark` reads it.
    */
   nav: number;
   /** Why the laptop refused the last action on a session, shown with it, by `refKey` of the session. */

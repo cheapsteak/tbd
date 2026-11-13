@@ -782,6 +782,12 @@ Research: `phone-app-stack.md`.
     `runner.js`, the only script the frame runs is the bundle the runner checked against its hash,
     and the script rules above (no inline script, no `eval`, Trusted Types) keep text the app
     displays from becoming script.
+- **History entries.** The app adds a browser history entry, with no URL, each time the user moves
+  to another worktree, so the phone's back button steps back through those worktrees before it
+  leaves the page, and the frame's address never changes. The app's one move through the history
+  is its in-app back, which goes back one entry only when the current entry is one the app added,
+  so the move stays among the app's own entries in the same document; the source policy bans
+  every other history move.
 - `srcdoc` is not used. A `srcdoc` frame inherits the loader's policy, which blocks the bundle.
 
 **The app bundle.**

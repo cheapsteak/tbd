@@ -16,7 +16,10 @@ import type { AppState, Store } from '../state/store.ts';
 import { applyPage, beginOpen, emptyTranscript, MAX_STALE_PAGES } from '../state/transcript.ts';
 import type { TranscriptState } from '../state/transcript.ts';
 import { createActions } from './index.ts';
-import type { Actions } from './index.ts';
+import type { ActionContext, Actions } from './index.ts';
+
+/** A browser history that records nothing: these tests never move between its entries. */
+const NO_HISTORY: ActionContext['routeHistory'] = { push() {}, replace() {}, stepBack: () => false };
 
 const CAN = { available: true };
 const R: PhoneSessionRef = { kind: 'local', terminalID: 'T-R' };
@@ -85,7 +88,7 @@ function harness() {
     },
   };
   const store = createStore(listed());
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: NO_HISTORY, now: () => 0 });
   const requests = () => sent.map((s): [Method, unknown] => [s.method, s.params]);
   /** The last request sent with `method`. */
   const last = (method: Method): Sent => {
@@ -920,7 +923,7 @@ function wired(): { client: AppClient; posted: Array<Record<string, unknown>>; s
     now: () => 0,
     newID: () => `r${++n}`,
   });
-  actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: NO_HISTORY, now: () => 0 });
   return { client, posted, store, actions };
 }
 

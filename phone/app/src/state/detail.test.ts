@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { chunkText } from '../../test/e2e/fake-laptop-app.js';
 import { AppError, BAD_REPLY_TEXT, SUPERSEDED_TEXT } from '../client/client.ts';
 import { createActions } from '../actions/index.ts';
+import type { ActionContext } from '../actions/index.ts';
 import { MAX_DETAIL_READS } from '../actions/transcript.ts';
 import type { Method, ParamsOf, PhoneItem, PhoneSessionRef, ResultOf, TranscriptDetailPart, TranscriptDetailResult } from '../protocol/types.ts';
 import { utf8Length } from '../limits.ts';
@@ -21,6 +22,9 @@ import type { DetailAsk, DetailState } from './detail.ts';
 import { createStore, initialState } from './store.ts';
 import { applyPage, applyTranscriptEvent, beginOpen, beginResume, emptyTranscript } from './transcript.ts';
 import type { TranscriptState } from './transcript.ts';
+
+/** A browser history that records nothing: these tests never move between its entries. */
+const NO_HISTORY: ActionContext['routeHistory'] = { push() {}, replace() {}, stepBack: () => false };
 
 const SWIFT_CONSTANTS = new URL('../../../../Sources/TBDDaemon/PhoneBridge/App/PhoneAppConstants.swift', import.meta.url);
 const NOT_FOUND_TEXT = 'That detail is not in the transcript.';
@@ -319,7 +323,7 @@ function harness(items: PhoneItem[] = [tool('t1'), nested(9)]) {
   };
   const opened = applyPage(beginOpen(emptyTranscript(), R, false, 'open-1'), { items, reachedStart: true, omittedItems: 0 });
   const store = createStore({ ...initialState(), transcript: { ...opened, phase: 'open' } });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: NO_HISTORY, now: () => 0 });
   const t = (): TranscriptState => store.get().transcript;
   const key = (i: number): number => t().rows[i]!.key;
   return {

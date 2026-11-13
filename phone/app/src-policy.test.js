@@ -2,9 +2,9 @@
 // frame's sandbox are what enforce the rules at run time. This test bans, in every source file
 // under `app/src/`, the patterns that would break them or lead out of the frame: HTML strings,
 // eval, runtime styles, the network, storage, workers, other windows, the frame's own
-// navigation, links that skip the loader's link sheet, and the raw loader port outside
-// `host.ts`. Self-navigation matters most: neither the policy nor the sandbox stops it, and the
-// request leaves before the loader sees the frame's second load.
+// navigation, links that skip the loader's link sheet, the raw loader port outside `host.ts`, and
+// a history move outside `state/history.ts`. Self-navigation matters most: neither the policy nor
+// the sandbox stops it, and the request leaves before the loader sees the frame's second load.
 //
 // It reads the files as text, comments included, so a banned name in a comment fails too. A
 // file the bundle never imports, such as a test, is held to it as well.
@@ -24,6 +24,19 @@ const PHONE = fileURLToPath(new URL('../', import.meta.url));
  * leaves through `HostLink`'s two message shapes. Its test drives the raw port to check that.
  */
 const PORT_FILES = ['host.ts', 'host.test.ts'];
+
+/**
+ * `state/history.ts` holds every History API call the app makes, and may go back one entry,
+ * the one move the app makes through the history. It is safe because it goes back only from an
+ * entry the app itself added (`RouteHistory.stepBack`): the frame's entries are numbered from 0
+ * when the app starts, and each one the app adds carries the next number, so the entry before a
+ * numbered one above 0 is the app's own, in the same document. Going back to it is a
+ * same-document move. It reloads nothing, fires no second `load`, and leaves neither the frame
+ * nor the loader's page. Going forward, or by any other number of entries, could reach an entry
+ * that is not the app's, so `go` and `forward` stay banned there too. Its test is held to the
+ * ban, so it drives a fake.
+ */
+const HISTORY_FILES = ['state/history.ts'];
 
 /**
  * @typedef {object} Ban
@@ -116,7 +129,9 @@ const BANNED = [
   },
   // The history and Navigation APIs reload the frame (`history.go(0)`, `navigation.reload()`) or
   // move it to another entry of the session history it shares with the loader's page. Each is
-  // banned with any accessor: `.`, `?.`, or a bracket around a string.
+  // banned with any accessor: `.`, `?.`, or a bracket around a string. Adding or rewriting an
+  // entry, with no URL, moves nothing, and going back is allowed in `state/history.ts` alone
+  // (`HISTORY_FILES`).
   {
     pattern: /\bnavigation\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:navigate|reload|back|forward|traverseTo)\b/,
     samples: ['navigation.navigate(url);', 'window.navigation.navigate(url);', 'navigation.reload();', 'navigation.back();',
@@ -124,9 +139,15 @@ const BANNED = [
       'self.navigation?.["traverseTo"](key);', 'navigation\n  .forward();'],
   },
   {
-    pattern: /\bhistory\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:go|back|forward)\b/,
-    samples: ['history.go(-1);', 'history.go(0);', 'history.go();', 'window.history.back();', 'history.forward();',
-      'history?.go(0);', "history['back']();", 'globalThis.history?.[`forward`]();', 'history\n  .go(0);'],
+    pattern: /\bhistory\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])(?:go|forward)\b/,
+    samples: ['history.go(-1);', 'history.go(0);', 'history.go();', 'win.history.forward();', 'history.forward();',
+      'history?.go(0);', "history['go'](1);", 'globalThis.history?.[`forward`]();', 'history\n  .go(0);'],
+  },
+  {
+    pattern: /\bhistory\s*(?:\??\.\s*|(?:\?\.)?\[\s*['"`])back\b/,
+    samples: ['window.history.back();', 'history.back();', 'history?.back();', "history['back']();", 'self.history?.["back"]();',
+      'history\n  .back();'],
+    exempt: HISTORY_FILES,
   },
   { pattern: /['"`]_self['"`]/, samples: ["form.target = '_self';", 'const target = "_self";'] },
   { pattern: /\b(?:window|self|globalThis)\.open\b/, samples: ['window.open(url);', "self.open(url, '_blank');"] },
@@ -178,6 +199,10 @@ const ALLOWED = [
   ' * Opening it clears `pendingOpen`. So does a navigation the user makes, `openSession` or `back`',
   'const older = history.slice(0, n);',
   'const goBack = history.length > 0;',
+  "win.history.pushState(data, '');",
+  "win.history.replaceState(data, '');",
+  'const state = win.history.state;',
+  'if (ctx.routeHistory.stepBack()) return;',
 ];
 
 /** Every `.ts` and `.tsx` file under `app/src/`, as a path relative to it with `/` separators. */
@@ -237,9 +262,22 @@ test('only host.ts and its test may touch the raw port', () => {
   }
 });
 
+test('only state/history.ts may go back in the history, and it may never go forward or by a count', () => {
+  const back = 'win.history.back();';
+  for (const file of HISTORY_FILES) assert.deepEqual(violations(back, file), [], file);
+  for (const file of ['history.ts', 'state/history.test.ts', 'state/route.ts', 'actions/shell.ts', 'main.tsx']) {
+    assert.equal(violations(back, file).length, 1, file);
+  }
+  // `go`, `forward` and the Navigation API stay banned in state/history.ts.
+  for (const line of ['win.history.go(-1);', 'win.history.go(0);', 'win.history.forward();', "history['go'](-1);",
+    'navigation.back();', 'navigation.traverseTo(key);', 'navigation.reload();']) {
+    assert.equal(violations(line, 'state/history.ts').length, 1, line);
+  }
+});
+
 test('the walk reaches the app sources', () => {
   const names = sourceFiles();
-  for (const expected of ['host.ts', 'env.ts', 'limits.ts', ...PORT_FILES]) assert.ok(names.includes(expected), expected);
+  for (const expected of ['host.ts', 'env.ts', 'limits.ts', ...PORT_FILES, ...HISTORY_FILES]) assert.ok(names.includes(expected), expected);
 });
 
 test('no app source uses a banned pattern', () => {

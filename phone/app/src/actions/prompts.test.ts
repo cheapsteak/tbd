@@ -18,7 +18,11 @@ import type { AnsweredHere, CardState } from '../state/prompts.ts';
 import { createStore, initialState } from '../state/store.ts';
 import type { AppState } from '../state/store.ts';
 import { createActions } from './index.ts';
+import type { ActionContext } from './index.ts';
 import { WAKING_TEXT } from './prompts.ts';
+
+/** A browser history that records nothing: these tests never move between its entries. */
+const NO_HISTORY: ActionContext['routeHistory'] = { push() {}, replace() {}, stepBack: () => false };
 
 const CAN = { available: true };
 const OFF_REASON = "Answering prompts is turned off in TBD's settings on the laptop.";
@@ -81,7 +85,7 @@ function harness(answer?: { available: boolean; reason?: string }) {
     },
   };
   const store = createStore({ ...initialState(), sessions: applySnapshot(snapshot(answer)) });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: NO_HISTORY, now: () => 0 });
   const last = (method: Method): Sent => {
     const found = sent.filter((s) => s.method === method).at(-1);
     assert.ok(found, `no ${method} was sent`);
@@ -916,7 +920,7 @@ function sendHarness(opts: { chip?: PhoneStatusChip; send?: { available: boolean
   });
   const initial = initialState();
   const store = createStore({ ...initial, sessions, ui: { ...initial.ui, route: { screen: 'session', ref: R } } });
-  const actions = createActions({ store, client, link: { openLink: () => {} }, now: () => 0 });
+  const actions = createActions({ store, client, link: { openLink: () => {} }, routeHistory: NO_HISTORY, now: () => 0 });
   const state = (): AppState => store.get();
   const sends = (): Sent[] => sent.filter((s) => s.method === 'message.send');
   const own = (r: Readonly<Record<string, string>>, ref: PhoneSessionRef): string | undefined => {
