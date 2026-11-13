@@ -525,16 +525,15 @@ public struct TmuxManager: Sendable {
 
     public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, remainOnExit: Bool = false, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
         // Spawn `shell <flags> <cmd>` (via ShellLaunchComposer.shellInvocation)
-        // so commands with arguments work (e.g.
-        // "claude --dangerously-skip-permissions").
-        // -i keeps it interactive, -l makes it a login shell, -c runs the
-        // command. zsh sources zshenv + zprofile + zshrc; bash login shells
-        // source profile files only, relying on the near-universal convention
-        // that .bash_profile sources .bashrc (same behavior as Terminal.app).
-        // /etc/zprofile's path_helper and ~/.zprofile supply the
-        // /usr/local/bin and Homebrew PATH entries; see
-        // docs/specs/2026-08-19-login-shell-panes-design.md. csh/tcsh cannot
-        // combine -l with -c and keep -i -c (see
+        // so commands with arguments work (e.g. "claude
+        // --dangerously-skip-permissions"). -i keeps it interactive, -l makes
+        // it a login shell, -c runs the command. zsh sources zshenv +
+        // zprofile + zshrc; bash login shells source profile files only,
+        // relying on the near-universal convention that .bash_profile sources
+        // .bashrc (same behavior as Terminal.app). /etc/zprofile's path_helper
+        // and ~/.zprofile supply the /usr/local/bin and Homebrew PATH entries;
+        // see docs/specs/2026-08-19-login-shell-panes-design.md. csh/tcsh
+        // cannot combine -l with -c and keep -i -c (see
         // ShellLaunchComposer.shellFlags(forShell:)).
         // `environment` is the test seam for the SHELL read; production call
         // sites take the default.
@@ -582,19 +581,19 @@ public struct TmuxManager: Sendable {
     /// Respawn (replace the running program of) an existing window's pane
     /// IN PLACE, keeping the same window id and pane id. Shares
     /// `newWindowCommand`'s env handling through
-    /// `ShellLaunchComposer.envExportPrefixed` and
-    /// `sensitiveEnvFlags` — the `env` map is inlined as an
-    /// `export …; ` prefix on the shell command (runs AFTER all startup files,
-    /// profile and rc alike), while `sensitiveEnv` is passed via tmux
-    /// `-e KEY=VALUE` so it's in the process environment before the shell
-    /// starts (kept out of `ps aux`, and visible during profile and rc
-    /// execution). Spawns the same interactive login-shell invocation as
-    /// `newWindowCommand` via `ShellLaunchComposer.shellInvocation` (zsh sources
-    /// zshenv + zprofile + zshrc; bash login shells source profile files
-    /// only, relying on .bash_profile sourcing .bashrc; csh/tcsh keep -i -c,
-    /// see `ShellLaunchComposer.shellFlags(forShell:)`). `-k` kills the pane's current program
-    /// first. `environment` is the test seam for the SHELL read; production
-    /// call sites take the default.
+    /// `ShellLaunchComposer.envExportPrefixed` and `sensitiveEnvFlags` — the
+    /// `env` map is inlined as an `export …; ` prefix on the shell command
+    /// (runs AFTER all startup files, profile and rc alike), while
+    /// `sensitiveEnv` is passed via tmux `-e KEY=VALUE` so it's in the process
+    /// environment before the shell starts (kept out of `ps aux`, and visible
+    /// during profile and rc execution). Spawns the same interactive
+    /// login-shell invocation as `newWindowCommand` via
+    /// `ShellLaunchComposer.shellInvocation` (zsh sources zshenv + zprofile +
+    /// zshrc; bash login shells source profile files only, relying on
+    /// .bash_profile sourcing .bashrc; csh/tcsh keep -i -c, see
+    /// `ShellLaunchComposer.shellFlags(forShell:)`). `-k` kills the pane's
+    /// current program first. `environment` is the test seam for the SHELL
+    /// read; production call sites take the default.
     ///
     /// Used by the seamless in-place account switch: same tab, same terminal
     /// row, new profile's `claude --resume` command. See PR 5222a79 for why the
@@ -875,8 +874,8 @@ public struct TmuxManager: Sendable {
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
     /// emit for one entry of the `env` map. Both build the prefix from the one
     /// shared `ShellLaunchComposer.envExportPrefixed`, so a pane spawned
-    /// either way — including the
-    /// in-place profile swap — carries this literal.
+    /// either way — including the in-place profile swap — carries this
+    /// literal.
     static let terminalIDExportAnchor = "export TBD_TERMINAL_ID='"
 
     /// Which TBD terminal a pane says it is, or nil when the pane carries no
@@ -913,16 +912,15 @@ public struct TmuxManager: Sendable {
     /// What a decoy anchor sitting inside an env *value* actually yields is
     /// worth stating exactly, because it is never the decoy's own payload.
     /// `ShellLaunchComposer.envExportPrefixed` escapes an embedded `'` as
-    /// `'\''`, so instructions
-    /// reading `export TBD_TERMINAL_ID='decoy'` are emitted as
+    /// `'\''`, so instructions reading `export TBD_TERMINAL_ID='decoy'` are
+    /// emitted as
     /// `export TBD_TERMINAL_ID='\''decoy'\''`: the anchor consumes that first
     /// quote and the value read is everything up to the next quote — a lone
     /// backslash. A decoy that instead ends the env entry right at the `=`
     /// reads as the `; export …=` text that always follows the entry's closing
     /// quote. Neither parses as a `UUID`, so the scan steps past and finds the
     /// real id. That guarantee comes from the escaping, not from the resolver,
-    /// which is why the two must stay coupled — see
-    /// `ShellLaunchComposer.envExportPrefixed`.
+    /// which is why the two must stay coupled — see `ShellLaunchComposer`.
     ///
     /// Residual adversarial case: an *unescaped* complete
     /// `export TBD_TERMINAL_ID='<valid uuid>'` earlier in the start command

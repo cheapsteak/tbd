@@ -1,11 +1,12 @@
 import Foundation
 
 /// Latest-wins serialization state for `pane.resize` RPCs on both the
-/// control-mode and pty-holder transports (R5-M3). The Coordinator's 100 ms debounce collapses a window-drag flurry
-/// to its tail, but cancel-and-replace only cancels the wrapper Task — each
-/// `paneResize` RPC rides its own socket task, so an already-in-flight resize
-/// has no ordering against a newer one and can be processed AFTER it,
-/// wedging the pane at a stale size until the next resize event.
+/// control-mode and pty-holder transports (R5-M3). The Coordinator's 100 ms
+/// debounce collapses a window-drag flurry to its tail, but
+/// cancel-and-replace only cancels the wrapper Task — each `paneResize` RPC
+/// rides its own socket task, so an already-in-flight resize has no ordering
+/// against a newer one and can be processed AFTER it, wedging the pane at a
+/// stale size until the next resize event.
 ///
 /// This type keeps at most ONE resize in flight: a debounce tick that fires
 /// while one is in flight stashes the latest size instead of sending, and the

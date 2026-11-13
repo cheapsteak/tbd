@@ -186,8 +186,9 @@ public struct AgentReaper: Sendable {
     /// Executable basenames a holder's job can legitimately present.
     ///
     /// The holder always forks `$SHELL <flags> <command>`
-    /// (`WorktreeLifecycle.holderLaunch` → `ShellLaunchComposer.shellInvocation`), and
-    /// a shell running a single simple command with `-c` is free to `exec` it
+    /// (`WorktreeLifecycle.holderLaunch` →
+    /// `ShellLaunchComposer.shellInvocation`), and a shell running a single
+    /// simple command with `-c` is free to `exec` it
     /// rather than fork — so by the time a sweep looks, the pid presents either
     /// the login shell or the agent binary the shell replaced itself with.
     /// Both are accepted; anything else is a stranger.
