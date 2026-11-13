@@ -4,21 +4,22 @@ import Testing
 
 /// `GhosttyCoreLog`: the engine logs under the app's subsystem until a host configures another.
 ///
-/// Serialized because the setting is process-wide. The test that changes it puts the default back
-/// before it returns, so no other suite logs under a test's subsystem for longer than that.
-@Suite(.serialized, .fastPassBounded)
+/// Each test builds a `Destination` of its own, so none changes where the rest of the process
+/// logs.
+@Suite(.fastPassBounded)
 struct GhosttyCoreLogTests {
     /// The default is the app's subsystem, which is where the engine logged before a host could
     /// choose.
     @Test func theDefaultIsTheAppsSubsystem() {
         #expect(GhosttyCoreLog.defaultSubsystem == "com.tbd.app")
+        #expect(GhosttyCoreLog.Destination().subsystem == GhosttyCoreLog.defaultSubsystem)
     }
 
-    @Test func configureChangesTheSubsystem() {
-        defer { GhosttyCoreLog.configure(subsystem: GhosttyCoreLog.defaultSubsystem) }
-        GhosttyCoreLog.configure(subsystem: "com.tbd.daemon")
-        #expect(GhosttyCoreLog.subsystem == "com.tbd.daemon")
-        GhosttyCoreLog.configure(subsystem: GhosttyCoreLog.defaultSubsystem)
-        #expect(GhosttyCoreLog.subsystem == GhosttyCoreLog.defaultSubsystem)
+    @Test func configureChangesTheLoggersSubsystem() {
+        let destination = GhosttyCoreLog.Destination()
+        destination.configure(subsystem: "com.tbd.daemon")
+        #expect(destination.subsystem == "com.tbd.daemon")
+        destination.configure(subsystem: GhosttyCoreLog.defaultSubsystem)
+        #expect(destination.subsystem == GhosttyCoreLog.defaultSubsystem)
     }
 }

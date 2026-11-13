@@ -10,12 +10,12 @@ import enum TBDShared.ProgramStatusProtocol
 /// probe, and it runs to the string terminator, BEL or `ESC \`. libghostty
 /// writes a whole answer inside one parse, so an answer never straddles two
 /// deliveries.
-public enum ProgramStatusProbeAnswer {
-    public static let introducer: [UInt8] = Array("\u{1b}]\(ProgramStatusProtocol.oscCode);?".utf8)
+package enum ProgramStatusProbeAnswer {
+    package static let introducer: [UInt8] = Array("\u{1b}]\(ProgramStatusProtocol.oscCode);?".utf8)
 
     /// `bytes` with every probe answer replaced by `replacement`, or removed
     /// when it is nil. Everything else is kept, in order.
-    public static func replacingLibghosttyAnswers(in bytes: [UInt8], with replacement: [UInt8]?) -> [UInt8] {
+    package static func replacingLibghosttyAnswers(in bytes: [UInt8], with replacement: [UInt8]?) -> [UInt8] {
         guard bytes.count >= introducer.count, let first = introducerIndex(in: bytes, from: 0) else {
             return bytes
         }

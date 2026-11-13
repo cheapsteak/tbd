@@ -7,8 +7,8 @@ import enum TBDShared.ProgramStatusState
 /// data after `7501;`, fields joined with `:`, `title` and `msg` in base64,
 /// as the protocol sends them. `ProgramStatusParser` reads it as it reads the
 /// raw bytes.
-public enum ProgramStatusPayloadBuilder {
-    public static func payload(for status: GhosttyTerminalCallbacks.ProgramStatus) -> [UInt8] {
+package enum ProgramStatusPayloadBuilder {
+    package static func payload(for status: GhosttyTerminalCallbacks.ProgramStatus) -> [UInt8] {
         var fields = ["state=\(stateValue(status.state))"]
         if !status.app.isEmpty { fields.append("app=\(status.app)") }
         if !status.id.isEmpty { fields.append("id=\(status.id)") }
