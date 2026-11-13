@@ -11,7 +11,7 @@ import Foundation
 /// while one is in flight stashes the latest size instead of sending, and the
 /// in-flight call's completion sends the stash (the sender loops until
 /// quiescent). Pure decision state, extracted so the branchy logic is
-/// headlessly testable — mirrors `ControlModeResizeGate` / `PasteInterception`.
+/// headlessly testable — mirrors `TerminalResizeGate` / `PasteInterception`.
 /// MainActor-confined by its owner (a Coordinator stored property), like the
 /// rest of the resize/debounce state.
 struct TerminalResizeSerializer {

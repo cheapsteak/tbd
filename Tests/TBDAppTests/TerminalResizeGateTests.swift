@@ -2,7 +2,7 @@ import TBDShared
 import Testing
 @testable import TBDApp
 
-/// Pins the M3.2 resize gate. The Coordinator's `scheduleControlModeResize`
+/// Pins the M3.2 resize gate. The Coordinator's `scheduleDaemonResize`
 /// carries no untested conditional — the whole attach/size gate lives here,
 /// one assertion per branch (CLAUDE.md gated-branch rule).
 ///
@@ -10,31 +10,31 @@ import Testing
 /// must never send a size the daemon would floor-clamp, or the pane
 /// permanently desyncs (the daemon clamps, the echo fence suppresses the
 /// resulting layout change, and nothing reports the clamp back).
-@Suite("ControlModeResizeGate.shouldSend")
-struct ControlModeResizeGateTests {
+@Suite("TerminalResizeGate.shouldSend")
+struct TerminalResizeGateTests {
     @Test("not attached → never send, regardless of size")
     func notAttached() {
-        #expect(!ControlModeResizeGate.shouldSend(controlModeAttached: false, cols: 100, rows: 30))
-        #expect(!ControlModeResizeGate.shouldSend(controlModeAttached: false, cols: 0, rows: 0))
+        #expect(!TerminalResizeGate.shouldSend(targetAttached: false, cols: 100, rows: 30))
+        #expect(!TerminalResizeGate.shouldSend(targetAttached: false, cols: 0, rows: 0))
     }
 
     @Test("attached + below the shared floor → do not send (the daemon would clamp it)")
     func attachedBelowSharedFloor() {
-        #expect(!ControlModeResizeGate.shouldSend(
-            controlModeAttached: true, cols: TerminalGeometryLimits.minCols - 1, rows: 100))
-        #expect(!ControlModeResizeGate.shouldSend(
-            controlModeAttached: true, cols: 100, rows: TerminalGeometryLimits.minRows - 1))
+        #expect(!TerminalResizeGate.shouldSend(
+            targetAttached: true, cols: TerminalGeometryLimits.minCols - 1, rows: 100))
+        #expect(!TerminalResizeGate.shouldSend(
+            targetAttached: true, cols: 100, rows: TerminalGeometryLimits.minRows - 1))
         // Degenerate mid-layout artifacts stay refused too.
-        #expect(!ControlModeResizeGate.shouldSend(controlModeAttached: true, cols: 1, rows: 30))
-        #expect(!ControlModeResizeGate.shouldSend(controlModeAttached: true, cols: 0, rows: 0))
+        #expect(!TerminalResizeGate.shouldSend(targetAttached: true, cols: 1, rows: 30))
+        #expect(!TerminalResizeGate.shouldSend(targetAttached: true, cols: 0, rows: 0))
     }
 
     @Test("attached + at or above the shared floor → send")
     func attachedAtOrAboveFloor() {
-        #expect(ControlModeResizeGate.shouldSend(
-            controlModeAttached: true,
+        #expect(TerminalResizeGate.shouldSend(
+            targetAttached: true,
             cols: TerminalGeometryLimits.minCols, rows: TerminalGeometryLimits.minRows))
-        #expect(ControlModeResizeGate.shouldSend(controlModeAttached: true, cols: 100, rows: 30))
+        #expect(TerminalResizeGate.shouldSend(targetAttached: true, cols: 100, rows: 30))
     }
 
     @Test("the app gate's floor IS the daemon clamp floor — one shared constant")

@@ -1481,8 +1481,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // path's: a transient size below it reaches neither the daemon nor
             // the child.
             let grid = engine.gridSize
-            let attachGrid: (cols: Int, rows: Int)? = ControlModeResizeGate.shouldSend(
-                controlModeAttached: true, cols: grid.cols, rows: grid.rows) ? grid : nil
+            let attachGrid: (cols: Int, rows: Int)? = TerminalResizeGate.shouldSend(
+                targetAttached: true, cols: grid.cols, rows: grid.rows) ? grid : nil
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
@@ -3487,7 +3487,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private func scheduleDaemonResize(cols: Int, rows: Int) {
             // The floor is the same for both transports and exists for the same
             // reason: SwiftTerm emits transient 0/1-cell sizes mid-layout that
-            // must reach neither a daemon nor a child. `controlModeAttached` is
+            // must reach neither a daemon nor a child. `targetAttached` is
             // passed as `true` because the question it stands for — is there a
             // daemon-side authority at all — is what `resolve` has just
             // answered.
@@ -3498,8 +3498,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     controlMode: controlModeAttach.map {
                         (worktreeID: $0.worktreeID, windowID: $0.windowID)
                     }),
-                  ControlModeResizeGate.shouldSend(
-                    controlModeAttached: true, cols: cols, rows: rows)
+                  TerminalResizeGate.shouldSend(
+                    targetAttached: true, cols: cols, rows: rows)
             else { return }
             resizeDebounceTask?.cancel()
             let daemonClient = appState?.daemonClient

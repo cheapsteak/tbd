@@ -12,7 +12,7 @@ import Foundation
 /// attach nothing ever detaches. Each resumption therefore re-checks the
 /// coordinator's torn-down flag through `undo(tornDown:at:)` and unwinds
 /// exactly what is committed at that stage. Extracted so the gated branches
-/// carry no untested conditional — mirrors `ControlModeResizeGate` /
+/// carry no untested conditional — mirrors `TerminalResizeGate` /
 /// `PasteInterception` / `OutgoingInputRoute`.
 enum ControlModeAttachAbort {
     /// Where the attach sequence is when it resumes from an `await`.
