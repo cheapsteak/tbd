@@ -182,8 +182,8 @@ let package = Package(
             dependencies: [
                 "GhosttyVt",
                 "TBDGhosttyShaderTypes",
-                // `ProjectedScreen`, for the screen projection.
-                "TBDTerminalSerialization",
+                // `ProjectedScreen` and `TerminalScreen`, for the screen projection.
+                "TBDShared",
             ],
             path: "Sources/TBDGhosttyTerminal",
             exclude: ["LICENSE-termio.txt", "LICENSE-tkzmux.txt"],

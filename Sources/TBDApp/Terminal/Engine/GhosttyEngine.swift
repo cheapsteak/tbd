@@ -5,7 +5,6 @@ import os
 import SwiftTerm
 import TBDGhosttyTerminal
 import TBDShared
-import TBDTerminalSerialization
 
 private let ghosttyEngineLog = Logger(subsystem: "com.tbd.app", category: "terminalEngine")
 

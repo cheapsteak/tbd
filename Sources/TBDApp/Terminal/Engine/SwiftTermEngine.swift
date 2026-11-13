@@ -1,6 +1,9 @@
 import AppKit
 import Foundation
 import SwiftTerm
+// Scoped, as `HolderReader` does: a whole `TBDShared` would make a bare
+// `Terminal` ambiguous with `SwiftTerm.Terminal`.
+import struct TBDShared.ProjectedScreen
 import TBDTerminalSerialization
 
 /// The SwiftTerm terminal engine: one `TBDTerminalView`, and everything the

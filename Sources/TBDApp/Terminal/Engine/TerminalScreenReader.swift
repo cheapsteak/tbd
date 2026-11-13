@@ -1,4 +1,4 @@
-import TBDTerminalSerialization
+import struct TBDShared.ProjectedScreen
 
 /// What a coordinator may read from, or do to, a terminal's model while the
 /// engine holds its lock.
