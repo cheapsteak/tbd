@@ -165,7 +165,7 @@ import Testing
         let reader: HolderReader
         private let ours: Int32
 
-        init(columns: Int, rows: Int) throws {
+        init(columns: Int, rows: Int, emulator: HolderEmulatorKind = .swiftTerm) throws {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             ours = pair[1]
@@ -176,6 +176,7 @@ import Testing
                 columns: columns,
                 rows: rows,
                 scrollbackLines: 200,
+                emulator: emulator,
                 observedChildFromStart: true)
         }
 

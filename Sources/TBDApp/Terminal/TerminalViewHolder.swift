@@ -38,7 +38,7 @@ final class TerminalViewHolder: @unchecked Sendable {
     ///   Injected so a test can drive the age a screen reply reports instead of
     ///   measuring the wall clock and asserting on a window. `Instant`, not
     ///   `Duration`: this is a timestamp two reads subtract, which is the same
-    ///   seam `HolderEmulator` takes for the daemon's half of the identical
+    ///   seam `HolderEmulatorLedger` takes for the daemon's half of the identical
     ///   measurement.
     init(monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.monotonicNow = monotonicNow

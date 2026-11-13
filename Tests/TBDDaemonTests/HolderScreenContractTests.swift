@@ -541,6 +541,7 @@ import Testing
 
         init(
             columns: Int, rows: Int,
+            emulator: HolderEmulatorKind = .swiftTerm,
             observedChildFromStart: Bool = true,
             monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = {
                 ContinuousClock.now
@@ -556,6 +557,7 @@ import Testing
                 columns: columns,
                 rows: rows,
                 scrollbackLines: 200,
+                emulator: emulator,
                 observedChildFromStart: observedChildFromStart,
                 monotonicNow: monotonicNow)
         }

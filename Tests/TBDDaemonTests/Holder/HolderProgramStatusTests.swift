@@ -144,7 +144,7 @@ import TBDShared
         private let box: DeliveryBox
         private let ours: Int32
 
-        init(tap: Bool = true) throws {
+        init(tap: Bool = true, emulator: HolderEmulatorKind = .swiftTerm) throws {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             ours = pair[1]
@@ -163,6 +163,7 @@ import TBDShared
                 rows: 24,
                 scrollbackLines: 200,
                 programStatus: programStatus,
+                emulator: emulator,
                 observedChildFromStart: true)
         }
 

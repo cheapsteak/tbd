@@ -195,11 +195,11 @@ public enum TerminalSnapshotWriter {
     ///   them.
     /// - Two spurious `bufferActivated` / alternate-screen-switch delegate
     ///   rounds. Inert in the daemon, whose delegate is
-    ///   `ReplyForwardingDelegate` (`HolderReader.swift`) and implements only
-    ///   `send`. **Not inert in the app**, where `MacTerminalView` posts each
-    ///   one onto its event queue and reacts — so running this same path
-    ///   against an app-side emulator, as the detach handback would, needs
-    ///   that considered first.
+    ///   `ReplyForwardingDelegate` (`SwiftTermHolderEmulator.swift`) and
+    ///   implements only `send`. **Not inert in the app**, where
+    ///   `MacTerminalView` posts each one onto its event queue and reacts —
+    ///   so running this same path against an app-side emulator, as the
+    ///   detach handback would, needs that considered first.
     ///
     /// Known gap: the alt buffer's own saved cursor (`ESC 7` / DECSC, in
     /// `altBuffer.savedX/savedY` and the saved autowrap flag) is not carried
