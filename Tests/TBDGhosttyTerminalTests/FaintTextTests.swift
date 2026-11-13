@@ -103,7 +103,8 @@ struct FaintTextTests {
     // MARK: - Selection and colour glyphs
 
     /// A selected faint cell dims towards its own background, not the selection colour drawn over
-    /// it: SwiftTerm draws the selection behind the cell's text and leaves the text's colour alone.
+    /// it. The libghostty engine keeps a selected cell's text colour (SwiftTerm draws selected text
+    /// in its selected-text colour instead), so the dim follows the cell, not the selection.
     @Test func aSelectedFaintCellDimsTowardsItsOwnBackground() throws {
         let tint: UInt32 = 0xFF56_3412
         try withOneCellFrame("\u{1b}[2;31;44mX", selectionTint: tint) { surface in
