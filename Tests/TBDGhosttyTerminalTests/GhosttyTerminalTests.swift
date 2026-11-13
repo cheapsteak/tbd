@@ -1,4 +1,5 @@
 import Foundation
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TestSupport
 import Testing

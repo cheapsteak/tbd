@@ -107,7 +107,7 @@ extension GhosttyClickedText.Row {
 }
 
 /// What a left ⌘-press lands on.
-enum CommandClickTarget: Sendable, Equatable {
+package enum CommandClickTarget: Sendable, Equatable {
     /// An OSC 8 link: its URI.
     case link(String)
     /// No link: the text around the press, for the host to look in.

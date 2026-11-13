@@ -6,6 +6,7 @@ import Observation
 import SwiftUI
 import Testing
 @testable import TBDApp
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDShared
 import TestSupport

@@ -23,6 +23,7 @@
 import AppKit
 import Foundation
 import QuartzCore
+import TBDGhosttyCore
 import UniformTypeIdentifiers
 
 // MARK: - Pure policy

@@ -3,17 +3,19 @@ import Combine
 import Foundation
 import os
 import SwiftTerm
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDShared
 
 private let ghosttyEngineLog = Logger(subsystem: "com.tbd.app", category: "terminalEngine")
 
-/// The libghostty terminal engine: one `TBDGhosttyTerminal.GhosttyTerminal`, the
+/// The libghostty terminal engine: one `TBDGhosttyCore.GhosttyTerminal`, the
 /// `GhosttyTerminalView` that draws it, and the adapter between them and the
 /// coordinators' `TerminalEngine` seam.
 ///
-/// `TBDGhosttyTerminal` knows nothing of the seam. This class is where its API
-/// meets TBD's rules, and four of those rules are facts about this emulator:
+/// `TBDGhosttyCore` and `TBDGhosttyTerminal` know nothing of the seam. This class
+/// is where their API meets TBD's rules, and four of those rules are facts about
+/// this emulator:
 ///
 /// - **Callbacks fire inside the parse.** libghostty runs every effect callback
 ///   on the feeding thread, before `feed` returns, so the snapshot mute is a
@@ -42,7 +44,7 @@ final class GhosttyEngine: TerminalEngine {
     let kind: TerminalEngineKind = .ghostty
 
     /// The emulator. `Sendable`, and called from the IO thread through `feed`.
-    nonisolated let terminal: TBDGhosttyTerminal.GhosttyTerminal
+    nonisolated let terminal: TBDGhosttyCore.GhosttyTerminal
     /// The view this engine owns, typed for tests.
     let terminalView: GhosttyTerminalView
 
@@ -75,7 +77,7 @@ final class GhosttyEngine: TerminalEngine {
         configuration: TerminalEngineConfiguration
     ) throws(GhosttyError) {
         let relay = GhosttyEngineRelay()
-        let terminal = try TBDGhosttyTerminal.GhosttyTerminal(
+        let terminal = try TBDGhosttyCore.GhosttyTerminal(
             cols: 80, rows: 24, scrollbackLines: Self.scrollbackLines,
             callbacks: Self.callbacks(relay: relay))
         var settings = GhosttyAppearance(settings: appearance)

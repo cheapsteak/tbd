@@ -18,14 +18,14 @@ import GhosttyVt
 ///
 /// Rows, not pixels: the conversion to a thumb rect is the view layer's job, which keeps this
 /// side testable without a window.
-struct TerminalScrollMetrics: Sendable, Hashable {
+package struct TerminalScrollMetrics: Sendable, Hashable {
     /// Total size of the scrollable area in rows (viewport + scrollback).
-    var total: Int
+    package var total: Int
     /// Offset into the total area that the viewport is at. Row 0 is the top of the scrollback.
     /// The same row space as `GHOSTTY_SCROLL_VIEWPORT_ROW`, so a position round-trips cleanly.
-    var offset: Int
+    package var offset: Int
     /// Length of the visible area in rows.
-    var visible: Int
+    package var visible: Int
     /// True on the alternate screen (Claude Code's TUI lives there), which has no scrollback.
     var isAlternateScreen: Bool
 
@@ -41,7 +41,7 @@ struct TerminalScrollMetrics: Sendable, Hashable {
     ///
     /// Spelled `empty` rather than `none` on purpose — it is stored in an `Optional` by the view's
     /// diff cache, where `== .none` would silently resolve to `Optional.none`.
-    static let empty = TerminalScrollMetrics(
+    package static let empty = TerminalScrollMetrics(
         total: 0, offset: 0, visible: 0, isAlternateScreen: false)
 
     /// True when there is more content than fits: the only case that draws anything.
@@ -61,7 +61,7 @@ struct TerminalScrollMetrics: Sendable, Hashable {
     /// value even while the alt screen is active, which is reason enough not to guess.
     ///
     /// Caller holds the terminal lock: it is only ever called inside `GhosttyTerminal.withRaw`.
-    static func read(_ terminal: VtTerminal) -> TerminalScrollMetrics {
+    package static func read(_ terminal: VtTerminal) -> TerminalScrollMetrics {
         var bar = GhosttyTerminalScrollbar()
         guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &bar) == GHOSTTY_SUCCESS
         else { return .empty }

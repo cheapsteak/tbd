@@ -1,4 +1,5 @@
 import GhosttyVt
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing
@@ -12,7 +13,7 @@ import Testing
 /// spelled with its module name.
 @Suite(.fastPassBounded)
 struct RenderHoldTests {
-    private typealias Terminal = TBDGhosttyTerminal.GhosttyTerminal
+    private typealias Terminal = TBDGhosttyCore.GhosttyTerminal
     private typealias ForceOff = SyncOutputWatchdog.ForceOff
 
     private static let begin = "\u{1b}[?2026h"

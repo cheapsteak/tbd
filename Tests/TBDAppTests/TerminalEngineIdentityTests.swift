@@ -3,6 +3,7 @@ import Foundation
 import os
 import Testing
 @testable import TBDApp
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDShared
 import TestSupport
@@ -211,7 +212,7 @@ struct TerminalEngineIdentityTests {
         let attributes = try #require(identity.deviceAttributes, "SwiftTerm's DA1 or DA2 reply did not parse")
         let version = try #require(identity.xtversion, "SwiftTerm's XTVERSION reply did not parse")
         let writes = OSAllocatedUnfairLock<[UInt8]>(initialState: [])
-        let terminal = try TBDGhosttyTerminal.GhosttyTerminal(
+        let terminal = try TBDGhosttyCore.GhosttyTerminal(
             cols: 80, rows: 24, scrollbackLines: 100,
             callbacks: GhosttyTerminalCallbacks(
                 writePty: { bytes in writes.withLock { $0.append(contentsOf: bytes) } },
@@ -240,7 +241,7 @@ struct TerminalEngineIdentityTests {
     @Test("libghostty's own answer to the probe is recognised and swapped whole")
     func libghosttysOwnProbeAnswerIsRecognised() throws {
         let writes = OSAllocatedUnfairLock<[UInt8]>(initialState: [])
-        let terminal = try TBDGhosttyTerminal.GhosttyTerminal(
+        let terminal = try TBDGhosttyCore.GhosttyTerminal(
             cols: 80, rows: 24, scrollbackLines: 100,
             callbacks: GhosttyTerminalCallbacks(
                 writePty: { bytes in writes.withLock { $0.append(contentsOf: bytes) } },
@@ -300,7 +301,7 @@ struct TerminalEngineIdentityTests {
     @Test("Each Claude-shaped report, parsed by libghostty and written back, parses as the raw report does")
     func rebuiltProgramStatusPayloadParsesLikeTheRawOne() throws {
         let received = OSAllocatedUnfairLock<[GhosttyTerminalCallbacks.ProgramStatus]>(initialState: [])
-        let terminal = try TBDGhosttyTerminal.GhosttyTerminal(
+        let terminal = try TBDGhosttyCore.GhosttyTerminal(
             cols: 80, rows: 24, scrollbackLines: 100,
             callbacks: GhosttyTerminalCallbacks(programStatus: { status in
                 received.withLock { $0.append(status) }
@@ -326,7 +327,7 @@ struct TerminalEngineIdentityTests {
 
     /// Feeds `text` to a headless libghostty terminal, whose `feed` takes
     /// bytes.
-    nonisolated private static func feed(_ text: String, into terminal: TBDGhosttyTerminal.GhosttyTerminal) {
+    nonisolated private static func feed(_ text: String, into terminal: TBDGhosttyCore.GhosttyTerminal) {
         terminal.feed(Array(text.utf8)[...])
     }
 

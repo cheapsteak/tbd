@@ -18,6 +18,7 @@
 
 import Foundation
 import GhosttyVt
+import TBDGhosttyCore
 import TBDGhosttyShaderTypes
 
 // MARK: - Errors
@@ -85,8 +86,9 @@ struct SurfaceColors: Sendable, Hashable {
 final class TerminalSurface {
     // MARK: Attachment
 
-    /// The attached terminal, or `nil` when detached.
-    private(set) var terminal: GhosttyTerminal?
+    /// The attached terminal, or `nil` when detached. Spelled with its module, here and in
+    /// `attach(_:)`, because `GhosttyVt` declares a `GhosttyTerminal` too: the C handle.
+    private(set) var terminal: TBDGhosttyCore.GhosttyTerminal?
     /// The render state; `nil` exactly when `terminal` is nil.
     private(set) var renderState: GhosttyRenderStateHandle?
     /// Reused across ticks. Repopulated from `DATA_ROW_ITERATOR` on every update (positions reset).
@@ -196,7 +198,7 @@ final class TerminalSurface {
     /// A freshly created render state reports `DIRTY_FULL` on its first update, so the first frame
     /// after an attach is a complete rebuild — no explicit invalidation is needed. Attaching while
     /// already attached detaches first, so `attach` is idempotent from the caller's point of view.
-    func attach(_ terminal: GhosttyTerminal) throws {
+    func attach(_ terminal: TBDGhosttyCore.GhosttyTerminal) throws {
         detach()
 
         let state = try makeRenderState()

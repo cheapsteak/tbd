@@ -36,6 +36,7 @@
 
 import Foundation
 import Synchronization
+import TBDGhosttyCore
 import os
 
 /// The drawables a view's layer has handed out and Metal has not reported presented.

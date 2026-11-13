@@ -36,6 +36,7 @@ import AppKit
 import Foundation
 import GhosttyVt
 import IOKit.hidsystem
+import TBDGhosttyCore
 
 // MARK: - Keyboard layout
 

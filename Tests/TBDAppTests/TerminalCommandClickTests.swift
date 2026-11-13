@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TBDGhosttyCore
 import TBDGhosttyTerminal
 
 /// TBD's own ⌘-click matcher, the one both engines run on the pressed row, and SwiftTerm's link

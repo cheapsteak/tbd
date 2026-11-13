@@ -1,4 +1,5 @@
 import GhosttyVt
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing
@@ -15,8 +16,8 @@ struct ContinuationTests {
     private static let partial = Array("\u{1b}[38;5".utf8)
     private static let remainder = Array(";196mX".utf8)
 
-    private static func makeTerminal() throws -> TBDGhosttyTerminal.GhosttyTerminal {
-        try TBDGhosttyTerminal.GhosttyTerminal(
+    private static func makeTerminal() throws -> TBDGhosttyCore.GhosttyTerminal {
+        try TBDGhosttyCore.GhosttyTerminal(
             cols: 10, rows: 3, scrollbackLines: 100, callbacks: GhosttyTerminalCallbacks())
     }
 
@@ -41,7 +42,7 @@ struct ContinuationTests {
             _ = ghostty_terminal_get(raw, GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES, &limit)
             return (limit, Self.encodeSnapshot(raw), state.pendingContinuationBytes())
         }
-        #expect(limit == TBDGhosttyTerminal.GhosttyTerminal.continuationMaxBytes,
+        #expect(limit == TBDGhosttyCore.GhosttyTerminal.continuationMaxBytes,
                 "continuation tracking is set to \(limit) bytes")
         #expect(encoded == GHOSTTY_SUCCESS, "cloning in the middle of an SGR returned \(encoded.rawValue)")
         #expect(pending == Self.partial, "the pending bytes were \(String(describing: pending))")

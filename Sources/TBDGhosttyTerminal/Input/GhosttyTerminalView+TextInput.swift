@@ -23,6 +23,7 @@
 import AppKit
 import Foundation
 import QuartzCore
+import TBDGhosttyCore
 
 extension GhosttyTerminalView: @preconcurrency NSTextInputClient {
     // MARK: - Marked text (preedit)

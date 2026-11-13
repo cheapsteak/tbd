@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import Metal
 import QuartzCore
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing

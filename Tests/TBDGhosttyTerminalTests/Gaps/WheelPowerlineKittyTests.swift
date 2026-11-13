@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import GhosttyVt
 import Metal
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing
@@ -18,8 +19,8 @@ private final class WheelSent {
 
 private func makeTerminal(
     cols: Int = 80, rows: Int = 24, callbacks: GhosttyTerminalCallbacks = GhosttyTerminalCallbacks()
-) throws -> TBDGhosttyTerminal.GhosttyTerminal {
-    try TBDGhosttyTerminal.GhosttyTerminal(cols: cols, rows: rows, scrollbackLines: 100, callbacks: callbacks)
+) throws -> TBDGhosttyCore.GhosttyTerminal {
+    try TBDGhosttyCore.GhosttyTerminal(cols: cols, rows: rows, scrollbackLines: 100, callbacks: callbacks)
 }
 
 /// Ten-pixel cells, so the point (5, 5) is cell 1;1.
@@ -43,7 +44,7 @@ private func describe(_ outcome: WheelOutcome) -> String {
     }
 }
 
-private func scrollMetrics(of terminal: TBDGhosttyTerminal.GhosttyTerminal) throws -> TerminalScrollMetrics {
+private func scrollMetrics(of terminal: TBDGhosttyCore.GhosttyTerminal) throws -> TerminalScrollMetrics {
     try terminal.withLocked { state in
         TerminalScrollMetrics.read(try #require(state.raw, "the terminal is closed"))
     }
@@ -51,7 +52,7 @@ private func scrollMetrics(of terminal: TBDGhosttyTerminal.GhosttyTerminal) thro
 
 /// The Kitty image storage limit of the active screen, or nil when the library was built without
 /// Kitty graphics.
-private func kittyStorageLimit(of terminal: TBDGhosttyTerminal.GhosttyTerminal) throws -> UInt64? {
+private func kittyStorageLimit(of terminal: TBDGhosttyCore.GhosttyTerminal) throws -> UInt64? {
     try terminal.withLocked { state -> UInt64? in
         let raw = try #require(state.raw, "the terminal is closed")
         var limit: UInt64 = .max
@@ -574,7 +575,7 @@ struct WheelPowerlineKittyTests {
 
     /// Feeds both Kitty queries and expects no reply to either, and a storage limit of zero.
     private static func expectNoKittyReply(
-        _ situation: String, terminal: TBDGhosttyTerminal.GhosttyTerminal, recorder: CallbackRecorder
+        _ situation: String, terminal: TBDGhosttyCore.GhosttyTerminal, recorder: CallbackRecorder
     ) throws {
         let before = recorder.writes.count
         terminal.feed(text: kittyQuery + shortKittyQuery)
@@ -582,7 +583,7 @@ struct WheelPowerlineKittyTests {
         #expect(!replies.contains("OK"), "\(situation), a Kitty query was answered OK: \(replies.debugDescription)")
         #expect(!replies.contains("\u{1b}_G"), "\(situation), a Kitty query was answered: \(replies.debugDescription)")
         if let limit = try kittyStorageLimit(of: terminal) {
-            #expect(limit == TBDGhosttyTerminal.GhosttyTerminal.kittyImageStorageLimit,
+            #expect(limit == TBDGhosttyCore.GhosttyTerminal.kittyImageStorageLimit,
                     "\(situation), the Kitty storage limit is \(limit) bytes")
         }
     }
@@ -618,7 +619,7 @@ struct WheelPowerlineKittyTests {
     }
 
     /// A terminal and a windowless view over it, 400×200 points, recording what it sends.
-    private func makeView() throws -> (TBDGhosttyTerminal.GhosttyTerminal, GhosttyTerminalView, WheelSent) {
+    private func makeView() throws -> (TBDGhosttyCore.GhosttyTerminal, GhosttyTerminalView, WheelSent) {
         let terminal = try makeTerminal()
         let appearance = GhosttyAppearance(
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),

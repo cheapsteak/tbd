@@ -40,6 +40,7 @@ import Foundation
 import Metal
 import QuartzCore
 import Synchronization
+import TBDGhosttyCore
 import os
 
 // MARK: - Small helpers

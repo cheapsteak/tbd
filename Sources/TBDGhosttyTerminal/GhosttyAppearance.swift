@@ -8,6 +8,7 @@
 // change.
 import AppKit
 import GhosttyVt
+import TBDGhosttyCore
 
 /// The font, stroke weight, colours and cursor a `GhosttyTerminalView` draws with.
 ///
@@ -15,18 +16,9 @@ import GhosttyVt
 /// objects as safe to use from any thread, but the SDK does not mark the class `Sendable`. The
 /// colours and the cursor settings are plain values.
 public struct GhosttyAppearance: @unchecked Sendable, Equatable {
-    /// An opaque 8-bit sRGB colour.
-    public struct RGB: Sendable, Hashable {
-        public var r: UInt8
-        public var g: UInt8
-        public var b: UInt8
-
-        public init(r: UInt8, g: UInt8, b: UInt8) {
-            self.r = r
-            self.g = g
-            self.b = b
-        }
-    }
+    /// An opaque 8-bit sRGB colour. Declared in `TBDGhosttyCore`, where the terminal reports
+    /// colours in it.
+    public typealias RGB = GhosttyRGB
 
     /// The cursor's shape when a program has not chosen one with DECSCUSR.
     public enum CursorStyle: Sendable, Hashable {
@@ -97,14 +89,6 @@ public struct GhosttyAppearance: @unchecked Sendable, Equatable {
 }
 
 extension GhosttyAppearance.RGB {
-    init(_ color: GhosttyColorRgb) {
-        self.init(r: color.r, g: color.g, b: color.b)
-    }
-
-    var vtColor: GhosttyTerminal.VtColor {
-        GhosttyTerminal.VtColor(r: r, g: g, b: b)
-    }
-
     /// Packed and opaque, as the shaders take it: `r | g << 8 | b << 16 | 0xFF << 24`.
     var packed: UInt32 {
         pack(GhosttyColorRgb(r: r, g: g, b: b))
@@ -121,7 +105,8 @@ extension GhosttyAppearance.CursorStyle {
     }
 }
 
-extension GhosttyTerminal {
+// Qualified: `GhosttyVt` declares a `GhosttyTerminal` too, the C handle.
+extension TBDGhosttyCore.GhosttyTerminal {
     /// Sets `appearance`'s colours and cursor as the terminal's defaults.
     func apply(_ appearance: GhosttyAppearance) {
         applyDefaults(

@@ -53,9 +53,6 @@ import Foundation
 import GhosttyVt
 import os
 
-/// The engine's log. Subsystem and category are the app's, so one predicate shows every engine.
-let terminalEngineLog = Logger(subsystem: "com.tbd.app", category: "terminalEngine")
-
 // MARK: - IO context (the only thing C callbacks ever see)
 
 /// An effect a C callback recorded during a parse, delivered after the lock drops.
@@ -390,24 +387,24 @@ struct Aftermath {
 /// What a render signal tells the view about the call that raised it, so the view can decide
 /// whether to draw at once or leave the frame to the display link: see `LeadingEdgePolicy`, and
 /// "Where the facts come from" in `docs/specs/2026-11-08-libghostty-frame-timing-design.md`.
-struct RenderHint: Sendable, Equatable {
+package struct RenderHint: Sendable, Equatable {
     /// Program output fed since a frame last read the terminal, as the call left it:
     /// `TerminalCore.outputBytesSinceFrame`.
-    var outputBytesSinceFrame = 0
+    package var outputBytesSinceFrame = 0
     /// Whether a DEC 2026 hold was open as the call left it: `IOContext.holdOpen`.
-    var holdOpen = false
+    package var holdOpen = false
     /// Whether the program ended a hold since the last call that signalled a render:
     /// `IOContext.holdEnded`, which this call took. A reset's or a resize's hint reports none,
     /// though either ends a hold: the program finished no frame.
-    var holdEnded = false
+    package var holdEnded = false
 
     /// What `close()` signals: no output and no hold.
-    static let empty = RenderHint()
+    package static let empty = RenderHint()
 
     /// This hint with a newer one folded in, for a relay that delivers several signals at once.
     /// The byte count and the open hold are state that every call reads afresh, so the newer value
     /// stands. An ended hold is an event that one call takes, so it stands if either hint saw one.
-    func merged(with newer: RenderHint) -> RenderHint {
+    package func merged(with newer: RenderHint) -> RenderHint {
         RenderHint(
             outputBytesSinceFrame: newer.outputBytesSinceFrame,
             holdOpen: newer.holdOpen,
@@ -422,7 +419,7 @@ struct RenderHold: Equatable, Sendable {
 }
 
 /// Names one `setRenderSignal` call, so only the view that installed a signal can clear it.
-struct RenderSignalToken: Equatable, Sendable {
+package struct RenderSignalToken: Equatable, Sendable {
     fileprivate let id: UInt64
 }
 
@@ -690,7 +687,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// `withRaw` for a frame's `ghostty_render_state_begin_update`, which also takes the byte
     /// counter: it reads `TerminalCore.outputBytesSinceFrame` and zeroes it in the same lock hold,
     /// so the count returned is exactly the output this update consumed. Returns nil once closed.
-    func withRawTakingOutputBytes<T>(
+    package func withRawTakingOutputBytes<T>(
         _ body: (VtTerminal) throws -> T
     ) rethrows -> (value: T, outputBytes: Int)? {
         try withCore(signalsRender: false, changesModes: false) { core, raw -> (value: T, outputBytes: Int) in
@@ -745,7 +742,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// whenever the screen may have changed, and once more by `close()`. Returns the token that
     /// takes it off again.
     @discardableResult
-    func setRenderSignal(_ signal: @escaping @Sendable (RenderHint) -> Void) -> RenderSignalToken {
+    package func setRenderSignal(_ signal: @escaping @Sendable (RenderHint) -> Void) -> RenderSignalToken {
         let (token, previous) = locked { core -> (RenderSignalToken, (@Sendable (RenderHint) -> Void)?) in
             let previous = core.renderSignal
             core.renderSignalID &+= 1
@@ -760,7 +757,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// Takes the render signal off, if it is still the one `token` installed. A second view over
     /// the same terminal may have installed its own since; clearing that one would leave it
     /// drawing nothing.
-    func clearRenderSignal(_ token: RenderSignalToken) {
+    package func clearRenderSignal(_ token: RenderSignalToken) {
         let previous = locked { core -> (@Sendable (RenderHint) -> Void)? in
             guard core.renderSignalID == token.id else { return nil }
             let previous = core.renderSignal
@@ -817,7 +814,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
     /// `resize(cols:rows:)` plus the cell size in pixels, which size reports and image protocols
     /// use. The view passes it; nil keeps the last one.
-    func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?) {
+    package func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?) {
         let columns = UInt16(clamping: max(cols, 1))
         let lines = UInt16(clamping: max(rows, 1))
         var failure: GhosttyResult?
@@ -923,14 +920,14 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
 extension GhosttyTerminal {
     /// An opaque 8-bit sRGB colour as libghostty takes it.
-    struct VtColor: Equatable {
+    package struct VtColor: Equatable {
         var r: UInt8, g: UInt8, b: UInt8
         var ghostty: GhosttyColorRgb { GhosttyColorRgb(r: r, g: g, b: b) }
     }
 
     /// Sets the default colours, cursor style and colour scheme. A program's own OSC 4/10/11/12
     /// overrides are kept: these are the defaults beneath them. Safe on a live terminal.
-    func applyDefaults(
+    package func applyDefaults(
         foreground: VtColor, background: VtColor, cursor: VtColor, palette: [VtColor],
         cursorStyle: GhosttyCursorStyle, cursorBlink: Bool, darkScheme: Bool
     ) {

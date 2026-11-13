@@ -1,5 +1,6 @@
 import Foundation
 import SwiftTerm
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TBDTerminalSerialization
 import TestSupport

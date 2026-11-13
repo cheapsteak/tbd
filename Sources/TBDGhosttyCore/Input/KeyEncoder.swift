@@ -13,27 +13,27 @@ import GhosttyVt
 /// The `*Right` bits are *sides*, not extra modifiers: `.altRight` is only meaningful when `.alt`
 /// is also set, and its absence means "left". libghostty cannot represent "both sides pressed"
 /// and does not need to.
-struct KeyModifiers: OptionSet, Sendable, Hashable {
-    let rawValue: UInt16
-    init(rawValue: UInt16) { self.rawValue = rawValue }
+package struct KeyModifiers: OptionSet, Sendable, Hashable {
+    package let rawValue: UInt16
+    package init(rawValue: UInt16) { self.rawValue = rawValue }
 
-    static let shift = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SHIFT))
-    static let control = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_CTRL))
+    package static let shift = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SHIFT))
+    package static let control = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_CTRL))
     /// Option on macOS.
-    static let alt = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_ALT))
+    package static let alt = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_ALT))
     /// Command on macOS.
-    static let super_ = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SUPER))
-    static let capsLock = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_CAPS_LOCK))
+    package static let super_ = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SUPER))
+    package static let capsLock = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_CAPS_LOCK))
     static let numLock = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_NUM_LOCK))
 
     /// Set when the pressed Shift is the right-hand one. Only read when `.shift` is set.
-    static let shiftRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SHIFT_SIDE))
+    package static let shiftRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SHIFT_SIDE))
     /// Set when the pressed Control is the right-hand one. Only read when `.control` is set.
-    static let controlRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_CTRL_SIDE))
+    package static let controlRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_CTRL_SIDE))
     /// Set when the pressed Option is the right-hand one. Only read when `.alt` is set.
-    static let altRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_ALT_SIDE))
+    package static let altRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_ALT_SIDE))
     /// Set when the pressed Command is the right-hand one. Only read when `.super_` is set.
-    static let superRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SUPER_SIDE))
+    package static let superRight = KeyModifiers(rawValue: UInt16(GHOSTTY_MODS_SUPER_SIDE))
 }
 
 // MARK: - Option-as-Alt
@@ -41,7 +41,7 @@ struct KeyModifiers: OptionSet, Sendable, Hashable {
 /// How the macOS Option key is treated, mirroring `GhosttyOptionAsAlt` (`key/encoder.h`).
 ///
 /// Note the library spells the "both sides" case `TRUE`, not `both`.
-enum OptionAsAlt: Sendable, Hashable {
+package enum OptionAsAlt: Sendable, Hashable {
     /// Option is never Alt: macOS' own Unicode translation wins (Option+B → `∫`).
     case never
     /// Both Option keys act as Alt (`GHOSTTY_OPTION_AS_ALT_TRUE`); Option+B → `ESC b`.
@@ -64,7 +64,7 @@ enum OptionAsAlt: Sendable, Hashable {
     ///
     /// The view layer needs this *before* it asks macOS to translate the key: see
     /// ``KeyEncoder/translationModifiers(for:optionAsAlt:)``.
-    func applies(to mods: KeyModifiers) -> Bool {
+    package func applies(to mods: KeyModifiers) -> Bool {
         guard mods.contains(.alt) else { return false }
         switch self {
         case .never: return false
@@ -81,7 +81,7 @@ enum OptionAsAlt: Sendable, Hashable {
 ///
 /// This is the seam the view layer fills in. Field semantics (and exactly what the AppKit layer
 /// must supply) are spelled out per field below.
-struct KeyPress: Sendable, Hashable {
+package struct KeyPress: Sendable, Hashable {
     /// Press / repeat / release, mirroring `GhosttyKeyAction`.
     ///
     /// AppKit: `keyDown` with `isARepeat == false` → `.press`, `keyDown` with `isARepeat` →
@@ -89,7 +89,7 @@ struct KeyPress: Sendable, Hashable {
     /// modifier key itself, depending on whether its bit appeared or disappeared.
     /// Releases only produce bytes when the kitty `REPORT_EVENTS` flag is on; in legacy mode the
     /// encoder returns nothing for them, which is normal, not an error.
-    enum Action: Sendable, Hashable {
+    package enum Action: Sendable, Hashable {
         case press
         case repeated
         case release
@@ -168,7 +168,7 @@ struct KeyPress: Sendable, Hashable {
     /// preedit is not echoed to the pty.
     var composing: Bool
 
-    init(
+    package init(
         action: Action = .press,
         key: GhosttyKey,
         mods: KeyModifiers = [],
@@ -196,7 +196,7 @@ struct KeyPress: Sendable, Hashable {
 /// options are re-derived from the terminal on every `encode` call. `InputBinding` owns the one
 /// instance, bound to its terminal, and calls `encode` only under the terminal's lock; nothing
 /// else may touch it.
-final class KeyEncoder {
+package final class KeyEncoder {
     private let encoder: GhosttyKeyEncoderHandle
     private let event: GhosttyKeyEvent
 
@@ -440,7 +440,7 @@ final class KeyEncoder {
     ///
     /// Feed the result to `NSEvent.characters(byApplyingModifiers:)` and use it as the base for
     /// ``KeyPress/consumedMods``. Nothing else changes.
-    static func translationModifiers(
+    package static func translationModifiers(
         for mods: KeyModifiers,
         optionAsAlt: OptionAsAlt
     ) -> KeyModifiers {

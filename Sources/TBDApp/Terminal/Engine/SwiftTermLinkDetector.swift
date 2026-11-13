@@ -1,6 +1,6 @@
 import Foundation
 import SwiftTerm
-import TBDGhosttyTerminal
+import TBDGhosttyCore
 
 /// SwiftTerm's own link detection, for the libghostty engine, which has none: the URL or path the
 /// SwiftTerm engine finds on the same screen, soft-wrapped across rows or not. A ⌘-click opens it,

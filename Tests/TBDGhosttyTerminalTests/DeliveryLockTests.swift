@@ -1,5 +1,6 @@
 import Dispatch
 import Foundation
+@testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TestSupport
 import Testing
