@@ -1,6 +1,8 @@
 import AppKit
 import Combine
 import SwiftTerm
+// Scoped: the gate is all this view needs from the engine core.
+import class TBDGhosttyCore.ProgramStatusGate
 // Scoped, not a whole-module import: `TBDShared.Terminal` (the DB row model)
 // would collide with `SwiftTerm.Terminal`.
 import enum TBDShared.ProgramStatusParser
@@ -1143,24 +1145,4 @@ final class OscReplayMute: Sendable {
     func raise() { depth.withLock { $0 += 1 } }
 
     func lower() { depth.withLock { $0 = max($0 - 1, 0) } }
-}
-
-/// `TBDTerminalView`'s holder-vs-tmux switch for the Program Status Protocol
-/// (OSC 7501): on for a holder-transport panel, off for a tmux one. Set on
-/// main from the panel's transport, read on SwiftTerm's parse thread inside
-/// the synchronous OSC handler, hence a lock rather than a plain `Bool`.
-final class ProgramStatusGate: Sendable {
-    private let state: OSAllocatedUnfairLock<Bool>
-
-    init() {
-        state = OSAllocatedUnfairLock(initialState: false)
-    }
-
-    var isEnabled: Bool {
-        state.withLock { $0 }
-    }
-
-    func set(_ enabled: Bool) {
-        state.withLock { $0 = enabled }
-    }
 }

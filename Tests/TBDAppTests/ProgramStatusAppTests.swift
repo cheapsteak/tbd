@@ -3,6 +3,7 @@ import Foundation
 import SwiftTerm
 import Testing
 @testable import TBDApp
+import TBDGhosttyCore
 import TBDShared
 import TestSupport
 
