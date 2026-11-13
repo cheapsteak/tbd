@@ -11,7 +11,8 @@ import TestSupport
 /// A program sees one terminal whichever engine draws it: libghostty answers
 /// the identity queries and the OSC 7501 probe with SwiftTerm's bytes, and
 /// the reports it hands over parsed come out the other side as the daemon
-/// would have read the raw ones.
+/// would have read the raw ones. The identity it answers with is frozen in
+/// `TerminalDeviceIdentity`, and a check here holds that to SwiftTerm's own.
 ///
 /// The engine-level checks build both engines through the factory and need a
 /// Metal device for libghostty's view; without one they skip with that reason.
@@ -202,37 +203,43 @@ struct TerminalEngineIdentityTests {
 
     // MARK: - The adapter, headless
 
-    /// The answers the engine hands libghostty are read from SwiftTerm at run
-    /// time. Fed to a headless libghostty terminal, they must give SwiftTerm's
-    /// bytes exactly; this runs without Metal, where the engine-level check
-    /// above cannot.
-    @Test("libghostty given SwiftTerm's identity answers DA1, DA2 and XTVERSION with SwiftTerm's bytes")
-    func libghosttyGivenSwiftTermsIdentityAnswersWithItsBytes() throws {
-        let identity = SwiftTermDeviceIdentity.answers
-        let attributes = try #require(identity.deviceAttributes, "SwiftTerm's DA1 or DA2 reply did not parse")
-        let version = try #require(identity.xtversion, "SwiftTerm's XTVERSION reply did not parse")
+    /// The frozen identity is SwiftTerm's at the pinned revision, byte for
+    /// byte. Each reply is its own expectation, and each side is compared as
+    /// escaped text, so a failure reads as the two replies.
+    @Test("The frozen DA1, DA2 and XTVERSION replies are SwiftTerm's, byte for byte")
+    func frozenIdentityIsSwiftTermsBytes() {
+        let swiftTerm = SwiftTermDeviceIdentity.rawAnswers()
+        #expect(Self.escaped(TerminalDeviceIdentity.da1Reply) == Self.escaped(swiftTerm.da1))
+        #expect(Self.escaped(TerminalDeviceIdentity.da2Reply) == Self.escaped(swiftTerm.da2))
+        #expect(Self.escaped(TerminalDeviceIdentity.xtversionReply) == Self.escaped(swiftTerm.xtversion))
+    }
+
+    /// The engine hands libghostty the frozen identity in libghostty's terms.
+    /// Fed to a headless libghostty terminal, those must give the frozen bytes
+    /// exactly; this runs without Metal, where the engine-level check above
+    /// cannot.
+    @Test("libghostty given the frozen identity answers DA1, DA2 and XTVERSION with its bytes")
+    func libghosttyGivenTheFrozenIdentityAnswersWithItsBytes() throws {
         let writes = OSAllocatedUnfairLock<[UInt8]>(initialState: [])
         let terminal = try TBDGhosttyCore.GhosttyTerminal(
             cols: 80, rows: 24, scrollbackLines: 100,
             callbacks: GhosttyTerminalCallbacks(
                 writePty: { bytes in writes.withLock { $0.append(contentsOf: bytes) } },
-                deviceAttributes: { attributes },
-                xtversion: { version }))
+                deviceAttributes: { TerminalDeviceIdentity.deviceAttributes },
+                xtversion: { TerminalDeviceIdentity.xtversion }))
         defer { terminal.close() }
-        let swiftTerm = SwiftTermDeviceIdentity.rawAnswers()
 
         let pairs: [(name: String, query: String, expected: [UInt8])] = [
-            ("DA1", Self.da1, swiftTerm.da1),
-            ("DA2", Self.da2, swiftTerm.da2),
-            ("XTVERSION", Self.xtversion, swiftTerm.xtversion),
+            ("DA1", Self.da1, TerminalDeviceIdentity.da1Reply),
+            ("DA2", Self.da2, TerminalDeviceIdentity.da2Reply),
+            ("XTVERSION", Self.xtversion, TerminalDeviceIdentity.xtversionReply),
         ]
         for (name, query, expected) in pairs {
             writes.withLock { $0 = [] }
             Self.feed(query, into: terminal)
             let answer = writes.withLock { $0 }
-            #expect(!expected.isEmpty, "SwiftTerm gave no \(name) reply")
             #expect(answer == expected,
-                    "\(name): libghostty answered \(EngineTestSupport.describe(answer)), SwiftTerm \(EngineTestSupport.describe(expected))")
+                    "\(name): libghostty answered \(EngineTestSupport.describe(answer)), frozen \(EngineTestSupport.describe(expected))")
         }
     }
 
@@ -329,6 +336,19 @@ struct TerminalEngineIdentityTests {
     /// bytes.
     nonisolated private static func feed(_ text: String, into terminal: TBDGhosttyCore.GhosttyTerminal) {
         terminal.feed(Array(text.utf8)[...])
+    }
+
+    /// `bytes` as text, one byte at a time: printable ASCII as itself, a
+    /// backslash doubled, and every other byte as `\xNN`. Different bytes give
+    /// different text, so comparing two of these compares the bytes.
+    nonisolated private static func escaped(_ bytes: [UInt8]) -> String {
+        bytes.map { (byte: UInt8) -> String in
+            switch byte {
+            case UInt8(ascii: "\\"): return "\\\\"
+            case 0x20...0x7E: return String(UnicodeScalar(byte))
+            default: return String(format: "\\x%02X", byte)
+            }
+        }.joined()
     }
 
     nonisolated private static func base64(_ text: String) -> String {

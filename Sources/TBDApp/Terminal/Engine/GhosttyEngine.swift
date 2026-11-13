@@ -32,10 +32,9 @@ private let ghosttyEngineLog = Logger(subsystem: "com.tbd.app", category: "termi
 /// - **Reports arrive parsed.** The engine writes each one back into the wire
 ///   form TBD forwards (`ProgramStatusPayloadBuilder`), so the daemon parses
 ///   both engines' reports with the one `ProgramStatusParser`.
-/// - **Device attributes are SwiftTerm's.** DA1, DA2 and XTVERSION are answered
-///   with the bytes SwiftTerm in this build answers with
-///   (`SwiftTermDeviceIdentity`), so a program sees one terminal whichever
-///   engine draws it.
+/// - **Device attributes are TBD's.** DA1, DA2 and XTVERSION are answered
+///   with the frozen bytes in `TerminalDeviceIdentity`, the ones SwiftTerm
+///   answers with, so a program sees one terminal whichever engine draws it.
 ///
 /// Only `feed(_:)` runs off main; see `TerminalEngine` for the threading rule.
 /// Design: `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
@@ -117,18 +116,7 @@ final class GhosttyEngine: TerminalEngine {
     /// anything reaches the delegate. Static, so no callback can capture the
     /// engine before it exists.
     nonisolated private static func callbacks(relay: GhosttyEngineRelay) -> GhosttyTerminalCallbacks {
-        let identity = SwiftTermDeviceIdentity.answers
         let probeReply = Array(ProgramStatusProtocol.probeReply.utf8)
-        // Left nil when SwiftTerm's answer did not parse, so libghostty answers
-        // with its own rather than with nothing.
-        var deviceAttributes: (@Sendable () -> GhosttyTerminalCallbacks.DeviceAttributes)?
-        if let attributes = identity.deviceAttributes {
-            deviceAttributes = { attributes }
-        }
-        var xtversion: (@Sendable () -> String)?
-        if let version = identity.xtversion {
-            xtversion = { version }
-        }
         return GhosttyTerminalCallbacks(
             writePty: { bytes in
                 // Decided here, in parse order, as SwiftTerm decides inside its
@@ -164,8 +152,8 @@ final class GhosttyEngine: TerminalEngine {
                     }
                 }
             },
-            deviceAttributes: deviceAttributes,
-            xtversion: xtversion)
+            deviceAttributes: { TerminalDeviceIdentity.deviceAttributes },
+            xtversion: { TerminalDeviceIdentity.xtversion })
     }
 
     private func deliverReply(_ bytes: [UInt8]) {
@@ -611,21 +599,11 @@ private struct GhosttyScreenReader: TerminalScreenReader {
 
 // MARK: - Device attributes
 
-/// The DA1, DA2 and XTVERSION answers SwiftTerm gives in this build, read once
-/// from a headless SwiftTerm terminal and handed to libghostty in its terms.
-///
-/// Read rather than written down, because SwiftTerm's XTVERSION carries its
-/// build's tag and version, and a copy would drift from it on the next
-/// SwiftTerm update. An answer that does not parse is left to libghostty's
-/// default, and logged.
+/// SwiftTerm's own DA1, DA2 and XTVERSION answers, read from a headless
+/// SwiftTerm terminal. The libghostty engine does not answer from these: it
+/// answers with `TerminalDeviceIdentity`'s frozen bytes, and the identity
+/// tests hold those to these while SwiftTerm is still linked.
 enum SwiftTermDeviceIdentity {
-    struct Answers: Sendable {
-        let deviceAttributes: GhosttyTerminalCallbacks.DeviceAttributes?
-        let xtversion: String?
-    }
-
-    static let answers: Answers = read()
-
     /// SwiftTerm's raw answers, for the identity tests.
     static func rawAnswers() -> (da1: [UInt8], da2: [UInt8], xtversion: [UInt8]) {
         let collector = ReplyCollector()
@@ -636,45 +614,6 @@ enum SwiftTermDeviceIdentity {
             return collector.bytes
         }
         return (ask("\u{1b}[c"), ask("\u{1b}[>c"), ask("\u{1b}[>0q"))
-    }
-
-    private static func read() -> Answers {
-        let raw = rawAnswers()
-        let primary = parameters(of: raw.da1, introducer: "\u{1b}[?", final: "c")
-        let secondary = parameters(of: raw.da2, introducer: "\u{1b}[>", final: "c")
-        var attributes: GhosttyTerminalCallbacks.DeviceAttributes?
-        if let primary, let level = primary.first, let secondary, secondary.count >= 3 {
-            attributes = GhosttyTerminalCallbacks.DeviceAttributes(
-                conformanceLevel: level,
-                features: Array(primary.dropFirst()),
-                deviceType: secondary[0],
-                firmwareVersion: secondary[1],
-                romCartridge: secondary[2],
-                unitID: 0)
-        } else {
-            ghosttyEngineLog.error(
-                "SwiftTerm's device attributes did not parse; libghostty answers with its own")
-        }
-        let xtversion = text(of: raw.xtversion, introducer: "\u{1b}P>|", terminator: "\u{1b}\\")
-        if xtversion == nil {
-            ghosttyEngineLog.error("SwiftTerm's XTVERSION did not parse; libghostty answers with its own")
-        }
-        return Answers(deviceAttributes: attributes, xtversion: xtversion)
-    }
-
-    /// The numbers of `CSI <introducer> n ; n ; … <final>`.
-    private static func parameters(of bytes: [UInt8], introducer: String, final: String) -> [UInt16]? {
-        guard let body = text(of: bytes, introducer: introducer, terminator: final) else { return nil }
-        let numbers = body.split(separator: ";", omittingEmptySubsequences: false).map { UInt16($0) }
-        guard !numbers.isEmpty, numbers.allSatisfy({ $0 != nil }) else { return nil }
-        return numbers.compactMap { $0 }
-    }
-
-    private static func text(of bytes: [UInt8], introducer: String, terminator: String) -> String? {
-        guard let reply = String(bytes: bytes, encoding: .utf8),
-              reply.hasPrefix(introducer), reply.hasSuffix(terminator),
-              reply.count >= introducer.count + terminator.count else { return nil }
-        return String(reply.dropFirst(introducer.count).dropLast(terminator.count))
     }
 
     /// Holds a headless terminal's replies. `Terminal` keeps its delegate
