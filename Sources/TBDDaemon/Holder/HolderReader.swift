@@ -189,7 +189,10 @@ actor HolderReader {
     ///   unhandled, as it was before the protocol existed.
     /// - Parameter emulator: which terminal parses the session's output, read
     ///   once here, so a running session never changes emulator. Production
-    ///   passes nothing; the reader's suites pass each kind.
+    ///   passes nothing. The six screen-reading `HolderReaderTests` run once
+    ///   per kind. The harnesses in `HolderScreenContractTests`,
+    ///   `HolderProgramStatusTests` and `HolderRenderProjectionTests` take a
+    ///   kind, defaulting to SwiftTerm, so each test there can choose.
     init(
         sessionID: UUID,
         ptyFD: Int32,

@@ -196,7 +196,8 @@ public enum TerminalSnapshotWriter {
     /// - Two spurious `bufferActivated` / alternate-screen-switch delegate
     ///   rounds. Inert in the daemon, whose delegate is
     ///   `ReplyForwardingDelegate` (`SwiftTermHolderEmulator.swift`) and
-    ///   implements only `send`. **Not inert in the app**, where
+    ///   implements only `send`, `showCursor` and `hideCursor`, none of which
+    ///   reacts to a buffer switch. **Not inert in the app**, where
     ///   `MacTerminalView` posts each one onto its event queue and reacts —
     ///   so running this same path against an app-side emulator, as the
     ///   detach handback would, needs that considered first.

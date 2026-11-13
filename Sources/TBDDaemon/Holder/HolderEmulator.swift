@@ -6,17 +6,27 @@ import os
 /// The headless terminal behind one holder-backed session, as `HolderReader`
 /// uses it.
 ///
-/// `SwiftTermHolderEmulator` is the one implementation. The reader picks it
-/// through `HolderEmulatorKind` when the reader is built, and a running
-/// session never changes emulator. What every implementation owes the reader:
+/// `SwiftTermHolderEmulator` implements it, and the notes below also say how a
+/// libghostty emulator meets each rule. The reader picks its emulator through
+/// `HolderEmulatorKind` when the reader is built, and a running session never
+/// changes emulator. What every implementation owes the reader:
 ///
-/// - **One lock, and every member takes it.** The drain thread feeds while the
-///   actor renders, resizes and snapshots, so each member is one hold of the
-///   terminal's own lock rather than of a second lock beside it.
+/// - **One lock: the terminal's own.** The drain thread feeds while the actor
+///   renders, resizes and snapshots, so every member is one hold of the lock
+///   the terminal parses under, never of a second lock beside it.
 /// - **A feed and its stamp are one step.** `feed` and `feedPreamble` call the
 ///   `HolderEmulatorLedger`'s `stampArrival()` inside the same hold as the
 ///   parse, and nothing else stamps it, so a screen's lines and its age are
-///   read in one hold and always describe the same moment.
+///   read in one hold and always describe the same moment. Each engine needs
+///   its own way to run the stamp inside that hold:
+///   - **SwiftTerm** publishes `terminalLock`. The emulator takes it around
+///     the stamp and `Terminal.feed`, and around every read.
+///   - **libghostty**'s `GhosttyTerminal.feed` takes the terminal's private,
+///     non-recursive lock itself, so no caller can wrap it. `GhosttyTerminal`
+///     provides a feed that takes a closure and runs it inside the same hold
+///     as `ghostty_terminal_vt_write`, and the emulator stamps there. Reads go
+///     through `withLocked`. `GhosttySnapshotWriter` takes the lock itself, so
+///     the emulator calls it outside any other hold.
 /// - **Replies and reports are wired at construction.** The reply sink (the
 ///   session's pty) and the OSC 7501 tap reach the emulator through
 ///   `HolderEmulatorKind.makeEmulator`, never through a member here.
@@ -30,9 +40,14 @@ protocol HolderEmulator: AnyObject, Sendable {
     func feed(_ bytes: ArraySlice<UInt8>)
 
     /// A departing viewer's handback preamble. Stamps the ledger and parses in
-    /// one hold, like `feed`, with OSC 7501 silenced for exactly this feed: a
-    /// probe in it is not answered and a report in it is not delivered,
-    /// because neither came from the child now.
+    /// one hold, like `feed`.
+    ///
+    /// OSC 7501 is always silenced for exactly this feed: no report in it is
+    /// delivered and no probe in it is answered, because neither came from
+    /// the child now. An emulator may also drop the other replies the preamble
+    /// provokes, because they answer questions the child never asked. The
+    /// libghostty emulator drops them, with `isMuted`. The SwiftTerm emulator
+    /// forwards them, as `feed` does.
     func feedPreamble(_ bytes: ArraySlice<UInt8>)
 
     /// Reshapes the grid. Never touches the tty, which is the reader's.
@@ -62,6 +77,10 @@ protocol HolderEmulator: AnyObject, Sendable {
     /// The whole terminal — modes, scrollback, viewport, cursor — as bytes
     /// that rebuild it in a fresh terminal. Nothing it provokes reaches the
     /// child, and it does not stamp the ledger.
+    ///
+    /// It never fails the attach. An emulator that cannot serialize its
+    /// terminal logs an error and returns a preamble that still resets the
+    /// receiver.
     func snapshotPreamble(maxScrollbackLines: Int) -> Data
 }
 
