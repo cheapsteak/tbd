@@ -1121,12 +1121,9 @@ public final class Daemon: Sendable {
         // `down` reclaims any holder still listening there.
         //
         // The registry reads the daemon's libghostty emulator flag each time it
-        // builds a reader. A failed read takes the shipped default, as the
-        // control-mode flag's provider does.
+        // builds a reader.
         let holderEmulatorKind: @Sendable () async -> HolderEmulatorKind = { [config = database.config] in
-            let enabled = (try? await config.get().ghosttyDaemonEmulatorEnabled)
-                ?? Config.ghosttyDaemonEmulatorDefault
-            return HolderEmulatorKind(ghosttyDaemonEmulatorEnabled: enabled)
+            await HolderEmulatorKind.configured(by: config)
         }
         let holderRegistry: HolderRegistry? = HolderRegistry(
             owner: await HolderRegistry.installationOwner(config: database.config),

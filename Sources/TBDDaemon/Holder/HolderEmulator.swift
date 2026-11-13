@@ -119,6 +119,26 @@ enum HolderEmulatorKind: CaseIterable, Sendable {
         self = ghosttyDaemonEmulatorEnabled ? .ghostty : .swiftTerm
     }
 
+    /// The kind the flag picks now, read from the config table: what the
+    /// daemon hands its registry, which asks each time it builds a reader.
+    ///
+    /// A failed read is logged and takes the shipped default, so a database
+    /// fault costs the flag for one reader and never the reader itself.
+    static func configured(by config: ConfigStore) async -> HolderEmulatorKind {
+        let enabled: Bool
+        do {
+            enabled = try await config.get().ghosttyDaemonEmulatorEnabled
+        } catch {
+            logger.error(
+                """
+                could not read ghostty_daemon_emulator_enabled, so this reader takes the shipped \
+                default: \(String(describing: error), privacy: .public)
+                """)
+            enabled = Config.ghosttyDaemonEmulatorDefault
+        }
+        return HolderEmulatorKind(ghosttyDaemonEmulatorEnabled: enabled)
+    }
+
     /// Builds this kind's emulator for one session, with its ledger stamped
     /// as adopted now and its outbound wiring in place.
     ///
