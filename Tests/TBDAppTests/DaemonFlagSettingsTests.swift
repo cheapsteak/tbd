@@ -143,6 +143,40 @@ struct DaemonFlagSettingsTests {
         #expect(Config.sessionRestoreDefault == false, "the flag ships off while it soaks")
     }
 
+    @Test("a daemon that does not report the libghostty emulator reads it as the shipped default")
+    func unreportedGhosttyDaemonEmulatorReadsTheDefault() throws {
+        let decoded = try JSONDecoder().decode(
+            DaemonCapabilitiesResult.self, from: Data(#"{"controlModeEnabled":false}"#.utf8))
+        #expect(decoded.ghosttyDaemonEmulatorEnabled == Config.ghosttyDaemonEmulatorDefault)
+        #expect(Config.ghosttyDaemonEmulatorDefault == false, "the flag ships off while it soaks")
+    }
+
+    /// The toggle reads the daemon's capabilities, never `UserDefaults`: before
+    /// they arrive it shows the shipped default, and after they arrive it
+    /// shows what the daemon reports, in both directions.
+    @Test("the daemon emulator toggle shows what the daemon reports")
+    func ghosttyDaemonEmulatorToggleFollowsCapabilities() async {
+        await withAppState { state in
+            let binding = TerminalSettingsView.ghosttyDaemonEmulatorBinding(state)
+            #expect(state.daemonCapabilities == nil)
+            #expect(binding.wrappedValue == Config.ghosttyDaemonEmulatorDefault)
+            state.daemonCapabilities = DaemonFlagToggle.ghosttyDaemonEmulator.capabilities(reporting: true)
+            #expect(binding.wrappedValue == true)
+            state.daemonCapabilities = DaemonFlagToggle.ghosttyDaemonEmulator.capabilities(reporting: false)
+            #expect(binding.wrappedValue == false)
+        }
+    }
+
+    /// The help is the toggle's whole explanation, and it carries the two
+    /// promises the operator acts on: when a change applies, and how to roll
+    /// it back.
+    @Test("the daemon emulator help says when a change applies and how to roll it back")
+    func ghosttyDaemonEmulatorHelpStatesWhenAndRollback() {
+        let help = TerminalSettingsView.ghosttyDaemonEmulatorHelp
+        #expect(help.contains("New sessions use it at once, and every session uses it after the next daemon start."))
+        #expect(help.contains("To roll back, turn it off and restart the daemon."))
+    }
+
     @Test("a daemon that does not report remote transcript live sync reads it as off")
     func unreportedRemoteTranscriptLiveSyncReadsOff() throws {
         let decoded = try JSONDecoder().decode(
@@ -162,6 +196,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
     case transcriptStreaming
     case remoteTranscriptLiveSync
     case sessionRestore
+    case ghosttyDaemonEmulator
 
     var testDescription: String { rawValue }
 
@@ -175,6 +210,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptStreaming: state.transcriptStreamingFlagSetter = setter
         case .remoteTranscriptLiveSync: state.remoteTranscriptLiveSyncFlagSetter = setter
         case .sessionRestore: state.sessionRestoreFlagSetter = setter
+        case .ghosttyDaemonEmulator: state.ghosttyDaemonEmulatorFlagSetter = setter
         }
     }
 
@@ -188,6 +224,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptStreaming: await state.setTranscriptStreamingEnabled(enabled)
         case .remoteTranscriptLiveSync: await state.setRemoteTranscriptLiveSyncEnabled(enabled)
         case .sessionRestore: await state.setSessionRestoreEnabled(enabled)
+        case .ghosttyDaemonEmulator: await state.setGhosttyDaemonEmulatorEnabled(enabled)
         }
     }
 
@@ -201,6 +238,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptStreaming: result.transcriptStreamingEnabled = enabled
         case .remoteTranscriptLiveSync: result.remoteTranscriptLiveSyncEnabled = enabled
         case .sessionRestore: result.sessionRestoreEnabled = enabled
+        case .ghosttyDaemonEmulator: result.ghosttyDaemonEmulatorEnabled = enabled
         }
         return result
     }
@@ -215,6 +253,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
         case .transcriptStreaming: return capabilities.transcriptStreamingEnabled
         case .remoteTranscriptLiveSync: return capabilities.remoteTranscriptLiveSyncEnabled
         case .sessionRestore: return capabilities.sessionRestoreEnabled
+        case .ghosttyDaemonEmulator: return capabilities.ghosttyDaemonEmulatorEnabled
         }
     }
 }

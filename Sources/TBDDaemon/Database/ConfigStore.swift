@@ -741,6 +741,21 @@ public struct ConfigStore: Sendable {
         }
     }
 
+    /// Persist the daemon's libghostty emulator gate. Off is the shipped
+    /// default. Writing either value is an explicit gesture that leaves the
+    /// column non-NULL forever after, so an operator who turns the emulator off
+    /// keeps it off when the shipped default graduates. The holder registry
+    /// reads it when it builds a reader, so a running session keeps the
+    /// emulator it was built with.
+    public func setGhosttyDaemonEmulator(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET ghostty_daemon_emulator_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
     /// Persist the Claude cloud sessions gate (design 2026-08-15 §7). Off is the
     /// shipped default. Writing either value is an explicit gesture that leaves
     /// the column non-NULL forever after — including `false`, which is the

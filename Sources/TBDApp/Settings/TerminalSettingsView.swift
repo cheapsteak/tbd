@@ -228,10 +228,17 @@ struct TerminalSettingsView: View {
                 Text("Takes effect for terminals opened after the change — restart the app to switch every open terminal at once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle(
+                    "Use libghostty for the daemon's copy of each terminal",
+                    isOn: Self.ghosttyDaemonEmulatorBinding(appState))
+                    .help(Self.ghosttyDaemonEmulatorHelp)
+                Text(Self.ghosttyDaemonEmulatorHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("Auto-resize and GPU rendering are off by default. The libghostty engine is on by default; turn it off to go back to SwiftTerm. All three are under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of one, turn it off and restart the app.")
+                Text("Auto-resize, GPU rendering and libghostty in the daemon are off by default. The libghostty engine is on by default; turn it off to go back to SwiftTerm. All four are under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of one, turn it off and restart the app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -315,6 +322,34 @@ struct TerminalSettingsView: View {
     static func ghosttyEngineBinding(_ appState: AppState) -> Binding<Bool> {
         Bindable(appState).ghosttyTerminalEngineSetting
     }
+
+    /// The binding the daemon's libghostty emulator toggle is handed, kept here
+    /// so the view and its tests use the same one. The flag lives in the
+    /// daemon's config, not in `UserDefaults`, so the toggle reads the daemon's
+    /// capabilities and writes through `AppState.setGhosttyDaemonEmulatorEnabled`,
+    /// never `@AppStorage`. Before capabilities arrive it reads the shipped
+    /// default.
+    @MainActor
+    static func ghosttyDaemonEmulatorBinding(_ appState: AppState) -> Binding<Bool> {
+        Binding(
+            get: {
+                appState.daemonCapabilities?.ghosttyDaemonEmulatorEnabled
+                    ?? Config.ghosttyDaemonEmulatorDefault
+            },
+            set: { newValue in Task { await appState.setGhosttyDaemonEmulatorEnabled(newValue) } }
+        )
+    }
+
+    /// The daemon emulator toggle's help and caption. A stored constant so a
+    /// test can pin its promises: when the change applies, and how to roll it
+    /// back.
+    static let ghosttyDaemonEmulatorHelp = """
+        The daemon keeps its own copy of each terminal's screen, which it hands to the app when \
+        you open the terminal and reads for tbd terminal output. When on, the daemon reads that \
+        screen with libghostty instead of SwiftTerm. New sessions use it at once, and every \
+        session uses it after the next daemon start. To roll back, turn it off and restart the \
+        daemon.
+        """
 
     private var currentScheme: TerminalColorScheme {
         ColorSchemes.scheme(forID: appearance.schemeID, store: appState.themeStore)
