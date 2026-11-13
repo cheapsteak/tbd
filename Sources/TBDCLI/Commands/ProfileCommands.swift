@@ -18,6 +18,7 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileLogin.self,
             ProfileKeychain.self,
             ProfileExec.self,
+            ProfileFableCheck.self,
             ProfileBalancing.self,
             ProfilePool.self,
             ProfileRename.self,
@@ -247,6 +248,27 @@ func usageAgeMarker(fetchedAt: Date?, now: Date = Date()) -> String? {
     let hours = minutes / 60
     if hours < 24 { return "(updated \(hours)h ago)" }
     return "(updated \(hours / 24)d ago)"
+}
+
+/// Render the FABLE column: `ok`, `out` or `?` plus the reading's age
+/// ("out 12m", "ok 3h", "? 2d"; no age under a minute), or an em dash when the
+/// profile has never been checked. The state shown is the last reading at any
+/// age: the age beside it is how much to trust it.
+func fableCell(_ fable: FableAvailability?, now: Date = Date()) -> String {
+    guard let fable else { return "—" }
+    let state: String
+    switch fable.state {
+    case .available: state = "ok"
+    case .out: state = "out"
+    case .unknown: state = "?"
+    }
+    let seconds = max(0, now.timeIntervalSince(fable.checkedAt))
+    let minutes = Int(seconds / 60)
+    if minutes < 1 { return state }
+    if minutes < 60 { return "\(state) \(minutes)m" }
+    let hours = minutes / 60
+    if hours < 24 { return "\(state) \(hours)h" }
+    return "\(state) \(hours / 24)d"
 }
 
 /// The exact JSON text `tbd profile list --json` prints: the RPC result inside
@@ -479,8 +501,26 @@ struct ProfileList: AsyncParsableCommand {
     @Flag(name: .long, help: "Refresh usage for stale logged-in OAuth profiles before listing (skips fresh or rate-limited profiles)")
     var refresh = false
 
+    @Flag(name: .long, help: "Probe Fable availability now for every pool profile before listing (a few tokens per account; same as `tbd profile fable-check`)")
+    var refreshFable = false
+
     mutating func run() async throws {
         let client = SocketClient()
+
+        if refreshFable {
+            // Like --refresh, an optimization: a failed probe pass leaves the
+            // listing to show whatever readings exist.
+            do {
+                _ = try client.call(
+                    method: RPCMethod.modelProfileFableCheck,
+                    params: ModelProfileFableCheckParams(ids: nil),
+                    resultType: ModelProfileFableCheckResult.self)
+            } catch {
+                guard case CLIError.rpcError(let message) = error else { throw error }
+                FileHandle.standardError.write(Data(
+                    "warning: Fable check failed (\(message)); listing anyway\n".utf8))
+            }
+        }
 
         if refresh {
             // A refresh is an optimization, never a precondition: the listing
@@ -538,7 +578,7 @@ struct ProfileList: AsyncParsableCommand {
 
         let header: [(String, Int)] = [
             ("NAME", 24), ("KIND", 6), ("IDENTITY", 26),
-            ("LIVE", 4), ("5H", 4), ("RESET", 10), ("WK", 4), ("", 0),
+            ("LIVE", 4), ("5H", 4), ("RESET", 10), ("WK", 4), ("FABLE", 8), ("", 0),
         ]
         print(tableRow(header))
         let width = header.reduce(0) { $0 + max($1.1, $1.0.count) + 2 }
@@ -563,6 +603,7 @@ struct ProfileList: AsyncParsableCommand {
                 (usagePercentCell(session), 4),
                 (usageResetCell(session?.resetsAt), 10),
                 (usagePercentCell(weeklyAll), 4),
+                (fableCell(entry.fable), 8),
             ]
 
             var trailing: [String] = []
@@ -578,6 +619,59 @@ struct ProfileList: AsyncParsableCommand {
             print(tableRow(cells))
         }
         for note in staleNotes { print(note) }
+    }
+}
+
+// MARK: - profile fable-check
+
+struct ProfileFableCheck: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "fable-check",
+        abstract: "Probe now whether profiles can run Fable (it needs usage credits, separate from the 5-hour and weekly windows)",
+        discussion: """
+            Runs a few-token `claude -p --model claude-fable-5-2` under each profile and \
+            prints the result. With no names, checks every pool profile (signed-in and \
+            token, not opted out). `out` means the account has no Fable usage credits; \
+            `?` means the probe could not tell (a 5-hour limit, a network or auth error), \
+            which balancing treats as not known to be out.
+            """)
+
+    @Argument(help: "Profile names or UUIDs (default: every pool profile)")
+    var names: [String] = []
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        var ids: [UUID]?
+        if !names.isEmpty {
+            let list = try client.call(
+                method: RPCMethod.modelProfileList, resultType: ModelProfileListResult.self)
+            ids = try names.map { try resolveProfile(named: $0, in: list.profiles).profile.id }
+        }
+        let result = try client.call(
+            method: RPCMethod.modelProfileFableCheck,
+            params: ModelProfileFableCheckParams(ids: ids),
+            resultType: ModelProfileFableCheckResult.self)
+        if json {
+            guard let output = jsonString(result) else { throw ExitCode.failure }
+            print(output)
+            return
+        }
+        if result.profiles.isEmpty {
+            print("No pool profiles to check.")
+            return
+        }
+        print(tableRow([("NAME", 24), ("FABLE", 8), ("REASON", 0)]))
+        print(String(repeating: "-", count: 60))
+        for entry in result.profiles {
+            print(tableRow([
+                (entry.name, 24),
+                (fableCell(entry.fable), 8),
+                (entry.fable.reason ?? "", 0),
+            ]))
+        }
     }
 }
 

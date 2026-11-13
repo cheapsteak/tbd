@@ -1707,7 +1707,11 @@ extension WorktreeLifecycle {
                     balance: ModelProfileResolver.balancesWorktreeSpawn(
                         restoringArchivedSessions: !archivedSessions.isEmpty,
                         carryingOver: carryover != nil),
-                    worktreeID: worktreeID)
+                    worktreeID: worktreeID,
+                    model: claudeSpawnExtras?.model ?? modelOverride)
+            } catch let error as FableUnavailableError {
+                // Never a silent fallback to another account or model.
+                throw WorktreeLifecycleError.invalidOperation(error.localizedDescription)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil

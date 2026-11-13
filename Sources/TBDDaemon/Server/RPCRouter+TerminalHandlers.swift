@@ -482,7 +482,13 @@ extension RPCRouter {
                 resolvedProfile = try await modelProfileResolver.resolve(
                     repoID: worktree.repoID,
                     balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
-                    worktreeID: params.worktreeID)
+                    worktreeID: params.worktreeID,
+                    model: spawnExtras?.model)
+            } catch let error as FableUnavailableError {
+                // Never a silent fallback to another account or model.
+                let message = error.localizedDescription
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil

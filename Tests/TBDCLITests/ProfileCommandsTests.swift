@@ -553,4 +553,38 @@ struct ProfileCommandsTests {
             _ = try ProfileRename.parse(["acme"])
         }
     }
+
+    // MARK: - FABLE column
+
+    @Test func fableCell_rendersStateAndAge() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func cell(_ state: FableAvailability.State, ago: TimeInterval) -> String {
+            fableCell(
+                FableAvailability(state: state, checkedAt: now.addingTimeInterval(-ago), source: .probe),
+                now: now)
+        }
+        #expect(fableCell(nil, now: now) == "—")
+        #expect(cell(.out, ago: 12 * 60) == "out 12m")
+        #expect(cell(.available, ago: 3 * 3600 + 5) == "ok 3h")
+        #expect(cell(.unknown, ago: 2 * 86_400) == "? 2d")
+        #expect(cell(.out, ago: 20) == "out")
+        #expect(cell(.out, ago: -500) == "out")   // future-stamped never shows a negative age
+    }
+
+    @Test func profileListJSON_carriesFableOnlyWhenKnown() throws {
+        let when = Date(timeIntervalSince1970: 1_800_000_000)
+        let known = ModelProfileWithUsage(
+            profile: ModelProfile(name: "a", kind: .oauth),
+            fable: FableAvailability(state: .out, reason: "model_requires_usage_credits", checkedAt: when, source: .session))
+        let unknown = ModelProfileWithUsage(profile: ModelProfile(name: "b", kind: .oauth))
+        let output = try #require(profileListJSONOutput(ModelProfileListResult(profiles: [known, unknown])))
+        let root = try #require(try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        let profiles = try #require(root["profiles"] as? [[String: Any]])
+        let fable = try #require(profiles[0]["fable"] as? [String: Any])
+        #expect(fable["state"] as? String == "out")
+        #expect(fable["reason"] as? String == "model_requires_usage_credits")
+        #expect(fable["source"] as? String == "session")
+        #expect(fable["checkedAt"] != nil)
+        #expect(profiles[1]["fable"] == nil)
+    }
 }

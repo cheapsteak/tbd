@@ -74,10 +74,12 @@ public actor ProfilePickReservations {
     ///   - candidates: The candidate list as read from the stores.
     ///   - pickTime: The time the picker judges snapshot staleness against.
     ///   - policy: The usage ceiling and reading-age thresholds.
+    ///   - requiresFable: The spawn asks for a Fable model (see `ProfilePoolPicker.pick`).
     public func pickAndReserve(
         candidates: [ProfilePoolCandidate],
         pickTime: Date,
-        policy: ProfilePoolPolicy = .standard
+        policy: ProfilePoolPolicy = .standard,
+        requiresFable: Bool = false
     ) -> Outcome {
         let current = now()
         let expiry = current.addingTimeInterval(-ttl)
@@ -93,7 +95,8 @@ public actor ProfilePickReservations {
             copy.liveSessions += held[candidate.profileID] ?? 0
             return copy
         }
-        let decision = ProfilePoolPicker.pick(candidates: adjusted, now: pickTime, policy: policy)
+        let decision = ProfilePoolPicker.pick(
+            candidates: adjusted, now: pickTime, policy: policy, requiresFable: requiresFable)
         var reservationID: UUID?
         if let chosen = decision.chosen ?? decision.fallback?.profileID {
             let id = UUID()

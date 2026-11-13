@@ -1527,10 +1527,16 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// daemons that implement the load-balancing feature (design 2026-09-05);
     /// nil on older daemons.
     public let liveSessions: Int?
+    /// The daemon's latest Fable reading for this profile, at any age (the
+    /// reader judges freshness from `checkedAt`). nil = never checked, or an
+    /// older daemon that doesn't send the field. Never carries a credential
+    /// or reply text; see `FableAvailability`.
+    public let fable: FableAvailability?
     public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
                 loginIdentity: String? = nil, configDirPath: String? = nil,
                 usageSnapshot: ProfileUsageSnapshot? = nil,
-                tokenTail: String? = nil, liveSessions: Int? = nil) {
+                tokenTail: String? = nil, liveSessions: Int? = nil,
+                fable: FableAvailability? = nil) {
         self.profile = profile
         self.usage = usage
         self.loginIdentity = loginIdentity
@@ -1538,6 +1544,7 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
         self.usageSnapshot = usageSnapshot
         self.tokenTail = tokenTail
         self.liveSessions = liveSessions
+        self.fable = fable
     }
 }
 
