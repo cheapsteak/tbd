@@ -291,6 +291,10 @@ actor HolderRegistry {
     /// pretending it could have spawned one. Adoption does not need it: an
     /// already-running holder is reached through its socket.
     private let spawner: HolderSpawner?
+    /// A unit test's stand-in for a holder process, consulted at spawn instead
+    /// of `spawner` and at every teardown instead of the holder. Always nil in
+    /// production; see `HolderSpawnFabricator` for exactly what it replaces.
+    private let spawnFabricator: (any HolderSpawnFabricator)?
     /// How this registry asks the kernel about, and signals, a pid.
     ///
     /// Injected rather than reached for statically because the one path that
@@ -311,7 +315,9 @@ actor HolderRegistry {
     /// different facts, and only the second one may gate a create.
     ///
     /// `nonisolated` and immutable so the gate can read it without hopping onto
-    /// the actor — `spawner` is a `let`, so this is decided once, in `init`.
+    /// the actor — `spawner` and `spawnFabricator` are `let`s, so this is
+    /// decided once, in `init`. A test's fabricator makes it true as well,
+    /// since `spawn` runs the fabricator in place of the spawner.
     nonisolated let canSpawn: Bool
 
     /// An attach whose descriptor has been vended and whose acknowledgement has
@@ -764,6 +770,7 @@ actor HolderRegistry {
         attachAdoptionBudget: Duration = HolderRegistry.defaultAttachAdoptionBudget,
         attachGenerationBase: UInt64 = HolderRegistry.randomAttachGenerationBase(),
         programStatus: ProgramStatusStore? = nil,
+        spawnFabricator: (any HolderSpawnFabricator)? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.programStatus = programStatus
@@ -771,8 +778,9 @@ actor HolderRegistry {
         self.environment = environment
         self.listTerminals = listTerminals
         self.spawner = spawner
+        self.spawnFabricator = spawnFabricator
         self.signaller = signaller
-        self.canSpawn = spawner != nil
+        self.canSpawn = spawner != nil || spawnFabricator != nil
         self.busyRetryBudget = busyRetryBudget
         self.adoptAllBudget = adoptAllBudget
         self.adoptionReceiveTimeout = adoptionReceiveTimeout
@@ -1064,6 +1072,18 @@ actor HolderRegistry {
     /// Not refused while the daemon shuts down, unlike adoption — see
     /// `isShuttingDown`.
     func spawn(terminalID: UUID, launch: HolderLaunchRequest) async throws -> HolderHandle {
+        if let spawnFabricator {
+            guard slots[terminalID] == nil else {
+                throw Error.sessionAlreadyRegistered(terminalID: terminalID)
+            }
+            let handle = try await spawnFabricator.spawn(
+                terminalID: terminalID, launch: launch, environment: environment)
+            // As in `publish` for a spawn, a fresh spawn clears any let-go this
+            // terminal id was under. There is no reader to publish: nothing
+            // was handed over.
+            sessionsLetGo[terminalID] = nil
+            return handle
+        }
         guard let spawner else { throw Error.holderExecutableUnavailable }
         guard slots[terminalID] == nil else {
             throw Error.sessionAlreadyRegistered(terminalID: terminalID)
@@ -1120,7 +1140,11 @@ actor HolderRegistry {
         markLetGo(terminalID, reason: reason)
         await release(terminalID: terminalID)
         recordStatus(nil, for: terminalID)
-        await dispose(handle: handle)
+        if let spawnFabricator {
+            await spawnFabricator.abandon(terminalID: terminalID, handle: handle)
+        } else {
+            await dispose(handle: handle)
+        }
     }
 
     /// Tears down the holder behind a row that is about to lose its DB record,
@@ -1240,6 +1264,16 @@ actor HolderRegistry {
         markLetGo(terminalID, reason: .teardown)
         await release(terminalID: terminalID)
         recordStatus(nil, for: terminalID)
+
+        if let spawnFabricator {
+            await spawnFabricator.abandon(
+                terminalID: terminalID,
+                handle: HolderHandle(
+                    holderPID: holderPID ?? 0,
+                    childPID: childPID ?? 0,
+                    socketPath: socketPath))
+            return nil
+        }
 
         let client = HolderClient(socketPath: socketPath)
         try? await client.forget()

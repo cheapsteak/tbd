@@ -13,6 +13,12 @@ extension RPCRouterTests {
 
     @Test("terminal.create and terminal.list work together")
     func terminalCreateAndList() async throws {
+        // On the holder transport, through the spawn double: listing does not
+        // depend on the transport, and no process is started.
+        let holder = FakeHolderLaunch()
+        router.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        try await db.config.setPtyHolderEnabled(true)
+
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)",
             displayName: "test-repo",
@@ -41,6 +47,9 @@ extension RPCRouterTests {
 
         let terminal = try createResp.decodeResult(Terminal.self)
         #expect(terminal.worktreeID == wt.id)
+        #expect(terminal.transport == .holder)
+        let launch = try #require(holder.launch(for: terminal.id))
+        #expect(launch.commandLine?.contains("vim") == true)
 
         // List terminals
         let listReq = try RPCRequest(
@@ -52,6 +61,7 @@ extension RPCRouterTests {
 
         let terminals = try listResp.decodeResult([Terminal].self)
         #expect(terminals.count == 1)
+        #expect(terminals.map(\.id) == holder.launches.map(\.terminalID))
     }
 
     /// Thread-safe collector for tmux argv lists invoked during dryRun.
@@ -207,6 +217,12 @@ extension RPCRouterTests {
 
     @Test("terminal.create with type claude sets label and sessionID")
     func terminalCreateClaude() async throws {
+        // On the holder transport, through the spawn double: the label and the
+        // session id do not depend on the transport, and no process is started.
+        let holder = FakeHolderLaunch()
+        router.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        try await db.config.setPtyHolderEnabled(true)
+
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)",
             displayName: "test-repo",
@@ -235,6 +251,8 @@ extension RPCRouterTests {
         let terminal = try createResp.decodeResult(Terminal.self)
         #expect(terminal.label == "Claude Code")
         #expect(terminal.claudeSessionID != nil)
+        #expect(terminal.transport == .holder)
+        #expect(holder.launches.map(\.terminalID) == [terminal.id])
     }
 
     // MARK: - Caller-supplied labels
