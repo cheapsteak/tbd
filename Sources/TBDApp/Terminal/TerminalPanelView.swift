@@ -980,7 +980,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// stashes and the in-flight sender's completion drains it. MainActor-
         /// confined like `resizeDebounceTask` — mutated only from the
         /// `@MainActor` debounce path.
-        private var resizeSerializer = ControlModeResizeSerializer()
+        private var resizeSerializer = TerminalResizeSerializer()
         /// Set (permanently) by `cleanup()` when the view is torn down. The
         /// attach establishment in `startControlModeClient` re-checks it
         /// after every `await` resumption and self-detaches anything it
@@ -1481,8 +1481,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // path's: a transient size below it reaches neither the daemon nor
             // the child.
             let grid = engine.gridSize
-            let attachGrid: (cols: Int, rows: Int)? = ControlModeResizeGate.shouldSend(
-                controlModeAttached: true, cols: grid.cols, rows: grid.rows) ? grid : nil
+            let attachGrid: (cols: Int, rows: Int)? = TerminalResizeGate.shouldSend(
+                targetAttached: true, cols: grid.cols, rows: grid.rows) ? grid : nil
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
@@ -3487,7 +3487,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private func scheduleDaemonResize(cols: Int, rows: Int) {
             // The floor is the same for both transports and exists for the same
             // reason: SwiftTerm emits transient 0/1-cell sizes mid-layout that
-            // must reach neither a daemon nor a child. `controlModeAttached` is
+            // must reach neither a daemon nor a child. `targetAttached` is
             // passed as `true` because the question it stands for — is there a
             // daemon-side authority at all — is what `resolve` has just
             // answered.
@@ -3498,8 +3498,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     controlMode: controlModeAttach.map {
                         (worktreeID: $0.worktreeID, windowID: $0.windowID)
                     }),
-                  ControlModeResizeGate.shouldSend(
-                    controlModeAttached: true, cols: cols, rows: rows)
+                  TerminalResizeGate.shouldSend(
+                    targetAttached: true, cols: cols, rows: rows)
             else { return }
             resizeDebounceTask?.cancel()
             let daemonClient = appState?.daemonClient
@@ -3521,7 +3521,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // iteration re-checks the torn-down flag BEFORE sending — a
                 // dead view must stop draining (its stash is irrelevant; the
                 // next live view sends its own initial resize).
-                while ControlModeResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
+                while TerminalResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
                     switch target {
                     case .controlModeWindow(let worktreeID, let windowID):
                         try? await daemonClient?.paneResize(

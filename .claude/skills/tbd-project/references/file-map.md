@@ -128,6 +128,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
 - `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
 - `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
+- `ShellLaunchComposer.swift` — the `export KEY='value'; ` env prefix and the `$SHELL <flags> <command>` argv that both the tmux spawn builders and the pty-holder launch run
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references

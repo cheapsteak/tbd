@@ -3,7 +3,7 @@ import Foundation
 /// Which daemon-side size authority a panel's debounced `pane.resize` is
 /// addressed to, or nil when the panel has none to tell.
 ///
-/// Extracted for the same reason as `ControlModeResizeGate`: the branch in
+/// Extracted for the same reason as `TerminalResizeGate`: the branch in
 /// `sizeChanged` picks between two keying schemes, and a holder row cannot be
 /// keyed the control-mode way. Its `windowID` is the empty string, so a
 /// `pane.resize` addressed by window resolves nothing and is dropped without a

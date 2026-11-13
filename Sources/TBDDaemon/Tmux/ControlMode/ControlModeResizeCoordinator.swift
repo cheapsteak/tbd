@@ -54,11 +54,11 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
     /// Sane geometry bounds. Garbage sizes from a mid-animation view (or a wildly
     /// wrong debounce sample) must not wedge tmux, which historically misbehaves
     /// on absurd dimensions — clamp before it ever reaches `resize-window`.
-    /// The SHARED `ControlModeGeometry` envelope (R6-M5): the app's resize
+    /// The SHARED `TerminalGeometryLimits` envelope (R6-M5): the app's resize
     /// gate refuses to send below the same floor, so this clamp is a backstop
     /// for other/older clients, not a path our own app exercises.
-    private static let colBounds = ControlModeGeometry.minCols...ControlModeGeometry.maxCols
-    private static let rowBounds = ControlModeGeometry.minRows...ControlModeGeometry.maxRows
+    private static let colBounds = TerminalGeometryLimits.minCols...TerminalGeometryLimits.maxCols
+    private static let rowBounds = TerminalGeometryLimits.minRows...TerminalGeometryLimits.maxRows
 
     init(commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?) {
         self.commandProvider = commandProvider
@@ -73,7 +73,7 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
     /// residual window (a newer call completing its ENTIRE send between this
     /// call's re-check and its `sendList` enqueue) is far narrower than the
     /// provider hop and additionally guarded app-side by
-    /// `ControlModeResizeSerializer`'s one-in-flight discipline.
+    /// `TerminalResizeSerializer`'s one-in-flight discipline.
     func resize(server: String, windowID: String, cols: Int, rows: Int) async {
         let clampedCols = min(max(cols, Self.colBounds.lowerBound), Self.colBounds.upperBound)
         let clampedRows = min(max(rows, Self.rowBounds.lowerBound), Self.rowBounds.upperBound)

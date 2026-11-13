@@ -273,8 +273,8 @@ struct PaneSendTargetQueryTests {
         // Derived from the real builder so the fixture tracks it: the body is
         // `newWindowCommand`'s final argv element, and tmux reports the argv
         // in `#{pane_start_command}` with the separate shell flags
-        // (`-i -l -c`, see TmuxManager.shellFlags(forShell:)) and the body
-        // quoted as the final argument.
+        // (`-i -l -c`, see ShellLaunchComposer.shellFlags(forShell:)) and the
+        // body quoted as the final argument.
         let args = TmuxManager.newWindowCommand(
             server: "tbd-acme", session: "main", cwd: "/tmp",
             shellCommand: "claude",
@@ -300,8 +300,9 @@ struct PaneSendTargetQueryTests {
     /// The two spawn paths that plant `TBD_TERMINAL_ID` into a pane's start
     /// command. Every adversarial case below is driven through both.
     ///
-    /// They share one env-prefix builder (`TmuxManager.envExportPrefixed`), so
-    /// today the two arms exercise the same code — but the resolver's anchor is
+    /// They share one env-prefix builder
+    /// (`ShellLaunchComposer.envExportPrefixed`), so today the two arms
+    /// exercise the same code — but the resolver's anchor is
     /// only safe while *every* spawn path emits the identical shape, and the
     /// in-place profile swap that goes through `respawnWindowCommand` is the
     /// path a reader is least likely to check. Parameterising rather than

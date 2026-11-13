@@ -418,7 +418,7 @@ class TBDTerminalView: TerminalView {
     /// than ceil did.
     ///
     /// It matters because a cols/rows count computed here and sent to tmux is
-    /// the same desync class `ControlModeGeometry` documents — SwiftTerm
+    /// the same desync class `TerminalGeometryLimits` documents — SwiftTerm
     /// believing a size tmux never adopted. Fix it by threading the target
     /// screen's scale in and snapping identically, the moment anyone observes
     /// an off-by-one column against a real pane rather than a computed one.

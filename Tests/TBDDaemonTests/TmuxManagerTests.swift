@@ -109,28 +109,6 @@ import Testing
     #expect(Array(kept.suffix(chain.count)) == chain)
 }
 
-@Test func testShellFlagsPerShellFamily() {
-    // Each branch of the flag choice, with hardcoded expectations: csh and
-    // tcsh reject -l when combined with -c (measured: "Unknown option: `-l'"),
-    // so they keep the pre-login-shell -i -c. Every other shell gets the
-    // interactive login -i -l -c. Flags are separate argv elements, never
-    // clustered, because some shells (e.g. nushell) reject GNU-style
-    // clustering while accepting the individual flags.
-    #expect(TmuxManager.shellFlags(forShell: "/bin/tcsh") == ["-i", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/bin/csh") == ["-i", "-c"])
-    // The lowercased basename decides, not the full path or its case.
-    #expect(TmuxManager.shellFlags(forShell: "/usr/local/bin/tcsh") == ["-i", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/bin/TCSH") == ["-i", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/opt/weird/wrappers/deep/path/csh") == ["-i", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/bin/zsh") == ["-i", "-l", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/bin/bash") == ["-i", "-l", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/opt/homebrew/bin/fish") == ["-i", "-l", "-c"])
-    // Degenerate paths fall into the default branch rather than crashing.
-    #expect(TmuxManager.shellFlags(forShell: "") == ["-i", "-l", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/") == ["-i", "-l", "-c"])
-    #expect(TmuxManager.shellFlags(forShell: "/bin/") == ["-i", "-l", "-c"])
-}
-
 @Test func testNewWindowCommandRunsLoginShell() throws {
     // Spawned panes run the user's shell as an interactive LOGIN shell:
     // zsh sources zshenv + zprofile + zshrc; bash login shells source

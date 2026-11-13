@@ -85,8 +85,9 @@ public struct ClaudeStateDetector: Sendable {
     ///
     /// The same ladder serves both transports because the pid means the same
     /// shape of thing on each. On tmux the root is `#{pane_pid}`: with
-    /// `zsh -i -l -c "claude …"` (see `TmuxManager.shellFlags(forShell:)`) zsh
-    /// may exec into Claude directly, so that pid IS the Claude process, and
+    /// `zsh -i -l -c "claude …"` (see
+    /// `ShellLaunchComposer.shellFlags(forShell:)`) zsh may exec into Claude
+    /// directly, so that pid IS the Claude process, and
     /// otherwise it is the shell that started one. On the holder the root is
     /// the job the holder forked — the `zsh -c` shell composed by
     /// `holderLaunch`, or Claude itself once that shell execs into it — which
