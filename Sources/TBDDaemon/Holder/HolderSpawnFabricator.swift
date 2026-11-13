@@ -24,14 +24,20 @@ import TBDKernel
 ///
 ///   - **`spawn`** asks the fabricator for the handle and returns it. Nothing
 ///     is handed over, so no reader is published: `reader(for:)` and
-///     `adoptedProcess(for:)` answer nil for the session, and no status is
-///     recorded, because a status may only come from a holder's own answer
-///     (see `WorktreeLifecycle.holderRowVerdict`).
+///     `adoptedProcess(for:)` answer nil for the session. A remembered status
+///     is cleared rather than replaced, because a status may only come from a
+///     holder's own answer (see `WorktreeLifecycle.holderRowVerdict`), and the
+///     let-go mark is cleared as a real spawn clears it.
+///   - **A live fabricated session refuses a second spawn**
+///     (`sessionAlreadyRegistered`) until a teardown lets it go, as an occupied
+///     slot does for a real one.
 ///   - **Every teardown** — `abandon` in each of its spellings and
 ///     `abandonVerifiedJob` — does the registry's own bookkeeping (the let-go
 ///     mark, the release, the cleared status) and then hands the handle to the
 ///     fabricator instead of telling a holder to forget and killing a job. A
 ///     fabricated pid is therefore never signalled through the registry.
+///     `abandonVerifiedJob` still reports a row that recorded no child pid or
+///     no start time, from the same gates the real teardown uses.
 protocol HolderSpawnFabricator: Sendable {
     /// Stands in for `HolderSpawner.spawn` and the hand-over after it. Returns
     /// the handle the caller records, or throws as a failed spawn would.

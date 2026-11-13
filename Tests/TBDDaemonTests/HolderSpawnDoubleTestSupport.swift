@@ -29,22 +29,27 @@ import TestSupport
 ///     from the registry's environment as a real spawn derives it — so a path
 ///     too long for `sun_path` is refused here as it would be there — and
 ///     nothing is ever bound at it.
-///   - `failNextSpawn(with:)` makes the next spawn throw; it records the
-///     terminal id in `failedSpawns` and returns no handle, so no row is
-///     written.
+///   - `failNextSpawn(with:)` makes the next spawn throw, before anything
+///     else it could fail on; it records the terminal id in `failedSpawns` and
+///     returns no handle, so no row is written.
+///   - A second spawn for a terminal id that is still live is refused with
+///     `HolderRegistry.Error.sessionAlreadyRegistered` and never reaches the
+///     double, as a real registry refuses it; a teardown frees the id again.
 ///   - Every registry teardown of the session — `abandon` in each spelling
-///     (create-time cleanup, `terminal.delete`, archive) and the hook tab's
-///     `abandonVerifiedJob` — is recorded in `abandonments` instead of
-///     signalling anything.
+///     (create-time cleanup, `terminal.delete`, archive, a park) and the hook
+///     tab's `abandonVerifiedJob` — is recorded in `abandonments` instead of
+///     signalling anything. `abandonVerifiedJob` still returns the report a
+///     real teardown gives a row that recorded no child pid or start time.
 ///
 /// **What it does not support**
 ///
 ///   - **No reader.** Nothing is handed over, so the registry publishes no
 ///     `HolderReader`: `reader(for:)` and `adoptedProcess(for:)` answer nil and
-///     no status is recorded. Anything served from the daemon's emulator —
-///     `terminal.output`, `terminal.send` and other input, attach, closed-
-///     terminal screen capture, resize — has nothing to serve such a row, and
-///     an on-demand adoption fails at the empty rendezvous.
+///     no status is recorded (a spawn clears any remembered one). Anything
+///     served from the daemon's emulator — `terminal.output`, `terminal.send`
+///     and other input, attach, closed-terminal screen capture, resize — has
+///     nothing to serve such a row, and an on-demand adoption fails at the
+///     empty rendezvous.
 ///   - **The pids are not alive.** The kernel answers "no such process" for
 ///     them, so every liveness probe (`holderProcessIsLive`,
 ///     `ProcessSignaller.isAlive`) reads the session as ended — reconcile's
@@ -122,21 +127,30 @@ final class FakeHolderLaunch: HolderSpawnFabricator, @unchecked Sendable {
     func spawn(
         terminalID: UUID, launch: HolderLaunchRequest, environment: [String: String]
     ) async throws -> HolderHandle {
+        // A queued failure is consumed first, so it is always the one that
+        // fires, whatever else this spawn would have failed on.
+        if let failure = takeScriptedFailure(for: terminalID) { throw failure }
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: terminalID, environment: environment)
-        return try lock.withLock {
-            if !scriptedFailures.isEmpty {
-                let scripted = scriptedFailures.removeFirst()
-                recordedFailures.append(terminalID)
-                if let scripted { throw scripted }
-                throw SpawnFailure(terminalID: terminalID)
-            }
+        return lock.withLock {
             let handle = HolderHandle(
                 holderPID: lastPID + 1, childPID: lastPID + 2, socketPath: socketPath)
             lastPID += 2
             recordedLaunches.append(
                 Launch(terminalID: terminalID, request: launch, handle: handle))
             return handle
+        }
+    }
+
+    /// Dequeues the next scripted failure, recording `terminalID` against it,
+    /// or answers nil when none is queued.
+    private func takeScriptedFailure(for terminalID: UUID) -> (any Error)? {
+        lock.withLock { () -> (any Error)? in
+            guard !scriptedFailures.isEmpty else { return nil }
+            let scripted = scriptedFailures.removeFirst()
+            recordedFailures.append(terminalID)
+            if let scripted { return scripted }
+            return SpawnFailure(terminalID: terminalID)
         }
     }
 

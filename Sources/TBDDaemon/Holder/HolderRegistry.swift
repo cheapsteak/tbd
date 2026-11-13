@@ -581,6 +581,16 @@ actor HolderRegistry {
     /// Written only through `recordStatus`, which keeps the two in step.
     private var statusesFromAbsentRendezvous: Set<UUID> = []
 
+    /// The sessions a `spawnFabricator` started that no teardown has let go
+    /// of yet: the fabricated counterpart of an occupied slot, so that `spawn`
+    /// refuses a second spawn for a live session (`sessionAlreadyRegistered`)
+    /// exactly as it does for a real one. Inserted by the fabricated `spawn`
+    /// (and removed again if the fabricator throws), removed by every
+    /// teardown's fabricated branch — `abandon` and `abandonVerifiedJob` — and
+    /// by nothing else: a `release` leaves a real holder running too. Always
+    /// empty in production.
+    private var fabricatedSessions: Set<UUID> = []
+
     /// What the hand-over said about each published session's processes.
     ///
     /// Keyed and cleared exactly like `slots`' `.adopted` case, in `publish`
@@ -1073,14 +1083,27 @@ actor HolderRegistry {
     /// `isShuttingDown`.
     func spawn(terminalID: UUID, launch: HolderLaunchRequest) async throws -> HolderHandle {
         if let spawnFabricator {
-            guard slots[terminalID] == nil else {
+            guard slots[terminalID] == nil, !fabricatedSessions.contains(terminalID) else {
                 throw Error.sessionAlreadyRegistered(terminalID: terminalID)
             }
-            let handle = try await spawnFabricator.spawn(
-                terminalID: terminalID, launch: launch, environment: environment)
-            // As in `publish` for a spawn, a fresh spawn clears any let-go this
-            // terminal id was under. There is no reader to publish: nothing
-            // was handed over.
+            // Claimed before the suspension, so a second spawn for this id is
+            // refused while the first is still inside the fabricator.
+            fabricatedSessions.insert(terminalID)
+            let handle: HolderHandle
+            do {
+                handle = try await spawnFabricator.spawn(
+                    terminalID: terminalID, launch: launch, environment: environment)
+            } catch {
+                fabricatedSessions.remove(terminalID)
+                throw error
+            }
+            // What `publish` does for a spawn, short of the reader: nothing was
+            // handed over, so there is none to publish. A real spawn replaces
+            // any remembered status with the holder's own report; with no
+            // holder to report, this one clears it — through `recordStatus`,
+            // so an absent-rendezvous mark goes with it. And a fresh spawn
+            // clears any let-go this terminal id was under.
+            recordStatus(nil, for: terminalID)
             sessionsLetGo[terminalID] = nil
             return handle
         }
@@ -1142,6 +1165,9 @@ actor HolderRegistry {
         recordStatus(nil, for: terminalID)
         if let spawnFabricator {
             await spawnFabricator.abandon(terminalID: terminalID, handle: handle)
+            // Only now is the stand-in holder gone, as a real one is only once
+            // `dispose` returns; until then a respawn is refused.
+            fabricatedSessions.remove(terminalID)
         } else {
             await dispose(handle: handle)
         }
@@ -1272,6 +1298,14 @@ actor HolderRegistry {
                     holderPID: holderPID ?? 0,
                     childPID: childPID ?? 0,
                     socketPath: socketPath))
+            fabricatedSessions.remove(terminalID)
+            // The stand-in job needs no identity check, but what the row
+            // failed to record is reported exactly as the real teardown
+            // reports it.
+            if case .missing(let report) = recordedJobIdentity(
+                terminalID: terminalID, childPID: childPID, childStartedAt: childStartedAt) {
+                return report
+            }
             return nil
         }
 
@@ -1287,27 +1321,43 @@ actor HolderRegistry {
         // identify at all. `signaller.forceKill` widens to the group on its own
         // when the pid is still there to name one, which is every case this
         // path is allowed to kill in.
-        let left = killVerifiedJob(
-            terminalID: terminalID, childPID: childPID, childStartedAt: childStartedAt)
+        let left: String?
+        switch recordedJobIdentity(
+            terminalID: terminalID, childPID: childPID, childStartedAt: childStartedAt) {
+        case .missing(let report):
+            left = report
+        case .recorded(let recordedPID, let startedAt):
+            left = killVerifiedJob(
+                terminalID: terminalID, childPID: recordedPID, childStartedAt: startedAt)
+        }
         await reap(holderPID: holderPID ?? 0)
         return left
     }
 
-    /// The decision half of `abandonVerifiedJob`: whether this pid may be
-    /// signalled, and what to say when it may not.
+    /// What a hook tab's row recorded of its job's identity: enough for
+    /// `killVerifiedJob` to check, or the report of what is missing.
+    private enum RecordedJobIdentity {
+        case recorded(childPID: Int32, startedAt: Date)
+        case missing(report: String)
+    }
+
+    /// The first two gates of `abandonVerifiedJob`'s ladder — no pid, no
+    /// anchor — which the row alone decides, before anything asks the kernel.
     ///
-    /// Split out so the ladder reads top to bottom in the order its gates
-    /// actually fail — no pid, no anchor, a corpse, a stranger — and so the
-    /// `forget`/reap either side of it stay unconditional.
-    private func killVerifiedJob(
+    /// Kept apart from `killVerifiedJob` so the fabricated teardown reports
+    /// exactly what the real one does for the same row. Together the two read
+    /// top to bottom in the order the gates actually fail: no pid and no
+    /// anchor here, then a corpse and a stranger in `killVerifiedJob`.
+    private func recordedJobIdentity(
         terminalID: UUID, childPID: Int32?, childStartedAt: Date?
-    ) -> String? {
+    ) -> RecordedJobIdentity {
         guard let childPID, childPID > 1 else {
             // `0` is the sentinel a row that never recorded a pid decodes to,
             // and signalling it would reach the daemon's own process group —
             // the hazard `jobProcessGroup` guards in the same words.
-            return "terminal \(terminalID) recorded no child pid, so its holder was told to "
-                + "let go but the job it forked was not killed"
+            return .missing(
+                report: "terminal \(terminalID) recorded no child pid, so its holder was told to "
+                    + "let go but the job it forked was not killed")
         }
         guard let childStartedAt else {
             Self.logger.warning(
@@ -1315,9 +1365,20 @@ actor HolderRegistry {
                 hook terminal \(terminalID, privacy: .public) recorded no child start time, so \
                 pid \(childPID, privacy: .public) could not be identified and was left alone
                 """)
-            return "terminal \(terminalID) recorded no child start time, so the job at pid "
-                + "\(childPID) could not be proved to be ours and was left running"
+            return .missing(
+                report: "terminal \(terminalID) recorded no child start time, so the job at pid "
+                    + "\(childPID) could not be proved to be ours and was left running")
         }
+        return .recorded(childPID: childPID, startedAt: childStartedAt)
+    }
+
+    /// The decision half of `abandonVerifiedJob` for a job its row identified:
+    /// whether this pid may be signalled, and what to say when it may not.
+    ///
+    /// Split out so the `forget`/reap either side of it stay unconditional.
+    private func killVerifiedJob(
+        terminalID: UUID, childPID: Int32, childStartedAt: Date
+    ) -> String? {
         // A corpse first, and for the reason `holderChildDisposition` asks it
         // first: `ps` prints a zombie's command in parentheses, which the
         // executable gate below would read as a stranger's. A zombie is past
