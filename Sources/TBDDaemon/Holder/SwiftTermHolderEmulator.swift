@@ -37,6 +37,11 @@ final class SwiftTermHolderEmulator: HolderEmulator, @unchecked Sendable {
     /// which `feedPreamble` holds that lock around — like everything else here.
     private var ingestingPreamble = false
 
+    let kind: HolderEmulatorKind = .swiftTerm
+    /// The snapshot's `DECRQM` queries and alt-screen toggle feed the live
+    /// terminal; see `snapshotPreamble`.
+    let snapshotNeedsSequenceBoundary = true
+
     init(
         ledger: HolderEmulatorLedger,
         columns: Int, rows: Int, scrollback: Int,

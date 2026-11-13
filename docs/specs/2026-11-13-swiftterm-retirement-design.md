@@ -126,14 +126,14 @@ implementations: `SwiftTermHolderEmulator` (today's code, moved behind the seam)
   size, the parser-boundary query, cursor visibility, the mode capture, the screen
   projection for `tbd terminal output`, the styled capture, the viewport lines, the attach
   snapshot, the handback feed, the replies to the child and the OSC 7501 reports.
-- **One lock** – the reader's bookkeeping lives once, in a ledger that both emulators
-  share: when the emulator began, when it last took in bytes, and whether it watched its
-  child from birth. Each emulator stamps the ledger and parses a chunk in one hold of its
-  terminal's own lock, and reads the screen and the ledger in one hold too. The SwiftTerm
-  emulator holds `terminalLock`. `GhosttyTerminal.feed` takes its lock itself, so the core
-  adds a feed that runs the stamp inside the same hold as the parse.
-  `GhosttySnapshotWriter` also takes the lock itself, so the emulator calls it outside any
-  hold.
+- **One lock** – the emulator's bookkeeping lives in one type, `HolderEmulatorLedger`,
+  that both emulators use: when the emulator began, when it last took in bytes, and
+  whether it watched its child from birth. Each emulator keeps its own ledger, and stamps
+  it and parses a chunk in one hold of its terminal's own lock. It reads the screen and the
+  ledger in one hold too. The SwiftTerm emulator holds `terminalLock`. `GhosttyTerminal`
+  takes its lock itself, so the core adds `feed(_:muted:underLock:)`, which runs the stamp
+  inside the same hold as the parse. `GhosttySnapshotWriter` also takes the lock itself, so
+  the emulator calls it outside any hold.
 - **Choice at creation** – the reader reads the flag when it is created: for a new session,
   or for every session at re-adoption when the daemon starts. A running session never
   changes emulator.
@@ -167,7 +167,8 @@ TBD does not use. The daemon takes the app engine's approach:
 
 libghostty sends device-status, cursor-position and mode replies through `writePty`, after
 its lock drops and before `feed` returns. The daemon forwards them to the child, as the
-SwiftTerm delegate's `send` does. `isMuted` drops them while a handback preamble is fed.
+SwiftTerm delegate's `send` does. The emulator feeds a handback preamble with
+`feed(_:muted:underLock:)` and `muted` set, which drops them for that one parse.
 
 The mode capture reads modes with `mode(_:ansi:)`, so the libghostty emulator feeds no
 DECRQM queries into the live terminal. The SwiftTerm emulator's queries could cut a

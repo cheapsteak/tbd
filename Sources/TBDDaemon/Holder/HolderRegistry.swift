@@ -692,6 +692,12 @@ actor HolderRegistry {
     /// probe; nil (tests that do not exercise the protocol) leaves OSC 7501
     /// unhandled in the daemon's emulators.
     private let programStatus: ProgramStatusStore?
+    /// Which emulator a reader this registry builds gets: the daemon's
+    /// `ghostty_daemon_emulator_enabled` flag, read each time a reader is
+    /// built, on a spawn and on every adoption. So a new session takes a change
+    /// at once, every session takes it when the next daemon re-adopts it, and
+    /// a running session never changes emulator.
+    private let emulatorKind: @Sendable () async -> HolderEmulatorKind
     private let clock: any Clock<Duration>
 
     /// Set by `adoptAll`'s budget timer, read by its loop between holders.
@@ -781,9 +787,11 @@ actor HolderRegistry {
         attachGenerationBase: UInt64 = HolderRegistry.randomAttachGenerationBase(),
         programStatus: ProgramStatusStore? = nil,
         spawnFabricator: (any HolderSpawnFabricator)? = nil,
+        emulatorKind: @escaping @Sendable () async -> HolderEmulatorKind = { .swiftTerm },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.programStatus = programStatus
+        self.emulatorKind = emulatorKind
         self.owner = owner
         self.environment = environment
         self.listTerminals = listTerminals
@@ -1111,6 +1119,9 @@ actor HolderRegistry {
         guard slots[terminalID] == nil else {
             throw Error.sessionAlreadyRegistered(terminalID: terminalID)
         }
+        // Read before the fork, so nothing waits on it between the child's
+        // first output and the reader that drains it.
+        let emulator = await emulatorKind()
 
         let spawned = try await spawner.spawn(
             sessionID: terminalID, launch: launch, owner: owner, environment: environment)
@@ -1121,6 +1132,7 @@ actor HolderRegistry {
                 terminalID: terminalID,
                 over: spawned.client,
                 expecting: owner,
+                emulator: emulator,
                 // The job has only just been forked, and nothing has read its
                 // pty yet, so whatever it says about its modes on startup lands
                 // in this emulator — and so does every cell it ever paints,
@@ -1707,11 +1719,16 @@ actor HolderRegistry {
         let clock = self.clock
         let notifyEndOfOutput = endOfOutputNotifier(for: terminalID)
         let statusTap = self.programStatusTap(for: terminalID)
+        let chooseEmulator = self.emulatorKind
         let task = Task<Adoption, Swift.Error> {
-            try await Self.attach(
+            // Read inside the task, not before it: the slot below is claimed
+            // with no suspension between the vacancy check and the claim.
+            let emulator = await chooseEmulator()
+            return try await Self.attach(
                 terminalID: terminalID,
                 socketPath: socketPath,
                 expecting: expected,
+                emulator: emulator,
                 busyRetryBudget: budget,
                 receiveTimeout: receiveTimeout,
                 clock: clock,
@@ -2048,6 +2065,7 @@ actor HolderRegistry {
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken,
+        emulator: HolderEmulatorKind,
         busyRetryBudget: Duration,
         receiveTimeout: Duration,
         clock: any Clock<Duration>,
@@ -2063,6 +2081,7 @@ actor HolderRegistry {
                     terminalID: terminalID,
                     socketPath: socketPath,
                     expecting: owner,
+                    emulator: emulator,
                     receiveTimeout: receiveTimeout,
                     observedChildFromStart: observedChildFromStart,
                     onEndOfOutput: onEndOfOutput,
@@ -2088,6 +2107,7 @@ actor HolderRegistry {
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken,
+        emulator: HolderEmulatorKind,
         receiveTimeout: Duration,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)?,
@@ -2098,6 +2118,7 @@ actor HolderRegistry {
             terminalID: terminalID,
             over: HolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout),
             expecting: owner,
+            emulator: emulator,
             observedChildFromStart: observedChildFromStart,
             onEndOfOutput: onEndOfOutput,
             programStatus: programStatus,
@@ -2128,6 +2149,7 @@ actor HolderRegistry {
         terminalID: UUID,
         over client: HolderClient,
         expecting owner: HolderOwnerToken,
+        emulator: HolderEmulatorKind,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
         programStatus: HolderProgramStatusTap? = nil,
@@ -2180,6 +2202,7 @@ actor HolderRegistry {
             rows: grid.rows,
             onEndOfOutput: onEndOfOutput,
             programStatus: programStatus,
+            emulator: emulator,
             observedChildFromStart: observedChildFromStart)
         // BEFORE the drain starts, and that ordering is the whole of the
         // handback's fidelity: the preamble's reset prelude erases the display

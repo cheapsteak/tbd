@@ -240,6 +240,12 @@ let package = Package(
                 // simply never touches the view types.
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 "TBDTerminalSerialization",
+                // The libghostty-vt emulator a holder-backed session's reader
+                // uses when `ghostty_daemon_emulator_enabled` is on
+                // (Sources/TBDDaemon/Holder/GhosttyHolderEmulator.swift). The
+                // headless core only: no AppKit, no Metal. Its `c++` linker
+                // setting reaches the daemon through this dependency.
+                "TBDGhosttyCore",
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ],
             path: "Sources/TBDDaemon",

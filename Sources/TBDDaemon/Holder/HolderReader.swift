@@ -124,6 +124,10 @@ actor HolderReader {
     /// thread needs. `nonisolated` for the same reason it is a `let` — it is
     /// fixed at construction, so reading it can never race the actor.
     nonisolated let observedChildFromStart: Bool
+    /// Which emulator parses this session: the kind asked for at
+    /// construction, or SwiftTerm when libghostty could not make its terminal.
+    /// `nonisolated` because it is fixed at construction.
+    nonisolated let emulatorKind: HolderEmulatorKind
     private let descriptor: PTYDescriptor
     private let emulator: any HolderEmulator
     private let stopTimeout: Duration
@@ -188,9 +192,10 @@ actor HolderReader {
     ///   every report's payload to the tap's `deliver`. nil leaves OSC 7501
     ///   unhandled, as it was before the protocol existed.
     /// - Parameter emulator: which terminal parses the session's output, read
-    ///   once here, so a running session never changes emulator. Production
-    ///   passes nothing. The six screen-reading `HolderReaderTests` run once
-    ///   per kind. The harnesses in `HolderScreenContractTests`,
+    ///   once here, so a running session never changes emulator. The registry
+    ///   passes the kind the daemon's flag picks; `emulatorKind` reports the
+    ///   kind actually built. The six screen-reading `HolderReaderTests` run
+    ///   once per kind. The harnesses in `HolderScreenContractTests`,
     ///   `HolderProgramStatusTests` and `HolderRenderProjectionTests` take a
     ///   kind, defaulting to SwiftTerm, so each test there can choose.
     init(
@@ -221,7 +226,7 @@ actor HolderReader {
         // A device-status or cursor-position report that never reaches the
         // child is a hang in that child, not a cosmetic loss — the program
         // asked the terminal a question and is waiting for the answer.
-        self.emulator = emulator.makeEmulator(
+        let built = emulator.makeEmulator(
             sessionID: sessionID,
             columns: columns,
             rows: rows,
@@ -230,6 +235,8 @@ actor HolderReader {
             monotonicNow: monotonicNow,
             programStatus: programStatus,
             reply: { [descriptor] bytes in descriptor.replyBestEffort(bytes) })
+        self.emulator = built
+        self.emulatorKind = built.kind
     }
 
     deinit {
@@ -446,9 +453,11 @@ actor HolderReader {
     /// after this call therefore sees every byte the session had produced up to
     /// the moment it stopped reading, and everything after that moment is still
     /// queued on the tty for whoever reads next. Nothing falls between the two.
-    /// If those bytes end part-way through one of the child's sequences, the
-    /// rest is waited for, briefly, so that the snapshot is taken between
-    /// sequences (`awaitSequenceBoundary`).
+    /// If those bytes end part-way through one of the child's sequences and the
+    /// emulator's snapshot feeds the live terminal, the rest is waited for,
+    /// briefly, so that the snapshot is taken between sequences
+    /// (`awaitSequenceBoundary`). The libghostty emulator's snapshot does not,
+    /// so it is not waited for there (`snapshotNeedsSequenceBoundary`).
     ///
     /// The descriptor is deliberately **not** closed: this reader still owns it
     /// and can be put back on it with `resumeDraining()`. The returned `dup` is
@@ -488,7 +497,7 @@ actor HolderReader {
             state = .suspended
         }
         let outputEnded = drainRemainder()
-        if !outputEnded { await awaitSequenceBoundary() }
+        if !outputEnded, emulator.snapshotNeedsSequenceBoundary { await awaitSequenceBoundary() }
         // That wait can park this actor, and a stop or a resume that lands in
         // it means this call is no longer the descriptor's only reader.
         switch state {

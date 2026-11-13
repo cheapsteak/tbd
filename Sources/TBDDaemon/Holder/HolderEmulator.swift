@@ -5,14 +5,15 @@ import os
 /// The headless terminal behind one holder-backed session, as `HolderReader`
 /// uses it.
 ///
-/// `SwiftTermHolderEmulator` implements it, and the notes below also say how a
-/// libghostty emulator meets each rule. The reader picks its emulator through
-/// `HolderEmulatorKind` when the reader is built, and a running session never
-/// changes emulator. What every implementation owes the reader:
+/// `SwiftTermHolderEmulator` and `GhosttyHolderEmulator` implement it. The
+/// reader picks its emulator through `HolderEmulatorKind` when the reader is
+/// built, and a running session never changes emulator. What every
+/// implementation owes the reader:
 ///
 /// - **One lock: the terminal's own.** The drain thread feeds while the actor
-///   renders, resizes and snapshots, so every member is one hold of the lock
-///   the terminal parses under, never of a second lock beside it.
+///   renders, resizes and snapshots, so every member that reads or changes the
+///   terminal is one hold of the lock the terminal parses under, never of a
+///   second lock beside it.
 /// - **A feed and its stamp are one step.** `feed` and `feedPreamble` call the
 ///   `HolderEmulatorLedger`'s `stampArrival()` inside the same hold as the
 ///   parse, and nothing else stamps it, so a screen's lines and its age are
@@ -20,18 +21,20 @@ import os
 ///   its own way to run the stamp inside that hold:
 ///   - **SwiftTerm** publishes `terminalLock`. The emulator takes it around
 ///     the stamp and `Terminal.feed`, and around every read.
-///   - **libghostty**'s `GhosttyTerminal.feed` takes the terminal's private,
-///     non-recursive lock itself, so no caller can wrap it. `GhosttyTerminal`
-///     provides a feed that takes a closure and runs it inside the same hold
-///     as `ghostty_terminal_vt_write`, and the emulator stamps there. Reads go
-///     through `withLocked`. `GhosttySnapshotWriter` takes the lock itself, so
-///     the emulator calls it outside any other hold.
+///   - **libghostty**'s `GhosttyTerminal` takes its private, non-recursive
+///     lock itself, so no caller can wrap a call in it. The emulator feeds
+///     through `GhosttyTerminal.feed(_:muted:underLock:)`, which runs the
+///     stamp in its closure, inside the same hold as
+///     `ghostty_terminal_vt_write`. Reads go through `withLocked`.
+///     `GhosttySnapshotWriter` takes the lock itself, so the emulator calls it
+///     outside any other hold.
 /// - **Replies and reports are wired at construction.** The reply sink (the
 ///   session's pty) and the OSC 7501 tap reach the emulator through
 ///   `HolderEmulatorKind.makeEmulator`, never through a member here.
-/// - **A reading never feeds the terminal**, with one exception:
-///   `snapshotPreamble` may, and the reader calls it only after waiting for
-///   the child's output to reach a sequence boundary.
+/// - **A reading never feeds the live terminal**, with one exception: the
+///   SwiftTerm emulator's `snapshotPreamble` does, and so says
+///   `snapshotNeedsSequenceBoundary`; the reader then calls it only after
+///   waiting for the child's output to reach a sequence boundary.
 protocol HolderEmulator: AnyObject, Sendable {
     /// The child's own output — the drain loop's reads, the quiesce remainder.
     /// Stamps the ledger and parses in one hold. Replies to the child's
@@ -45,9 +48,24 @@ protocol HolderEmulator: AnyObject, Sendable {
     /// delivered and no probe in it is answered, because neither came from
     /// the child now. An emulator may also drop the other replies the preamble
     /// provokes, because they answer questions the child never asked. The
-    /// libghostty emulator drops them, with `isMuted`. The SwiftTerm emulator
-    /// forwards them, as `feed` does.
+    /// libghostty emulator drops them: it feeds with
+    /// `GhosttyTerminal.feed(_:muted:underLock:)`, which mutes that one parse
+    /// inside the same hold as the stamp. The SwiftTerm emulator forwards
+    /// them, as `feed` does.
     func feedPreamble(_ bytes: ArraySlice<UInt8>)
+
+    /// The kind this emulator is. Fixed at construction; it can differ from
+    /// the kind asked for when libghostty could not make its terminal and
+    /// `HolderEmulatorKind.makeEmulator` fell back to SwiftTerm.
+    var kind: HolderEmulatorKind { get }
+
+    /// Whether `snapshotPreamble` feeds the live terminal, so that the reader
+    /// must wait for the child's output to reach a sequence boundary before
+    /// calling it (`HolderReader.suspendDraining`). True for SwiftTerm, whose
+    /// `DECRQM` queries would cut a sequence the child is part-way through.
+    /// False for libghostty, whose snapshot only reads the live terminal and
+    /// ends with the bytes of a sequence left open, for the viewer to finish.
+    var snapshotNeedsSequenceBoundary: Bool { get }
 
     /// Reshapes the grid. Never touches the tty, which is the reader's.
     func resize(columns: Int, rows: Int)
@@ -91,6 +109,15 @@ protocol HolderEmulator: AnyObject, Sendable {
 enum HolderEmulatorKind: CaseIterable, Sendable {
     /// A headless SwiftTerm `Terminal`: `SwiftTermHolderEmulator`.
     case swiftTerm
+    /// A libghostty-vt terminal: `GhosttyHolderEmulator`. Chosen by the
+    /// `ghostty_daemon_emulator_enabled` flag, default off.
+    case ghostty
+
+    /// The kind the daemon's libghostty emulator flag picks:
+    /// `Config.ghosttyDaemonEmulatorEnabled`, resolved.
+    init(ghosttyDaemonEmulatorEnabled: Bool) {
+        self = ghosttyDaemonEmulatorEnabled ? .ghostty : .swiftTerm
+    }
 
     /// Builds this kind's emulator for one session, with its ledger stamped
     /// as adopted now and its outbound wiring in place.
@@ -101,6 +128,13 @@ enum HolderEmulatorKind: CaseIterable, Sendable {
     /// - Parameter programStatus: the OSC 7501 tap. With one, the emulator
     ///   answers the `?` probe and hands every report's payload to `deliver`;
     ///   nil leaves OSC 7501 unhandled.
+    /// - Parameter makeGhosttyTerminal: how `.ghostty` builds its terminal. A
+    ///   test seam; production passes nothing.
+    ///
+    /// **`.ghostty` falls back to SwiftTerm** when libghostty cannot make the
+    /// terminal, with an error in the log naming the session and the reason.
+    /// The session still gets an emulator, and its pty is still drained; the
+    /// built emulator's `kind` says which one it got.
     func makeEmulator(
         sessionID: UUID,
         columns: Int,
@@ -109,15 +143,15 @@ enum HolderEmulatorKind: CaseIterable, Sendable {
         observedChildFromStart: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
         programStatus: HolderProgramStatusTap?,
-        reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void
+        reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void,
+        makeGhosttyTerminal: GhosttyHolderEmulator.TerminalFactory = GhosttyHolderEmulator.makeTerminal
     ) -> any HolderEmulator {
         let ledger = HolderEmulatorLedger(
             sessionID: sessionID,
             observedChildFromStart: observedChildFromStart,
             monotonicNow: monotonicNow)
-        switch self {
-        case .swiftTerm:
-            return SwiftTermHolderEmulator(
+        let swiftTerm = {
+            SwiftTermHolderEmulator(
                 ledger: ledger,
                 columns: columns,
                 rows: rows,
@@ -125,14 +159,40 @@ enum HolderEmulatorKind: CaseIterable, Sendable {
                 programStatus: programStatus,
                 reply: reply)
         }
+        switch self {
+        case .swiftTerm:
+            return swiftTerm()
+        case .ghostty:
+            do {
+                return try GhosttyHolderEmulator(
+                    ledger: ledger,
+                    sessionID: sessionID,
+                    columns: columns,
+                    rows: rows,
+                    scrollback: scrollback,
+                    programStatus: programStatus,
+                    reply: reply,
+                    makeTerminal: makeGhosttyTerminal)
+            } catch {
+                Self.logger.error(
+                    """
+                    session \(sessionID.uuidString, privacy: .public): libghostty could not make \
+                    the daemon's terminal, so this session uses SwiftTerm: \
+                    \(String(describing: error), privacy: .public)
+                    """)
+                return swiftTerm()
+            }
+        }
     }
+
+    private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 }
 
 /// What a holder emulator knows about itself that no grid can tell: when it
 /// began, when it last took in bytes, and whether it watched its child from
 /// birth — and the screen and mode reading built from those facts and a
-/// projection. Shared by every `HolderEmulator`, so the arithmetic and the
-/// handshake records exist once.
+/// projection. One type that every `HolderEmulator` uses, each emulator with
+/// its own instance, so the arithmetic and the handshake records exist once.
 ///
 /// `@unchecked Sendable` because the one mutable field, `lastByteAt`, is
 /// guarded by the **owning emulator's lock** — the terminal's own, so that a
