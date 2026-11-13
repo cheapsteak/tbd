@@ -199,6 +199,9 @@ final class GhosttyEngine: TerminalEngine {
 
     // MARK: - The view's hooks
 
+    /// SwiftTerm's link detection for the ⌘-hover underline, which keeps the screen it last read.
+    private let hoverLinks = SwiftTermLinkDetector.HoverLinks()
+
     private func installForwarders() {
         terminalView.onSend = { [weak self] bytes in
             self?.sendUserInput(bytes)
@@ -215,6 +218,12 @@ final class GhosttyEngine: TerminalEngine {
         }
         terminalView.onCommandClickText = { [weak self] clicked in
             self?.openCommandClick(on: clicked) ?? false
+        }
+        // A ⌘-hover underlines what SwiftTerm's link detection finds, as the SwiftTerm view
+        // underlines its own matches. TBD's matcher, which a ⌘-click runs first, underlines
+        // nothing on either engine.
+        terminalView.onCommandHoverText = { [weak self] hovered in
+            self?.hoverLinks.textLink(in: hovered)
         }
         terminalView.onCloseTab = { [weak self] in
             guard let self else { return }

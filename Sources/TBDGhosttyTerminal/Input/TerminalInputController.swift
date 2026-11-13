@@ -108,6 +108,8 @@ final class TerminalInputController {
         case .keyUp:
             return handleKeyUp(event)
         case .flagsChanged:
+            // Command shows or clears the ⌘-hover underline without waiting for a move.
+            view.mouseController.modifierFlagsChanged(event.modifierFlags)
             return handleFlagsChanged(event)
         case .leftMouseDown, .leftMouseUp, .leftMouseDragged,
              .rightMouseDown, .rightMouseUp, .rightMouseDragged,

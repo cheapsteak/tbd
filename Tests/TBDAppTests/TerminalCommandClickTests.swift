@@ -175,4 +175,84 @@ struct TerminalCommandClickTests {
         let pastTheColumns = SwiftTermLinkDetector.link(in: clicked(rows, column: 40, row: 0, columns: 40))
         #expect(pastTheColumns == nil)
     }
+
+    // MARK: - The cells SwiftTerm's link covers, for the ⌘-hover underline
+
+    @Test func aPrintedURLCoversItsOwnCells() throws {
+        let text = "see https://example.com/acme now"
+        let link = SwiftTermLinkDetector.textLink(in: clicked(
+            [(text, false)], column: try column(of: "example", in: text), row: 0, columns: 40))
+        #expect(link == GhosttyTextLink(text: "https://example.com/acme", spans: [.init(row: 0, columns: 4..<28)]))
+    }
+
+    @Test func plainWordsCoverNoCells() {
+        let link = SwiftTermLinkDetector.textLink(in: clicked(
+            [("just some words", false)], column: 2, row: 0, columns: 40))
+        #expect(link == nil)
+    }
+
+    /// The URL runs past the end of the first row and on at the start of the second.
+    @Test func aSoftWrappedURLCoversBothRowsFromEither() {
+        let wrapped = [("see https://example.", false), ("com/acme/wrapped now", true), ("", false)]
+        let expected = GhosttyTextLink(
+            text: "https://example.com/acme/wrapped",
+            spans: [.init(row: 0, columns: 4..<20), .init(row: 1, columns: 0..<16)])
+        let fromBelow = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 2, row: 1, columns: 20))
+        #expect(fromBelow == expected)
+        let fromAbove = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 6, row: 0, columns: 20))
+        #expect(fromAbove == expected)
+    }
+
+    /// A program that wraps its own lines ends the row with a newline and indents the next, which
+    /// SwiftTerm joins when the first row's text reaches near its end. The indent is not the link's.
+    @Test func aURLItsProgramWrappedCoversBothRowsFromEither() {
+        let wrapped = [("see https://example.com/", false), ("  acme/wrapped now", false), ("", false)]
+        let expected = GhosttyTextLink(
+            text: "https://example.com/acme/wrapped",
+            spans: [.init(row: 0, columns: 4..<24), .init(row: 1, columns: 2..<14)])
+        let fromBelow = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 5, row: 1, columns: 24))
+        #expect(fromBelow == expected)
+        let fromAbove = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 10, row: 0, columns: 24))
+        #expect(fromAbove == expected)
+    }
+
+    /// The same URL ends one row and starts the next, rows SwiftTerm does not join: the first row's
+    /// text stops short of the end. Each is a link of its own.
+    @Test func theSameURLOnTheNextRowIsAnotherLink() {
+        let url = "https://example.com/acme"
+        let rows = [("see \(url)", false), ("\(url) again", false), ("", false)]
+        let upper = SwiftTermLinkDetector.textLink(in: clicked(rows, column: 10, row: 0, columns: 40))
+        #expect(upper == GhosttyTextLink(text: url, spans: [.init(row: 0, columns: 4..<28)]))
+        let lower = SwiftTermLinkDetector.textLink(in: clicked(rows, column: 10, row: 1, columns: 40))
+        #expect(lower == GhosttyTextLink(text: url, spans: [.init(row: 1, columns: 0..<24)]))
+    }
+
+    /// Two wide characters before the URL take two columns each, so its cells are the screen's.
+    @Test func wideCharactersLeaveTheLinksCellsWhereTheyAreOnScreen() throws {
+        let text = "\u{65E5}\0\u{672C}\0 https://example.com/acme"
+        let link = SwiftTermLinkDetector.textLink(in: clicked(
+            [(text, false)], column: try column(of: "https", in: text), row: 0, columns: 40))
+        #expect(link == GhosttyTextLink(text: "https://example.com/acme", spans: [.init(row: 0, columns: 5..<29)]))
+    }
+
+    /// The hover asks about every cell the pointer crosses. One screen is written once, whatever
+    /// is asked about it, and a screen that changed is written again rather than answered from
+    /// the old one.
+    @Test func hoverLinksWritesEachScreenOnce() {
+        let hover = SwiftTermLinkDetector.HoverLinks()
+        let screen = [("see https://example.com/acme and /srv/acme/notes.txt", false)]
+        let url = hover.textLink(in: clicked(screen, column: 10, row: 0, columns: 60))
+        #expect(url == GhosttyTextLink(text: "https://example.com/acme", spans: [.init(row: 0, columns: 4..<28)]))
+        let sameURL = hover.textLink(in: clicked(screen, column: 20, row: 0, columns: 60))
+        #expect(sameURL == url)
+        let path = hover.textLink(in: clicked(screen, column: 40, row: 0, columns: 60))
+        #expect(path == GhosttyTextLink(text: "/srv/acme/notes.txt", spans: [.init(row: 0, columns: 33..<52)]))
+        let between = hover.textLink(in: clicked(screen, column: 30, row: 0, columns: 60))
+        #expect(between == nil)
+        #expect(hover.screensWritten == 1)
+
+        let changed = hover.textLink(in: clicked([("see nothing here", false)], column: 10, row: 0, columns: 60))
+        #expect(changed == nil)
+        #expect(hover.screensWritten == 2)
+    }
 }

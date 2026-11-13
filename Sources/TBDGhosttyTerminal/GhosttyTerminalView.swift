@@ -486,6 +486,13 @@ public final class GhosttyTerminalView: NSView {
     /// a press the host declined (`onMouseDownClaimFocus`).
     public var onCommandClickText: (@MainActor (GhosttyClickedText) -> Bool)?
 
+    /// Asked, while Command is held with the pointer over plain text and no OSC 8 link under it,
+    /// for the link the host finds there, which the view underlines as it underlines an OSC 8
+    /// link. Given the screen's text read as a ⌘-press reads it, with the hovered cell as the
+    /// pressed one, and answers in that text's rows. The host decides which links earn the
+    /// underline. nil, or no hook, underlines nothing.
+    public var onCommandHoverText: (@MainActor (GhosttyClickedText) -> GhosttyTextLink?)?
+
     /// The view became the first responder (`true`) or stopped being it (`false`), however focus
     /// moved. Unlike `onFocusChanged`, a window gaining or losing key status does not call it.
     public var onFirstResponderChanged: (@MainActor (Bool) -> Void)?
@@ -962,7 +969,12 @@ public final class GhosttyTerminalView: NSView {
 
     /// A mouse event's location in **device pixels**, top-left origin (the view is flipped).
     func devicePixels(of event: NSEvent) -> CGPoint {
-        let point = convert(event.locationInWindow, from: nil)
+        devicePixels(atWindowLocation: event.locationInWindow)
+    }
+
+    /// `location`, a point in the window's coordinates, in **device pixels**, top-left origin.
+    func devicePixels(atWindowLocation location: CGPoint) -> CGPoint {
+        let point = convert(location, from: nil)
         let scale = backingScale
         return CGPoint(x: point.x * scale, y: point.y * scale)
     }
@@ -1512,9 +1524,14 @@ public final class GhosttyTerminalView: NSView {
     /// sibling drawn over it at that point. `NSTrackingArea` does not check either, so a hover
     /// handler has to. Outside a window there is nothing to be covered by.
     func isPointerTarget(_ event: NSEvent) -> Bool {
+        isPointerTarget(atWindowLocation: event.locationInWindow)
+    }
+
+    /// `isPointerTarget(_:)` for a pointer at `location`, a point in the window's coordinates.
+    func isPointerTarget(atWindowLocation location: CGPoint) -> Bool {
         guard !isHiddenOrHasHiddenAncestor else { return false }
         guard let window, let content = window.contentView else { return true }
-        guard let hit = content.hitTest(event.locationInWindow) else { return false }
+        guard let hit = content.hitTest(location) else { return false }
         return hit === self || hit.isDescendant(of: self)
     }
 
