@@ -353,10 +353,9 @@ a bounded time ("The bounded wait", below).
 
 ### The off switch
 
-The whole engine sits behind `useGhosttyTerminalEngine`, which is off by default and turned
-on in Settings ▸ Terminal ▸ Experimental. That flag is this design's off switch, and it meets
-CLAUDE.md's default-off rule: everything this design changes runs only in terminals built on
-the engine. The design adds no setting, no hidden key and no pacing mode. The
+The whole engine sits behind `useGhosttyTerminalEngine`, which Settings ▸ Terminal ▸
+Experimental turns on and off. That flag is this design's off switch: everything this design
+changes runs only in terminals built on the engine. The design adds no setting, no hidden key and no pacing mode. The
 A/B already compares libghostty with SwiftTerm, so it needs no second libghostty arm, and one
 frame path is less to maintain than two.
 

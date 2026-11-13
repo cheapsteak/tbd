@@ -314,7 +314,8 @@ between engines. So both engines must look the same to the program.
 - **Three states** – the key is read as
   `object(forKey:) as? Bool ?? AppState.ghosttyTerminalEngineDefault`. Unset follows the
   default, and an explicit on or off survives any change to the default.
-  `ghosttyTerminalEngineDefault` is `false`.
+  `ghosttyTerminalEngineDefault` is `true`: libghostty is the app's default engine
+  ([retirement design](2026-11-13-swiftterm-retirement-design.md), section A).
 - **Before step 4** – no Settings UI. A developer turns the engine on with
   `defaults write com.github.cheapsteak.tbd useGhosttyTerminalEngine -bool true`, then
   opens new terminals.
