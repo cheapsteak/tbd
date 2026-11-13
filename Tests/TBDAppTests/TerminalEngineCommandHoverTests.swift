@@ -150,25 +150,27 @@ struct TerminalEngineCommandHoverTests {
     }
 
     /// The pointer stays on a URL while output arrives, as it does over a program at work. Output
-    /// on other rows leaves the underline. Output over its row takes it away, rather than leave it
-    /// under text that is no longer the link, and the next move looks again. libghostty-only: the
-    /// SwiftTerm view keeps its underline on the rows of its buffer whatever is written there.
+    /// on other rows leaves the underline, even on the row directly below when the URL stops short
+    /// of its own row's end and so cannot run on into it. Output over its row takes it away, rather
+    /// than leave it under text that is no longer the link, and the next move looks again.
+    /// libghostty-only: the SwiftTerm view keeps its underline on the rows of its buffer whatever
+    /// is written there.
     @Test("output over a ⌘-hovered URL clears its underline, and output elsewhere keeps it",
           .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
     func outputUnderAStillPointer() async throws {
         let fixture = try HoverFixture(kind: .ghostty)
         defer { fixture.tearDown() }
-        await fixture.show("see \(HoverFixture.linkURL) now\r\n\r\n\r\nworking 1")
+        await fixture.show("see \(HoverFixture.linkURL) now\r\nworking 1")
         try fixture.command(down: true)
         try fixture.move(column: 14, row: 0, flags: .command)
         let url = [Underline(row: 0, columns: 4..<28)]
         let before = try fixture.underlined()
         #expect(before == url, "over the URL, \(before)")
 
-        // The last digit of "working 1", three rows down, changes.
-        await fixture.feed("\u{1b}[4;9H2")
-        let afterElsewhere = try fixture.underlined()
-        #expect(afterElsewhere == url, "output three rows down left \(afterElsewhere)")
+        // The last digit of "working 1", on the row directly below the URL's, changes.
+        await fixture.feed("\u{1b}[2;9H2")
+        let afterBelow = try fixture.underlined()
+        #expect(afterBelow == url, "output on the row below left \(afterBelow)")
 
         // The URL's row is erased and written over.
         await fixture.feed("\u{1b}[1;1H\u{1b}[2Kall done")

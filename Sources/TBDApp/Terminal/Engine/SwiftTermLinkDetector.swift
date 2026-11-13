@@ -305,7 +305,7 @@ enum SwiftTermLinkDetector {
             for column in start..<max(start, textEnd(ofRow: row) ?? 0) {
                 var character = text[column]
                 if character == "\0" {
-                    if column > 0, !text[column - 1].isASCII { continue }
+                    if column > 0, isWide(column: column - 1, row: row) { continue }
                     character = " "
                 }
                 characters.append((character: character, cell: Cell(row: row, column: column)))
@@ -313,12 +313,16 @@ enum SwiftTermLinkDetector {
             return characters
         }
 
-        /// How many columns the character in `cell` takes: two for one whose second half is the
-        /// next cell.
+        /// How many columns the character in `cell` takes: two for a wide one.
         private func width(of cell: Cell) -> Int {
-            let row = cells[cell.row]
-            guard cell.column + 1 < row.count, !row[cell.column].isASCII, row[cell.column + 1] == "\0" else { return 1 }
-            return 2
+            isWide(column: cell.column, row: cell.row) ? 2 : 1
+        }
+
+        /// Whether SwiftTerm holds a wide character in the cell at `column`, `row`. Asked of its
+        /// buffer: an empty cell after a narrow character reads the same in the rows as the
+        /// second half of a wide one.
+        private func isWide(column: Int, row: Int) -> Bool {
+            terminal.getLine(row: row)?.getWidth(index: column) == 2
         }
 
         /// `cells` as spans, one per row, each from its row's first cell to past its last

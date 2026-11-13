@@ -530,11 +530,15 @@ final class MouseController: NSObject {
     /// What the viewport shows may have changed (`screenGeneration`). The ⌘-hover's reads and
     /// lookups are dropped, and an underline the screen no longer bears out is cleared: the next
     /// move looks again. One that still stands stays, so output elsewhere on the screen, a
-    /// spinner's say, does not take it away under a still pointer.
+    /// spinner's, say, does not take it away under a still pointer, and its lookup holds for the
+    /// screen as it is now, so a move within its cell does not look again.
     func screenMayHaveChanged() {
         screenGeneration &+= 1
         guard hoveredLink != nil else { return }
-        if let view, let hoverLookup, underlineStands(hoverLookup, in: view) { return }
+        if let view, let hoverLookup, underlineStands(hoverLookup, in: view) {
+            self.hoverLookup?.generation = screenGeneration
+            return
+        }
         clearLinkOverlay()
     }
 
@@ -582,7 +586,7 @@ final class MouseController: NSObject {
 
     /// Whether the screen as it is now still bears out the underline `lookup` drew: the same OSC 8
     /// run at its position or, for a link found in the plain text, the same text on the rows it
-    /// is drawn on and on the row either side, which a link could have run on into since.
+    /// is drawn on and on any row either side it could have run on into since.
     private func underlineStands(_ lookup: HoverLookup, in view: GhosttyTerminalView) -> Bool {
         guard let link = lookup.link else { return false }
         guard let rows = lookup.rows else { return hyperlink(at: lookup.position, in: view) == link }
@@ -601,8 +605,8 @@ final class MouseController: NSObject {
 
     /// The link the host finds in the plain text under `position` (`onCommandHoverText`), its
     /// spans moved onto the viewport's rows and cut to them, with the text of the viewport rows
-    /// from the one above its first span to the one below its last, as read. nil with no hook,
-    /// over an OSC 8 cell, and when the host finds nothing on view.
+    /// it is on and of those either side it could run on into, as read. nil with no hook, over an
+    /// OSC 8 cell, and when the host finds nothing on view.
     private func plainTextLink(
         at position: SurfacePoint, cell: HoverCell?, in view: GhosttyTerminalView
     ) -> (link: GhosttyTextLink, rows: [(row: Int, text: GhosttyClickedText.Row)])? {
@@ -617,8 +621,19 @@ final class MouseController: NSObject {
             guard (0..<rows).contains(row), !span.columns.isEmpty else { return nil }
             return GhosttyTextLink.Span(row: row, columns: span.columns)
         }
-        guard let first = spans.first?.row, let last = spans.last?.row else { return nil }
-        let checked = max(0, first - 1)...min(rows - 1, last + 1)
+        guard let first = spans.first, let last = spans.last else { return nil }
+        // The rows either side the link could run on into, as SwiftTerm joins rows: the one above
+        // when it starts its row's text, and the one below when it ends its row's text.
+        var top = first.row, bottom = last.row
+        let firstRow = Array(hovered.rows[first.row + shift].text)
+        if let start = firstRow.firstIndex(where: { $0 != "\0" && !$0.isWhitespace }), first.columns.lowerBound <= start {
+            top -= 1
+        }
+        let lastRow = Array(hovered.rows[last.row + shift].text)
+        if let end = lastRow.lastIndex(where: { $0 != "\0" }), last.columns.upperBound > end {
+            bottom += 1
+        }
+        let checked = max(0, top)...min(rows - 1, bottom)
         return (link: GhosttyTextLink(text: link.text, spans: spans),
                 rows: checked.map { (row: $0, text: hovered.rows[$0 + shift]) })
     }

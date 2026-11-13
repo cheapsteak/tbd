@@ -278,4 +278,33 @@ struct TerminalCommandClickTests {
             text: url, spans: [.init(row: 100, columns: 90..<100), .init(row: 101, columns: 0..<14)]))
         #expect(screen.lookups <= 8, "\(screen.lookups) lookups")
     }
+
+    /// A letter outside ASCII is one column wide unless it is a wide character. At the end of a
+    /// link with nothing written after it, the empty cell after it is no part of the link, as
+    /// SwiftTerm sees it, so the hover there finds nothing.
+    @Test func aNarrowAccentedLetterEndsItsLinkAtItsOwnCell() {
+        let url = "https://fr.wikipedia.org/wiki/Caf\u{E9}"
+        let screen = [("see \(url)", false), ("next", false)]
+        let hover = SwiftTermLinkDetector.HoverLinks()
+        let link = hover.textLink(in: clicked(screen, column: 10, row: 0, columns: 60))
+        #expect(link == GhosttyTextLink(text: url, spans: [.init(row: 0, columns: 4..<38)]))
+        let pastTheAccent = hover.textLink(in: clicked(screen, column: 38, row: 0, columns: 60))
+        #expect(pastTheAccent == nil)
+    }
+
+    /// SwiftTerm starts a soft-wrapped row at its first cell that is not blank, as it does a row
+    /// an editor's hard wrap joins, and the line `located` reads keeps the blanks. The link is not
+    /// in that line, so its cells are found by asking about each: more questions than the five
+    /// `located` asks about a link no hard wrap crosses.
+    @Test func aLinkNotInTheLinesTextIsFoundCellByCell() throws {
+        let wrapped = [("see https://example.", false), ("  com/acme now", true)]
+        let rows = clicked(wrapped, column: 0, row: 0, columns: 20).rows
+        let screen = try #require(SwiftTermLinkDetector.Screen(rows: rows, columns: 20))
+
+        let link = screen.textLink(column: 4, row: 1)
+
+        #expect(link == GhosttyTextLink(
+            text: "https://example.com/acme", spans: [.init(row: 0, columns: 4..<20), .init(row: 1, columns: 2..<10)]))
+        #expect(screen.lookups > 5, "\(screen.lookups) lookups: the cells were not asked about one by one")
+    }
 }
