@@ -103,3 +103,59 @@ struct SwapProfileMenuLabelTests {
         #expect(label == "Gmail")
     }
 }
+
+@Suite("SwapProfileMenu — items")
+struct SwapProfileMenuItemsTests {
+    private func entry(_ name: String) -> ModelProfileWithUsage {
+        ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: name, kind: .oauth, createdAt: Date()),
+            usage: nil)
+    }
+
+    @Test func marksOnlyTheCurrentAccount() {
+        let a = entry("acct-a"), b = entry("acct-b")
+        let items = SwapProfileMenu.items(
+            profiles: [a, b], currentProfileID: b.profile.id, mode: .inPlace, activityState: .idle)
+        #expect(items == [
+            .profile(id: nil, title: "Default (logged in)", isCurrent: false),
+            .separator,
+            .profile(id: a.profile.id, title: "acct-a", isCurrent: false),
+            .profile(id: b.profile.id, title: "acct-b", isCurrent: true),
+        ])
+    }
+
+    @Test func defaultIsCurrentWhenTabHasNoProfile() {
+        let items = SwapProfileMenu.items(
+            profiles: [entry("acct-a")], currentProfileID: nil, mode: .fork, activityState: nil)
+        #expect(items.first == .profile(id: nil, title: "Default (logged in)", isCurrent: true))
+    }
+
+    @Test func busyCaptionOnlyForInPlaceWorkingSession() {
+        let busy = SwapProfileMenu.items(
+            profiles: [], currentProfileID: nil, mode: .inPlace, activityState: .working)
+        #expect(busy.last == .caption(SwapProfileMenu.interruptsRunCaption))
+        let fork = SwapProfileMenu.items(
+            profiles: [], currentProfileID: nil, mode: .fork, activityState: .working)
+        #expect(!fork.contains { if case .caption = $0 { true } else { false } })
+    }
+}
+
+@Suite("TabContextMenuHitTest")
+struct TabContextMenuHitTestTests {
+    @Test func findsTheTabUnderThePoint() {
+        let a = UUID(), b = UUID()
+        let frames = [a: CGRect(x: 0, y: 0, width: 100, height: 28),
+                      b: CGRect(x: 100, y: 0, width: 100, height: 28)]
+        #expect(TabContextMenuHitTest.tabID(at: CGPoint(x: 150, y: 10), frames: frames) == b)
+        #expect(TabContextMenuHitTest.tabID(at: CGPoint(x: 50, y: 10), frames: frames) == a)
+        #expect(TabContextMenuHitTest.tabID(at: CGPoint(x: 250, y: 10), frames: frames) == nil)
+        #expect(TabContextMenuHitTest.tabID(at: .zero, frames: [:]) == nil)
+    }
+
+    @Test func onlyRightAndControlClicksOpenTheMenu() {
+        #expect(TabContextMenuHitTest.opensContextMenu(type: .rightMouseDown, modifiers: []))
+        #expect(TabContextMenuHitTest.opensContextMenu(type: .leftMouseDown, modifiers: .control))
+        #expect(!TabContextMenuHitTest.opensContextMenu(type: .leftMouseDown, modifiers: []))
+        #expect(!TabContextMenuHitTest.opensContextMenu(type: .mouseMoved, modifiers: .control))
+    }
+}

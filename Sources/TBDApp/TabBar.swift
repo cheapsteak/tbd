@@ -1181,6 +1181,10 @@ private struct TabBarItem: View {
         // nil = no card (non-Claude tabs).
         .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
+        // The toolbar row takes the right-click before the `.contextMenu`
+        // above sees it, so a Claude tab also answers through the window's
+        // event monitor (`TabContextMenuRegistry`).
+        .background(TabContextMenuAnchor(tabID: tab.id) { toolbarRowMenu() })
         .onAppear { fileMenuApps.show(path: fileMenuTarget?.path) }
         .onChange(of: fileMenuTarget?.path) { _, path in
             fileMenuApps.show(path: path)
@@ -1259,6 +1263,28 @@ private struct TabBarItem: View {
                 appState: appState
             )
         )
+    }
+
+    /// The Claude tab's right-click menu for the window-level event monitor;
+    /// nil for any other tab, which keeps its SwiftUI `.contextMenu`.
+    private func toolbarRowMenu() -> NSMenu? {
+        guard isClaudeTerminal, let terminalID = terminal?.id else { return nil }
+        let worktreeID = worktreeID
+        let linkTerminalID = linkTerminalID
+        return TabContextMenu.build(
+            header: formatProfileHeader(terminal?.profileID),
+            profiles: appState.modelProfiles,
+            currentProfileID: terminal?.profileID,
+            activityState: terminal?.activityState,
+            copyLink: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(
+                    DeepLink.makeShareableOpenURL(worktreeID, terminalID: linkTerminalID).absoluteString,
+                    forType: .string)
+            },
+            swap: { [appState] profileID, mode in
+                Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: profileID, mode: mode) }
+            })
     }
 
     private func formatProfileHeader(_ profileID: UUID?) -> String {
