@@ -175,8 +175,8 @@ struct ControlModeResizeCoordinatorTests {
         // app-side gate refuses to send below the same floor, so app and
         // daemon can never disagree about the minimum sendable size again.
         #expect(write.hasPrefix(
-            "resize-window -t @0 -x \(ControlModeGeometry.minCols) -y \(ControlModeGeometry.maxRows)\n"))
-        #expect(ControlModeGeometry.minCols == 20)
-        #expect(ControlModeGeometry.maxRows == 300)
+            "resize-window -t @0 -x \(TerminalGeometryLimits.minCols) -y \(TerminalGeometryLimits.maxRows)\n"))
+        #expect(TerminalGeometryLimits.minCols == 20)
+        #expect(TerminalGeometryLimits.maxRows == 300)
     }
 }

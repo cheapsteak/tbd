@@ -151,7 +151,7 @@ struct TerminalEngineReattachCursorTests {
         await EngineTestSupport.settle()
         let grid = fixture.engine.gridSize
         try #require(
-            grid.cols < ControlModeGeometry.minCols || grid.rows < ControlModeGeometry.minRows,
+            grid.cols < TerminalGeometryLimits.minCols || grid.rows < TerminalGeometryLimits.minRows,
             "\(kind): a 100x40 frame gave a \(grid.cols)x\(grid.rows) grid, which is not below the floor")
 
         let sent = await attachGrids(attaching: fixture.engine, defaults: fixture.suite.defaults)

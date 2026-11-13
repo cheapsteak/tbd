@@ -1464,7 +1464,8 @@ extension WorktreeLifecycle {
     /// of the decisions behind it.
     ///
     /// The two transports must start the *same* program in the *same* place, so
-    /// this reuses `TmuxManager`'s own composition rather than paraphrasing it:
+    /// this composes through the same `ShellLaunchComposer` the tmux path uses
+    /// rather than paraphrasing it:
     ///
     ///   - `envExportPrefixed` inlines `env` as `export K='v';` in front of the
     ///     command, so those variables land after every startup file has run —
@@ -1491,8 +1492,8 @@ extension WorktreeLifecycle {
         rows: Int,
         environment: [String: String]
     ) -> HolderLaunchRequest {
-        let fullCommand = TmuxManager.envExportPrefixed(shellCommand, env: env)
-        let argv = TmuxManager.shellInvocation(fullCommand, environment: environment)
+        let fullCommand = ShellLaunchComposer.envExportPrefixed(shellCommand, env: env)
+        let argv = ShellLaunchComposer.shellInvocation(fullCommand, environment: environment)
         return HolderLaunchRequest(
             executable: argv[0],
             arguments: Array(argv.dropFirst()),

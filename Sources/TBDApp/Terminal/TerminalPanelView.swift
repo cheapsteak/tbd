@@ -980,7 +980,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// stashes and the in-flight sender's completion drains it. MainActor-
         /// confined like `resizeDebounceTask` — mutated only from the
         /// `@MainActor` debounce path.
-        private var resizeSerializer = ControlModeResizeSerializer()
+        private var resizeSerializer = TerminalResizeSerializer()
         /// Set (permanently) by `cleanup()` when the view is torn down. The
         /// attach establishment in `startControlModeClient` re-checks it
         /// after every `await` resumption and self-detaches anything it
@@ -3521,7 +3521,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // iteration re-checks the torn-down flag BEFORE sending — a
                 // dead view must stop draining (its stash is irrelevant; the
                 // next live view sends its own initial resize).
-                while ControlModeResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
+                while TerminalResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
                     switch target {
                     case .controlModeWindow(let worktreeID, let windowID):
                         try? await daemonClient?.paneResize(

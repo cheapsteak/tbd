@@ -1,7 +1,7 @@
 import Foundation
 
-/// Latest-wins serialization state for control-mode `pane.resize` RPCs
-/// (R5-M3). The Coordinator's 100 ms debounce collapses a window-drag flurry
+/// Latest-wins serialization state for `pane.resize` RPCs on both the
+/// control-mode and pty-holder transports (R5-M3). The Coordinator's 100 ms debounce collapses a window-drag flurry
 /// to its tail, but cancel-and-replace only cancels the wrapper Task — each
 /// `paneResize` RPC rides its own socket task, so an already-in-flight resize
 /// has no ordering against a newer one and can be processed AFTER it,
@@ -14,7 +14,7 @@ import Foundation
 /// headlessly testable — mirrors `ControlModeResizeGate` / `PasteInterception`.
 /// MainActor-confined by its owner (a Coordinator stored property), like the
 /// rest of the resize/debounce state.
-struct ControlModeResizeSerializer {
+struct TerminalResizeSerializer {
     struct Size: Equatable {
         let cols: Int
         let rows: Int

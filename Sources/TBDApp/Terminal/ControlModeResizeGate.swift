@@ -7,7 +7,7 @@ import TBDShared
 /// conditional — mirrors `OutgoingInputRoute` / `PasteInterception`.
 ///
 /// A resize is sent only when this panel is control-mode attached AND the
-/// size is at or above the SHARED `ControlModeGeometry` floor (R6-M5). The
+/// size is at or above the SHARED `TerminalGeometryLimits` floor (R6-M5). The
 /// floor serves two purposes: SwiftTerm emits transient tiny sizes (0/1
 /// cols/rows) mid-layout that must never reach the daemon, and — the R6-M5
 /// bug — any size below the daemon's clamp floor would be silently clamped
@@ -15,10 +15,10 @@ import TBDShared
 /// `%layout-change`), permanently desyncing SwiftTerm from tmux. Accepted
 /// residual: a panel physically below the floor keeps tmux at its last
 /// >= floor size; self-heals on the next >= floor resize (see
-/// `ControlModeGeometry`).
+/// `TerminalGeometryLimits`).
 enum ControlModeResizeGate {
     static func shouldSend(controlModeAttached: Bool, cols: Int, rows: Int) -> Bool {
         guard controlModeAttached else { return false }
-        return cols >= ControlModeGeometry.minCols && rows >= ControlModeGeometry.minRows
+        return cols >= TerminalGeometryLimits.minCols && rows >= TerminalGeometryLimits.minRows
     }
 }

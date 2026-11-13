@@ -450,25 +450,8 @@ public struct TmuxManager: Sendable {
         return false
     }
 
-    /// Prefix `shellCommand` with one `export KEY='value'; ` per `env` entry,
-    /// sorted by key, single-quoting each value with the standard `'\''`
-    /// escape for an embedded quote.
-    ///
-    /// Shared by `newWindowCommand` and `respawnWindowCommand` deliberately.
-    /// `resolvePaneTerminalID` reads a pane's identity back out of exactly this
-    /// text, anchored on `terminalIDExportAnchor`, and that anchor is only safe
-    /// while every spawn path emits the identical shape. Two independently
-    /// maintained copies could drift and reopen the forgery hole on one path.
-    static func envExportPrefixed(_ shellCommand: String, env: [String: String]) -> String {
-        var envPrefix = ""
-        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
-            envPrefix += "export \(key)=\(shellEscape(value)); "
-        }
-        return envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
-    }
-
     /// tmux `-e KEY=VALUE` flags, sorted by key. Shared by the two spawn
-    /// builders for the same reason as `envExportPrefixed`.
+    /// builders for the same reason as `ShellLaunchComposer.envExportPrefixed`.
     ///
     /// Every value routed through here is sensitive by construction — that is
     /// what `-e` is *for* on the spawn path (`ANTHROPIC_API_KEY`,
@@ -540,56 +523,10 @@ public struct TmuxManager: Sendable {
         return String(name)
     }
 
-    /// Shell flags for spawning the user's shell with a command string,
-    /// chosen by the shell's lowercased basename (the same derivation as
-    /// `CLIInstaller.shellRCAndExport`, so "/bin/TCSH" and wrapper paths
-    /// behave consistently across both). Flags are separate argv elements
-    /// (`-i -l -c`, never clustered `-ilc`): some shells (e.g. nushell)
-    /// accept the individual flags but reject GNU-style clustering, and a
-    /// rejected spawn kills every pane silently. csh and tcsh cannot combine
-    /// -l with -c at all (tcsh accepts -l only as its sole argument), so
-    /// they keep the pre-login-shell `-i -c`; every other shell gets
-    /// `-i -l -c` (interactive login shell, see
-    /// docs/specs/2026-08-19-login-shell-panes-design.md).
-    ///
-    /// Measured on this macOS host (2026-08-19), separate flags behaving
-    /// identically to the clustered forms:
-    ///   zsh  -i -l -c 'echo ok' -> ok, exit 0 (same as -ilc)
-    ///   bash -i -l -c 'echo ok' -> ok, exit 0 (same as -ilc)
-    ///   dash -i -l -c 'echo ok' -> ok, exit 0 (same as -ilc)
-    ///   tcsh -i -c 'echo ok' -> ok, exit 0 (same as -ic);
-    ///        tcsh -i -l -c -> exit 1, "Unknown option: `-l'"
-    ///   csh  -i -c 'echo ok' -> ok, exit 0 (same as -ic);
-    ///        csh  -i -l -c -> exit 1, "Unknown option: `-l'"
-    ///   (fish not installed to measure)
-    static func shellFlags(forShell shellPath: String) -> [String] {
-        let basename = (shellPath as NSString).lastPathComponent.lowercased()
-        switch basename {
-        case "csh", "tcsh":
-            return ["-i", "-c"]
-        default:
-            return ["-i", "-l", "-c"]
-        }
-    }
-
-    /// The `[shell] + flags + [command]` argv tail appended by both spawn
-    /// builders. Shared for the same drift-hazard reason as
-    /// `envExportPrefixed`: `newWindowCommand` and `respawnWindowCommand`
-    /// must spawn through the identical shell invocation, and the per-shell
-    /// flag choice (`shellFlags(forShell:)`) must not fork between them.
-    /// The defaulted `environment` parameter is the test seam for the SHELL
-    /// read, matching the `TBDConstants.*(environment:)` idiom.
-    static func shellInvocation(
-        _ fullCommand: String,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> [String] {
-        let userShell = environment["SHELL"] ?? "/bin/zsh"
-        return [userShell] + shellFlags(forShell: userShell) + [fullCommand]
-    }
-
     public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, remainOnExit: Bool = false, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
-        // Spawn `shell <flags> <cmd>` (via shellInvocation) so commands with
-        // arguments work (e.g. "claude --dangerously-skip-permissions").
+        // Spawn `shell <flags> <cmd>` (via ShellLaunchComposer.shellInvocation)
+        // so commands with arguments work (e.g.
+        // "claude --dangerously-skip-permissions").
         // -i keeps it interactive, -l makes it a login shell, -c runs the
         // command. zsh sources zshenv + zprofile + zshrc; bash login shells
         // source profile files only, relying on the near-universal convention
@@ -597,11 +534,12 @@ public struct TmuxManager: Sendable {
         // /etc/zprofile's path_helper and ~/.zprofile supply the
         // /usr/local/bin and Homebrew PATH entries; see
         // docs/specs/2026-08-19-login-shell-panes-design.md. csh/tcsh cannot
-        // combine -l with -c and keep -i -c (see shellFlags(forShell:)).
+        // combine -l with -c and keep -i -c (see
+        // ShellLaunchComposer.shellFlags(forShell:)).
         // `environment` is the test seam for the SHELL read; production call
         // sites take the default.
         // After the command exits, the pane closes (tmux default behavior)
-        let fullCommand = envExportPrefixed(shellCommand, env: env)
+        let fullCommand = ShellLaunchComposer.envExportPrefixed(shellCommand, env: env)
         // `sensitiveEnv` carries values that must be in the spawned window's
         // PROCESS environment before the shell starts, via tmux's -e KEY=VALUE
         // flag — NOT inlined into the shell command argv like `env` above.
@@ -628,7 +566,7 @@ public struct TmuxManager: Sendable {
         return ["-L", server, "new-window", "-t", session, "-c", cwd]
             + eFlags
             + ["-PF", "#{window_id} #{pane_id}"]
-            + shellInvocation(fullCommand, environment: environment)
+            + ShellLaunchComposer.shellInvocation(fullCommand, environment: environment)
             + (remainOnExit ? remainOnExitChain : [])
     }
 
@@ -643,17 +581,18 @@ public struct TmuxManager: Sendable {
 
     /// Respawn (replace the running program of) an existing window's pane
     /// IN PLACE, keeping the same window id and pane id. Shares
-    /// `newWindowCommand`'s env handling through `envExportPrefixed` and
+    /// `newWindowCommand`'s env handling through
+    /// `ShellLaunchComposer.envExportPrefixed` and
     /// `sensitiveEnvFlags` — the `env` map is inlined as an
     /// `export …; ` prefix on the shell command (runs AFTER all startup files,
     /// profile and rc alike), while `sensitiveEnv` is passed via tmux
     /// `-e KEY=VALUE` so it's in the process environment before the shell
     /// starts (kept out of `ps aux`, and visible during profile and rc
     /// execution). Spawns the same interactive login-shell invocation as
-    /// `newWindowCommand` via `shellInvocation` (zsh sources
+    /// `newWindowCommand` via `ShellLaunchComposer.shellInvocation` (zsh sources
     /// zshenv + zprofile + zshrc; bash login shells source profile files
     /// only, relying on .bash_profile sourcing .bashrc; csh/tcsh keep -i -c,
-    /// see `shellFlags(forShell:)`). `-k` kills the pane's current program
+    /// see `ShellLaunchComposer.shellFlags(forShell:)`). `-k` kills the pane's current program
     /// first. `environment` is the test seam for the SHELL read; production
     /// call sites take the default.
     ///
@@ -670,11 +609,11 @@ public struct TmuxManager: Sendable {
         sensitiveEnv: [String: String] = [:],
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String] {
-        let fullCommand = envExportPrefixed(shellCommand, env: env)
+        let fullCommand = ShellLaunchComposer.envExportPrefixed(shellCommand, env: env)
         let eFlags = sensitiveEnvFlags(sensitiveEnv)
         return ["-L", server, "respawn-window", "-k", "-t", windowID, "-c", cwd]
             + eFlags
-            + shellInvocation(fullCommand, environment: environment)
+            + ShellLaunchComposer.shellInvocation(fullCommand, environment: environment)
     }
 
     /// Resize an existing tmux window to the given cell dimensions.
@@ -935,7 +874,8 @@ public struct TmuxManager: Sendable {
 
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
     /// emit for one entry of the `env` map. Both build the prefix from the one
-    /// shared `envExportPrefixed`, so a pane spawned either way — including the
+    /// shared `ShellLaunchComposer.envExportPrefixed`, so a pane spawned
+    /// either way — including the
     /// in-place profile swap — carries this literal.
     static let terminalIDExportAnchor = "export TBD_TERMINAL_ID='"
 
@@ -972,7 +912,8 @@ public struct TmuxManager: Sendable {
     ///
     /// What a decoy anchor sitting inside an env *value* actually yields is
     /// worth stating exactly, because it is never the decoy's own payload.
-    /// `envExportPrefixed` escapes an embedded `'` as `'\''`, so instructions
+    /// `ShellLaunchComposer.envExportPrefixed` escapes an embedded `'` as
+    /// `'\''`, so instructions
     /// reading `export TBD_TERMINAL_ID='decoy'` are emitted as
     /// `export TBD_TERMINAL_ID='\''decoy'\''`: the anchor consumes that first
     /// quote and the value read is everything up to the next quote — a lone
@@ -980,7 +921,8 @@ public struct TmuxManager: Sendable {
     /// reads as the `; export …=` text that always follows the entry's closing
     /// quote. Neither parses as a `UUID`, so the scan steps past and finds the
     /// real id. That guarantee comes from the escaping, not from the resolver,
-    /// which is why the two must stay coupled — see `envExportPrefixed`.
+    /// which is why the two must stay coupled — see
+    /// `ShellLaunchComposer.envExportPrefixed`.
     ///
     /// Residual adversarial case: an *unescaped* complete
     /// `export TBD_TERMINAL_ID='<valid uuid>'` earlier in the start command

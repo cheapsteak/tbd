@@ -1,6 +1,6 @@
 import Foundation
 
-/// ONE shared geometry envelope for control-mode window sizing (R6-M5).
+/// ONE shared geometry envelope for terminal window sizing (R6-M5).
 ///
 /// Two independent guards used to disagree: the app's resize gate refused
 /// only degenerate mid-layout sizes (< 2), while the daemon clamped
@@ -18,7 +18,7 @@ import Foundation
 /// resize. That is strictly better than the pre-fix silent desync, and a
 /// sub-20-column terminal is not a usable target for tmux anyway
 /// (tmux historically misbehaves on absurd dimensions).
-public enum ControlModeGeometry {
+public enum TerminalGeometryLimits {
     /// Smallest width/height the app will send AND the daemon will accept
     /// un-clamped. Below this the app's gate refuses to send.
     public static let minCols = 20
