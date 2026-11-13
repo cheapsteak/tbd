@@ -231,7 +231,7 @@ struct TerminalSettingsView: View {
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("All three off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of one, turn it off and restart the app.")
+                Text("Auto-resize and GPU rendering are off by default. The libghostty engine is on by default; turn it off to go back to SwiftTerm. All three are under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of one, turn it off and restart the app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
