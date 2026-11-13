@@ -410,8 +410,15 @@ final class FrameBuilder {
             foreground = bright
         }
 
+        // Faint (SGR 2) blends the text halfway towards its cell's background, as SwiftTerm does.
+        // It comes after the swap and the brightening, so a bold faint cell dims its bright colour
+        // towards the background it ends up with, and before the selection, so a selected cell
+        // dims towards its own background rather than the selection colour. The blend is opaque:
+        // a faint colour glyph keeps its full alpha, and faint box drawing tiles without seams.
+        // The default underline and the strikethrough take the dimmed colour; an SGR 58 underline
+        // colour is not dimmed.
         if hasStyling, style.has(.faint) {
-            foreground = (foreground & 0x00FF_FFFF) | (UInt32(0x99) << 24)
+            foreground = dimmed(foreground, towards: background ?? colors.background)
         }
 
         if selected {
@@ -702,6 +709,22 @@ func composite(_ top: UInt32, over base: UInt32) -> UInt32 {
         let over = Double((top >> shift) & 0xFF)
         let under = Double((base >> shift) & 0xFF)
         return min(UInt32((over * alpha + under * (1 - alpha)).rounded()), 0xFF) << shift
+    }
+    return 0xFF00_0000 | channel(0) | channel(8) | channel(16)
+}
+
+/// The colour faint (SGR 2) text drawn in packed `color` takes: each channel the mean of the
+/// colour's and `background`'s, rounded to nearest. The background's alpha is ignored and the
+/// result is opaque.
+///
+/// SwiftTerm's rule (adapted from SwiftTerm, MIT, Copyright (c) 2019-2026 Miguel de Icaza,
+/// `dimmedColor(towards:)` in Sources/SwiftTerm/Mac/MacExtensions.swift at cheapsteak/SwiftTerm
+/// b4db5b0): an sRGB half-sum that keeps the foreground's alpha, which for a terminal colour is
+/// opaque. Not `composite` at alpha 0x80, because 128/255 is not one half.
+@inline(__always)
+func dimmed(_ color: UInt32, towards background: UInt32) -> UInt32 {
+    func channel(_ shift: UInt32) -> UInt32 {
+        ((((color >> shift) & 0xFF) + ((background >> shift) & 0xFF) + 1) / 2) << shift
     }
     return 0xFF00_0000 | channel(0) | channel(8) | channel(16)
 }
