@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TBDGhosttyCore
 import TBDGhosttyShaderTypes
 @testable import TBDGhosttyTerminal
 import TestSupport
