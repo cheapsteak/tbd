@@ -460,8 +460,9 @@ public final class GhosttyTerminalView: NSView {
     /// main thread, right after `onDrawStart`'s frame. Not called for a frame that drew nothing.
     public var onFrameEncoded: (@MainActor () -> Void)?
 
-    /// The user ⌘-clicked an OSC 8 link. The view opens nothing itself: a program controls this
-    /// string entirely, so the host decides what it may open.
+    /// The user ⌘-clicked an OSC 8 link. Called at the release, for a press that ended as a click
+    /// with ⌘ still held. The view opens nothing itself: a program controls this string entirely,
+    /// so the host decides what it may open.
     public var onOpenLink: (@MainActor (String) -> Void)?
 
     /// The view gained or lost keyboard focus.
@@ -480,11 +481,12 @@ public final class GhosttyTerminalView: NSView {
 
     /// Offered a left ⌘-press that landed on no OSC 8 link, with the screen's text around it, read
     /// once at the press, for the host to look in for what plain text names: a file path, a URL.
-    /// `true` says the host opened something, and the view consumes the press whole: it reaches
+    /// `.opened` says the host opened something, and the view consumes the press whole: it reaches
     /// neither the program, even one that reports the mouse, nor the selection, and its drags and
-    /// release go nowhere. `false`, or no hook, lets it go on as an ordinary click. Not asked about
-    /// a press the host declined (`onMouseDownClaimFocus`).
-    public var onCommandClickText: (@MainActor (GhosttyClickedText) -> Bool)?
+    /// release go nowhere. `.opensOnRelease` hands the view a link to open at the release, which
+    /// it treats as it treats an OSC 8 link. `.nothing`, or no hook, leaves the press to go on as
+    /// any ⌘-press does. Not asked about a press the host declined (`onMouseDownClaimFocus`).
+    public var onCommandClickText: (@MainActor (GhosttyClickedText) -> GhosttyCommandClickOutcome)?
 
     /// Asked, while Command is held with the pointer over plain text and no OSC 8 link under it,
     /// for the link the host finds there, which the view underlines as it underlines an OSC 8
@@ -1571,9 +1573,10 @@ public final class GhosttyTerminalView: NSView {
     private var activationClickEventNumber: Int?
 
     /// Set while the left press under way was consumed at its mouse-down, as the window's
-    /// activating click or a ⌘-click that opened something: its drags and its release go nowhere
-    /// either. The mouse controller saw no press begin, so it declines them, and without this they
-    /// would go on up the responder chain as a drag and a release of a press nobody saw begin.
+    /// activating click, a ⌘-click that opened something, or a ⌘-press kept from a program that
+    /// reports the mouse: its drags and its release go nowhere either. The mouse controller saw no
+    /// press begin, so it declines them, and without this they would go on up the responder chain
+    /// as a drag and a release of a press nobody saw begin.
     private var pressIsConsumed = false
 
     /// Set while the host declined the left press under way (`onMouseDownClaimFocus` answered
@@ -1581,41 +1584,68 @@ public final class GhosttyTerminalView: NSView {
     /// host has something over the view that owns its events.
     private(set) var hostDeclinedPress = false
 
+    /// What the left press under way opens at its release, read at its mouse-down: the OSC 8 link
+    /// under it, or a link the host found in its text (`GhosttyCommandClickOutcome.opensOnRelease`).
+    /// It opens only if the press ends as a click with ⌘ still held, as in SwiftTerm. A drag drops
+    /// it: the first drag of a selection, or, for a press that reached no selection, a move of more
+    /// than `commandDragThreshold` from where it went down.
+    private var opensOnRelease: (@MainActor () -> Void)?
+
+    /// Where the left press under way went down, in the view's coordinates.
+    private var pressLocation: CGPoint = .zero
+
+    /// How far, in points, the pointer may move during a ⌘-press that reached no selection before
+    /// the press counts as a drag and opens nothing. The SwiftTerm panel view uses the same.
+    private static let commandDragThreshold: CGFloat = 3
+
     public override func mouseDown(with event: NSEvent) {
         let isActivationClick = event.eventNumber == activationClickEventNumber
         activationClickEventNumber = nil
         pressIsConsumed = false
+        opensOnRelease = nil
+        pressLocation = convert(event.locationInWindow, from: nil)
         hostDeclinedPress = onMouseDownClaimFocus?() == false
         // Click-to-focus. `TerminalInputController.acceptsKeyDown` declines every event whose view
         // is not the first responder, so a pane that cannot take focus by being clicked cannot be
         // typed into at all. The activating click focuses the view too.
         if let window, window.firstResponder !== self { window.makeFirstResponder(self) }
-        // A ⌘-click that opens something goes no further, and the activating click does nothing
-        // else (`acceptsActivatingClick`). The screen is read once, here: the feed thread can
-        // rewrite it between two reads, and a press let through on the first that found nothing on
-        // the second would go on as an ordinary click.
-        let openedCommandClick = openCommandClick(event, activatesWindow: isActivationClick)
-        if openedCommandClick || isActivationClick {
+        // A ⌘-click that opened something goes no further; a link that opens at the release waits
+        // for it. The screen is read once, here: the feed thread can rewrite it between two reads,
+        // and a press let through on the first that found nothing on the second would go on as an
+        // ordinary click.
+        switch commandClickOutcome(event, activatesWindow: isActivationClick) {
+        case .opened:
+            pressIsConsumed = true
+            return
+        case .opensOnRelease(let open):
+            opensOnRelease = open
+        case .nothing:
+            break
+        }
+        // The activating click does nothing else (`acceptsActivatingClick`). A ⌘-press never
+        // reaches a program that reports the mouse: ⌘ is the view's link modifier, and a mouse
+        // report has no bit for it, so the program would read a plain click. With reporting off a
+        // ⌘-press selects, as any press does, so a ⌘-drag from a link selects text.
+        if isActivationClick || (event.modifierFlags.contains(.command) && terminal.isMouseReporting) {
             pressIsConsumed = true
             return
         }
         if !forward(event) { super.mouseDown(with: event) }
     }
 
-    /// Opens what the ⌘-press `event` lands on: its OSC 8 link, through `onOpenLink`, or what the
-    /// host finds in its text, through `onCommandClickText`. True when something opened.
-    private func openCommandClick(_ event: NSEvent, activatesWindow: Bool) -> Bool {
+    /// What the ⌘-press `event` lands on: its OSC 8 link, which opens at the release through
+    /// `onOpenLink`, or what the host makes of its text, through `onCommandClickText`.
+    private func commandClickOutcome(_ event: NSEvent, activatesWindow: Bool) -> GhosttyCommandClickOutcome {
         switch mouseController.commandClickTarget(at: event) {
         case .link(let uri):
-            guard let onOpenLink else { return false }
-            onOpenLink(uri)
-            return true
+            guard let onOpenLink else { return .nothing }
+            return .opensOnRelease(open: { onOpenLink(uri) })
         case .text(var text):
-            guard let onCommandClickText else { return false }
+            guard let onCommandClickText else { return .nothing }
             text.activatesWindow = activatesWindow
             return onCommandClickText(text)
         case nil:
-            return false
+            return .nothing
         }
     }
 
@@ -1623,14 +1653,28 @@ public final class GhosttyTerminalView: NSView {
         defer {
             pressIsConsumed = false
             hostDeclinedPress = false
+            opensOnRelease = nil
         }
-        guard !pressIsConsumed else { return }
-        if !forward(event) { super.mouseUp(with: event) }
+        if !pressIsConsumed, !forward(event) { super.mouseUp(with: event) }
+        if let opensOnRelease, event.modifierFlags.contains(.command) { opensOnRelease() }
     }
 
     public override func mouseDragged(with event: NSEvent) {
-        guard !pressIsConsumed else { return }
+        guard !pressIsConsumed else {
+            // This press reached no selection, so it counts as a drag once it moves far enough.
+            if hasMovedPastCommandDragThreshold(event) { opensOnRelease = nil }
+            return
+        }
+        // This drag extends a selection, so the press selects text and opens nothing.
+        if mouseController.isSelecting { opensOnRelease = nil }
         if !forward(event) { super.mouseDragged(with: event) }
+    }
+
+    /// Whether `event` is more than `commandDragThreshold` from where the press went down.
+    private func hasMovedPastCommandDragThreshold(_ event: NSEvent) -> Bool {
+        let location = convert(event.locationInWindow, from: nil)
+        let dx = location.x - pressLocation.x, dy = location.y - pressLocation.y
+        return dx * dx + dy * dy > Self.commandDragThreshold * Self.commandDragThreshold
     }
 
     public override func mouseMoved(with event: NSEvent) {

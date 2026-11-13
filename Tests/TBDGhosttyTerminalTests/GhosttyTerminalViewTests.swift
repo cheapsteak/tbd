@@ -20,7 +20,8 @@ private final class ViewRecorder {
     var claimsPress = true
     /// Every text `onCommandClickText` was offered.
     var clickedTexts: [GhosttyClickedText] = []
-    /// What `onCommandClickText` answers: whether the host opened something.
+    /// Whether `onCommandClickText` answers that the host opened something (`.opened`), or that it
+    /// found nothing (`.nothing`).
     var opensText = false
 }
 
@@ -1091,7 +1092,7 @@ struct GhosttyCommandClickTextTests {
         view.onMouseDownClaimFocus = { recorder.claimsPress }
         view.onCommandClickText = { text in
             recorder.clickedTexts.append(text)
-            return recorder.opensText
+            return recorder.opensText ? .opened : .nothing
         }
     }
 
@@ -1198,7 +1199,9 @@ struct GhosttyCommandClickTextTests {
 
     /// A program reporting the mouse gets none of a ⌘-press the host opened something for: not the
     /// press, not its drag, not its release, and neither does the selection or the responder chain.
-    /// The same press the host opens nothing for is an ordinary click, and is reported.
+    /// Nor does it get a ⌘-press the host opens nothing for: ⌘ is the view's link modifier, and a
+    /// mouse report has no bit for it, so the program would read a plain click. The same press
+    /// without ⌘ is an ordinary click, and is reported.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func aPressTheHostOpensIsConsumedWholeEvenWhileTheProgramReportsTheMouse() throws {
         let fixture = try ViewFixture()
@@ -1229,19 +1232,28 @@ struct GhosttyCommandClickTextTests {
         let pending = view.mouseController.pendingReportReleases
         #expect(pending.isEmpty, "\(pending) wait for a release")
 
-        // Control: the host opens nothing, so the same ⌘-press is an ordinary, reported click.
+        // The host opens nothing, and the ⌘-press still reaches neither the program nor the
+        // responder chain.
         recorder.opensText = false
         view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window, flags: .command))
         view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window, flags: .command))
+        let sentByUnopened = recorder.sent
+        #expect(sentByUnopened.isEmpty, "a ⌘-press the host opened nothing for reached the program: \(sentByUnopened)")
+        let upsByUnopened = counter.upCount
+        #expect(upsByUnopened == 0, "the release of a ⌘-press the host opened nothing for went up the responder chain")
+
+        // Control: without ⌘, the same press is an ordinary, reported click.
+        view.mouseDown(with: try mouseEvent(.leftMouseDown, at: onText, in: window))
+        view.mouseUp(with: try mouseEvent(.leftMouseUp, at: onText, in: window))
         let reports = recorder.sent
         let pressAndRelease = reports.count == 2
             && reports.first.map { isReport($0, final: "M") } == true
             && reports.last.map { isReport($0, final: "m") } == true
-        #expect(pressAndRelease, "control: a ⌘-press the host opened nothing for sent \(reports)")
+        #expect(pressAndRelease, "control: a click without ⌘ sent \(reports)")
     }
 
     /// The link is looked up first and opens alone: the host is not offered the text a link shows,
-    /// so one ⌘-click never opens two things. The press is consumed, release and all.
+    /// so one ⌘-click never opens two things. It opens at the release, which goes no further.
     @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil, noMetalDevice))
     func anOSC8LinkOpensOnceAndItsTextIsNeverOffered() throws {
         let fixture = try ViewFixture()
