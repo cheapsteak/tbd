@@ -1,0 +1,111 @@
+[?1049h[>4;2m[?1h=[?2004h[?1004h[1;30r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[30;1H"sample.c" 331L, 9154B[2;1H▽[6n[2;1H  [3;1HPzz\[0%m[6n[3;1H           [1;1H[>c]11;?]10;?[1;1H[93m  1 [m[96m/* sample.c: generated for the emulator parity corpus. */[m
+[93m  2 [m[38;5;81m#include [m[95m<stdio.h>[m[2;23H[K[3;1H[93m  3 [m[38;5;81m#include [m[95m<string.h>[m[3;24H[K[4;1H[93m  4 
+  5 [m[96m/* Widths: 漢字 and かな take two cells each; café[5;55H has a precomposed é[5;75H. */[m
+[93m  6 
+  7 [m[38;5;121mstatic[m [38;5;121mint[m step_01([38;5;121mint[m value) {
+[93m  8 [m    [96m/* step 1: scale, then offset */[m
+[93m  9 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 01"[m;
+[93m 10 [m    [93mif[m (value > [95m13[m) { [93mreturn[m value - [95m1[m; }
+[93m 11 [m    [93mreturn[m value * [95m3[m + strlen(label);
+[93m 12 [m}
+[93m 13 
+ 14 [m[38;5;121mstatic[m [38;5;121mint[m step_02([38;5;121mint[m value) {
+[93m 15 [m    [96m/* step 2: scale, then offset */[m
+[93m 16 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 02"[m;
+[93m 17 [m    [93mif[m (value > [95m26[m) { [93mreturn[m value - [95m2[m; }
+[93m 18 [m    [93mreturn[m value * [95m4[m + strlen(label);
+[93m 19 [m}
+[93m 20 
+ 21 [m[38;5;121mstatic[m [38;5;121mint[m step_03([38;5;121mint[m value) {
+[93m 22 [m    [96m/* step 3: scale, then offset */[m
+[93m 23 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 03"[m;
+[93m 24 [m    [93mif[m (value > [95m39[m) { [93mreturn[m value - [95m3[m; }
+[93m 25 [m    [93mreturn[m value * [95m5[m + strlen(label);
+[93m 26 [m}
+[93m 27 
+ 28 [m[38;5;121mstatic[m [38;5;121mint[m step_04([38;5;121mint[m value) {
+[1m[7msample.c                                                                          1,1            Top[1;5H[?25h[?4m[?25l[m[30;90H12j[1;5H[30;90H   [13;5H[29;84H[1m[7m3,0-1[13;5H[?25h[?25l[m[30;90H^F[13;5H[30;90H  [1;5H[27m[23m[29m[m[H[2J[1;1H[93m 27 
+ 28 [m[38;5;121mstatic[m [38;5;121mint[m step_04([38;5;121mint[m value) {
+[93m 29 [m    [96m/* step 4: scale, then offset */[m
+[93m 30 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 04"[m;
+[93m 31 [m    [93mif[m (value > [95m52[m) { [93mreturn[m value - [95m4[m; }
+[93m 32 [m    [93mreturn[m value * [95m6[m + strlen(label);
+[93m 33 [m}
+[93m 34 
+ 35 [m[38;5;121mstatic[m [38;5;121mint[m step_05([38;5;121mint[m value) {
+[93m 36 [m    [96m/* step 5: scale, then offset */[m
+[93m 37 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 05"[m;
+[93m 38 [m    [93mif[m (value > [95m65[m) { [93mreturn[m value - [95m5[m; }
+[93m 39 [m    [93mreturn[m value * [95m2[m + strlen(label);
+[93m 40 [m}
+[93m 41 
+ 42 [m[38;5;121mstatic[m [38;5;121mint[m step_06([38;5;121mint[m value) {
+[93m 43 [m    [96m/* step 6: scale, then offset */[m
+[93m 44 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 06"[m;
+[93m 45 [m    [93mif[m (value > [95m78[m) { [93mreturn[m value - [95m6[m; }
+[93m 46 [m    [93mreturn[m value * [95m3[m + strlen(label);
+[93m 47 [m}
+[93m 48 
+ 49 [m[38;5;121mstatic[m [38;5;121mint[m step_07([38;5;121mint[m value) {
+[93m 50 [m    [96m/* step 7: scale, then offset; needle 7 marks it for search */[m
+[93m 51 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 07"[m;
+[93m 52 [m    [93mif[m (value > [95m91[m) { [93mreturn[m value - [95m7[m; }
+[93m 53 [m    [93mreturn[m value * [95m4[m + strlen(label);
+[93m 54 [m}
+[1m[7msample.c                                                                          27,0-1          8%[1;5H[?25h[?25l[m[30;90H^F[1;5H[30;90H  [1;9H[27m[23m[29m[m[H[2J[1;1H[93m 53 [m    [93mreturn[m value * [95m4[m + strlen(label);
+[93m 54 [m}
+[93m 55 
+ 56 [m[38;5;121mstatic[m [38;5;121mint[m step_08([38;5;121mint[m value) {
+[93m 57 [m    [96m/* step 8: scale, then offset */[m
+[93m 58 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 08"[m;
+[93m 59 [m    [93mif[m (value > [95m104[m) { [93mreturn[m value - [95m8[m; }
+[93m 60 [m    [93mreturn[m value * [95m5[m + strlen(label);
+[93m 61 [m}
+[93m 62 
+ 63 [m[38;5;121mstatic[m [38;5;121mint[m step_09([38;5;121mint[m value) {
+[93m 64 [m    [96m/* step 9: scale, then offset */[m
+[93m 65 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 09"[m;
+[93m 66 [m    [93mif[m (value > [95m117[m) { [93mreturn[m value - [95m9[m; }
+[93m 67 [m    [93mreturn[m value * [95m6[m + strlen(label);
+[93m 68 [m}
+[93m 69 
+ 70 [m[38;5;121mstatic[m [38;5;121mint[m step_10([38;5;121mint[m value) {
+[93m 71 [m    [96m/* step 10: scale, then offset */[m
+[93m 72 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 10"[m;
+[93m 73 [m    [93mif[m (value > [95m130[m) { [93mreturn[m value - [95m10[m; }
+[93m 74 [m    [93mreturn[m value * [95m2[m + strlen(label);
+[93m 75 [m}
+[93m 76 
+ 77 [m[38;5;121mstatic[m [38;5;121mint[m step_11([38;5;121mint[m value) {
+[93m 78 [m    [96m/* step 11: scale, then offset */[m
+[93m 79 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 11"[m;
+[93m 80 [m    [93mif[m (value > [95m143[m) { [93mreturn[m value - [95m11[m; }
+[1m[7msample.c                                                                          53,5           17%[1;9H[?25h[?25l[30;1H[m/needle[1;2H[93m85[m[5C[96m/* step 12: scale, then offset */[m[2;2H[93m86[m[1C    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 12"[m;[3;2H[93m87[m[5C[93mif[m (value > [95m156[m) { [93mreturn[m value - [95m12[m; }[4;2H[93m88[m[1C    [93mreturn[m value * [95m4[m + strlen(label);[5;2H[93m89[m[1C}[5;9H[K[6;2H[93m90[m[6;9H[K[7;2H[93m91[m[1C[38;5;121mstatic[m [38;5;121mint[m step_13([38;5;121mint[m value) {[7;36H[K[8;2H[93m92[m[5C[96m/* step 13: scale, then offset */[m[9;2H[93m93[m[1C    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 13"[m;[10;2H[93m94[m[5C[93mif[m (value > [95m169[m) { [93mreturn[m value - [95m13[m; }[11;2H[93m95[m[1C    [93mreturn[m value * [95m5[m + strlen(label);[12;2H[93m96[m[1C}[12;9H[K[13;2H[93m97[m[13;9H[K[14;2H[93m98[m[1C[38;5;121mstatic[m [38;5;121mint[m step_14([38;5;121mint[m value) {[14;36H[K[15;2H[93m99[m[5C[96m/* step 14: scale, then offset; [m[30m[103mneedle[m[96m 14 marks it for search */[m
+[93m100[m[1C    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 14"[m;
+[93m101[m[5C[93mif[m (value > [95m182[m) { [93mreturn[m value - [95m14[m; }
+[93m102[m[1C    [93mreturn[m value * [95m6[m + strlen(label);
+[93m103[m[1C}[19;9H[K[20;1H[93m104[m[20;9H[K[21;1H[93m105[m[1C[38;5;121mstatic[m [38;5;121mint[m step_15([38;5;121mint[m value) {[21;36H[K[22;1H[93m106[m[5C[96m/* step 15: scale, then offset */[m
+[93m107[m[1C    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 15"[m;
+[93m108[m[5C[93mif[m (value > [95m195[m) { [93mreturn[m value - [95m15[m; }
+[93m109[m[1C    [93mreturn[m value * [95m2[m + strlen(label);
+[93m110[m[1C}[26;9H[K[27;1H[93m111[m[27;9H[K[28;1H[93m112[m[1C[38;5;121mstatic[m [38;5;121mint[m step_16([38;5;121mint[m value) {[28;36H[K[29;83H[1m[7m99,37[10C27[15;41H[?25h[?25l[m[30;90Hn[15;41H[30;90H[K[30;1H[14;41H[1;1H[93m13[m[6C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 19"[m;[1;39H[K[2;1H[93m13[m[6C[93mif[m (value > [95m247[m) { [93mreturn[m value - [95m19[m; }
+[93m13[m[6C[93mreturn[m value * [95m6[m + strlen(label);[3;43H[K[4;1H[93m13[m[2C}[4;9H[K[5;1H[93m13[m[5;5H[K[6;1H[93m14[m[2C[38;5;121mstatic[m [38;5;121mint[m step_20([38;5;121mint[m value) {
+[93m14[m[2C    [96m/* step 20: scale, then offset */[m
+[93m14[m[6C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 20"[m;[8;39H[K[9;1H[93m14[m[6C[93mif[m (value > [95m260[m) { [93mreturn[m value - [95m20[m; }
+[93m14[m[6C[93mreturn[m value * [95m2[m + strlen(label);[10;43H[K[11;1H[93m14[m[2C}[11;9H[K[12;1H[93m14[m[12;5H[K[13;1H[93m14[m[2C[38;5;121mstatic[m [38;5;121mint[m step_21([38;5;121mint[m value) {
+[93m14[m[2C    [96m/* step 21: scale, then offset; [m[30m[103mneedle[m[96m 21 marks it for search */[m
+[93m14[m[6C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 21"[m;[15;39H[K[16;2H[93m5[m[6C[93mif[m (value > [95m273[m) { [93mreturn[m value - [95m21[m; }[17;2H[93m5[m[6C[93mreturn[m value * [95m3[m + strlen(label);[17;43H[K[18;2H[93m5[m[2C}[18;9H[K[19;2H[93m5[m[19;5H[K[20;2H[93m5[m[2C[38;5;121mstatic[m [38;5;121mint[m step_22([38;5;121mint[m value) {[21;2H[93m5[m[2C    [96m/* step 22: scale, then offset */[m[22;2H[93m5[m[6C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 22"[m;[22;39H[K[23;2H[93m5[m[6C[93mif[m (value > [95m286[m) { [93mreturn[m value - [95m22[m; }[24;2H[93m5[m[6C[93mreturn[m value * [95m4[m + strlen(label);[24;43H[K[25;2H[93m5[m[2C}[25;9H[K[26;2H[93m6[m[26;5H[K[27;2H[93m6[m[2C[38;5;121mstatic[m [38;5;121mint[m step_23([38;5;121mint[m value) {[28;2H[93m6[m[2C    [96m/* step 23: scale, then offset */[m[29;83H[1m[7m148,37[9C44%[14;41H[?25h[?25l[m[30;1H[K[30;1H:split[1;2H[93m42[m[31C[95m20[m[2;2H[93m43[m[18C[95m60[19C20[m[3;2H[93m44[m[20C[95m2[m[4;2H[93m45
+146
+147[m[18C1[7;3H[93m8[m[14C[96m1[20C; [m[30m[103mneedle[m[96m 21 marks it for search */[m[8;3H[93m9[m[32C[95m1[m[9;2H[93m50[m[18C[95m73[20C1[m[10;2H[93m51[m[20C[95m3[m[11;2H[93m52
+153
+154[m[18C2[14;2H[93m55[m[14C[96m2[20C */[m[14;42H[K[15;1H[1m[7msample.c                                                                          148,37         44%[m[16;2H[93m42[m[5C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 20"[m;[16;39H[K[17;2H[93m43[m[5C[93mif[m (value > [95m260[m) { [93mreturn[m value - [95m20[m; }[18;2H[93m44[m[1C    [93mreturn[m value * [95m2[m + strlen(label);[19;2H[93m45[m[1C}[20;2H[93m46[m[20;5H[K[21;2H[93m47[m[1C[38;5;121mstatic[m [38;5;121mint[m step_21([38;5;121mint[m value) {[21;36H[K[22;2H[93m48[m[5C[96m/* step 21: scale, then offset; [m[30m[103mneedle[m[96m 21 marks it for search */[m[23;2H[93m49[m[5C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 21"[m;[23;39H[K[24;3H[93m0[m[5C[93mif[m (value > [95m273[m) { [93mreturn[m value - [95m21[m; }[25;3H[93m1[m[1C    [93mreturn[m value * [95m3[m + strlen(label);[26;2H[93m52[m[1C}[27;2H[93m53[m[27;5H[K[28;2H[93m54[m[1C[38;5;121mstatic[m [38;5;121mint[m step_22([38;5;121mint[m value) {[28;36H[K[29;1H[7msample.c[m[1m[7m [m[7m                                                                          148,37         44%[7;41H[?25h[?25l[1;14r[m[14;1H
+[1;30r[14;1H[93m156 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 22"[m;[30;1H[K[6;41H[?25h[?25l[1;14r[14;1H
+[1;30r[14;1H[93m157 [m    [93mif[m (value > [95m286[m) { [93mreturn[m value - [95m22[m; }[15;99H[1m[7m5%[5;41H[?25h[?25l[m[30;90H^E[5;41H[30;90H  [4;41H[1;14r[14;1H
+[1;30r[14;1H[93m158 [m    [93mreturn[m value * [95m4[m + strlen(label);[4;41H[?25h[?25l[30;90H20j[4;41H[30;90H   [8;35H[1;2H[93m61[m[1C[38;5;121mstatic[m [38;5;121mint[m step_23([38;5;121mint[m value) {[2;2H[93m62[m[5C[96m/* step 23: scale, then offset */[m[3;2H[93m63[m[1C    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 23"[m;[4;2H[93m64[m[5C[93mif[m (value > [95m299[m) { [93mreturn[m value - [95m23[m; }[4;48H[K[5;2H[93m65[m[5C[93mreturn[m value * [95m5[m + strlen(label);[6;2H[93m66[m[1C}[6;9H[K[7;2H[93m67[m[7;9H[K[8;2H[93m68[m[1C[38;5;121mstatic[m [38;5;121mint[m step_24([38;5;121mint[m value) [46m{[m[9;2H[93m69[m[5C[96m/* step 24: scale, then offset */[m[10;2H[93m70[m[1C    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 24"[m;[11;2H[93m71[m[5C[93mif[m (value > [95m312[m) { [93mreturn[m value - [95m24[m; }[12;2H[93m72[m[5C[93mreturn[m value * [95m6[m + strlen(label);[13;2H[93m73[m[1C[46m}[m[13;9H[K[14;2H[93m74[m[14;9H[K[15;84H[1m[7m68,31 [8C50%[8;35H[?25h[?25l[1;14r[m[1;1H[L[1;30r[1;1H[93m160 [9;35H[?25h[?25l[m[30;90H^Y[9;35H[30;90H  [10;35H[1;14r[1;1H[L[1;30r[1;1H[93m159 [m}[10;35H{[15;98H[1m[7m49%[10;35H[?25h[?25l[30;1H[m:vsplit[1;51H[7m|[2;51H|[3;51H|[4;51H|[5;51H|[6;51H|[7;51H|[8;51H|[9;51H|[10;51H|[11;51H|[12;51H|[13;51H|[14;51H|[m[15;33H[1m[7m168,31[9C49%[m[1;52H[93m159 [m}[2;52H[93m160 [3;52H161 [m[38;5;121mstatic[m [38;5;121mint[m step_23([38;5;121mint[m value) {[4;52H[93m162 [m    [96m/* step 23: scale, then offset */[m[5;52H[93m163 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 23"[m;[6;52H[93m164 [m    [93mif[m (value > [95m299[m) { [93mreturn[m value - [95m23[m; }[7;52H[93m165 [m    [93mreturn[m value * [95m5[m + strlen(label);[8;52H[93m166 [m}[9;52H[93m167 [10;52H168 [m[38;5;121mstatic[m [38;5;121mint[m step_24([38;5;121mint[m value) {[11;52H[93m169 [m    [96m/* step 24: scale, then offset */[m[12;52H[93m170 [m    [38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 24"[m;[13;52H[93m171 [m    [93mif[m (value > [95m312[m) { [93mreturn[m value - [95m24[m; }[14;52H[93m172 [m    [93mreturn[m value * [95m6[m + strlen(label);[15;52H[7msample.c                       168,31         49%[10;35H[?25h[?25l[m[30;90H^Wl[10;35H[30;90H   [10;86H[15;1H[7msample.c[m[1m[7m [m[7m                        168,31         49%[m[1m[7m [m[7m [m[1m[7msample.c                       168,31         49%[10;86H[?25h[?25l[m[30;90HG[10;86H[30;90H [14;56H[1;52H[93m318[m[1C    total += step_30(total);[2;52H[93m319[m[5Ctotal += step_31(total);[3;52H[93m320[m[1C    total += step_32(total);[3;84H[K[4;52H[93m321[m[5Ctotal += step_33(total);[4;84H[K[5;52H[93m322[m[5Ctotal += step_34(total);[5;84H[K[6;52H[93m323[m[5Ctotal += step_35(total);[6;84H[K[7;52H[93m324[m[5Ctotal += step_36(total);[7;84H[K[8;52H[93m325[m[1C    total += step_37(total);[9;52H[93m326[m[5Ctotal += step_38(total);[10;52H[93m327[m[1C    total += step_39(total);[10;84H[K[11;52H[93m328[m[5Ctotal += step_40(total);[11;84H[K[12;52H[93m329[m[5Cprintf([95m"total [m[38;5;224m%d\n[m[95m"[m, total);[12;88H[K[13;52H[93m330[m[5C[93mreturn[m [95m0[m;[13;70H[K[14;52H[93m331[m[1C}[14;60H[K[15;83H[1m[7m331,1  [8CBot[14;56H[?25h[?25l[m[30;1H[1m-- INSERT --[m[30;1H[K[14;71H[15;10H[7m[+][m[1;52H[93m321 [m    total += step_33(total);                 [2;52H[93m322 [m    total += step_34(total);                 [3;52H[93m323 [m    total += step_35(total);                 [4;52H[93m324 [m    total += step_36(total);                 [5;52H[93m325 [m    total += step_37(total);                 [6;52H[93m326 [m    total += step_38(total);                 [7;52H[93m327 [m    total += step_39(total);                 [8;52H[93m328 [m    total += step_40(total);                 [9;52H[93m329 [m    printf([95m"total [m[38;5;224m%d\n[m[95m"[m, total);             [10;52H[93m330 [m    [93mreturn[m [95m0[m;                                [11;52H[93m331 [m}                                            [12;52H                                                 [13;52H                                                 [14;52H                                                 [12;52H[93m332 [m[96m// inserted by the parity corpus[m[13;52H[93m333 [m[96m// a second line[m[14;52H[93m334 [m[96m// 漢字 and café[m[15;61H[1m[7m[+][21C4,20-17[m[29;10H[7m[+][86C3[m
+[1m-- INSERT --[14;72H[m[30;90H^[[14;71H[30;90H  [14;72H[30;1H[K[15;87H[1m[7m18-16 [14;71H[?25h[?25l[m[30;90H^Ww[14;71H[30;90H   [22;41H[15;52H[7msample.c [+][m[1m[7m [m[7m                   334,18-16      Bot[m[29;1H[1m[7msample.c [+]                                                                      148,37         43%[22;41H[?25h[?25l[m[30;90Hgg[22;41H[30;90H  [16;5H[93m  1[m[1C[96m/* sample.c: generated for the emulator parity corpus. */[m
+[93m  2[m[1C[38;5;81m#include [m[95m<stdio.h>[m[17;23H[K[18;1H[93m  3[m[1C[38;5;81m#include [m[95m<string.h>[m[18;24H[K[19;1H[93m  4[m[19;5H[K[20;1H[93m  5[m[1C[96m/* Widths: 漢字 and かな take two cells each; café[20;55H has a precomposed é[20;75H. */[m
+[93m  6[m[21;5H[K[22;1H[93m  7[m[1C[38;5;121mstatic[m [38;5;121mint[m step_01([38;5;121mint[m value) {[22;36H[K[23;1H[93m  8[m[5C[96m/* step 1: scale, then offset */[m
+[93m  9[m[5C[38;5;121mconst[m [38;5;121mchar[m *label = [95m"step 01"[m;[24;39H[K[25;1H[93m 10[m[5C[93mif[m (value > [95m13[m) { [93mreturn[m value - [95m1[m; }
+[93m 11[m[1C    [93mreturn[m value * [95m3[m + strlen(label);
+[93m 12[m[1C}
+[93m 13[m[28;5H[K[29;84H[1m[7m,1    [8CTop[16;5H[?25h[?25l[30;1H[m:qa![?2004l[>4;m[23;2t[23;1t[30;1H[K[30;1H[?1004l[?2004l[?1l>[?1049l[?25h[>4;m

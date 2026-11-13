@@ -1,0 +1,194 @@
+{
+  "about": "Recorded terminal output for the emulator parity suite. Each .vt file holds only the bytes the program wrote to its pty, recorded by scripts/record-emulator-parity-corpus.py, which documents the environment, the keystrokes and the query answers. Feed a file to a fresh terminal of the listed size.",
+  "recorder": "scripts/record-emulator-parity-corpus.py",
+  "platform": "Darwin arm64",
+  "answers": {
+    "DA1": "ESC[?65;4;1;2;6;21;22;17;28c",
+    "DA2": "ESC[>65;20;1c",
+    "XTVERSION": "ESC P>|SwiftTerm+b4db5b0ecd62:ESC \\",
+    "DSR": "ESC[0n",
+    "CPR": "ESC[1;1R (fixed: the recorder runs no emulator)",
+    "DECRQM ?2026": "ESC[?2026;2$y, or ESC[?2026;1$y while DEC 2026 is set",
+    "OSC 7501 probe": "ESC]7501;?BEL"
+  },
+  "recordings": [
+    {
+      "name": "claude-stub",
+      "file": "claude-stub.vt",
+      "cols": 100,
+      "rows": 30,
+      "bytes": 12731,
+      "sha256": "571c0d06070d6f4f09f47d97c66c345e138b2e12f1752083c41588c09d93625f",
+      "description": "The Claude Code TUI against the fake model API (scripts/claude-stub.py): the welcome screen, one typed prompt, a scripted markdown answer long enough to scroll, then /exit.",
+      "tool": "Claude Code 2.1.325",
+      "exit_status": 0,
+      "answered": [
+        {
+          "query": "DA1 (primary device attributes)",
+          "sequence": "ESC[c",
+          "reply": "ESC[?65;4;1;2;6;21;22;17;28c",
+          "count": 2
+        },
+        {
+          "query": "DECRQM ?2026 (synchronized output)",
+          "sequence": "ESC[?2026$p",
+          "reply": "ESC[?2026;2$y",
+          "count": 1
+        },
+        {
+          "query": "OSC 7501 probe (program status)",
+          "sequence": "ESC]7501;?BEL",
+          "reply": "ESC]7501;?BEL",
+          "count": 1
+        },
+        {
+          "query": "XTVERSION (terminal name and version)",
+          "sequence": "ESC[>0q",
+          "reply": "ESC P>|SwiftTerm+b4db5b0ecd62:ESC \\",
+          "count": 1
+        }
+      ],
+      "unanswered": [
+        {
+          "query": "DECRQM ?1016",
+          "sequence": "ESC[?1016$p",
+          "count": 1
+        },
+        {
+          "query": "XTWINOPS 16t (window report)",
+          "sequence": "ESC[16t",
+          "count": 1
+        },
+        {
+          "query": "kitty graphics query",
+          "sequence": "ESC_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAAESC \\",
+          "count": 1
+        },
+        {
+          "query": "kitty keyboard flags query",
+          "sequence": "ESC[?u",
+          "count": 1
+        }
+      ],
+      "exercises": [
+        "DEC 2026 synchronized output",
+        "DECSC/DECRC save and restore cursor",
+        "DECTCEM cursor visibility",
+        "OSC 0 title",
+        "OSC 7501 state reports (6)",
+        "SGR mouse encoding",
+        "SGR truecolor",
+        "SGR-pixels mouse encoding",
+        "XTMODKEYS",
+        "alternate screen (1049)",
+        "bracketed paste",
+        "colour scheme updates",
+        "focus events",
+        "mouse reporting",
+        "wide characters"
+      ],
+      "stub_requests": 1
+    },
+    {
+      "name": "vim",
+      "file": "vim.vt",
+      "cols": 100,
+      "rows": 30,
+      "bytes": 17969,
+      "sha256": "ae4dc4e63fcd3881b93399bf62d2ae96c6241cd2e5af32e724e7564fb65f0c51",
+      "description": "vim with a minimal vimrc (syntax colours, line numbers, status line, search highlighting) on a generated C file: moves, pages down, searches, splits horizontally and vertically, scrolls a split, inserts three lines, then :qa!.",
+      "tool": "VIM - Vi IMproved 9.1 Included patches: 1-1752",
+      "exit_status": 0,
+      "answered": [
+        {
+          "query": "CPR (cursor position report)",
+          "sequence": "ESC[6n",
+          "reply": "ESC[1;1R",
+          "count": 2
+        },
+        {
+          "query": "DA2 (secondary device attributes)",
+          "sequence": "ESC[>c",
+          "reply": "ESC[>65;20;1c",
+          "count": 1
+        }
+      ],
+      "unanswered": [
+        {
+          "query": "OSC 10 colour query",
+          "sequence": "ESC]10;?BEL",
+          "count": 1
+        },
+        {
+          "query": "OSC 11 colour query",
+          "sequence": "ESC]11;?BEL",
+          "count": 1
+        },
+        {
+          "query": "XTQMODKEYS (modifier key mode query)",
+          "sequence": "ESC[?4m",
+          "count": 1
+        }
+      ],
+      "exercises": [
+        "DECCKM application cursor keys",
+        "DECKPAM/DECKPNM keypad mode",
+        "DECSTBM scroll region",
+        "DECTCEM cursor visibility",
+        "IL insert lines",
+        "SGR 256 colours",
+        "XTMODKEYS",
+        "XTWINOPS title stack",
+        "alternate screen (1049)",
+        "bracketed paste",
+        "cursor blink",
+        "focus events",
+        "wide characters"
+      ]
+    },
+    {
+      "name": "less",
+      "file": "less.vt",
+      "cols": 90,
+      "rows": 26,
+      "bytes": 17828,
+      "sha256": "064e8d83c270d744b9a5236012a2d2fa9cd7fbf5320a3ecf2d3546ee683be3a9",
+      "description": "less -R on a generated build log with SGR colours: two pages down, a search, n, G, g, then q.",
+      "tool": "less 668",
+      "exit_status": 0,
+      "answered": [],
+      "unanswered": [],
+      "exercises": [
+        "DECCKM application cursor keys",
+        "DECKPAM/DECKPNM keypad mode",
+        "RI reverse index",
+        "alternate screen (1049)",
+        "wide characters"
+      ]
+    },
+    {
+      "name": "colour-log",
+      "file": "colour-log.vt",
+      "cols": 80,
+      "rows": 24,
+      "bytes": 18264,
+      "sha256": "74051363d9ac551378bf88bddc0d491672dcf563269e2e3ca7f4ad7f06a112bb",
+      "description": "bash --norc running a generated colour log script: 16, 256 and truecolor foregrounds and backgrounds, bold, faint, italic, underline styles and colours, inverse, strikethrough, wide CJK and emoji, combining marks, lines that wrap, carriage-return progress, and more lines than the screen holds; then exit.",
+      "tool": "GNU bash, version 3.2.57(1)-release",
+      "exit_status": 0,
+      "answered": [],
+      "unanswered": [],
+      "exercises": [
+        "SGR 256 colours",
+        "SGR colon sub-parameters",
+        "SGR truecolor",
+        "SGR underline colour (58)",
+        "SGR underline styles (4:n)",
+        "ZWJ sequences",
+        "combining marks",
+        "meta key mode",
+        "wide characters"
+      ]
+    }
+  ]
+}
