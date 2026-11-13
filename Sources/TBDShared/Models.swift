@@ -1857,6 +1857,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// Phone control: the daemon's bridge to a paired phone through a relay.
     /// Resolved as `phone_control_enabled ?? Config.phoneControlEnabledDefault`.
     public var phoneControlEnabled: Bool = Config.phoneControlEnabledDefault
+    /// The daemon's libghostty emulator: parse each holder-backed session's
+    /// output with libghostty-vt instead of a headless SwiftTerm. Resolved as
+    /// `ghostty_daemon_emulator_enabled ?? Config.ghosttyDaemonEmulatorDefault`.
+    /// Read when a session's reader is built, so new sessions take a change at
+    /// once and every session takes it at the next daemon start.
+    public var ghosttyDaemonEmulatorEnabled: Bool = Config.ghosttyDaemonEmulatorDefault
     /// Normalized relay base URL; nil means phone control is not set up.
     public var phoneRelayURL: String?
     /// Loader URL override; nil means `Config.phoneLoaderURLDefault`.
@@ -2016,6 +2022,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Ships off; the backing column has no SQL default, so graduation
     /// is a change to this constant.
     public static let phoneControlEnabledDefault = false
+    /// The shipped default for `ghosttyDaemonEmulatorEnabled`, and the single
+    /// place it lives. Ships off; the backing column has no SQL default, so
+    /// graduation is a change to this constant, reaching everyone who never
+    /// chose and keeping every explicit choice.
+    public static let ghosttyDaemonEmulatorDefault = false
     /// The loader's public URL: the Pages site of the `tbd-phone` org (spec
     /// section 11). It keeps the trailing slash, as the loader URL field's
     /// placeholder and the pairing link tests do; `PhoneURLValidation.loader`
@@ -2224,6 +2235,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .sessionRestoreEnabled) ?? Config.sessionRestoreDefault
         phoneControlEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .phoneControlEnabled) ?? Config.phoneControlEnabledDefault
+        ghosttyDaemonEmulatorEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .ghosttyDaemonEmulatorEnabled) ?? Config.ghosttyDaemonEmulatorDefault
         phoneRelayURL = try c.decodeIfPresent(String.self, forKey: .phoneRelayURL)
         phoneLoaderURL = try c.decodeIfPresent(String.self, forKey: .phoneLoaderURL)
         // Absent means never set, the NULL column's situation; the policy
