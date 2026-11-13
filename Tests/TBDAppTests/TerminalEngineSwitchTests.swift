@@ -385,21 +385,22 @@ struct TerminalEngineSwitchTests {
     func switchCommandHiddenWhenExperimentOff() async {
         #expect(!TerminalEngineSwitchCommand.isVisible(experimentEnabled: false))
         #expect(TerminalEngineSwitchCommand.isVisible(experimentEnabled: true))
-        // Through the three-state read of the store: unset and false hide it.
-        #expect(!TerminalEngineSwitchCommand.isVisible(
-            experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: nil)))
+        // Through the three-state read of the store: false hides it, true
+        // shows it, and unset follows the shipped default.
         #expect(!TerminalEngineSwitchCommand.isVisible(
             experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: false)))
         #expect(TerminalEngineSwitchCommand.isVisible(
             experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: true)))
+        #expect(TerminalEngineSwitchCommand.isVisible(
+            experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: nil))
+                == AppState.ghosttyTerminalEngineDefault)
         #expect(!TerminalEngineSwitchCommand.isEnabled(experimentEnabled: false, focusedHost: .panel(.holder)))
 
         // Both branches of the panel's own check, on a live holder attach:
-        // unset and false switch nothing, and the control below, flag on,
-        // does switch.
-        for flag in [nil, false] as [Bool?] {
-            let name = flag.map { "\($0)" } ?? "unset"
-            let fixture = SwitchFixture(label: "Hidden.\(name)", flag: flag)
+        // with the flag stored false a switch does nothing, and the control
+        // below, flag on, does switch.
+        do {
+            let fixture = SwitchFixture(label: "Hidden.false", flag: false)
             defer { fixture.tearDown() }
             let panel = fixture.makePanel()
             #expect(panel.engine.kind == .swiftTerm)
@@ -407,9 +408,9 @@ struct TerminalEngineSwitchTests {
             let identity = fixture.identity
             fixture.state.switchTerminalEngine(terminalID: fixture.terminalID)
             #expect(fixture.daemon.events == ["attach", "ready"],
-                    "a switch with the flag \(name) touched the session: \(fixture.daemon.events)")
+                    "a switch with the flag off touched the session: \(fixture.daemon.events)")
             #expect(fixture.state.terminalEngineOverrides[fixture.terminalID] == nil)
-            #expect(fixture.identity == identity, "a switch with the flag \(name) would rebuild the panel")
+            #expect(fixture.identity == identity, "a switch with the flag off would rebuild the panel")
         }
 
         // The control: flag on, a holder panel on SwiftTerm switches. The
@@ -552,8 +553,8 @@ struct TerminalEngineSwitchTests {
             #expect(TerminalEngineLabel.text(experimentEnabled: false, kind: kind) == nil,
                     "a \(kind) label with the experiment off")
             #expect(TerminalEngineLabel.text(
-                experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: nil), kind: kind) == nil,
-                    "a \(kind) label with the flag unset")
+                experimentEnabled: AppState.ghosttyTerminalEngineEnabled(stored: false), kind: kind) == nil,
+                    "a \(kind) label with the flag stored false")
         }
 
         // The record behind it, through the panel's own entry points. A
@@ -587,11 +588,12 @@ struct TerminalEngineSwitchTests {
     /// Every terminal tab item reads the engine record for its label, so a
     /// write to it redraws them all. With the experiment off no label shows,
     /// so a panel's mount and teardown must not write it at all; the control,
-    /// flag on, must.
+    /// flag on, must. Unset reads as the shipped default does.
     @Test("With the experiment off, a panel's mount and teardown write no engine record; with it on, they do")
     func engineRecordIsNotWrittenWhileTheExperimentIsOff() async {
         for flag in [nil, false, true] as [Bool?] {
             let name = flag.map { "\($0)" } ?? "unset"
+            let on = AppState.ghosttyTerminalEngineEnabled(stored: flag)
             let fixture = SwitchFixture(label: "QuietRecord.\(name)", flag: flag)
             defer { fixture.tearDown() }
             // An override counts only while the flag is on, and keeps the
@@ -611,8 +613,8 @@ struct TerminalEngineSwitchTests {
             await EngineTestSupport.mainQueueTurn()
 
             let wasWritten = written.isSet
-            if flag == true {
-                #expect(wasWritten, "control: with the experiment on, the panel's mount wrote no engine record")
+            if on {
+                #expect(wasWritten, "control: with the flag \(name), on, the panel's mount wrote no engine record")
             } else {
                 #expect(!wasWritten,
                         "with the flag \(name), a panel's mount or teardown wrote the engine record every tab item reads")
@@ -623,11 +625,13 @@ struct TerminalEngineSwitchTests {
 
     /// The tab's label (`AppState.terminalEngineLabel(for:)`) reads the record
     /// only while the experiment is on, so with the flag off a tab does not
-    /// depend on the record and a write to it does not redraw the tab.
+    /// depend on the record and a write to it does not redraw the tab. Unset
+    /// reads as the shipped default does.
     @Test("With the experiment off, the tab's label does not read the engine record; with it on, it does")
     func engineLabelReadsTheRecordOnlyWhileTheExperimentIsOn() {
         for flag in [nil, false, true] as [Bool?] {
             let name = flag.map { "\($0)" } ?? "unset"
+            let on = AppState.ghosttyTerminalEngineEnabled(stored: flag)
             withTestDefaults("TerminalEngineSwitch.LabelRead.\(name)") { defaults in
                 if let flag {
                     defaults.set(flag, forKey: AppState.useGhosttyTerminalEngineKey)
@@ -642,8 +646,8 @@ struct TerminalEngineSwitchTests {
                 }
                 state.noteTerminalEngineInUse(.swiftTerm, terminalID: terminalID, owner: UUID())
                 let redrawn = changed.isSet
-                if flag == true {
-                    #expect(redrawn, "control: with the experiment on, the label did not read the record")
+                if on {
+                    #expect(redrawn, "control: with the flag \(name), on, the label did not read the record")
                 } else {
                     #expect(!redrawn, "with the flag \(name), a record write would redraw the tab")
                 }
@@ -657,18 +661,24 @@ struct TerminalEngineSwitchTests {
     /// AppState and the mock app use a store other than `.standard`, so a
     /// label read from `.standard` would show or hide against the flag that
     /// built the panel. The flag is set after the AppState is made, as a
-    /// person turning it on in a running app does, so the mirror has to
-    /// follow the store, and each change has to redraw what read it.
+    /// person turning it off or on in a running app does, so the mirror has
+    /// to follow the store, and each change has to redraw what read it. The
+    /// first write is the opposite of the shipped default, so both are
+    /// changes.
     @Test("The tab's engine label and the menu follow the flag in the AppState's own store, set after the AppState was made")
     func engineLabelFollowsTheFlagInTheAppStatesStore() async {
         await withTestDefaults("TerminalEngineSwitch.LabelStore") { defaults in
             let state = AppState(userDefaults: defaults)
             let terminalID = UUID()
             state.noteTerminalEngineInUse(.ghostty, terminalID: terminalID, owner: UUID())
+            let shippedDefault = AppState.ghosttyTerminalEngineDefault
             let unset = state.terminalEngineLabel(for: terminalID)
-            #expect(unset == nil, "a label with the flag unset in the AppState's store")
+            let expectedUnset: String? = shippedDefault ? "libghostty" : nil
+            #expect(unset == expectedUnset,
+                    "with the flag unset in the AppState's store, the label read \(String(describing: unset))")
 
-            for (flag, expected) in [(true, "libghostty"), (false, nil)] as [(Bool, String?)] {
+            for flag in [!shippedDefault, shippedDefault] {
+                let expected: String? = flag ? "libghostty" : nil
                 let redrawn = HolderTestLatch()
                 withObservationTracking {
                     _ = state.terminalEngineLabel(for: terminalID)

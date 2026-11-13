@@ -314,7 +314,8 @@ between engines. So both engines must look the same to the program.
 - **Three states** – the key is read as
   `object(forKey:) as? Bool ?? AppState.ghosttyTerminalEngineDefault`. Unset follows the
   default, and an explicit on or off survives any change to the default.
-  `ghosttyTerminalEngineDefault` is `false`.
+  `ghosttyTerminalEngineDefault` is `true`: libghostty is the app's default engine
+  ([retirement design](2026-11-13-swiftterm-retirement-design.md), section A).
 - **Before step 4** – no Settings UI. A developer turns the engine on with
   `defaults write com.github.cheapsteak.tbd useGhosttyTerminalEngine -bool true`, then
   opens new terminals.
@@ -359,8 +360,9 @@ time, are a pair under the same load.
 - The app's latency refusal reasons are unchanged. The `terminal-latency-probe.py`
   driver has an engine mode (`--swiftterm-terminal`, `--ghostty-terminal`). Its two arms
   are holder terminals, one on each engine, and the samples go to an arm by terminal id.
-  Before and after the run, the driver confirms each arm's engine: the flag must be a
-  boolean true in the app's own defaults domain, the latest "engine active" line for the
+  Before and after the run, the driver confirms each arm's engine: the flag must read as
+  on in the app's own defaults domain, the way the app reads it (an unset key follows the
+  shipped default), the latest "engine active" line for the
   arm's id must name its engine, and no flag line may follow that line. The driver records
   when it issued each request, and the report places each draw line in a load band by
   that time, so the draw comparison, like the echo one, is band against band. Each

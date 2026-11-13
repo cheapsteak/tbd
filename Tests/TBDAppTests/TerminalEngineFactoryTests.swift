@@ -23,31 +23,27 @@ struct TerminalEngineFactoryTests {
 
     // MARK: - Flag off
 
-    @Test("With the flag unset or false, every host asks for and gets SwiftTerm, override or not")
+    /// Off is an explicit `false`: an unset key follows the shipped default,
+    /// which is on (`unsetFlagFollowsDefault`).
+    @Test("With the flag stored false, every host asks for and gets SwiftTerm, override or not")
     func flagOffBuildsSwiftTerm() {
         withTestDefaults("TerminalEngineFactory.FlagOff") { defaults in
             let appearance = AppearanceSettings(defaults: defaults)
-            for stored in [nil, false] as [Bool?] {
-                if let stored {
-                    defaults.set(stored, forKey: Self.key)
-                } else {
-                    defaults.removeObject(forKey: Self.key)
-                }
-                let state = AppState(userDefaults: defaults)
-                #expect(!state.ghosttyTerminalEngineEnabled, "stored \(String(describing: stored)) read as on")
+            defaults.set(false, forKey: Self.key)
+            let state = AppState(userDefaults: defaults)
+            #expect(!state.ghosttyTerminalEngineEnabled, "a stored false read as on")
 
-                for host in Self.hosts {
-                    let kind = TerminalEngineFactory.requestedKind(
-                        flagEnabled: state.ghosttyTerminalEngineEnabled, host: host)
-                    #expect(kind == .swiftTerm, "\(host) asked for \(kind) with the flag off")
-                    let engine = Self.make(kind, appearance: appearance)
-                    #expect(engine.kind == .swiftTerm)
-                }
-                // A switch's override counts only while the flag is on.
-                let overridden = TerminalEngineFactory.requestedKind(
-                    flagEnabled: state.ghosttyTerminalEngineEnabled, host: .panel(.holder), override: .ghostty)
-                #expect(overridden == .swiftTerm, "an override reached libghostty with the flag off")
+            for host in Self.hosts {
+                let kind = TerminalEngineFactory.requestedKind(
+                    flagEnabled: state.ghosttyTerminalEngineEnabled, host: host)
+                #expect(kind == .swiftTerm, "\(host) asked for \(kind) with the flag off")
+                let engine = Self.make(kind, appearance: appearance)
+                #expect(engine.kind == .swiftTerm)
             }
+            // A switch's override counts only while the flag is on.
+            let overridden = TerminalEngineFactory.requestedKind(
+                flagEnabled: state.ghosttyTerminalEngineEnabled, host: .panel(.holder), override: .ghostty)
+            #expect(overridden == .swiftTerm, "an override reached libghostty with the flag off")
         }
     }
 
@@ -254,11 +250,11 @@ struct TerminalEngineFactoryTests {
 
     // MARK: - Three states
 
-    @Test("An unset key reads the shipped default, which is off, and reading it writes nothing")
+    @Test("An unset key reads the shipped default, which is on, and reading it writes nothing")
     func unsetFlagFollowsDefault() {
         withTestDefaults("TerminalEngineFactory.Unset") { defaults in
             #expect(defaults.object(forKey: Self.key) == nil)
-            #expect(AppState.ghosttyTerminalEngineDefault == false, "the experiment must ship off")
+            #expect(AppState.ghosttyTerminalEngineDefault == true, "libghostty is the shipped default")
             #expect(AppState.ghosttyTerminalEngineEnabled(defaults: defaults) == AppState.ghosttyTerminalEngineDefault)
             #expect(AppState(userDefaults: defaults).ghosttyTerminalEngineEnabled == AppState.ghosttyTerminalEngineDefault)
             // Unset follows whatever the default is.
@@ -268,13 +264,15 @@ struct TerminalEngineFactoryTests {
         }
     }
 
-    @Test("An explicit false holds when the default turns on, an explicit true holds when it is off, and unset follows it")
+    @Test("An explicit false holds against a default of on, an explicit true holds against a default of off, and unset follows the default")
     func explicitFalseSurvivesADefaultChange() {
         withTestDefaults("TerminalEngineFactory.Explicit") { defaults in
             defaults.set(false, forKey: Self.key)
             #expect(!AppState.ghosttyTerminalEngineEnabled(defaults: defaults, shippedDefault: true),
                     "an explicit false followed a default of true")
             #expect(!AppState.ghosttyTerminalEngineEnabled(defaults: defaults, shippedDefault: false))
+            #expect(!AppState(userDefaults: defaults).ghosttyTerminalEngineEnabled,
+                    "an explicit false followed the shipped default")
 
             defaults.set(true, forKey: Self.key)
             #expect(AppState.ghosttyTerminalEngineEnabled(defaults: defaults, shippedDefault: false),

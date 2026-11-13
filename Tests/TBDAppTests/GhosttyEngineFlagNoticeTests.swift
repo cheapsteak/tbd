@@ -35,25 +35,36 @@ struct GhosttyEngineFlagNoticeTests {
         }
     }
 
-    @Test("Launching with the flag off, unset or stored false, sends no notice")
+    @Test("Launching with the flag stored false sends no notice")
     func launchWithTheFlagOff() {
-        for stored in [nil, false] as [Bool?] {
-            withTestDefaults("GhosttyEngineFlagNotice.LaunchOff") { defaults in
-                if let stored {
-                    defaults.set(stored, forKey: Self.key)
-                }
-                let recorder = EngineNoticeRecorder()
-                let state = Self.make(defaults, recorder)
-                let sent = recorder.notices
-                #expect(sent.isEmpty, "launching with the flag stored as \(String(describing: stored)) sent \(sent)")
-                withExtendedLifetime(state) {}
-            }
+        withTestDefaults("GhosttyEngineFlagNotice.LaunchOff") { defaults in
+            defaults.set(false, forKey: Self.key)
+            let recorder = EngineNoticeRecorder()
+            let state = Self.make(defaults, recorder)
+            let sent = recorder.notices
+            #expect(sent.isEmpty, "launching with the flag stored false sent \(sent)")
+            withExtendedLifetime(state) {}
         }
     }
 
+    @Test("Launching with the key unset sends what the shipped default gives: one turned-on notice when it is on, none when it is off")
+    func launchWithTheKeyUnset() {
+        withTestDefaults("GhosttyEngineFlagNotice.LaunchUnset") { defaults in
+            let recorder = EngineNoticeRecorder()
+            let state = Self.make(defaults, recorder)
+            let sent = recorder.notices
+            let expected: [TerminalEngineNotice] = AppState.ghosttyTerminalEngineDefault ? [Self.turnedOn] : []
+            #expect(sent == expected, "launching with the key unset sent \(sent)")
+            withExtendedLifetime(state) {}
+        }
+    }
+
+    /// The flag starts stored off, so the write outside the app is a real
+    /// change and launch sent nothing before it.
     @Test("A real change sends one notice, whether it is written outside the app or through the toggle")
     func aRealChangeSendsOneNotice() async {
         await withTestDefaults("GhosttyEngineFlagNotice.Change") { defaults in
+            defaults.set(false, forKey: Self.key)
             let recorder = EngineNoticeRecorder()
             let state = Self.make(defaults, recorder)
 

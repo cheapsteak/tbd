@@ -29,22 +29,15 @@ struct GhosttyEngineSettingTests {
         TerminalSettingsView.ghosttyEngineBinding(state)
     }
 
-    @Test("Turning the toggle on stores true in the AppState's own store, and turning it off stores an explicit false that holds against a later default")
+    /// Off first, from a fresh store that reads the default, on, so each
+    /// step moves the mirror and its check shows the setter refreshed it.
+    @Test("Turning the toggle off stores an explicit false in the AppState's own store that holds against a default of on, and turning it back on stores true")
     func toggleWritesTheFlagKey() {
         withTestDefaults("GhosttyEngineSetting.Writes") { defaults in
             let state = AppState(userDefaults: defaults)
             let toggle = Self.toggle(state)
             let before = defaults.object(forKey: Self.key)
             #expect(before == nil, "a fresh store already held the key")
-
-            toggle.wrappedValue = true
-            let storedOn: Bool? = defaults.object(forKey: Self.key) as? Bool
-            let expectedOn: Bool? = true
-            #expect(storedOn == expectedOn, "turning the toggle on stored \(String(describing: storedOn))")
-            let shownOn = toggle.wrappedValue
-            #expect(shownOn, "the toggle did not read back on")
-            let mirrorOn = state.ghosttyTerminalEngineFlag
-            #expect(mirrorOn, "the flag the tabs and the Terminal menu read stayed off")
 
             toggle.wrappedValue = false
             let keyPresent = defaults.object(forKey: Self.key) != nil
@@ -57,14 +50,23 @@ struct GhosttyEngineSettingTests {
             let mirrorOff = state.ghosttyTerminalEngineFlag
             #expect(!mirrorOff, "the flag the tabs and the Terminal menu read stayed on")
 
-            // A removed key would follow a default that graduates to true; an
-            // explicit false keeps the choice.
-            let afterGraduation = AppState.ghosttyTerminalEngineEnabled(defaults: defaults, shippedDefault: true)
-            #expect(!afterGraduation, "the stored off did not hold against a default of on")
+            // A removed key would follow the default, which is on; an explicit
+            // false keeps the choice.
+            let againstOn = AppState.ghosttyTerminalEngineEnabled(defaults: defaults, shippedDefault: true)
+            #expect(!againstOn, "the stored off did not hold against a default of on")
+
+            toggle.wrappedValue = true
+            let storedOn: Bool? = defaults.object(forKey: Self.key) as? Bool
+            let expectedOn: Bool? = true
+            #expect(storedOn == expectedOn, "turning the toggle on stored \(String(describing: storedOn))")
+            let shownOn = toggle.wrappedValue
+            #expect(shownOn, "the toggle did not read back on")
+            let mirrorOn = state.ghosttyTerminalEngineFlag
+            #expect(mirrorOn, "the flag the tabs and the Terminal menu read stayed off")
         }
     }
 
-    @Test("The toggle shows the three-state read: an unset key shows the default, which is off, and a stored true or false shows as stored")
+    @Test("The toggle shows the three-state read: an unset key shows the default, which is on, and a stored true or false shows as stored")
     func toggleReflectsTheThreeStateRead() {
         for stored in [nil, true, false] as [Bool?] {
             withTestDefaults("GhosttyEngineSetting.Reads") { defaults in
@@ -76,7 +78,7 @@ struct GhosttyEngineSettingTests {
                 let expected: Bool = stored ?? AppState.ghosttyTerminalEngineDefault
                 #expect(shown == expected, "stored \(String(describing: stored)) showed the toggle \(shown ? "on" : "off")")
                 if stored == nil {
-                    #expect(!shown, "an unset key showed the toggle on, but the engine ships off")
+                    #expect(shown, "an unset key showed the toggle off, but libghostty is the shipped default")
                 }
             }
         }
@@ -86,13 +88,15 @@ struct GhosttyEngineSettingTests {
     /// write to the store from outside the toggle, as `defaults write` makes,
     /// reaches a Settings window already open. A getter that read the store
     /// instead of the observed mirror would show the right value and never
-    /// redraw.
+    /// redraw. The write outside is the opposite of the shipped default, so
+    /// it changes what the toggle shows.
     @Test("Reading the toggle is observation-tracked, so a write to the store from outside the toggle redraws it")
     func toggleRedrawsOnAWriteFromOutside() async {
         await withTestDefaults("GhosttyEngineSetting.Tracked") { defaults in
             let state = AppState(userDefaults: defaults)
+            let shippedDefault = AppState.ghosttyTerminalEngineDefault
             let unset = Self.toggle(state).wrappedValue
-            #expect(!unset, "a fresh store showed the toggle on")
+            #expect(unset == shippedDefault, "a fresh store showed the toggle \(unset ? "on" : "off")")
 
             let redrawn = HolderTestLatch()
             withObservationTracking {
@@ -100,7 +104,7 @@ struct GhosttyEngineSettingTests {
             } onChange: {
                 redrawn.set()
             }
-            defaults.set(true, forKey: Self.key)
+            defaults.set(!shippedDefault, forKey: Self.key)
             await EngineTestSupport.waitUntil(
                 "the toggle to redraw after the key was set outside it",
                 observed: { "redrawn \(redrawn.isSet), toggle shows \(Self.toggle(state).wrappedValue)" }
@@ -110,7 +114,7 @@ struct GhosttyEngineSettingTests {
             let wasRedrawn = redrawn.isSet
             #expect(wasRedrawn, "setting the key outside the toggle did not redraw a view that read it")
             let shown = Self.toggle(state).wrappedValue
-            #expect(shown, "the toggle did not show the key set outside it")
+            #expect(shown == !shippedDefault, "the toggle did not show the key set outside it")
         }
     }
 
@@ -141,6 +145,9 @@ struct GhosttyEngineSettingTests {
     /// AppStates on two stores share nothing through the toggle, and the write
     /// lands in the AppState's own domain, where a relaunch reads it. A toggle
     /// that wrote one shared store would show through the other AppState.
+    /// This AppState's toggle is set to the opposite of the shipped default,
+    /// so a bystander that read it would show something it cannot show from
+    /// its own unset key.
     @Test("The toggle writes its AppState's own store and no other: a second AppState on a second store neither sees the write nor shares its own")
     func toggleWritesOnlyTheAppStatesOwnStore() {
         let mine = TestDefaultsSuite("GhosttyEngineSetting.Mine")
@@ -151,31 +158,33 @@ struct GhosttyEngineSettingTests {
         }
         let state = AppState(userDefaults: mine.defaults)
         let bystander = AppState(userDefaults: other.defaults)
+        let shippedDefault = AppState.ghosttyTerminalEngineDefault
+        let chosen = !shippedDefault
 
-        Self.toggle(state).wrappedValue = true
+        Self.toggle(state).wrappedValue = chosen
 
         let reopened = mine.reopen()
         let persisted: Bool? = reopened.object(forKey: Self.key) as? Bool
-        let expectedOn: Bool? = true
-        #expect(persisted == expectedOn, "the AppState's domain held \(String(describing: persisted)) after the toggle went on")
+        let expectedMine: Bool? = chosen
+        #expect(persisted == expectedMine, "the AppState's domain held \(String(describing: persisted)) after the toggle was set to \(chosen)")
         let relaunchedShown = Self.toggle(AppState(userDefaults: reopened)).wrappedValue
-        #expect(relaunchedShown, "an AppState rebuilt on the same domain showed the toggle off")
+        #expect(relaunchedShown == chosen, "an AppState rebuilt on the same domain showed the toggle \(relaunchedShown ? "on" : "off")")
 
         let otherBefore = other.defaults.object(forKey: Self.key)
         #expect(otherBefore == nil, "the other store got the key from this AppState's toggle")
         let bystanderShown = Self.toggle(bystander).wrappedValue
-        #expect(!bystanderShown, "the other AppState's toggle went on with this one")
+        #expect(bystanderShown == shippedDefault, "the other AppState's toggle followed this one")
         let bystanderMirror = bystander.ghosttyTerminalEngineFlag
-        #expect(!bystanderMirror, "the other AppState's tabs and menu saw this AppState's flag")
+        #expect(bystanderMirror == shippedDefault, "the other AppState's tabs and menu saw this AppState's flag")
 
-        Self.toggle(bystander).wrappedValue = false
+        Self.toggle(bystander).wrappedValue = shippedDefault
 
         let otherStored: Bool? = other.defaults.object(forKey: Self.key) as? Bool
-        let expectedOff: Bool? = false
-        #expect(otherStored == expectedOff, "the other AppState's toggle stored \(String(describing: otherStored))")
+        let expectedOther: Bool? = shippedDefault
+        #expect(otherStored == expectedOther, "the other AppState's toggle stored \(String(describing: otherStored))")
         let mineStored: Bool? = mine.defaults.object(forKey: Self.key) as? Bool
-        #expect(mineStored == expectedOn, "the other AppState's off reached this store: \(String(describing: mineStored))")
+        #expect(mineStored == expectedMine, "the other AppState's write reached this store: \(String(describing: mineStored))")
         let stillShown = Self.toggle(state).wrappedValue
-        #expect(stillShown, "the other AppState's off turned this toggle off")
+        #expect(stillShown == chosen, "the other AppState's write changed this toggle")
     }
 }

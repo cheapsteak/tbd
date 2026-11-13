@@ -2,10 +2,12 @@ import Foundation
 
 /// Which emulator draws a terminal.
 ///
-/// `swiftTerm` is the only engine the app builds today. `ghostty` names the
-/// libghostty-vt engine that `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`
-/// adds behind a default-off flag; until that lands, `TerminalEngineFactory`
-/// builds SwiftTerm for every kind.
+/// `ghostty` is the libghostty-vt engine
+/// (`docs/specs/2026-11-07-libghostty-terminal-engine-design.md`), which
+/// `useGhosttyTerminalEngine`, on by default, gives holder panels and local
+/// PTYs. `swiftTerm` draws tmux panels, a terminal whose libghostty start
+/// failed, and every terminal while that flag is off
+/// (`TerminalEngineFactory.requestedKind`).
 enum TerminalEngineKind: String, Sendable, CaseIterable {
     case swiftTerm
     case ghostty

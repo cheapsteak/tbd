@@ -94,10 +94,12 @@ run against it.
 
 A build while the engine is off logs nothing, so a libghostty panel rebuilt
 then becomes SwiftTerm while its latest line still says libghostty. Two checks
-close that gap. The flag itself must be a boolean true in the app's own
-defaults domain (`com.github.cheapsteak.tbd` for an app inside a `.app`
-bundle, `TBDApp` for an unbundled build; unset is off, and so is a string,
-which `defaults read` prints just as it prints a boolean). And no flag line
+close that gap. The flag itself must read as on, the way the app reads it, in
+the app's own defaults domain (`com.github.cheapsteak.tbd` for an app inside a
+`.app` bundle, `TBDApp` for an unbundled build). The app takes a boolean, or a
+number that is exactly 1 or 0, as the value it holds. An unset key, or any
+other value, follows the shipped default, which is on. That includes a string
+"1", which `defaults read` prints just as it prints a boolean. And no flag line
 may come after an arm's latest build line: the flag was off at some point
 since.
 
@@ -662,9 +664,12 @@ def app_launched_at(pid: int) -> datetime.datetime:
 # build.
 BUNDLED_DOMAIN = "com.github.cheapsteak.tbd"
 UNBUNDLED_DOMAIN = APP_PROCESS_NAME
-# `AppState.useGhosttyTerminalEngineKey`. An unset key is off: it follows
-# `AppState.ghosttyTerminalEngineDefault`, which ships false.
+# `AppState.useGhosttyTerminalEngineKey`.
 ENGINE_FLAG_KEY = "useGhosttyTerminalEngine"
+# `AppState.ghosttyTerminalEngineDefault`: what the app reads when the key is
+# unset or holds a value it does not take as a Bool. The probe's tests pin it
+# to the Swift constant.
+ENGINE_FLAG_DEFAULT = True
 
 
 @dataclass(frozen=True)
@@ -677,11 +682,37 @@ class EngineFlag:
     value_type: str | None  # "boolean", "string", ..., or None when unset or unread
 
     @property
+    def stored(self) -> bool | None:
+        """The key as the app reads it, `object(forKey:) as? Bool`, or None
+        where the app gets no Bool and so follows `ENGINE_FLAG_DEFAULT`
+        (`AppState.ghosttyTerminalEngineEnabled(stored:shippedDefault:)`).
+
+        A boolean is its own value. Swift bridges an `NSNumber` to `Bool` only
+        when it is exactly 1 or 0, so an integer or a float is a Bool at 1 or
+        0 and no Bool otherwise. `defaults read` prints a boolean, an integer
+        1 and a float 1.0 all as 1; `read-type` tells them apart. A string,
+        even "1", and every other type is no Bool.
+        """
+        if self.value is None or self.value_type not in ("boolean", "integer", "float"):
+            return None
+        try:
+            number = float(self.value)
+        except ValueError:
+            return None
+        if number == 1:
+            return True
+        if number == 0:
+            return False
+        return None
+
+    @property
     def enabled(self) -> bool:
-        # `defaults read` prints a boolean true as 1, and a string "1" the
-        # same way. The app reads the key `as? Bool`, so the string is unset
-        # to it, which is off: only a boolean 1 is on.
-        return self.value_type == "boolean" and self.value == "1"
+        # A value whose type `read-type` did not give is not taken as on:
+        # how the app reads it cannot be told.
+        if self.value is not None and self.value_type is None:
+            return False
+        stored = self.stored
+        return ENGINE_FLAG_DEFAULT if stored is None else stored
 
 
 def defaults_domain(executable: str) -> str:
@@ -717,13 +748,16 @@ def engine_flag_problem(flag: EngineFlag) -> str | None:
     """Why the flag is not on, or None when it is."""
     if flag.enabled:
         return None
+    shipped = "on" if ENGINE_FLAG_DEFAULT else "off"
+    read_type = f"`defaults read-type {flag.domain} {ENGINE_FLAG_KEY}`"
     if flag.value is None:
-        reads = "nothing (unset, which is off)"
-    elif flag.value_type != "boolean":
+        reads = f"nothing (unset, which follows the shipped default, {shipped})"
+    elif flag.value_type is None:
+        reads = f"{flag.value!r}, but {read_type} gave no type, so how the app reads it cannot be told"
+    elif flag.stored is None:
         reads = (
-            f"{flag.value!r}, but `defaults read-type {flag.domain} {ENGINE_FLAG_KEY}` says"
-            f" {flag.value_type or 'nothing'}, not boolean. The app reads a string as unset,"
-            " which is off, and this check takes only the boolean the Settings toggle writes"
+            f"{flag.value!r}, but {read_type} says {flag.value_type}. The app takes no Bool from"
+            f" that, so it follows the shipped default, {shipped}"
         )
     else:
         reads = repr(flag.value)

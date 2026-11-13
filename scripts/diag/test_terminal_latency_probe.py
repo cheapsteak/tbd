@@ -27,6 +27,7 @@ import datetime
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -502,41 +503,85 @@ class EngineFlagTests(unittest.TestCase):
         self.assertEqual(commands[1][2], "TBDApp")
         self.assertTrue(flag.enabled)
 
-    def test_an_unset_key_is_off(self):
+    def test_the_shipped_default_is_the_apps(self):
+        # The one place the Swift side states it; a change there that this
+        # constant does not follow fails here.
+        source = (HERE.parent.parent / "Sources" / "TBDApp" / "AppState.swift").read_text(encoding="utf-8")
+        found = re.findall(r"^\s*static let ghosttyTerminalEngineDefault = (true|false)\s*$", source, re.MULTILINE)
+        self.assertEqual(len(found), 1, f"AppState.swift declares ghosttyTerminalEngineDefault {len(found)} times")
+        self.assertEqual(probe.ENGINE_FLAG_DEFAULT, found[0] == "true")
+
+    def test_an_unset_key_follows_the_shipped_default(self):
         flag, _ = self.read(
             "/Applications/TBD.app/Contents/MacOS/TBDApp", 1,
             stderr="Error: Could not find key 'useGhosttyTerminalEngine' in domain 'com.github.cheapsteak.tbd'.",
         )
         self.assertEqual(flag, probe.EngineFlag("com.github.cheapsteak.tbd", None, None))
-        problem = probe.engine_flag_problem(flag)
-        assert problem is not None
-        self.assertIn(
-            "`defaults read com.github.cheapsteak.tbd useGhosttyTerminalEngine` reads nothing (unset, which is off)",
-            problem,
-        )
+        self.assertIsNone(flag.stored)
+        # The shipped default is on, so an install that never chose passes.
+        self.assertTrue(flag.enabled)
+        self.assertIsNone(probe.engine_flag_problem(flag))
+        # Whichever way the default points.
+        with mock.patch.object(probe, "ENGINE_FLAG_DEFAULT", False):
+            self.assertFalse(flag.enabled)
+            problem = probe.engine_flag_problem(flag)
+            assert problem is not None
+            self.assertIn(
+                "`defaults read com.github.cheapsteak.tbd useGhosttyTerminalEngine` reads nothing"
+                " (unset, which follows the shipped default, off)",
+                problem,
+            )
 
-    def test_only_a_true_boolean_is_on(self):
-        for value, value_type in (
-            ("0", "boolean"),
-            # `defaults write ... -string 1` prints 1 too, and the app reads it
-            # as unset.
-            ("1", "string"),
-            ("1", "integer"),
-            ("true", "string"),
-            ("YES", "string"),
-            ("", "string"),
+    def test_each_value_reads_as_the_app_reads_it(self):
+        # (printed value, `read-type`'s type, what `as? Bool` gives the app:
+        # None for no Bool, which follows the shipped default)
+        for value, value_type, stored in (
+            ("1", "boolean", True),
+            ("0", "boolean", False),
+            # An NSNumber is a Bool only at exactly 1 or 0.
+            ("1", "integer", True),
+            ("0", "integer", False),
+            ("2", "integer", None),
+            ("1", "float", True),
+            ("0", "float", False),
+            ("0.5", "float", None),
+            # `defaults write ... -string 1` prints 1 too, and is no Bool.
+            ("1", "string", None),
+            ("0", "string", None),
+            ("true", "string", None),
+            ("YES", "string", None),
+            ("", "string", None),
+            ("(\n    1\n)", "array", None),
         ):
             flag, _ = self.read("/Users/someone/tbd/.build/debug/TBDApp", 0, value + "\n", value_type=value_type)
             self.assertEqual(flag, probe.EngineFlag("TBDApp", value, value_type))
-            self.assertFalse(flag.enabled, (value, value_type))
-            problem = probe.engine_flag_problem(flag) or ""
-            self.assertIn(f"reads {value!r}", problem)
-            if value_type != "boolean":
-                self.assertIn(
-                    f"`defaults read-type TBDApp useGhosttyTerminalEngine` says {value_type}, not boolean", problem
-                )
-        flag, _ = self.read("/Users/someone/tbd/.build/debug/TBDApp", 0, "1\n", value_type="boolean")
-        self.assertTrue(flag.enabled)
+            self.assertEqual(flag.stored, stored, (value, value_type))
+            for shipped in (True, False):
+                with mock.patch.object(probe, "ENGINE_FLAG_DEFAULT", shipped):
+                    expected = shipped if stored is None else stored
+                    self.assertEqual(flag.enabled, expected, (value, value_type, shipped))
+                    problem = probe.engine_flag_problem(flag)
+                    if expected:
+                        self.assertIsNone(problem, (value, value_type, shipped))
+                        continue
+                    assert problem is not None
+                    self.assertIn(f"reads {value!r}", problem)
+                    if stored is None:
+                        self.assertIn(
+                            f"`defaults read-type TBDApp useGhosttyTerminalEngine` says {value_type}."
+                            " The app takes no Bool from that, so it follows the shipped default, off",
+                            problem,
+                        )
+
+    def test_a_value_of_unknown_type_is_not_taken_as_on(self):
+        # `read-type` failed, so the app's reading cannot be told from `1`.
+        flag = probe.EngineFlag("TBDApp", "1", None)
+        self.assertFalse(flag.enabled)
+        problem = probe.engine_flag_problem(flag)
+        assert problem is not None
+        self.assertIn(
+            "reads '1', but `defaults read-type TBDApp useGhosttyTerminalEngine` gave no type", problem
+        )
 
     def test_a_process_that_is_gone_is_refused(self):
         def run(command, **kwargs):
@@ -822,14 +867,23 @@ class EngineRunTests(unittest.TestCase):
         self.assertEqual(out, "")
 
     def test_flag_off_refuses_before_any_keystroke(self):
-        engine_flag = FakeFlag(probe.EngineFlag("com.github.cheapsteak.tbd", None, None))
+        engine_flag = FakeFlag(probe.EngineFlag("com.github.cheapsteak.tbd", "0", "boolean"))
         log = FakeLog(STANDARD_ENGINE_LINES)
         status, out, err, written = self.run_main(log, engine_flag=engine_flag)
         self.assertIn("REFUSING TO RUN — the libghostty engine flag is not on", str(status))
+        self.assertIn("`defaults read com.github.cheapsteak.tbd useGhosttyTerminalEngine` reads '0'", str(status))
         self.assertIn("Nothing has been written to any terminal.", str(status))
         self.assertEqual(engine_flag.calls, [PID])
         self.assertEqual(written, [])
         self.assertEqual(out, "")
+
+    def test_an_unset_flag_runs_on_the_shipped_default(self):
+        engine_flag = FakeFlag(probe.EngineFlag("com.github.cheapsteak.tbd", None, None))
+        status, out, err, written = self.run_main(FakeLog(STANDARD_ENGINE_LINES), engine_flag=engine_flag)
+        self.assertEqual(status, 0, err)
+        self.assertEqual(engine_flag.calls, [PID, PID])
+        self.assertEqual(len(written), 4)
+        self.assertIn("terminal engine latency, milliseconds", out)
 
     def test_flag_turned_off_during_the_run_refuses_the_report(self):
         engine_flag = FakeFlag()

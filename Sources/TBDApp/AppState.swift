@@ -5162,13 +5162,15 @@ final class AppState {
         stored ?? shippedDefault
     }
 
-    /// UserDefaults key for the experimental libghostty terminal engine. When
-    /// on, holder panels and local PTY terminals (remote attach and remote
-    /// sign-in) opened afterwards are built on `GhosttyEngine` instead of
+    /// UserDefaults key for the libghostty terminal engine. When on, holder
+    /// panels and local PTY terminals (remote attach and remote sign-in)
+    /// opened afterwards are built on `GhosttyEngine` instead of
     /// `SwiftTermEngine`; tmux and control-mode panels stay on SwiftTerm
-    /// whatever it says. Off by default, because it replaces a load-bearing
-    /// rendering and input path. Design:
-    /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
+    /// whatever it says. On by default (`ghosttyTerminalEngineDefault`). The
+    /// Settings → Terminal → Experimental toggle turns it off by storing an
+    /// explicit `false`, which holds. Design:
+    /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md` and
+    /// `docs/specs/2026-11-13-swiftterm-retirement-design.md`.
     ///
     /// App-side `UserDefaults`, on `.standard` in the app, for the reasons on
     /// `useMetalTerminalRendererKey`. Nothing writes it except a person
@@ -5176,10 +5178,9 @@ final class AppState {
     /// `ghosttyTerminalEngineEnabled(defaults:)`, never `bool(forKey:)`.
     static let useGhosttyTerminalEngineKey = "useGhosttyTerminalEngine"
 
-    /// The one default for `useGhosttyTerminalEngineKey`. Graduation is a
-    /// one-line change here: it reaches everyone who never chose and keeps
-    /// every explicit `false`.
-    static let ghosttyTerminalEngineDefault = false
+    /// The one default for `useGhosttyTerminalEngineKey`: on. It reaches
+    /// everyone who never chose, and every explicit `false` holds against it.
+    static let ghosttyTerminalEngineDefault = true
 
     /// Whether terminals opened now should be built on libghostty, where their
     /// host allows it (`TerminalEngineFactory.requestedKind`). Three-state: an

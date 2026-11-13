@@ -10,7 +10,8 @@ let terminalEngineSwitchLog = Logger(subsystem: "com.tbd.app", category: "termin
 // MARK: - Switch Terminal Engine
 
 /// Switch Terminal Engine: move a live holder terminal to the other engine, to
-/// compare the two on the same session while `useGhosttyTerminalEngine` soaks.
+/// compare the two on the same session, or to put one terminal back on
+/// SwiftTerm when libghostty shows a problem in it.
 ///
 /// The switch records the other engine in `AppState.terminalEngineOverrides`
 /// (`TerminalPanelRepresentable.Coordinator.switchEngine()`), and nothing
