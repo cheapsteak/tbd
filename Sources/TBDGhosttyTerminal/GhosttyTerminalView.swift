@@ -821,6 +821,8 @@ public final class GhosttyTerminalView: NSView {
         }
         applyPendingGridResize()
         startBlinkIfNeeded()
+        // No render signal reached the view while it was detached.
+        mouseController.screenMayHaveChanged()
     }
 
     /// Detaches the surface and the view's half of the attachment. Also run when the surface is
@@ -889,13 +891,15 @@ public final class GhosttyTerminalView: NSView {
     /// The terminal's render signal, on the main thread, with the hint the relay folded from every
     /// signal since the last delivery. `close()` signals one last time, and the view stops its
     /// cursor blink then and asks for no frame, so nothing keeps waking a view that will never draw
-    /// again.
+    /// again. Every delivery tells the mouse controller the screen may have changed, for its
+    /// ⌘-hover underline.
     ///
     /// Otherwise the delivery decides once, by `LeadingEdgePolicy`, whether to draw now. It draws
     /// with the tick's own `renderTick(now:)`, inside this delivery, so the leading edge adds no
     /// main-queue hop, and its frame drops at the drawable limit as the policy does. Anything else
     /// asks the display link for a frame.
     private func renderSignalled(_ hint: RenderHint) {
+        mouseController.screenMayHaveChanged()
         guard !terminal.isClosed else {
             stopBlink()
             return

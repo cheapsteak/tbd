@@ -255,4 +255,27 @@ struct TerminalCommandClickTests {
         #expect(changed == nil)
         #expect(hover.screensWritten == 2)
     }
+
+    /// SwiftTerm scans the whole line for each cell it is asked about. On a line of 20,000
+    /// characters, soft-wrapped over 200 rows, a URL crossing a row end in the middle takes a few
+    /// questions, not one for each of its cells and those either side.
+    @Test func aLinkOnALongLineTakesAFewLookups() throws {
+        let url = "https://example.com/acme"
+        let columns = 100
+        // The URL starts 10,090 characters in, at column 90 of row 100, and runs on into row 101.
+        let text = String(repeating: "word ", count: 2_018) + url + " " + String(repeating: "word ", count: 1_977)
+        let characters = Array(text)
+        try #require(characters.count == 20_000)
+        let rows = (0..<200).map { index in
+            GhosttyClickedText.Row(
+                text: String(characters[(index * columns)..<((index + 1) * columns)]), isWrapContinuation: index > 0)
+        }
+        let screen = try #require(SwiftTermLinkDetector.Screen(rows: rows, columns: columns))
+
+        let link = screen.textLink(column: 5, row: 101)
+
+        #expect(link == GhosttyTextLink(
+            text: url, spans: [.init(row: 100, columns: 90..<100), .init(row: 101, columns: 0..<14)]))
+        #expect(screen.lookups <= 8, "\(screen.lookups) lookups")
+    }
 }

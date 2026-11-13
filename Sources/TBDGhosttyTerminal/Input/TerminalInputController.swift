@@ -276,6 +276,7 @@ final class TerminalInputController {
         let optionHeld = mods.contains(.alt)
         let up = key == GHOSTTY_KEY_PAGE_UP
         if view.terminal.scrollViewportByPage(up: up, ignoringApplicationCursorKeys: optionHeld) {
+            view.mouseController.screenMayHaveChanged()
             view.requestFrame()
             return true
         }
@@ -662,6 +663,8 @@ final class TerminalInputController {
 
     /// Brings the viewport down to the cursor, and asks for a frame when it moved.
     private func scrollToBottom(_ view: GhosttyTerminalView) {
-        if view.terminal.scrollViewportToBottom() { view.requestFrame() }
+        guard view.terminal.scrollViewportToBottom() else { return }
+        view.mouseController.screenMayHaveChanged()
+        view.requestFrame()
     }
 }

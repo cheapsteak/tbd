@@ -109,6 +109,77 @@ struct TerminalEngineCommandHoverTests {
         #expect(afterRelease.isEmpty, "letting go of Command left \(afterRelease)")
     }
 
+    /// A ⌘-hover asks the host about the cell under the pointer, from the screen's text, which the
+    /// terminal reads under its lock. Moves come at the display's rate, so the text is read once
+    /// for each screen, a move onto another cell asks the host about it from that read, and a move
+    /// within the cell asked about last asks nothing. A screen that changed is read again.
+    /// libghostty-only: the SwiftTerm view reads its own buffer.
+    @Test("⌘-hover moves read each screen once, and a move within a cell asks nothing",
+          .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
+    func movesReadEachScreenOnce() async throws {
+        let fixture = try HoverFixture(kind: .ghostty)
+        defer { fixture.tearDown() }
+        await fixture.show("see \(HoverFixture.linkURL) now")
+        let view = try #require(fixture.engine.view as? GhosttyTerminalView)
+        let controller = view.mouseController
+        controller.pointerLocation = { _ in nil }
+        let findLink = try #require(view.onCommandHoverText)
+        let asked = AskCount()
+        view.onCommandHoverText = { hovered in
+            asked.count += 1
+            return findLink(hovered)
+        }
+        try fixture.command(down: true)
+        let readsBefore = controller.screenReads
+
+        try fixture.move(column: 5, row: 0, flags: .command)
+        try fixture.move(column: 14, row: 0, flags: .command)
+        try fixture.move(column: 14, row: 0, flags: .command)
+        let overTheURL = try fixture.underlined()
+        try fixture.move(column: 30, row: 0, flags: .command)
+
+        #expect(overTheURL == [Underline(row: 0, columns: 4..<28)], "over the URL, \(overTheURL)")
+        #expect(controller.screenReads - readsBefore == 1, "\(controller.screenReads - readsBefore) reads of one screen")
+        #expect(asked.count == 3, "the host was asked \(asked.count) times about three cells")
+
+        await fixture.show("see nothing at all here")
+        try fixture.move(column: 14, row: 0, flags: .command)
+        let afterChange = try fixture.underlined()
+        #expect(controller.screenReads - readsBefore == 2, "a changed screen was not read again")
+        #expect(afterChange.isEmpty, "the changed screen underlined \(afterChange)")
+    }
+
+    /// The pointer stays on a URL while output arrives, as it does over a program at work. Output
+    /// on other rows leaves the underline. Output over its row takes it away, rather than leave it
+    /// under text that is no longer the link, and the next move looks again. libghostty-only: the
+    /// SwiftTerm view keeps its underline on the rows of its buffer whatever is written there.
+    @Test("output over a ⌘-hovered URL clears its underline, and output elsewhere keeps it",
+          .enabled(if: EngineTestSupport.canBuildGhostty, EngineTestSupport.noMetalDevice))
+    func outputUnderAStillPointer() async throws {
+        let fixture = try HoverFixture(kind: .ghostty)
+        defer { fixture.tearDown() }
+        await fixture.show("see \(HoverFixture.linkURL) now\r\n\r\n\r\nworking 1")
+        try fixture.command(down: true)
+        try fixture.move(column: 14, row: 0, flags: .command)
+        let url = [Underline(row: 0, columns: 4..<28)]
+        let before = try fixture.underlined()
+        #expect(before == url, "over the URL, \(before)")
+
+        // The last digit of "working 1", three rows down, changes.
+        await fixture.feed("\u{1b}[4;9H2")
+        let afterElsewhere = try fixture.underlined()
+        #expect(afterElsewhere == url, "output three rows down left \(afterElsewhere)")
+
+        // The URL's row is erased and written over.
+        await fixture.feed("\u{1b}[1;1H\u{1b}[2Kall done")
+        let afterOver = try fixture.underlined()
+        #expect(afterOver.isEmpty, "output over the URL's row left \(afterOver)")
+
+        try fixture.move(column: 14, row: 0, flags: .command)
+        let afterMove = try fixture.underlined()
+        #expect(afterMove.isEmpty, "a move over the new text underlined \(afterMove)")
+    }
+
     @Test("a hover without Command underlines nothing", arguments: TerminalEngineFactory.availableKinds)
     func noCommand(kind: TerminalEngineKind) async throws {
         let fixture = try HoverFixture(kind: kind)
@@ -167,6 +238,12 @@ private struct Underline: Equatable, CustomStringConvertible {
     let columns: Range<Int>
 
     var description: String { "row \(row) \(columns)" }
+}
+
+/// How many times the host was asked for a ⌘-hover's link.
+@MainActor
+private final class AskCount {
+    var count = 0
 }
 
 /// Records what an engine opens, and answers the panel's focus claim.
@@ -251,9 +328,14 @@ private final class HoverFixture {
 
     /// Clears the screen and writes `text` from the top-left cell.
     func show(_ text: String) async {
-        engine.feed(Array("\u{1b}[H\u{1b}[2J\(text)".utf8)[...])
-        await EngineTestSupport.settle()
+        await feed("\u{1b}[H\u{1b}[2J\(text)")
         recorder.reset()
+    }
+
+    /// Writes `text` as program output, wherever the cursor is.
+    func feed(_ text: String) async {
+        engine.feed(Array(text.utf8)[...])
+        await EngineTestSupport.settle()
     }
 
     /// The window point at the centre of the cell at `column`, `row`, by the view's own cell size.
