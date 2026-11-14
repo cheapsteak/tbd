@@ -1,19 +1,14 @@
 import Foundation
 
-/// Which daemon-side size authority a panel's debounced `pane.resize` is
-/// addressed to, or nil when the panel has none to tell.
+/// The holder session a panel's debounced `pane.resize` is addressed to, or
+/// nil when the panel has none to tell.
 ///
-/// Extracted for the same reason as `TerminalResizeGate`: the branch in
-/// `sizeChanged` picks between two keying schemes, and a holder row cannot be
-/// keyed the control-mode way. Its `windowID` is the empty string, so a
-/// `pane.resize` addressed by window resolves nothing and is dropped without a
-/// word — which is exactly how a holder panel's resize came to be a no-op.
-enum TerminalResizeTarget: Equatable, Sendable {
-    /// A control-mode panel. The daemon sizes per tmux WINDOW, because one
-    /// server hosts other windows' viewers.
-    case controlModeWindow(worktreeID: UUID, windowID: String)
-    /// A holder-backed panel. There is no window, so the session names itself.
-    case holderSession(worktreeID: UUID, terminalID: UUID)
+/// A holder row has no tmux window — its `windowID` is the empty string — so a
+/// `pane.resize` addressed by window would resolve nothing and be dropped
+/// without a word. The session names itself by terminal ID instead.
+struct TerminalResizeTarget: Equatable, Sendable {
+    let worktreeID: UUID
+    let terminalID: UUID
 
     /// - Parameter holderPTYIsOwned: whether this panel holds a writable
     ///   duplicate of the session's pty master. It is the app's claim on
@@ -28,21 +23,9 @@ enum TerminalResizeTarget: Equatable, Sendable {
     static func resolve(
         holderPTYIsOwned: Bool,
         worktreeID: UUID?,
-        terminalID: UUID,
-        controlMode: (worktreeID: UUID, windowID: String)?
+        terminalID: UUID
     ) -> TerminalResizeTarget? {
-        // The holder arm comes first: the two are mutually exclusive by
-        // construction (`handleHolderTransport` returns before the control-mode
-        // client is ever started), so the order is documentation rather than
-        // arbitration — but a panel that somehow held both must be addressed as
-        // what it actually owns a descriptor for.
-        if holderPTYIsOwned, let worktreeID {
-            return .holderSession(worktreeID: worktreeID, terminalID: terminalID)
-        }
-        if let controlMode {
-            return .controlModeWindow(
-                worktreeID: controlMode.worktreeID, windowID: controlMode.windowID)
-        }
-        return nil
+        guard holderPTYIsOwned, let worktreeID else { return nil }
+        return TerminalResizeTarget(worktreeID: worktreeID, terminalID: terminalID)
     }
 }

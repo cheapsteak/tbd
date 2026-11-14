@@ -101,9 +101,7 @@ struct AppLivenessArbiter: Sendable {
     /// that holds the actor for both spawns — every other call into it queues
     /// behind the check, including ones that need no check at all — and pins
     /// one of the cooperative pool's few threads while it waits. So the check
-    /// runs on a GCD thread, the discipline `TmuxControlSupervisor.stopAll`
-    /// follows for its blocking `stop()`s, and the caller suspends until it
-    /// answers. An actor awaiting this is free for the whole check, so
+    /// runs on a GCD thread, and the caller suspends until it answers. An actor awaiting this is free for the whole check, so
     /// anything it read before the `await` may have changed by the time the
     /// verdict arrives.
     func verdictOffThePool(for identity: ProcessIdentity?) async -> AppLivenessVerdict {

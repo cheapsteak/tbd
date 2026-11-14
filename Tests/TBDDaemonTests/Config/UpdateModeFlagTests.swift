@@ -197,7 +197,7 @@ struct UpdateModeFlagTests {
     /// the column.
     @Test func capabilitiesCarryTheModeAndDefaultWhenAbsent() throws {
         let encoded = try JSONEncoder().encode(
-            DaemonCapabilitiesResult(controlModeEnabled: false, updateMode: .auto))
+            DaemonCapabilitiesResult(updateMode: .auto))
         #expect(try JSONDecoder().decode(
             DaemonCapabilitiesResult.self, from: encoded).updateMode == .auto)
 

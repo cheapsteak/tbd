@@ -48,14 +48,6 @@ struct TerminalLimitHit: Equatable {
     let receivedAt: Date
 }
 
-/// Identifies one control-mode pane app-side. `paneID` (tmux `%N`) is only
-/// unique within one server, so it is always paired with `worktreeID` — the
-/// same keying as the daemon router and `SidecarInputHeader`.
-struct ControlModePaneKey: Hashable {
-    let worktreeID: UUID
-    let paneID: String
-}
-
 /// One remote selection's attach-pane restart generation, plus when the child
 /// mounted under it was spawned.
 ///
@@ -1139,7 +1131,7 @@ final class AppState {
     /// The last `pushComposerDrafts` report, which the next one waits on.
     @ObservationIgnored var composerDraftsPush: Task<Void, Never>?
     /// How `pushComposerDrafts` reports to the daemon — injectable for the
-    /// same reason as `controlModeSetter`.
+    /// same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var composerDraftsSetter: @MainActor ([UUID]) async throws -> Void =
         { [daemonClient] ids in try await daemonClient.setComposerDrafts(terminalIDs: ids) }
     /// Weak composer text views keyed by target, so Cmd+/ can move focus into
@@ -1431,22 +1423,6 @@ final class AppState {
     /// In-memory only — the banner is advisory, and a relaunch is a cheap
     /// second chance to notice an update worth taking.
     var dismissedUpdateCommit: String?
-    /// Panes currently rendered through a live control-mode attach, mapped to
-    /// the attach GENERATION the record belongs to (`nil` when the daemon
-    /// vended none). Maintained by `TerminalPanelRepresentable.Coordinator`
-    /// (attach success inserts; detach/fallback removes). Gates the
-    /// input-health indicator: it must NEVER show on a pane that isn't
-    /// control-mode attached (#318 polish), whatever health deltas arrive.
-    /// Generation-scoped (M3 review fix) so a closing pane's stale clear —
-    /// landing after a fresh attach's set for the same pane under adverse
-    /// MainActor scheduling — cannot drop a healthy pane's attached state
-    /// (the app-side twin of the daemon's generation-checked detach).
-    private(set) var controlModeAttachedPanes: [ControlModePaneKey: UInt64?] = [:]
-    /// Panes the daemon has flagged input-failing via edge-triggered
-    /// `controlModeInputHealthChanged` deltas. A `healthy: true` delta or a
-    /// detach clears the flag. Read through `isInputDeliveryFailing(_:)`,
-    /// which applies the attached-pane gate.
-    private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
     var historyActiveWorktrees: Set<UUID> = []
     var historyLoadStates: [UUID: HistoryLoadState] = [:]
     /// Only the latest refresh for a worktree may publish or invalidate history.
@@ -2101,10 +2077,6 @@ final class AppState {
     let daemonClient: DaemonClient
     let tmuxExecutableResolver: TmuxExecutableResolver
     let tmuxBridge: TmuxBridge
-    /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
-    /// Lives here — not on any view — so SwiftUI view destruction cannot tear
-    /// down an active reader. Keyed by `FDVendHeader.routingKey`.
-    let controlModeReaders = ControlModeReaderRegistry()
     /// The app's own transcript reader. Constructed unconditionally — it costs
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
@@ -2215,10 +2187,9 @@ final class AppState {
     @ObservationIgnored lazy var transcriptPollScheduler =
         TranscriptPollScheduler(source: transcriptSource)
     /// Feature flags fetched from the daemon at connect time. Nil until the
-    /// first successful fetch — treated as "control mode off". The app cannot
-    /// derive these locally: it is launched via `open`, which drops shell env.
-    /// Published so the Settings control-mode toggle re-renders after
-    /// `setControlModeEnabled` refreshes it.
+    /// first successful fetch. The app cannot derive these locally: it is
+    /// launched via `open`, which drops shell env. Published so a Settings
+    /// toggle re-renders after its setter refreshes it.
     var daemonCapabilities: DaemonCapabilitiesResult?
     /// Whether the daemon reports transcript streaming as on — the resolved
     /// `transcript_streaming_enabled` flag, which spawns sessions with the
@@ -2281,29 +2252,26 @@ final class AppState {
                     rows: rows
                 )
             }
-    /// How `setControlModeEnabled` persists the flag — injectable for the same
-    /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
-    /// protocol), so the Settings-toggle tests can exercise the success branch.
-    @ObservationIgnored lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setControlMode(enabled: enabled) }
     /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
-    /// same reason as `controlModeSetter`.
+    /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
+    /// no protocol), so the Settings-toggle tests can exercise the success
+    /// branch.
     @ObservationIgnored lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
     /// How `setUpdateMode` persists the setting — injectable for the same
-    /// reason as `controlModeSetter`.
+    /// reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var updateModeSetter: @MainActor (UpdateMode) async throws -> Void =
         { [daemonClient] mode in try await daemonClient.setUpdateMode(mode) }
     /// How `checkForUpdatesNow` asks the daemon to check — injectable for the
-    /// same reason as `controlModeSetter`.
+    /// same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var updateCheckRunner: @MainActor () async throws -> UpdateStatus =
         { [daemonClient] in try await daemonClient.checkForUpdate() }
     /// How `setAutoTrustWorktrees` persists the flag — injectable for the
-    /// same reason as `controlModeSetter`.
+    /// same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoTrustWorktrees(enabled: enabled) }
     /// How `setGCCollectorEnabled` persists one opt-in GC collector's switch —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var gcCollectorSetter: @MainActor (GCCollector, Bool) async throws -> Void =
         { [daemonClient] collector, enabled in
             let mapping = collector.mapping
@@ -2314,19 +2282,19 @@ final class AppState {
     @ObservationIgnored lazy var configFetcher: @MainActor () async throws -> Config =
         { [daemonClient] in try await daemonClient.getConfig() }
     /// How `setQueuedPromptEnabled` persists the queued-prompt soak flag —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var queuedPromptFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setQueuedPrompt(enabled: enabled) }
     /// How `setSessionRestoreEnabled` persists the session restore flag —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var sessionRestoreFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setSessionRestore(enabled: enabled) }
     /// How `setHolderClaimReconcileEnabled` persists the holder claim-reconcile
-    /// soak flag — injectable for the same reason as `controlModeSetter`.
+    /// soak flag — injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
     /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
-    /// the same reason as `controlModeSetter`, so the sweep's cadence and its
+    /// the same reason as `autoCloseSetupSetter`, so the sweep's cadence and its
     /// answers are testable without a daemon.
     @ObservationIgnored
     lazy var holderClaimSweepSender:
@@ -2343,7 +2311,7 @@ final class AppState {
             try await daemonClient.terminalHibernate(terminalID: terminalID)
         }
     /// How `wakeTerminalOutcome` reaches the daemon — injectable for the same
-    /// reason as `controlModeSetter`, so the wake's prompt plumbing and its
+    /// reason as `autoCloseSetupSetter`, so the wake's prompt plumbing and its
     /// failure branches are testable without a running daemon.
     @ObservationIgnored
     lazy var terminalWakeSender:
@@ -2354,7 +2322,7 @@ final class AppState {
                 fallbackToDefaultProfile: fallback, prompt: prompt)
         }
     /// How `swapTerminalProfile` reaches the daemon — injectable for the same
-    /// reason as `controlModeSetter`, so the switching record's lifetime is
+    /// reason as `autoCloseSetupSetter`, so the switching record's lifetime is
     /// testable across both the reply and the error without a running daemon.
     @ObservationIgnored
     lazy var terminalProfileSwapper:
@@ -2419,27 +2387,27 @@ final class AppState {
                 provider: selection.provider, sessionID: selection.sessionID)
         }
     /// How `setTranscriptStreamingEnabled` persists the streaming gate —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored
     lazy var transcriptStreamingFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptStreamingEnabled(enabled: enabled)
         }
     /// How `setProfileBalancingEnabled` persists the profile-balancing soak flag —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var profileBalancingFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setProfileBalancing(enabled: enabled) }
     /// How `setProfilePoolOptOut` persists a profile's pool opt-out —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var profilePoolOptOutSetter: @MainActor (UUID, Bool) async throws -> Void =
         { [daemonClient] profileID, optOut in try await daemonClient.setProfilePoolOptOut(id: profileID, optOut: optOut) }
     /// How `setPRPollScheduleEnabled` persists the schedule-based PR polling
-    /// gate — injectable for the same reason as `controlModeSetter`.
+    /// gate — injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
     /// Carries OSC 7501 reports an attached panel read off a holder pty to the
     /// daemon, one at a time and in order — see `forwardProgramStatusReport`.
-    /// Replaceable for the same reason as `controlModeSetter`, so a test can
+    /// Replaceable for the same reason as `autoCloseSetupSetter`, so a test can
     /// record what would have been sent without a daemon.
     @ObservationIgnored lazy var programStatusForwarder: ProgramStatusForwarder =
         ProgramStatusForwarder(send: { [daemonClient] params in
@@ -2448,24 +2416,24 @@ final class AppState {
                 payload: params.payload, observedAt: params.observedAt)
         })
     /// How `setTranscriptPromptAnswerEnabled` persists the transcript
-    /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
+    /// prompt-answer gate — injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setTranscriptPromptAnswer(enabled: enabled) }
     /// How `setComposerDraftEnabled` persists the composer draft gate —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var composerDraftFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setComposerDraft(enabled: enabled) }
     /// How `setSessionModUsageEnabled` persists the session usage gate —
-    /// injectable for the same reason as `controlModeSetter`.
+    /// injectable for the same reason as `autoCloseSetupSetter`.
     @ObservationIgnored lazy var sessionModUsageFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setSessionModUsage(enabled: enabled) }
     /// How `setRemoteTranscriptLiveSyncEnabled` persists the live remote
     /// transcript sync gate — injectable for the same reason as
-    /// `controlModeSetter`.
+    /// `autoCloseSetupSetter`.
     @ObservationIgnored lazy var remoteTranscriptLiveSyncFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setRemoteTranscriptLiveSync(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
-    /// for the same reason as `controlModeSetter`, so the Settings toggle's
+    /// for the same reason as `autoCloseSetupSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
     @ObservationIgnored lazy var claudeCloudFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setClaudeCloud(enabled: enabled) }
@@ -2782,7 +2750,7 @@ final class AppState {
             try await daemonClient.remoteRename(provider: provider, sessionID: sessionID, title: title)
         }
     /// How `setRemoteBackendsEnabled` persists the remote-backends master
-    /// switch — injectable for the same reason as `controlModeSetter`
+    /// switch — injectable for the same reason as `autoCloseSetupSetter`
     /// (`DaemonClient` is concrete, no protocol), so the Settings toggle
     /// tests can exercise the success branch without a real daemon.
     @ObservationIgnored lazy var remoteBackendsSetter: @MainActor (Bool) async throws -> Void =
@@ -2845,11 +2813,10 @@ final class AppState {
         }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
-    /// `.modelProfilesChanged` delta handler so a control-mode toggle from
-    /// ANOTHER client propagates here without waiting for a reconnect. Keeps
-    /// the last known value on failure: the delta fires for many config
-    /// changes, and a transient RPC hiccup must not nil out good capabilities
-    /// (new panes would silently fall back to grouped sessions).
+    /// `.modelProfilesChanged` delta handler so a flag toggled from ANOTHER
+    /// client propagates here without waiting for a reconnect. Keeps the last
+    /// known value on failure: the delta fires for many config changes, and a
+    /// transient RPC hiccup must not nil out good capabilities.
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
             daemonCapabilities = capabilities
@@ -3513,8 +3480,7 @@ final class AppState {
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
                 await self?.loadGCConfig()
-                // The daemon reuses this delta for config changes including
-                // the control-mode toggle (handleConfigSetControlMode), so
+                // The daemon reuses this delta for config changes, so
                 // refresh capabilities too — a toggle from ANOTHER client
                 // must reach this one without waiting for a reconnect
                 // (R7-minor). Best-effort: failure keeps the last value.
@@ -3565,8 +3531,6 @@ final class AppState {
             // space that is now live.
             archivedScratchWorktrees.removeAll { $0.id == d.worktreeID }
             Task { [weak self] in await self?.refreshWorktrees() }
-        case .controlModeInputHealthChanged(let d):
-            applyControlModeInputHealthDelta(d)
         case .reapRecordsChanged:
             if let repoID = selectedRepoID {
                 Task { [weak self] in await self?.refreshReapRecords(repoID: repoID) }
@@ -3593,80 +3557,6 @@ final class AppState {
             applyPanelSurfaceDelta(delta)
         default:
             break
-        }
-    }
-
-    // MARK: - Control-mode input-delivery health (#318 polish)
-
-    /// Record that `paneID` is now rendered through a live control-mode
-    /// attach owned by `generation` (from `openAttach`; nil when the daemon
-    /// vended none). Called by the terminal coordinator once `attach.ready`
-    /// is acked. A re-attach for the same pane overwrites the record with its
-    /// own generation AND clears any stale failing flag — a fresh attach
-    /// starts from a healthy baseline, mirroring the daemon router's
-    /// `register()` reset. Without this, a failing flag from a previous
-    /// generation could stick forever: the stale detach's generation guard
-    /// (correctly) refuses to clear it, and the daemon's register-reset is
-    /// silent — no recovery delta ever arrives to un-stick the indicator.
-    func controlModePaneAttached(worktreeID: UUID, paneID: String, generation: UInt64?) {
-        let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
-        controlModeAttachedPanes[key] = generation
-        controlModeFailingInputPanes.remove(key)
-    }
-
-    /// Clear a pane's attach record AND any failing flag — the indicator must
-    /// vanish on detach, and a later re-attach starts from a healthy baseline
-    /// (mirrors the daemon router's unregister semantics). Idempotent; also
-    /// safe to call from the attach-failure fallback path where the pane was
-    /// never marked attached.
-    ///
-    /// Generation-scoped (M3 review fix): when `generation` is present, the
-    /// clear applies ONLY if it matches the recorded attach's generation — a
-    /// closing pane's stale clear landing after a fresh attach's set for the
-    /// same pane must not drop the successor's attached state. `nil`
-    /// (generation unknown — e.g. an openAttach that failed before vending
-    /// one) clears unconditionally, as before. A record stored WITHOUT a
-    /// generation can't be discriminated, so any detach clears it.
-    func controlModePaneDetached(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
-        let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
-        if let generation,
-           let record = controlModeAttachedPanes[key], let recordedGeneration = record,
-           recordedGeneration != generation {
-            return
-        }
-        controlModeAttachedPanes.removeValue(forKey: key)
-        controlModeFailingInputPanes.remove(key)
-    }
-
-    /// Whether the "input not being delivered" indicator should show for a
-    /// pane: it must be BOTH control-mode attached and flagged failing. A
-    /// failing delta for a non-attached pane (stale, or grouped-sessions
-    /// fallback) never surfaces.
-    func isInputDeliveryFailing(_ key: ControlModePaneKey) -> Bool {
-        controlModeAttachedPanes.index(forKey: key) != nil
-            && controlModeFailingInputPanes.contains(key)
-    }
-
-    private func applyControlModeInputHealthDelta(_ delta: ControlModeInputHealthDelta) {
-        let key = ControlModePaneKey(worktreeID: delta.worktreeID, paneID: delta.paneID)
-        if delta.healthy {
-            // Recovery clears regardless of generation: clearing is always
-            // safe (worst case the indicator re-fires on the next failure).
-            controlModeFailingInputPanes.remove(key)
-        } else {
-            // A FAILING delta is generation-scoped (R6-M7): apply only if it
-            // belongs to the attach this pane currently records — a stale
-            // attach's failure surfacing after a re-attach must not flag the
-            // fresh, healthy attach. Nil on either side (older daemon delta,
-            // or a record vended without a generation) applies unchecked,
-            // preserving pre-R6 behavior — same discrimination rule as
-            // `controlModePaneDetached`.
-            if let deltaGeneration = delta.generation,
-               let record = controlModeAttachedPanes[key], let recordedGeneration = record,
-               recordedGeneration != deltaGeneration {
-                return
-            }
-            controlModeFailingInputPanes.insert(key)
         }
     }
 
@@ -4391,10 +4281,8 @@ final class AppState {
         isConnected = didConnect
         if didConnect {
             // Fetch capabilities BEFORE refreshAll: terminal views are created
-            // as soon as worktree/terminal state lands, and each view decides
-            // grouped-sessions vs control-mode at creation time. Fetching
-            // afterwards would leave every initially-rendered pane on the
-            // grouped path even when the control-mode gate is on.
+            // as soon as worktree/terminal state lands, and they should see the
+            // daemon's flags rather than nil.
             await fetchDaemonCapabilitiesAtConnect()
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
@@ -5161,8 +5049,8 @@ final class AppState {
     /// UserDefaults key for the libghostty terminal engine. When on, holder
     /// panels and local PTY terminals (remote attach and remote sign-in)
     /// opened afterwards are built on `GhosttyEngine` instead of
-    /// `SwiftTermEngine`; tmux and control-mode panels stay on SwiftTerm
-    /// whatever it says. On by default (`ghosttyTerminalEngineDefault`). The
+    /// `SwiftTermEngine`; tmux panels stay on SwiftTerm whatever it says. On
+    /// by default (`ghosttyTerminalEngineDefault`). The
     /// Settings → Terminal → Experimental toggle turns it off by storing an
     /// explicit `false`, which holds. Design:
     /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md` and

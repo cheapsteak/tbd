@@ -26,8 +26,8 @@ private final class BroadcastDeltas: @unchecked Sendable {
 /// / `config.setGCEnabled`.
 @Suite("GC RPC handlers")
 struct GCHandlersTests {
-    /// Router construction mirrors `RPCRouterTests` / `ControlModeSettingsRPCTests`
-    /// (in-memory DB, dry-run tmux). Callers that need `orphanGC` wired set
+    /// Router construction mirrors `RPCRouterTests` (in-memory DB, dry-run
+    /// tmux). Callers that need `orphanGC` wired set
     /// `router.orphanGC` afterward, the same post-construction seam
     /// `Daemon.swift` uses for `claudeUsagePoller`.
     private func makeRouter(db: TBDDatabase, subscriptions: StateSubscriptionManager = StateSubscriptionManager())

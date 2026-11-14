@@ -73,7 +73,7 @@ private final class MonotonicCounter: @unchecked Sendable {
 /// refuses with `.notConnected` instead of writing into a recycled fd.
 ///
 /// The accept loop and each receive loop run on dedicated `Thread`s — the house
-/// pattern for indefinitely-blocking syscalls (see `TmuxControlConnection`).
+/// pattern for indefinitely-blocking syscalls.
 actor FDVendingServer {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "fdVending")
     private var clientFD: Int32 = -1
@@ -688,7 +688,7 @@ actor FDVendingServer {
     /// descriptor to one app while the caller records another as holding it,
     /// and a later verdict that the recorded app is dead would seize a pty the
     /// other one is reading. The holder attach path records this answer as the
-    /// claim's owner; control mode has no use for it.
+    /// claim's owner.
     func sendReportingRecipient(fd: Int32, header: Data) async throws -> ProcessIdentity? {
         let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
         for attempt in 0..<retryAttempts {

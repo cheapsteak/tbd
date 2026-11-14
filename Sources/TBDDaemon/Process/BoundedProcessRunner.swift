@@ -257,10 +257,9 @@ enum BoundedProcessOutcome {
 ///
 /// `.pipes` is the default and what every pre-existing call site gets.
 /// `.pseudoTerminal` substitutes one `openpty(3)` pair for both pipes and hands
-/// the replica to the child as stdin, stdout and stderr — the same allocation
-/// `TmuxControlConnection.start()` performs, including the detail that matters:
-/// the parent closes its copy of the replica after spawn so the primary sees
-/// EOF when the child exits.
+/// the replica to the child as stdin, stdout and stderr. The detail that
+/// matters: the parent closes its copy of the replica after spawn so the
+/// primary sees EOF when the child exits.
 ///
 /// **PTY mode is opt-in per invocation, not a property of a caller, and the
 /// reason is a real loss.** A pseudo-terminal is one file descriptor, so the
@@ -274,10 +273,9 @@ enum BoundedProcessStdio: Sendable {
 
 /// The `winsize` reported to a `.pseudoTerminal` child via `TIOCGWINSZ`.
 ///
-/// **This is a capture surface, not a display surface — do NOT "restore" it to
-/// the 24x80 that `TmuxControlConnection` uses.** That site is not a precedent:
-/// what crosses its pty is tmux's `-CC` control protocol, which is not
-/// width-formatted at all, so the reported width cannot affect its bytes.
+/// **This is a capture surface, not a display surface — do NOT shrink it to a
+/// conventional 24x80.** A pty carrying a protocol that is not width-formatted
+/// could use any size, because the reported width cannot affect its bytes.
 ///
 /// Here it can, and does. The pty itself never wraps — `winsize` is advisory
 /// metadata and the kernel line discipline inserts nothing — but a child that
@@ -725,8 +723,7 @@ func runBoundedProcess(
         do {
             try process.run()
             // The child now holds the replica; close the parent's copy so the
-            // primary sees EOF when the child exits. Same discipline as
-            // `TmuxControlConnection.start()`.
+            // primary sees EOF when the child exits.
             if replicaToClose >= 0 {
                 Darwin.close(replicaToClose)
                 replicaToClose = -1

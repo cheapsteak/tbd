@@ -3,7 +3,7 @@ import TBDShared
 
 /// A remote-session `attach`: `<exec> [args...] attach <id>` spawned on a
 /// plain PTY by the shared `LocalPTYTerminalRepresentable` host — no tmux
-/// window-recreate, hibernation, or control-mode machinery, since a
+/// window-recreate or hibernation machinery, since a
 /// provider's `attach` is just "exec me and get out of the way"
 /// (`docs/remote-provider-contract.md` § `attach`). This type contributes
 /// the two things that ARE attach-specific: the argv and the environment.

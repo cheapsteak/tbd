@@ -70,9 +70,9 @@ import Testing
     /// too; a newer app decodes the rest of the payload and ignores the key.
     @Test("capabilities from an older daemon that still sends programStatusEnabled decode")
     func capabilitiesThatStillCarryTheFlagDecode() throws {
-        let json = #"{"controlModeEnabled":true,"programStatusEnabled":true}"#
+        let json = #"{"remoteBackendsEnabled":true,"programStatusEnabled":true}"#
         let decoded = try JSONDecoder().decode(
             DaemonCapabilitiesResult.self, from: Data(json.utf8))
-        #expect(decoded.controlModeEnabled)
+        #expect(decoded.remoteBackendsEnabled)
     }
 }

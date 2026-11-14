@@ -157,7 +157,7 @@ struct UpdateNoticeTests {
     var written: UpdateMode?
     state.updateModeSetter = { mode in written = mode }
     state.daemonCapabilitiesFetcher = {
-        DaemonCapabilitiesResult(controlModeEnabled: false, updateMode: .check)
+        DaemonCapabilitiesResult(updateMode: .check)
     }
 
     await state.setUpdateMode(.check)
@@ -173,7 +173,7 @@ struct UpdateNoticeTests {
     state.updateModeSetter = { _ in }        // the set succeeds...
     state.daemonCapabilitiesFetcher = { nil }  // ...but the re-fetch fails
     state.daemonCapabilities = DaemonCapabilitiesResult(
-        controlModeEnabled: false, updateMode: .auto)
+        updateMode: .auto)
 
     await state.setUpdateMode(.auto)
 

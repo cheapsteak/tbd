@@ -73,7 +73,7 @@ struct SidebarInteractionTests {
         h.state.repos = [repo]
         h.state.worktrees = [repo.id: [SidebarOutlineControllerTests.row("work", repo)]]
         h.state.remoteProviders = [SidebarGroupFixtures.provider(), Self.cloudProvider()]
-        h.state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, claudeCloudEnabled: true)
+        h.state.daemonCapabilities = DaemonCapabilitiesResult(claudeCloudEnabled: true)
         h.mount()
 
         let header = SidebarNodeID.repoHeader(repo.id)

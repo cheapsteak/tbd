@@ -12,7 +12,7 @@ private let ptyLogger = Logger(subsystem: "com.tbd.app", category: "localPTY")
 /// A minimal terminal host for ONE locally-spawned process on a plain PTY.
 /// Modeled on `TerminalPanelView`'s `Coordinator` (same `LocalProcess(delegate:)`
 /// + `startProcess` path) but deliberately WITHOUT any of the tmux
-/// window-recreate, hibernation, or control-mode machinery — this is the
+/// window-recreate or hibernation machinery — this is the
 /// "exec it and get out of the way" shape.
 ///
 /// Two callers, both remote-provider-related and both wanting exactly this
@@ -397,8 +397,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
 
         // What this host does not use. It has no notification, Program
         // Status, file-click or close-tab handling, and it never turns on
-        // click routing or paste interception, so no focus change, mouse-down
-        // claim or paste is ever reported. `engineMovedToWindow` stays empty
+        // click routing, so no focus change or mouse-down claim is ever
+        // reported. `engineMovedToWindow` stays empty
         // because the attach pane's focus claim is chained onto the view's
         // window hook, after the engine's own (`registerRemoteTerminalView`).
         func engine(_ e: any TerminalEngine, notification title: String, body: String) {}
@@ -408,6 +408,5 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         func engine(_ e: any TerminalEngine, focusChanged focused: Bool) {}
         func engineMouseDownClaimsFocus(_ e: any TerminalEngine) -> Bool { false }
         func engineMovedToWindow(_ e: any TerminalEngine) {}
-        func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool { false }
     }
 }

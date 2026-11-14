@@ -93,8 +93,8 @@ struct HolderShutdownAttachTests {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
             transport: .holder, holderPID: 4242, childPID: 4243)
-        router.controlMode = TmuxControlModeBridge(
-            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: FDVendingServer())
+        router.attachSidecar = AttachSidecar(
+            fdVending: FDVendingServer())
         let registry = Self.registry()
         router.holderRegistry = registry
         // A live holder, so nothing about the session reads as ended and only

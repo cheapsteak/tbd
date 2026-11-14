@@ -84,7 +84,7 @@ import Testing
         #expect(!configLabels.contains("panelSurfaceEnabled"))
         #expect(!configLabels.contains("agentPanelControlEnabled"))
 
-        let capsLabels = Mirror(reflecting: DaemonCapabilitiesResult(controlModeEnabled: false))
+        let capsLabels = Mirror(reflecting: DaemonCapabilitiesResult())
             .children.compactMap(\.label)
         #expect(!capsLabels.contains("panelTabsEnabled"))
         #expect(!capsLabels.contains("panelSurfaceEnabled"))
@@ -149,9 +149,9 @@ import Testing
     /// The same for `daemon.capabilities`: an old daemon's panel flags are
     /// ignored rather than read.
     @Test func capabilitiesThatStillCarryTheFlagsDecode() throws {
-        let json = #"{"controlModeEnabled":true,"panelSurfaceEnabled":true,"panelTabsEnabled":true}"#
+        let json = #"{"remoteBackendsEnabled":true,"panelSurfaceEnabled":true,"panelTabsEnabled":true}"#
         let caps = try JSONDecoder().decode(DaemonCapabilitiesResult.self, from: Data(json.utf8))
-        #expect(caps.controlModeEnabled == true)
+        #expect(caps.remoteBackendsEnabled == true)
     }
 
     // MARK: - Helpers

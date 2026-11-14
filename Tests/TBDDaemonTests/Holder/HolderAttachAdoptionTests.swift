@@ -525,9 +525,9 @@ import TBDKernel
     }
 
     /// A terminal read that throws — a moment of `SQLITE_BUSY` under a write —
-    /// is an error the app retries, never the "unavailable" status the
-    /// control-mode path answers with its gate off, which the app takes as
-    /// permanent and offers no retry for.
+    /// is an error the app retries, never the "unavailable" status a
+    /// non-holder row is answered with, which the app takes as permanent and
+    /// offers no retry for.
     @Test func aTerminalReadThatThrowsAnswersARetryableError() async throws {
         let harness = try await RouterHarness.make()
         try await harness.db.writerForTests.write { conn in
@@ -623,8 +623,8 @@ private struct RouterHarness {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
             transport: .holder, holderPID: 4242, childPID: 4243)
-        router.controlMode = TmuxControlModeBridge(
-            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: FDVendingServer())
+        router.attachSidecar = AttachSidecar(
+            fdVending: FDVendingServer())
         // The recorded holder started with the row, as far as this registry's
         // process table can tell, for the tests that need it verifiably
         // running.

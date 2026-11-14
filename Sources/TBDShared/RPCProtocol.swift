@@ -428,7 +428,6 @@ public enum RPCMethod {
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
-    public static let configSetControlMode = "config.setControlMode"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
     /// The session restore gate (`session_restore_enabled`). Read at the start
@@ -3572,14 +3571,6 @@ public struct ConfigSetAutoHibernateParams: Codable, Sendable {
     }
 }
 
-/// Params for `config.setControlMode` — persist the tmux control-mode opt-in
-/// (M5). The gate is `env || flag`; the change applies to newly created
-/// panes, existing attaches are untouched.
-public struct ConfigSetControlModeParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setDeliveryVerification` — the delivery-acknowledgement
 /// soak flag (default OFF, fleet-supervision design §12). This is the
 /// operator's enable path for the soak, and **enabling it means restarting the
@@ -3975,29 +3966,28 @@ public struct TerminalSuspendParams: Codable, Sendable {
     public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
-/// Params for `attach.request` — ask the daemon to vend a control-mode pipe
-/// fd for one pane. Carries `worktreeID` because tmux pane IDs are only
-/// unique per tmux server; the daemon resolves worktree → `tmuxServer` and
-/// keys everything by the (server, paneID) composite.
+/// Params for `attach.request` — ask the daemon to vend a holder-backed
+/// session's pty descriptor. `terminalID` names the session; `worktreeID`,
+/// `paneID` and `attachID` ride back in the vend header, which is what the
+/// app's sidecar demux keys on.
 public struct AttachRequestParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
     public let windowID: String
     /// Per-request nonce minted by the app and echoed back in the vend
     /// header, so the app's sidecar demux can tell two in-flight attaches for
-    /// the SAME pane apart (the daemon replaces the pane's pipe on re-attach;
-    /// without the nonce, the superseded attach's dead fd could be delivered
-    /// to the fresh attach's waiter if it arrived first).
+    /// the SAME session apart: without the nonce, a superseded attach's
+    /// descriptor could be delivered to the fresh attach's waiter if it
+    /// arrived first.
     public let attachID: UUID
-    /// The terminal being attached, when the caller knows it.
+    /// The terminal being attached.
     ///
-    /// Load-bearing only for the holder transport, and the reason it exists:
-    /// a holder-backed row has no tmux coordinates at all — its `tmuxServer`,
+    /// A holder-backed row has no tmux coordinates at all — its `tmuxServer`,
     /// `tmuxWindowID` and `tmuxPaneID` are the empty string by construction —
-    /// so `paneID` cannot name the session the way it does on the control-mode
-    /// path. The daemon resolves the row from this and branches on its
-    /// transport. Optional so an older app, which only ever attaches panes,
-    /// still encodes and decodes.
+    /// so nothing else in these params can name the session. The daemon
+    /// resolves the row from this and attaches only a holder-backed one.
+    /// Optional for wire compatibility: a request without it is answered
+    /// "unavailable".
     public let terminalID: UUID?
     /// This request's place in the app's attach count: the app numbers every
     /// `attach.request` it sends, from 1 and up by one, per app process.
@@ -4041,7 +4031,8 @@ public struct AttachRequestParams: Codable, Sendable {
 /// Result of `attach.request`.
 public struct AttachRequestResult: Codable, Sendable {
     /// One of "pending" (fd vended; waiting for attach.ready),
-    /// "unavailable" (control mode off / not configured), or
+    /// "unavailable" (the request names no holder-backed terminal, or this
+    /// daemon has no holder transport), or
     /// `holderSessionEndedStatus` (a holder attach whose session's holder
     /// process is gone, so there is nothing left to attach to).
     public let status: String
@@ -4064,24 +4055,20 @@ public struct AttachRequestResult: Codable, Sendable {
     /// daemon other than the one that minted it therefore finds no claim to
     /// hand back. A generation below the floor may repeat across daemon
     /// processes, and resending it could hand back a different viewer's claim.
-    ///
-    /// Holder attaches only: a control-mode attach's generation is the tmux
-    /// fanout's own count, which starts small in every process.
     public static let uniqueGenerationFloor: UInt64 = 1 << 32
-    /// Daemon-side fanout generation of the vended attach ("pending" only).
-    /// The app echoes it back in `pane.detach` so a stale detach — a closing
-    /// view racing a fresh attach for the same pane — cannot kill the newer
-    /// attach's sink. Optional for wire back-compat with older daemons.
+    /// Generation of the vended attach ("pending" only). The app echoes it
+    /// back in `attach.ready` and `pane.detach` so a stale ack or detach — a
+    /// closing view racing a fresh attach for the same session — cannot act on
+    /// the newer attach. Optional for wire back-compat with older daemons.
     public let generation: UInt64?
     /// The screen that was already on the session, as the escape-sequence
-    /// stream that reconstructs it ("pending" holder attaches only).
+    /// stream that reconstructs it ("pending" only).
     ///
     /// It rides the RPC result rather than the vended descriptor because it
     /// must be fed to the terminal *before* the viewer goes live on that
     /// descriptor: a preamble interleaved with live output would paint the
-    /// session's past over its present. Nil on every control-mode attach,
-    /// which replays through tmux instead, and defaulted so those callers
-    /// decode a daemon that has never heard of it.
+    /// session's past over its present. Optional for wire back-compat with
+    /// older daemons.
     public let snapshotPreamble: Data?
     public init(status: String, generation: UInt64? = nil, snapshotPreamble: Data? = nil) {
         self.status = status
@@ -4130,23 +4117,20 @@ public struct HolderReconcileClaimsResult: Codable, Sendable, Equatable {
     }
 }
 
-/// Params for `attach.ready` — the app's ack that its reader is draining the
-/// vended fd; opens the daemon-side write gate.
+/// Params for `attach.ready` — the app's ack that it holds the vended
+/// descriptor, which makes the session the viewer's.
 public struct AttachReadyParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
     /// The attach generation this ready acknowledges (echoed from
-    /// `AttachRequestResult.generation`). When present, the daemon runs the
-    /// replay sequence ONLY if it still matches the pane's current attach —
-    /// a stale ready (a superseded viewer's ack landing after a successor's
-    /// attach) must send NOTHING on the shared per-server command client:
-    /// pause state is keyed per PANE there, so a stale pause/continue would
-    /// freeze the pane or resume output into the successor's closed gate.
-    /// Optional for wire back-compat; absent → behave as before.
+    /// `AttachRequestResult.generation`). The daemon refuses an ack without
+    /// one: there would be nothing to check it against, and confirming the
+    /// wrong attach would release a reader a live attach depends on. Optional
+    /// only for wire back-compat.
     public let generation: UInt64?
-    /// The terminal being acknowledged, when the caller knows it. Present for
-    /// the same reason as on `AttachRequestParams`: a holder row carries no
-    /// pane coordinates, so nothing else in these params names the session.
+    /// The terminal being acknowledged. Present for the same reason as on
+    /// `AttachRequestParams`: a holder row carries no pane coordinates, so
+    /// nothing else in these params names the session.
     public let terminalID: UUID?
     public init(
         worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
@@ -4158,27 +4142,26 @@ public struct AttachReadyParams: Codable, Sendable {
     }
 }
 
-/// Params for `pane.detach` — the app stops rendering this pane; the daemon
-/// closes the pipe write end (the app's reader sees EOF).
+/// Params for `pane.detach` — the app has closed its descriptor for a
+/// holder-backed session, so the daemon takes the session back.
 public struct PaneDetachParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
     /// The attach generation this detach targets (from
-    /// `AttachRequestResult.generation`). When present the daemon detaches
-    /// generation-checked — a stale detach from a closing view no-ops against
-    /// a newer attach's sink. Absent (older app) → unconditional detach.
+    /// `AttachRequestResult.generation`). The daemon hands back only the
+    /// attach it names, so a stale detach from a closing view cannot take the
+    /// session from a newer attach. A detach without one is logged and leaves
+    /// the claim in place.
     public let generation: UInt64?
-    /// Present when the panel is holder-backed, and then it — not
-    /// `worktreeID`/`paneID` — is the key the daemon resolves. A holder row
-    /// carries no tmux coordinates at all, so the transport on the row this
-    /// names is the only thing that can discriminate the two paths.
+    /// The session being handed back. A holder row carries no tmux
+    /// coordinates at all, so this — not `worktreeID`/`paneID` — is the key
+    /// the daemon resolves. A detach without it is a no-op.
     public let terminalID: UUID?
     /// The screen the viewer is handing back, as the byte stream that
     /// reconstructs it — the mirror of `AttachRequestResult.snapshotPreamble`,
     /// produced by the same `TerminalSnapshotWriter` in the other direction.
     ///
-    /// Holder transport only, and it is what keeps the daemon's model of the
-    /// session from being frozen at the instant the viewer arrived: the jiggle
+    /// It is what keeps the daemon's model of the session from being frozen at the instant the viewer arrived: the jiggle
     /// that follows heals only programs that repaint, so a plain shell would
     /// otherwise hand back nothing at all. Absent or empty is tolerated — the
     /// detach still releases the session — and costs exactly the screen.
@@ -4196,21 +4179,16 @@ public struct PaneDetachParams: Codable, Sendable {
 }
 
 /// Params for `pane.resize` — the app's debounced desired size for one
-/// control-mode window. Carries `windowID` because the daemon sizes per WINDOW
-/// (the same tmux server hosts other windows' viewers), and `worktreeID` to
-/// resolve the server (pane/window ids are only unique per server).
+/// holder-backed session.
 public struct PaneResizeParams: Codable, Sendable {
     public let worktreeID: UUID
     public let windowID: String
     public let cols: Int
     public let rows: Int
-    /// Present when the panel is holder-backed, and then it — not `windowID` —
-    /// is the key the daemon resolves.
-    ///
-    /// A holder row has no tmux coordinates at all: its `windowID` is the empty
-    /// string, so the window lookup this method was built around resolves
-    /// nothing and the resize is silently dropped. Optional and defaulted so an
-    /// older app's params, which carry no such field, still decode.
+    /// The session being resized, and the key the daemon resolves: a holder
+    /// row has no tmux coordinates at all, so its `windowID` is the empty
+    /// string. A resize without it is a no-op. Optional and defaulted for wire
+    /// compatibility.
     public let terminalID: UUID?
     public init(
         worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
@@ -4227,15 +4205,6 @@ public struct PaneResizeParams: Codable, Sendable {
 /// locally (it is launched via `open`, which drops shell env, so it cannot
 /// read the daemon's gate variables itself).
 public struct DaemonCapabilitiesResult: Codable, Sendable {
-    /// Effective control-mode gate: `(env || persisted flag) && tmux >= 3.2`,
-    /// re-evaluated by the daemon on every call.
-    public let controlModeEnabled: Bool
-    /// tmux version the daemon detects for this request (e.g. "3.6a"); nil
-    /// when detection fails (tmux missing/unparseable).
-    public let tmuxVersion: String?
-    /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
-    /// Computed daemon-side so the app never parses version strings.
-    public let controlModeSupported: Bool
     /// Whether the setup-hook tab auto-closes after a clean run (default ON,
     /// resolved through `Config.autoCloseSetupDefault`). Re-evaluated by the
     /// daemon on every call.
@@ -4303,8 +4272,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     public let updateMode: UpdateMode
     /// Whether this daemon could actually put a new session on a holder — that
     /// is, whether it located the `TBDHolder` helper beside its own binary
-    /// (`HolderRegistry.canSpawn`). Computed daemon-side, exactly as
-    /// `controlModeSupported` is, so the app never inspects the filesystem.
+    /// (`HolderRegistry.canSpawn`). Computed daemon-side, so the app never
+    /// inspects the filesystem.
     ///
     /// Every session opens on a holder, so with this false the daemon refuses
     /// every new session, naming the missing helper — and Settings says why.
@@ -4381,10 +4350,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// the type-checker reason `profileBalancingEnabled` gives.
     public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
 
-    public init(controlModeEnabled: Bool,
-                tmuxVersion: String? = nil,
-                controlModeSupported: Bool = false,
-                autoCloseSetupEnabled: Bool = Config.autoCloseSetupDefault,
+    public init(autoCloseSetupEnabled: Bool = Config.autoCloseSetupDefault,
                 deliveryVerificationEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
                 remoteBackendsEnabled: Bool = false,
@@ -4399,9 +4365,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 sessionRestoreEnabled: Bool = Config.sessionRestoreDefault) {
         self.sessionRestoreEnabled = sessionRestoreEnabled
-        self.controlModeEnabled = controlModeEnabled
-        self.tmuxVersion = tmuxVersion
-        self.controlModeSupported = controlModeSupported
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
@@ -4419,11 +4382,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        controlModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .controlModeEnabled) ?? false
-        // New in M5 — absent when talking to a pre-M5 daemon; default to the
-        // conservative "unsupported / unknown version".
-        tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
-        controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
         // Absent means the daemon knew nothing about setup-tab auto-close:
         // follow the shipped default.
         autoCloseSetupEnabled = try c.decodeIfPresent(

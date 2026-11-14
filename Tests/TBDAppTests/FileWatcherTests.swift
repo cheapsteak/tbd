@@ -76,9 +76,8 @@ import TestSupport
 /// weak criterion rather than a wrong one, and it is not what these values are
 /// sized against. Several of the deeper tests here — `atomicSaveReopensAndKeepsStreamLive`
 /// chains three armed writes, three handshake guards, three polls and an FD
-/// wait — have a paper cascade well past 300 s. That is the same arithmetic
-/// `.clockDriven`'s own doc comment reports for `PaneRepairCoordinatorTests`,
-/// and it is consistent for the same reason: only a test that is *already*
+/// wait — have a paper cascade well past 300 s. That is consistent with the
+/// invariant `.clockDriven`'s own doc comment states: only a test that is *already*
 /// failing walks a full chain of timeouts, and its first guard has recorded a
 /// named diagnostic before the limit can truncate anything.
 ///

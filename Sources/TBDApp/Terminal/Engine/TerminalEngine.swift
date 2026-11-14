@@ -109,14 +109,11 @@ protocol TerminalEngine: AnyObject, Sendable {
     /// terminal leaves clicks to itself and does not take the click that
     /// activates its window.
     func setClickRouting(enabled: Bool)
-    /// Whether pastes are offered to the delegate before the terminal brackets
-    /// them. On only while a control-mode attach is live.
-    func setControlModePasteInterception(enabled: Bool)
     /// Routes text a drop produced, such as the shell-quoted paths of dropped
-    /// files, exactly as the view routes a real drop: offered to the delegate
-    /// while paste interception is on, else sent as typed. The view's drop
-    /// handler calls the same entry, and a test drives it here, because a test
-    /// can neither build an `NSDraggingInfo` nor write the general pasteboard.
+    /// files, exactly as the view routes a real drop: sent as typed. The view's
+    /// drop handler calls the same entry, and a test drives it here, because a
+    /// test can neither build an `NSDraggingInfo` nor write the general
+    /// pasteboard.
     func deliverDroppedText(_ text: String)
 
     // MARK: Instruments

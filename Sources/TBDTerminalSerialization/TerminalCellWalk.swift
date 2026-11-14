@@ -19,8 +19,7 @@ import SwiftTerm
 /// its own attribute changes, so a reader can begin at any line. Lines carry no
 /// terminator — the caller joins them with `\r\n` and must not add a trailing
 /// one, because a trailing newline scrolls one extra row into the receiver's
-/// scrollback (the same rule `ReplayWriter.assemble` follows for the same
-/// reason).
+/// scrollback.
 public enum TerminalCellWalk {
     /// The retained scrollback plus viewport, for replaying into a fresh
     /// terminal: the history half of `TerminalSnapshotWriter`'s preamble.

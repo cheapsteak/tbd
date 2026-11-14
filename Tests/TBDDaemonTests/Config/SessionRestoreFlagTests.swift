@@ -104,7 +104,7 @@ struct SessionRestoreFlagTests {
 
     @Test func initializersCarryTheValue() {
         #expect(Config(sessionRestoreEnabled: true).sessionRestoreEnabled == true)
-        #expect(DaemonCapabilitiesResult(controlModeEnabled: false, sessionRestoreEnabled: true)
+        #expect(DaemonCapabilitiesResult(sessionRestoreEnabled: true)
             .sessionRestoreEnabled == true)
     }
 

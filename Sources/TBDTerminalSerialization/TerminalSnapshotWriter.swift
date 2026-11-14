@@ -4,8 +4,7 @@ import SwiftTerm
 /// Renders a live terminal as a byte stream that reconstructs it in a fresh one.
 ///
 /// The byte order is reset prelude → history → modes → (alt screen) → region →
-/// cursor, and every step of it was learned by `ReplayWriter` on the tmux path.
-/// On an alt screen, cursor visibility moves from the modes step to just after
+/// cursor. On an alt screen, cursor visibility moves from the modes step to just after
 /// the switch, because the receiver shows the cursor on every `?1049h`. The
 /// modes that switch saves with the cursor (DECOM and the wrap modes) split in
 /// two: the modes step carries the primary's saved values, and the alt
