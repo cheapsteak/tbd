@@ -215,6 +215,33 @@ import TestSupport
         #expect(!painted.contains("PAYLOAD"), "the viewer printed the title's rest: \(painted.debugDescription)")
     }
 
+    /// The wait is for the over-long sequence, not for ground: the read that
+    /// ends it can open a short one in the same breath, which the snapshot
+    /// carries. The wait stops there rather than running out its budget and
+    /// logging an abandoned wait for a sequence it never needed to see end.
+    @Test("a libghostty attach stops waiting once only a short sequence is open")
+    func libghosttyStopsWaitingAtAShortSequence() async throws {
+        let budget: Duration = .milliseconds(20)
+        let rest = Array("PAYLOAD\u{07}AFTER\(Self.esc)]0;short".utf8)
+        let harness = try Harness(reads: [.deliver(rest)], waitingAtMost: budget, emulator: .ghostty)
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Self.overlongTitle)
+
+        let vended = try await harness.reader.suspendDraining()
+        defer { close(vended) }
+        let waited = harness.elapsed
+        let abandoned = await harness.reader.abandonedSequenceBoundaryWaits
+        let preamble = await harness.reader.snapshotPreamble()
+
+        #expect(harness.script.reads > 1, "the attach never read on toward the end of the over-long title")
+        #expect(abandoned == 0, "the attach waited out its budget for a sequence the snapshot carries")
+        #expect(waited < budget, "the attach waited \(waited) after the over-long title ended")
+        let open = Array("\(Self.esc)]0;short".utf8)
+        #expect(
+            preamble.suffix(open.count).elementsEqual(open),
+            "the snapshot does not end with the short title, for the viewer to finish")
+    }
+
     /// The wait for a sequence too long to carry is bounded like any other.
     /// When it runs out, the snapshot ends with the opener that takes in the
     /// rest, and the viewer still gets the screen.

@@ -571,7 +571,7 @@ actor HolderReader {
     /// and when the attach is cancelled, which must not wait for anything.
     private func awaitSequenceBoundary() async {
         let elapsed = Self.stopwatch(on: clock)
-        while !emulator.isAtSequenceBoundary {
+        while snapshotMustWait {
             guard elapsed() < sequenceBoundaryBudget else {
                 abandonedSequenceBoundaryWaits += 1
                 Self.logger.notice(
@@ -592,6 +592,15 @@ actor HolderReader {
         }
     }
 
+    /// Whether the wait goes on: the output is mid-sequence and the emulator
+    /// still needs a boundary for its snapshot. Asked again after every read,
+    /// because for the libghostty emulator the answer changes with the
+    /// sequence: a read that ends an over-long one and opens a short one ends
+    /// the wait, since the snapshot carries the short one.
+    private var snapshotMustWait: Bool {
+        !emulator.isAtSequenceBoundary && emulator.snapshotNeedsSequenceBoundary
+    }
+
     /// Reads a bufferful at a time while the output is still mid-sequence and
     /// the budget lasts, until the descriptor would block.
     ///
@@ -599,7 +608,7 @@ actor HolderReader {
     ///   output, so that nothing more will ever arrive on it.
     private func readTowardSequenceBoundary(within elapsed: () -> Duration) -> Bool {
         var buffer = [UInt8](repeating: 0, count: Self.sequenceBoundaryReadSize)
-        while !emulator.isAtSequenceBoundary, elapsed() < sequenceBoundaryBudget {
+        while snapshotMustWait, elapsed() < sequenceBoundaryBudget {
             switch descriptor.read(into: &buffer) {
             case .bytes(let count): emulator.feed(buffer[0..<count])
             case .interrupted: continue
