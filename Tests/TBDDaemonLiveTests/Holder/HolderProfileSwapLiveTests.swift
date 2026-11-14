@@ -560,6 +560,133 @@ struct HolderProfileSwapLiveTests {
                     "the retry resumed the wrong session: \(argv)")
         }
     }
+
+    // MARK: - The tab's own values
+
+    /// A stored settings overlay that also hooks `PreToolUse`, an event TBD
+    /// hooks too: the switched session's settings file must keep TBD's own
+    /// entry beside this one.
+    static let hookOverlay = #"{"acmeSetting":"on","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"acme-guard"}]}]}}"#
+
+    /// The tab's plugin folders and settings overlay survive the switch. They
+    /// are kept on the row, and the session the switch resumes under the new
+    /// account is launched with them: each folder as a `--plugin-dir`, and a
+    /// `--settings` file that carries the stored overlay merged with TBD's own
+    /// hooks. The row keeps them for every later start.
+    @Test func inPlaceSwapReappliesTheTabsPluginFoldersAndOverlay() async throws {
+        let fixture = try await SwapFixture.make()
+        defer { fixture.tearDown() }
+        let plugin = try fixture.makePluginDir("acme-plugin")
+        let extras = ClaudeSpawnExtras(
+            claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plugin])
+        let terminal = try await fixture.spawnHolderRow(blank: false, extras: extras)
+        // Written under the process's `TBD_HOME`, which the test wrapper
+        // fences, by the launch the switch makes. Not there before it.
+        let overlayPath = ClaudeHookOverlay.perSessionOverlayPath(
+            sessionKey: terminal.id.uuidString)
+        defer { try? FileManager.default.removeItem(atPath: overlayPath) }
+        #expect(!FileManager.default.fileExists(atPath: overlayPath),
+                "a settings file existed before the switch, so this test cannot see it written")
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id,
+                newProfileID: fixture.destProfileID,
+                mode: .inPlace)))
+        #expect(response.success, "the swap failed: \(response.error ?? "")")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        if let newHolder = after.holderPID, let newChild = after.childPID {
+            fixture.remember(holderPID: newHolder, childPID: newChild)
+        }
+        #expect(after.profileID == fixture.destProfileID, "the row is not on the new account")
+        #expect(after.claudeSpawnExtras == extras, "the switch dropped the tab's own values")
+        #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).count == 1,
+                "the switch opened a second tab")
+
+        let argv = await Self.launchedArgv(fixture)
+        #expect(Self.flag(argv, "--resume", Self.sessionID),
+                "the swap did not resume the tab's session: \(argv)")
+        #expect(!argv.contains("--fork-session"), "an in-place switch forked: \(argv)")
+        #expect(Self.flag(argv, "--plugin-dir", plugin),
+                "the resumed session lost the tab's plugin folder: \(argv)")
+        #expect(Self.flag(argv, "--settings", overlayPath),
+                "the resumed session was not given the tab's settings file: \(argv)")
+        try Self.expectHookOverlayApplied(at: overlayPath)
+    }
+
+    /// The tab's own model outranks the new account's. The session the switch
+    /// resumes runs with `ANTHROPIC_MODEL` set to the model the tab was opened
+    /// with, never to the destination profile's, and the row keeps it.
+    @Test func inPlaceSwapKeepsTheTabsModel() async throws {
+        let fixture = try await SwapFixture.make()
+        defer { fixture.tearDown() }
+        let extras = ClaudeSpawnExtras(model: "acme-opus")
+        let terminal = try await fixture.spawnHolderRow(blank: false, extras: extras)
+        let dest = try await fixture.db.modelProfiles.create(
+            name: "Dest with a model", kind: .oauth, model: "acme-sonnet")
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: terminal.id, newProfileID: dest.id, mode: .inPlace)))
+        #expect(response.success, "the swap failed: \(response.error ?? "")")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        if let newHolder = after.holderPID, let newChild = after.childPID {
+            fixture.remember(holderPID: newHolder, childPID: newChild)
+        }
+        #expect(after.profileID == dest.id, "the row is not on the new account")
+        #expect(after.claudeSpawnExtras == extras, "the switch dropped the tab's model")
+
+        let argv = await Self.launchedArgv(fixture)
+        #expect(Self.flag(argv, "--resume", Self.sessionID),
+                "the swap did not resume the tab's session: \(argv)")
+        let namesDestModel = argv.contains { $0.contains("acme-sonnet") }
+        #expect(!namesDestModel, "the destination profile's model reached the argv: \(argv)")
+        // What the resumed `claude` actually saw, after the command's own
+        // exports ran: the stub records the variable as it found it.
+        let modelEnv = ((try? String(contentsOfFile: fixture.launchModelEnvPath, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+        #expect(modelEnv == ["ANTHROPIC_MODEL=acme-opus"],
+                "the resumed session ran on the wrong model: \(modelEnv)")
+    }
+
+    /// The argv the switch's launch handed the `claude` stub, once the stub has
+    /// finished recording. The stub writes the environment last, so waiting on
+    /// that file is what makes the argv file complete.
+    private static func launchedArgv(_ fixture: SwapFixture) async -> [String] {
+        let launched = await pollUntil("the swapped session to reach its claude stub") {
+            (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?
+                .contains("TBD_TERMINAL_ID=") ?? false
+        }
+        #expect(launched, "the swap never launched anything through the pinned shell")
+        return ((try? String(contentsOfFile: fixture.launchArgvPath, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+    }
+
+    /// Whether `flag` is immediately followed by `value`. Adjacency, not mere
+    /// presence: TBD's own plugin folder is also passed as a `--plugin-dir`.
+    private static func flag(_ argv: [String], _ flag: String, _ value: String) -> Bool {
+        argv.indices.dropLast().contains { argv[$0] == flag && argv[$0 + 1] == value }
+    }
+
+    /// The settings file at `path` carries the stored overlay — its setting and
+    /// its `PreToolUse` entry, after TBD's own `PreToolUse` entry.
+    private static func expectHookOverlayApplied(at path: String) throws {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let settings = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(settings["acmeSetting"] as? String == "on")
+        let pre = try #require(
+            (settings["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        let matchers = pre.compactMap { $0["matcher"] as? String }
+        #expect(matchers.contains("AskUserQuestion"), "TBD's own entry is gone: \(matchers)")
+        #expect(matchers.last == "Bash", "\(matchers)")
+        let guardCommand = (pre.last?["hooks"] as? [[String: Any]])?.first?["command"] as? String
+        #expect(guardCommand == "acme-guard")
+    }
 }
 
 // MARK: - Raced wake recorder
@@ -624,12 +751,22 @@ private final class SwapFixture {
     let destProfileID: UUID
 
     /// Where the stub `claude` records the argv it was launched with, one
-    /// argument per line, and the `TBD_` environment it saw. Neither exists
-    /// until the swap has actually launched something. The argv file is
-    /// written first and the env file last, so a reader that waits for the env
-    /// file has a complete argv file to read.
+    /// argument per line, the `ANTHROPIC_MODEL` it saw, and the `TBD_`
+    /// environment it saw. None exists until the swap has actually launched
+    /// something. The argv file is written first and the `TBD_` env file last,
+    /// so a reader that waits for that file has the other two complete.
     var launchArgvPath: String { "\(home)/launch-argv" }
+    var launchModelEnvPath: String { "\(home)/launch-model-env" }
     var launchEnvPath: String { "\(home)/launch-env" }
+
+    /// A real folder under this fixture's scratch root, for a tab's plugin
+    /// folders: a start skips a folder that is not there.
+    func makePluginDir(_ name: String) throws -> String {
+        let path = "\(home)/plugins/\(name)"
+        try FileManager.default.createDirectory(
+            atPath: path, withIntermediateDirectories: true)
+        return path
+    }
 
     /// Every actuation line the log holds, decoded. A swap whose transport
     /// half failed is visible nowhere else: the arm reports the failure out of
@@ -718,6 +855,7 @@ private final class SwapFixture {
         #!/bin/sh
         printf '%s\\n' "$@" > "\(home)/launch-argv"
         printf 'SWAPPED-OK\\n'
+        env | grep '^ANTHROPIC_MODEL=' > "\(home)/launch-model-env"
         env | grep '^TBD_' > "\(home)/launch-env"
         """.write(toFile: "\(binDir)/claude", atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
@@ -842,7 +980,12 @@ private final class SwapFixture {
     /// the only way a test can tell a transcript carried before the park from
     /// one re-taken after it. It ends on the same `SIGTERM` rung as the
     /// default job, so the park it drives is the same park.
-    func spawnHolderRow(blank: Bool, flushOnTerm: Bool = false) async throws -> Terminal {
+    ///
+    /// `extras` are the tab's own plugin folders, settings overlay and model,
+    /// kept on the row as `terminal.create` keeps them.
+    func spawnHolderRow(
+        blank: Bool, flushOnTerm: Bool = false, extras: ClaudeSpawnExtras? = nil
+    ) async throws -> Terminal {
         let terminalID = UUID()
         let arguments = flushOnTerm
             ? [try writeFlushOnTermJob()]
@@ -869,7 +1012,8 @@ private final class SwapFixture {
             transport: .holder,
             holderPID: handle.holderPID,
             childPID: handle.childPID,
-            holderChildStartedAt: Date())
+            holderChildStartedAt: Date(),
+            claudeSpawnExtras: extras)
         if !blank {
             let transcript = "\(home)/\(HolderProfileSwapLiveTests.sessionID).jsonl"
             try #"{"type":"user","message":{"content":"switch me"}}"#
