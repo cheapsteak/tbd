@@ -51,13 +51,13 @@ up() {
 
     # Both halves matter: `swift-safe` holds the machine-global admission lock
     # (#576) so parallel worktrees can't start competing compiler swarms, and
-    # naming the two products keeps the mock from building the whole package.
-    # Deliberately not RUNTIME_PRODUCTS (restart-bundle-lib.sh): a mock daemon
-    # wires no holder registry and no peer bridge, so it needs no sibling helper.
+    # naming the products keeps the mock from building the whole package.
+    # TBDHolder is the one sibling helper a mock daemon needs: every session
+    # opens on a pty holder, which the daemon finds beside its own binary. It
+    # wires no peer bridge, so the rest of RUNTIME_PRODUCTS
+    # (restart-bundle-lib.sh) stays unbuilt.
     echo "Building mock products..."
-    (cd "$REPO_ROOT" \
-        && scripts/swift-safe build --product TBDApp \
-        && scripts/swift-safe build --product TBDDaemon) 2>&1 | tail -6
+    build_products
 
     down_quiet
     rm -rf "$MOCK_HOME"          # fresh DB each `up`; re-seeding an existing state.db collides on UNIQUE (now fail-loud)
@@ -83,7 +83,49 @@ up() {
     echo "  home: $MOCK_HOME  logs: $DAEMON_LOG / $APP_LOG"
 }
 
-down_quiet() { kill_pidfile "$APP_PIDFILE"; kill_pidfile "$DAEMON_PIDFILE"; rm -f "$MOCK_SOCK"; }
+build_products() {
+    (cd "$REPO_ROOT" \
+        && scripts/swift-safe build --product TBDApp \
+        && scripts/swift-safe build --product TBDDaemon \
+        && scripts/swift-safe build --product TBDHolder) 2>&1 | tail -6
+}
+
+# A pty holder outlives the daemon that spawned it by design (it calls
+# `setsid()` and ignores SIGHUP), so killing the mock daemon leaves any holder
+# it started running. Reclaim them by resource: whoever `lsof` says holds a
+# rendezvous socket under the mock's own TBD_HOME, and that holder's children,
+# enumerated before it dies because its job re-parents to launchd. Never by
+# name — this machine runs real holders. `-a` is load-bearing: without it lsof
+# ORs `-U` with the path and answers with every unix-socket owner on the box.
+reap_mock_holders() {
+    local lsof_bin socket owners pid children child
+    lsof_bin="$(command -v lsof || true)"
+    [ -n "$lsof_bin" ] || return 0
+    [ -d "$MOCK_HOME/holders" ] || return 0
+    while IFS= read -r socket; do
+        [ -n "$socket" ] || continue
+        owners="$("$lsof_bin" -t -a -U "$socket" 2>/dev/null || true)"
+        for pid in $owners; do
+            case "$pid" in ''|*[!0-9]*) continue ;; esac
+            [ "$pid" -gt 1 ] || continue
+            children="$(pgrep -P "$pid" 2>/dev/null || true)"
+            kill -9 "$pid" 2>/dev/null || true
+            for child in $children; do
+                case "$child" in ''|*[!0-9]*) continue ;; esac
+                [ "$child" -gt 1 ] || continue
+                kill -9 "$child" 2>/dev/null || true
+            done
+        done
+    done < <(find "$MOCK_HOME/holders" -maxdepth 1 -name '*.sock' 2>/dev/null || true)
+    return 0
+}
+
+down_quiet() {
+    kill_pidfile "$APP_PIDFILE"
+    kill_pidfile "$DAEMON_PIDFILE"
+    rm -f "$MOCK_SOCK"
+    reap_mock_holders
+}
 
 down() {
     down_quiet
@@ -107,8 +149,6 @@ case "$cmd" in
     up)      up "${1:-default}" ;;
     down)    down ;;
     shot)    shot "${1:-}" ;;
-    restart) (cd "$REPO_ROOT" \
-                && scripts/swift-safe build --product TBDApp \
-                && scripts/swift-safe build --product TBDDaemon) 2>&1 | tail -6; down; up "${1:-default}" ;;
+    restart) build_products; down; up "${1:-default}" ;;
     *) echo "usage: mock.sh {up [scenario]|down|shot <name>|restart [scenario]}" >&2; exit 1 ;;
 esac

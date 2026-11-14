@@ -245,7 +245,7 @@ public final class Daemon: Sendable {
     /// The daemon's single owner of every live `HolderReader` — one per
     /// holder-backed session, re-adopted at startup (step 8e). Owned here
     /// because a reader's lifetime is the daemon's: the holder and its job
-    /// outlive us, the reader must not. `nil` in mock mode.
+    /// outlive us, the reader must not. Built in mock mode too.
     ///
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
@@ -1108,18 +1108,18 @@ public final class Daemon: Sendable {
         // Startup adoption still happens at 8e — construction is cheap and
         // opens nothing.
         //
-        // `nil` in mock mode, like every other rail. With no registry the spawn
-        // gate falls back to tmux even with the flag on, which is the only
-        // honest answer when there is nothing to hold a pty.
-        let holderRegistry: HolderRegistry? = mockMode == nil
-            ? HolderRegistry(
-                owner: await HolderRegistry.installationOwner(config: database.config),
-                listTerminals: { [database] in try await database.terminals.list() },
-                spawner: HolderSpawner.locateSiblingExecutable().map {
-                    HolderSpawner(executableURL: $0)
-                },
-                programStatus: programStatusStore)
-            : nil
+        // Built in mock mode too: every session opens on a holder, so a daemon
+        // with no registry could open none. Its rendezvous sockets resolve
+        // through the process environment, so a mock daemon's land under the
+        // isolated `TBD_HOME` that `scripts/mock.sh` exports, and the script's
+        // `down` reclaims any holder still listening there.
+        let holderRegistry: HolderRegistry? = HolderRegistry(
+            owner: await HolderRegistry.installationOwner(config: database.config),
+            listTerminals: { [database] in try await database.terminals.list() },
+            spawner: HolderSpawner.locateSiblingExecutable().map {
+                HolderSpawner(executableURL: $0)
+            },
+            programStatus: programStatusStore)
         self.holderRegistry = holderRegistry
 
         // Input for a holder-backed session, routed by who is reading its pty.
@@ -1208,7 +1208,7 @@ public final class Daemon: Sendable {
         // recorder before releasing its reader. Installed before startup
         // adoption (step 8e) so a server that ended during an outage, whose
         // status rides the hand-over, is seen too. The recorder ignores every
-        // tab that is not a dev server's. Nil registry in mock mode.
+        // tab that is not a dev server's.
         if let holderRegistry {
             let recorder = DevServerFinalOutputRecorder(db: database, resolver: holderScreenResolver)
             await holderRegistry.setSessionEndedObserver { terminalID, status, reader in
