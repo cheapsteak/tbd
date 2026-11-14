@@ -82,7 +82,8 @@ struct StartAdmissionRouterTests {
             path: FileManager.default.temporaryDirectory.path, tmuxServer: "tbd-acme")
     }
 
-    /// A session parked on the pty holder: the only kind of row a wake can
+    /// A parked Claude session, on the pty holder unless `transport` says
+    /// otherwise. A row parked on the holder is the only kind a wake can
     /// start, and so the only kind a wake asks admission about.
     private func makeParkedClaude(
         in db: TBDDatabase, worktree: Worktree, kind: TerminalKind = .claude,
@@ -517,8 +518,10 @@ struct StartAdmissionRouterTests {
         let worktree = try await makeWorktree(in: fixture.db)
         let first = try await makeRunningClaude(in: fixture.db, worktree: worktree, window: 1)
         let second = try await makeRunningClaude(in: fixture.db, worktree: worktree, window: 2)
-        // A parked row is only rewritten, which starts nothing, so it still moves.
-        let parked = try await makeParkedClaude(in: fixture.db, worktree: worktree)
+        // A row parked on tmux is only rewritten onto the holder, which starts
+        // nothing, so it still moves while the running sessions are held.
+        let parked = try await makeParkedClaude(
+            in: fixture.db, worktree: worktree, transport: .tmux)
 
         let response = await fixture.router.handle(try RPCRequest(
             method: RPCMethod.terminalMigrateTransport,
