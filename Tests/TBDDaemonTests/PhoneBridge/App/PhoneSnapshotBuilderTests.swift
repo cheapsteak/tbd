@@ -323,6 +323,8 @@ struct PhoneSnapshotBuilderTests {
             transcript: Self.available, send: noWake, answer: Self.available,
             switchProfile: Self.available, fork: Self.available, model: noWake))
         #expect(PhoneSessionStatus.parkedOnTmuxReason.utf8.count <= PhoneText.fieldLimit)
+        #expect(PhoneSessionStatus.parkedOnTmuxReason.contains(TransportMigrationVocabulary.menuTitle),
+                "the phone names a menu item the app does not have")
         #expect(PhoneSessionStatus.switchOnTmuxReason.utf8.count <= PhoneText.fieldLimit)
     }
 

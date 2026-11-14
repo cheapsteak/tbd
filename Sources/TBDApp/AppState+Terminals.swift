@@ -1009,8 +1009,6 @@ extension Terminal {
 /// Pure decisions behind the transport-migration gestures, so each branch is
 /// testable without SwiftUI (same pattern as `SwapProfileMenu`).
 enum TransportMigrationMenu {
-    static let title = "Move to Holder (No tmux)"
-
     /// Offered for any row that is not already holder-backed, and only when the
     /// daemon can run a holder (the capability the Settings toggle reads).
     static func isOffered(for terminal: Terminal?, holderSupported: Bool) -> Bool {

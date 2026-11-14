@@ -1360,7 +1360,7 @@ private struct TabBarItem: View {
                 guard let terminalID = terminal?.id else { return }
                 Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }
             } label: {
-                Label(TransportMigrationMenu.title, systemImage: "arrow.right.square")
+                Label(TransportMigrationVocabulary.menuTitle, systemImage: "arrow.right.square")
             }
 
             Divider()

@@ -397,7 +397,7 @@ struct ComposerMountingTests {
         #expect(!decision.state.isEnabled)
         let note = TableTranscriptPaneView.parkedOnTmuxComposerNote
         #expect(note.hasPrefix(HibernatedBannerModel.parkedOnTmuxInstruction))
-        #expect(note.contains(TransportMigrationMenu.title))
+        #expect(note.contains(TransportMigrationVocabulary.menuTitle))
         #expect(note.contains("tbd terminal migrate"))
     }
 

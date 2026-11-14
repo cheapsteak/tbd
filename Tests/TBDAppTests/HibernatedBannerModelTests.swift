@@ -187,7 +187,7 @@ struct HibernatedBannerModelTests {
         let banner = HibernatedBannerModel.banner(
             for: terminal(hibernatedAt: Date(), hibernateReason: reason, transport: .tmux))
         #expect(banner == .hibernatedOverlay(message: HibernatedBannerModel.parkedOnTmuxMessage))
-        #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains(TransportMigrationMenu.title))
+        #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains(TransportMigrationVocabulary.menuTitle))
         #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains("tbd terminal migrate"))
     }
 

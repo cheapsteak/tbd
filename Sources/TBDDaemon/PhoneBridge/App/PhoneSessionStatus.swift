@@ -146,11 +146,11 @@ enum PhoneSessionStatus {
         "This session runs on tmux, so it cannot switch profiles in place. Fork it to the profile instead."
     /// Why a session parked on the tmux transport takes no message: sending
     /// to a parked session wakes it, and TBD wakes only sessions on the pty
-    /// holder.
+    /// holder. It names the app's menu item by its shared title.
     static let parkedOnTmuxReason =
         "This session is parked on tmux, which TBD no longer resumes sessions on. "
-        + "Move it to the pty holder on the laptop first: Move to Holder in its tab's menu, "
-        + "or `tbd terminal migrate`."
+        + "Move it to the pty holder on the laptop first: "
+        + "\(TransportMigrationVocabulary.menuTitle) in its tab's menu, or `tbd terminal migrate`."
 
     /// A local session's capabilities. A Claude session has all six; a Codex
     /// session shows its status only. A tab in a remote lane's row has none,

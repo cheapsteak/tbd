@@ -530,7 +530,7 @@ enum HibernatedBannerModel {
     /// with their own gesture, so the two say the rest in the same words.
     static let parkedOnTmuxInstruction =
         "Parked on tmux, which TBD no longer resumes sessions on — choose "
-        + "\(TransportMigrationMenu.title) in the tab's menu (or run `tbd terminal migrate`)"
+        + "\(TransportMigrationVocabulary.menuTitle) in the tab's menu (or run `tbd terminal migrate`)"
 
     /// The notice for a row parked on the tmux transport. The daemon starts
     /// sessions only on the pty holder, so such a row cannot be woken where it
