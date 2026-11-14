@@ -154,24 +154,24 @@ import TBDShared
         #expect(await harness.reader.renderScreen().contains("hello"))
     }
 
-    /// The twin with no preamble, which every app quit with an attached
-    /// session takes. The viewer finished the CSI the daemon's parser was
-    /// left inside, so the child's next bytes are new output: `hX` prints,
-    /// rather than `h` finishing `ESC[4h` and turning insert mode on.
-    @Test func aTakeBackWithNoPreambleAbandonsTheOpenSequence() async throws {
+    /// The twin with no preamble, which a take-back from a viewer that may
+    /// have read the pty takes (`viewerMayHaveRead`). The viewer finished the
+    /// CSI the daemon's parser was left inside, so the child's next bytes are
+    /// new output: `hX` prints, rather than `h` finishing `ESC[4h` and
+    /// turning insert mode on.
+    @Test func abandoningTheOpenSequenceReadsTheNextBytesAsNewOutput() async throws {
         let harness = try Harness()
         defer { harness.tearDown() }
         await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)[4".utf8))
         close(try await harness.reader.suspendDraining())
 
         await harness.reader.abandonOpenSequence()
-        #expect(harness.readReplies().isEmpty, "abandoning the sequence wrote to the child")
 
         await harness.reader.feedChildOutputForTesting(Data("hX".utf8))
-        #expect(try await harness.reader.screen(maxLines: 8).lines.first == "hX")
+        #expect(try await harness.firstLine() == "hX")
         // Insert mode off: a carriage return and a `Y` overwrite the `h`.
         await harness.reader.feedChildOutputForTesting(Data("\rY".utf8))
-        #expect(try await harness.reader.screen(maxLines: 8).lines.first == "YX", "insert mode is on")
+        #expect(try await harness.firstLine() == "YX", "insert mode is on")
     }
 
     /// The control: without the abandon, the same bytes finish the cut CSI,
@@ -183,7 +183,52 @@ import TBDShared
 
         await harness.reader.feedChildOutputForTesting(Data("hX".utf8))
 
-        #expect(try await harness.reader.screen(maxLines: 8).lines.first == "X")
+        #expect(try await harness.firstLine() == "X")
+    }
+
+    /// The abandon is muted. Its CAN dispatches a cut query like any other
+    /// way out of one, so a cut program-status probe (`ESC]7501;?`), which
+    /// this emulator answers, would put an answer into the child's input
+    /// that nobody asked for now.
+    @Test func abandoningACutQuerySendsTheChildNothing() async throws {
+        let harness = try Harness(answersProbes: true)
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]7501;?".utf8))
+        close(try await harness.reader.suspendDraining())
+
+        await harness.reader.abandonOpenSequence()
+
+        let sent = harness.readReplies()
+        #expect(sent.isEmpty, "abandoning a cut query wrote \(Self.describe(sent)) into the child's input")
+    }
+
+    /// The control: the same cut probe, ended by a CAN the child sends, is
+    /// answered, so the test above shows the mute at work and not a query the
+    /// CAN never dispatched.
+    @Test func aProbeEndedByACANIsAnswered() async throws {
+        let harness = try Harness(answersProbes: true)
+        defer { harness.tearDown() }
+
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]7501;?\u{18}".utf8))
+
+        #expect(!harness.readReplies().isEmpty, "a probe ended by a CAN drew no answer")
+    }
+
+    /// CAN alone dispatches a cut `ESC]8;;URL`, which would leave that link on
+    /// the pen for everything the child writes next and hand it on at the next
+    /// attach. The abandon closes the link after the CAN.
+    @Test func abandoningACutLinkLeavesNoLink() async throws {
+        let harness = try Harness()
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]8;;https://exa".utf8))
+        close(try await harness.reader.suspendDraining())
+
+        await harness.reader.abandonOpenSequence()
+        await harness.reader.feedChildOutputForTesting(Data("text".utf8))
+
+        #expect(try await harness.firstLine() == "text")
+        let next = await harness.reader.snapshotPreamble()
+        #expect(!Self.contains(next, "https://exa"), "the text the child wrote next carries the cut link")
     }
 
     // MARK: - The snapshot waits only for what it cannot carry
@@ -295,10 +340,21 @@ import TBDShared
 
     /// A libghostty `HolderReader` over one end of a socketpair, never started.
     private struct Harness {
+        static let rows = 24
+
         let reader: HolderReader
         private let ours: Int32
 
-        init() throws {
+        /// The viewport's first row. The screen read asks for every row of the
+        /// grid: it keeps the newest lines it is asked for and drops blank
+        /// ones, so asking for fewer would start below row 0.
+        func firstLine() async throws -> String? {
+            try await reader.screen(maxLines: Self.rows).lines.first
+        }
+
+        /// `answersProbes` gives the reader a program-status tap, without which
+        /// it answers no program-status probe.
+        init(answersProbes: Bool = false) throws {
             var pair: [Int32] = [-1, -1]
             try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             ours = pair[1]
@@ -309,8 +365,9 @@ import TBDShared
                 sessionID: UUID(),
                 ptyFD: pair[0],
                 columns: 80,
-                rows: 24,
+                rows: Self.rows,
                 scrollbackLines: 200,
+                programStatus: answersProbes ? HolderProgramStatusTap(deliver: { _ in }) : nil,
                 emulator: .ghostty,
                 observedChildFromStart: true)
             try #require(reader.emulatorKind == .ghostty, "libghostty could not make a terminal")
