@@ -63,7 +63,11 @@ scanned and the run fails if it holds the user's name, the host's name, a home
 path (`/Users/...`, `/home/...`), the temporary directory's path, an email
 address, a date or a time of day, or any word listed in the environment
 variable `EMULATOR_PARITY_PRIVATE_WORDS` (comma-separated: an employer, a
-client, anything this repository may not name). Claude Code runs with its own
+client, anything this repository may not name). Every check reads each
+recording three ways: as raw bytes, as printed text with each escape sequence
+and control replaced by a space, and as printed text with escape sequences,
+controls and line ends removed, so a word that a colour change or a line end
+cuts in two is still found. Claude Code runs with its own
 `HOME` and `CLAUDE_CONFIG_DIR` inside the sandbox and never sees the real
 configuration, and its only network peer is the stub on loopback.
 
@@ -474,9 +478,10 @@ def is_wide(char: str) -> bool:
 
 def strip_escapes(data: bytes, separator: str = "") -> str:
     """The printed text: every escape sequence and control replaced by
-    `separator`. The privacy scan separates with a space, because a TUI moves
-    the cursor between words instead of printing spaces, and a word glued to
-    its neighbours would slip past a whole-word match."""
+    `separator`. The privacy scan reads it both ways. With a space, because a
+    TUI moves the cursor between words instead of printing spaces, and a word
+    glued to its neighbours would slip past a whole-word match; and with
+    nothing, because an escape sequence can also cut a word in two."""
     text = data.decode("utf-8", "replace")
     text = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)", separator, text)
     text = re.sub(r"\x1b[P_^X][^\x1b]*\x1b\\", separator, text)
@@ -495,8 +500,8 @@ DATE_PATTERNS = [
     re.compile(rf"\b(0?[1-9]|[12]\d|3[01]) +({MONTHS})\b", re.IGNORECASE),
 ]
 TIME_PATTERN = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?\b|\b(1[0-2]|0?[1-9]) ?[ap]\.?m\.?\b", re.IGNORECASE)
-EMAIL_PATTERN = re.compile(rb"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
-HOME_PATTERN = re.compile(rb"/Users/|/home/[a-z]|/var/folders/|/private/var/")
+EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+HOME_PATTERN = re.compile(r"/Users/|/home/[a-z]|/var/folders/|/private/var/")
 
 
 def private_words(temp_root: Path | None) -> list[str]:
@@ -534,27 +539,35 @@ def private_words(temp_root: Path | None) -> list[str]:
 
 
 def privacy_findings(name: str, data: bytes, words: list[str]) -> list[str]:
-    """Whole-word matches, over the raw bytes and over the printed text, so a
-    word is found whether an escape sequence or a space sits beside it."""
+    """Every check over three texts: the raw bytes; the printed text with each
+    escape sequence and control replaced by a space, so a word is found whether
+    an escape sequence or a cursor move sits beside it; and the printed text
+    with escape sequences, controls and line ends removed and nothing put in
+    their place, so a word is found when an escape sequence or a line end cuts
+    it in two, as in Claude Code's shimmer, which styles each character of a
+    word on its own."""
     findings = []
-    text = strip_escapes(data, separator=" ")
-    lowered = [data.decode("utf-8", "replace").lower(), text.lower()]
+    raw = data.decode("utf-8", "replace")
+    spaced = strip_escapes(data, separator=" ")
+    joined = strip_escapes(data).replace("\n", "")
+    texts = [("raw", raw), ("spaced", spaced), ("joined", joined)]
     for word in words:
         pattern = re.compile(r"(?<![a-z0-9])" + re.escape(word.lower()) + r"(?![a-z0-9])")
-        if any(pattern.search(haystack) for haystack in lowered):
-            findings.append(f"{name}: names a private word ({len(word)} characters, starts with {word[:1]!r})")
-    if HOME_PATTERN.search(data):
-        findings.append(f"{name}: holds a home or temporary path: {HOME_PATTERN.search(data).group().decode()}")
-    match = EMAIL_PATTERN.search(data)
-    if match:
-        findings.append(f"{name}: holds an email address")
-    for pattern in DATE_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            findings.append(f"{name}: holds a date: {match.group()!r}")
-    match = TIME_PATTERN.search(text)
-    if match:
-        findings.append(f"{name}: holds a time of day: {match.group()!r}")
+        found = [label for label, text in texts if pattern.search(text.lower())]
+        if found:
+            findings.append(
+                f"{name}: names a private word ({len(word)} characters, starts with {word[:1]!r}) "
+                f"in the {', '.join(found)} text"
+            )
+    checks = [("a home or temporary path", HOME_PATTERN), ("an email address", EMAIL_PATTERN)]
+    checks += [("a date", pattern) for pattern in DATE_PATTERNS]
+    checks += [("a time of day", TIME_PATTERN)]
+    for what, pattern in checks:
+        for label, text in texts:
+            match = pattern.search(text)
+            if match:
+                findings.append(f"{name}: holds {what} in the {label} text: {match.group()!r}")
+                break
     return findings
 
 
