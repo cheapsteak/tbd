@@ -176,8 +176,8 @@ struct HolderEmulatorParityTests {
 
     // MARK: - The streams
 
-    static let scenarios = HandoverCorpus.scenarios.map(\.name)
-    static let workloads = HandoverCorpus.checkpoints.map { $0.workload }
+    static let scenarios: [String] = HandoverCorpus.scenarios.map { $0.name }
+    static let workloads: [String] = HandoverCorpus.checkpoints.map { $0.workload }
 
     @Test(arguments: HolderEmulatorParityTests.scenarios)
     func scenarioMatches(_ name: String) async throws {
@@ -231,14 +231,19 @@ struct HolderEmulatorParityTests {
     /// both emulators know, synchronized output both reset and set, since Claude Code wraps its
     /// frames in it only on a "set" answer; and the OSC 7501 probe, which turns on Claude Code's
     /// program-status reports. Here and not in the corpus, because no other suite reads replies.
-    static let queries = Array(
-        ("\u{1b}[c" + "\u{1b}[>c" + "\u{1b}[>q" + "\u{1b}[5n" + "\u{1b}[5;10H\u{1b}[6n"
-            + "\u{1b}[?1$p\u{1b}[?7$p\u{1b}[?25$p\u{1b}[?2004$p\u{1b}[?2026$p"
-            + "\u{1b}[?2026h\u{1b}[?2026$p\u{1b}[?2026l"
-            + "\u{1b}]7501;?\u{07}").utf8)
+    static let queryPieces: [String] = [
+        "\u{1b}[c", "\u{1b}[>c", "\u{1b}[>q", "\u{1b}[5n", "\u{1b}[5;10H\u{1b}[6n",
+        "\u{1b}[?1$p\u{1b}[?7$p\u{1b}[?25$p\u{1b}[?2004$p\u{1b}[?2026$p",
+        "\u{1b}[?2026h\u{1b}[?2026$p\u{1b}[?2026l",
+        "\u{1b}]7501;?\u{07}",
+    ]
+    static let queryText: String = queryPieces.joined()
+    static let queries: [UInt8] = Array(queryText.utf8)
 
     /// How many replies of each kind `queries` asks for.
-    static let queryReplies = ["DA1": 1, "DA2": 1, "XTVERSION": 1, "DSR": 1, "CPR": 1, "DECRQM": 6, "7501probe": 1]
+    static let queryReplies: [String: Int] = [
+        "DA1": 1, "DA2": 1, "XTVERSION": 1, "DSR": 1, "CPR": 1, "DECRQM": 6, "7501probe": 1,
+    ]
 
     /// No miss is listed for the queries, so every field, every kind of reply among them, must
     /// match; and each emulator must send each reply, so a kind neither sends cannot pass.
@@ -248,8 +253,9 @@ struct HolderEmulatorParityTests {
             pair.feed(Self.queries[...])
             Self.expectOutcome("queries", plan: nil, differences: try pair.differences(stream: Self.queries[...]))
             for (emulator, sink) in [(pair.swiftTerm, pair.swiftTermSink), (pair.ghostty, pair.ghosttySink)] {
-                let kinds = EmulatorParity.splitReplies(sink.replies).map { EmulatorParity.replyKind($0) }
-                let counts = Dictionary(kinds.map { ($0, 1) }, uniquingKeysWith: +)
+                let kinds: [String] = EmulatorParity.splitReplies(sink.replies).map { EmulatorParity.replyKind($0) }
+                var counts: [String: Int] = [:]
+                for kind in kinds { counts[kind, default: 0] += 1 }
                 #expect(counts == Self.queryReplies, "the \(emulator.kind) emulator sent \(kinds)")
             }
         }
@@ -319,12 +325,12 @@ struct HolderEmulatorParityTests {
     /// a field no miss names fails and prints the difference, one that does both fails once with
     /// both, and a plan's own entry adds to the stream's.
     @Test func theOutcomeHoldsTheListExact() {
-        let misses = [
+        let misses: [String: [Miss]] = [
             "fake": [Miss(reason: "a fake miss", fields: ["render", "capture"])],
             "fake/64": [Miss(reason: "a fake chunked miss", fields: ["replies.other"])],
             "fake/whole": [Miss(reason: "a fake whole-feed miss", fields: ["reports"])],
         ]
-        let both = ["render": "fake difference", "capture": "fake difference"]
+        let both: [String: String] = ["render": "fake difference", "capture": "fake difference"]
         let passing = Self.outcomeFailures("fake", keys: ["fake"], differences: both, misses: misses)
         #expect(passing.isEmpty, "\(passing)")
 
@@ -348,7 +354,7 @@ struct HolderEmulatorParityTests {
         #expect(bothWays.first?.contains("now match in [\"capture\"]") == true, "\(bothWays)")
 
         // The whole feed's own key adds to the bare name's, and only for that plan.
-        let wholeKeys = ["fake", EmulatorParity.FeedPlan(chunkSize: nil).missKey(for: "fake")]
+        let wholeKeys: [String] = ["fake", EmulatorParity.FeedPlan(chunkSize: nil).missKey(for: "fake")]
         let whole = both.merging(["reports": "fake difference"]) { $1 }
         let wholePassing = Self.outcomeFailures("fake, whole", keys: wholeKeys, differences: whole, misses: misses)
         #expect(wholePassing.isEmpty, "\(wholePassing)")
@@ -359,15 +365,18 @@ struct HolderEmulatorParityTests {
     /// A reply split and sorted by kind: sequences cut across writes are rejoined, each reply's
     /// kind is read from its form, and a byte that is not UTF-8 is written as `\xNN`.
     @Test func repliesAreSplitAndSortedByKind() {
-        let bytes = Array(
-            ("\u{1b}[?65;1c\u{1b}[>65;20;1c\u{1b}P>|name\u{1b}\\\u{1b}[0n\u{1b}[5;10R\u{1b}[?2026;2$y"
-                + "\u{1b}]7501;?\u{07}\u{1b}]10;rgb:0/0/0\u{1b}\\\u{1b}]11;rgb:f/f/f\u{07}\u{1b}[6;16;10t"
-                + "\u{1b}_Gi=31;OK\u{1b}\\\u{1b}[I\u{1b}[?0u").utf8)
-        let replies = EmulatorParity.splitReplies(bytes)
-        #expect(replies.map { EmulatorParity.replyKind($0) } == [
+        let pieces: [String] = [
+            "\u{1b}[?65;1c", "\u{1b}[>65;20;1c", "\u{1b}P>|name\u{1b}\\", "\u{1b}[0n", "\u{1b}[5;10R",
+            "\u{1b}[?2026;2$y", "\u{1b}]7501;?\u{07}", "\u{1b}]10;rgb:0/0/0\u{1b}\\", "\u{1b}]11;rgb:f/f/f\u{07}",
+            "\u{1b}[6;16;10t", "\u{1b}_Gi=31;OK\u{1b}\\", "\u{1b}[I", "\u{1b}[?0u",
+        ]
+        let expected: [String] = [
             "DA1", "DA2", "XTVERSION", "DSR", "CPR", "DECRQM", "7501probe", "OSC10", "OSC11", "windowOps",
             "kittyGraphics", "focus", "other",
-        ])
+        ]
+        let bytes: [UInt8] = Array(pieces.joined().utf8)
+        let kinds: [String] = EmulatorParity.splitReplies(bytes).map { EmulatorParity.replyKind($0) }
+        #expect(kinds == expected)
         #expect(EmulatorParity.escaped([0x61, 0xff, 0xe2, 0x9c, 0x93, 0xe2, 0x9c]) == "a\\xFF✓\\xE2\\x9C")
     }
 
@@ -389,7 +398,8 @@ struct HolderEmulatorParityTests {
 
     private static func expectOutcome(_ name: String, plan: EmulatorParity.FeedPlan?, differences: [String: String]) {
         let label = plan.map { "\(name), fed \($0.testDescription)" } ?? name
-        let keys = [name] + (plan.map { [$0.missKey(for: name)] } ?? [])
+        let planKeys: [String] = plan.map { [$0.missKey(for: name)] } ?? []
+        let keys: [String] = [name] + planKeys
         for failure in outcomeFailures(label, keys: keys, differences: differences, misses: misses) {
             Issue.record(EmulatorParity.Failure(description: failure))
         }

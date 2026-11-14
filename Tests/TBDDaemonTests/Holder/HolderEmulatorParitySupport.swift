@@ -50,8 +50,8 @@ enum EmulatorParity {
     struct FeedPlan: Sendable, CustomTestStringConvertible {
         let chunkSize: Int?
 
-        static let chunkSizes = [64, 4_096]
-        static let all = [FeedPlan(chunkSize: nil)] + chunkSizes.map { FeedPlan(chunkSize: $0) }
+        static let chunkSizes: [Int] = [64, 4_096]
+        static let all: [FeedPlan] = [FeedPlan(chunkSize: nil)] + chunkSizes.map { FeedPlan(chunkSize: $0) }
 
         var testDescription: String { chunkSize.map { "\($0)-byte chunks" } ?? "whole" }
 
@@ -189,22 +189,22 @@ enum EmulatorParity {
     }
 
     /// Comparison 1: what the daemon reads of a session's screen.
-    static let daemonFields = [
+    static let daemonFields: [String] = [
         "screen.lines", "screen.viewportStart", "screen.cursor", "screen.cursorVisible", "screen.size", "screen.modes",
         "screen.provenance", "render", "capture",
     ]
     /// Comparison 2: what the emulator sent. The replies to the child, one field per kind of
     /// reply (`replyKind`), each reply on a line of its own, and `replies.order`, the order of
     /// the kinds both emulators sent; then the program-status reports.
-    static let sentFields = replyKinds.map { "replies." + $0 } + ["replies.order", "reports"]
+    static let sentFields: [String] = replyKinds.map { "replies." + $0 } + ["replies.order", "reports"]
 
     /// Comparison 3: what a viewer restores from the snapshot, read under `prefix`.
     static func viewerFields(prefix: String) -> [String] {
-        let read = ["text", "styled", "cursor", "pendingWrap", "cursorVisible", "cursorStyle", "alternateScreen"]
-            + viewerModes.map { "mode." + $0.name }
-            + ["mouseTracking", "mouseEncoding", "region", "kittyFlags"]
-            + viewerExtras.map { $0.name }
-            + ["savedCursor"]
+        let screen: [String] = ["text", "styled", "cursor", "pendingWrap", "cursorVisible", "cursorStyle", "alternateScreen"]
+        let modes: [String] = viewerModes.map { "mode." + $0.name }
+        let rest: [String] = ["mouseTracking", "mouseEncoding", "region", "kittyFlags"]
+        let extras: [String] = viewerExtras.map { $0.name }
+        let read: [String] = screen + modes + rest + extras + ["savedCursor"]
         return read.map { prefix + $0 }
     }
 
@@ -280,7 +280,8 @@ enum EmulatorParity {
     /// so a `?47l` or `?1047l` leaves without restoring the cursor `?1049h` saved, as the
     /// program's own would.
     static func leaveSequence(_ stream: ArraySlice<UInt8>) -> [UInt8] {
-        let entries = [47, 1047, 1049].compactMap { mode in
+        let modes: [Int] = [47, 1047, 1049]
+        let entries: [(mode: Int, at: Int)] = modes.compactMap { mode in
             lastIndex(of: Array("\u{1b}[?\(mode)h".utf8), in: stream).map { (mode: mode, at: $0) }
         }
         let entered = entries.max { $0.at < $1.at }?.mode ?? 1049
@@ -298,7 +299,7 @@ enum EmulatorParity {
     // MARK: - Replies
 
     /// The kinds of reply `replyKind` tells apart, each compared as a field of its own.
-    static let replyKinds = [
+    static let replyKinds: [String] = [
         "DA1", "DA2", "XTVERSION", "DSR", "CPR", "DECRQM", "7501probe", "OSC10", "OSC11", "windowOps",
         "kittyGraphics", "focus", "other",
     ]
@@ -466,10 +467,10 @@ enum EmulatorParity {
     /// and then the scrollback, and puts the cursor back: the screen and history are gone, so the
     /// formatter runs for the extras are short, and the state they restore is untouched. It
     /// overwrites the saved cursor, which `savedCursor` therefore reads from a viewer of its own.
-    private static let blankOut = Array("\u{1b}7\u{1b}[0m\u{1b}[2J\u{1b}[3J\u{1b}8".utf8)
+    private static let blankOut: [UInt8] = Array("\u{1b}7\u{1b}[0m\u{1b}[2J\u{1b}[3J\u{1b}8".utf8)
 
     /// DECRC: makes the saved cursor the cursor, so a viewer's readings of the cursor read it.
-    private static let restoreCursor = Array("\u{1b}8".utf8)
+    private static let restoreCursor: [UInt8] = Array("\u{1b}8".utf8)
 
     /// What a fresh headless libghostty viewer of the stream's size holds once fed `bytes` muted,
     /// as the app's viewer ingests a snapshot. `savedCursor` comes from a second viewer fed the
@@ -575,11 +576,12 @@ enum EmulatorParity {
     /// `printCell` maps only British and DEC special graphics), so an ASCII designation reads as
     /// no designation, on both sides.
     static func withoutASCIIDesignations(_ charsets: [UInt8]) -> [UInt8] {
+        let slotDesignators: [UInt8] = [UInt8(ascii: "("), UInt8(ascii: ")"), UInt8(ascii: "*"), UInt8(ascii: "+")]
         var out: [UInt8] = []
         var index = 0
         while index < charsets.count {
             if index + 2 < charsets.count, charsets[index] == 0x1b,
-                [UInt8(ascii: "("), UInt8(ascii: ")"), UInt8(ascii: "*"), UInt8(ascii: "+")].contains(charsets[index + 1]),
+                slotDesignators.contains(charsets[index + 1]),
                 charsets[index + 2] == UInt8(ascii: "B")
             {
                 index += 3
@@ -754,7 +756,7 @@ enum EmulatorParity {
     /// `EmulatorParityRecordingPinTests` holds the files to. Written by
     /// `scripts/record-emulator-parity-corpus.py`.
     enum Recordings {
-        static let names = ["claude-stub", "vim", "less", "colour-log"]
+        static let names: [String] = ["claude-stub", "vim", "less", "colour-log"]
 
         struct Entry: Decodable, Sendable {
             let name: String
