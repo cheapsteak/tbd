@@ -7,7 +7,8 @@ import Testing
 import TBDKernel
 
 /// Build a fresh router over an in-memory DB with dry-run tmux. Returns the
-/// DB too so tests can create repo/worktree rows for server resolution.
+/// DB too so tests can create the repo, worktree and terminal rows a request
+/// names.
 private func makeRouterAndDB() throws -> (RPCRouter, TBDDatabase) {
     let db = try TBDDatabase(inMemory: true)
     let router = RPCRouter(
@@ -26,20 +27,20 @@ private func makeRouterAndDB() throws -> (RPCRouter, TBDDatabase) {
 }
 
 /// Create a repo + worktree row and return the worktree's ID.
-private func makeWorktree(in db: TBDDatabase, tmuxServer: String = "tbd-attach-test") async throws -> UUID {
+private func makeWorktree(in db: TBDDatabase) async throws -> UUID {
     let repo = try await db.repos.create(
         path: "/tmp/attach-test-repo", displayName: "attach-test", defaultBranch: "main"
     )
     let worktree = try await db.worktrees.create(
         repoID: repo.id, name: "attach-wt",
         branch: "main", path: "/tmp/attach-test-repo",
-        tmuxServer: tmuxServer
+        tmuxServer: "tbd-attach-test"
     )
     return worktree.id
 }
 
-@Suite("Attach RPC stubs")
-struct AttachRPCStubTests {
+@Suite("Attach RPCs")
+struct AttachRPCTests {
     /// Only a holder-backed terminal can be attached; a request that names no
     /// terminal has nothing the daemon could vend.
     @Test("attach.request naming no terminal is answered unavailable")
