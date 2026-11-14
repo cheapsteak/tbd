@@ -256,7 +256,7 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(
             raised.exception.code,
             f"terminal {TMUX_ID} is on transport='tmux', but was given as the holder arm."
-            " A holder session exists only if the pty-holder flag was on when it spawned.",
+            " Every new session opens on the pty holder; a tmux session predates that.",
         )
 
 

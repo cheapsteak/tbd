@@ -55,7 +55,7 @@ The map is a plain `[String: String]`. There is **no** name validation, **no** d
 
 ## Lifecycle
 
-Overrides are read fresh at spawn time, so they survive every path that respawns the primary agent: resume, reboot recovery, manual create, recreate-window, and a mid-conversation profile swap. Change an override and the next spawned (or respawned) session picks it up; already-running sessions keep the env they were spawned with.
+Overrides are read fresh at spawn time, so they survive every path that respawns the primary agent: resume, reboot recovery, manual create, and a mid-conversation profile swap. Change an override and the next spawned (or respawned) session picks it up; already-running sessions keep the env they were spawned with.
 
 ## Worked example: Bedrock
 

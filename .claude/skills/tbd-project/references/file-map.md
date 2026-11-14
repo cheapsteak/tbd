@@ -87,7 +87,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
 - `TmuxManager+WorktreeServerLock.swift` — `withWorktreeServerLock`: locks a worktree's current tmux server and re-reads its row after waiting, retrying if the server changed
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
-- `HibernationCoordinator.swift` (+`Holder`) — parks and wakes Claude sessions on both transports: manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
+- `HibernationCoordinator.swift` (+`Holder`) — parks Claude sessions on both transports and wakes them on the pty holder (a session parked on tmux refuses to wake, naming `tbd terminal migrate`): manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
 - `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy), and the tmux signal ending every tmux park uses

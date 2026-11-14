@@ -47,7 +47,7 @@ JSON over Unix socket. `RPCRequest` has `method: String` and `params: String` (r
 
 ### Tmux Integration
 
-Uses **grouped sessions** — NOT control mode. Each terminal panel creates a grouped session (`tmux new-session -t main -s view-<uuid>`) and attaches via a native PTY. SwiftTerm connects directly. For rationale and details: consult `references/architecture.md` or `docs/tmux-integration.md`.
+Every new session opens on the pty holder. For sessions still on tmux, TBD uses **grouped sessions** — NOT control mode. Each terminal panel creates a grouped session (`tmux new-session -t main -s view-<uuid>`) and attaches via a native PTY. SwiftTerm connects directly. For rationale and details: consult `references/architecture.md` or `docs/tmux-integration.md`.
 
 ### Git Operations
 

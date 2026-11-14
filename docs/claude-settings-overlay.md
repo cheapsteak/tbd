@@ -34,8 +34,7 @@ rule the repo file adds.
 - **Repo fragment** – read fresh from the file at actual spawn time, so
   it applies on every Claude start — create, resume, hibernation wake,
   account switch, reopen and revive — and edits made while a preSession hook
-  is still running are picked up by the spawn it gates. (recreate-window
-  respawns as shell/codex, never Claude, so no overlay is involved there.)
+  is still running are picked up by the spawn it gates.
 - **Per-spawn fragment** – kept with its terminal, beside the terminal's
   plugin folders; both apply on every start of that terminal's Claude
   session:
@@ -57,8 +56,6 @@ rule the repo file adds.
     each revived session starts with its own.
   - **Revive a conversation on a fresh branch** – starts with the
     archived session's values.
-
-  **Continue in Claude from a Codex tab** – has no Claude values to carry.
 
 ## Plugin folders
 

@@ -53,9 +53,9 @@ BUILD_IDENTITY_PATHSPECS=(
 #                  (relink_installed_cli).
 #   TBDHolder      the pty holder the daemon spawns for a holder-backed session
 #                  (HolderSpawner.locateSiblingExecutable). Missing, the daemon
-#                  reports ptyHolderSupported=false: the Settings toggle greys
-#                  out, and a toggle that was already on sends every new
-#                  session to tmux with no error.
+#                  reports ptyHolderSupported=false, Settings says why, and
+#                  every new session is refused with an error that names the
+#                  missing helper.
 #   TBDPeerHelper  the shadow-peer helper for remote peer messaging
 #                  (ShadowPeerHelperProcessSpawner). Missing, a remote lane
 #                  fails to arm with executableMissing.

@@ -9,17 +9,17 @@ extracted from a running tmux server. Nothing moves without a gesture.
 
 This is the mechanism by which the tmux transport's remaining sessions leave it,
 so the tmux path can be deleted without stranding a session somebody still
-wants. A second, much smaller piece completes that guarantee: once the tmux path
-is gone, a row still recorded as `tmux` refuses its wake with a reason naming
-this migration, so a session nobody got around to moving produces a clear
-message rather than a broken tab.
+wants. A second, much smaller piece completes that guarantee: TBD starts no
+session on tmux, so a row still recorded as `tmux` refuses its wake with a
+reason naming this migration, and a session nobody got around to moving
+produces a clear message rather than a broken tab.
 
 ## Why a gesture rather than a behaviour
 
 The transport a session runs on is recorded per row at spawn and kept for life.
-Flipping the default changes what new sessions get; it moves nothing that
-already exists. Sessions therefore outlive the default that created them, and
-the last tmux-backed ones would outlive the tmux code itself.
+Opening every new session on the holder changes what new sessions get; it moves
+nothing that already exists. Sessions therefore outlive the code path that
+created them, and the last tmux-backed ones would outlive the tmux code itself.
 
 Moving a session costs something real: its program is killed and started again.
 An agent session reappears through `claude --resume` with its conversation
@@ -208,14 +208,14 @@ is worth saying which states it can leave behind. There are two, and no third.
 
 - **The spawn failed.** The row is untouched: still `tmux`, still awake, naming
   a window that is now dead. That is the ordinary window-died state the app's
-  recovery banner already owns, and `terminal.recreateWindow` can still repair
-  it precisely because the row was not rewritten.
+  recovery banner already owns. `terminal.recreateWindow` refuses it with a
+  reason naming this migration, and running the migration again moves it,
+  precisely because the row was not rewritten.
 - **The write lost its compare-and-set.** The holder that was started is
   abandoned — a holder and a job no row names would be reclaimable by nothing —
-  and the row is in the same state as above. The race this loses is a
-  window-died recovery recreating the row's window in the gap, which rotates
-  the row's incarnation; the person keeps the fresh tmux window the recovery
-  gave them.
+  and the row is in the same state as above. The race this loses is another
+  writer changing the row in the gap, such as the tab being closed; the row is
+  left as that writer left it.
 
 Killing before the write is the opposite of the parked path's order, and it is
 safe for a different reason: the write is a compare-and-set, so a recovery that
@@ -269,10 +269,15 @@ it needs no switch, which is why "Hibernate now" has never had one.
 
 ## The backstop
 
-Deleting the tmux path removes the code a `tmux` row's wake would take. From
-that point a row still recorded as `tmux` refuses its wake with a reason naming
-this migration, instead of failing obscurely inside a path that no longer
-exists. This is a refusal and nothing more: no migration logic, no flag, a
+TBD has no tmux wake: waking a session means starting its program again, and
+TBD starts programs only on the pty holder. So a parked row still recorded as
+`tmux` refuses its wake with a reason naming this migration and the row's own
+id (`tbd terminal migrate <id>`), whether or not tmux is installed, instead of
+failing obscurely inside a path that no longer exists. The row stays parked
+with its session id, so a wake after the migration resumes it on the holder.
+The other gestures that would start a program in a tmux window refuse the same
+way: recreating a dead window, and switching a running tmux session's account
+in place. This is a refusal and nothing more: no migration logic, no flag, a
 handful of lines. It is what keeps "a session never silently breaks" true
 without a daemon-initiated migration.
 
@@ -286,8 +291,7 @@ without a daemon-initiated migration.
 - **Moving a session back to tmux.** There is no reverse gesture, and none is
   planned: the whole point of this one is to drain the transport that is being
   deleted, so a way back would be a way to re-enter a state the next release
-  removes. A session that must run on tmux is closed and opened again with the
-  transport flag off.
+  removes. TBD opens no new session on tmux, so there is no way back at all.
 
 ## Reconcilers
 
