@@ -1505,7 +1505,9 @@ extension RPCRouter {
         // A row with no agent session to keep would be recreated as a shell,
         // which TBD no longer does on tmux.
         guard let plan = terminal.recoveryResumePlan else {
-            return RPCResponse(error: Self.tmuxRecreateRefusal(terminalID: terminal.id))
+            return RPCResponse(
+                error: Self.tmuxRecreateRefusal(terminalID: terminal.id),
+                code: RPCErrorCode.terminalOnTmux.rawValue)
         }
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
@@ -2220,7 +2222,9 @@ extension RPCRouter {
         // carried, so the row is exactly as it was. A fork is unaffected — it
         // opens a new tab, on the holder, and leaves this row alone.
         if mode == .inPlace, oldTerminal.transport != .holder {
-            return RPCResponse(error: Self.tmuxSwapRefusal(terminalID: oldTerminal.id))
+            return RPCResponse(
+                error: Self.tmuxSwapRefusal(terminalID: oldTerminal.id),
+                code: RPCErrorCode.terminalOnTmux.rawValue)
         }
 
         // The spawn gate, asked once per swap and before anything is recorded.

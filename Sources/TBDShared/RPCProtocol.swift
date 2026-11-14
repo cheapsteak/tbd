@@ -146,6 +146,13 @@ public enum RPCErrorCode: String, Sendable {
     /// provider identity is not the required source provider. This includes a
     /// repeated Continue-in-Claude request after the row already became Claude.
     case terminalWrongProvider
+    /// A request that would start or replace the process behind a terminal —
+    /// a window recreate, an in-place account switch — was refused because the
+    /// row is still on the tmux transport, which TBD no longer starts sessions
+    /// on. Nothing was changed. The text names `tbd terminal migrate <id>`:
+    /// moving the row to the pty holder is the remedy, so a plain retry cannot
+    /// help and the app offers none.
+    case terminalOnTmux
     /// An agent start or wake was held by the user's start-admission command
     /// (`~/tbd/hooks/start-admission`). The message is the command's reason.
     /// Nothing was started and nothing is queued: the caller asks again when

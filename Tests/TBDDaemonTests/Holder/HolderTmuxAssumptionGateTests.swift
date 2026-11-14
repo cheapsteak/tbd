@@ -403,6 +403,8 @@ struct HolderTmuxAssumptionGateTests {
 
         #expect(!response.success)
         #expect(response.error == RPCRouter.tmuxRecreateRefusal(terminalID: terminal.id))
+        #expect(response.knownErrorCode == .terminalOnTmux,
+                "the app reads the code, not the text, to hide its Retry")
         #expect(response.error?.contains("tbd terminal migrate \(terminal.id.uuidString)") == true)
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
@@ -1577,6 +1579,8 @@ struct HolderTmuxAssumptionGateTests {
 
         #expect(!response.success)
         #expect(response.error == RPCRouter.tmuxSwapRefusal(terminalID: terminal.id))
+        #expect(response.knownErrorCode == .terminalOnTmux,
+                "the app reads the code, not the text, to know the row needs moving")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before, "a refused swap mutated the tmux row")
         #expect(!recorded.snapshot().contains { $0.contains("respawn-window") },

@@ -21,8 +21,31 @@ enum AutomaticTerminalRecreationOutcome: Equatable {
     case alreadyInFlight
     case terminalUnavailable
     case recreated(attempt: Int)
-    case failed(attempt: Int)
+    /// `refusal` is what the daemon said when it declined the recreate, or nil
+    /// when the attempt failed for another reason, such as a lost connection.
+    case failed(attempt: Int, refusal: TerminalRecreationRefusal? = nil)
     case budgetExhausted
+}
+
+/// What the daemon said when it refused a window recreate: its own sentence,
+/// and whether the row must first move to the pty holder, which no retry of
+/// the same request can do.
+///
+/// Decided from the refusal's code, never its text
+/// (`RPCErrorCode.terminalOnTmux`), so the daemon can reword the sentence
+/// without changing what the panel offers.
+struct TerminalRecreationRefusal: Equatable, Sendable {
+    let message: String
+    let needsMigration: Bool
+
+    /// The refusal `error` carries, or nil when the daemon did not write one —
+    /// a dropped connection, a timeout, an unreadable answer.
+    static func from(_ error: any Error) -> TerminalRecreationRefusal? {
+        guard case DaemonClientError.rpcError(let message, let code) = error else { return nil }
+        return TerminalRecreationRefusal(
+            message: message,
+            needsMigration: code == RPCErrorCode.terminalOnTmux.rawValue)
+    }
 }
 
 extension AppState {
@@ -672,23 +695,30 @@ extension AppState {
                 }
                 logger.error("Automatic terminal recreation attempt \(attempt, privacy: .public) failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 handleConnectionError(error)
-                return .failed(attempt: attempt)
+                return .failed(attempt: attempt, refusal: TerminalRecreationRefusal.from(error))
             }
         }
     }
 
     /// User-triggered recreation is independent of the automatic recovery budget.
-    func recreateTerminalWindow(terminalID: UUID) async {
+    ///
+    /// Returns the daemon's refusal when it declined, so the panel that asked
+    /// can show what it said; nil when the recreate went through, was already
+    /// in flight, or failed for a reason the daemon did not write.
+    @discardableResult
+    func recreateTerminalWindow(terminalID: UUID) async -> TerminalRecreationRefusal? {
         guard claimManualTerminalRecreation(terminalID: terminalID) == .claimed else {
-            return
+            return nil
         }
         defer { finishTerminalRecreation(terminalID: terminalID) }
 
         do {
             try await performTerminalRecreation(terminalID: terminalID)
+            return nil
         } catch {
             logger.error("Failed to recreate terminal window: \(error)")
             handleConnectionError(error)
+            return TerminalRecreationRefusal.from(error)
         }
     }
 

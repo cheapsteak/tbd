@@ -267,22 +267,81 @@ struct TerminalPanelViewTests {
 
     @MainActor
     @Test("recovery guidance callback carries the actual failed and exhausted messages")
-    func recoveryGuidanceCallbackCarriesActualMessage() {
+    func recoveryGuidanceCallbackCarriesActualMessage() throws {
         let coordinator = TerminalPanelRepresentable.Coordinator()
         var messages: [String] = []
-        coordinator.onRecoveryGuidance = { messages.append($0) }
+        coordinator.onRecoveryGuidance = { messages.append($0.message) }
 
         coordinator.recoveryGuidanceDidBecomeAvailable(
-            TerminalRecoveryPresentation.failedMessage
+            try #require(TerminalRecoveryPresentation.guidance(for: .failed(attempt: 1)))
         )
         coordinator.recoveryGuidanceDidBecomeAvailable(
-            TerminalRecoveryPresentation.exhaustedMessage
+            try #require(TerminalRecoveryPresentation.guidance(for: .budgetExhausted))
         )
 
         #expect(messages == [
             "Automatic terminal recovery failed. Retry manually or close the tab.",
             "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
         ])
+    }
+
+    // MARK: - The daemon's recreate refusal
+
+    static let migrateRefusal = TerminalRecreationRefusal(
+        message: "Terminal acme runs on the tmux transport, which TBD no longer starts sessions on. "
+            + "Run `tbd terminal migrate acme` to move it to the pty holder, then open it again.",
+        needsMigration: true)
+
+    /// A failed automatic recovery the daemon refused shows the daemon's own
+    /// sentence, not the generic one, so the person reads what to do.
+    @Test("a refused automatic recovery shows the daemon's text")
+    func aRefusedAutomaticRecoveryShowsTheDaemonsText() {
+        let guidance = TerminalRecoveryPresentation.guidance(
+            for: .failed(attempt: 1, refusal: Self.migrateRefusal))
+        #expect(guidance?.message == Self.migrateRefusal.message)
+    }
+
+    /// A row that must move to the pty holder first gets no Retry: the same
+    /// request would be refused again.
+    @Test("a refusal that needs a migration offers no Retry")
+    func aRefusalThatNeedsAMigrationOffersNoRetry() {
+        let guidance = TerminalRecoveryPresentation.guidance(for: Self.migrateRefusal)
+        #expect(guidance == TerminalRecoveryGuidance(
+            message: Self.migrateRefusal.message, offersRetry: false))
+    }
+
+    /// Any other refusal keeps Retry, with the daemon's reason in the text.
+    @Test("any other refusal keeps Retry and names the daemon's reason")
+    func anyOtherRefusalKeepsRetry() {
+        let refusal = TerminalRecreationRefusal(
+            message: "Worktree not found for terminal: acme", needsMigration: false)
+        let guidance = TerminalRecoveryPresentation.guidance(for: refusal)
+        #expect(guidance.offersRetry)
+        #expect(guidance.message.contains("Worktree not found for terminal: acme"))
+    }
+
+    /// A failure the daemon did not write keeps the generic text and Retry.
+    @Test("a failure with no refusal keeps the generic text and Retry")
+    func aFailureWithNoRefusalKeepsTheGenericTextAndRetry() {
+        #expect(TerminalRecoveryPresentation.guidance(for: .failed(attempt: 2))
+            == TerminalRecoveryGuidance(
+                message: TerminalRecoveryPresentation.failedMessage, offersRetry: true))
+    }
+
+    /// The migration is read from the code, never the sentence.
+    @Test("a refusal needs a migration exactly when it carries the tmux code")
+    func aRefusalNeedsAMigrationExactlyWhenItCarriesTheTmuxCode() {
+        let coded = TerminalRecreationRefusal.from(DaemonClientError.rpcError(
+            "anything at all", code: RPCErrorCode.terminalOnTmux.rawValue))
+        #expect(coded == TerminalRecreationRefusal(message: "anything at all", needsMigration: true))
+
+        let uncoded = TerminalRecreationRefusal.from(DaemonClientError.rpcError(
+            "run `tbd terminal migrate` first", code: nil))
+        #expect(uncoded?.needsMigration == false,
+                "the sentence was read to decide the migration")
+
+        #expect(TerminalRecreationRefusal.from(DaemonClientError.daemonNotRunning) == nil,
+                "a failure the daemon did not write was shown as its refusal")
     }
 
     @MainActor

@@ -363,7 +363,7 @@ extension PhoneAppService {
         // terminal ids, pane ids, worktree names and registered provider
         // names TBD keeps, and no provider's words.
         case .profileMissing, .terminalBusy, .terminalHasComposerDraft,
-             .terminalSessionGone, .terminalWrongProvider,
+             .terminalSessionGone, .terminalWrongProvider, .terminalOnTmux,
              .remoteLaneArchiveGuarded, .worktreeArchiveUncommitted:
             return .text
 
