@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftTerm
 import Testing
 @testable import TBDApp
 @testable import TBDGhosttyTerminal
@@ -7,9 +8,11 @@ import TestSupport
 
 /// What a ⌘-click on plain text opens, the same whichever engine draws the terminal: a path on one
 /// row, found by TBD's own matcher; a path soft-wrapped across rows, or a URL, found by SwiftTerm's
-/// link detection; and an OSC 8 link, which wins over both. Each test runs on every engine this
-/// machine can build and expects the same delegate calls from each, so the SwiftTerm engine is the
-/// reference the libghostty one is held to.
+/// link detection; and an OSC 8 link, which wins over both. What TBD's matcher finds opens at the
+/// press; what SwiftTerm's detection finds, and an OSC 8 link, at the release, so a ⌘-drag from
+/// one opens nothing. Each test runs on every engine this machine can build and expects the same
+/// delegate calls from each, so the SwiftTerm engine is the reference the libghostty one is held
+/// to.
 ///
 /// The engine is built through the factory with click routing on, as a panel's is, in an
 /// offscreen window, and mouse events are handed straight to its view's overrides, the way AppKit
@@ -196,6 +199,145 @@ struct TerminalEngineCommandClickTests {
         let opened = fixture.recorder.opened
         #expect(opened == ["link \(CommandClickFixture.linkURL)"], "\(kind): \(opened)")
     }
+
+    // MARK: - Drags and the release
+
+    /// SwiftTerm's view opens what its link detection finds, and an OSC 8 link, at the release, and
+    /// not after a drag, so a ⌘-drag that starts on either selects text and opens nothing. The
+    /// ⌘-clicks after are the control: the same presses, released where they went down, open both.
+    @Test("a ⌘-drag from a printed URL or an OSC 8 link selects and opens nothing",
+          arguments: TerminalEngineFactory.availableKinds)
+    func commandDragFromALinkSelects(kind: TerminalEngineKind) async throws {
+        let fixture = try CommandClickFixture(kind: kind)
+        defer { fixture.tearDown() }
+        await fixture.show(CommandClickFixture.twoLinks)
+
+        try await fixture.drag(from: fixture.point(column: 14, row: 0), to: fixture.point(column: 20, row: 0))
+        let selectedFromURL = try fixture.hasSelection()
+        #expect(selectedFromURL, "\(kind): the ⌘-drag from the URL selected nothing")
+        try await fixture.drag(from: fixture.point(column: 3, row: 1), to: fixture.point(column: 12, row: 1))
+        let selectedFromLink = try fixture.hasSelection()
+        #expect(selectedFromLink, "\(kind): the ⌘-drag from the OSC 8 link selected nothing")
+        let openedByDrags = fixture.recorder.opened
+        #expect(openedByDrags.isEmpty, "\(kind): the ⌘-drags opened \(openedByDrags)")
+
+        try await fixture.click(column: 14, row: 0)
+        try await fixture.click(column: 3, row: 1)
+        let openedByClicks = fixture.recorder.opened
+        #expect(openedByClicks == CommandClickFixture.twoLinksOpened, "\(kind): \(openedByClicks)")
+    }
+
+    /// With a program holding the mouse, SwiftTerm's view keeps every ⌘-press from it and measures
+    /// the drag itself: a press that moved more than 3 points opens nothing at its release. The
+    /// ⌘-clicks after open both links and send nothing either, and the plain click after that is
+    /// reported, so the program held the mouse throughout.
+    @Test("with a program holding the mouse, a ⌘-drag from a printed URL or an OSC 8 link opens and sends nothing",
+          arguments: TerminalEngineFactory.availableKinds)
+    func commandDragFromALinkWhileTheProgramHoldsTheMouse(kind: TerminalEngineKind) async throws {
+        let fixture = try CommandClickFixture(kind: kind)
+        defer { fixture.tearDown() }
+        await fixture.show(CommandClickFixture.twoLinks)
+        await fixture.programTakesTheMouse()
+
+        try await fixture.drag(from: fixture.point(column: 14, row: 0), to: fixture.point(column: 20, row: 0))
+        try await fixture.drag(from: fixture.point(column: 3, row: 1), to: fixture.point(column: 12, row: 1))
+        let openedByDrags = fixture.recorder.opened
+        #expect(openedByDrags.isEmpty, "\(kind): the ⌘-drags opened \(openedByDrags)")
+
+        try await fixture.click(column: 14, row: 0)
+        try await fixture.click(column: 3, row: 1)
+        let openedByClicks = fixture.recorder.opened
+        #expect(openedByClicks == CommandClickFixture.twoLinksOpened, "\(kind): \(openedByClicks)")
+        let sent = fixture.recorder.sends
+        #expect(sent.isEmpty, "\(kind): the ⌘-presses reached the program: \(sent.map(EngineTestSupport.describe))")
+
+        let controlReported = try await fixture.controlClickIsReported()
+        #expect(controlReported, "\(kind): the control click was not reported, so the program never held the mouse")
+    }
+
+    /// A ⌘-press that moves a point before its release is still a click while a program holds the
+    /// mouse: SwiftTerm's view lets it move 3 points. With reporting off the move extends a
+    /// selection, and SwiftTerm opens nothing after any selection drag, however short.
+    @Test("a ⌘-press on a URL that moves a point opens it only while a program holds the mouse",
+          arguments: TerminalEngineFactory.availableKinds, [true, false])
+    func commandPressThatMovesAPoint(kind: TerminalEngineKind, programHoldsTheMouse: Bool) async throws {
+        let fixture = try CommandClickFixture(kind: kind)
+        defer { fixture.tearDown() }
+        await fixture.show("see \(CommandClickFixture.linkURL) now")
+        if programHoldsTheMouse { await fixture.programTakesTheMouse() }
+
+        let pressed = try fixture.point(column: 14, row: 0)
+        try await fixture.drag(from: pressed, to: NSPoint(x: pressed.x + 1, y: pressed.y))
+
+        let opened = fixture.recorder.opened
+        let expected: [String] = programHoldsTheMouse ? ["link \(CommandClickFixture.linkURL)"] : []
+        #expect(opened == expected, "\(kind), the program holding the mouse \(programHoldsTheMouse): \(opened)")
+    }
+
+    /// SwiftTerm's view opens a link at the release only while ⌘ is still held, so a ⌘-press whose
+    /// ⌘ is let go before the button opens nothing, and sends a program holding the mouse nothing.
+    /// Control: ⌘ held through the release, the same clicks open both links.
+    @Test("⌘ let go before the button on a printed URL or an OSC 8 link opens nothing",
+          arguments: TerminalEngineFactory.availableKinds, [false, true])
+    func commandLetGoBeforeTheButton(kind: TerminalEngineKind, programHoldsTheMouse: Bool) async throws {
+        let fixture = try CommandClickFixture(kind: kind)
+        defer { fixture.tearDown() }
+        await fixture.show(CommandClickFixture.twoLinks)
+        if programHoldsTheMouse { await fixture.programTakesTheMouse() }
+
+        try await fixture.click(column: 14, row: 0, releaseFlags: [])
+        try await fixture.click(column: 3, row: 1, releaseFlags: [])
+        let openedByLetGo = fixture.recorder.opened
+        #expect(openedByLetGo.isEmpty, "\(kind): letting ⌘ go before the button opened \(openedByLetGo)")
+        if programHoldsTheMouse {
+            let sent = fixture.recorder.sends
+            #expect(sent.isEmpty, "\(kind): the ⌘-presses reached the program: \(sent.map(EngineTestSupport.describe))")
+        }
+
+        try await fixture.click(column: 14, row: 0)
+        try await fixture.click(column: 3, row: 1)
+        let openedByClicks = fixture.recorder.opened
+        #expect(openedByClicks == CommandClickFixture.twoLinksOpened, "\(kind): \(openedByClicks)")
+    }
+
+    /// What TBD's own matcher finds opens at the press, on either engine, so a ⌘-drag that starts
+    /// on it opens it, once, and selects nothing.
+    @Test("a ⌘-drag from a path TBD's matcher finds opens it at the press",
+          arguments: TerminalEngineFactory.availableKinds)
+    func commandDragFromAMatchedPath(kind: TerminalEngineKind) async throws {
+        let fixture = try CommandClickFixture(kind: kind)
+        defer { fixture.tearDown() }
+        let path = fixture.notesPath
+        await fixture.show("see \(path) now")
+
+        try await fixture.drag(from: fixture.point(column: 6, row: 0), to: fixture.point(column: 16, row: 0))
+
+        let opened = fixture.recorder.opened
+        #expect(opened == ["file \(path)"], "\(kind): \(opened)")
+        let selected = try fixture.hasSelection()
+        #expect(!selected, "\(kind): the ⌘-drag that opened the path also selected")
+    }
+
+    /// SwiftTerm's view keeps every ⌘-press from a program holding the mouse, one that opens nothing
+    /// included: ⌘ is TBD's link modifier, and a mouse report has no bit for it, so the program
+    /// would read a plain click. The plain click after is the control.
+    @Test("with a program holding the mouse, a ⌘-click on plain text sends it nothing",
+          arguments: TerminalEngineFactory.availableKinds)
+    func commandClickOnPlainTextSendsNothing(kind: TerminalEngineKind) async throws {
+        let fixture = try CommandClickFixture(kind: kind)
+        defer { fixture.tearDown() }
+        await fixture.show("just some words")
+        await fixture.programTakesTheMouse()
+
+        try await fixture.click(column: 2, row: 0)
+
+        let opened = fixture.recorder.opened
+        #expect(opened.isEmpty, "\(kind): \(opened)")
+        let sent = fixture.recorder.sends
+        #expect(sent.isEmpty, "\(kind): the ⌘-click reached the program: \(sent.map(EngineTestSupport.describe))")
+        let controlReported = try await fixture.controlClickIsReported()
+        #expect(controlReported, "\(kind): the control click was not reported, so the program never held the mouse")
+    }
 }
 
 // MARK: - Fixture and recorder
@@ -245,6 +387,15 @@ private final class CommandClickRecorder: TerminalEngineDelegate {
 private final class CommandClickFixture {
     /// The URL every link fixture points at.
     static let linkURL = "https://example.com/acme"
+    /// The URL the OSC 8 link in `twoLinks` points at.
+    static let osc8URL = "https://example.com/widgets"
+    /// `linkURL` printed on row 0, on columns 4 to 27, and on row 1 an OSC 8 link to `osc8URL`, on
+    /// columns 0 to 20, whose text names no file and holds no URL.
+    static var twoLinks: String {
+        "see \(linkURL) now\r\n\u{1b}]8;;\(osc8URL)\u{1b}\\open the widgets page\u{1b}]8;;\u{1b}\\"
+    }
+    /// What a ⌘-click on each of `twoLinks`, the printed URL first, opens.
+    static var twoLinksOpened: [String] { ["link \(linkURL)", "link \(osc8URL)"] }
 
     let engine: any TerminalEngine
     let recorder = CommandClickRecorder()
@@ -309,10 +460,11 @@ private final class CommandClickFixture {
     }
 
     /// A press and its release at the cell at `column`, `row`, ⌘ held unless `flags` says
-    /// otherwise. An `activating` click is the one AppKit asks the view about first, the click
-    /// that brings its window forward.
+    /// otherwise, and released with `releaseFlags` held, or `flags` if nil. An `activating` click
+    /// is the one AppKit asks the view about first, the click that brings its window forward.
     func click(
-        column: Int, row: Int, flags: NSEvent.ModifierFlags = .command, activating: Bool = false
+        column: Int, row: Int, flags: NSEvent.ModifierFlags = .command,
+        releaseFlags: NSEvent.ModifierFlags? = nil, activating: Bool = false
     ) async throws {
         let location = try point(column: column, row: row)
         let number = nextEventNumber
@@ -323,8 +475,45 @@ private final class CommandClickFixture {
             #expect(takesIt, "the view did not take the click that activates its window")
         }
         engine.view.mouseDown(with: down)
-        engine.view.mouseUp(with: try mouseEvent(.leftMouseUp, at: location, flags: flags, eventNumber: number))
+        engine.view.mouseUp(with: try mouseEvent(
+            .leftMouseUp, at: location, flags: releaseFlags ?? flags, eventNumber: number))
         await EngineTestSupport.settle()
+    }
+
+    /// A ⌘-press at the window point `from`, one drag to `to`, and the release there, ⌘ held
+    /// throughout.
+    func drag(from: NSPoint, to: NSPoint) async throws {
+        let number = nextEventNumber
+        nextEventNumber += 1
+        engine.view.mouseDown(with: try mouseEvent(.leftMouseDown, at: from, flags: .command, eventNumber: number))
+        engine.view.mouseDragged(with: try mouseEvent(.leftMouseDragged, at: to, flags: .command, eventNumber: number))
+        engine.view.mouseUp(with: try mouseEvent(.leftMouseUp, at: to, flags: .command, eventNumber: number))
+        await EngineTestSupport.settle()
+    }
+
+    /// The program takes the mouse with button-event tracking (1002) and SGR encoding (1006).
+    /// Clears what was recorded before.
+    func programTakesTheMouse() async {
+        engine.feed(Array("\u{1b}[?1002h\u{1b}[?1006h".utf8)[...])
+        await EngineTestSupport.settle()
+        recorder.reset()
+    }
+
+    /// Whether a plain click on a blank cell reaches the program as a press and a release. After a
+    /// check that a ⌘-press sent nothing, it shows the program held the mouse throughout.
+    func controlClickIsReported() async throws -> Bool {
+        let before = recorder.sends.count
+        try await click(column: 40, row: 5, flags: [])
+        return recorder.sends.count - before == 2
+    }
+
+    /// Whether the engine's view holds a selection.
+    func hasSelection() throws -> Bool {
+        if let view = engine.view as? GhosttyTerminalView {
+            return view.terminal.copySelectionText() != nil
+        }
+        let view = try #require(engine.view as? TBDTerminalView, "the engine's view is a \(type(of: engine.view))")
+        return view.selectionActive
     }
 
     private func mouseEvent(

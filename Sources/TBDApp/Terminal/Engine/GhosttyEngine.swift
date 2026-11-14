@@ -217,7 +217,7 @@ final class GhosttyEngine: TerminalEngine {
             self.delegate?.engine(self, openLink: link, params: [:])
         }
         terminalView.onCommandClickText = { [weak self] clicked in
-            self?.openCommandClick(on: clicked) ?? false
+            self?.commandClickOutcome(on: clicked) ?? .nothing
         }
         // A ⌘-hover underlines what SwiftTerm's link detection finds, as the SwiftTerm view
         // underlines its own matches. TBD's matcher, which a ⌘-click runs first, underlines
@@ -293,18 +293,19 @@ final class GhosttyEngine: TerminalEngine {
     /// panel's terminal, one whose ⌘-clicks TBD's own matcher reads.
     private var routesClicks = false
 
-    /// Opens what a ⌘-click on plain text names, as the SwiftTerm engine finds it and in the same
-    /// order: TBD's own matcher on the pressed row first, while click routing is on, then
-    /// SwiftTerm's link detection, which the SwiftTerm engine runs on the release. A file goes to
-    /// `filePathClicked` and the rest to `openLink`, the calls the SwiftTerm engine makes; its view
-    /// opens a pull request link itself, where this engine hands it to the delegate, which opens it
-    /// the same way. True when something opened, and the view then consumes the press.
+    /// What a ⌘-click on plain text opens, as the SwiftTerm engine finds it, in the same order and
+    /// at the same time: TBD's own matcher on the pressed row first, while click routing is on,
+    /// which opens at the press (`.opened`); then SwiftTerm's link detection, which opens at the
+    /// release (`.opensOnRelease`), as the SwiftTerm view's mouse-up opens it, so a ⌘-drag that
+    /// starts on it selects instead. A file goes to `filePathClicked` and the rest to `openLink`,
+    /// the calls the SwiftTerm engine makes; its view opens a pull request link itself, where this
+    /// engine hands it to the delegate, which opens it the same way.
     ///
     /// The SwiftTerm view consumes the click that activates its window unless TBD's matcher opened
     /// something or an OSC 8 link is under it, so SwiftTerm's detection never sees that click, and
     /// it is not run here either.
-    private func openCommandClick(on clicked: GhosttyClickedText) -> Bool {
-        guard let delegate, clicked.rows.indices.contains(clicked.row) else { return false }
+    private func commandClickOutcome(on clicked: GhosttyClickedText) -> GhosttyCommandClickOutcome {
+        guard let delegate, clicked.rows.indices.contains(clicked.row) else { return .nothing }
         if routesClicks, let target = TerminalCommandClick.target(
             row: clicked.rows[clicked.row].text, column: clicked.column,
             worktreePath: configuration.worktreePath, remoteURL: configuration.remoteURL) {
@@ -315,12 +316,14 @@ final class GhosttyEngine: TerminalEngine {
             case .url(let url):
                 delegate.engine(self, openLink: url.absoluteString, params: [:])
             }
-            return true
+            return .opened
         }
-        guard !clicked.activatesWindow, let link = SwiftTermLinkDetector.link(in: clicked) else { return false }
-        ghosttyEngineLog.debug("file-click[mouseDown/detected]: \(link, privacy: .public)")
-        delegate.engine(self, openLink: link, params: [:])
-        return true
+        guard !clicked.activatesWindow, let link = SwiftTermLinkDetector.link(in: clicked) else { return .nothing }
+        return .opensOnRelease(open: { [weak self] in
+            guard let self else { return }
+            ghosttyEngineLog.debug("file-click[mouseUp/detected]: \(link, privacy: .public)")
+            self.delegate?.engine(self, openLink: link, params: [:])
+        })
     }
 
     func setClickRouting(enabled: Bool) {

@@ -11,10 +11,11 @@
 //   * It never writes to a pty. Report and paste bytes go out on the view's `onSend`. The one
 //     thing ⌘V sends that is neither is the Ctrl-V chord for an image-only pasteboard, and that
 //     goes through the input controller's key path — it is a keystroke, not a paste.
-//   * It never opens a link, and never sees the ⌘-click that opens one. The view reads that press
-//     first (`commandClickTarget`): an OSC 8 URI goes to its `onOpenLink`, and the host decides
-//     what a program-supplied URI may open; plain text goes to its `onCommandClickText`, and the
-//     host decides what the text names.
+//   * It never opens a link. The view reads a ⌘-press first (`commandClickTarget`): an OSC 8 URI
+//     goes to its `onOpenLink` at the release, and the host decides what a program-supplied URI
+//     may open; plain text goes to its `onCommandClickText`, and the host decides what the text
+//     names. A left ⌘-press reaches this controller only with reporting off, as a selection
+//     press.
 //   * It finds no link in plain text. Under a ⌘-hover it asks the view's `onCommandHoverText`,
 //     and the host decides which text is a link.
 //   * It never clears `surface.needsDisplay`; it only ever asks the view for a frame.
