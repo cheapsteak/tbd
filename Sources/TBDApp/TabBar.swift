@@ -738,6 +738,20 @@ enum SwapProfileMenu {
         return interruptsRunCaption
     }
 
+    /// Whether an in-place account switch is offered for `terminal`.
+    ///
+    /// Not for a running row still on the tmux transport: the switch replaces
+    /// the session's process, TBD no longer starts processes on tmux, and the
+    /// daemon refuses it (`RPCErrorCode.terminalOnTmux`). Such a row is offered
+    /// only a fork, which opens a new tab on the pty holder and leaves the row
+    /// alone. A parked tmux row keeps the switch: switching it re-homes the
+    /// row and starts nothing. With no row to judge, the switch is offered and
+    /// the daemon decides.
+    static func offersInPlaceSwitch(for terminal: TBDShared.Terminal?) -> Bool {
+        guard let terminal else { return true }
+        return terminal.transport == .holder || terminal.isParked
+    }
+
     /// Formats a swap-profile menu item label with compact usage stats appended.
     /// Examples: "Gmail", "Gmail — 5h 40% · wk 16%", "Gmail — no data".
     /// Appends live session count when present (design 2026-09-05 §8.2).
@@ -1356,8 +1370,10 @@ private struct TabBarItem: View {
             Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)
 
-            Menu("Swap profile") {
-                swapProfileMenuItems(mode: .inPlace)
+            if SwapProfileMenu.offersInPlaceSwitch(for: terminal) {
+                Menu("Swap profile") {
+                    swapProfileMenuItems(mode: .inPlace)
+                }
             }
 
             Divider()

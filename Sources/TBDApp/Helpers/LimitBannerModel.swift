@@ -36,6 +36,17 @@ struct LimitBannerModel {
         return "Switch to \(name) — \(summary)"
     }
 
+    /// The fork button's title, offered in place of the switch on a row that
+    /// cannot be switched in place (`SwapProfileMenu.offersInPlaceSwitch`):
+    /// "Fork to <name> — <summary>", or "Fork to <name>", or nil when there is
+    /// no suggested profile to offer. The fork continues the conversation in
+    /// a new tab on that account and leaves this one as it is.
+    var forkButtonTitle: String? {
+        guard let name = suggestedProfileName else { return nil }
+        guard let summary = suggestedUsageSummary else { return "Fork to \(name)" }
+        return "Fork to \(name) — \(summary)"
+    }
+
     /// Static helper to build the banner model from state.
     /// - `limitHit`: The `TerminalLimitHit` from `AppState.limitHits[terminalID]`.
     /// - `limitedProfile`: The profile the limit hit on, looked up from the app's list.

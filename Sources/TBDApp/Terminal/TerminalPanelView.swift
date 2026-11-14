@@ -335,18 +335,28 @@ struct TerminalPanelView: View {
                     suggestedProfile: suggestedProfile,
                     suggestedLiveCount: suggestedLiveCount
                 )
+                // A running tmux row cannot be switched in place, so its
+                // banner offers a fork to the suggested account instead, and
+                // keeps the banner: this tab is still at its limit.
+                let switchesInPlace = SwapProfileMenu.offersInPlaceSwitch(
+                    for: appState.terminals.values.flatMap({ $0 })
+                        .first(where: { $0.id == terminalID }))
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                     Text("⚠ Session limit hit on \(model.limitedProfileName) · \(model.resetsText)")
                         .font(.caption)
                     Spacer()
-                    if let switchTitle = model.switchButtonTitle {
+                    if let switchTitle = switchesInPlace ? model.switchButtonTitle : model.forkButtonTitle {
                         Button(switchTitle) {
                             Task {
                                 if let suggestedID = limitHit.suggestedProfileID {
-                                    await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: suggestedID, mode: .inPlace)
-                                    appState.limitHits.removeValue(forKey: terminalID)
+                                    await appState.swapTerminalProfile(
+                                        terminalID: terminalID, newProfileID: suggestedID,
+                                        mode: switchesInPlace ? .inPlace : .fork)
+                                    if switchesInPlace {
+                                        appState.limitHits.removeValue(forKey: terminalID)
+                                    }
                                 }
                             }
                         }

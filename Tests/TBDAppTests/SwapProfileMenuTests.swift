@@ -25,6 +25,42 @@ struct SwapProfileMenuTests {
     }
 }
 
+/// Which rows are offered an in-place account switch. The tab's menu and the
+/// limit banner both read this, and a fork stays on offer for every row.
+@Suite("SwapProfileMenu — in-place switch")
+struct SwapProfileMenuInPlaceTests {
+    private func row(transport: TerminalTransport, parked: Bool) -> TBDShared.Terminal {
+        TBDShared.Terminal(
+            worktreeID: UUID(),
+            tmuxWindowID: transport == .holder ? "" : "@1",
+            tmuxPaneID: transport == .holder ? "" : "%1",
+            label: "claude", claudeSessionID: "acme-session", kind: .claude,
+            hibernatedAt: parked ? Date() : nil,
+            transport: transport)
+    }
+
+    /// The daemon refuses an in-place switch of a running tmux row, so the
+    /// menu does not offer one.
+    @Test func aRunningTmuxRowIsNotOfferedAnInPlaceSwitch() {
+        #expect(!SwapProfileMenu.offersInPlaceSwitch(for: row(transport: .tmux, parked: false)))
+    }
+
+    /// A parked tmux row's switch re-homes it and starts nothing, so it stays.
+    @Test func aParkedTmuxRowKeepsTheInPlaceSwitch() {
+        #expect(SwapProfileMenu.offersInPlaceSwitch(for: row(transport: .tmux, parked: true)))
+    }
+
+    @Test func aHolderRowKeepsTheInPlaceSwitchRunningOrParked() {
+        #expect(SwapProfileMenu.offersInPlaceSwitch(for: row(transport: .holder, parked: false)))
+        #expect(SwapProfileMenu.offersInPlaceSwitch(for: row(transport: .holder, parked: true)))
+    }
+
+    /// With no row to judge, the switch is offered and the daemon decides.
+    @Test func noRowKeepsTheInPlaceSwitch() {
+        #expect(SwapProfileMenu.offersInPlaceSwitch(for: nil))
+    }
+}
+
 @Suite("SwapProfileMenu — menuLabel")
 struct SwapProfileMenuLabelTests {
     private func profile(name: String) -> ModelProfile {

@@ -502,9 +502,11 @@ extension AppState {
     /// Swap the model profile of a terminal, awake or parked.
     ///
     /// `.inPlace` (default, "Switch account"): the daemon moves the SAME
-    /// terminal row to the new profile. An awake row is respawned under it; a
-    /// parked row takes the daemon's cold path, which re-homes it without a
-    /// wake, so it stays parked and wakes under the new profile next time.
+    /// terminal row to the new profile. An awake holder row is parked and woken
+    /// under it; an awake tmux row is refused, because TBD no longer starts
+    /// processes on tmux; a parked row takes the daemon's cold path, which
+    /// re-homes it without a wake, so it stays parked and wakes under the new
+    /// profile next time.
     /// The row is updated in place via the `terminalProfileChanged` delta — no
     /// new tab is created, so this method just fires the RPC and lets the delta
     /// reconcile local state. For the RPC's duration an awake holder row is
@@ -531,10 +533,12 @@ extension AppState {
         // and relabel an unrelated hibernation of the source landing mid-fork
         // as a switch.
         //
-        // A tmux row's swap respawns the agent inside the window the pane is
-        // attached to and never parks it, so it has nothing to ride; a record
-        // there would only relabel an unrelated hibernation landing mid-swap
-        // as the switch.
+        // A tmux row has nothing to ride. The daemon refuses an in-place
+        // switch of a running tmux row before changing anything
+        // (`RPCErrorCode.terminalOnTmux`), so the app does not offer one
+        // (`SwapProfileMenu.offersInPlaceSwitch`); a parked tmux row takes the
+        // cold path below. A record there would only relabel an unrelated
+        // hibernation landing mid-swap as the switch.
         //
         // An in-place switch of a row already parked takes the daemon's cold
         // path: it is re-homed and stays parked, so there is no park or wake to
