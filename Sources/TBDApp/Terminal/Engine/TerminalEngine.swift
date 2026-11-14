@@ -50,6 +50,8 @@ protocol TerminalEngine: AnyObject, Sendable {
     /// before the handback snapshot feeds its probe.
     nonisolated var isAtSequenceBoundary: Bool { get }
     /// Called before a preamble goes into a view that has been used before.
+    /// Like `ingestSnapshot(_:)`, call it before live output is wired to this
+    /// engine.
     func prepareForPreamble()
     /// Feeds a snapshot preamble so that no callback, OSC event or pty reply it
     /// provokes reaches the delegate.

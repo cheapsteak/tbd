@@ -382,16 +382,39 @@ final class GhosttyEngine: TerminalEngine {
         terminal.withLocked { $0.isAtSequenceBoundary }
     }
 
-    /// A full reset (RIS), muted, so neither a reply nor the program status
-    /// clear libghostty reports for RIS reaches anyone. Unlike SwiftTerm's,
-    /// libghostty's reset gives a used terminal a fresh screen, alternate
-    /// screen included, so the preamble lands as it would in a new one.
+    /// A CAN, then a full reset (RIS), both muted, so the preamble lands as it
+    /// would in a new terminal. Unlike SwiftTerm's, libghostty's reset gives a
+    /// used terminal a fresh screen, alternate screen included.
+    ///
+    /// The reset clears the screen model but leaves libghostty's stream parser
+    /// where it was, so a terminal whose output stopped inside a sequence
+    /// would let the preamble's first ESC end that sequence on the fresh
+    /// screen: a cut OSC 8 would put its link on every cell the preamble
+    /// writes. The CAN first returns the parser to ground from any state. It
+    /// ends an unfinished OSC or DCS as it stands (a cut DECRQSS answers),
+    /// runs a cut kitty graphics APC, drops a cut CSI, and ends a partial
+    /// UTF-8 character as U+FFFD at the old cursor. The reset then clears
+    /// what those changed on the screen: the link on the pen, the title, the
+    /// images, the stray character. Colours a cut OSC 4, 10, 11 or 12 sets
+    /// survive the reset, as they would if the preamble's ESC had ended it.
+    ///
+    /// The mute keeps what the two provoke from the delegate: a reply to a
+    /// sequence the CAN ended, and the program status clear libghostty
+    /// reports for RIS.
+    ///
+    /// Two calls rather than one lock hold, because no feed can land between
+    /// them: like `ingestSnapshot(_:)`, this runs before live output is wired
+    /// to this engine.
     func prepareForPreamble() {
         terminal.isMuted = true
+        terminal.feed(Self.cancel[...])
         terminal.reset()
         terminal.isMuted = false
         rebaselineGrid()
     }
+
+    /// CAN, which ends any escape sequence or UTF-8 character in progress.
+    private static let cancel: [UInt8] = [0x18]
 
     /// Depth of the snapshot feeds in flight; see `SwiftTermEngine`.
     private var snapshotIngestDepth = 0
