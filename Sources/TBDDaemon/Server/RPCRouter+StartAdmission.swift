@@ -9,11 +9,17 @@ extension RPCRouter {
     /// Which agent a wake of this row would start, or nil when the wake starts
     /// no agent and so is not checked.
     ///
-    /// Only a parked row can start anything: a wake of a live one is answered
-    /// as a no-op and must stay that way. A parked row names the provider
-    /// through its recovery resume plan, just as the wake itself does.
+    /// Only a row parked on the pty holder can start anything. A wake of a
+    /// live row is answered as a no-op and must stay that way. A wake of a row
+    /// parked on tmux starts nothing either: it is refused with the command
+    /// that moves the session (`HibernationCoordinator.tmuxWakeUnavailableReason`).
+    /// Asking admission first would let a hold hide that command, and mark
+    /// start-held a row that no wake will ever start. A parked holder row
+    /// names the provider through its recovery resume plan, just as the wake
+    /// itself does.
     static func startAdmissionAgent(forWaking terminal: Terminal) -> StartAdmissionAgent? {
-        guard terminal.isParked, let plan = terminal.recoveryResumePlan else { return nil }
+        guard terminal.isParked, terminal.transport == .holder,
+              let plan = terminal.recoveryResumePlan else { return nil }
         switch plan {
         case .claude: return .claude
         case .codex: return .codex
@@ -69,8 +75,9 @@ extension RPCRouter {
 
     /// The start-admission gate for a wake. Call right after `beginActuation`.
     ///
-    /// A terminal that is missing, not parked, or not an agent tab is not
-    /// checked, so the wake path answers it exactly as it did before. A held
+    /// A terminal that is missing, not parked, parked on tmux, or not an agent
+    /// tab is not checked, so the wake path gives it its own answer: a row
+    /// parked on tmux is refused with `tbd terminal migrate`. A held
     /// wake records the reason and the time on the row and publishes the row,
     /// so the parked pane can say why it is still asleep. If the row was woken or
     /// re-parked while the command ran, nothing is written. `earlierHold` is as
