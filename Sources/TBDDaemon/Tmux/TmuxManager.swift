@@ -654,9 +654,8 @@ public struct TmuxManager: Sendable {
     /// mode enabled — which agent TUIs (Claude Code, Codex) AND modern
     /// interactive shells (zsh, bash ≥4.4, fish) all do at their prompt — and
     /// emits bare bytes otherwise (a cooked-mode consumer, e.g. a program
-    /// reading stdin). Note `-d`/no-`-r`: like the GUI `PasteExecutor` path,
-    /// tmux replaces interior LF with CR in the pasted body; this is the proven
-    /// paste behavior we deliberately match, and is inside the brackets so it
+    /// reading stdin). Note `-d`/no-`-r`: tmux replaces interior LF with CR in
+    /// the pasted body; this is deliberate, and is inside the brackets so it
     /// does not affect the separate trailing Enter.
     public static func pasteBufferCommand(server: String, bufferName: String, paneID: String) -> [String] {
         ["-L", server, "paste-buffer", "-d", "-p", "-b", bufferName, "-t", paneID]
@@ -1267,20 +1266,17 @@ public struct TmuxManager: Sendable {
     /// paste and can't be absorbed by a TUI's paste-burst coalescing window
     /// (the root cause of `--submit` silently dropping large messages).
     ///
-    /// Mirrors `PasteExecutor.paste` (the GUI paste path) but over `runTmux`
-    /// rather than the `-CC` control command client, so it stays consistent with
-    /// `handleTerminalSend`'s existing plain-subprocess tmux usage and adds no
-    /// coupling to control mode. The temp file is removed in all paths; a paste
-    /// failure best-effort deletes the orphaned buffer before rethrowing so the
-    /// caller surfaces the error.
+    /// Runs over `runTmux`, consistent with `handleTerminalSend`'s existing
+    /// plain-subprocess tmux usage. The temp file is removed in all paths; a
+    /// paste failure best-effort deletes the orphaned buffer before rethrowing
+    /// so the caller surfaces the error.
     public func pasteText(server: String, paneID: String, bytes: Data) async throws {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-paste-\(UUID().uuidString)")
         let path = tempURL.path
-        // Note: no quote/newline guard is needed here (unlike PasteExecutor,
-        // which single-quotes the path INTO a tmux command string). `runTmux`
-        // passes `path` as a distinct argv element with no shell, so any bytes
-        // in a FileManager temp path are safe.
+        // Note: no quote/newline guard is needed here. `runTmux` passes `path`
+        // as a distinct argv element with no shell, so any bytes in a
+        // FileManager temp path are safe.
         // Unique buffer per call so concurrent pastes never clobber each other.
         let bufferName = "tbd-paste-\(UUID().uuidString.prefix(8))"
         let loadArgs = Self.loadBufferCommand(server: server, bufferName: bufferName, path: path)
@@ -1296,7 +1292,7 @@ public struct TmuxManager: Sendable {
         }
 
         // Register cleanup BEFORE the write so a mid-write throw still removes
-        // any partial temp file (PasteExecutor's "removed in all paths").
+        // any partial temp file ("removed in all paths").
         defer { try? FileManager.default.removeItem(at: tempURL) }
         try bytes.write(to: tempURL)
 
