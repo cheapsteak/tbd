@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 import TBDShared
+import TestSupport
 
 @Suite("CodexExecutableResolver")
 struct CodexExecutableResolverTests {
@@ -191,6 +192,100 @@ struct CodexExecutableResolverTests {
         } catch {
             Issue.record("Unexpected error: \(error)")
         }
+    }
+}
+
+@Suite("CodexLaunchPreparation")
+struct CodexLaunchPreparationTests {
+    /// Set from inside a synchronous seam and read by a poll. A locked class
+    /// rather than an actor because the seams cannot await.
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isSet = false
+        var value: Bool { lock.withLock { isSet } }
+        func set() { lock.withLock { isSet = true } }
+    }
+
+    /// The preparation lock serialises only the home ensurer. Every launch
+    /// path shares that lock, and most call `prepare` inline from async code,
+    /// so if a stalled resolver held it, each other Codex launch in the
+    /// process would park a cooperative-pool thread waiting for it. Here one
+    /// launch's resolver is held on a gate, and a second launch must still
+    /// finish.
+    ///
+    /// Both preparations run through `gateHoldingTask`: the first blocks its
+    /// thread on the gate, and the second would block on the lock if the lock
+    /// still spanned resolution, so neither may take a pool thread.
+    @Test("a stalled executable resolver does not hold up another launch's preparation")
+    func stalledResolverDoesNotBlockAnotherPreparation() async throws {
+        let heldResolverEntered = Flag()
+        let heldHomeEnsured = Flag()
+        let heldFinished = Flag()
+        let releaseHeldResolver = DispatchSemaphore(value: 0)
+        // Release on every exit, so an early return cannot leave the held
+        // thread parked until the gate's own deadline. The release below makes
+        // this a second signal on the normal path; it finds no waiter.
+        defer { releaseHeldResolver.signal() }
+
+        let held = gateHoldingTask { () -> Result<CodexLaunchPreparation, any Error> in
+            defer { heldFinished.set() }
+            return Result {
+                try CodexLaunchPreparation.prepare(
+                    executableResolver: {
+                        heldResolverEntered.set()
+                        releaseHeldResolver.waitForGate("the stalled Codex executable resolver")
+                        return "/opt/acme/bin/codex-held"
+                    },
+                    homeEnsurer: {
+                        heldHomeEnsured.set()
+                        return URL(fileURLWithPath: "/nonexistent/acme/codex-home-held", isDirectory: true)
+                    })
+            }
+        }
+        let entered = try await waitFor("the first preparation to enter its executable resolver") {
+            heldResolverEntered.value
+        }
+        guard entered else { return }
+
+        let otherResolved = Flag()
+        let otherFinished = Flag()
+        let other = gateHoldingTask { () -> Result<CodexLaunchPreparation, any Error> in
+            defer { otherFinished.set() }
+            return Result {
+                try CodexLaunchPreparation.prepare(
+                    executableResolver: {
+                        otherResolved.set()
+                        return "/opt/acme/bin/codex-other"
+                    },
+                    homeEnsurer: {
+                        URL(fileURLWithPath: "/nonexistent/acme/codex-home-other", isDirectory: true)
+                    })
+            }
+        }
+        try await waitFor(
+            "a second preparation to finish while the first one's executable resolver is stalled",
+            observed: {
+                "second resolver ran: \(otherResolved.value), first resolver still held: \(!heldFinished.value)"
+            }
+        ) { otherFinished.value }
+        // The second preparation overlapped the stall rather than following it.
+        #expect(!heldHomeEnsured.value, "the first preparation reached its home ensurer before the gate was released")
+        #expect(!heldFinished.value, "the first preparation finished before the gate was released")
+
+        releaseHeldResolver.signal()
+        let bothFinished = try await waitFor(
+            "both preparations to finish once the stalled resolver is released",
+            observed: { "first finished: \(heldFinished.value), second finished: \(otherFinished.value)" }
+        ) { heldFinished.value && otherFinished.value }
+        guard bothFinished else { return }
+
+        let heldPreparation = try await held.value.get()
+        #expect(heldPreparation.executablePath == "/opt/acme/bin/codex-held")
+        #expect(heldPreparation.codexHome.path == "/nonexistent/acme/codex-home-held")
+        #expect(heldHomeEnsured.value)
+        let otherPreparation = try await other.value.get()
+        #expect(otherPreparation.executablePath == "/opt/acme/bin/codex-other")
+        #expect(otherPreparation.codexHome.path == "/nonexistent/acme/codex-home-other")
     }
 }
 
