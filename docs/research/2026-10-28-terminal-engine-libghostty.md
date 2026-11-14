@@ -119,9 +119,9 @@ other.
   commits in TBD's SwiftTerm fork, which
   `Package.swift` lists with the reason for each.
 
-Neither emulator sits behind tmux. Holder-backed sessions are the default
-(`Config.ptyHolderDefault`), so an engine is not ruled out for expecting to own
-the pty or for being unable to speak to a tmux client.
+Neither emulator sits behind tmux. Every new session opens on a pty holder, so
+an engine is not ruled out for expecting to own the pty or for being unable to
+speak to a tmux client.
 
 ### Two emulators, one snapshot format
 

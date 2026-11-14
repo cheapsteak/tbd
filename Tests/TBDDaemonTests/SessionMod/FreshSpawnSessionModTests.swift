@@ -14,31 +14,18 @@ import Testing
 /// it stays legacy. With every feature off, every one of them is the spawn it
 /// always was.
 ///
-/// tmux runs in dry-run mode, so the spawned process's environment is read off
-/// the recorded `new-window` argv (its `-e` pairs).
+/// Every spawn goes through the holder spawn double, so the spawned process's
+/// environment is read off the launch request it recorded.
 @Suite("Session mod: fresh Claude spawns")
 struct FreshSpawnSessionModTests {
 
     // MARK: - Fixture
 
-    private final class TmuxCalls: @unchecked Sendable {
-        private let lock = NSLock()
-        private var calls: [[String]] = []
-        func record(_ argv: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            calls.append(argv)
-        }
-        var all: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return calls
-        }
-    }
-
     private struct Fixture {
         let db: TBDDatabase
         let lifecycle: WorktreeLifecycle
         let router: RPCRouter
-        let tmux: TmuxCalls
+        let holder: FakeHolderLaunch
         let repo: Repo
         let worktree: Worktree
         let sessionsDir: URL
@@ -133,19 +120,16 @@ struct FreshSpawnSessionModTests {
             #expect(response.success)
         }
 
-        /// The process environment the window spawned for `terminalID` was
-        /// given: the `-e` pairs of its `new-window`, which carries the
-        /// terminal's id in its command.
+        /// The process environment the session spawned for `terminalID` was
+        /// given: its holder launch's environment.
         func launchEnvironment(
             of terminalID: UUID, sourceLocation: SourceLocation = #_sourceLocation
         ) throws -> [String: String] {
             let launch = try #require(
-                tmux.all.last {
-                    $0.contains("new-window") && ($0.last?.contains(terminalID.uuidString) ?? false)
-                },
-                "no new-window was recorded for terminal \(terminalID)",
+                holder.launch(for: terminalID),
+                "no holder launch was recorded for terminal \(terminalID)",
                 sourceLocation: sourceLocation)
-            return tmuxEnvironmentFlags(launch)
+            return launch.request.environment
         }
 
         /// The spawn carried the mod: its row holds an incarnation, its launch
@@ -207,21 +191,20 @@ struct FreshSpawnSessionModTests {
         try FileManager.default.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: worktreePath, withIntermediateDirectories: true)
 
-        let calls = TmuxCalls()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { calls.record($0) },
             dryRunCapturePane: { _, _ in "" })
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
         try await db.config.setComposerDraftAsTheOnlyModFeature(flagOn)
         try await db.config.setPrimaryAgentPreference(.claude)
 
-        // A carryover primary and a fork of a real conversation schedule a
-        // session-id recapture. This one runs at once and finds nothing, so no
-        // task outlives the test and nothing reads a session file at a
-        // process-wide path.
+        // A fork of a real conversation schedules a session-id recapture. This
+        // one runs at once and finds nothing, so no task outlives the test and
+        // nothing reads a session file at a process-wide path.
         let inertRecapture: @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler = {
             db, tmux in
             SessionRecaptureScheduler(
@@ -232,13 +215,14 @@ struct FreshSpawnSessionModTests {
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager,
             sessionsDir: sessionsDir)
-        lifecycle.sessionRecaptureFactory = inertRecapture
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
             sessionsDir: sessionsDir,
             actuationLog: makeTestActuationLog())
         router.sessionRecaptureFactory = inertRecapture
+        router.holderRegistry = registry
 
         let repo = try await db.repos.create(
             path: "/tmp/tbd-freshmod-repo-\(UUID().uuidString)",
@@ -247,7 +231,7 @@ struct FreshSpawnSessionModTests {
             repoID: repo.id, name: "wt", branch: "tbd/wt",
             path: worktreePath.path, tmuxServer: "tbd-freshmod-test")
         return Fixture(
-            db: db, lifecycle: lifecycle, router: router, tmux: calls,
+            db: db, lifecycle: lifecycle, router: router, holder: holder,
             repo: repo, worktree: worktree, sessionsDir: sessionsDir, home: home)
     }
 
@@ -364,8 +348,7 @@ struct FreshSpawnSessionModTests {
     }
 
     /// A conversation carried into a new worktree forks (`--fork-session`):
-    /// its session id exists only once it has launched, and its recapture is
-    /// scheduled expecting no incarnation. It stays legacy.
+    /// its session id exists only once it has launched. It stays legacy.
     @Test func carryoverPrimaryStaysLegacy() async throws {
         let fixture = try await Self.makeFixture(flagOn: true)
         defer { fixture.tearDown() }
@@ -434,10 +417,8 @@ struct FreshSpawnSessionModTests {
         let fork = try await fixture.forkSwap(source)
 
         #expect(fork.id != source.id)
-        let launch = try #require(fixture.tmux.all.last {
-            $0.contains("new-window") && ($0.last?.contains(fork.id.uuidString) ?? false)
-        })
-        #expect(launch.last?.contains("--fork-session") == true,
+        let launch = try #require(fixture.holder.launch(for: fork.id)?.commandLine)
+        #expect(launch.contains("--fork-session"),
                 "a fork of a real conversation did not fork the session")
         try await fixture.expectNoMod(fork.id)
         #expect(try fixture.sessionsDirContents().isEmpty)

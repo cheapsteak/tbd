@@ -57,6 +57,7 @@ struct LimitBannerModelTests {
         #expect(model.suggestedUsageSummary?.contains("30") == true) // Usage percent
         #expect(model.suggestedUsageSummary?.contains("live") == true)
         #expect(model.switchButtonTitle?.hasPrefix("Switch to Available — ") == true)
+        #expect(model.forkButtonTitle?.hasPrefix("Fork to Available — ") == true)
     }
 
     @Test
@@ -87,6 +88,7 @@ struct LimitBannerModelTests {
         #expect(model.suggestedProfileName == nil)
         #expect(model.suggestedUsageSummary == nil)
         #expect(model.switchButtonTitle == nil)
+        #expect(model.forkButtonTitle == nil)
     }
 
     /// A suggestion whose fresh snapshot has no displayable buckets and no
@@ -126,6 +128,7 @@ struct LimitBannerModelTests {
         #expect(model.suggestedProfileName == "Spare")
         #expect(model.suggestedUsageSummary == nil)
         #expect(model.switchButtonTitle == "Switch to Spare")
+        #expect(model.forkButtonTitle == "Fork to Spare")
     }
 
     /// Live sessions alone still make a summary, without a leading separator.

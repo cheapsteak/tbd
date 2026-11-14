@@ -767,10 +767,10 @@ public struct TerminalStore: Sendable {
     /// handler rejects user-driven creates on archived rows before spawn.
     /// Promoted rows have no such flow — they are never revived.
     ///
-    /// `transport` is stamped here and never changed afterwards — the
-    /// `pty_holder_enabled` gate is read at spawn time, so a session created on
-    /// one transport keeps it for life. It defaults to `.tmux` so every existing
-    /// call site keeps creating tmux-backed sessions untouched.
+    /// `transport` is stamped here. Every spawn passes `.holder`
+    /// (`WorktreeLifecycle.spawnTerminal`); the `.tmux` default remains for the
+    /// fixtures that write the rows an older build left behind, and only
+    /// `tbd terminal migrate` moves a row off it.
     ///
     /// `sessionIncarnationID` is the incarnation a fresh Claude spawn exports
     /// as `TBD_TERMINAL_INCARNATION_ID` when a session-mod feature is on
@@ -1584,16 +1584,15 @@ public struct TerminalStore: Sendable {
     /// which the row stops describing a dead tmux pane and starts describing a
     /// live holder, and a caller that fails anywhere before it leaves the row
     /// untouched — still `tmux`, still awake, naming a window that is now dead,
-    /// which is the ordinary window-died state `terminal.recreateWindow`
-    /// repairs.
+    /// which a later move picks up exactly as this one found it.
     ///
     /// **The guard is the complement of `setParkedTransport`'s.** That one
     /// requires the row to read parked; this one requires it to read awake and
     /// not already holder-backed, so neither can be used for the other's case
-    /// by mistake. Between the caller's kill and this write the app may notice
-    /// the dead window and recreate it, which rotates the row's incarnation:
-    /// the snapshot then fails to match, nothing is written, and the caller
-    /// abandons the holder it started.
+    /// by mistake. Any writer that changes the row between the caller's kill
+    /// and this write — closing the tab, say — leaves the snapshot stale: it
+    /// then fails to match, nothing is written, and the caller abandons the
+    /// holder it started.
     ///
     /// The session and activity columns are cleared through the same helper
     /// `replaceRecreatedShellWindow` uses, because this is the same event — a

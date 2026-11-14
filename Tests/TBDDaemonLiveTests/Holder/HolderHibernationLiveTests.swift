@@ -1146,7 +1146,6 @@ private final class HibernationFixture {
         ]
 
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPtyHolderEnabled(true)
 
         let executable = try #require(
             HolderProcessFixture.locateExecutable(),

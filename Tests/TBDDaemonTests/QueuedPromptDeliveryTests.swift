@@ -5,8 +5,8 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2 — dry-run tmux, an in-memory database, an `EventDrivenTestClock`
-/// for the readiness ceiling and the settle.
+/// Tier 2 — dry-run tmux, the holder spawn double, an in-memory database, an
+/// `EventDrivenTestClock` for the readiness ceiling and the settle.
 ///
 /// `docs/specs/2026-08-10-queued-prompt-on-create-design.md`: a parked prompt
 /// reaches its agent by the one delivery path — a paste, once, behind the
@@ -33,10 +33,6 @@ struct QueuedPromptDeliveryTests {
             lock.lock(); defer { lock.unlock() }
             _calls.append(args)
         }
-        /// Just the shell-command bodies — the last argv element of each
-        /// `new-window` call, which is where a spawn's trailing prompt would
-        /// land if anything still put one there.
-        var shellBodies: String { calls.compactMap { $0.last }.joined(separator: "\n") }
         var joinedAll: String {
             calls.map { $0.joined(separator: " ") }.joined(separator: "\n")
         }
@@ -250,15 +246,24 @@ struct QueuedPromptDeliveryTests {
     private struct SpawnFixture {
         let lifecycle: WorktreeLifecycle
         let db: TBDDatabase
-        let recorder: ArgvRecorder
+        /// Every session the spawn opened, through the holder spawn double.
+        let holder: FakeHolderLaunch
         let coordinator: PendingPromptCoordinator
         let sends: SendRecorder
         let repo: Repo
         let worktree: Worktree
+
+        /// The command line of every session the spawn opened, which is where
+        /// a spawn's trailing prompt would land if anything still put one
+        /// there.
+        var commandLines: String {
+            holder.launches.compactMap { $0.commandLine }.joined(separator: "\n")
+        }
     }
 
     /// A `WorktreeLifecycle` wired to a coordinator whose send seam is a
-    /// recorder, so `spawnPrimaryTerminals` can be driven directly.
+    /// recorder, so `spawnPrimaryTerminals` can be driven directly. Its spawns
+    /// go through the holder spawn double, so no process is started.
     ///
     /// The clock defaults to an `EventDrivenTestClock` nobody advances: a
     /// readiness wait this suite does not care about then simply never
@@ -275,10 +280,9 @@ struct QueuedPromptDeliveryTests {
         attachCoordinator: Bool = true,
         gate: Gate? = nil
     ) async throws -> SpawnFixture {
-        let recorder = ArgvRecorder()
+        let holder = FakeHolderLaunch()
         let tmux = TmuxManager(
             dryRun: true,
-            dryRunRecorder: { recorder.record($0) },
             dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
         let db = try TBDDatabase(inMemory: true)
         let sends = SendRecorder()
@@ -305,9 +309,10 @@ struct QueuedPromptDeliveryTests {
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config),
             configDirManager: isolatedConfigDirManager())
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         if attachCoordinator { lifecycle.pendingPromptCoordinator = coordinator }
         return SpawnFixture(
-            lifecycle: lifecycle, db: db, recorder: recorder, coordinator: coordinator,
+            lifecycle: lifecycle, db: db, holder: holder, coordinator: coordinator,
             sends: sends, repo: repo, worktree: worktree)
     }
 
@@ -447,7 +452,7 @@ struct QueuedPromptDeliveryTests {
             preSessionTerminalID: nil)
         await awaitDeliveries(fixture.coordinator)
 
-        #expect(!fixture.recorder.shellBodies.contains("deliver me"))
+        #expect(!fixture.commandLines.contains("deliver me"))
         #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == "deliver me")
         #expect(fixture.sends.calls.isEmpty)
         #expect(try await fixture.db.notifications.unread(
@@ -500,7 +505,7 @@ struct QueuedPromptDeliveryTests {
     /// line — because "the spawn consumed it" and "the spawn delivered it"
     /// were the same act in the design this replaces. Restore either and this
     /// reds: a take clears the column, an argv puts the words in
-    /// `shellBodies`.
+    /// `commandLines`.
     @Test("the spawn path neither reads nor writes the pending-prompt column")
     func spawnPathNeverTouchesTheColumn() async throws {
         let fixture = try await makeSpawnFixture(attachCoordinator: false)
@@ -512,7 +517,7 @@ struct QueuedPromptDeliveryTests {
             worktree: fixture.worktree, repo: fixture.repo, skipClaude: false,
             preSessionTerminalID: nil)
 
-        #expect(!fixture.recorder.shellBodies.contains("parser.swift"))
+        #expect(!fixture.commandLines.contains("parser.swift"))
         let row = try await fixture.db.worktrees.get(id: fixture.worktree.id)
         #expect(row?.pendingPrompt == Self.multiLinePrompt)
         #expect(row?.pendingPromptSubmit == true)
@@ -533,8 +538,8 @@ struct QueuedPromptDeliveryTests {
             worktree: fixture.worktree, repo: fixture.repo, skipClaude: false,
             initialPrompt: "cli words", preSessionTerminalID: nil)
 
-        #expect(fixture.recorder.shellBodies.contains("'cli words'"))
-        #expect(!fixture.recorder.shellBodies.contains("parked words"))
+        #expect(fixture.commandLines.contains("'cli words'"))
+        #expect(!fixture.commandLines.contains("parked words"))
         // Still recoverable: the pane exists but its hook has not fired, so
         // nothing has been typed and nothing has been cleared.
         #expect(try await pendingPrompt(fixture.db, fixture.worktree.id) == "parked words")

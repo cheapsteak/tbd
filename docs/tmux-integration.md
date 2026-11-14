@@ -2,6 +2,16 @@
 
 How TBD integrates with tmux, what we tried, what worked, and why.
 
+TBD opens every new session on the pty holder
+([`specs/2026-08-30-pty-holder-session-transport-design.md`](specs/2026-08-30-pty-holder-session-transport-design.md)).
+What follows describes the sessions that still run on tmux, which TBD keeps
+serving until `tbd terminal migrate` moves them to the holder. TBD starts no
+new tmux window for them: a parked tmux session refuses to wake, and an
+in-place account switch of a running one is refused. `terminal.recreateWindow`
+opens no window: it parks a tmux agent tab whose window has gone and whose
+session can be resumed, so a migration followed by a wake brings it back on
+the holder, and it refuses every other row.
+
 ## Architecture: One Linked Window Per Viewer + Direct PTY
 
 Each terminal panel in TBD gets its own tmux client attached to a **private
@@ -283,7 +293,7 @@ Wake now asks the same question `terminal.send` asks, through the same
 
 **Wake reports here; it does not repair.** Respawning a row the database calls
 awake would make tmux authoritative over the parked flag, and one false-negative
-probe would then destroy a live session's in-flight work. Recovery stays the
-parked-row path and the explicit `terminal.recreateWindow` RPC. Reusing send's
+probe would then destroy a live session's in-flight work. Recovery for a tmux
+session is `tbd terminal migrate`, which moves it to the pty holder. Reusing send's
 probe rather than adding a second one is deliberate: two liveness primitives
 would drift, and this is the one that already carries pane identity.

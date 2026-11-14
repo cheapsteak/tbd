@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 import DaemonTestSupport
 import TestSupport
 
@@ -63,10 +64,11 @@ struct PreSessionRerunTests {
         defer { cleanup() }
         let (db, repoDir, worktree, _) = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        // dryRun tmux never actually runs the hook, so no marker ever appears
-        // and the first run's detached wait stays in flight for the full
-        // `timeout: 2` — that IS the in-flight window this test needs. No
-        // marker write, no sleep script required.
+        // The holder double never actually runs the hook, so no marker ever
+        // appears, and its job reads as still running, so the first run's
+        // detached wait stays in flight for the full `timeout: 2` — that IS
+        // the in-flight window this test needs. No marker write, no sleep
+        // script required.
         try await installPreSessionHook(repoDir: repoDir, script: "#!/bin/sh\nexit 0\n")
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)
@@ -105,7 +107,7 @@ struct PreSessionRerunTests {
         }
     }
 
-    @Test("RPC handler forwards params.cols/rows to the spawned window's resize-window")
+    @Test("RPC handler forwards params.cols/rows to the spawned hook tab's size")
     func rpcForwardsColsAndRows() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
@@ -113,8 +115,8 @@ struct PreSessionRerunTests {
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
         try await installPreSessionHook(repoDir: repoDir, script: "#!/bin/sh\nexit 0\n")
 
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 2)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, timeout: 2, holder: holder)
         let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true), actuationLog: makeTestActuationLog())
         let params = try JSONEncoder().encode(
             WorktreeRerunPreSessionParams(worktreeID: worktree.id, cols: 180, rows: 45)
@@ -123,20 +125,15 @@ struct PreSessionRerunTests {
         let response = try await router.handleWorktreeRerunPreSession(params)
         #expect(response.error == nil)
 
-        // createWindow's dry-run records the new-window shape (tmux new-window
-        // itself has no -x/-y), then issues an explicit resize-window to lock
-        // in the requested size — see TmuxManager.createWindow. That
-        // resize-window command is where cols/rows become observable, and
-        // going through the RPCRouter (not the lifecycle directly) is what
-        // proves handleWorktreeRerunPreSession actually forwards
-        // params.cols/params.rows instead of dropping them.
-        let resize = try #require(
-            recorder.snapshot().first { $0.contains("resize-window") }
-        )
-        #expect(resize.contains("-x"))
-        #expect(resize.contains("180"))
-        #expect(resize.contains("-y"))
-        #expect(resize.contains("45"))
+        // The hook tab's holder is launched at the requested size. Going
+        // through the RPCRouter (not the lifecycle directly) is what proves
+        // handleWorktreeRerunPreSession actually forwards params.cols /
+        // params.rows instead of dropping them.
+        let launches = holder.launches
+        #expect(launches.count == 1)
+        let launch = try #require(launches.first)
+        #expect(launch.request.columns == 180)
+        #expect(launch.request.rows == 45)
     }
 
     @Test("RPC surfaces the rejection message verbatim")
@@ -145,9 +142,10 @@ struct PreSessionRerunTests {
         defer { cleanup() }
         let (db, repoDir, worktree, _) = try await makeWorktreeFixture(status: .active)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        // dryRun tmux never actually runs the hook, so no marker ever appears
-        // and the first run's detached wait stays in flight for the full
-        // `timeout: 2` — that IS the in-flight window this test needs.
+        // The holder double never actually runs the hook, so no marker ever
+        // appears, and its job reads as still running, so the first run's
+        // detached wait stays in flight for the full `timeout: 2` — that IS
+        // the in-flight window this test needs.
         try await installPreSessionHook(repoDir: repoDir, script: "#!/bin/sh\nexit 0\n")
 
         let lifecycle = makeLifecycle(db: db, timeout: 2)

@@ -106,7 +106,6 @@ struct HolderInPlaceSwapTests {
             dryRunRecorder: { recorder.record($0) },
             dryRunCapturePane: { _, _ in "" })
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPtyHolderEnabled(true)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "holder-in-place-swap")
         let lifecycle = WorktreeLifecycle(

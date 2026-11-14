@@ -21,9 +21,9 @@ extension RPCRouter {
         // tmux coordinates to resolve — `tmuxServer` and `tmuxWindowID` are the
         // empty string — and the control-mode gate asks a question about tmux's
         // version that has nothing to say about this transport. The row's
-        // transport is the whole gate: a row can only be `.holder` because the
-        // holder flag was on when it was created, and flipping that flag off
-        // afterwards must never strand a live session.
+        // transport is the whole gate: a holder row was born on a holder or
+        // moved onto one by `tbd terminal migrate`, and a tmux row stays on
+        // tmux until it is migrated.
         //
         // A read that throws is answered as an error, not swallowed into the
         // control-mode path: that path answers "unavailable" with its gate

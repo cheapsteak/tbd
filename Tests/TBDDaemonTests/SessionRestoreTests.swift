@@ -48,7 +48,9 @@ private actor WakeLatch {
 /// The startup restore pass through the real router: real stores, dry-run tmux,
 /// a real actuation log in a temp directory, and every wake through the real
 /// `terminal.wake` handler. Each wake outcome comes from the production path
-/// that produces it, so nothing here stubs the wake.
+/// that produces it, so nothing here stubs the wake; the one double is the
+/// holder spawn double, which records each holder a wake starts instead of
+/// starting it.
 ///
 /// Tier 2: real filesystem, and real git in the tests that run a reconcile.
 /// Virtual time drives the gaps, and rows carry fixed dates, so nothing depends
@@ -65,6 +67,7 @@ struct SessionRestoreTests {
         let router: RPCRouter
         let lifecycle: WorktreeLifecycle
         let db: TBDDatabase
+        let holder: FakeHolderLaunch
         let clock: EventDrivenTestClock
         let logPath: String
         let directory: URL
@@ -94,20 +97,27 @@ struct SessionRestoreTests {
 
         let db = try TBDDatabase(inMemory: true)
         let clock = EventDrivenTestClock()
-        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        // One registry for every owner production wires: the wake's
+        // coordinator, the router and the lifecycle whose reconcile parks.
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: makeIsolatedConfigDirManager(tag: "session-restore"),
             sessionsDir: directory.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: ActuationLog(path: logPath), clock: clock)
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
         if let flag { try await db.config.setSessionRestore(flag) }
 
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
         let worktree = try await makeWorktree(db: db, repoID: repo.id, directory: directory)
         return Fixture(
-            router: router, lifecycle: lifecycle, db: db, clock: clock, logPath: logPath,
-            directory: directory, repoID: repo.id, worktree: worktree)
+            router: router, lifecycle: lifecycle, db: db, holder: holder, clock: clock,
+            logPath: logPath, directory: directory, repoID: repo.id, worktree: worktree)
     }
 
     /// A worktree row with its own directory on disk: its path is unique, and a
@@ -124,8 +134,8 @@ struct SessionRestoreTests {
         try await makeWorktree(db: fixture.db, repoID: fixture.repoID, directory: fixture.directory)
     }
 
-    /// A parked row, by default one this startup parked for recovery. Window ids
-    /// are unique so one row's wake never reads as a claim on another's window.
+    /// A parked holder row, by default one this startup parked for recovery. It
+    /// names no process, as a park leaves it.
     @discardableResult
     private func park(
         in fixture: Fixture,
@@ -135,12 +145,12 @@ struct SessionRestoreTests {
         parkedAt: Date = SessionRestoreTests.thisStartup,
         transcriptPath: String? = nil
     ) async throws -> UUID {
-        let token = UUID().uuidString
-        let sessionID = "session-\(token)"
+        let sessionID = "session-\(UUID().uuidString)"
         let terminal = try await fixture.db.terminals.create(
             worktreeID: (worktree ?? fixture.worktree).id,
-            tmuxWindowID: "@\(token)", tmuxPaneID: "%\(token)",
-            label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: kind)
+            tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: kind,
+            transport: .holder)
         if let transcriptPath {
             try await fixture.db.terminals.updateSession(
                 id: terminal.id, sessionID: sessionID, transcriptPath: transcriptPath)
@@ -226,12 +236,8 @@ struct SessionRestoreTests {
         return rows.filter { ($0["method"] as? String) == RPCMethod.terminalWake }
     }
 
-    /// Every window answers dead, as after a reboot.
-    private static func rebootedTmux() -> TmuxManager {
-        TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
-    }
-
-    /// A real startup reconcile finding a main worktree's Claude session dead.
+    /// A real startup reconcile finding a main worktree's Claude session dead:
+    /// its holder answers at no rendezvous, as after a reboot.
     /// - Returns: the parked row, and the moment before the reconcile began.
     private func startupThatParks(
         _ fixture: Fixture, repoDir: URL
@@ -242,8 +248,9 @@ struct SessionRestoreTests {
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
             tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
         let terminal = try await fixture.db.terminals.create(
-            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude)
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-1", kind: .claude,
+            transport: .holder)
         let parkedSince = Date()
         try await fixture.lifecycle.reconcile(
             repoID: repo.id, actuationLog: ActuationLog(path: fixture.logPath),
@@ -261,7 +268,7 @@ struct SessionRestoreTests {
     func flagOffWakesNothing(flag: Bool?) async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
-        let fixture = try await makeFixture(flag: flag, tmux: Self.rebootedTmux())
+        let fixture = try await makeFixture(flag: flag)
         defer { fixture.cleanUp() }
         let startup = try await startupThatParks(fixture, repoDir: repoDir)
         let codex = try await park(in: fixture, kind: .codex, parkedAt: startup.parkedSince)
@@ -278,7 +285,7 @@ struct SessionRestoreTests {
     func flagOnWakesWhatTheStartupParked() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
-        let fixture = try await makeFixture(flag: true, tmux: Self.rebootedTmux())
+        let fixture = try await makeFixture(flag: true)
         defer { fixture.cleanUp() }
         let startup = try await startupThatParks(fixture, repoDir: repoDir)
         let codex = try await park(in: fixture, kind: .codex, parkedAt: startup.parkedSince)
@@ -639,13 +646,12 @@ struct SessionRestoreTests {
         #expect(row.hibernateReason == .recovery)
     }
 
-    @Test("a spawn tmux refuses leaves the row parked and the pass goes on")
+    @Test("a spawn the holder refuses leaves the row parked and the pass goes on")
     func failedSpawnLeavesTheRowParkedAndThePassContinues() async throws {
-        let fixture = try await makeFixture(tmux: TmuxManager(
-            dryRun: true,
-            dryRunRespawnWindowError: { _ in TmuxError.unexpectedOutput("no such window") }))
+        let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
         let ids = try await parkRows(4, in: fixture)
+        for _ in ids { fixture.holder.failNextSpawn() }
         let pass = startPass(fixture)
 
         try await fixture.clock.requireAdvanceWhenArmed(
@@ -653,6 +659,7 @@ struct SessionRestoreTests {
 
         let summary = await pass.value
         #expect(summary == SessionRestoreSummary(selected: 4, failed: 4))
+        #expect(Set(fixture.holder.failedSpawns) == Set(ids))
         #expect(try await awake(ids, in: fixture.db).isEmpty)
         for id in ids {
             let row = try #require(try await fixture.db.terminals.get(id: id))
@@ -895,6 +902,7 @@ struct SessionRestoreTests {
             terminalID: row, condition: SessionRestoreCondition(parkedSince: Self.thisStartup))
 
         #expect(result == .conditionNotMet)
+        #expect(fixture.holder.launches.isEmpty, "the wake started a holder")
         #expect(recorded.snapshot().isEmpty, "the wake reached tmux: \(recorded.snapshot())")
         let after = try #require(try await fixture.db.terminals.get(id: row))
         #expect(after == before)
@@ -933,33 +941,25 @@ struct SessionRestoreTests {
         }
     }
 
-    /// A dry run records a size only where a wake recreates its window, so that
-    /// is where a size the pass sent would show.
-    @Test("a wake names no size, so a window it recreates takes the default")
+    /// A wake starts its holder at the size it was given, so the launch is where
+    /// a size the pass sent would show.
+    @Test("a wake names no size, so the holder it starts takes the default")
     func wakeNamesNoSize() async throws {
-        let recorded = RecordedTmuxArgs()
-        let fixture = try await makeFixture(tmux: TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { _ in true }))
+        let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
-        try await park(in: fixture)
+        let row = try await park(in: fixture)
 
         let summary = await fixture.router.restoreSessionsAfterStartup(parkedSince: Self.thisStartup)
 
         #expect(summary == SessionRestoreSummary(selected: 1, woken: 1))
-        let newSession = recorded.snapshot().first { $0.contains("new-session") }
-        let args = try #require(newSession)
-        let width = try #require(args.firstIndex(of: "-x"))
-        let height = try #require(args.firstIndex(of: "-y"))
-        #expect(args[width + 1] == String(TmuxManager.defaultCols))
-        #expect(args[height + 1] == String(TmuxManager.defaultRows))
+        let launch = try #require(fixture.holder.launch(for: row))
+        #expect(launch.request.columns == UInt16(TmuxManager.defaultCols))
+        #expect(launch.request.rows == UInt16(TmuxManager.defaultRows))
     }
 
-    /// A fast-pass test cannot start a real holder. This registry has no spawner,
-    /// so the wake gets as far as the fixture can state: the row was selected and
-    /// its wake took the holder path to the spawn it then refused, reaching no
-    /// tmux on the way.
+    /// A registry with no spawner in place of the fixture's double: the row was
+    /// selected and its wake took the holder path to the spawn it then refused,
+    /// reaching no tmux on the way.
     @Test("a holder row is selected and wakes on the holder path")
     func holderRowWakesOnTheHolderPath() async throws {
         let recorded = RecordedTmuxArgs()

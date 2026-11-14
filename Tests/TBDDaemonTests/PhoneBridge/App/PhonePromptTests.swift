@@ -1839,10 +1839,6 @@ private struct ChangingTheSettingBeforeTheCore: PhoneSessionActions {
         try await router.phoneCreateWorktree(p, deviceID: deviceID)
     }
 
-    func phoneSpawnsOnHolder() async -> Bool {
-        await router.phoneSpawnsOnHolder()
-    }
-
     func phoneRemoteProviders() async throws -> RPCResponse {
         try await router.phoneRemoteProviders()
     }

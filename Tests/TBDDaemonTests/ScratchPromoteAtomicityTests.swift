@@ -86,15 +86,22 @@ struct ScratchPromoteAtomicityTests {
 @Suite("terminal.create archived-worktree guard")
 struct TerminalCreateArchivedWorktreeGuardTests {
 
+    /// Spawns go through the holder spawn double, so the only thing that can
+    /// refuse a `terminal.create` here is the guard under test.
     private func makeRouter(_ db: TBDDatabase) -> RPCRouter {
-        RPCRouter(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
+        return router
     }
 
     private func makeScratchDir() throws -> URL {
@@ -194,6 +201,7 @@ struct TerminalCreateArchivedWorktreeGuardTests {
         #expect(resp.success)
         let terminal = try resp.decodeResult(Terminal.self)
         #expect(terminal.worktreeID == wt.id)
+        #expect(terminal.transport == .holder)
         #expect(try await db.terminals.get(id: terminal.id) != nil)
     }
 }

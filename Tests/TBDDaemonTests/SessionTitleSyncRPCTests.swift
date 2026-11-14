@@ -10,38 +10,31 @@ import TestSupport
 /// `UserPromptSubmit` hook. See docs/specs/2026-10-14-session-title-sync-design.md.
 @Suite("session title sync over RPC")
 struct SessionTitleSyncRPCTests {
-    /// Thread-safe collector for tmux argv lists invoked during dryRun.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        var calls: [[String]] {
-            lock.lock(); defer { lock.unlock() }
-            return _calls
-        }
-        func record(_ args: [String]) {
-            lock.lock(); defer { lock.unlock() }
-            _calls.append(args)
-        }
-    }
-
     let db: TBDDatabase
     let router: RPCRouter
-    private let recorder: Recorder
+    /// Every session `terminal.create` opens lands on the holder spawn double,
+    /// which records the command line it was asked to run.
+    private let holder: FakeHolderLaunch
 
     init() throws {
-        let recorder = Recorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) })
+        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
-        self.db = db
-        self.recorder = recorder
-        self.router = RPCRouter(
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
+        self.db = db
+        self.holder = holder
+        self.router = router
     }
 
     /// A worktree named `acme-feature` whose path exists on disk, since
@@ -79,11 +72,9 @@ struct SessionTitleSyncRPCTests {
             label: TerminalLabel.claudeCode, claudeSessionID: UUID().uuidString, kind: .claude)
     }
 
-    /// The `new-window` argv lines the dryRun tmux recorded.
-    private func spawnArgv() -> [String] {
-        recorder.calls
-            .filter { $0.contains("new-window") }
-            .map { $0.joined(separator: " ") }
+    /// The command lines the holder spawn double was asked to run.
+    private func spawnCommandLines() -> [String] {
+        holder.launches.compactMap(\.commandLine)
     }
 
     /// Sends one `UserPromptSubmit` hook's `terminal.sessionTitle` and returns
@@ -132,7 +123,7 @@ struct SessionTitleSyncRPCTests {
         #expect(createResponse.success)
         let created = try createResponse.decodeResult(Terminal.self)
 
-        #expect(spawnArgv().contains { $0.contains("--name 'acme-feature · 2'") })
+        #expect(spawnCommandLines().contains { $0.contains("--name 'acme-feature · 2'") })
 
         let response = try await prompt(created)
         #expect(response.success)
@@ -253,28 +244,8 @@ struct SessionTitleSyncRPCTests {
         #expect(createResponse.success)
         let created = try createResponse.decodeResult(Terminal.self)
 
-        #expect(spawnArgv().contains { $0.contains("--name 'acme-feature · 3'") })
+        #expect(spawnCommandLines().contains { $0.contains("--name 'acme-feature · 3'") })
         #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature · 3")
-    }
-
-    @Test("recreating a Claude tab as a plain shell forgets its title, freeing the number")
-    func recreateAsShellForgetsTitle() async throws {
-        let (wt, path) = try await makeWorktree()
-        defer { try? FileManager.default.removeItem(atPath: path) }
-        // No claudeSessionID, so the recreate takes the plain-shell arm.
-        let tab = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
-            label: TerminalLabel.claudeCode, kind: .claude)
-        let titles = router.lifecycle.sessionTitles
-        await titles.record(terminalID: tab.id, worktreeID: wt.id, title: "acme-feature")
-
-        let response = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: tab.id)))
-        #expect(response.success, "error: \(response.error ?? "nil")")
-
-        #expect(try await db.terminals.get(id: tab.id)?.kind == .shell)
-        #expect(await titles.lastApplied(terminalID: tab.id) == nil)
     }
 
     @Test("a prompt leaves the reservation of a spawn whose row is not written yet")
@@ -313,7 +284,7 @@ struct SessionTitleSyncRPCTests {
         #expect(createResponse.success)
         let created = try createResponse.decodeResult(Terminal.self)
 
-        #expect(spawnArgv().contains { $0.contains("--name 'acme-feature · 3'") })
+        #expect(spawnCommandLines().contains { $0.contains("--name 'acme-feature · 3'") })
         #expect(await router.lifecycle.sessionTitles.lastApplied(terminalID: created.id) == "acme-feature · 3")
         #expect(await router.lifecycle.sessionTitles.isReserved(terminalID: created.id) == false)
     }

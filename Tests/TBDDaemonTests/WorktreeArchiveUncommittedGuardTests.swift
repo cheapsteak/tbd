@@ -115,10 +115,12 @@ struct WorktreeArchiveUncommittedGuardTests {
         let db = try TBDDatabase(inMemory: true)
         // A global hooks directory that does not exist, so the only archive
         // hook that can resolve is one a test installs in the worktree.
-        let lifecycle = WorktreeLifecycle(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(
                 globalHooksDir: tempDir.appendingPathComponent("no-global-hooks").path))
+        lifecycle.holderRegistry = registry
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
         let actuationLogPath = tempDir
@@ -128,6 +130,7 @@ struct WorktreeArchiveUncommittedGuardTests {
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true),
             subscriptions: StateSubscriptionManager(), actuationLog: actuationLog)
+        router.holderRegistry = registry
         return Fixture(
             tempDir: tempDir, db: db, lifecycle: lifecycle, router: router,
             actuationLog: actuationLog, actuationLogPath: actuationLogPath,
@@ -530,17 +533,25 @@ extension TBDHomeSerialized {
         @Test func aScratchSpaceWithAnUntrackedFileArchivesAndKeepsIt() async throws {
             let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
             let db = try TBDDatabase(inMemory: true)
+            // The holder spawn double, so `scratch.create` passes the spawn
+            // gate; the primary terminal it opens is cleared below, so the
+            // archive under test has no session to close.
+            let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+            var lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver())
+            lifecycle.holderRegistry = registry
             let router = RPCRouter(
                 db: db,
-                lifecycle: WorktreeLifecycle(
-                    db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                    hooks: HookResolver()),
+                lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 subscriptions: StateSubscriptionManager(), actuationLog: makeTestActuationLog())
+            router.holderRegistry = registry
             let created = await router.handle(try RPCRequest(
                 method: RPCMethod.scratchCreate,
                 params: ScratchCreateParams(name: "wt-scratch-uncommitted")))
             let scratch = try created.decodeResult(Worktree.self)
+            try await db.terminals.deleteForWorktree(worktreeID: scratch.id)
             let notes = (scratch.localPath as NSString).appendingPathComponent("notes.md")
             try "half a thought\n".write(toFile: notes, atomically: true, encoding: .utf8)
 

@@ -76,6 +76,10 @@ extension RPCRouter {
             throw ContinueInCodexHandlerError.userFacing(
                 "Worktree directory is missing on disk: \(worktree.path)")
         }
+        // The spawn gate, the same one every other spawn path asks, and part of
+        // the preflight: a refusal comes back before the import writes any
+        // Codex state.
+        let transport = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
 
         // The actuation row opens before the import, which is the first step
         // that writes Codex state, so a held start leaves none behind. Every
@@ -135,21 +139,14 @@ extension RPCRouter {
             resumeThreadID: threadID,
             executablePath: preparation.executablePath)
 
-        // The transport gate, the same one every other spawn path asks.
-        let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
-
         let terminal: Terminal
         do {
             terminal = try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
             ) { currentWorktree in
-                try await prepareTmuxServer(
-                    for: transport, worktree: currentWorktree,
-                    cols: TmuxManager.defaultCols, rows: TmuxManager.defaultRows)
-                return try await lifecycle.spawnTerminal(
+                try await lifecycle.spawnTerminal(
                     id: plannedTerminalID,
                     worktreeID: currentWorktree.id,
-                    tmuxServer: currentWorktree.tmuxServer,
                     workingDirectory: currentWorktree.path,
                     command: command,
                     env: codexEnv,

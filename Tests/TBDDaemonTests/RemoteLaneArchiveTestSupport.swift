@@ -73,18 +73,26 @@ struct RemoteLaneFixture {
             logPath: logPath, actuationLog: actuationLog, repo: repo, dir: dir)
     }
 
-    func router() -> RPCRouter {
+    /// The router, with no holder registry unless one is passed. A remote
+    /// lane needs none; a test that sends a local worktree on to the lifecycle
+    /// passes one, because a revive asks the spawn gate before it records its
+    /// request row.
+    func router(holderRegistry: HolderRegistry? = nil) -> RPCRouter {
         let tmux = TmuxManager(dryRun: true)
-        return RPCRouter(
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            subscriptions: subscriptions)
+        lifecycle.holderRegistry = holderRegistry
+        let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                subscriptions: subscriptions),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             subscriptions: subscriptions,
             remoteManager: manager,
             actuationLog: actuationLog)
+        router.holderRegistry = holderRegistry
+        return router
     }
 
     /// The lane lifecycle the router and the merge rail both build, for tests

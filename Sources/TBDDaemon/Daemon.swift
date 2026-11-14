@@ -245,7 +245,7 @@ public final class Daemon: Sendable {
     /// The daemon's single owner of every live `HolderReader` — one per
     /// holder-backed session, re-adopted at startup (step 8e). Owned here
     /// because a reader's lifetime is the daemon's: the holder and its job
-    /// outlive us, the reader must not. `nil` in mock mode.
+    /// outlive us, the reader must not. Built in mock mode too.
     ///
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
@@ -1108,18 +1108,18 @@ public final class Daemon: Sendable {
         // Startup adoption still happens at 8e — construction is cheap and
         // opens nothing.
         //
-        // `nil` in mock mode, like every other rail. With no registry the spawn
-        // gate falls back to tmux even with the flag on, which is the only
-        // honest answer when there is nothing to hold a pty.
-        let holderRegistry: HolderRegistry? = mockMode == nil
-            ? HolderRegistry(
-                owner: await HolderRegistry.installationOwner(config: database.config),
-                listTerminals: { [database] in try await database.terminals.list() },
-                spawner: HolderSpawner.locateSiblingExecutable().map {
-                    HolderSpawner(executableURL: $0)
-                },
-                programStatus: programStatusStore)
-            : nil
+        // Built in mock mode too: every session opens on a holder, so a daemon
+        // with no registry could open none. Its rendezvous sockets resolve
+        // through the process environment, so a mock daemon's land under the
+        // isolated `TBD_HOME` that `scripts/mock.sh` exports, and the script's
+        // `down` reclaims any holder still listening there.
+        let holderRegistry: HolderRegistry? = HolderRegistry(
+            owner: await HolderRegistry.installationOwner(config: database.config),
+            listTerminals: { [database] in try await database.terminals.list() },
+            spawner: HolderSpawner.locateSiblingExecutable().map {
+                HolderSpawner(executableURL: $0)
+            },
+            programStatus: programStatusStore)
         self.holderRegistry = holderRegistry
 
         // Input for a holder-backed session, routed by who is reading its pty.
@@ -1208,7 +1208,7 @@ public final class Daemon: Sendable {
         // recorder before releasing its reader. Installed before startup
         // adoption (step 8e) so a server that ended during an outage, whose
         // status rides the hand-over, is seen too. The recorder ignores every
-        // tab that is not a dev server's. Nil registry in mock mode.
+        // tab that is not a dev server's.
         if let holderRegistry {
             let recorder = DevServerFinalOutputRecorder(db: database, resolver: holderScreenResolver)
             await holderRegistry.setSessionEndedObserver { terminalID, status, reader in
@@ -1404,14 +1404,6 @@ public final class Daemon: Sendable {
         rpcRouter.holderInjectionCourier = holderInjectionCourier
         rpcRouter.holderScreenResolver = holderScreenResolver
         rpcRouter.devServerTabInspector = devServerTabInspector
-        // The wake path recreates a terminal's tmux server/window when the
-        // window is gone (e.g. post-reboot); give the recreated server the
-        // same gated control-mode connection as every other ensureServer
-        // call site.
-        await rpcRouter.hibernationCoordinator.setOnServerCreated { server in
-            await controlModeBridge.enableIfGated(serverName: server)
-        }
-
         // 8a. Wire the merged-PR transition fan-out. When a worktree's cached PR
         // state transitions into `.merged`, the dispatcher evaluates auto-archive
         // (archive supersedes hibernate) and, if the worktree survives, auto-park
@@ -1559,9 +1551,8 @@ public final class Daemon: Sendable {
         // listeners serve, both because `terminal.output` needs the readers and
         // because the liveness debt starts accruing the moment the daemon is up.
         //
-        // On an install with no holder-backed session rows — one that opted
-        // the transport off — this is a single query and cannot delay the
-        // socket bind at all.
+        // On an install with no holder-backed session rows this is a single
+        // query and cannot delay the socket bind at all.
         //
         // **The ordering was reconsidered and stands, because the phase is now
         // bounded.** Adopting first costs everyone the phase's duration, and
@@ -1731,16 +1722,6 @@ public final class Daemon: Sendable {
             // is built above, before the server exists, so it can't be an init dep).
             rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
             try await sock.start()
-
-            // Pending provider replacements recover only after the socket is live:
-            // Codex readiness arrives through the SessionStart hook RPC, so a
-            // pre-bind recovery would always time out despite a healthy process.
-            // The durable row remains Codex throughout the pass. It is NOT run
-            // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
-            // for that hook, serially, so awaiting it would hold every later boot
-            // step behind N × 15 s. The maintenance task in step 11a-gc runs the
-            // same pass immediately after boot, off the critical path, and then
-            // hourly.
 
             // 9a. Finish the holder sessions the startup budget did not reach.
             //
@@ -1962,11 +1943,9 @@ public final class Daemon: Sendable {
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
                 self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
-                    // Sweep once immediately (cold recovery), then every hour.
-                    // The immediate pass is also the post-socket recovery of any
-                    // Continue in Claude transaction a crash left pending: it
-                    // waits on hook-delivered readiness, so it runs here, off
-                    // the boot path, rather than serially before the listeners.
+                    // Sweep once immediately (cold recovery), then every hour,
+                    // with what an earlier build's interrupted Continue in
+                    // Claude left behind.
                     await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,

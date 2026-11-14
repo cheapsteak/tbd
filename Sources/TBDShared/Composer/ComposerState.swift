@@ -32,10 +32,13 @@ public enum ComposerState: Equatable {
     /// highlighted.
     case blocked(message: String)
     /// Shown but disabled, with `message` as a note and nothing to act on.
-    /// Only a remote target reaches it — a session the provider reports as
-    /// exited, which has no wake path (`RemoteComposerState.exited`). The local
-    /// resolver never produces it: a local session that exited is
-    /// `.notRunning`, which sending resumes.
+    /// Two targets reach it, both with no wake path: a remote session the
+    /// provider reports as exited (`RemoteComposerState.exited`), and a local
+    /// session parked on the tmux transport, which the app's composer gives
+    /// this state in place of `.notRunning`
+    /// (`TableTranscriptPaneView.composerState`). The resolver itself never
+    /// produces it: a local session that exited is `.notRunning`, which
+    /// sending resumes.
     case unavailable(message: String)
 
     public var isEnabled: Bool {

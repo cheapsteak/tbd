@@ -8,8 +8,8 @@ import TBDKernel
 
 /// The pane-ownership guard (`TmuxManager.paneOwnership`) extended to every
 /// other call site that tears down a tmux window by DB-recorded coordinate.
-/// There are seven. `terminal.delete` is the first and is covered by
-/// `TerminalDeletePaneOwnershipTests`; the other six each have a `MARK:`
+/// There are six. `terminal.delete` is the first and is covered by
+/// `TerminalDeletePaneOwnershipTests`; the other five each have a `MARK:`
 /// section below:
 ///
 /// - `captureThenKillWindow`, shared by the archive path and the
@@ -18,8 +18,9 @@ import TBDKernel
 /// - the running-shell move's program stop
 /// - `forgetWorktree`
 /// - `scratch.delete`'s teardown
-/// - `terminal.recreateWindow`, whose shell and codex branches carry the guard
-///   separately and are tested separately
+///
+/// `terminal.recreateWindow` is not one of them: it refuses every tmux row
+/// before it consults a pane or kills anything.
 ///
 /// All of them `kill-window` the exact same way and share the exact same
 /// hazard: a tmux server restart resets window/pane numbering, and several
@@ -97,7 +98,7 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
 
     // MARK: - the transport migration's window retire
 
-    /// The sixth site. Moving a PARKED session to the pty holder blanks the row's
+    /// Moving a PARKED session to the pty holder blanks the row's
     /// tmux coordinates, so the window the park kept belongs to nobody
     /// afterwards and the migration retires it — through the same guard, for
     /// the same reason. The hazard is sharper here than for the others
@@ -170,10 +171,10 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
 
     // MARK: - the running shell move's kill
 
-    /// The seventh site. A session with nothing to resume moves by having its
+    /// A session with nothing to resume moves by having its
     /// program stopped and a fresh login shell started on a holder — and the
     /// stop is a `kill-window` by DB-recorded coordinate, so it goes through
-    /// the same guard. It is the sharpest of the seven: this kill is not
+    /// the same guard. It is the sharpest of the six: this kill is not
     /// reclaiming a window somebody has finished with, it is *ending a running
     /// program*, so a recycled coordinate would kill a stranger's live session
     /// rather than an idle leftover.
@@ -340,217 +341,6 @@ struct KillWindowSiblingSitesPaneOwnershipTests {
                 "scratch delete must still remove the stale terminal row")
         #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
                 "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
-    }
-
-    // MARK: - terminal.recreateWindow (non-Claude-resumable branch)
-
-    /// The shell-recreate branch: unlike `terminal.delete` and the bulk-kill
-    /// teardowns above, this action targets ONE specific row the caller named,
-    /// so a mismatch means that row's own coordinate has already been
-    /// recycled — the same "stale, please retry" condition every other check
-    /// in this handler reports, rather than a silent skip.
-    @Test(arguments: RefusingPaneAnswer.allCases)
-    func recreateWindowRefusesWhenThePaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-kwss-recreate-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let repo = try await db.repos.create(
-            path: dir.path, displayName: "acme", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
-            tmuxServer: "tbd-kwss-recreate")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
-
-        let recorder = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager("kwss-recreate"),
-            actuationLog: makeTestActuationLog())
-
-        let resp = try await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-
-        #expect(!resp.success, "a pane not provably this terminal's must refuse the recreate rather than destroy a stranger's window")
-        let unchanged = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(unchanged.tmuxWindowID == "@2", "the row's own coordinate must be untouched by a refused recreate")
-        #expect(unchanged.tmuxPaneID == "%2", "the row's own coordinate must be untouched by a refused recreate")
-        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
-    }
-
-    /// The positive control: a pane answering with the row's own id recreates
-    /// exactly as before — the old window is killed and a new one replaces it.
-    @Test func recreateWindowProceedsWhenThePaneAnswersWithItsOwnID() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-kwss-recreate-ok-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let repo = try await db.repos.create(
-            path: dir.path, displayName: "acme", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
-            tmuxServer: "tbd-kwss-recreate-ok")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
-
-        let recorder = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .live(terminalID: terminal.id.uuidString) })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager("kwss-recreate-ok"),
-            actuationLog: makeTestActuationLog())
-
-        let resp = try await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-
-        #expect(resp.success, "a pane confirmed as this row's own must still recreate")
-        #expect(recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane confirmed as this row's own must still be killed: \(recorder.snapshot())")
-    }
-
-    /// The codex branch's own guard, mirroring the shell branch's mismatch
-    /// test above — the two branches duplicate the same guard shape, and a
-    /// regression in one would not be caught by a test of the other.
-    @Test(arguments: RefusingPaneAnswer.allCases)
-    func recreateWindowCodexBranchRefusesWhenThePaneIsNotProvablyOurs(_ refusal: RefusingPaneAnswer) async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-kwss-recreate-codex-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let repo = try await db.repos.create(
-            path: dir.path, displayName: "acme", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
-            tmuxServer: "tbd-kwss-recreate-codex")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
-            label: "Codex", kind: .codex)
-
-        let recorder = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in try refusal.answer() })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux, actuationLog: makeTestActuationLog())
-
-        let resp = try await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-
-        #expect(!resp.success, "a pane not provably this terminal's must refuse the recreate rather than destroy a stranger's window")
-        let unchanged = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(unchanged.tmuxWindowID == "@2", "the row's own coordinate must be untouched by a refused recreate")
-        #expect(unchanged.tmuxPaneID == "%2", "the row's own coordinate must be untouched by a refused recreate")
-        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "a pane not provably this terminal's must never be kill-windowed: \(recorder.snapshot())")
-    }
-
-    // MARK: - terminal.recreateWindow against a dead server
-
-    /// The post-reboot case recreate exists for: the repo's tmux server is
-    /// gone, so the pane probe and its reachability probe both fail
-    /// (`.unreachable`). tmux positively reports no server behind the socket
-    /// (`probeServer` → `.absent`), and a dead server holds no stranger pane,
-    /// so the guard must not block the rebuild — on either branch.
-    @Test(arguments: [TerminalKind.shell, TerminalKind.codex])
-    func recreateWindowProceedsWhenTheServerIsPositivelyGone(_ kind: TerminalKind) async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-kwss-recreate-dead-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let repo = try await db.repos.create(
-            path: dir.path, displayName: "acme", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
-            tmuxServer: "tbd-kwss-recreate-dead")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
-            label: kind == .codex ? "Codex" : nil, kind: kind)
-
-        let recorder = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .unreachable },
-            dryRunServerPresence: { _ in .absent })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager("kwss-recreate-dead-\(kind.rawValue)"),
-            actuationLog: makeTestActuationLog())
-
-        let resp = try await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-
-        #expect(resp.success, "a dead server must not block the rebuild recreate exists for: \(resp.error ?? "")")
-        let replaced = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(replaced.tmuxWindowID != "@2" || replaced.tmuxPaneID != "%2",
-                "the row must be re-pointed at the rebuilt window")
-    }
-
-    /// The other side of that line: an unreachable pane on a server NOT
-    /// positively known to be gone stays "we do not know" and still refuses.
-    @Test(arguments: [TmuxPresence.alive, TmuxPresence.unknown])
-    func recreateWindowStillRefusesAnUnreachablePaneOnAServerNotProvablyGone(
-        _ serverPresence: TmuxPresence
-    ) async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-kwss-recreate-unreach-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let repo = try await db.repos.create(
-            path: dir.path, displayName: "acme", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main", path: dir.path,
-            tmuxServer: "tbd-kwss-recreate-unreach")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
-
-        let recorder = RecordedTmuxArgs()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunPaneSendTarget: { _, _ in .unreachable },
-            dryRunServerPresence: { _ in serverPresence })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager("kwss-recreate-unreach"),
-            actuationLog: makeTestActuationLog())
-
-        let resp = try await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-
-        #expect(!resp.success, "an unreachable pane on a server not provably gone must still refuse")
-        #expect(!recorder.snapshot().contains { $0.contains("kill-window") },
-                "an unverified pane must never be kill-windowed: \(recorder.snapshot())")
     }
 }
 

@@ -59,19 +59,26 @@ struct ActuationLogSpawnWiringTests {
             }
     }
 
+    /// A router whose spawns go through the holder spawn double, so the
+    /// lifecycle's spawn opens a session without starting a process.
     private func makeRouter(db: TBDDatabase, logPath: String) -> RPCRouter {
-        RPCRouter(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
-            ),
+            git: GitManager(),
+            tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver()
+        )
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
+            db: db,
+            lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath)
         )
+        router.holderRegistry = registry
+        return router
     }
 
     // MARK: - scratch.create

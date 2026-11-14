@@ -4,6 +4,7 @@ import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 // Nested under TBDHomeSerialized: scratch.create/promote resolve
 // TBDConstants.scratchDir from the process-global TBD_HOME, and the wake tests
@@ -31,14 +32,20 @@ struct ScratchPromoteMigrationTests {
 
     /// Router with a fully isolated Claude config-dir manager: profile config
     /// dirs under `<home>/profiles/`, ambient host dir `<home>/claude-host/`.
+    /// Spawns go through the holder spawn double, wired into both the router
+    /// and the lifecycle it copies, so `scratch.create` opens its primary
+    /// terminal as the daemon does.
     private func makeRouter(
         _ db: TBDDatabase, home: URL,
         subscriptions: StateSubscriptionManager = StateSubscriptionManager()
     ) -> RPCRouter {
-        RPCRouter(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subscriptions,
@@ -48,6 +55,8 @@ struct ScratchPromoteMigrationTests {
             ),
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
+        return router
     }
 
     /// Makes the scratch folder a repo with one empty commit, so promote's
@@ -304,9 +313,11 @@ struct WakePathGuardTests {
         let missingPath = home.appendingPathComponent("never-created").path
         let wt = try await db.worktrees.createScratch(
             name: "gone", displayName: "gone", path: missingPath, tmuxServer: "tbd-test")
+        // Parked on the holder: a row parked on tmux is refused before the
+        // directory is looked at.
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude, transport: .holder)
         try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
 
         let result = await router.hibernationCoordinator.wake(terminalID: terminal.id)
@@ -322,14 +333,18 @@ struct WakePathGuardTests {
         let (home, cleanup) = isolate(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
         let router = makeRouter(db)
+        // The wake respawns on the holder, through the spawn double.
+        let holder = FakeHolderLaunch()
+        await router.hibernationCoordinator.setHolderRegistry(
+            makeHolderRegistryDouble(launch: holder))
 
         let wtDir = home.appendingPathComponent("wt", isDirectory: true)
         try FileManager.default.createDirectory(at: wtDir, withIntermediateDirectories: true)
         let wt = try await db.worktrees.createScratch(
             name: "wt", displayName: "wt", path: wtDir.path, tmuxServer: "tbd-test")
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude, transport: .holder)
 
         // Stored transcript lives under an OLD slug (as after a promote).
         let ambientRoot = home.appendingPathComponent("claude-host/projects", isDirectory: true)
@@ -345,6 +360,8 @@ struct WakePathGuardTests {
 
         #expect(result.isOk)
         #expect(try await db.terminals.get(id: terminal.id)?.hibernatedAt == nil)
+        let launch = try #require(holder.launch(for: terminal.id))
+        #expect(launch.request.workingDirectory == wtDir.path)
         let derived = TranscriptProjectDirSync.derivedProjectDir(
             worktreePath: wtDir.path, projectsRoot: ambientRoot)
         #expect(try String(
@@ -375,10 +392,14 @@ struct TerminalCreateResumeSyncWiringTests {
     @Test func terminalCreateResumeSyncsStoredTranscriptIntoDerivedDir() async throws {
         let (home, cleanup) = isolate(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
+        // The resumed session opens on the holder, through the spawn double.
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             configDirManager: ClaudeProfileConfigDirManager(
@@ -387,6 +408,7 @@ struct TerminalCreateResumeSyncWiringTests {
             ),
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
 
         let wtDir = home.appendingPathComponent("wt", isDirectory: true)
         try FileManager.default.createDirectory(at: wtDir, withIntermediateDirectories: true)

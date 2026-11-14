@@ -40,9 +40,10 @@ real SwiftUI views where a test can measure and photograph them.
   `TBDHolder` process for daemon unit tests: a real `HolderRegistry` whose
   spawns start no process and open no socket, recording each launch's argv,
   working directory, environment and size and handing back pids no real process
-  can hold. Wire it as `router.holderRegistry` or `lifecycle.holderRegistry`
-  with `pty_holder_enabled` on, and every path through
-  `WorktreeLifecycle.spawnTerminal` writes an ordinary holder row. Reach for it
+  can hold. Wire it as `router.holderRegistry` and `lifecycle.holderRegistry`,
+  and every path through `WorktreeLifecycle.spawnTerminal` writes an ordinary
+  holder row. Every new session opens on the holder, so a test that reaches a
+  spawn with no registry wired gets the spawn refused. Reach for it
   when a test needs a session on the holder transport but not a live one:
   there is no reader, so `terminal.output`, sends and attach are not served,
   and every liveness probe reads the session as ended. A live holder is

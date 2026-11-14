@@ -58,8 +58,13 @@ struct CodexSessionHistoryTests {
         """.write(to: file, atomically: true, encoding: .utf8)
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true)
-        let router = RPCRouter(db: db, lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-                               tmux: tmux, actuationLog: makeTestActuationLog())
+        // Resuming a session opens a tab, which runs on the holder: the spawn
+        // double stands in for it, so no process is started.
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: tmux, actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
         let repo = try await db.repos.create(path: root.path, displayName: "sample", defaultBranch: "main")
         let worktree = try await db.worktrees.create(repoID: repo.id, name: "sample", branch: "sample", path: root.path, tmuxServer: "history-test")
         let session = LocalAgentSession(worktreeID: worktree.id,

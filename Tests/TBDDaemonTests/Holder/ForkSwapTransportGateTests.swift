@@ -9,14 +9,14 @@ import TestSupport
 
 /// The transport gate as a `.fork` profile swap asks it, and the recapture
 /// target that follows from it — the branches that need no `TBDHolder` binary.
-/// The branch that does, a fork landing on a real holder, is
+/// A fork that lands is driven through the holder spawn double
+/// (`FakeHolderLaunch`); a fork landing on a real holder is
 /// `HolderSpawnGateTests` in the live target.
 ///
 /// The recapture half is the reason this suite exists rather than a row
 /// assertion alone. A real scheduler's only trace is a database write five wall
-/// seconds later, made only if a live Claude process answers, so "scheduled
-/// against the pane" and "scheduled against the holder's child" are
-/// indistinguishable from the row. `router.sessionRecaptureFactory` makes the
+/// seconds later, made only if a live Claude process answers, so which process
+/// a recapture was scheduled against is invisible in the row. `router.sessionRecaptureFactory` makes the
 /// decision itself the observable, on virtual time.
 @Suite("terminal.swapProfile fork transport gate")
 struct ForkSwapTransportGateTests {
@@ -74,6 +74,7 @@ struct ForkSwapTransportGateTests {
         let db: TBDDatabase
         let router: RPCRouter
         let recorder: TmuxArgvRecorder
+        let launch: FakeHolderLaunch
         let probe: RecaptureProbe
         let environment: [String: String]
         let worktree: Worktree
@@ -94,14 +95,19 @@ struct ForkSwapTransportGateTests {
         }
     }
 
-    private static func unspawnableSpawner() -> HolderSpawner {
-        HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))
+    /// The registry a fixture's router and coordinator share.
+    private enum Registry {
+        /// Spawns through the holder spawn double, so a fork lands.
+        case spawnDouble
+        /// Has no spawner: a daemon whose `TBDHolder` binary has gone.
+        case cannotSpawn
+        /// A spawner whose executable does not exist. The registry reports
+        /// `canSpawn`, so the gate grants it, and the spawn then fails at
+        /// `posix_spawn`, before any holder exists.
+        case unspawnable
     }
 
-    private static func makeFixture(
-        holderFlag: Bool,
-        spawner: HolderSpawner?
-    ) async throws -> Fixture {
+    private static func makeFixture(_ registry: Registry) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdfsg")
         let environment = [
             "TBD_HOME": home,
@@ -114,7 +120,6 @@ struct ForkSwapTransportGateTests {
             dryRunRecorder: { recorder.record($0) },
             dryRunCapturePane: { _, _ in "" })
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPtyHolderEnabled(holderFlag)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "fork-swap-gate")
         let lifecycle = WorktreeLifecycle(
@@ -124,11 +129,20 @@ struct ForkSwapTransportGateTests {
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
             actuationLog: makeTestActuationLog())
-        router.holderRegistry = HolderRegistry(
-            owner: HolderOwnerToken(rawValue: "acme-installation"),
-            environment: environment,
-            listTerminals: { [] },
-            spawner: spawner)
+        let launch = FakeHolderLaunch()
+        switch registry {
+        case .spawnDouble:
+            router.holderRegistry = makeHolderRegistryDouble(
+                launch: launch, environment: environment)
+        case .cannotSpawn, .unspawnable:
+            router.holderRegistry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: environment,
+                listTerminals: { [] },
+                spawner: registry == .unspawnable
+                    ? HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))
+                    : nil)
+        }
         // The coordinator's registry as well as the router's: the in-place
         // holder arm parks through the coordinator, and a coordinator with no
         // registry refuses for a reason that is not the one under test.
@@ -174,7 +188,7 @@ struct ForkSwapTransportGateTests {
         let source = try #require(try await db.terminals.get(id: created.id))
 
         return Fixture(
-            db: db, router: router, recorder: recorder, probe: probe,
+            db: db, router: router, recorder: recorder, launch: launch, probe: probe,
             environment: environment, worktree: worktree, source: source,
             home: home, worktreePath: worktreePath)
     }
@@ -188,68 +202,65 @@ struct ForkSwapTransportGateTests {
             "the fork created no new terminal row")
     }
 
-    // MARK: - Flag off
+    // MARK: - The fork lands
 
-    /// Today's behaviour, exactly: a tmux window, a tmux row, and a recapture
-    /// scheduled against that row's own pane.
-    @Test("flag off: a fork tab spawns onto tmux and recaptures through its pane")
-    func flagOffForksOntoTmux() async throws {
-        let fixture = try await Self.makeFixture(
-            holderFlag: false, spawner: Self.unspawnableSpawner())
+    /// A holder row with the double's pids, no tmux at all, and a recapture
+    /// scheduled against the job the holder forked — the only process that can
+    /// name the session a `--fork-session` resume mints.
+    @Test("a fork tab spawns onto the holder and recaptures through its child")
+    func aForkLandsOnTheHolder() async throws {
+        let fixture = try await Self.makeFixture(.spawnDouble)
         defer { fixture.tearDown() }
 
         let response = try await fixture.fork()
         #expect(response.success, "\(response.error ?? "")")
 
         let forked = try await forkedRow(in: fixture)
-        #expect(forked.transport == .tmux)
-        #expect(!forked.tmuxPaneID.isEmpty)
-        #expect(forked.holderPID == nil)
-        #expect(forked.childPID == nil)
-        #expect(fixture.recorder.count("new-window") == 1)
+        let launch = try #require(fixture.launch.launch(for: forked.id))
+        #expect(forked.transport == .holder)
+        #expect(forked.tmuxWindowID.isEmpty)
+        #expect(forked.tmuxPaneID.isEmpty)
+        #expect(forked.holderPID == launch.handle.holderPID)
+        #expect(forked.childPID == launch.handle.childPID)
+        #expect(
+            fixture.recorder.count("new-window") == 0 && fixture.recorder.count("new-session") == 0,
+            "a holder fork opened tmux: \(fixture.recorder.all)")
 
         let landed = await waitUntil { !fixture.probe.targets.isEmpty }
         #expect(landed, "the fork scheduled no session recapture")
-        #expect(fixture.probe.targets == [
-            .tmuxPane(server: fixture.worktree.tmuxServer, paneID: forked.tmuxPaneID)
-        ])
+        #expect(fixture.probe.targets == [.holderChild(pid: launch.handle.childPID)])
 
         // The source tab is untouched — a fork copies, it does not move.
         #expect(try await fixture.db.terminals.get(id: fixture.source.id) != nil)
     }
 
-    // MARK: - Flag on, nothing to spawn with
+    // MARK: - Nothing to spawn with
 
-    /// A registry with no spawner falls back to tmux whole: a tmux row AND a
-    /// pane-addressed recapture, not a half-taken holder path.
-    @Test("flag on with a registry that cannot spawn falls back to tmux")
-    func flagOnWithoutASpawnerFallsBackToTmux() async throws {
-        let fixture = try await Self.makeFixture(holderFlag: true, spawner: nil)
+    /// A registry with no spawner refuses the fork with the gate's reason:
+    /// no new row, no tmux, no recapture.
+    @Test("a registry that cannot spawn refuses the fork")
+    func aRegistryThatCannotSpawnRefusesTheFork() async throws {
+        let fixture = try await Self.makeFixture(.cannotSpawn)
         defer { fixture.tearDown() }
 
         let response = try await fixture.fork()
-        #expect(response.success, "\(response.error ?? "")")
-
-        let forked = try await forkedRow(in: fixture)
-        #expect(forked.transport == .tmux)
-        #expect(fixture.recorder.count("new-window") == 1)
-
-        let landed = await waitUntil { !fixture.probe.targets.isEmpty }
-        #expect(landed, "the fork scheduled no session recapture")
-        #expect(fixture.probe.targets == [
-            .tmuxPane(server: fixture.worktree.tmuxServer, paneID: forked.tmuxPaneID)
-        ])
+        #expect(!response.success)
+        #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
+        let rows = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+        #expect(rows.map(\.id) == [fixture.source.id], "a refused fork left a row behind")
+        #expect(
+            fixture.recorder.count("new-window") == 0 && fixture.recorder.count("new-session") == 0,
+            "a refused fork opened tmux: \(fixture.recorder.all)")
+        #expect(fixture.probe.targets.isEmpty, "a refused fork scheduled a recapture")
     }
 
-    // MARK: - Flag on, the holder spawn fails
+    // MARK: - The holder spawn fails
 
     /// The fork takes the holder path and fails there, leaving no new row, no
-    /// tmux window and no tmux server — `prepareTmuxServer` is a no-op for a
-    /// holder decision, and the fork must not have started one anyway.
+    /// tmux window and no tmux server.
     @Test("a holder fork spawn failure fails the swap and starts no tmux server")
     func holderSpawnFailureFailsTheFork() async throws {
-        let fixture = try await Self.makeFixture(
-            holderFlag: true, spawner: Self.unspawnableSpawner())
+        let fixture = try await Self.makeFixture(.unspawnable)
         defer { fixture.tearDown() }
 
         let response = try await fixture.fork()
@@ -270,15 +281,14 @@ struct ForkSwapTransportGateTests {
 
     // MARK: - The in-place holder arm is not this suite's
 
-    /// `.inPlace` on a holder row is no longer refused on its transport: it
-    /// takes the holder arm, which parks the session first. This fixture's
-    /// registry adopted nothing, so the park stops at its reader lookup —
-    /// enough to say the transport is not what stopped it, and
-    /// enough to say the fork path below is still the only one that spawns.
-    /// The arm itself is `HolderInPlaceSwapTests` and the live suite.
+    /// `.inPlace` on a holder row takes the holder arm, which parks the
+    /// session first. This fixture's registry adopted nothing, so the park
+    /// stops at its reader lookup — enough to say the transport is not what
+    /// stopped it, and that only the fork path spawns. The arm itself is
+    /// `HolderInPlaceSwapTests` and the live suite.
     @Test("an in-place swap on a holder row takes the holder arm rather than refusing")
     func inPlaceOnAHolderRowTakesTheHolderArm() async throws {
-        let fixture = try await Self.makeFixture(holderFlag: true, spawner: nil)
+        let fixture = try await Self.makeFixture(.spawnDouble)
         defer { fixture.tearDown() }
         let holderSource = try await fixture.db.terminals.create(
             worktreeID: fixture.worktree.id,
@@ -301,5 +311,6 @@ struct ForkSwapTransportGateTests {
             "the swap failed for some other reason: \(response.error ?? "success")")
         #expect(fixture.recorder.count("new-window") == 0)
         #expect(fixture.recorder.count("respawn-window") == 0)
+        #expect(fixture.launch.launches.isEmpty, "the in-place arm spawned before parking")
     }
 }

@@ -109,8 +109,8 @@ struct RunningShellTransportMoveTests {
     /// is what a holder that could not be started looks like from here.
     ///
     /// `beforeTheWrite` runs inside the oracle's spawn, i.e. after the kill and
-    /// before the one guarded write — the window in which a window-died
-    /// recovery can rotate the row's incarnation and take the race.
+    /// before the one guarded write — the window in which another writer can
+    /// change the row and take the race.
     /// `panePID` and `paneForegroundPID` drive the busy rail, exactly as they
     /// do in the migrator's own fixture: a foreground pid equal to the pane's
     /// pid is an idle interactive shell (the default — `FakeInspector` answers
@@ -522,10 +522,10 @@ struct RunningShellTransportMoveTests {
     // MARK: - Failing after the kill
 
     /// The first of the two states a failed move lands in: the row untouched,
-    /// still naming the window that is now dead. That is the ordinary
-    /// window-died state the app's recovery banner already owns, and
-    /// `terminal.recreateWindow` can still repair it precisely because the row
-    /// has not been rewritten.
+    /// still naming the window that is now dead, exactly as it read before the
+    /// move because nothing rewrote it. The refusal names the move to run
+    /// again, with this session's id, because running it again is what moves
+    /// a row in that state.
     @Test("a spawn that fails leaves the row on tmux with its coordinates intact")
     func aSpawnThatFailsLeavesTheRowOnTmux() async throws {
         let fixture = try await Self.makeFixture(spawnThrows: true)
@@ -540,6 +540,8 @@ struct RunningShellTransportMoveTests {
         }
         #expect(reason.contains("starting a holder"),
                 "the refusal did not name the failed spawn: \(reason)")
+        #expect(reason.contains("tbd terminal migrate \(row.id.uuidString)"),
+                "the refusal did not name the move that recovers the session: \(reason)")
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.transport == .tmux, "a failed spawn rewrote the row anyway")
         #expect(after.tmuxWindowID == row.tmuxWindowID && after.tmuxPaneID == row.tmuxPaneID,
@@ -552,10 +554,10 @@ struct RunningShellTransportMoveTests {
 
     /// The loser of two concurrent moves of one row. The registry declines the
     /// spawn because the winner already has a holder for this session, and the
-    /// spawn-failure message must not be reused for it: its recovery advice —
-    /// the row reads as running on tmux with its window gone, and the tab's
-    /// window-died recovery repairs it — is false in every particular once the
-    /// winner has moved the row.
+    /// spawn-failure message must not be reused for it: its advice — the row
+    /// reads as running on tmux with its window gone, and running the move
+    /// again moves it — is false in every particular once the winner has moved
+    /// the row.
     @Test("a spawn the registry declines as already-registered says another move won")
     func aSecondConcurrentMoveSaysAnotherMoveWon() async throws {
         let fixture = try await Self.makeFixture(spawnThrowsAlreadyRegistered: true)
@@ -567,7 +569,7 @@ struct RunningShellTransportMoveTests {
         #expect(outcome == .refused(
             reason: HibernationCoordinator.shellMoveAlreadyMovingRefusal))
         guard case .refused(let reason) = outcome else { return }
-        #expect(!reason.contains("window-died recovery"),
+        #expect(!reason.contains("tbd terminal migrate"),
                 "the loser was given the spawn failure's false recovery advice: \(reason)")
         #expect(await fixture.abandons.isEmpty,
                 "a spawn that never happened was abandoned")
@@ -596,10 +598,10 @@ struct RunningShellTransportMoveTests {
     /// The second state, and the reason the abandon is not optional: a holder
     /// and a job no row names would be reclaimable by nothing.
     ///
-    /// The race is the real one — a window-died recovery recreating the row's
-    /// window in the gap between the kill and the write, which rotates the
-    /// row's incarnation. The compare-and-set then writes nothing, and the
-    /// person keeps the fresh tmux window the recovery gave them.
+    /// The race is staged by rotating the row's incarnation in the gap between
+    /// the kill and the write, as any writer that changes the row there would.
+    /// The compare-and-set then writes nothing, and the row keeps what that
+    /// writer left.
     @Test("a write that loses its compare-and-set abandons the holder")
     func aWriteThatLosesItsCompareAndSetAbandonsTheHolder() async throws {
         let fixture = try await Self.makeFixture(beforeTheWrite: { db, terminalID in
@@ -623,9 +625,38 @@ struct RunningShellTransportMoveTests {
         let after = try #require(try await fixture.db.terminals.get(id: row.id))
         #expect(after.transport == .tmux, "the write landed on a row that had moved")
         #expect(after.tmuxWindowID == "@9" && after.tmuxPaneID == "%9",
-                "the recovery's window was taken from the person anyway")
+                "the move overwrote the change that won the race")
         #expect(after.holderPID == nil && after.childPID == nil,
                 "the row names a holder that was abandoned")
+    }
+
+    /// A write that throws rather than losing the race. The holder the move
+    /// started is abandoned, since no row names it, and the refusal names the
+    /// move to run again: the row was not rewritten, so that is what moves it.
+    @Test("a write that throws abandons the holder and names the move to run again")
+    func aWriteThatThrowsAbandonsTheHolderAndNamesTheMove() async throws {
+        let fixture = try await Self.makeFixture(beforeTheWrite: { db, _ in
+            // Closing the connection makes the guarded write throw instead of
+            // answering, which no row state can do.
+            _ = try? db.writerForTests.close()
+        })
+        defer { fixture.tearDown() }
+        let row = try await Self.runningShell(fixture)
+
+        let outcome = await fixture.coordinator.moveRunningShellToHolder(terminal: row)
+
+        guard case .refused(let reason) = outcome else {
+            Issue.record("a write that threw was reported as \(outcome)")
+            return
+        }
+        #expect(reason.contains("could not be recorded"),
+                "the refusal did not name the failed write: \(reason)")
+        #expect(reason.contains("tbd terminal migrate \(row.id.uuidString)"),
+                "the refusal did not name the move that recovers the session: \(reason)")
+        let abandons = await fixture.abandons
+        #expect(abandons.count == 1, "the holder nobody names was not abandoned")
+        #expect(abandons.first?.handle == Self.handle,
+                "a handle other than the spawned one was abandoned")
     }
 
     /// The write's own guard, each clause on its own. Every snapshot below

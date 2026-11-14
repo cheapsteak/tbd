@@ -100,15 +100,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     // `remote_peer_messaging_enabled` stays in the table (migration
     // `20260830003851_config_remote_peer_messaging`) but is read by nothing:
     // peer messaging is switched per repository in its `tbd.toml` instead.
-    /// The pty-holder transport gate. **Genuinely tri-state**, same shape as
-    /// `gc_hang_stacks_enabled`: the
-    /// `20260831055718_config_pty_holder` migration carries no SQL default, so
-    /// `nil` here means "never chose" rather than "off". Resolve it through
-    /// `Config.ptyHolderDefault`, never through `?? false`.
-    var pty_holder_enabled: Bool?
     /// Gate for `remote.delete`, the verb that destroys a provider-hosted agent
-    /// session. **Genuinely tri-state**, same shape as `pty_holder_enabled`:
-    /// the
+    /// session. **Genuinely tri-state**, same shape as
+    /// `gc_hang_stacks_enabled`: the
     /// `20260902130000_config_remote_delete` migration carries no SQL default,
     /// so `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.remoteDeleteEnabledDefault`, never through `?? false`.
@@ -239,8 +233,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcHangStacksDefault: same shape once more, for
     ///   `gc_hang_stacks_enabled` — the hang-stack reclaimer's soak gate,
     ///   which also governs the app-side write-time cap.
-    /// - Parameter ptyHolderDefault: same shape once more, for
-    ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
     /// - Parameter remoteDeleteDefault: and the last of them, for
     ///   `remote_delete_enabled` — the gate on destroying a provider-hosted
     ///   session, whose soak is the one that matters most, because what it
@@ -296,7 +288,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
         gcHangStacksDefault: Bool = Config.gcHangStacksEnabledDefault,
-        ptyHolderDefault: Bool = Config.ptyHolderDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
@@ -371,8 +362,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the hang-stack reclaimer's gate —
             // NOT `?? false`.
             gcHangStacksEnabled: gc_hang_stacks_enabled ?? gcHangStacksDefault,
-            // And once more, for the pty-holder transport's gate — NOT `?? false`.
-            ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
             // And truly the last of them, for the remote-delete gate —
             // NOT `?? false`.
             remoteDeleteEnabled: remote_delete_enabled ?? remoteDeleteDefault,
@@ -831,21 +820,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_hang_stacks_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the pty-holder transport gate (default ON). It gates
-    /// which transport a session is *spawned* onto; a session records its
-    /// transport at creation and keeps it for life, so flipping this never
-    /// migrates a running session. The column is written on every call, because
-    /// writing either value is the explicit gesture that lifts it out of NULL
-    /// forever after.
-    public func setPtyHolderEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET pty_holder_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

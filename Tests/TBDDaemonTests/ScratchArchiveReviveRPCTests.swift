@@ -6,7 +6,9 @@ import Foundation
 @testable import TBDShared
 
 /// Router whose lifecycle and handlers share one StateSubscriptionManager,
-/// with every broadcast delta captured in `deltas`.
+/// with every broadcast delta captured in `deltas`. Spawns go through the
+/// holder spawn double, wired into both the router and the lifecycle it
+/// copies, so `scratch.create` opens its primary terminal as the daemon does.
 private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, deltas: BroadcastDeltas) {
     let deltas = BroadcastDeltas()
     let subs = StateSubscriptionManager()
@@ -16,11 +18,16 @@ private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, deltas: Broadcas
         }
         return true
     }
+    let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+    var lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+    lifecycle.holderRegistry = registry
     let router = RPCRouter(
         db: db,
-        lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+        lifecycle: lifecycle,
         tmux: TmuxManager(dryRun: true),
         subscriptions: subs, actuationLog: makeTestActuationLog())
+    router.holderRegistry = registry
     return (router, deltas)
 }
 

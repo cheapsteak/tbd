@@ -4,181 +4,29 @@ import Testing
 import TBDShared
 import TestSupport
 
-/// The Settings surface for the pty-holder transport gate — the flag that had
-/// no user-facing control at all, so its soak could not be started by any
-/// ordinary gesture.
-///
-/// Every test that constructs `AppState` does so against a unique throwaway
-/// `UserDefaults` suite and tears it down — TBDApp ships as an unbundled SPM
-/// executable, so `UserDefaults.standard` is the running developer's real
-/// `TBDApp.plist`.
+/// The Settings row for the pty-holder transport. There is no switch: every
+/// new session opens on a holder. When the daemon cannot start one, the row's
+/// caption says why.
 @MainActor
 @Suite("PtyHolderSettings")
 struct PtyHolderSettingsTests {
 
-    private func withAppState(_ body: (AppState) async -> Void) async {
-        let suite = TestDefaultsSuite("tbd-pty-holder-settings")
-        let defaults = suite.defaults
-        await body(AppState(userDefaults: defaults))
-        suite.tearDown()
-    }
-
-    // MARK: - The setter, both directions and both branches
-
-    @Test func setterPersistsOnAndRefreshesCapabilities() async {
-        await withAppState { state in
-            var written: [Bool] = []
-            var refreshes = 0
-            state.ptyHolderFlagSetter = { @MainActor enabled in written.append(enabled) }
-            state.daemonCapabilitiesFetcher = { @MainActor in
-                refreshes += 1
-                return DaemonCapabilitiesResult(
-                    controlModeEnabled: false, ptyHolderEnabled: true, ptyHolderSupported: true)
-            }
-
-            await state.setPtyHolderEnabled(true)
-
-            #expect(written == [true])
-            #expect(refreshes == 1)
-            #expect(state.daemonCapabilities?.ptyHolderEnabled == true)
-        }
-    }
-
-    /// The off branch is its own test rather than a second assertion, because
-    /// turning the transport OFF is the operator's exit from the soak and a
-    /// setter that ignored its argument would pass the on-only test.
-    @Test func setterPersistsOffAndRefreshesCapabilities() async {
-        await withAppState { state in
-            var written: [Bool] = []
-            state.ptyHolderFlagSetter = { @MainActor enabled in written.append(enabled) }
-            state.daemonCapabilitiesFetcher = { @MainActor in
-                DaemonCapabilitiesResult(
-                    controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
-            }
-
-            await state.setPtyHolderEnabled(false)
-
-            #expect(written == [false])
-            #expect(state.daemonCapabilities?.ptyHolderEnabled == false)
-        }
-    }
-
-    /// A failed write surfaces the error and re-fetches capabilities, so the
-    /// toggle snaps back to the daemon's persisted value instead of holding the
-    /// optimistic flip.
-    ///
-    /// The cache is seeded `true` and the post-failure fetch returns `false` —
-    /// deliberately different values — so the assertion can only pass if the
-    /// refetch actually landed in `daemonCapabilities`. Seeding and fetching
-    /// the same value (as an earlier version of this test did) would pass
-    /// whether or not the refetch ran at all.
-    @Test func setterSurfacesAFailureAndRefetchesCapabilities() async {
-        struct Boom: Error {}
-        await withAppState { state in
-            var refreshes = 0
-            state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, ptyHolderEnabled: true, ptyHolderSupported: true)
-            state.ptyHolderFlagSetter = { @MainActor _ in throw Boom() }
-            state.daemonCapabilitiesFetcher = { @MainActor in
-                refreshes += 1
-                return DaemonCapabilitiesResult(
-                    controlModeEnabled: false, ptyHolderEnabled: false, ptyHolderSupported: true)
-            }
-
-            await state.setPtyHolderEnabled(true)
-
-            #expect(refreshes == 1, "a refused write must re-fetch so the toggle snaps back")
-            #expect(state.daemonCapabilities?.ptyHolderEnabled == false,
-                    "the cache must now equal what the refetch returned, not the seeded value")
-            #expect(state.alertMessage?.contains("Failed to set the session transport") == true)
-        }
-    }
-
-    // MARK: - The help text
-
-    /// The one claim the design spec forbids. Its §"why" is explicit that the
-    /// justification is scaling headroom, not current latency — there is no
-    /// measured win on a quiet machine — so a rewrite that promised speed
-    /// would tell the operator something untrue about their own machine. This
-    /// assertion fails on exactly that rewrite and on nothing else a faithful
-    /// edit would do.
-    @Test func theHelpTextMakesNoSpeedClaim() {
-        let help = AppState.ptyHolderHelp.lowercased()
-        for word in ["faster", "fast", "speed", "quicker", "latency", "snappier", "responsive"] {
-            #expect(!help.contains(word), "the help text must not promise speed: found \"\(word)\"")
-        }
-    }
-
-    /// The four things an operator has to know before flipping it, each of
-    /// which is a fact about their sessions rather than a description of the
-    /// implementation. Pinned by substring per fact, so a rewording that keeps
-    /// a fact passes and a rewrite that drops one fails.
-    @Test func theHelpTextCarriesEveryFactAnOperatorNeeds() {
-        let help = AppState.ptyHolderHelp
-        #expect(help.contains("Each new session runs on its own terminal rather than inside a tmux window."),
-                "what changes, and that it is per-session")
-        #expect(help.contains("Sessions already running stay on tmux; the change takes effect as they end and respawn."),
-                "that it is not retroactive")
-        #expect(help.contains("Attached sessions keep running uninterrupted across daemon restarts."),
-                "what the operator gains")
-        #expect(help.contains("Less scrollback is kept than tmux retains."),
-                "what the operator gives up")
-        #expect(help.contains("On by default; turn it off to put new sessions back in tmux windows."),
-                "which way the switch sits before the operator touches it")
-    }
-
-    /// The disabled-state caption. It exists because the spawn gate asks two
-    /// questions, not one: with no `TBDHolder` helper the flag is honored by
-    /// falling back to tmux every single time, so a switch offered there would
-    /// change nothing. The caption has to name the missing helper — "not
-    /// available" alone would leave the operator with nothing to fix.
+    /// The caption has to name the missing helper — "not available" alone
+    /// would leave the operator with nothing to fix — and say what it costs.
     @Test func theUnsupportedCaptionNamesTheMissingHelper() {
-        #expect(AppState.ptyHolderUnsupportedCaption ==
-            "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it.")
+        let caption = AppState.ptyHolderUnsupportedCaption
+        #expect(caption.contains("TBDHolder helper"))
+        #expect(caption.contains("cannot open any"))
     }
 
-    // MARK: - What the toggle renders from
-
-    /// Capabilities are nil until the first successful fetch, and the toggle
-    /// must read OFF and greyed rather than claiming a transport the daemon has
-    /// not confirmed.
-    @Test func anUnfetchedCapabilityReadsOffAndUnsupported() async {
-        await withAppState { state in
-            #expect(state.daemonCapabilities == nil)
-            #expect((state.daemonCapabilities?.ptyHolderEnabled ?? false) == false)
-            #expect((state.daemonCapabilities?.ptyHolderSupported ?? false) == false)
-            #expect(!AppState.ptyHolderToggleIsInteractive(state.daemonCapabilities))
-        }
-    }
-
-    // MARK: - When the toggle is interactive
-
-    private static func capabilities(supported: Bool, flagOn: Bool) -> DaemonCapabilitiesResult {
-        DaemonCapabilitiesResult(
-            controlModeEnabled: false, ptyHolderEnabled: flagOn, ptyHolderSupported: supported)
-    }
-
-    /// A daemon that can start a holder offers the toggle in both positions,
-    /// so it can be turned off as well as on.
-    @Test func aSupportedDaemonOffersTheToggleWhicheverWayTheFlagSits() {
-        #expect(
-            AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: true, flagOn: true)),
-            "a supported daemon running holders can be turned off")
-        #expect(
-            AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: true, flagOn: false)),
-            "a supported daemon can be turned on")
-    }
-
-    /// A daemon with no `TBDHolder` helper greys the toggle in both positions.
-    /// The flag-on case is the one worth pinning: the flag ships ON, so that is
-    /// the position such a daemon usually reports, and it must not make the
-    /// control interactive.
-    @Test func anUnsupportedDaemonGreysTheToggleWhicheverWayTheFlagSits() {
-        #expect(
-            !AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: false, flagOn: true)),
-            "no helper and the flag reads on: new sessions run in tmux either way")
-        #expect(
-            !AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: false, flagOn: false)),
-            "no helper and the flag reads off: new sessions run in tmux either way")
+    /// Capabilities are nil until the first successful fetch, and the row must
+    /// read unsupported rather than claim a transport the daemon has not
+    /// confirmed.
+    @Test func anUnfetchedCapabilityReadsUnsupported() {
+        let suite = TestDefaultsSuite("tbd-pty-holder-settings")
+        let state = AppState(userDefaults: suite.defaults)
+        #expect(state.daemonCapabilities == nil)
+        #expect((state.daemonCapabilities?.ptyHolderSupported ?? false) == false)
+        suite.tearDown()
     }
 }

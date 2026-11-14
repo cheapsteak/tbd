@@ -15,7 +15,7 @@ Long-running headless process. Owns all state and logic.
 - **PR status manager** — polls GitHub for PR state (open/merged/closed, mergeable) per worktree, persists last-known status to the DB so icons survive restart
 - **Auto-archive-on-merge coordinator** — archives a worktree automatically once its PR merges, when armed per-worktree or via the global default
 - **SSH agent resolver** — finds live SSH agent socket, maintains `~/.ssh/tbd-agent.sock` symlink
-- **Hibernation coordinator** — parks Claude sessions and wakes them with `claude --resume`, on tmux and on the pty holder. Parks come from "Hibernate now" (`terminal.hibernate`), from the idle sweep and park-on-merge (both off by default), and from the in-place profile swap and the transport migration; the session mod is a park's only guard for an unsent draft. A session parked by hand wakes only when asked; an automatic park also wakes when its worktree is focused
+- **Hibernation coordinator** — parks Claude sessions, on tmux and on the pty holder, and wakes them with `claude --resume` on the pty holder; a session parked on tmux refuses to wake until `tbd terminal migrate` moves it. Parks come from "Hibernate now" (`terminal.hibernate`), from the idle sweep and park-on-merge (both off by default), and from the in-place profile swap and the transport migration; the session mod is a park's only guard for an unsent draft. A session parked by hand wakes only when asked; an automatic park also wakes when its worktree is focused
 - **Model profile resolver** — picks the credential profile (oauth/apiKey/proxy/bedrock) for a spawned Claude session
 - **Claude usage poller** — polls Claude OAuth usage every 30 min, broadcasts to clients
 - **Session instrumentation writers** — `PluginDirWriter`, `ClaudeHookOverlay`, `SkillFileWriter`, `CodexHomeManager` (see "Session Instrumentation")
@@ -53,7 +53,7 @@ TBD instruments the agent sessions it spawns. At `Daemon.start()`:
 - **`PluginDirWriter`** writes a Claude Code plugin to `~/Library/Application Support/TBD/plugin/` containing `.claude-plugin/plugin.json` and `skills/tbd/SKILL.md`. The skill body is `TBDSkillContent.body`. While a session-mod feature flag is on, it also writes the session mod — the hooks module in `hooks/` and its `$.state` contract in `types/`, which the manifest names — from `SessionModContent` (generated from `SessionMod/` by `scripts/gen-session-mod-content.py`), and removes both when every flag is off. It runs after the database opens (the flags live there) and before any spawn path, writes only files whose bytes changed (each write hot-reloads the plugin in running sessions), and is skipped in mock mode. The daemon half of the mod — `spawn.json` and the other per-session files under `~/tbd/sessions/<claudeSessionID>/`, liveness, the spawn variables and the composer-draft park gate's status — lives in `Sources/TBDDaemon/SessionMod/`.
 - **`ClaudeHookOverlay`** writes `~/tbd/runtime/claude-overlay.json` registering `SessionStart`, `Stop` (×2), `StopFailure`, `UserPromptSubmit` (session title), `AskUserQuestion` Pre/PostToolUse, `PostToolUse:Bash` (PR binding) and `SessionEnd` hooks. None reports agent state.
 - **`SkillFileWriter`** drops the same skill body to a failsafe path so a session can `Read` it even with no harness skill registered.
-- **`ClaudeSpawnCommandBuilder`** (pure function) builds the `claude` command, appending `--plugin-dir` and `--settings` (each only if the file exists). It also returns `sensitiveEnv` carrying auth/routing vars (`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, ...) — passed via tmux `-e KEY=VALUE` so secrets never appear in `ps` argv.
+- **`ClaudeSpawnCommandBuilder`** (pure function) builds the `claude` command, appending `--plugin-dir` and `--settings` (each only if the file exists). It also returns `sensitiveEnv` carrying auth/routing vars (`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, ...) — passed as the pty-holder job's process environment, never inlined in the command, so secrets never appear in `ps` argv.
 - **`CodexHomeManager`** does the equivalent for Codex sessions via a per-repo isolated `CODEX_HOME`.
 
 The `SessionStart` hook calls `tbd session-event`, which RPCs the daemon with the new session id + transcript path; the daemon updates the terminal record and broadcasts `terminalSessionUpdated` so the transcript pane retargets after `/clear` or `/compact`.
@@ -104,6 +104,8 @@ GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migrati
 
 ## Tmux Architecture
 
+Every new session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. This section covers the sessions that still run on tmux, which TBD serves — send, output, park, view — until `tbd terminal migrate` moves them. TBD opens no new tmux window for them: a parked tmux session refuses to wake, and an in-place account switch of a running one is refused. `terminal.recreateWindow` opens no window: it parks a tmux agent tab whose window has gone and whose session can be resumed, so a migration followed by a wake brings it back on the holder, and it refuses every other row.
+
 **Grouped sessions** (not control mode). Rationale in `docs/tmux-integration.md`.
 
 ```
@@ -115,11 +117,10 @@ tmux server: tbd-<djb2-hash-of-repo-path>
 └── Session "tbd-view-abc123" (grouped, created by app for viewing)
 ```
 
-- Daemon creates windows in `main`; app creates grouped sessions per visible terminal panel
+- A tmux session's window lives in `main`; app creates grouped sessions per visible terminal panel
 - Each grouped session shares all windows but has independent current-window and PTY size
 - `main` persists when app closes; grouped sessions are ephemeral
 - Server name uses djb2 hash of repo path (deterministic, survives DB recreations)
-- Secrets/routing env reach windows via tmux's `-e KEY=VALUE` (`createWindow(sensitiveEnv:)`), keeping them out of `ps`
 
 ### TmuxManager API highlights
 - `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"
@@ -134,10 +135,10 @@ Split across files: base struct (`WorktreeLifecycle.swift`), `+Create`, `+Archiv
 ### Create (two-phase async)
 **Phase 1 (beginCreateWorktree):** Resolve parent via `ParentResolver` → generate name → insert DB row with `status = .creating` → return immediately. App shows an optimistic placeholder before the RPC returns.
 
-**Phase 2 (completeCreateWorktree):** Best-effort fetch → create base dir (`~/tbd/worktrees/<repo>/`) → git worktree add (retries with a new name on collision) → ensure tmux server → create windows with `TBD_*` env vars → insert terminals → status `.active`. On failure, deletes the DB row.
+**Phase 2 (completeCreateWorktree):** Best-effort fetch → create base dir (`~/tbd/worktrees/<repo>/`) → git worktree add (retries with a new name on collision) → spawn each tab on a pty holder with `TBD_*` env vars and insert its terminal row (a setup tab only when a setup hook resolves) → status `.active`. On failure, including a daemon with no `TBDHolder` beside it, which refuses every spawn, deletes the DB row.
 
 ### Archive (two-phase async)
-**Phase 1:** Validate not `.main`/`.creating` → refuse a folder with uncommitted changes or an unreadable `git status` (`WorktreeArchiveError.uncommittedChanges`, RPC code `worktreeArchiveUncommitted`; lifted by `force`, which also skips the hook, or by `discardUncommittedChanges`, which does not; auto-archive on merge keeps the worktree and notifies) → status `.archived` + `archivedAt` → kill tmux windows → delete terminals → return. **Phase 2:** background — run archive hook → `git worktree remove`.
+**Phase 1:** Validate not `.main`/`.creating` → refuse a folder with uncommitted changes or an unreadable `git status` (`WorktreeArchiveError.uncommittedChanges`, RPC code `worktreeArchiveUncommitted`; lifted by `force`, which also skips the hook, or by `discardUncommittedChanges`, which does not; auto-archive on merge keeps the worktree and notifies) → status `.archived` + `archivedAt` → tear down each terminal (dispose its holder, or kill a tmux row's window) → delete terminals → return. **Phase 2:** background — run archive hook → `git worktree remove`.
 
 ### Revive / Adopt
 Revive recreates a worktree from an archived branch. Adopt (`worktree.adopt`) registers an existing on-disk git worktree into TBD (idempotent).

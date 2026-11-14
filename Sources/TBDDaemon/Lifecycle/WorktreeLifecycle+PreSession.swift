@@ -105,9 +105,8 @@ extension WorktreeLifecycle {
             .appendingPathComponent(worktreeID.uuidString)
     }
 
-    /// Environment for hook panes (preSession + setup), routed through
-    /// `createWindow(sensitiveEnv:)` so tmux injects it with `-e KEY=VALUE` —
-    /// i.e. into the PROCESS environment before zsh starts. The regular
+    /// Environment for hook panes (preSession + setup), passed as the spawn's
+    /// `sensitiveEnv` so it lands in the PROCESS environment before zsh starts. The regular
     /// `env:` dict is inlined as `export KEY='V'; ` statements inside the
     /// `-c` command string, which runs AFTER every startup file (profile and
     /// rc) completes, so it cannot affect anything the startup files do.
@@ -187,13 +186,11 @@ extension WorktreeLifecycle {
             markerPath: markerPath,
             shell: defaultShell
         )
-        // The transport gate, the same one every other spawn asks. A hook tab is
-        // a session like any other once it is running: it holds a pty, it is
-        // read through the same surfaces, and nothing about running a hook
-        // wants a tmux server of its own.
-        let preSessionConfig = try? await db.config.get()
-        let transport = TerminalSpawnTransport.decide(
-            config: preSessionConfig, registry: holderRegistry)
+        // The spawn gate, the same one every other spawn asks. A hook tab is a
+        // session like any other once it is running: it holds a pty, and it is
+        // read through the same surfaces. A refusal throws before anything is
+        // spawned, and the caller reports it as its own failure.
+        let transport = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
         let (terminal, tmuxServer) = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktreeID, allowedStatuses: [worktree.status]
         ) { currentWorktree in
@@ -207,25 +204,11 @@ extension WorktreeLifecycle {
                 "TBD_REPO_PATH": repo?.path ?? currentPath,
                 "TBD_BRANCH": currentWorktree.branch,
             ]
-            // Only the tmux transport needs a server — and then the untracked
-            // window `new-session` creates has to be killed once the real one
-            // exists, exactly as before.
-            var initialWindowID: String?
-            if !transport.isHolder {
-                initialWindowID = try await tmux.ensureServer(
-                    server: currentWorktree.tmuxServer,
-                    session: "main",
-                    cwd: currentPath,
-                    cols: resolvedCols,
-                    rows: resolvedRows)
-            }
-            // The one spawn-and-record step every path shares: it creates the
-            // window or the holder job, writes the row that records which, and
-            // owns both rollbacks.
+            // The one spawn-and-record step every path shares: it starts the
+            // holder job, writes the row that records it, and owns the rollback.
             let terminal = try await spawnTerminal(
                 id: terminalID,
                 worktreeID: worktreeID,
-                tmuxServer: currentWorktree.tmuxServer,
                 workingDirectory: currentPath,
                 command: command,
                 env: env,
@@ -238,17 +221,6 @@ extension WorktreeLifecycle {
                 kind: .shell,
                 transport: transport,
                 claudeSpawnExtras: claudeSpawnExtras)
-            // Kill the untracked initial window that new-session created, but skip
-            // if a restarted tmux server reused the window ID for the replacement
-            // we just created (ABA scenario: the fresh window and the old ID are
-            // textually identical, so killing it would destroy the session we just
-            // spawned). Within one live tmux incarnation, window IDs are unique, so
-            // this is defense in depth.
-            if let initialWindowID, initialWindowID != terminal.tmuxWindowID {
-                try? await tmux.killWindow(
-                    server: currentWorktree.tmuxServer,
-                    windowID: initialWindowID)
-            }
             return (terminal, currentWorktree.tmuxServer)
         }
         if claimsFocus {

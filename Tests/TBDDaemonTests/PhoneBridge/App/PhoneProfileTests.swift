@@ -166,11 +166,13 @@ struct PhoneProfileTests {
 
     /// A parked session takes the swap's cold path: the phone asks for the
     /// same in-place swap, and the daemon moves the parked row, which the
-    /// reply says is still parked.
-    @Test func switchProfileOnAParkedSessionIsTheSameSwap() async throws {
+    /// reply says is still parked. A row parked on tmux too, since moving it
+    /// starts nothing.
+    @Test(arguments: [TerminalTransport.holder, .tmux])
+    func switchProfileOnAParkedSessionIsTheSameSwap(_ transport: TerminalTransport) async throws {
         let h = try await PhoneServiceHarness.make()
         let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
-        let terminal = try await h.seedTerminal()
+        let terminal = try await h.seedTerminal(transport: transport)
         try await h.park(terminal.id)
         h.actions.respond(to: .swapProfile, with: try Self.swapped(terminal.id, parked: true))
         let outbox = await h.connect()
@@ -220,6 +222,27 @@ struct PhoneProfileTests {
         let reply = try PhoneAppCoding.reply(
             requestID: String(repeating: "r", count: PhoneAppConstants.requestIDMaxBytes), result: result)
         #expect(PhoneAppCoding.framedSize(reply) <= PhoneFrameBudget.maxPlaintext)
+    }
+
+    /// A running session on tmux cannot switch in place, since the switch
+    /// restarts its process and TBD no longer starts processes on tmux. The
+    /// request is `unsupported` with the reason the sessions list shows, and
+    /// no swap reaches the daemon.
+    @Test func switchProfileOnARunningTmuxSessionIsUnsupported() async throws {
+        let h = try await PhoneServiceHarness.make()
+        let profile = try await h.db.modelProfiles.create(name: "Acme Work", kind: .oauth)
+        let terminal = try await h.seedTerminal(transport: .tmux)
+        h.actions.respond(to: .swapProfile, with: try Self.swapped(terminal.id))
+        let outbox = await h.connect()
+
+        let (reply, _) = try await h.request(
+            .sessionSwitchProfile,
+            params: SessionSwitchProfileParams(session: .local(terminalID: terminal.id), profileID: profile.id),
+            on: outbox)
+
+        #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.switchOnTmuxReason))
+        #expect(h.actions.swaps.isEmpty)
+        #expect(h.actions.calls.isEmpty)
     }
 
     @Test func switchProfileOnRemoteIsUnsupported() async throws {

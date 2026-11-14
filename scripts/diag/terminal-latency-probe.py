@@ -124,9 +124,9 @@ SETUP THIS DRIVER CANNOT DO FOR YOU
    resolves once at launch; flipping it under a running app does nothing. An
    unbundled `swift run` build reads the `TBDApp` domain instead.
 2. Two `cat` shell terminals in a scratch worktree.
-   - Transport mode: one spawned with `Config.ptyHolderDefault` off (tmux) and
-     one with it on (holder). The flag is read at spawn, so a holder session
-     exists only if it was on then.
+   - Transport mode: one on tmux and one on the holder. TBD opens every new
+     session on the holder, so the tmux arm has to be a session that predates
+     that and has not been moved by `tbd terminal migrate`.
    - Engine mode: two holder terminals, opened while Settings > Terminal >
      Experimental > "Use the libghostty terminal engine" is on, so the app
      logs which engine each one got. Both open on libghostty. Focus one and
@@ -274,12 +274,12 @@ def verify(
                     f"terminal {terminal_id} is on transport={transport!r},"
                     f" but was given as the {arm} arm, and an engine comparison runs"
                     f" both arms on the {expected_transport} transport."
-                    " A holder session exists only if the pty-holder flag was on when it spawned."
+                    " Every new session opens on the pty holder; a tmux session predates that."
                 )
             raise SystemExit(
                 f"terminal {terminal_id} is on transport={transport!r},"
                 f" but was given as the {expected_transport} arm."
-                " A holder session exists only if the pty-holder flag was on when it spawned."
+                " Every new session opens on the pty holder; a tmux session predates that."
             )
         return row
     raise SystemExit(

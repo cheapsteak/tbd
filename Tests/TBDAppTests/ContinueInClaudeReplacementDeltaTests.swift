@@ -3,47 +3,6 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-@Suite("Continue in Claude menu")
-struct ContinueInClaudeMenuTests {
-    private func terminal(
-        kind: TerminalKind = .codex,
-        transcriptPath: String? = "/tmp/codex-rollout.jsonl",
-        activityState: TerminalActivityState = .idle,
-        transport: TerminalTransport = .tmux
-    ) -> TBDShared.Terminal {
-        TBDShared.Terminal(
-            worktreeID: UUID(),
-            tmuxWindowID: transport == .tmux ? "@1" : "",
-            tmuxPaneID: transport == .tmux ? "%1" : "",
-            transcriptPath: transcriptPath,
-            kind: kind,
-            activityState: activityState,
-            transport: transport)
-    }
-
-    @Test("visible only for tmux Codex rows with a rollout")
-    func visibility() {
-        #expect(ContinueInClaudeMenu.isVisible(for: terminal()))
-        #expect(!ContinueInClaudeMenu.isVisible(for: terminal(transcriptPath: nil)))
-        #expect(!ContinueInClaudeMenu.isVisible(for: terminal(transcriptPath: "")))
-        #expect(!ContinueInClaudeMenu.isVisible(for: terminal(transport: .holder)))
-        #expect(!ContinueInClaudeMenu.isVisible(for: terminal(kind: .claude)))
-        #expect(!ContinueInClaudeMenu.isVisible(for: terminal(kind: .shell)))
-        #expect(!ContinueInClaudeMenu.isVisible(for: nil))
-    }
-
-    /// A tmux Codex row carries no agent status, so its column reads
-    /// `.unknown`; the daemon's rollout read is what refuses a busy turn.
-    @Test("a visible tmux Codex row at unknown activity enables account choices")
-    func continueIsEnabledForAVisibleUnknownCodexRow() {
-        let row = terminal(activityState: .unknown)
-        #expect(ContinueInClaudeMenu.isVisible(for: row))
-        #expect(ContinueInClaudeMenu.isEnabled(for: row))
-        #expect(!ContinueInClaudeMenu.isEnabled(for: terminal(transport: .holder)))
-        #expect(!ContinueInClaudeMenu.isEnabled(for: nil))
-    }
-}
-
 @MainActor
 @Suite("Continue in Claude replacement delta")
 struct ContinueInClaudeReplacementDeltaTests {
@@ -218,7 +177,6 @@ struct ContinueInClaudeReplacementDeltaTests {
         #expect(state.tabs[worktreeID] == [
             Tab(id: tabID, content: .terminal(terminalID: terminalID), label: nil),
         ])
-        #expect(!ContinueInClaudeMenu.isVisible(for: committed))
 
         var rollback = source
         rollback.sessionIncarnationID = UUID()
@@ -230,7 +188,5 @@ struct ContinueInClaudeReplacementDeltaTests {
 
         let restored = try #require(state.terminals[worktreeID]?.first)
         #expect(restored == rollback)
-        #expect(ContinueInClaudeMenu.isVisible(for: restored))
-        #expect(ContinueInClaudeMenu.isEnabled(for: restored))
     }
 }

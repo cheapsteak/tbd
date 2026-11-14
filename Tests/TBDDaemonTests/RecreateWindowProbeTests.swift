@@ -7,8 +7,10 @@ import Testing
 
 /// `terminal.recreateWindow` and the window probe it decides on.
 ///
-/// The Claude-resumable arm of this handler parks the row and then `killWindow`s
-/// it the moment it believes the window is gone. Believing that on a `false`
+/// For a tmux agent row — Claude, or Codex with a recorded thread — the handler
+/// opens no window: it parks the row and then `killWindow`s it the moment it
+/// believes the window is gone, keeping the identity a wake resumes from once
+/// the row has been migrated to the pty holder. Believing that on a `false`
 /// meant believing it on a timeout, so a recreate arriving while the machine was
 /// busy parked and killed a session that was alive and working — on a user's own
 /// gesture, which makes it worse than the startup sweep's version of the same
@@ -36,12 +38,31 @@ struct RecreateWindowProbeTests {
         return (wt, dir)
     }
 
-    private func seedClaudeTerminal(
-        _ db: TBDDatabase, worktreeID: UUID
+    /// The two agent rows the handler parks: a Claude tab with a session, and
+    /// a Codex tab with a recorded thread and launch options.
+    enum Agent: String, CaseIterable, Sendable {
+        case claude, codex
+    }
+
+    static let codexOptions = CodexLaunchOptions(
+        model: "acme-model", disabledFeatures: ["acme-feature"])
+
+    private func seedTerminal(
+        _ db: TBDDatabase, worktreeID: UUID, agent: Agent
     ) async throws -> Terminal {
-        let terminal = try await db.terminals.create(
-            worktreeID: worktreeID, tmuxWindowID: "@7", tmuxPaneID: "%7",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-recreate", kind: .claude)
+        let terminal: Terminal
+        switch agent {
+        case .claude:
+            terminal = try await db.terminals.create(
+                worktreeID: worktreeID, tmuxWindowID: "@7", tmuxPaneID: "%7",
+                label: TerminalLabel.claudeCode, claudeSessionID: "sess-recreate",
+                kind: .claude, transport: .tmux)
+        case .codex:
+            terminal = try await db.terminals.create(
+                worktreeID: worktreeID, tmuxWindowID: "@7", tmuxPaneID: "%7",
+                label: TerminalLabel.codex, claudeSessionID: "acme-thread",
+                kind: .codex, transport: .tmux, codexLaunchOptions: Self.codexOptions)
+        }
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .idle, source: .derived)
         return try #require(try await db.terminals.get(id: terminal.id))
@@ -62,6 +83,9 @@ struct RecreateWindowProbeTests {
         let tmuxWindowID: String
         let tmuxPaneID: String
         let claudeSessionID: String?
+        let transport: TerminalTransport
+        let kind: TerminalKind?
+        let codexLaunchOptions: CodexLaunchOptions?
         let hibernatedAt: Date?
         let suspendedAt: Date?
         let hibernateReason: HibernateReason?
@@ -71,6 +95,9 @@ struct RecreateWindowProbeTests {
             tmuxWindowID = t.tmuxWindowID
             tmuxPaneID = t.tmuxPaneID
             claudeSessionID = t.claudeSessionID
+            transport = t.transport
+            kind = t.kind
+            codexLaunchOptions = t.codexLaunchOptions
             hibernatedAt = t.hibernatedAt
             suspendedAt = t.suspendedAt
             hibernateReason = t.hibernateReason
@@ -79,7 +106,7 @@ struct RecreateWindowProbeTests {
     }
 
     private func run(
-        windowPresence: TmuxPresence
+        windowPresence: TmuxPresence, agent: Agent = .claude
     ) async throws -> (response: RPCResponse, before: RowFingerprint,
                        after: RowFingerprint, tmuxCalls: [[String]], terminalID: UUID) {
         let db = try TBDDatabase(inMemory: true)
@@ -90,7 +117,7 @@ struct RecreateWindowProbeTests {
             dryRunWindowPresence: { _, _ in windowPresence })
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id)
+        let terminal = try await seedTerminal(db, worktreeID: wt.id, agent: agent)
         let before = RowFingerprint(terminal)
 
         let response = await router(db, tmux: tmux).handle(try RPCRequest(
@@ -103,9 +130,9 @@ struct RecreateWindowProbeTests {
 
     /// The regression. A probe that never answered must not become a park and a
     /// kill; the caller is told to retry instead.
-    @Test("an unanswered probe parks nothing, kills nothing, and says so")
-    func unknownProbeRefusesAndLeavesTheRowAlone() async throws {
-        let run = try await run(windowPresence: .unknown)
+    @Test("an unanswered probe parks nothing, kills nothing, and says so", arguments: Agent.allCases)
+    func unknownProbeRefusesAndLeavesTheRowAlone(agent: Agent) async throws {
+        let run = try await run(windowPresence: .unknown, agent: agent)
 
         #expect(!run.response.success)
         #expect(run.response.error == RPCRouter.unansweredWindowProbeRefusal(
@@ -116,26 +143,40 @@ struct RecreateWindowProbeTests {
                 "an unanswered probe killed a window: \(run.tmuxCalls)")
     }
 
-    /// Positive evidence still parks, exactly as before. Without this the
-    /// tri-state could be satisfied by a handler that never acts.
-    @Test("a window tmux says is gone is still parked")
-    func absentProbeStillParks() async throws {
-        let run = try await run(windowPresence: .absent)
+    /// Positive evidence parks. Without this the tri-state could be satisfied
+    /// by a handler that never acts.
+    ///
+    /// The row stays on tmux and keeps everything a wake resumes from — the
+    /// Claude session id, or the Codex thread id and launch options — so a
+    /// migration followed by a wake brings the session back on the holder.
+    /// No window is opened: TBD starts nothing on tmux.
+    @Test("a window tmux says is gone is parked with its identity kept", arguments: Agent.allCases)
+    func absentProbeParks(agent: Agent) async throws {
+        let run = try await run(windowPresence: .absent, agent: agent)
 
-        #expect(run.response.success)
+        #expect(run.response.success, "the re-park was refused: \(run.response.error ?? "")")
+        let returned = try run.response.decodeResult(TBDShared.Terminal.self)
+        #expect(returned.isParked, "the response did not carry the parked row")
         #expect(run.after.hibernatedAt != nil,
                 "the tri-state probe stopped recreateWindow acting on positive evidence")
         #expect(run.after.claudeSessionID == run.before.claudeSessionID,
                 "the park discarded the session identity it exists to preserve")
+        #expect(run.after.kind == run.before.kind, "the park changed the tab's kind")
+        #expect(run.after.codexLaunchOptions == run.before.codexLaunchOptions,
+                "the park discarded the recorded Codex launch options")
+        #expect(run.after.transport == .tmux,
+                "the park moved the row off tmux without a migration")
         #expect(run.tmuxCalls.contains { $0.contains("kill-window") },
                 "the park did not eliminate the dead pane: \(run.tmuxCalls)")
+        #expect(!run.tmuxCalls.contains { $0.contains("new-window") || $0.contains("respawn-window") },
+                "recreateWindow started something on tmux: \(run.tmuxCalls)")
     }
 
     /// A live window means the request was stale. Unchanged behaviour: succeed,
     /// touch nothing.
-    @Test("a live window is a stale request and is ignored")
-    func aliveProbeIgnoresTheRequest() async throws {
-        let run = try await run(windowPresence: .alive)
+    @Test("a live window is a stale request and is ignored", arguments: Agent.allCases)
+    func aliveProbeIgnoresTheRequest(agent: Agent) async throws {
+        let run = try await run(windowPresence: .alive, agent: agent)
 
         #expect(run.response.success)
         #expect(run.after == run.before,

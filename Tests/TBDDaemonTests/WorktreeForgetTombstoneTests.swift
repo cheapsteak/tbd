@@ -20,13 +20,17 @@ import Testing
 /// paths against `git worktree list` output, which reports realpath()-resolved
 /// paths (/private/var/... on macOS).
 
+/// Spawns go through the holder spawn double, so a create opens its tabs on
+/// the holder transport without starting a process.
 private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
-    WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+    return lifecycle
 }
 
 /// A forgotten worktree under a TBD-managed prefix gets no row from the next

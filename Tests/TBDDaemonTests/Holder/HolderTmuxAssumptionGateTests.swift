@@ -381,28 +381,113 @@ struct HolderTmuxAssumptionGateTests {
                 "recreateWindow reached tmux for a holder row: \(recorded.snapshot())")
     }
 
-    @Test("recreateWindow still recreates a tmux row whose window is gone")
-    func recreateWindowStillActsOnTmuxRow() async throws {
+    /// TBD no longer opens tmux windows, so a tmux SHELL row whose window is
+    /// gone is refused, with the migration named, rather than stood back up.
+    /// A tmux agent row is parked instead, keeping its session
+    /// (`RecreateWindowProbeTests`).
+    @Test("recreateWindow refuses a tmux shell row whose window is gone and leaves every column alone")
+    func recreateWindowRefusesTmuxShellRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
-        // A shell row, so the handler takes the respawn branch rather than the
-        // repark branch — the branch that would have stood up a tmux window
-        // under a holder row.
+        // A shell row: the kind whose window the handler used to respawn.
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old", kind: .shell)
+        let before = RowFingerprint(terminal)
 
         let response = await router(db, tmux: tmux).handle(try RPCRequest(
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
-        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
+        #expect(response.knownErrorCode == .terminalOnTmux,
+                "the app reads the code, not the text, to hide its Retry")
+        #expect(response.error?.contains("tbd terminal migrate \(terminal.id.uuidString)") == true)
         let after = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(after.tmuxWindowID != "@old",
-                "the tmux leg must still get a fresh window")
-        #expect(recorded.snapshot().contains { $0.contains("new-window") })
+        #expect(RowFingerprint(after) == before,
+                "recreateWindow mutated a tmux row it was supposed to refuse")
+        #expect(!recorded.snapshot().contains { $0.contains("new-window") || $0.contains("kill-window") },
+                "recreateWindow opened or killed a tmux window: \(recorded.snapshot())")
+    }
+
+    /// The tmux rows the migration always skips, one of each kind, with the
+    /// skip the migration gives it.
+    enum UnmovableTmuxRow: CaseIterable, Sendable {
+        case codexWithoutThread
+        case claudeWithoutSession
+        case setupHookTab
+        case preSessionHookTab
+
+        var skip: String {
+            switch self {
+            case .codexWithoutThread: return TransportMigrationEligibility.codexSkip
+            case .claudeWithoutSession: return TransportMigrationEligibility.claudeWithoutConversationSkip
+            case .setupHookTab: return TransportMigrationEligibility.setupSkip
+            case .preSessionHookTab: return TransportMigrationEligibility.preSessionSkip
+            }
+        }
+    }
+
+    /// A tmux row whose window is gone and which the migration would skip is
+    /// told to close the tab and open a new one, not to run a migration that
+    /// would turn it away. Nor is it given the migration's own skip, which is
+    /// written for a live window: it would tell a pre-session tab whose hook
+    /// has died that the tab closes itself, and a dead Codex tab that its
+    /// session is running. The code stays `terminalOnTmux`, so the app still
+    /// offers no Retry, and the row is left as it was.
+    @Test("recreateWindow tells a tmux row the migration skips to close the tab",
+          arguments: UnmovableTmuxRow.allCases)
+    func recreateWindowTellsAnUnmovableTmuxRowToCloseTheTab(_ kind: UnmovableTmuxRow) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal: TBDShared.Terminal
+        switch kind {
+        case .codexWithoutThread:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.codex, kind: .codex)
+        case .claudeWithoutSession:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.claudeCode, kind: .claude)
+        case .setupHookTab:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.setup, kind: .shell)
+        case .preSessionHookTab:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.preSession, kind: .shell)
+        }
+        #expect(TransportMigrationEligibility.decide(terminal) == .skip(reason: kind.skip),
+                "the fixture is not a row the migration skips")
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
+        #expect(response.error?.hasSuffix(RPCRouter.unmovableTmuxRecreateAdvice) == true,
+                "the refusal did not tell the person to close the tab: \(response.error ?? "nil")")
+        #expect(response.error?.contains(kind.skip) == false,
+                "the refusal gave the migration's skip, which is written for a live window")
+        #expect(response.error?.contains("tbd terminal migrate") == false,
+                "the refusal sent the person to a migration that skips this row")
+        #expect(response.knownErrorCode == .terminalOnTmux,
+                "the app reads the code, not the text, to hide its Retry")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "recreateWindow mutated a tmux row it was supposed to refuse")
+        #expect(!recorded.snapshot().contains { $0.contains("new-window") || $0.contains("kill-window") },
+                "recreateWindow opened or killed a tmux window: \(recorded.snapshot())")
     }
 
     // MARK: - Gate 2: hibernation eligibility
@@ -899,24 +984,6 @@ struct HolderTmuxAssumptionGateTests {
                 "a classified wake still mutated the holder row")
         #expect(recorded.snapshot().isEmpty,
                 "wake reached tmux for a holder row: \(recorded.snapshot())")
-    }
-
-    @Test("wake still un-parks an identical tmux row")
-    func wakeStillUnparksTmuxRow() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = deadWindowTmux(recorded)
-        let (wt, dir) = try await seedWorktree(db)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(
-            db, worktreeID: wt.id, transport: .tmux)
-        try await db.terminals.setHibernated(
-            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
-
-        let result = await coordinator(db, tmux: tmux).wake(terminalID: terminal.id)
-        #expect(result.isOk)
-        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
-        #expect(!recorded.snapshot().isEmpty, "the tmux leg must still drive tmux")
     }
 
     /// The wake gate's ON branch, stopped at the one refusal a fixture can
@@ -1471,11 +1538,12 @@ struct HolderTmuxAssumptionGateTests {
                 "the holder wake path reached tmux: \(recorded.snapshot())")
     }
 
-    /// The tmux leg of the same guard: a parked tmux row is judged by its
-    /// window, never by the process table, so a signaller scripted to report a
-    /// perfect identity changes nothing about how it wakes.
-    @Test("a parked tmux row still wakes through tmux whatever the process table says")
-    func parkedTmuxRowIsUnaffectedByTheAdoptGuard() async throws {
+    /// The tmux side of the same guard: a parked tmux row never wakes, and
+    /// the process table cannot change that — a signaller scripted to report a
+    /// perfect identity does not get the row adopted. It is refused with the
+    /// migration named, before the guard is asked.
+    @Test("a parked tmux row is refused whatever the process table says")
+    func parkedTmuxRowIsRefusedWhateverTheProcessTableSays() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1487,7 +1555,7 @@ struct HolderTmuxAssumptionGateTests {
         // deliberately so: without them the process table says nothing about
         // this row and the test could not tell a transport-blind guard from a
         // correct one. With them, a guard that stopped discriminating on
-        // transport would adopt this row and drive no tmux at all.
+        // transport would adopt this row and un-park it.
         let childStartedAt = Date()
         let signaller = FakeProcessSignaller()
         signaller.behaviors[9109] = .init(aliveInitially: true)
@@ -1502,12 +1570,17 @@ struct HolderTmuxAssumptionGateTests {
         try await db.terminals.setHibernated(
             id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
 
+        let before = RowFingerprint(try #require(try await db.terminals.get(id: terminal.id)))
+
         let result = await coordinator(db, tmux: tmux, signaller: signaller)
             .wake(terminalID: terminal.id)
-        #expect(result.isOk)
-        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
-        #expect(!recorded.snapshot().isEmpty,
-                "the tmux leg must still drive tmux to wake a parked row")
+        #expect(result == .respawnFailed(
+            reason: HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id)))
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "a refused tmux wake un-parked the row")
+        #expect(RowFingerprint(after) == before, "a refused tmux wake mutated the row")
+        #expect(recorded.snapshot().isEmpty,
+                "a refused tmux wake drove tmux: \(recorded.snapshot())")
     }
 
     // MARK: - Gate 4: terminal.swapProfile, .inPlace
@@ -1516,9 +1589,10 @@ struct HolderTmuxAssumptionGateTests {
     /// category error, and what stops it here is the PARK rather than the
     /// transport.
     ///
-    /// This suite's registry adopted nothing, so the daemon holds no reader
-    /// for the session and the park refuses by name — which is this suite's
-    /// standing way of saying a path got as far as the reader lookup.
+    /// The registry is the holder spawn double, so the swap's spawn gate grants
+    /// it; it adopted nothing, so the daemon holds no reader for the session
+    /// and the park refuses by name — which is this suite's standing way of
+    /// saying a path got as far as the reader lookup.
     /// The row assertions are the half a return value cannot see: the arm
     /// parks BEFORE it re-homes precisely so that a park which refuses leaves
     /// the row claiming nothing new.
@@ -1534,7 +1608,8 @@ struct HolderTmuxAssumptionGateTests {
         let before = RowFingerprint(terminal)
 
         let router = self.router(db, tmux: tmux)
-        let registry = holderRegistry(listing: [terminal])
+        let launch = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: launch, listTerminals: { [terminal] })
         router.holderRegistry = registry
         await router.hibernationCoordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
@@ -1557,10 +1632,14 @@ struct HolderTmuxAssumptionGateTests {
         // address a tmux coordinate a holder row has not got.
         #expect(recorded.snapshot().isEmpty,
                 "the in-place swap reached tmux for a holder row: \(recorded.snapshot())")
+        #expect(launch.launches.isEmpty, "a swap whose park refused started a holder")
     }
 
-    @Test("an in-place profile swap still respawns an identical tmux row")
-    func inPlaceSwapStillActsOnTmuxRow() async throws {
+    /// The tmux side: an in-place switch would replace the running process,
+    /// and TBD no longer starts one on tmux, so the swap is refused with the
+    /// migration named and the row is left exactly as it was.
+    @Test("an in-place profile swap refuses an identical tmux row")
+    func inPlaceSwapRefusesTmuxRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1575,12 +1654,14 @@ struct HolderTmuxAssumptionGateTests {
             params: TerminalSwapProfileParams(
                 terminalID: terminal.id, newProfileID: nil, mode: .inPlace)))
 
-        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.tmuxSwapRefusal(terminalID: terminal.id))
+        #expect(response.knownErrorCode == .terminalOnTmux,
+                "the app reads the code, not the text, to know the row needs moving")
         let after = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(after.sessionIncarnationID != before.sessionIncarnationID,
-                "the tmux leg must still commit a replacement incarnation")
-        #expect(recorded.snapshot().contains { $0.contains("respawn-window") },
-                "the tmux leg must still respawn its window: \(recorded.snapshot())")
+        #expect(RowFingerprint(after) == before, "a refused swap mutated the tmux row")
+        #expect(!recorded.snapshot().contains { $0.contains("respawn-window") },
+                "a refused swap respawned the tmux window: \(recorded.snapshot())")
     }
 
     // MARK: - Gate 5: terminal.delete — the one that acts

@@ -21,8 +21,32 @@ enum AutomaticTerminalRecreationOutcome: Equatable {
     case alreadyInFlight
     case terminalUnavailable
     case recreated(attempt: Int)
-    case failed(attempt: Int)
+    /// `refusal` is what the daemon said when it declined the recreate, or nil
+    /// when the attempt failed for another reason, such as a lost connection.
+    case failed(attempt: Int, refusal: TerminalRecreationRefusal? = nil)
     case budgetExhausted
+}
+
+/// What the daemon said when it refused a window recreate: its own sentence,
+/// and whether the row is still on the tmux transport. Such a row's sentence
+/// says what to do — migrate it, or close the tab and open a new one — and no
+/// retry of the same request can succeed.
+///
+/// Decided from the refusal's code, never its text
+/// (`RPCErrorCode.terminalOnTmux`), so the daemon can reword the sentence
+/// without changing what the panel offers.
+struct TerminalRecreationRefusal: Equatable, Sendable {
+    let message: String
+    let rowIsOnTmux: Bool
+
+    /// The refusal `error` carries, or nil when the daemon did not write one —
+    /// a dropped connection, a timeout, an unreadable answer.
+    static func from(_ error: any Error) -> TerminalRecreationRefusal? {
+        guard case DaemonClientError.rpcError(let message, let code) = error else { return nil }
+        return TerminalRecreationRefusal(
+            message: message,
+            rowIsOnTmux: code == RPCErrorCode.terminalOnTmux.rawValue)
+    }
 }
 
 extension AppState {
@@ -672,23 +696,30 @@ extension AppState {
                 }
                 logger.error("Automatic terminal recreation attempt \(attempt, privacy: .public) failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 handleConnectionError(error)
-                return .failed(attempt: attempt)
+                return .failed(attempt: attempt, refusal: TerminalRecreationRefusal.from(error))
             }
         }
     }
 
     /// User-triggered recreation is independent of the automatic recovery budget.
-    func recreateTerminalWindow(terminalID: UUID) async {
+    ///
+    /// Returns the daemon's refusal when it declined, so the panel that asked
+    /// can show what it said; nil when the recreate went through, was already
+    /// in flight, or failed for a reason the daemon did not write.
+    @discardableResult
+    func recreateTerminalWindow(terminalID: UUID) async -> TerminalRecreationRefusal? {
         guard claimManualTerminalRecreation(terminalID: terminalID) == .claimed else {
-            return
+            return nil
         }
         defer { finishTerminalRecreation(terminalID: terminalID) }
 
         do {
             try await performTerminalRecreation(terminalID: terminalID)
+            return nil
         } catch {
             logger.error("Failed to recreate terminal window: \(error)")
             handleConnectionError(error)
+            return TerminalRecreationRefusal.from(error)
         }
     }
 
@@ -807,40 +838,6 @@ extension AppState {
                 "Continue in Codex failed: \(error.localizedDescription, privacy: .public)")
             showAlert(
                 "Couldn't continue in Codex: \(error.localizedDescription)",
-                isError: true)
-            handleConnectionError(error)
-        }
-    }
-
-    /// Replace an idle Codex process with Claude in the same terminal row and
-    /// tmux window. The daemon owns eligibility and rollback; this layer keeps
-    /// the UI on the existing tab and adopts the returned replacement row.
-    func continueInClaude(sourceTerminalID: UUID, profileID: UUID?) async {
-        guard let source = terminals.values
-            .flatMap({ $0 })
-            .first(where: { $0.id == sourceTerminalID }) else {
-            showAlert("Couldn't continue in Claude: source terminal not found.", isError: true)
-            return
-        }
-
-        do {
-            let size = mainAreaTerminalSize()
-            let updated = try await daemonClient.continueInClaude(
-                sourceTerminalID: sourceTerminalID,
-                profileID: profileID,
-                cols: size.cols,
-                rows: size.rows)
-            guard updated.id == source.id,
-                  updated.worktreeID == source.worktreeID,
-                  updated.tmuxWindowID == source.tmuxWindowID else {
-                throw DaemonClientError.invalidResponse
-            }
-            adoptProviderReplacement(updated)
-        } catch {
-            logger.error(
-                "Continue in Claude failed: \(error.localizedDescription, privacy: .public)")
-            showAlert(
-                "Couldn't continue in Claude: \(error.localizedDescription)",
                 isError: true)
             handleConnectionError(error)
         }
@@ -1012,8 +1009,6 @@ extension Terminal {
 /// Pure decisions behind the transport-migration gestures, so each branch is
 /// testable without SwiftUI (same pattern as `SwapProfileMenu`).
 enum TransportMigrationMenu {
-    static let title = "Move to Holder (No tmux)"
-
     /// Offered for any row that is not already holder-backed, and only when the
     /// daemon can run a holder (the capability the Settings toggle reads).
     static func isOffered(for terminal: Terminal?, holderSupported: Bool) -> Bool {

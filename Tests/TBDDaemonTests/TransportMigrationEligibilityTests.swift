@@ -37,6 +37,22 @@ import Testing
             == .skip(reason: "Session is waiting on a permission prompt"))
     }
 
+    /// `nothingToResumeSkip` names only the rows no migration will ever move,
+    /// for which other refusals name no migration. A busy session is
+    /// skipped only until its turn ends, and a shell is moved, so neither has
+    /// one; a tab the migration always skips has the same reason `decide`
+    /// gives it.
+    @Test func onlyTheRowsNoMigrationMovesHaveANothingToResumeSkip() throws {
+        #expect(TransportMigrationEligibility.nothingToResumeSkip(
+            makeTerminal(activityState: .working)) == nil)
+        #expect(TransportMigrationEligibility.nothingToResumeSkip(
+            makeTerminal(kind: .shell, claudeSessionID: nil)) == nil)
+        let unmovable = makeTerminal(claudeSessionID: nil)
+        let reason = try #require(TransportMigrationEligibility.nothingToResumeSkip(unmovable))
+        #expect(reason == TransportMigrationEligibility.claudeWithoutConversationSkip)
+        #expect(TransportMigrationEligibility.decide(unmovable) == .skip(reason: reason))
+    }
+
     // The resumable-Claude guard that the profile swap and manual hibernate
     // apply is deliberately NOT applied here: a shell must be migratable.
     @Test func aShellWithNoSessionIDIsEligible() {
@@ -72,6 +88,35 @@ import Testing
     /// one answer however busy it looks.
     @Test func aBusyCodexTabIsStillSkippedAsCodex() {
         let t = makeTerminal(kind: .codex, claudeSessionID: nil, activityState: .working)
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.codexSkip))
+    }
+
+    /// A RUNNING Codex tab is skipped even when it names a thread: no park
+    /// takes it, so the only move left would replace it with a bare shell.
+    @Test func aRunningCodexTabThatNamesAThreadIsStillSkipped() {
+        let t = makeTerminal(
+            kind: .codex, label: TerminalLabel.codex, claudeSessionID: "acme-thread")
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.codexSkip))
+    }
+
+    /// A PARKED Codex tab that names a thread is eligible: the move only
+    /// rewrites it, and its next wake resumes the thread on the holder.
+    @Test func aParkedCodexTabThatNamesAThreadIsEligible() {
+        let t = makeTerminal(
+            kind: .codex, label: TerminalLabel.codex, claudeSessionID: "acme-thread",
+            hibernatedAt: Date())
+        #expect(TransportMigrationEligibility.decide(t) == .eligible)
+    }
+
+    /// The parked exception needs positive evidence that the id is Codex's:
+    /// a row that only carries the Codex LABEL has no Codex plan to wake from,
+    /// so it keeps the skip even when parked.
+    @Test func aParkedCodexLabelWithoutTheCodexKindIsStillSkipped() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.codex, claudeSessionID: "acme-thread",
+            hibernatedAt: Date())
         #expect(TransportMigrationEligibility.decide(t)
             == .skip(reason: TransportMigrationEligibility.codexSkip))
     }

@@ -842,24 +842,6 @@ actor DaemonClient {
             resultType: TerminalContinueInCodexResult.self)
     }
 
-    /// Replace one idle Codex process with a fresh Claude session in the same
-    /// terminal row and tmux window. A nil profile selects the ambient login.
-    func continueInClaude(
-        sourceTerminalID: UUID,
-        profileID: UUID?,
-        cols: Int?,
-        rows: Int?
-    ) async throws -> Terminal {
-        try await callAsync(
-            method: RPCMethod.terminalContinueInClaude,
-            params: TerminalContinueInClaudeParams(
-                sourceTerminalID: sourceTerminalID,
-                profileID: profileID,
-                cols: cols,
-                rows: rows),
-            resultType: Terminal.self)
-    }
-
     /// List terminals, optionally filtered by worktree.
     func listTerminals(worktreeID: UUID? = nil) async throws -> [Terminal] {
         return try await callAsync(
@@ -1334,18 +1316,6 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetSessionRestore,
             params: ConfigSetSessionRestoreParams(enabled: enabled)
-        )
-    }
-
-    /// Persist the pty-holder transport gate (default ON). Read fresh at spawn
-    /// time, so no daemon restart is needed — but it applies only to sessions
-    /// created after the call: a session records its transport at creation and
-    /// keeps it for life. Sending either value is an explicit gesture that
-    /// survives a later change to the shipped default.
-    func setPtyHolderEnabled(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetPtyHolderEnabled,
-            params: ConfigSetPtyHolderEnabledParams(enabled: enabled)
         )
     }
 

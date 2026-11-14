@@ -45,6 +45,11 @@ struct MockSeederTests {
         #expect(terms.count == 1)
         #expect(terms[0].kind == .claude)
         #expect(terms[0].activityState == .working)
+        // Every seeded session is a holder row with no holder behind it: the
+        // mock starts no process and names no tmux window.
+        #expect(terms[0].transport == .holder)
+        #expect(terms[0].tmuxWindowID.isEmpty && terms[0].tmuxPaneID.isEmpty)
+        #expect(terms[0].holderPID == nil && terms[0].childPID == nil)
         let expected = dir.appendingPathComponent("transcripts")
             .appendingPathComponent("long-session.jsonl").path
         #expect(terms[0].transcriptPath == expected)

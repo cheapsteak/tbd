@@ -987,7 +987,7 @@ struct RowActionMenuCallSiteTests {
             let terminal = holderTerminal(worktreeID: worktree.id)
             state.terminals[worktree.id] = [terminal]
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, ptyHolderEnabled: true)
+                controlModeEnabled: false, ptyHolderSupported: true)
             // The claim a panel takes the instant `attach.ready` is accepted.
             let registration = state.terminalInjections.register(
                 terminalID: terminal.id) { _, _ in true }

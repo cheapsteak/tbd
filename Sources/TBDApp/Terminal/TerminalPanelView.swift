@@ -107,6 +107,41 @@ enum TerminalRecoveryPresentation {
     static let exhaustedMessage =
         "The terminal window is still unavailable after two automatic recovery attempts. Retry manually or close the tab."
     static let retryTitle = "Retry"
+
+    /// The banner a failed recovery raises, or nil for an outcome that needs
+    /// none.
+    static func guidance(
+        for outcome: AutomaticTerminalRecreationOutcome
+    ) -> TerminalRecoveryGuidance? {
+        switch outcome {
+        case .failed(_, let refusal?):
+            return guidance(for: refusal)
+        case .failed(_, nil):
+            return TerminalRecoveryGuidance(message: failedMessage, offersRetry: true)
+        case .budgetExhausted:
+            return TerminalRecoveryGuidance(message: exhaustedMessage, offersRetry: true)
+        case .alreadyInFlight, .terminalUnavailable, .recreated:
+            return nil
+        }
+    }
+
+    /// The banner for a recreate the daemon refused: its own sentence, which
+    /// says what to do. A row still on tmux gets no Retry, because repeating
+    /// the request cannot change the transport it is on; every other refusal
+    /// keeps one.
+    static func guidance(for refusal: TerminalRecreationRefusal) -> TerminalRecoveryGuidance {
+        if refusal.rowIsOnTmux {
+            return TerminalRecoveryGuidance(message: refusal.message, offersRetry: false)
+        }
+        return TerminalRecoveryGuidance(
+            message: "Terminal recovery failed: \(refusal.message)", offersRetry: true)
+    }
+}
+
+/// What a panel's recovery banner says, and whether it offers Retry.
+struct TerminalRecoveryGuidance: Equatable, Sendable {
+    let message: String
+    let offersRetry: Bool
 }
 
 /// Sendable wrapper for a weak terminal engine reference, used to pass the
@@ -169,7 +204,7 @@ struct TerminalPanelView: View {
 
     @State private var proxyWarning: String?
     @State private var didProbe = false
-    @State private var recoveryGuidanceMessage: String?
+    @State private var recoveryGuidance: TerminalRecoveryGuidance?
     /// Bytes this panel's outgoing queue is holding for a pty that has stopped
     /// accepting writes, once the stall has outlasted the queue's threshold;
     /// `nil` whenever nothing is waiting. Panel-local `@State` rather than an
@@ -181,6 +216,10 @@ struct TerminalPanelView: View {
     /// which shows the Retry banner. Never lowered: Retry replaces this view,
     /// and this state goes with it.
     @State private var holderAttachRetryOffered = false
+    /// Whether the limit banner's switch or fork is still running. A second
+    /// click while it runs is dropped: a double click on Fork would otherwise
+    /// open two new tabs on the other account.
+    @State private var limitSwitchInFlight = false
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -197,6 +236,17 @@ struct TerminalPanelView: View {
         appState.terminals.values.flatMap({ $0 })
             .first(where: { $0.id == terminalID })
             .map { ControlModePaneKey(worktreeID: $0.worktreeID, paneID: $0.tmuxPaneID) }
+    }
+
+    /// The recovery banner's Retry. A retry the daemon refuses replaces the
+    /// banner with what the daemon said, so the person reads the reason rather
+    /// than a Retry that silently does nothing.
+    private func retryRecovery() {
+        Task {
+            if let refusal = await appState.recreateTerminalWindow(terminalID: terminalID) {
+                recoveryGuidance = TerminalRecoveryPresentation.guidance(for: refusal)
+            }
+        }
     }
 
     var body: some View {
@@ -232,12 +282,10 @@ struct TerminalPanelView: View {
                 .padding(.vertical, 4)
                 .background(Color.orange.opacity(0.18))
             }
-            if let recoveryGuidanceMessage {
-                TerminalRetryBanner(message: recoveryGuidanceMessage) {
-                    Task {
-                        await appState.recreateTerminalWindow(terminalID: terminalID)
-                    }
-                }
+            if let recoveryGuidance {
+                TerminalRetryBanner(
+                    message: recoveryGuidance.message,
+                    onRetry: recoveryGuidance.offersRetry ? retryRecovery : nil)
             }
             // The Retry the attach-failed placard points at; the placard itself
             // is written into the terminal. Retry advances the terminal's
@@ -291,22 +339,38 @@ struct TerminalPanelView: View {
                     suggestedProfile: suggestedProfile,
                     suggestedLiveCount: suggestedLiveCount
                 )
+                // A running tmux row cannot be switched in place, so its
+                // banner offers a fork to the suggested account instead, and
+                // keeps the banner: this tab is still at its limit.
+                let switchesInPlace = SwapProfileMenu.offersInPlaceSwitch(
+                    for: appState.terminals.values.flatMap({ $0 })
+                        .first(where: { $0.id == terminalID }))
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                     Text("⚠ Session limit hit on \(model.limitedProfileName) · \(model.resetsText)")
                         .font(.caption)
                     Spacer()
-                    if let switchTitle = model.switchButtonTitle {
+                    if let switchTitle = switchesInPlace ? model.switchButtonTitle : model.forkButtonTitle {
                         Button(switchTitle) {
+                            // Raised here, before the task starts, so a second
+                            // click handled before the view redraws as disabled
+                            // still finds it.
+                            guard !limitSwitchInFlight,
+                                  let suggestedID = limitHit.suggestedProfileID else { return }
+                            limitSwitchInFlight = true
                             Task {
-                                if let suggestedID = limitHit.suggestedProfileID {
-                                    await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: suggestedID, mode: .inPlace)
+                                defer { limitSwitchInFlight = false }
+                                await appState.swapTerminalProfile(
+                                    terminalID: terminalID, newProfileID: suggestedID,
+                                    mode: switchesInPlace ? .inPlace : .fork)
+                                if switchesInPlace {
                                     appState.limitHits.removeValue(forKey: terminalID)
                                 }
                             }
                         }
                         .controlSize(.small)
+                        .disabled(limitSwitchInFlight)
                     }
                     Button("Dismiss") {
                         appState.limitHits.removeValue(forKey: terminalID)
@@ -329,7 +393,7 @@ struct TerminalPanelView: View {
                 onFilePathClicked: onFilePathClicked,
                 onTerminalNotification: onTerminalNotification,
                 onMissingWindow: onMissingWindow,
-                onRecoveryGuidance: { recoveryGuidanceMessage = $0 },
+                onRecoveryGuidance: { recoveryGuidance = $0 },
                 onOutgoingBackpressureChange: { pendingOutgoingBytes = $0 },
                 onHolderAttachRetryOffered: { holderAttachRetryOffered = true },
                 initialSnapshot: initialSnapshot,
@@ -399,7 +463,8 @@ struct TerminalPanelView: View {
 /// Retry: automatic recovery that gave up, and a holder attach that did.
 private struct TerminalRetryBanner: View {
     let message: String
-    let onRetry: @MainActor () -> Void
+    /// nil hides Retry, for a banner whose remedy is something else.
+    let onRetry: (@MainActor () -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -407,9 +472,12 @@ private struct TerminalRetryBanner: View {
                 .foregroundStyle(.orange)
             Text(message)
                 .font(.caption)
+                .textSelection(.enabled)
             Spacer()
-            Button(TerminalRecoveryPresentation.retryTitle) { onRetry() }
-                .controlSize(.small)
+            if let onRetry {
+                Button(TerminalRecoveryPresentation.retryTitle) { onRetry() }
+                    .controlSize(.small)
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
@@ -439,7 +507,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     @Environment(AppState.self) var appState
     @EnvironmentObject var appearance: AppearanceSettings
     var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-    var onRecoveryGuidance: (@MainActor (String) -> Void)?
+    var onRecoveryGuidance: (@MainActor (TerminalRecoveryGuidance) -> Void)?
     /// Carries this panel's queued-byte count to the parent's `@State` banner.
     var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
     /// Raises the parent's Retry banner once the attach-failed placard is up.
@@ -735,7 +803,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         let viewSessionReclaim = ViewSessionReclaim()
         var tabCloseContext: TabCloseContext?
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
-        var onRecoveryGuidance: (@MainActor (String) -> Void)?
+        var onRecoveryGuidance: (@MainActor (TerminalRecoveryGuidance) -> Void)?
         /// Called when this panel paints the attach-failed placard, whose
         /// remedy is the Retry banner this raises. Not for the session-ended
         /// placards: there is nothing to attach to, and closing is the advice.
@@ -2170,19 +2238,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         nonisolated static func recoveryMessage(
             for outcome: AutomaticTerminalRecreationOutcome
         ) -> String? {
-            switch outcome {
-            case .failed:
-                return TerminalRecoveryPresentation.failedMessage
-            case .budgetExhausted:
-                return TerminalRecoveryPresentation.exhaustedMessage
-            case .alreadyInFlight, .terminalUnavailable, .recreated:
-                return nil
-            }
+            TerminalRecoveryPresentation.guidance(for: outcome)?.message
         }
 
         @MainActor
-        func recoveryGuidanceDidBecomeAvailable(_ message: String) {
-            onRecoveryGuidance?(message)
+        func recoveryGuidanceDidBecomeAvailable(_ guidance: TerminalRecoveryGuidance) {
+            onRecoveryGuidance?(guidance)
         }
 
         @MainActor
@@ -2335,9 +2396,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 logger.info(
                     "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=recreated attempt=\(attempt, privacy: .public)"
                 )
-            case .failed(let attempt):
+            case .failed(let attempt, let refusal):
                 logger.error(
-                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=failed attempt=\(attempt, privacy: .public)"
+                    "automatic terminal recovery terminal=\(terminalID, privacy: .public) worktree=\(worktreeID, privacy: .public) stage=\(failedStage.rawValue, privacy: .public) category=failed attempt=\(attempt, privacy: .public) refusal=\(refusal?.message ?? "none", privacy: .public)"
                 )
             case .budgetExhausted:
                 logger.error(
@@ -2583,9 +2644,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     failedStage: failedStage,
                     diagnosticContext: diagnosticContext
                 )
-                if let message = Self.recoveryMessage(for: outcome) {
-                    recoveryGuidanceDidBecomeAvailable(message)
-                    feedPreparationMessage(message, into: engine)
+                if let guidance = TerminalRecoveryPresentation.guidance(for: outcome) {
+                    recoveryGuidanceDidBecomeAvailable(guidance)
+                    feedPreparationMessage(guidance.message, into: engine)
                 }
                 return
             case .startViewer(let value):

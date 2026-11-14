@@ -70,12 +70,8 @@ extension PhoneAppService {
     /// `PhoneAppConstants.worktreeSessionWait` for its first agent session.
     ///
     /// A message over `PhoneAppConstants.messageMaxBytes` is `bad_request`.
-    /// So is one over `PhoneAppConstants.firstPromptMaxBytes` once
-    /// shell-quoted (`fitsTmuxFirstPrompt(_:)`) when the new session would
-    /// spawn on the tmux transport (`phoneSpawnsOnHolder`),
-    /// whose spawn command the first message rides
-    /// (`firstMessageTooLongReason`); on the pty-holder transport it is not
-    /// held to that cap. A
+    /// The new session opens on the pty holder, whose spawn takes the first
+    /// message up to that same cap. A
     /// blank message (empty, or only whitespace and invisible format
     /// characters, `PhoneMessageText.isBlank`) creates the worktree with no
     /// first message, so its agent starts idle. Any other message goes to
@@ -96,11 +92,6 @@ extension PhoneAppService {
         }
         _ = try await visibleRepo(params.repoID)
         let prompt = PhoneMessageText.isBlank(params.message) ? nil : params.message
-        if let prompt, !Self.fitsTmuxFirstPrompt(prompt) {
-            guard await actions.phoneSpawnsOnHolder() else {
-                throw PhoneAppError(code: .badRequest, message: Self.firstMessageTooLongReason)
-            }
-        }
         try Task.checkCancellation()
         let response = try await actions.phoneCreateWorktree(
             WorktreeCreateParams(repoID: params.repoID, prompt: prompt), deviceID: context.peer.deviceID)

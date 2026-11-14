@@ -22,12 +22,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -47,8 +48,9 @@ import Testing
     #expect(result.displayName == result.name, "daemon defaults displayName to name")
     #expect(result.hasDefaultDisplayName)
 
+    // The primary only: no setup hook is installed, so no setup tab opens.
     let terminals = try await db.terminals.list(worktreeID: result.id)
-    #expect(terminals.count == 2)
+    #expect(terminals.count == 1)
 }
 
 @Test func testCreateWorktreeUsesCodexPrimaryAgentPreference() async throws {
@@ -57,18 +59,19 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
     try await db.config.setPrimaryAgentPreference(.codex)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
 
     let terminals = try await db.terminals.list(worktreeID: result.id)
-    #expect(terminals.count == 2)
+    #expect(terminals.count == 1, "the primary only: no setup hook is installed")
     #expect(terminals.contains { $0.kind == .codex && $0.label == "Codex" })
     #expect(!terminals.contains { $0.kind == .claude || $0.label == "Claude Code" })
 }
@@ -78,12 +81,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     try await db.config.setPrimaryAgentPreference(.claude)
@@ -107,9 +111,7 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
     try await db.config.setPrimaryAgentPreference(.codex)
-    // On the holder transport, through the spawn double: the tab order does
-    // not depend on the transport, and no process is started.
-    try await db.config.setPtyHolderEnabled(true)
+    // Through the holder spawn double, so no process is started.
     let holder = FakeHolderLaunch()
     var lifecycle = WorktreeLifecycle(
         db: db,
@@ -157,13 +159,14 @@ import Testing
         }
     )
 
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         modelProfileResolver: resolver
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
@@ -192,12 +195,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let result = try await lifecycle.createWorktree(
@@ -218,12 +222,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -253,12 +258,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -294,12 +300,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -310,9 +317,9 @@ import Testing
     #expect(revived.status == .active)
     #expect(FileManager.default.fileExists(atPath: revived.localPath))
 
-    // Verify fresh terminals were created
+    // Verify a fresh primary was created (no setup hook, so no setup tab)
     let terminals = try await db.terminals.list(worktreeID: revived.id)
-    #expect(terminals.count == 2)
+    #expect(terminals.count == 1)
 }
 
 @Test func testReviveActiveWorktreeThrows() async throws {
@@ -320,12 +327,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -340,12 +348,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     // makeTestRepo, not a bare repos.create: without the worktreeRoot override
     // the created worktree — and the stray dir this test plants where it used
@@ -376,12 +385,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -417,12 +427,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -440,12 +451,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
@@ -462,12 +474,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -487,12 +500,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -525,12 +539,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -553,12 +568,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -587,8 +603,8 @@ import Testing
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
     let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
 
-    // Should have 2 setup + 2 claude = but setup only creates once, so:
-    // 1 claude (from first session) + 1 setup + 1 extra claude (from second session) = 3
+    // The first session comes back as the primary and the second as a
+    // restored tab.
     let terminals = try await db.terminals.list(worktreeID: revived.id)
     let claudeTerminals = terminals.filter { $0.claudeSessionID != nil }
     #expect(claudeTerminals.count == 2,
@@ -617,16 +633,12 @@ import Testing
         keychain: { id in id == token.id.uuidString ? secret : nil }
     )
 
-    // Recorder captures the dryRun shellCommand args from createWindow.
-    let recorded = LifecycleRecordedCommands()
-    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
-        recorded.append(args)
-    })
-
-    let lifecycle = WorktreeLifecycle(
+    // The holder spawn double records what each spawn would have run.
+    let holder = FakeHolderLaunch()
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
-        tmux: tmux,
+        tmux: TmuxManager(dryRun: true),
         hooks: HookResolver(),
         modelProfileResolver: resolver,
         // This is the only test in the file that spawns Claude against a
@@ -635,20 +647,20 @@ import Testing
         // ~/tbd/profiles.
         configDirManager: makeIsolatedConfigDirManager(tag: "lifecycle")
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
 
-    // (a) Token must be passed via tmux -e flag, NOT inlined into the shell command body.
-    let snap = recorded.snapshot()
-    let claudeCall = snap.first { call in
-        let body = call.last ?? ""
-        return body.contains("claude --session-id")
+    // (a) Token must be passed in the job's process environment, NOT inlined
+    // into the shell command body.
+    let claudeLaunch = holder.launches.first { launch in
+        launch.commandLine?.contains("claude --session-id") == true
     }
-    #expect(claudeCall != nil, "expected a createWindow call spawning claude")
-    #expect(claudeCall?.contains("ANTHROPIC_API_KEY=\(secret)") == true,
-            "expected token in tmux -e flag; got: \(claudeCall ?? [])")
-    let shellBody = claudeCall?.last ?? ""
+    #expect(claudeLaunch != nil, "expected a holder launch spawning claude")
+    #expect(claudeLaunch?.request.environment["ANTHROPIC_API_KEY"] == secret,
+            "expected token in the job's process environment")
+    let shellBody = claudeLaunch?.commandLine ?? ""
     #expect(!shellBody.contains(secret),
             "secret leaked into shell command body: \(shellBody)")
     #expect(!shellBody.contains("ANTHROPIC_API_KEY"),
@@ -685,10 +697,10 @@ import Testing
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    let wt = try await seedTmuxShellTerminals(db: db, repo: repo, repoDir: repoDir)
 
     let terminalsBefore = try await db.terminals.list(worktreeID: wt.id)
-    #expect(terminalsBefore.count == 2, "Expected 2 terminals after createWorktree")
+    #expect(terminalsBefore.count == 2, "Expected the 2 seeded tmux terminals")
 
     let windowIDsBefore = Set(terminalsBefore.map { $0.tmuxWindowID })
 
@@ -754,6 +766,23 @@ import Testing
     #expect(try await db.tabs.listForWorktree(worktreeID: main.id)
             .first(where: { $0.id == terminal.id })?.label == "Finished output")
     #expect(!recorded.snapshot().contains { $0.contains("kill-window") })
+}
+
+/// A main worktree at the repo path holding two tmux shell rows on distinct
+/// windows: the rows the tmux arm of reconcile judges. Seeded directly,
+/// because no spawn opens a tmux window.
+private func seedTmuxShellTerminals(
+    db: TBDDatabase, repo: Repo, repoDir: URL
+) async throws -> Worktree {
+    let main = try await db.worktrees.createMain(
+        repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+        tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
+    for index in 1...2 {
+        _ = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@\(index)", tmuxPaneID: "%\(index)",
+            label: "Shell", kind: .shell)
+    }
+    return main
 }
 
 // MARK: - Reconcile and the pane consultation's two negative answers
@@ -884,7 +913,7 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    let wt = try await seedTmuxShellTerminals(db: db, repo: repo, repoDir: repoDir)
 
     var terminals = try await db.terminals.list(worktreeID: wt.id)
     #expect(terminals.count == 2)
@@ -986,7 +1015,7 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     )
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    let wt = try await seedTmuxShellTerminals(db: db, repo: repo, repoDir: repoDir)
 
     // Seed a stale window ID to simulate what happens after a reboot
     // (the DB still has the old window ID, but the tmux server is gone).
@@ -1031,12 +1060,13 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -1058,22 +1088,6 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
 }
 
 // MARK: - Helpers
-
-/// Thread-safe collector for TmuxManager dryRun recorded args.
-private final class LifecycleRecordedCommands: @unchecked Sendable {
-    private let lock = NSLock()
-    private var commands: [[String]] = []
-
-    func append(_ args: [String]) {
-        lock.lock(); defer { lock.unlock() }
-        commands.append(args)
-    }
-
-    func snapshot() -> [[String]] {
-        lock.lock(); defer { lock.unlock() }
-        return commands
-    }
-}
 
 private final class LockedInt: @unchecked Sendable {
     private let lock = NSLock()

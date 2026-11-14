@@ -512,7 +512,8 @@ extension PhoneAppService {
     ///
     /// The refusals come in this order, each `unsupported`:
     /// 1. **What the session itself cannot do**, with the reason the list
-    ///    shows: a Codex session, a tab in a remote lane. This check leaves
+    ///    shows: a Codex session, a tab in a remote lane, a switch on a
+    ///    running session still on the tmux transport. This check leaves
     ///    the setting out, so a session that could never answer says why,
     ///    whatever the setting.
     /// 2. **Not Claude**, with `notClaude`: any other session the list does

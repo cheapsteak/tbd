@@ -334,7 +334,9 @@ struct WorktreeReviveRemoteLaneTests {
             repoID: fixture.repo.id, name: "acme-local", branch: "acme-branch",
             path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
 
-        let response = try await revive(fixture.router(), worktree)
+        let response = try await revive(
+            fixture.router(holderRegistry: makeHolderRegistryDouble(launch: FakeHolderLaunch())),
+            worktree)
 
         #expect(!response.success, "an active local worktree is not revivable")
         #expect(fixture.invoker.calls == [["describe"]], "a local revive must call no provider")
@@ -349,7 +351,9 @@ struct WorktreeReviveRemoteLaneTests {
         let fixture = try await RemoteLaneFixture.make(capabilities: [], tag: "revive-unknown")
         defer { fixture.cleanup() }
 
-        let response = await fixture.router().handle(try RPCRequest(
+        let router = fixture.router(
+            holderRegistry: makeHolderRegistryDouble(launch: FakeHolderLaunch()))
+        let response = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeRevive,
             params: WorktreeReviveParams(worktreeID: UUID()),
             actor: .app))

@@ -145,7 +145,6 @@ public struct MockSeeder: Sendable {
                     worktreeID: wt.id,
                     worktreeName: wtSeed.name,
                     terminalIndex: termIdx,
-                    index: wtIdx * 100 + termIdx,
                     into: db,
                     fixtureDirectory: fixtureDirectory
                 )
@@ -158,19 +157,27 @@ public struct MockSeeder: Sendable {
         worktreeID: UUID,
         worktreeName: String,
         terminalIndex: Int,
-        index: Int,
         into db: TBDDatabase,
         fixtureDirectory: URL
     ) async throws {
         let item = "terminal[\(terminalIndex)] in worktree '\(worktreeName)'"
         try await wrap(item) {
+            // A holder row, the only transport a session is opened on, with
+            // no holder behind it: the mock starts no process. Startup
+            // adoption finds no holder at its rendezvous and reads the session
+            // as ended, exactly as it would for a holder that died while the
+            // daemon was down. A `suspended` seed becomes a parked holder row,
+            // which a wake serves like any other — refused here as
+            // `worktreeMissing`, because a fixture's worktree paths are not
+            // created on disk.
             let terminal = try await db.terminals.create(
                 worktreeID: worktreeID,
-                tmuxWindowID: "mock-w-\(index)",
-                tmuxPaneID: "mock-p-\(index)",
+                tmuxWindowID: "",
+                tmuxPaneID: "",
                 label: tSeed.label,
                 claudeSessionID: tSeed.claudeSessionID,
-                kind: tSeed.kind
+                kind: tSeed.kind,
+                transport: .holder
             )
 
             if let state = tSeed.activityState {

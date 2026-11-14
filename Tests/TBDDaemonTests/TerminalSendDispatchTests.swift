@@ -374,9 +374,9 @@ struct TerminalSendDispatchTests {
         #expect(fixture.pastes.pastes == ["status?"])
     }
 
-    /// And a target that stopped being verifiable — a `recreateWindow` turning
-    /// an agent terminal into a shell while keeping its id — refuses too. The
-    /// payload it is holding opens with an envelope a shell would execute.
+    /// And a target that stopped being verifiable — a row that now reads as a
+    /// shell under the id an agent terminal had — refuses too. The payload it
+    /// is holding opens with an envelope a shell would execute.
     @Test("the retry refuses a target that is no longer an observable agent")
     func redeliveryRefusesAnIneligibleTarget() async throws {
         let fixture = try await makeShellFixture()

@@ -309,16 +309,23 @@ struct ComposerMountingTests {
 
     // MARK: - The mount decision
 
+    /// A terminal on `transport`: the pty holder unless a test asks for tmux,
+    /// since TBD opens every new session on the holder. A holder row has empty
+    /// tmux IDs, as it does when TBD makes one.
     private func terminal(
         worktreeID: UUID,
         id: UUID = UUID(),
         kind: TerminalKind? = .claude,
-        hibernatedAt: Date? = nil
+        hibernatedAt: Date? = nil,
+        transport: TerminalTransport = .holder
     ) -> Terminal {
-        Terminal(
-            id: id, worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+        let onHolder = transport == .holder
+        return Terminal(
+            id: id, worktreeID: worktreeID,
+            tmuxWindowID: onHolder ? "" : "@1", tmuxPaneID: onHolder ? "" : "%1",
             kind: kind, hibernatedAt: hibernatedAt,
-            hibernateReason: hibernatedAt == nil ? nil : .manual)
+            hibernateReason: hibernatedAt == nil ? nil : .manual,
+            transport: transport)
     }
 
     private func worktree(id: UUID = UUID(), remote: Bool = false) -> Worktree {
@@ -377,6 +384,34 @@ struct ComposerMountingTests {
         let decision = try #require(mount(
             terminal: terminal(worktreeID: wt.id, hibernatedAt: Date()), worktree: wt))
         #expect(decision.state == .notRunning(exited: false))
+    }
+
+    /// A session parked on tmux cannot be woken where it is, so its composer
+    /// mounts disabled, with a note in the parked pane's words that says how
+    /// to move it first, rather than offering a send the daemon would refuse.
+    @Test func aSessionParkedOnTmuxMountsDisabledWithTheMoveInstruction() throws {
+        let wt = worktree()
+        let decision = try #require(mount(
+            terminal: terminal(worktreeID: wt.id, hibernatedAt: Date(), transport: .tmux), worktree: wt))
+        #expect(decision.state == .unavailable(message: TableTranscriptPaneView.parkedOnTmuxComposerNote))
+        #expect(!decision.state.isEnabled)
+        let note = TableTranscriptPaneView.parkedOnTmuxComposerNote
+        #expect(note.hasPrefix(HibernatedBannerModel.parkedOnTmuxInstruction))
+        #expect(note.contains(TransportMigrationVocabulary.menuTitle))
+        #expect(note.contains("tbd terminal migrate"))
+    }
+
+    /// Only the parked tmux row changes. A running tmux session still takes a
+    /// message, typed into its pane, and a parked holder session still wakes
+    /// with one.
+    @Test func aRunningTmuxSessionAndAParkedHolderSessionKeepTheirComposer() throws {
+        let wt = worktree()
+        let runningTmux = try #require(mount(
+            terminal: terminal(worktreeID: wt.id, transport: .tmux), worktree: wt))
+        #expect(runningTmux.state == .running)
+        let parkedHolder = try #require(mount(
+            terminal: terminal(worktreeID: wt.id, hibernatedAt: Date(), transport: .holder), worktree: wt))
+        #expect(parkedHolder.state == .notRunning(exited: false))
     }
 
     // MARK: - The transcript as a focus target

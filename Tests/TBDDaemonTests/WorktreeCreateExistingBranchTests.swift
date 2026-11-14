@@ -28,12 +28,13 @@ import Testing
     try await shell("git branch existing-feature", at: repoDir)
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -93,12 +94,13 @@ import Testing
     try await shell("git config branch.autoSetupMerge false", at: cloneRepoDir)
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(
         db: db, tempDir: cloneTempDir, repoDir: cloneRepoDir
@@ -152,12 +154,13 @@ import Testing
     try await shell("git branch existing-feature", at: repoDir)
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -217,12 +220,13 @@ import Testing
     try await shell("git branch feature/auth-refactor-other", at: repoDir)
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
@@ -273,9 +277,10 @@ import Testing
     try await shell("git branch already-here", at: repoDir)
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Note: no `useExistingBranch`. This is the plain create path.
@@ -299,9 +304,10 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     let wt = try await lifecycle.createWorktree(
@@ -325,9 +331,10 @@ import Testing
     try await shell("git branch contested", at: repoDir)
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     let first = try await lifecycle.createWorktree(

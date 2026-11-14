@@ -102,19 +102,10 @@ extension TBDHomeSerialized {
 /// `worktree.create` with `profileID` and `terminal.create` with
 /// `overrideProfileID`: an unusable profile is refused before anything of the
 /// create exists, a usable one is used and skips balancing. Tier 2: an
-/// in-memory database, a dry-run tmux, a real git repo and a scratch
-/// directory; nothing is spawned.
+/// in-memory database, a dry-run tmux, the holder spawn double, a real git
+/// repo and a scratch directory; no process is started.
 @Suite("An explicit model profile is checked before a create")
 struct ExplicitProfileRPCTests {
-    /// Every tmux argv the dry-run manager would have run.
-    final class TmuxRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        func record(_ args: [String]) { lock.withLock { _calls.append(args) } }
-        var calls: [[String]] { lock.withLock { _calls } }
-        var newWindowCount: Int { calls.filter { $0.contains("new-window") }.count }
-    }
-
     /// Counts the balancing pool's reads, so a test can tell whether a spawn
     /// took a balanced pick.
     final class CallCounter: @unchecked Sendable {
@@ -154,7 +145,8 @@ struct ExplicitProfileRPCTests {
     struct Fixture {
         let router: RPCRouter
         let db: TBDDatabase
-        let recorder: TmuxRecorder
+        /// Every session a create opened.
+        let holder: FakeHolderLaunch
         let repo: Repo
         let repoDir: URL
         let worktree: Worktree
@@ -270,8 +262,9 @@ struct ExplicitProfileRPCTests {
             at: actuationDirectory, withIntermediateDirectories: true)
         let actuationLogPath = actuationDirectory.appendingPathComponent("actuations.jsonl").path
 
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        let tmux = TmuxManager(dryRun: true)
         let db = try TBDDatabase(inMemory: true)
         let claudeBase = scratch.appendingPathComponent("claude", isDirectory: true)
         let configDirManager = ClaudeProfileConfigDirManager(
@@ -296,11 +289,12 @@ struct ExplicitProfileRPCTests {
                     return configDirManager.loginIdentity(forProfileID: id)
                 }),
             reservations: ProfilePickReservations())
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             modelProfileResolver: resolver,
             configDirManager: configDirManager,
             preSessionPollInterval: 0.05)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -316,6 +310,7 @@ struct ExplicitProfileRPCTests {
             sessionsDir: scratch.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: ActuationLog(path: actuationLogPath),
             modelProfileKeychain: keychain)
+        router.holderRegistry = registry
 
         let repoDir = scratch.appendingPathComponent("repo", isDirectory: true)
         try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
@@ -330,7 +325,7 @@ struct ExplicitProfileRPCTests {
             path: worktreePath, tmuxServer: "tbd-test")
 
         try await body(Fixture(
-            router: router, db: db, recorder: recorder, repo: repo, repoDir: repoDir,
+            router: router, db: db, holder: holder, repo: repo, repoDir: repoDir,
             worktree: worktree, configDirManager: configDirManager, keychain: keychain,
             poolReads: poolReads, actuationLogPath: actuationLogPath))
     }
@@ -338,7 +333,7 @@ struct ExplicitProfileRPCTests {
     // MARK: - worktree.create
 
     /// Refused before phase 1, so nothing of the create exists: no worktree
-    /// row, no git worktree, no branch, no actuation row, no tmux call.
+    /// row, no git worktree, no branch, no actuation row, no session.
     @Test func worktreeCreateRefusesUnusableProfileBeforeCreating() async throws {
         try await withFixture { f in
             for unusable in try await f.unusableProfiles() {
@@ -354,8 +349,7 @@ struct ExplicitProfileRPCTests {
             #expect(try await git.worktreeList(repoPath: f.repoDir.path).count == 1)
             #expect(try await git.localBranchExists(repoPath: f.repoDir.path, name: "tbd/refused") == false)
             #expect(try f.actuationRows().isEmpty)
-            #expect(f.recorder.newWindowCount == 0)
-            #expect(!f.recorder.calls.contains { $0.contains("new-session") })
+            #expect(f.holder.launches.isEmpty)
         }
     }
 
@@ -395,7 +389,7 @@ struct ExplicitProfileRPCTests {
     // MARK: - terminal.create
 
     /// Refused after the request row and before any spawn work: no terminal
-    /// row, no window, and the request closed as a not-eligible refusal.
+    /// row, no session, and the request closed as a not-eligible refusal.
     @Test func terminalCreateRefusesUnusableProfile() async throws {
         try await withFixture { f in
             let unusable = try await f.unusableProfiles()
@@ -414,13 +408,13 @@ struct ExplicitProfileRPCTests {
                 #expect(outcome["error"] as? String == resp.error)
             }
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCount == 0)
+            #expect(f.holder.launches.isEmpty)
         }
     }
 
     /// A profile that passes its check but loses its key before the spawn
     /// loads it is refused as well, rather than starting the tab on the
-    /// machine's own login: no terminal row, no window, and the request closed
+    /// machine's own login: no terminal row, no session, and the request closed
     /// as a not-eligible refusal.
     @Test(arguments: KeyLoss.allCases)
     func terminalCreateRefusesProfileLostAfterItsCheck(loss: KeyLoss) async throws {
@@ -440,7 +434,7 @@ struct ExplicitProfileRPCTests {
             #expect(outcome["reason"] as? String == "not-eligible")
             #expect(outcome["error"] as? String == resp.error)
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCount == 0)
+            #expect(f.holder.launches.isEmpty)
         }
     }
 
@@ -455,7 +449,7 @@ struct ExplicitProfileRPCTests {
                 #expect(resp.error == unusable.error)
             }
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCount == 0)
+            #expect(f.holder.launches.isEmpty)
         }
     }
 
@@ -484,7 +478,7 @@ struct ExplicitProfileRPCTests {
             #expect(!resp.success)
             #expect(resp.error == "Model profile \(missing.uuidString) does not exist. Run tbd profile list to see the profiles.")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCount == 0)
+            #expect(f.holder.launches.isEmpty)
         }
     }
 

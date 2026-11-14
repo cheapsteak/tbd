@@ -9,17 +9,17 @@ extracted from a running tmux server. Nothing moves without a gesture.
 
 This is the mechanism by which the tmux transport's remaining sessions leave it,
 so the tmux path can be deleted without stranding a session somebody still
-wants. A second, much smaller piece completes that guarantee: once the tmux path
-is gone, a row still recorded as `tmux` refuses its wake with a reason naming
-this migration, so a session nobody got around to moving produces a clear
-message rather than a broken tab.
+wants. A second, much smaller piece completes that guarantee: TBD starts no
+session on tmux, so a row still recorded as `tmux` refuses its wake with a
+reason naming this migration, and a session nobody got around to moving
+produces a clear message rather than a broken tab.
 
 ## Why a gesture rather than a behaviour
 
 The transport a session runs on is recorded per row at spawn and kept for life.
-Flipping the default changes what new sessions get; it moves nothing that
-already exists. Sessions therefore outlive the default that created them, and
-the last tmux-backed ones would outlive the tmux code itself.
+Opening every new session on the holder changes what new sessions get; it moves
+nothing that already exists. Sessions therefore outlive the code path that
+created them, and the last tmux-backed ones would outlive the tmux code itself.
 
 Moving a session costs something real: its program is killed and started again.
 An agent session reappears through `claude --resume` with its conversation
@@ -126,17 +126,25 @@ unsent draft may be lost.
   idle shell prompt. That is the cost of moving a shell, and it is why nothing
   moves without a gesture.
 - **Agents migrate through `--resume`** on the session id the row records, the
-  same argv a wake builds.
+  same argv a wake builds. A parked Codex tab migrates the same way: the
+  rewrite keeps its thread id and recorded launch options, and its next wake
+  on the holder resumes the thread through Codex's own launch preparation.
 - **Four rows that name no conversation are skipped rather than moved,
   each with its own reason.** "No conversation to resume" is what sends a row
   down the shell move, and for these four the move available would start a
   bare login shell where something else belongs — so each is turned away where
   eligibility is decided, and each reason says what the person can do instead.
-  - **A Codex tab.** Moving it properly needs Codex's own launch preparation —
-    the executable resolver, the home ensurer and the merged environment
-    overrides — which lives on the RPC router rather than on this path. A bare
+  - **A running Codex tab.** No park takes it: a manual hibernate is
+    Claude-only, so the one move left would be the shell move, and a bare
     shell in its place would discard the Codex session silently. Close the tab
-    and open a new one.
+    and open a new one, which starts on the holder. A *parked* Codex tab is
+    not skipped. Startup reconcile parks a Codex row whose window died, and
+    the wake refuses every row parked on tmux, so a parked Codex tab that
+    could not migrate could never come back. It is only rewritten — nothing
+    is launched during the move — and the rewrite keeps the thread id and the
+    recorded launch options (model, disabled features, dedicated home) from
+    which the holder wake prepares Codex's resume. So a parked Codex tab that
+    names a thread is eligible like any parked row.
   - **A Claude tab whose session has not begun.** An agent that is still
     starting up, or whose session hook never fired, names no conversation
     either, and that happens in the field. Without a reason of its own it
@@ -208,23 +216,26 @@ is worth saying which states it can leave behind. There are two, and no third.
 
 - **The spawn failed.** The row is untouched: still `tmux`, still awake, naming
   a window that is now dead. That is the ordinary window-died state the app's
-  recovery banner already owns, and `terminal.recreateWindow` can still repair
-  it precisely because the row was not rewritten.
+  recovery banner already owns. `terminal.recreateWindow` refuses it with a
+  reason naming this migration, and running the migration again moves it,
+  precisely because the row was not rewritten.
 - **The write lost its compare-and-set.** The holder that was started is
   abandoned — a holder and a job no row names would be reclaimable by nothing —
-  and the row is in the same state as above. The race this loses is a
-  window-died recovery recreating the row's window in the gap, which rotates
-  the row's incarnation; the person keeps the fresh tmux window the recovery
-  gave them.
+  and the row is in the same state as above. The race this loses is another
+  writer changing the row in the gap, such as the tab being closed; the row is
+  left as that writer left it.
 
 Killing before the write is the opposite of the parked path's order, and it is
-safe for a different reason: the write is a compare-and-set, so a recovery that
-notices the dead window first makes this write a no-op. Both outcomes are
-consistent, and nothing can leave a row naming a transport its live process is
-not on. Everything that can turn the move away is settled *before* the kill —
-no holder can be started, a worktree that gives no local directory, a pane that
-cannot be proven to be this terminal's, a pane running something other than its
-own shell — and each leaves the session the program it has.
+safe for a different reason: the write is a compare-and-set. The window's
+recovery cannot race it, because `terminal.recreateWindow` refuses a tmux shell
+row and writes nothing. A writer that does change the row in the gap, such as a
+reconcile that removes a shell whose window is gone or the tab being closed,
+makes this write a no-op. Both outcomes are consistent, and nothing can leave a
+row naming a transport its live process is not on. Everything that can turn the
+move away is settled *before* the kill — no holder can be started, a worktree
+that gives no local directory, a pane that cannot be proven to be this
+terminal's, a pane running something other than its own shell — and each
+leaves the session the program it has.
 
 Two kill outcomes are not failures and must not be reported as any. A kill that
 tmux refuses while the window is still there, or while tmux cannot say, is a
@@ -269,12 +280,32 @@ it needs no switch, which is why "Hibernate now" has never had one.
 
 ## The backstop
 
-Deleting the tmux path removes the code a `tmux` row's wake would take. From
-that point a row still recorded as `tmux` refuses its wake with a reason naming
-this migration, instead of failing obscurely inside a path that no longer
-exists. This is a refusal and nothing more: no migration logic, no flag, a
-handful of lines. It is what keeps "a session never silently breaks" true
-without a daemon-initiated migration.
+TBD has no tmux wake: waking a session means starting its program again, and
+TBD starts programs only on the pty holder. So a parked row still recorded as
+`tmux` refuses its wake with a reason naming this migration and the row's own
+id (`tbd terminal migrate <id>`), whether or not tmux is installed, instead of
+failing obscurely inside a path that no longer exists. The row stays parked
+with its session id, so a wake after the migration resumes it on the holder.
+Switching a running tmux session's account in place would start a program in a
+tmux window too, and it refuses the same way.
+
+A dead window parks an agent session instead of refusing it. Recreating the
+window would start a program, but its program is already gone, and a park keeps
+what a later wake needs. So `terminal.recreateWindow` parks a tmux agent row
+whose window tmux says is gone, keeping its session id, and the session waits
+for the migration like any other parked tmux row. A tmux row with no session to
+park is refused and left as it was. A shell is told to run the migration, which
+moves it. A tab the migration always skips — a Codex tab with no thread, a
+Claude tab whose session never began, a setup or pre-session hook tab — is told
+that nothing that ran in its window can move, and to close the tab and open a
+new one, which starts on the pty holder. It is not given the migration's own
+reason for skipping it, because those reasons describe a live window: a hook
+tab that closes itself when its hook finishes, a Codex session still running.
+Once the window is gone, neither is true.
+
+None of this is migration logic: each is a refusal or a park, with no flag. It
+is what keeps "a session never silently breaks" true without a
+daemon-initiated migration.
 
 ## Out of scope
 
@@ -286,8 +317,7 @@ without a daemon-initiated migration.
 - **Moving a session back to tmux.** There is no reverse gesture, and none is
   planned: the whole point of this one is to drain the transport that is being
   deleted, so a way back would be a way to re-enter a state the next release
-  removes. A session that must run on tmux is closed and opened again with the
-  transport flag off.
+  removes. TBD opens no new session on tmux, so there is no way back at all.
 
 ## Reconcilers
 
@@ -385,13 +415,14 @@ wake: a pane tmux cannot answer for is not evidence that a process is there.
   refuses with nothing started.
 - Each row that names no conversation and must not become a shell is skipped
   with its own reason, after the already-holder answer and before the activity
-  rails, with nothing killed, spawned or written: a Codex tab by kind and by
-  label, a Claude tab with no session yet (while the same tab *with* a session
-  stays eligible, so the skip is about the conversation and not the kind), and
-  a hook tab of either kind including an idle one — while a plain `shell` tab
-  with no conversation still moves, which is what keeps the hook skips about
-  the label rather than about shells. A row with no `kind` at all reads as a
-  shell and still moves.
+  rails, with nothing killed, spawned or written: a running Codex tab by kind
+  and by label (while a parked one that names a thread is rewritten, and its
+  next wake resumes the thread on the holder), a Claude tab with no session
+  yet (while the same tab *with* a session stays eligible, so the skip is
+  about the conversation and not the kind), and a hook tab of either kind
+  including an idle one — while a plain `shell` tab with no conversation still
+  moves, which is what keeps the hook skips about the label rather than about
+  shells. A row with no `kind` at all reads as a shell and still moves.
 - A wake that fails after the rewrite is reported as its own outcome rather
   than as a refusal, for each shape of wake answer, and the row it names really
   is holder-backed. Its rewritten row is published like a clean migration's,

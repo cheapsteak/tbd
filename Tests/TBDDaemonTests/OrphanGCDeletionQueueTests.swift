@@ -279,8 +279,9 @@ struct OrphanGCDeletionQueueTests {
 
         // The point of pruning: revive's preflight throws
         // `worktreeAlreadyRegistered` while the registration survives.
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
         #expect(revived.status == .active)
         #expect(FileManager.default.fileExists(atPath: path))

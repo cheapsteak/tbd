@@ -30,7 +30,9 @@ struct RPCRouterPhoneSessionActionsTests {
 
     /// The router fixture of `RPCRouterRemoteAnswerTests`, with no remote
     /// manager. The router records no app identity, so the socket check that
-    /// guards `prompt.answer` refuses every caller that reaches it.
+    /// guards `prompt.answer` refuses every caller that reaches it. It has a
+    /// holder registry double, so the spawn gate grants it and a create
+    /// reaches the handler's repo lookup; the double starts no holder.
     private func makeFixture() throws -> Fixture {
         let directory = URL(
             fileURLWithPath: fencedScratchRoot(prefix: "tbd-phone-actions"), isDirectory: true)
@@ -38,15 +40,19 @@ struct RPCRouterPhoneSessionActionsTests {
         let logPath = directory.appendingPathComponent("actuations.jsonl").path
         let db = try TBDDatabase(inMemory: true)
         let subs = StateSubscriptionManager()
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
+            subscriptions: subs)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
-                subscriptions: subs),
+            lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: subs,
             actuationLog: ActuationLog(path: logPath))
+        router.holderRegistry = registry
         return Fixture(db: db, router: router, logPath: logPath)
     }
 
@@ -56,29 +62,6 @@ struct RPCRouterPhoneSessionActionsTests {
         return try await f.db.worktrees.create(
             repoID: repo.id, name: name, branch: "main",
             path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
-    }
-
-    // MARK: - The spawn transport
-
-    /// `phoneSpawnsOnHolder` answers as every spawn path decides: tmux with
-    /// no registry, or with the flag off; the holder with the flag on and a
-    /// registry that can spawn.
-    @Test func phoneSpawnsOnHolderFollowsTheSpawnTransportGate() async throws {
-        let f = try makeFixture()
-        #expect(await f.actions.phoneSpawnsOnHolder() == false)
-
-        let home = fencedScratchRoot(prefix: "tbd-phone-holder")
-        defer { try? FileManager.default.removeItem(atPath: home) }
-        f.router.holderRegistry = HolderRegistry(
-            owner: HolderOwnerToken(rawValue: "acme-installation"),
-            environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
-            listTerminals: { [] },
-            spawner: HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder")))
-        try await f.db.config.setPtyHolderEnabled(true)
-        #expect(await f.actions.phoneSpawnsOnHolder() == true)
-
-        try await f.db.config.setPtyHolderEnabled(false)
-        #expect(await f.actions.phoneSpawnsOnHolder() == false)
     }
 
     // MARK: - Handler-backed methods carry the phone actor

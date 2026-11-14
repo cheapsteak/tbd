@@ -581,15 +581,21 @@ struct ActuationLogTeardownWiringTests {
 
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true)
+        // An in-place switch runs on a holder row and passes the spawn gate
+        // before the row is written, so the router has the holder spawn double.
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
             actuationLog: ActuationLog(path: try makeUnwritablePath()))
+        router.holderRegistry = registry
 
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")
@@ -612,8 +618,9 @@ struct ActuationLogTeardownWiringTests {
             .write(to: transcript, atomically: true, encoding: .utf8)
 
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: .claude)
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: .claude,
+            transport: .holder)
         try await db.terminals.updateSession(
             id: terminal.id, sessionID: sessionID, transcriptPath: transcript.path)
 

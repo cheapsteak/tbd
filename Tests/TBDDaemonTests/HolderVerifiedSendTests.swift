@@ -361,9 +361,9 @@ struct HolderVerifiedSendTests {
     }
 
     /// The eligibility that admitted the first send has to still hold for the
-    /// second: a `recreateWindow` between the observation and the retry can turn
-    /// an agent row into a shell while keeping its id, and the payload being held
-    /// opens with an envelope a shell would run as a command line of its own.
+    /// second: a row that reads as a shell by the time of the retry, under the id
+    /// an agent row had, must not receive the payload being held, which opens
+    /// with an envelope a shell would run as a command line of its own.
     @Test("a holder retry to a row that is now a shell is not eligible")
     func aHolderRetryToAShellRowIsNotEligible() async throws {
         let writes = HolderVerifyWriteRecorder()

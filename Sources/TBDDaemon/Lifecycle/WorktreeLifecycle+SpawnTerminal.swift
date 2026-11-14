@@ -1,90 +1,84 @@
 import Foundation
 import TBDShared
 
-/// Which transport one spawn is born onto.
+/// Why a new session cannot be opened: no pty holder can be started for it.
 ///
-/// Decided once, from the flag and the registry, and then **carried** through
-/// the spawn and the row rather than re-derived at either: two readings of the
-/// flag could disagree between the two and leave a session on a transport its
-/// row does not record.
+/// Every session TBD opens runs in a pty holder, so this is the only reason the
+/// spawn gate ever refuses. It is phrased for the person who asked for the
+/// session — it names the missing `TBDHolder` helper and how to put it back —
+/// because each caller hands it on as its own error, an RPC reply or a
+/// creation failure, rather than translating it.
+struct TerminalSpawnRefusal: Error, Equatable, Sendable, CustomStringConvertible, LocalizedError {
+    let message: String
+
+    /// The refusal when this daemon cannot start a holder: it found no
+    /// `TBDHolder` beside its own binary, or it was wired with no holder
+    /// registry at all. Phrased from the same fact as
+    /// `TerminalTransportMigrator.holderUnspawnableRefusal`.
+    static let holderUnavailable = TerminalSpawnRefusal(message:
+        "The TBDHolder helper is missing beside the daemon, so no pty holder can be started and no new session can open; nothing was changed. "
+        + "Reinstall TBD (for example with `tbd update`) so TBDHolder sits next to TBDDaemon, then try again.")
+
+    var description: String { message }
+    var errorDescription: String? { message }
+}
+
+/// The transport one spawn is born onto: always a pty holder.
 ///
-/// The `.holder` case carries the registry that will run the spawn, so a caller
-/// holding `.holder` provably holds something that can spawn — there is no
-/// state in which the transport says holder and the registry is nil.
-enum TerminalSpawnTransport: Sendable {
-    case tmux
-    case holder(HolderRegistry)
+/// Decided once by `decide(registry:)` and then **carried** through the spawn,
+/// so a caller holding one provably holds a registry that can spawn — there is
+/// no state in which the gate said yes and nothing can start the holder.
+struct TerminalSpawnTransport: Sendable {
+    /// The registry that runs the spawn.
+    let registry: HolderRegistry
 
-    /// **The transport gate, for every path that creates a session row.**
+    /// **The spawn gate, for every path that creates a session row.**
     ///
-    /// Off puts the new session in a tmux window; on puts it on a holder.
-    /// The decision is made at spawn time and the row keeps it for life:
-    /// flipping the flag must never migrate a running session, because the
-    /// transport is a property of a live pty that already exists, not of a
-    /// preference (spec, "Rollout" → "Granularity: spawn time only").
+    /// Every new session opens on a pty holder. The gate answers the holder
+    /// when there is a registry and it can spawn, and otherwise refuses with
+    /// `TerminalSpawnRefusal.holderUnavailable`. There is no fallback: a
+    /// session that cannot open says why, and the caller turns the refusal into
+    /// an error at its own boundary before it has changed anything.
     ///
-    /// Both halves of "can this spawn put a session on a holder" are asked
-    /// here, and they are different questions. Mock mode has no registry at
-    /// all; a daemon whose `TBDHolder` binary is missing has one that cannot
-    /// spawn — it is still built, because adoption reaches an already-running
-    /// holder through its socket and must keep working across an upgrade that
-    /// moved the binary. Gating on the registry's mere presence would take the
-    /// holder path with nothing able to start a holder, and the
-    /// `holderExecutableUnavailable` that `spawn` then throws has nothing
-    /// catching it: the whole create would fail. Either way the fallback is
-    /// tmux, because a session that will not open is a worse answer than one
-    /// that opens on the old transport.
-    ///
-    /// `config` is optional because the RPC handlers read it with `try?`: a
-    /// config that could not be read is a config in which nobody chose the
-    /// holder, and the fallback is the same tmux.
-    static func decide(config: Config?, registry: HolderRegistry?) -> TerminalSpawnTransport {
-        guard let config, config.ptyHolderEnabled,
-              let registry, registry.canSpawn else { return .tmux }
-        return .holder(registry)
-    }
-
-    /// Whether this spawn goes onto the pty-holder transport.
-    var isHolder: Bool {
-        if case .holder = self { return true }
-        return false
+    /// The registry is asked two different questions here. A daemon wired with
+    /// no registry has nothing to spawn with at all; a daemon whose `TBDHolder`
+    /// binary is missing still builds one, because adoption reaches an
+    /// already-running holder through its socket and must keep working across
+    /// an upgrade that moved the binary, but that registry cannot spawn.
+    static func decide(
+        registry: HolderRegistry?
+    ) -> Result<TerminalSpawnTransport, TerminalSpawnRefusal> {
+        guard let registry, registry.canSpawn else {
+            return .failure(.holderUnavailable)
+        }
+        return .success(TerminalSpawnTransport(registry: registry))
     }
 }
 
 extension WorktreeLifecycle {
-    /// **The one place a terminal is spawned and its row written, on either
-    /// transport.**
+    /// **The one place a terminal is spawned and its row written.**
     ///
     /// Every spawn path — the primary terminal at worktree creation, the setup
     /// and pre-session hook tabs, restored archived sessions, the extra
     /// terminals `terminal.create` opens, `terminal.continueInCodex`,
-    /// revive-from-history tabs and fork-session tabs — decides *what* to run on
-    /// its own (the command, the two environments, the label and kind) and
-    /// hands the result here, because the part that
-    /// diverges by transport is the same at all of them and subtle enough that
-    /// a second copy is a second thing to get wrong: the holder launch
-    /// composition, the row that records the transport and the pids, the stamp
-    /// `ProcessIdentityCheck` later compares, and the cleanup for a spawn
-    /// whose row could not be written.
-    ///
-    /// The tmux server is the caller's to ensure, and only on the tmux
-    /// transport: a holder-backed session needs no server at all, and ensuring
-    /// one anyway would resurrect the very resource the transport exists to
-    /// remove. The primary path memoizes that ensure because it opens several
-    /// tabs and any of them may be the first to need one; the RPC handlers make
-    /// it once, under the same lock they call this from.
+    /// revive-from-history tabs, fork-session tabs and dev-server tabs —
+    /// decides *what* to run on its own (the command, the two environments,
+    /// the label and kind) and hands the result here, because what follows is
+    /// the same at all of them and subtle enough that a second copy is a second
+    /// thing to get wrong: the holder launch composition, the row that records
+    /// the transport and the pids, the stamp `ProcessIdentityCheck` later
+    /// compares, and the cleanup for a spawn whose row could not be written.
     ///
     /// - Parameters:
-    ///   - env: inlined as `export K='v';` in front of the command on both
-    ///     transports, so it lands after every startup file has run — where
-    ///     code reading `TBD_TERMINAL_ID` from a session expects it.
-    ///   - sensitiveEnv: the spawned *process* environment — tmux's `-e`, or
-    ///     the holder job's environment directly.
-    ///   - transport: the transport this spawn runs on. The holder registry
-    ///     travels inside it rather than being read from `self`, because the
-    ///     router and the lifecycle are wired independently —
-    ///     `WorktreeLifecycle` is a value type, and a test fixture sets the
-    ///     router's registry alone — so the caller's is the authoritative one.
+    ///   - env: inlined as `export K='v';` in front of the command, so it lands
+    ///     after every startup file has run — where code reading
+    ///     `TBD_TERMINAL_ID` from a session expects it.
+    ///   - sensitiveEnv: the holder job's process environment.
+    ///   - transport: the gate's answer. The holder registry travels inside it
+    ///     rather than being read from `self`, because the router and the
+    ///     lifecycle are wired independently — `WorktreeLifecycle` is a value
+    ///     type, and a test fixture sets the router's registry alone — so the
+    ///     caller's is the authoritative one.
     ///   - serverName: the declared dev server this tab runs (`server.start`),
     ///     nil for every other spawn.
     ///   - sessionIncarnationID: the incarnation a Claude spawn made with a
@@ -103,7 +97,6 @@ extension WorktreeLifecycle {
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
-        tmuxServer: String,
         workingDirectory: String,
         command: String,
         env: [String: String],
@@ -120,55 +113,35 @@ extension WorktreeLifecycle {
         claudeSpawnExtras: ClaudeSpawnExtras? = nil,
         codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
-        // The two transports diverge for exactly this one spawn, and converge
-        // again on the row below.
-        let coordinate: (windowID: String, paneID: String)
-        let holderHandle: HolderHandle?
-        switch transport {
-        case .holder(let registry):
-            holderHandle = try await registry.spawn(
-                terminalID: id,
-                launch: Self.holderLaunch(
-                    shellCommand: command,
-                    env: env,
-                    sensitiveEnv: sensitiveEnv,
-                    workingDirectory: workingDirectory,
-                    cols: cols,
-                    rows: rows,
-                    environment: registry.environment))
-            // A holder session has no tmux coordinate. The columns are NOT NULL
-            // from the v1 schema, so they take the empty string — and nothing
-            // may read them back: a holder row is discriminated by `transport`
-            // alone. See `WorktreeLifecycle+Reconcile`'s exemption.
-            coordinate = (windowID: "", paneID: "")
-        case .tmux:
-            holderHandle = nil
-            coordinate = try await tmux.createWindow(
-                server: tmuxServer,
-                session: "main",
-                cwd: workingDirectory,
+        let registry = transport.registry
+        let holderHandle = try await registry.spawn(
+            terminalID: id,
+            launch: Self.holderLaunch(
                 shellCommand: command,
                 env: env,
                 sensitiveEnv: sensitiveEnv,
+                workingDirectory: workingDirectory,
                 cols: cols,
                 rows: rows,
-                // A server's tab keeps its final screen and exit status.
-                remainOnExit: serverName != nil
-            )
-        }
+                environment: registry.environment))
         do {
             return try await db.terminals.create(
                 id: id,
                 worktreeID: worktreeID,
-                tmuxWindowID: coordinate.windowID,
-                tmuxPaneID: coordinate.paneID,
+                // A holder session has no tmux coordinate. The columns are NOT
+                // NULL from the v1 schema, so they take the empty string — and
+                // nothing may read them back: a holder row is discriminated by
+                // `transport` alone. See `WorktreeLifecycle+Reconcile`'s
+                // exemption.
+                tmuxWindowID: "",
+                tmuxPaneID: "",
                 label: label,
                 claudeSessionID: claudeSessionID,
                 profileID: profileID,
                 kind: kind,
-                transport: holderHandle == nil ? .tmux : .holder,
-                holderPID: holderHandle?.holderPID,
-                childPID: holderHandle?.childPID,
+                transport: .holder,
+                holderPID: holderHandle.holderPID,
+                childPID: holderHandle.childPID,
                 // The identity anchor for the job just spawned. `createdAt`
                 // would say the same thing today and stop being true the first
                 // time this row is parked and woken, so it is recorded from the
@@ -177,23 +150,19 @@ extension WorktreeLifecycle {
                 // persisted and later compared against a process start time by
                 // `ProcessIdentityCheck`, which is exactly the kind of fact a
                 // test has to be able to pin end to end.
-                holderChildStartedAt: holderHandle == nil ? nil : now(),
+                holderChildStartedAt: now(),
                 serverName: serverName,
                 sessionIncarnationID: sessionIncarnationID,
                 claudeSpawnExtras: claudeSpawnExtras,
                 codexLaunchOptions: codexLaunchOptions
             )
         } catch {
-            // Best-effort creation-time cleanup on both transports: a resource
-            // that exists with no row naming it is one nothing will ever find
-            // again. On the holder path that means `forget` (the holder closes
-            // the pty master and winds down) and then killing the job by pid,
-            // because holder death is deliberately not child death.
-            if case .holder(let registry) = transport, let holderHandle {
-                await registry.abandon(terminalID: id, handle: holderHandle)
-            } else {
-                try? await tmux.killWindow(server: tmuxServer, windowID: coordinate.windowID)
-            }
+            // Best-effort creation-time cleanup: a holder that exists with no
+            // row naming it is one nothing will ever find again. That means
+            // `forget` (the holder closes the pty master and winds down) and
+            // then killing the job by pid, because holder death is deliberately
+            // not child death.
+            await registry.abandon(terminalID: id, handle: holderHandle)
             throw error
         }
     }

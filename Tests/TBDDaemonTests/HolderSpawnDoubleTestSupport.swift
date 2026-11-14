@@ -12,9 +12,9 @@ import TestSupport
 /// It is a `HolderSpawnFabricator`, so it plugs into a **real**
 /// `HolderRegistry` (`makeHolderRegistryDouble(launch:)`) rather than standing
 /// beside one. Wire that registry exactly where production wires its own —
-/// `router.holderRegistry`, `lifecycle.holderRegistry` — and turn
-/// `pty_holder_enabled` on; `TerminalSpawnTransport.decide` then picks the
-/// holder, because the registry reports `canSpawn`.
+/// `router.holderRegistry`, `lifecycle.holderRegistry` — and
+/// `TerminalSpawnTransport.decide` grants it, because the registry reports
+/// `canSpawn`. With no registry wired, every spawn is refused.
 ///
 /// **What it supports**
 ///
@@ -178,10 +178,9 @@ final class FakeHolderLaunch: HolderSpawnFabricator, @unchecked Sendable {
 /// A real `HolderRegistry` whose spawns and teardowns go through `launch`.
 ///
 /// It has no `HolderSpawner`, so nothing it does can start a holder, and it
-/// reports `canSpawn`, so the transport gate picks it with
-/// `pty_holder_enabled` on. Everything else is the production registry: let-go
-/// marks, releases, attach bookkeeping and the rest behave as they do in the
-/// daemon, over sessions that have no reader.
+/// reports `canSpawn`, so the transport gate grants it. Everything else is the
+/// production registry: let-go marks, releases, attach bookkeeping and the rest
+/// behave as they do in the daemon, over sessions that have no reader.
 func makeHolderRegistryDouble(
     launch: FakeHolderLaunch,
     environment: [String: String] = FakeHolderLaunch.scratchEnvironment(),

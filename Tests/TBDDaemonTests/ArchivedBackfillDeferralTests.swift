@@ -25,9 +25,10 @@ struct ArchivedBackfillDeferralTests {
     private func makeBrokenArchivedRow(
         db: TBDDatabase, git: GitManager, tempDir: URL, repoDir: URL
     ) async throws -> BrokenRow {
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
         let staleBranch = wt.branch
@@ -309,9 +310,10 @@ struct ArchivedBackfillDeferralTests {
 
         let db = try TBDDatabase(inMemory: true)
         let git = GitManager()
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         var ids: [UUID: String] = [:]
         for _ in 0..<3 {

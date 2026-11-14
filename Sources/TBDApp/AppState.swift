@@ -2321,10 +2321,6 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var sessionRestoreFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setSessionRestore(enabled: enabled) }
-    /// How `setPtyHolderEnabled` persists the pty-holder transport gate —
-    /// injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var ptyHolderFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setPtyHolderEnabled(enabled: enabled) }
     /// How `setHolderClaimReconcileEnabled` persists the holder claim-reconcile
     /// soak flag — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =

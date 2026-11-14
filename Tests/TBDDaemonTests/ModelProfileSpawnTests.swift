@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import DaemonTestSupport
 import TestSupport
+import TBDKernel
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -18,6 +19,31 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
     )
 }
 
+/// What the holder spawn double was asked to run, in the two shapes the
+/// tests in this file search.
+private extension FakeHolderLaunch {
+    /// The launches from position `start` on, one per line: each one's process
+    /// environment as `K=V` — where a spawn's `sensitiveEnv` lands — then its
+    /// argv, whose last element is the command line with the spawn's `env`
+    /// exported in front of it.
+    func spawned(from start: Int = 0) -> String {
+        launches.dropFirst(start).map { launch in
+            let environment = launch.request.environment
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+            return (environment + launch.argv).joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+
+    /// The argv of the launches from position `start` on, one per line: what
+    /// `ps` shows for a job's whole life, so a secret must never be in it.
+    func spawnedArgv(from start: Int = 0) -> String {
+        launches.dropFirst(start)
+            .map { $0.argv.joined(separator: " ") }
+            .joined(separator: "\n")
+    }
+}
+
 // Nested under TBDHomeSerialized: several tests mutate the process-global
 // `TBD_HOME` env var (via setenv/unsetenv) to isolate the overlay/runtime dir.
 // Nesting prevents cross-suite races with the other TBD_HOME-mutating suites.
@@ -30,96 +56,29 @@ struct ModelProfileSpawnTests {
     /// Recorder for tmux argv lists invoked during dryRun.
     final class TmuxRecorder: @unchecked Sendable {
         private let lock = NSLock()
-        private let releaseGate = DispatchSemaphore(value: 0)
         private var _calls: [[String]] = []
-        private var blockMatch: String?
-        private var _isBlocked = false
-        private var _blockedCommand: [String]?
         var calls: [[String]] {
             lock.lock(); defer { lock.unlock() }
             return _calls
         }
         func record(_ args: [String]) {
-            let shouldBlock = lock.withLock { () -> Bool in
-                _calls.append(args)
-                guard let blockMatch,
-                      !_isBlocked,
-                      args.joined(separator: " ").contains(blockMatch) else {
-                    return false
-                }
-                _isBlocked = true
-                _blockedCommand = args
-                return true
-            }
-            if shouldBlock {
-                releaseGate.waitForGate("profile respawn")
-            }
-        }
-        func arm(matching value: String) {
-            lock.withLock {
-                blockMatch = value
-                _isBlocked = false
-                _blockedCommand = nil
-            }
-        }
-        var isBlocked: Bool { lock.withLock { _isBlocked } }
-        var blockedCommand: [String]? { lock.withLock { _blockedCommand } }
-        func release() {
-            releaseGate.signal()
+            lock.withLock { _calls.append(args) }
         }
         var joinedAll: String { calls.map { $0.joined(separator: " ") }.joined(separator: "\n") }
-        /// Concatenation of just the shell-command bodies (last argv element of
-        /// each new-window call). Used to assert that secrets do NOT leak into
-        /// the long-running shell process arg.
-        var shellBodies: String {
-            calls.compactMap { $0.last }.joined(separator: "\n")
-        }
     }
 
-    final class StateDeltaRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var values: [StateDelta] = []
-
-        func subscribe(to router: RPCRouter) {
-            router.subscriptions.addSubscriber { [weak self] data in
-                guard let delta = try? JSONDecoder().decode(StateDelta.self, from: data) else {
-                    return true
-                }
-                guard let self else { return false }
-                self.lock.withLock { self.values.append(delta) }
-                return true
-            }
-        }
-
-        func snapshot() -> [StateDelta] {
-            lock.withLock { values }
-        }
-    }
-
-    /// `panePID` is what the dry-run tmux answers for every pane's pid (its
-    /// own default is "0"); the inspector and signaller are the router's
-    /// process-table seams, production by default as in the router itself.
-    private func makeFixture(
-        respawnWindowError: (@Sendable (String) -> Error?)? = nil,
-        sessionsDir: URL? = nil,
-        panePID: String? = nil,
-        paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
-        processSignaller: any ProcessSignaller = ProductionProcessSignaller()
-    ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
-        let recorder = TmuxRecorder()
-        var panePIDAnswer: (@Sendable (String, String) throws -> String)?
-        if let panePID {
-            panePIDAnswer = { _, _ in panePID }
-        }
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { args in recorder.record(args) },
-            dryRunRespawnWindowError: respawnWindowError,
-            dryRunPanePID: panePIDAnswer)
+    /// A router and its lifecycle wired to one holder spawn double, so every
+    /// session the test opens is recorded in the returned `FakeHolderLaunch`
+    /// instead of started.
+    private func makeFixture() -> (RPCRouter, TBDDatabase, FakeHolderLaunch) {
+        let tmux = TmuxManager(dryRun: true)
         let db = try! TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: isolatedConfigDirManager())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -127,12 +86,10 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
-            paneProcessInspector: paneProcessInspector,
-            processSignaller: processSignaller,
-            sessionsDir: sessionsDir ?? TBDConstants.sessionsDir(),
             actuationLog: makeTestActuationLog()
         )
-        return (router, db, recorder)
+        router.holderRegistry = registry
+        return (router, db, holder)
     }
 
     private func seedRepoAndWorktree(_ db: TBDDatabase) async throws -> (Repo, Worktree) {
@@ -141,9 +98,8 @@ struct ModelProfileSpawnTests {
             displayName: "r",
             defaultBranch: "main"
         )
-        // terminal.create / recreate refuse to spawn into a missing directory
-        // (tmux would silently fall back to $HOME), so the worktree path must
-        // actually exist on disk.
+        // terminal.create refuses to spawn into a missing directory, so the
+        // worktree path must actually exist on disk.
         let wtPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("wt-\(UUID().uuidString)").path
         try FileManager.default.createDirectory(
@@ -183,7 +139,7 @@ struct ModelProfileSpawnTests {
 
     @Test("spawn: no tokens → no env prefix, profileID nil")
     func spawnNoToken() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -195,15 +151,15 @@ struct ModelProfileSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == nil)
-        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
-        #expect(!recorder.joinedAll.contains("CLAUDE_CONFIG_DIR"))
+        #expect(!holder.spawned().contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!holder.spawned().contains("CLAUDE_CONFIG_DIR"))
     }
 
     // MARK: - Spawn: global default
 
     @Test("spawn: global default oauth → CLAUDE_CONFIG_DIR + profileID, no token")
     func spawnWithGlobalDefaultOAuth() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let tok = try await seedOAuthProfile(db, name: "Default")
@@ -218,17 +174,19 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == tok.id)
         // OAuth profiles inject CLAUDE_CONFIG_DIR, not a token.
-        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
-        // The config dir is a path derived from the profile UUID, injected via tmux -e.
-        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
-        #expect(!recorder.shellBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!holder.spawned().contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        // The config dir is a path derived from the profile UUID, in the job's
+        // process environment.
+        let launch = try #require(holder.launch(for: term.id))
+        #expect(launch.request.environment["CLAUDE_CONFIG_DIR"] != nil)
+        #expect(!holder.spawnedArgv().contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     // MARK: - Spawn: repo override beats default
 
     @Test("spawn: repo override beats global default")
     func spawnRepoOverride() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -245,15 +203,15 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == b.id)
         // OAuth profiles inject CLAUDE_CONFIG_DIR, not a token.
-        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
-        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
+        #expect(!holder.spawned().contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(holder.spawned().contains("CLAUDE_CONFIG_DIR="))
     }
 
     // MARK: - Spawn: non-claude type ignores token
 
     @Test("spawn: non-claude type ignores token")
     func spawnNonClaudeIgnoresToken() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let tok = try await seedOAuthProfile(db, name: "A")
@@ -267,15 +225,15 @@ struct ModelProfileSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == nil)
-        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!holder.spawned().contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     // MARK: - Spawn: token profiles (CredentialKind.oauthToken)
 
     /// The whole security property of a token profile in one assertion pair:
-    /// the secret reaches the pane as process env through tmux's `-e`, and it
-    /// is nowhere in the command string, which is `ps`-visible for as long as
-    /// the pane lives.
+    /// the secret reaches the session as its process environment, and it is
+    /// nowhere in the command string, which is `ps`-visible for as long as the
+    /// session lives.
     @Test("builder: oauthToken injects CLAUDE_CODE_OAUTH_TOKEN via env only")
     func builderOAuthTokenInjectsViaEnvOnly() {
         let secret = "sk-ant-oat01-TESTTOKEN"
@@ -363,11 +321,11 @@ struct ModelProfileSpawnTests {
     }
 
     /// The same property end to end, through the real spawn path: the stored
-    /// secret is read by the resolver, injected by tmux's `-e`, and absent from
-    /// the long-running shell command.
-    @Test("spawn: oauthToken default → token via tmux -e, never in the shell body")
+    /// secret is read by the resolver, injected as the job's process
+    /// environment, and absent from the long-running shell command.
+    @Test("spawn: oauthToken default → token in the process env, never in the argv")
     func spawnWithTokenProfile() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let secret = "sk-ant-oat01-\(UUID().uuidString)"
@@ -383,20 +341,22 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == profile.id)
 
-        // Delivered as process env via `-e KEY=VALUE`...
-        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)"))
+        let launch = try #require(holder.launch(for: term.id))
+        // Delivered as the job's process environment...
+        #expect(launch.request.environment["CLAUDE_CODE_OAUTH_TOKEN"] == secret)
         // ...and a token profile still gets its isolated config dir.
-        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
-        // The shell command body is what `ps` shows for the pane's whole life.
-        #expect(!recorder.shellBodies.contains(secret))
-        #expect(!recorder.shellBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(launch.request.environment["CLAUDE_CONFIG_DIR"] != nil)
+        // The argv is what `ps` shows for the job's whole life.
+        let argv = launch.argv.joined(separator: " ")
+        #expect(!argv.contains(secret))
+        #expect(!argv.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     /// Off-branch of the same path: a signed-in profile spawned the same way
     /// carries no token at all, not even when a secret file exists for it.
     @Test("spawn: oauth default with a stray stored secret → no token injected")
     func spawnOAuthWithStrayStoredSecret() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "SignedIn")
@@ -408,13 +368,13 @@ struct ModelProfileSpawnTests {
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)))
         #expect(resp.success)
-        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
-        #expect(!recorder.joinedAll.contains(stray))
+        #expect(!holder.spawned().contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!holder.spawned().contains(stray))
     }
 
-    @Test("terminal.create prepares Codex home before tmux or terminal mutation")
+    @Test("terminal.create prepares Codex home before any spawn or terminal mutation")
     func terminalCreateCodexHomeFailurePrecedesMutation() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         router.codexExecutableResolver = { "/opt/test/bin/codex" }
@@ -427,13 +387,13 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(worktreeID: wt.id, type: .codex)))
 
         #expect(!response.success)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     @Test("terminal.create spawns the injected absolute Codex executable")
     func terminalCreateUsesResolvedAbsoluteCodexExecutable() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         router.codexExecutableResolver = { "/opt/TBD Codex/bin/codex" }
@@ -447,47 +407,18 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(worktreeID: wt.id, type: .codex)))
 
         #expect(response.success)
-        #expect(recorder.shellBodies.contains("'/opt/TBD Codex/bin/codex'"))
-        #expect(!recorder.shellBodies.contains("; codex --profile"))
-    }
-
-    @Test("terminal.recreate prepares Codex home before killing the old window")
-    func terminalRecreateCodexHomeFailurePreservesOldWindowAndRow() async throws {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@old-codex",
-            tmuxPaneID: "%old-codex",
-            label: TerminalLabel.codex,
-            kind: .codex)
-        router.codexExecutableResolver = { "/opt/test/bin/codex" }
-        router.codexHomeEnsurer = {
-            throw ExpectedCodexPreparationFailure()
-        }
-
-        let response = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-
-        #expect(!response.success)
-        #expect(recorder.calls.isEmpty)
-        let unchanged = try #require(
-            try await db.terminals.get(id: terminal.id))
-        #expect(unchanged.tmuxWindowID == terminal.tmuxWindowID)
-        #expect(unchanged.tmuxPaneID == terminal.tmuxPaneID)
-        #expect(unchanged.kind == .codex)
+        #expect(holder.spawnedArgv().contains("'/opt/TBD Codex/bin/codex'"))
+        #expect(!holder.spawnedArgv().contains("; codex --profile"))
     }
 
     // MARK: - Spawn: Codex free-form env overrides (branch-test rule)
 
-    /// Build a lifecycle + recorder fixture. Unlike `makeFixture`, this exposes
-    /// the `WorktreeLifecycle` so tests can drive `spawnPrimaryTerminals`
-    /// directly — the chokepoint where the env-injection branches live. A real
-    /// `ModelProfileResolver` is attached so the Claude branch resolves the
-    /// worktree's effective profile (Codex tests ignore it — Codex resolves no
-    /// profile).
+    /// Build a lifecycle fixture wired to a holder spawn double. Unlike
+    /// `makeFixture`, this exposes the `WorktreeLifecycle` so tests can drive
+    /// `spawnPrimaryTerminals` directly — the chokepoint where the
+    /// env-injection branches live. A real `ModelProfileResolver` is attached
+    /// so the Claude branch resolves the worktree's effective profile (Codex
+    /// tests ignore it — Codex resolves no profile).
     private func makeLifecycleFixture(
         codexExecutableResolver: @escaping @Sendable () throws -> String = {
             "/usr/bin/true"
@@ -496,27 +427,28 @@ struct ModelProfileSpawnTests {
             FileManager.default.temporaryDirectory.appendingPathComponent(
                 "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
         }
-    ) -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+    ) -> (WorktreeLifecycle, TBDDatabase, FakeHolderLaunch) {
+        let tmux = TmuxManager(dryRun: true)
         let db = try! TBDDatabase(inMemory: true)
+        let holder = FakeHolderLaunch()
         let resolver = ModelProfileResolver(
             profiles: db.modelProfiles, repos: db.repos, config: db.config
         )
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             modelProfileResolver: resolver,
             configDirManager: isolatedConfigDirManager(),
             codexExecutableResolver: codexExecutableResolver,
             codexHomeEnsurer: codexHomeEnsurer
         )
-        return (lifecycle, db, recorder)
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        return (lifecycle, db, holder)
     }
 
     /// Codex's primary spawn carries the merged free-form env overrides
-    /// (global ∪ repo) via tmux `-e KEY=VALUE`. Covers the
+    /// (global ∪ repo) in its process environment. Covers the
     /// `primarySensitiveEnv = mergedEnvOverrides` branch in spawnPrimaryTerminals.
-    @Test("spawn: Codex primary receives merged global+repo env overrides via -e")
+    @Test("spawn: Codex primary receives merged global+repo env overrides in its process env")
     func codexReceivesMergedEnvOverrides() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
@@ -526,7 +458,7 @@ struct ModelProfileSpawnTests {
             try? FileManager.default.removeItem(at: codexHome)
         }
 
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.codex)
@@ -544,19 +476,19 @@ struct ModelProfileSpawnTests {
             worktree: wt, repo: freshRepo, skipClaude: false, preSessionTerminalID: nil
         )
 
-        // Both scopes reach the Codex pane as sensitive -e env.
-        #expect(recorder.joinedAll.contains("FOO=bar"))
-        #expect(recorder.joinedAll.contains("REPO_VAR=rv"))
+        // Both scopes reach the Codex job's process environment.
+        #expect(holder.spawned().contains("FOO=bar"))
+        #expect(holder.spawned().contains("REPO_VAR=rv"))
         // The forced omz suppression wins over the user's explicit "false";
         // other override keys merged untouched above.
-        #expect(recorder.joinedAll.contains("DISABLE_AUTO_UPDATE=true"))
-        #expect(!recorder.joinedAll.contains("DISABLE_AUTO_UPDATE=false"))
+        #expect(holder.spawned().contains("DISABLE_AUTO_UPDATE=true"))
+        #expect(!holder.spawned().contains("DISABLE_AUTO_UPDATE=false"))
     }
 
-    /// With no env overrides configured, the Codex primary spawn's only
-    /// sensitive `-e` env is the omz update-prompt suppression (the
-    /// empty-config off branch injects no user overrides).
-    @Test("spawn: empty config → Codex primary gets only omz suppression as -e env")
+    /// With no env overrides configured, the only variable the Codex primary
+    /// spawn adds to its process environment is the omz update-prompt
+    /// suppression (the empty-config off branch injects no user overrides).
+    @Test("spawn: empty config → Codex primary gets only omz suppression as process env")
     func codexEmptyConfigInjectsNothing() async throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
@@ -566,7 +498,7 @@ struct ModelProfileSpawnTests {
             try? FileManager.default.removeItem(at: codexHome)
         }
 
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.codex)
@@ -576,26 +508,30 @@ struct ModelProfileSpawnTests {
             worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
         )
 
-        // The Codex `new-window` call exists; its only `-e` env is the
-        // omz update-prompt suppression — an agent tab runs a command and
-        // must never block on the interactive "Would you like to update?"
-        // prompt. No user overrides leak in.
-        let codexCall = try #require(recorder.calls.first {
-            $0.contains("new-window") && ($0.last?.contains("codex") ?? false)
-        })
-        let eIndices = codexCall.indices.filter { codexCall[$0] == "-e" }
-        #expect(eIndices.count == 1)
-        #expect(codexCall.contains("DISABLE_AUTO_UPDATE=true"),
-                "codex window must suppress the oh-my-zsh update prompt via -e")
-        #expect(!recorder.joinedAll.contains("FOO=bar"))
+        // The Codex launch exists, and the only variable it adds to the
+        // environment every holder job inherits is the omz update-prompt
+        // suppression — an agent tab runs a command and must never block on
+        // the interactive "Would you like to update?" prompt. No user
+        // overrides leak in.
+        let rows = try await db.terminals.list(worktreeID: wt.id)
+        let codexRows = rows.filter { $0.kind == .codex }
+        #expect(codexRows.count == 1)
+        let codexRow = try #require(codexRows.first)
+        let codexLaunch = try #require(holder.launch(for: codexRow.id))
+        let registry = try #require(lifecycle.holderRegistry)
+        let base = SpawnBaseEnvironment.inheriting(registry.environment)
+        let added = codexLaunch.request.environment.filter { base[$0.key] != $0.value }
+        #expect(added == ["DISABLE_AUTO_UPDATE": "true"],
+                "the codex launch must suppress the oh-my-zsh update prompt in its process env, and add nothing else")
+        #expect(!holder.spawned().contains("FOO=bar"))
     }
 
-    @Test("spawn: missing Codex executable fails before tmux or terminal mutation")
+    @Test("spawn: missing Codex executable fails before any spawn or terminal mutation")
     func codexResolutionFailurePrecedesSpawnMutation() async throws {
         let expected = CodexExecutableResolutionError.notFound(
             searchPath: "/missing",
             fallbackPath: CodexExecutableResolver.chatGPTBundlePath)
-        let (lifecycle, db, recorder) = makeLifecycleFixture(
+        let (lifecycle, db, holder) = makeLifecycleFixture(
             codexExecutableResolver: { throw expected })
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
@@ -609,7 +545,7 @@ struct ModelProfileSpawnTests {
                 preSessionTerminalID: nil)
         }
 
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
@@ -627,7 +563,7 @@ struct ModelProfileSpawnTests {
             try? FileManager.default.removeItem(at: codexHome)
         }
 
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.codex)
@@ -637,7 +573,7 @@ struct ModelProfileSpawnTests {
             codexModelOverride: "acme-model"
         )
 
-        #expect(recorder.shellBodies.contains(
+        #expect(holder.spawnedArgv().contains(
             #"tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
         // Recorded on the primary's row, so a relaunch in that tab keeps it.
         let codexRow = try await db.terminals.list(worktreeID: wt.id)
@@ -656,7 +592,7 @@ struct ModelProfileSpawnTests {
             try? FileManager.default.removeItem(at: codexHome)
         }
 
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.codex)
@@ -665,9 +601,9 @@ struct ModelProfileSpawnTests {
             worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
         )
 
-        #expect(recorder.shellBodies.contains(
+        #expect(holder.spawnedArgv().contains(
             " tbd --no-daemon --dangerously-bypass-approvals-and-sandbox"))
-        #expect(!recorder.shellBodies.contains("model="))
+        #expect(!holder.spawnedArgv().contains("model="))
         let codexRow = try await db.terminals.list(worktreeID: wt.id)
             .first { $0.kind == .codex }
         #expect(codexRow != nil)
@@ -678,7 +614,7 @@ struct ModelProfileSpawnTests {
     /// rather than treating it as a second agent-selection mechanism.
     @Test("spawn: Claude primary ignores a Codex model override")
     func claudePrimaryIgnoresCodexModelOverride() async throws {
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.claude)
@@ -688,8 +624,8 @@ struct ModelProfileSpawnTests {
             codexModelOverride: "acme-model"
         )
 
-        #expect(!recorder.calls.isEmpty)
-        #expect(!recorder.joinedAll.contains("acme-model"))
+        #expect(!holder.launches.isEmpty)
+        #expect(!holder.spawned().contains("acme-model"))
     }
 
     /// A Codex terminal's model keeps its Codex meaning: `-c model=` on the
@@ -697,7 +633,7 @@ struct ModelProfileSpawnTests {
     /// saved Claude values.
     @Test("terminal.create passes a Codex model override to the Codex launch")
     func terminalCreateCodexModelUnchanged() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         router.codexExecutableResolver = { "/opt/test/bin/codex" }
@@ -712,9 +648,9 @@ struct ModelProfileSpawnTests {
                 worktreeID: wt.id, type: .codex, model: "acme-model")))
 
         #expect(response.success)
-        #expect(recorder.shellBodies.contains(
+        #expect(holder.spawnedArgv().contains(
             #"tbd -c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
-        #expect(!recorder.joinedAll.contains("ANTHROPIC_MODEL"))
+        #expect(!holder.spawned().contains("ANTHROPIC_MODEL"))
         let terminal = try response.decodeResult(TBDShared.Terminal.self)
         #expect(terminal.codexLaunchOptions?.model == "acme-model")
         #expect(terminal.claudeSpawnExtras == nil)
@@ -722,7 +658,7 @@ struct ModelProfileSpawnTests {
 
     @Test("terminal.create gives only the requested Codex tab its guarded home")
     func terminalCreateCodexHomeOverride() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         router.codexExecutableResolver = { "/opt/test/bin/codex" }
@@ -738,15 +674,13 @@ struct ModelProfileSpawnTests {
                 model: "acme-model", codexHome: home.path)))
 
         #expect(response.success, "create failed: \(response.error ?? "nil")")
-        let launch = try #require(recorder.calls.last {
-            $0.last?.contains("--dangerously-bypass-hook-trust") == true
-        }).joined(separator: " ")
-        #expect(launch.contains("CODEX_HOME=\(home.path)"))
-        #expect(!launch.contains("/synthetic/elsewhere"))
-        #expect(recorder.shellBodies.contains(
+        let terminal = try response.decodeResult(Terminal.self)
+        let launch = try #require(holder.launch(for: terminal.id))
+        #expect(launch.request.environment["CODEX_HOME"] == home.path)
+        #expect(!holder.spawned().contains("/synthetic/elsewhere"))
+        #expect(holder.spawnedArgv().contains(
             #"-c 'model="acme-model"' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -- 'synthetic prompt'"#))
         #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent("tbd.config.toml").path))
-        let terminal = try response.decodeResult(Terminal.self)
         #expect(try await db.terminals.get(id: terminal.id)?.codexLaunchOptions
             == CodexLaunchOptions(model: "acme-model", codexHome: home.path))
     }
@@ -763,76 +697,10 @@ struct ModelProfileSpawnTests {
         return home
     }
 
-    /// Creates a guarded Codex tab, then runs `prepare` before recreating its window.
-    private func createGuardedThenRecreate(
-        prepare: (URL) throws -> Void = { _ in }
-    ) async throws -> (
-        recreated: RPCResponse, home: URL, before: Terminal, after: Terminal,
-        callsBefore: Int, recorder: TmuxRecorder
-    ) {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        router.codexExecutableResolver = { "/opt/test/bin/codex" }
-        router.codexHomeEnsurer = {
-            FileManager.default.temporaryDirectory.appendingPathComponent(
-                "tbd-test-shared-codex-home-\(UUID().uuidString)", isDirectory: true)
-        }
-        let home = try makeGuardedCodexHome()
-        let created = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreateGuardedCodex,
-            params: TerminalCreateParams(worktreeID: wt.id, type: .codex, codexHome: home.path)))
-        #expect(created.success, "create failed: \(created.error ?? "nil")")
-        let terminal = try created.decodeResult(Terminal.self)
-        let before = try #require(try await db.terminals.get(id: terminal.id))
-        try prepare(home)
-        let callsBefore = recorder.calls.count
-        let recreated = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-        let after = try #require(try await db.terminals.get(id: terminal.id))
-        return (recreated, home, before, after, callsBefore, recorder)
-    }
-
-    @Test("terminal.recreate relaunches a guarded Codex tab in its own home")
-    func terminalRecreateKeepsGuardedCodexHome() async throws {
-        let r = try await createGuardedThenRecreate()
-        defer { try? FileManager.default.removeItem(at: r.home) }
-        #expect(r.recreated.success, "recreate failed: \(r.recreated.error ?? "nil")")
-        let relaunch = try #require(r.recorder.calls.last { $0.contains("respawn-window") })
-        let joined = relaunch.joined(separator: " ")
-        #expect(joined.contains("CODEX_HOME=\(r.home.path)"))
-        #expect(!joined.contains("tbd-test-shared-codex-home"))
-        #expect(r.after.codexLaunchOptions?.codexHome == r.home.path)
-    }
-
-    @Test("terminal.recreate refuses a Codex tab whose recorded options cannot be read")
-    func terminalRecreateRefusesUnreadableLaunchOptions() async throws {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        router.codexExecutableResolver = { "/opt/test/bin/codex" }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@old-codex", tmuxPaneID: "%old-codex",
-            label: TerminalLabel.codex, kind: .codex,
-            codexLaunchOptions: CodexLaunchOptions(codexHome: "/synthetic/home"))
-        try await db.writerForTests.write { conn in
-            try conn.execute(
-                sql: "UPDATE terminal SET codex_launch_options = 'not json' WHERE id = ?",
-                arguments: [terminal.id.uuidString])
-        }
-        let response = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-        #expect(!response.success)
-        #expect(response.error?.contains("cannot be read") == true)
-        #expect(recorder.calls.isEmpty)
-    }
-
     @Test("terminal.create refuses turning off either hook feature in a guarded tab",
           arguments: ["hooks", "codex_hooks"])
     func terminalCreateRefusesHooksOffWithGuardedHome(feature: String) async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let home = try makeGuardedCodexHome()
@@ -844,26 +712,13 @@ struct ModelProfileSpawnTests {
                 codexDisabledFeatures: ["computer_use", feature], codexHome: home.path)))
         #expect(!response.success)
         #expect(response.error?.contains("--codex-disable \(feature)") == true)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
-    }
-
-    @Test("terminal.recreate refuses a guarded tab whose home lost its guard, before touching the window")
-    func terminalRecreateRefusesUnguardedHome() async throws {
-        let r = try await createGuardedThenRecreate { home in
-            try FileManager.default.removeItem(at: home.appendingPathComponent("hooks.json"))
-        }
-        defer { try? FileManager.default.removeItem(at: r.home) }
-        #expect(!r.recreated.success)
-        #expect(r.recreated.error?.contains("Guarded Codex home") == true)
-        #expect(r.recorder.calls.count == r.callsBefore)
-        #expect(r.after.tmuxWindowID == r.before.tmuxWindowID)
-        #expect(r.after.codexLaunchOptions?.codexHome == r.home.path)
     }
 
     @Test("terminal.create rejects an unusable Codex home before making a tab")
     func terminalCreateRejectsMissingCodexGuard() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let home = FileManager.default.temporaryDirectory
@@ -874,26 +729,26 @@ struct ModelProfileSpawnTests {
             method: RPCMethod.terminalCreateGuardedCodex,
             params: TerminalCreateParams(worktreeID: wt.id, type: .codex, codexHome: home.path)))
         #expect(!response.success)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     @Test("guarded RPC refuses a missing home before making a tab")
     func guardedRPCRequiresHome() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreateGuardedCodex,
             params: TerminalCreateParams(worktreeID: wt.id, type: .codex)))
         #expect(!response.success)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     @Test("ordinary RPC refuses a guarded home field")
     func ordinaryRPCRejectsGuardedHome() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let response = await router.handle(try RPCRequest(
@@ -901,14 +756,14 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(
                 worktreeID: wt.id, type: .codex, codexHome: "/synthetic/home")))
         #expect(!response.success)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     @Test("terminal.create refuses Codex home for non-Codex terminals",
           arguments: [TerminalCreateType?.none, .claude, .shell])
     func terminalCreateRefusesCodexHomeForNonCodex(type: TerminalCreateType?) async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let response = await router.handle(try RPCRequest(
@@ -916,7 +771,7 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(worktreeID: wt.id, type: type, codexHome: "/synthetic/home")))
         #expect(!response.success)
         #expect(response.error == TerminalCreateParams.codexHomeRequiresCodexMessage)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
     }
 
     /// A Claude terminal takes `model` as its Claude model (see
@@ -924,7 +779,7 @@ struct ModelProfileSpawnTests {
     @Test("terminal.create refuses a model for a shell terminal",
           arguments: [TerminalCreateType?.none, .shell])
     func terminalCreateShellModelRefused(type: TerminalCreateType?) async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -934,13 +789,13 @@ struct ModelProfileSpawnTests {
 
         #expect(!response.success)
         #expect(response.error == TerminalCreateParams.modelRequiresAgentMessage)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     @Test("terminal.create passes validated disabled features to Codex, de-duplicated in order")
     func terminalCreatePassesDisabledFeatures() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -951,14 +806,14 @@ struct ModelProfileSpawnTests {
                 codexDisabledFeatures: ["computer_use", "apps", "computer_use"])))
 
         #expect(response.success)
-        #expect(recorder.shellBodies.contains(
+        #expect(holder.spawnedArgv().contains(
             "tbd --disable 'computer_use' --disable 'apps' --no-daemon --dangerously-bypass-approvals-and-sandbox"))
     }
 
     @Test("terminal.create refuses disabled features for non-Codex terminals",
           arguments: [TerminalCreateType?.none, .claude, .shell])
     func terminalCreateRefusesDisabledFeaturesForNonCodex(type: TerminalCreateType?) async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -969,13 +824,13 @@ struct ModelProfileSpawnTests {
 
         #expect(!response.success)
         #expect(response.error == TerminalCreateParams.codexDisableRequiresCodexMessage)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
     @Test("terminal.create refuses a malformed disabled feature name")
     func terminalCreateRefusesMalformedDisabledFeature() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -985,81 +840,20 @@ struct ModelProfileSpawnTests {
                 worktreeID: wt.id, type: .codex, codexDisabledFeatures: ["x; rm -rf ~"])))
 
         #expect(!response.success)
-        #expect(recorder.calls.isEmpty)
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
-    }
-
-    // MARK: - Recreate: Codex launch options (branch-test rule)
-
-    /// Create a Codex terminal over RPC, then recreate its window, and return
-    /// the recreate's Codex launch. Creation opens its window with
-    /// `new-window`, so the last `respawn-window` body is always the recreate.
-    private func createThenRecreateCodex(
-        model: String? = nil, disabledFeatures: [String]? = nil
-    ) async throws -> (relaunch: String, before: Terminal, after: Terminal) {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        router.codexExecutableResolver = { "/opt/test/bin/codex" }
-        router.codexHomeEnsurer = {
-            FileManager.default.temporaryDirectory.appendingPathComponent(
-                "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
-        }
-
-        let created = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(
-                worktreeID: wt.id, type: .codex, model: model,
-                codexDisabledFeatures: disabledFeatures)))
-        #expect(created.success, "create failed: \(created.error ?? "nil")")
-        let terminal = try created.decodeResult(Terminal.self)
-        let before = try #require(try await db.terminals.get(id: terminal.id))
-
-        let recreated = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
-        #expect(recreated.success, "recreate failed: \(recreated.error ?? "nil")")
-        let relaunch = try #require(
-            recorder.calls.last { $0.contains("respawn-window") }?.last)
-        let after = try #require(try await db.terminals.get(id: terminal.id))
-        return (relaunch, before, after)
-    }
-
-    @Test("terminal.recreate relaunches Codex with the model and disabled features it was created with")
-    func terminalRecreateReappliesCodexLaunchOptions() async throws {
-        let (relaunch, before, after) = try await createThenRecreateCodex(
-            model: "acme-model", disabledFeatures: ["computer_use", "browser_use"])
-
-        let options = CodexLaunchOptions(
-            model: "acme-model", disabledFeatures: ["computer_use", "browser_use"])
-        #expect(before.codexLaunchOptions == options)
-        #expect(relaunch.contains(
-            #"tbd -c 'model="acme-model"' --disable 'computer_use' --disable 'browser_use' --no-daemon --dangerously-bypass-approvals-and-sandbox"#))
-        // Kept for the next relaunch as well.
-        #expect(after.codexLaunchOptions == options)
-    }
-
-    @Test("terminal.recreate relaunches a Codex terminal created without options with the default command")
-    func terminalRecreateWithoutCodexLaunchOptionsIsUnchanged() async throws {
-        let (relaunch, before, after) = try await createThenRecreateCodex()
-
-        #expect(before.codexLaunchOptions == nil)
-        #expect(relaunch.contains(" tbd --no-daemon --dangerously-bypass-approvals-and-sandbox"))
-        #expect(!relaunch.contains("model="))
-        #expect(!relaunch.contains("--disable"))
-        #expect(after.codexLaunchOptions == nil)
     }
 
     // MARK: - Spawn: Claude free-form env overrides (branch-test rule)
 
     /// Claude's primary spawn carries the merged free-form env overrides from
-    /// all three scopes (global ∪ repo ∪ resolved-profile) via tmux
-    /// `-e KEY=VALUE`. Covers the
+    /// all three scopes (global ∪ repo ∪ resolved-profile) in its process
+    /// environment. Covers the
     /// `primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv)`
     /// branch in spawnPrimaryTerminals.
-    @Test("spawn: Claude primary receives merged global+repo+profile env overrides via -e")
+    @Test("spawn: Claude primary receives merged global+repo+profile env overrides in its process env")
     func claudeReceivesMergedEnvOverrides() async throws {
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.claude)
@@ -1081,10 +875,10 @@ struct ModelProfileSpawnTests {
             worktree: wt, repo: freshRepo, skipClaude: false, preSessionTerminalID: nil
         )
 
-        // All three scopes reach the Claude pane as sensitive -e env.
-        #expect(recorder.joinedAll.contains("GLOBAL_VAR=gv"))
-        #expect(recorder.joinedAll.contains("REPO_VAR=rv"))
-        #expect(recorder.joinedAll.contains("PROFILE_VAR=pv"))
+        // All three scopes reach the Claude job's process environment.
+        #expect(holder.spawned().contains("GLOBAL_VAR=gv"))
+        #expect(holder.spawned().contains("REPO_VAR=rv"))
+        #expect(holder.spawned().contains("PROFILE_VAR=pv"))
     }
 
     /// The Claude builder's structured auth/routing env is layered ON TOP of the
@@ -1094,7 +888,7 @@ struct ModelProfileSpawnTests {
     /// AWS_REGION=us-west-2 while a free-form override tries AWS_REGION=us-east-1.
     @Test("spawn: Claude auth/routing env wins over a free-form collision")
     func claudeAuthEnvWinsOverFreeFormCollision() async throws {
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.claude)
@@ -1113,9 +907,9 @@ struct ModelProfileSpawnTests {
         )
 
         // Builder's structured AWS_REGION is final; the free-form value loses.
-        #expect(recorder.joinedAll.contains("AWS_REGION=us-west-2"))
-        #expect(!recorder.joinedAll.contains("AWS_REGION=us-east-1"))
-        #expect(recorder.joinedAll.contains("CLAUDE_CODE_USE_BEDROCK=1"))
+        #expect(holder.spawned().contains("AWS_REGION=us-west-2"))
+        #expect(!holder.spawned().contains("AWS_REGION=us-east-1"))
+        #expect(holder.spawned().contains("CLAUDE_CODE_USE_BEDROCK=1"))
     }
 
     // MARK: - Spawn: per-creation model override (picker model buttons)
@@ -1124,7 +918,7 @@ struct ModelProfileSpawnTests {
     /// ANTHROPIC_MODEL, winning over the profile's own model for this spawn.
     @Test("spawn: modelOverride wins over the profile's model as ANTHROPIC_MODEL")
     func spawnModelOverrideWinsOverProfileModel() async throws {
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.claude)
@@ -1139,15 +933,15 @@ struct ModelProfileSpawnTests {
             modelOverride: "claude-fable-5"
         )
 
-        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-fable-5"))
-        #expect(!recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-opus-4-8"))
+        #expect(holder.spawned().contains("ANTHROPIC_MODEL=claude-fable-5"))
+        #expect(!holder.spawned().contains("ANTHROPIC_MODEL=claude-opus-4-8"))
     }
 
     /// Branch guard: with no override, the profile's own model is injected
     /// unchanged (today's behavior).
     @Test("spawn: nil modelOverride keeps the profile's model")
     func spawnNilModelOverrideKeepsProfileModel() async throws {
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.claude)
@@ -1161,15 +955,15 @@ struct ModelProfileSpawnTests {
             preSessionTerminalID: nil
         )
 
-        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-opus-4-8"))
-        #expect(!recorder.joinedAll.contains("claude-fable-5"))
+        #expect(holder.spawned().contains("ANTHROPIC_MODEL=claude-opus-4-8"))
+        #expect(!holder.spawned().contains("claude-fable-5"))
     }
 
     /// Branch guard: an override on a profile WITHOUT a model still injects
     /// the override (the `??` fallback isn't required for injection).
     @Test("spawn: modelOverride injects even when the profile has no model")
     func spawnModelOverrideWithoutProfileModel() async throws {
-        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        let (lifecycle, db, holder) = makeLifecycleFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
         try await db.config.setPrimaryAgentPreference(.claude)
@@ -1182,7 +976,7 @@ struct ModelProfileSpawnTests {
             modelOverride: "claude-sonnet-5"
         )
 
-        #expect(recorder.joinedAll.contains("ANTHROPIC_MODEL=claude-sonnet-5"))
+        #expect(holder.spawned().contains("ANTHROPIC_MODEL=claude-sonnet-5"))
     }
 
     // MARK: - Spawn: fallbackModels overlay routing
@@ -1199,7 +993,7 @@ struct ModelProfileSpawnTests {
         // The --settings flag is only emitted when the overlay file exists.
         ClaudeHookOverlay.writeOverlay()
 
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let tok = try await seedOAuthProfile(db, name: "NoFallback")
@@ -1211,7 +1005,7 @@ struct ModelProfileSpawnTests {
         ))
         #expect(resp.success)
 
-        let bodies = recorder.shellBodies
+        let bodies = holder.spawnedArgv()
         #expect(bodies.contains("--settings"))
         // Uses the shared global overlay, NOT a per-session file.
         #expect(bodies.contains(ClaudeHookOverlay.overlayPath))
@@ -1229,7 +1023,7 @@ struct ModelProfileSpawnTests {
         }
         ClaudeHookOverlay.writeOverlay()
 
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let tok = try await db.modelProfiles.create(
@@ -1244,7 +1038,7 @@ struct ModelProfileSpawnTests {
         ))
         #expect(resp.success)
 
-        let bodies = recorder.shellBodies
+        let bodies = holder.spawnedArgv()
         #expect(bodies.contains("--settings"))
         // A per-session overlay file is used, NOT the shared global overlay.
         #expect(bodies.contains("claude-overlay-session-"))
@@ -1297,7 +1091,7 @@ struct ModelProfileSpawnTests {
 
     @Test("fork on blank session: forks into a new tab with a fresh session id and new token")
     func swapToDifferentToken() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -1319,7 +1113,7 @@ struct ModelProfileSpawnTests {
         #expect(oldTerm.profileID == a.id)
         let oldSessionID = oldTerm.claudeSessionID
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
 
         // FORK to B → returns a NEW terminal row, old one untouched.
         let swapResp = await router.handle(try RPCRequest(
@@ -1338,243 +1132,21 @@ struct ModelProfileSpawnTests {
         let oldAfter = try await db.terminals.get(id: oldTerm.id)
         #expect(oldAfter?.profileID == a.id)
 
-        // Daemon did NOT send C-c or send-keys to the old pane (fork spawns a
-        // brand-new window; it never interrupts the source pane).
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(!joined.contains("C-c"))
-        #expect(!joined.contains("send-keys"))
-        #expect(!joined.contains("respawn-window"))
-        // The new tab was spawned with B's CLAUDE_CONFIG_DIR via tmux -e (NOT inlined),
-        // and the shell body contains --session-id <newSessionID> (fresh path),
-        // never --resume.
+        // The fork started exactly one session, the new tab's, and never tore
+        // down the source session.
+        let forkedIDs = holder.launches.dropFirst(beforeSwap).map { $0.terminalID }
+        #expect(forkedIDs == [newTerm.id])
+        let abandonedIDs = holder.abandonments.map { $0.terminalID }
+        #expect(!abandonedIDs.contains(oldTerm.id))
+        // The new tab was spawned with B's CLAUDE_CONFIG_DIR, and its command
+        // line contains --session-id <newSessionID> (fresh path), never --resume.
+        let joined = holder.spawned(from: beforeSwap)
         #expect(joined.contains("CLAUDE_CONFIG_DIR="))
         #expect(joined.contains("claude --session-id \(newTerm.claudeSessionID!)"))
         #expect(!joined.contains("claude --resume"))
         #expect(joined.contains("--dangerously-skip-permissions"))
-        // Negative: secrets and tokens must NOT appear in any shell body or tmux call.
-        let postBodies = postSwap.compactMap { $0.last }.joined(separator: "\n")
-        #expect(!postBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
-    }
-
-    @Test("in-place swap (default): keeps terminal id + tmux window id, updates profile_id")
-    func inPlaceSwapKeepsRowAndWindow() async throws {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let a = try await seedOAuthProfile(db, name: "A")
-        let b = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(a.id)
-
-        let createResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
-        ))
-        let oldTerm = try createResp.decodeResult(Terminal.self)
-        #expect(oldTerm.profileID == a.id)
-        let originalWindowID = oldTerm.tmuxWindowID
-
-        let beforeSwap = recorder.calls.count
-
-        // Default mode (nil → .inPlace): same tab.
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id)
-        ))
-        #expect(swapResp.success)
-        let result = try swapResp.decodeResult(Terminal.self)
-        // Same terminal id + same tmux window id — the row and tab survive.
-        #expect(result.id == oldTerm.id)
-        #expect(result.tmuxWindowID == originalWindowID)
-        // profile_id flipped to B, in place.
-        #expect(result.profileID == b.id)
-        // DB reflects the in-place update — no new row was created.
-        let all = try await db.terminals.list(worktreeID: wt.id)
-        #expect(all.count == 1)
-        #expect(all.first?.profileID == b.id)
-
-        // The pane was respawned in place (respawn-window -k on the SAME window),
-        // not spawned as a new window.
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(joined.contains("respawn-window"))
-        #expect(joined.contains(originalWindowID))
-        #expect(!joined.contains("new-window"))
-        #expect(joined.contains("CLAUDE_CONFIG_DIR="))
-    }
-
-    @Test("in-place swap: handler event from the respawn gap is fenced")
-    func inPlaceSwapFencesSessionStartHandledDuringRespawnGap() async throws {
-        let (router, db, recorder) = makeFixture()
-        let deltas = StateDeltaRecorder()
-        deltas.subscribe(to: router)
-        defer { Task { await cleanup(db) } }
-        let (_, worktree) = try await seedRepoAndWorktree(db)
-        let profileA = try await seedOAuthProfile(db, name: "A")
-        let profileB = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(profileA.id)
-
-        let createResponse = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktree.id, type: .claude)))
-        let terminal = try createResponse.decodeResult(Terminal.self)
-
-        let swapRequest = try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(
-                terminalID: terminal.id,
-                newProfileID: profileB.id,
-                mode: .inPlace))
-        recorder.arm(matching: "respawn-window")
-        let swap = gateHoldingTask {
-            await router.handle(swapRequest)
-        }
-        guard await waitUntil({ recorder.isBlocked }) else {
-            recorder.release()
-            _ = await swap.value
-            Issue.record("profile swap never reached the respawn")
-            return
-        }
-        let staged = try #require(try await db.terminals.get(id: terminal.id))
-        let intendedSessionID = try #require(staged.claudeSessionID)
-        let replacementToken = try #require(staged.sessionIncarnationID)
-        #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
-        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
-        #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
-
-        let gapEvent = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id,
-                sessionID: "old-process-gap-session",
-                transcriptPath: "/tmp/old-process-gap-session.jsonl",
-                source: "startup"))
-        #expect((await router.handle(gapEvent)).success)
-        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID
-                == intendedSessionID)
-
-        let replacementEvent = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id,
-                sessionID: "replacement-session",
-                transcriptPath: "/tmp/replacement-session.jsonl",
-                source: "startup",
-                sessionIncarnationID: replacementToken))
-        #expect((await router.handle(replacementEvent)).success)
-        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID
-                == "replacement-session")
-
-        recorder.release()
-        #expect((await swap.value).success)
-        let finalized = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(finalized.profileID == profileB.id)
-        #expect(finalized.claudeSessionID == "replacement-session")
-        #expect(finalized.transcriptPath == "/tmp/replacement-session.jsonl")
-
-        let sessionDeltas = deltas.snapshot().compactMap { delta -> TerminalSessionDelta? in
-            guard case .terminalSessionUpdated(let session) = delta else { return nil }
-            return session
-        }
-        #expect(sessionDeltas.last?.sessionID == "replacement-session")
-        #expect(sessionDeltas.last?.transcriptPath == "/tmp/replacement-session.jsonl")
-    }
-
-    @Test("in-place swap: launch failure broadcasts the derived unknown reset")
-    func inPlaceSwapLaunchFailureBroadcastsActivityReset() async throws {
-        let (router, db, _) = makeFixture(respawnWindowError: { _ in
-            TmuxError.unexpectedOutput("replacement launch failed")
-        })
-        defer { Task { await cleanup(db) } }
-        let (_, worktree) = try await seedRepoAndWorktree(db)
-        let profileA = try await seedOAuthProfile(db, name: "A")
-        let profileB = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(profileA.id)
-        let createResponse = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktree.id, type: .claude)))
-        let terminal = try createResponse.decodeResult(Terminal.self)
-        try await db.terminals.setActivityState(
-            id: terminal.id,
-            activityState: .working,
-            source: .hookEvent("UserPromptSubmit"),
-            observedAt: Date(timeIntervalSinceReferenceDate: 5))
-        let deltas = StateDeltaRecorder()
-        deltas.subscribe(to: router)
-
-        _ = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(
-                terminalID: terminal.id,
-                newProfileID: profileB.id,
-                mode: .inPlace)))
-
-        let stored = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(stored.activityState == .unknown)
-        #expect(stored.activityStateSource == .derived)
-        let activityDeltas = deltas.snapshot().compactMap { delta -> TerminalActivityDelta? in
-            guard case .terminalActivityUpdated(let activity) = delta else { return nil }
-            return activity
-        }
-        let reset = try #require(activityDeltas.last)
-        #expect(reset.activityState == stored.activityState)
-        #expect(reset.activityStateSource == stored.activityStateSource)
-        #expect(reset.activityStateObservedAt == stored.activityStateObservedAt)
-        #expect(reset.activityStateOrderObservedAt == stored.activityStateOrderObservedAt)
-    }
-
-    /// An in-place swap kills the pane's Claude and respawns it, keeping the
-    /// SAME terminal row — so a permission prompt that was on screen when the
-    /// user switched account died with the old process while its recorded
-    /// reason stayed on the row.
-    ///
-    /// The post-respawn lifecycle transition retracts the prompt and replaces
-    /// old-process activity with derived unknown. The resumed process's hooks
-    /// establish its new activity after that durable fence.
-    @Test("in-place swap: retracts a prompt recorded against the process it killed")
-    func inPlaceSwapRetractsAStandingWaitReason() async throws {
-        let (router, db, _) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let a = try await seedOAuthProfile(db, name: "A")
-        let b = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(a.id)
-
-        let createResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
-        ))
-        let oldTerm = try createResp.decodeResult(Terminal.self)
-
-        let workingAt = Date(timeIntervalSince1970: 1_700_000_000)
-        let reason = try #require(ProgramStatusColumnValue.waitingForUser(
-            ProgramStatusBlock(kind: .permission, taskID: nil)).awaitingInputReason)
-        _ = try #require(try await db.terminals.applyProgramStatusActivity(
-            id: oldTerm.id, scope: .anyLiveIncarnation, activityState: .waitingForUser,
-            awaitingInputReason: reason, observedAt: workingAt))
-        try #require(try await db.terminals.get(id: oldTerm.id)?.awaitingInputReason == reason)
-
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(
-                terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
-        ))
-        #expect(swapResp.success)
-
-        let after = try #require(try await db.terminals.get(id: oldTerm.id))
-        #expect(after.profileID == b.id)
-        #expect(after.awaitingInputReason == nil)
-        #expect(after.awaitingInputObservedAt == nil)
-        // The dead prompt and activity are gone from the composed answer: the
-        // new incarnation has not reported yet.
-        let state = SessionStateResolver().resolve(SessionStateFacts(terminal: after))
-        #expect(!state.value.isConfident)
-        #expect(state.source == .unavailable)
-        #expect(after.activityState == .unknown)
-        #expect(after.activityStateSource == .derived)
-        #expect(after.activityStateObservedAt != workingAt)
+        // Negative: secrets and tokens must NOT appear in the new job's argv.
+        #expect(!holder.spawnedArgv(from: beforeSwap).contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     // MARK: - Swap over a NON-BLANK session: resume + --fork-session flag
@@ -1613,7 +1185,7 @@ struct ModelProfileSpawnTests {
     /// the `.fresh` path, which never adds the flag.
     @Test("fork on non-blank session: router emits claude --resume WITH --fork-session")
     func forkOverNonBlankEmitsForkSessionFlag() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -1622,194 +1194,19 @@ struct ModelProfileSpawnTests {
 
         let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
         ))
         #expect(swapResp.success)
 
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        let joined = holder.spawned(from: beforeSwap)
         // Non-blank → resume plan, and .fork adds --fork-session.
         #expect(joined.contains("claude --resume \(oldTerm.claudeSessionID!)"),
                 "fork over a non-blank session must resume the source id; got: \(joined)")
         #expect(joined.contains("--fork-session"),
                 "fork mode must append --fork-session so the fork gets a new id; got: \(joined)")
-    }
-
-    /// Inverse branch guard: the same non-blank session swapped `.inPlace` still
-    /// resumes but must NOT carry `--fork-session` (the source process is killed,
-    /// so a same-id resume is correct — no fork).
-    @Test("in-place swap on non-blank session: resumes WITHOUT --fork-session")
-    func inPlaceOverNonBlankOmitsForkSessionFlag() async throws {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let a = try await seedOAuthProfile(db, name: "A")
-        let b = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(a.id)
-
-        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
-
-        let beforeSwap = recorder.calls.count
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
-        ))
-        #expect(swapResp.success)
-
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(joined.contains("claude --resume \(oldTerm.claudeSessionID!)"),
-                "in-place swap over a non-blank session must resume the source id; got: \(joined)")
-        #expect(!joined.contains("--fork-session"),
-                "in-place swap must NOT fork the session; got: \(joined)")
-    }
-
-    /// The tmux in-place swap launches its replacement under the incarnation
-    /// `prepareProfileAgentRespawn` committed. With the flag on that launch
-    /// carries the session mod in its process environment and its spawn
-    /// record names that incarnation; with the flag off, neither.
-    @Test("in-place swap: the replacement carries the session mod only with the flag on",
-          arguments: [true, false])
-    func tmuxInPlaceSwapExportsTheMod(flagOn: Bool) async throws {
-        let sessionsDir = try makeSessionsDir()
-        defer { try? FileManager.default.removeItem(at: sessionsDir) }
-        let (router, db, recorder) = makeFixture(sessionsDir: sessionsDir)
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let a = try await seedOAuthProfile(db, name: "A")
-        let b = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(a.id)
-        // Every feature off for the create, and composer drafts alone set
-        // after it, so the swap's launch is the only spawn the flag can reach.
-        try await db.config.setEverySessionModFeatureOff()
-        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
-        try await db.config.setComposerDraftAsTheOnlyModFeature(flagOn)
-
-        let beforeSwap = recorder.calls.count
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
-        ))
-        #expect(swapResp.success)
-
-        let swapped = try #require(try await db.terminals.get(id: oldTerm.id))
-        let incarnation = try #require(swapped.sessionIncarnationID)
-        let sessionID = try #require(swapped.claudeSessionID)
-        let launch = try #require(
-            Array(recorder.calls.dropFirst(beforeSwap)).last { $0.contains("respawn-window") })
-        let launchEnv = tmuxEnvironmentFlags(launch)
-        if flagOn {
-            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
-            #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
-            #expect(launchEnv[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
-            let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID))
-            #expect(spawn.sessionId == sessionID)
-            #expect(spawn.incarnationId == incarnation.uuidString)
-            #expect(spawn.features == ["composer-draft"])
-        } else {
-            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
-            #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
-            #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
-            #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
-        }
-    }
-
-    /// The pane's own pid — its login-shell wrapper — and the Claude process
-    /// beneath it, for the swap's signal ending. Both sit above macOS's
-    /// PID_MAX (99999), so a regression into a raw `kill` of either cannot
-    /// reach a real process; the Claude pid only ever reaches the fake
-    /// signaller.
-    private static let swapShellPID: Int32 = 900_011
-    private static let swapClaudePID: Int32 = 900_012
-
-    /// The tmux in-place swap of a session spawned with the composer-draft
-    /// feature types nothing into the pane — a Ctrl+C would clear its box —
-    /// and sends SIGTERM to the Claude pid under the pane's shell before the
-    /// respawn.
-    @Test("in-place swap of a composer-draft session: SIGTERM to Claude, no keys")
-    func featureTmuxSwapSendsNoKeys() async throws {
-        let sessionsDir = try makeSessionsDir()
-        defer { try? FileManager.default.removeItem(at: sessionsDir) }
-        let signaller = FakeProcessSignaller()
-        let (router, db, recorder) = makeFixture(
-            sessionsDir: sessionsDir,
-            panePID: String(Self.swapShellPID),
-            paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
-            processSignaller: signaller)
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let a = try await seedOAuthProfile(db, name: "A")
-        let b = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(a.id)
-        // On before the create, so the session is spawned with the feature:
-        // the create writes the spawn record for the incarnation it persists.
-        try await db.config.setComposerDraftAsTheOnlyModFeature(true)
-        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
-        let row = try #require(try await db.terminals.get(id: oldTerm.id))
-        let incarnation = try #require(row.sessionIncarnationID)
-        let sessionID = try #require(row.claudeSessionID)
-        let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID))
-        #expect(UUID(uuidString: spawn.incarnationId) == incarnation)
-
-        let beforeSwap = recorder.calls.count
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
-        ))
-        #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
-
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
-        let keys = postSwap.filter { $0.contains("send-keys") }
-        #expect(keys.isEmpty, "the swap typed into a feature session: \(keys)")
-        #expect(postSwap.contains { $0.contains("respawn-window") })
-        #expect(signaller.terminatedProcessOnly == [Self.swapClaudePID])
-        #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
-    }
-
-    /// The same swap of a session spawned without the feature — flag off, no
-    /// spawn record — types nothing either and ends by the same SIGTERM. A
-    /// typed `/exit` would submit whatever draft the box holds; no Escape,
-    /// Ctrl+C or `/exit` reaches the pane, and the only signal is the one to
-    /// the Claude pid under the pane's shell.
-    @Test("in-place swap of a legacy session: SIGTERM to Claude, no keys")
-    func legacyTmuxSwapSendsNoKeys() async throws {
-        let sessionsDir = try makeSessionsDir()
-        defer { try? FileManager.default.removeItem(at: sessionsDir) }
-        let signaller = FakeProcessSignaller()
-        let (router, db, recorder) = makeFixture(
-            sessionsDir: sessionsDir,
-            panePID: String(Self.swapShellPID),
-            paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
-            processSignaller: signaller)
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let a = try await seedOAuthProfile(db, name: "A")
-        let b = try await seedOAuthProfile(db, name: "B")
-        try await db.config.setDefaultProfileID(a.id)
-        // Legacy by construction: every feature is off for the create, so it
-        // writes no spawn record and the session reads as spawned without the
-        // feature.
-        try await db.config.setEverySessionModFeatureOff()
-        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
-        let sessionID = try #require(oldTerm.claudeSessionID)
-        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID) == nil)
-
-        let beforeSwap = recorder.calls.count
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
-        ))
-        #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
-
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
-        let keys = postSwap.filter { $0.contains("send-keys") }
-        #expect(keys.isEmpty, "the swap typed into a legacy session: \(keys)")
-        #expect(postSwap.contains { $0.contains("respawn-window") })
-        #expect(signaller.terminatedProcessOnly == [Self.swapClaudePID])
-        #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
     }
 
     /// Give `term`'s session a BLANK transcript on disk: the file exists and
@@ -1836,24 +1233,28 @@ struct ModelProfileSpawnTests {
     /// creates no row, and is recorded as a refused actuation.
     @Test("fork over a missing transcript: refused, nothing spawned, no row, refusal recorded")
     func forkOverMissingTranscriptIsRefused() async throws {
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let tmux = TmuxManager(dryRun: true)
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
         defer { Task { await cleanup(db) } }
         let logDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-fork-missing-log-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: logDir) }
         let logPath = logDir.appendingPathComponent("actuations.jsonl").path
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: isolatedConfigDirManager())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: isolatedConfigDirManager()),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
             actuationLog: ActuationLog(path: logPath))
+        router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
         let b = try await seedOAuthProfile(db, name: "B")
 
@@ -1867,7 +1268,7 @@ struct ModelProfileSpawnTests {
         let sessionID = try #require(oldTerm.claudeSessionID)
         #expect(oldTerm.transcriptPath == nil)
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
@@ -1880,10 +1281,8 @@ struct ModelProfileSpawnTests {
         #expect(error.contains("\(sessionID).jsonl"), "refusal must name the looked-for path: \(error)")
 
         // Nothing spawned, and the only row in the worktree is the source.
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(!joined.contains("new-window"), "a refused fork spawned a window: \(joined)")
-        #expect(!joined.contains("claude --session-id"), "a refused fork composed a spawn: \(joined)")
+        #expect(holder.launches.count == beforeSwap,
+                "a refused fork spawned a session: \(holder.spawned(from: beforeSwap))")
         let rows = try await db.terminals.list(worktreeID: wt.id)
         #expect(rows.map(\.id) == [oldTerm.id], "a refused fork left a row behind")
         #expect(try await db.terminals.get(id: oldTerm.id)?.profileID == oldTerm.profileID)
@@ -1907,22 +1306,26 @@ struct ModelProfileSpawnTests {
     /// fork resumes it with `--fork-session`.
     @Test("fork: transcript found only under the source config dir is resumed, not refused")
     func forkFindsTranscriptUnderSourceConfigDir() async throws {
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let tmux = TmuxManager(dryRun: true)
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
         defer { Task { await cleanup(db) } }
         let manager = isolatedConfigDirManager()
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: manager)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: manager),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
             actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
 
         // Ambient session (no default profile), transcriptPath nil, transcript
@@ -1941,14 +1344,13 @@ struct ModelProfileSpawnTests {
         try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
             .write(to: projectDir.appendingPathComponent("\(sessionID).jsonl"), atomically: true, encoding: .utf8)
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil, mode: .fork)
         ))
         #expect(swapResp.success, "\(swapResp.error ?? "")")
-        let joined = Array(recorder.calls.dropFirst(beforeSwap))
-            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        let joined = holder.spawned(from: beforeSwap)
         #expect(joined.contains("claude --resume \(sessionID)"), "got: \(joined)")
         #expect(joined.contains("--fork-session"), "got: \(joined)")
     }
@@ -1960,22 +1362,26 @@ struct ModelProfileSpawnTests {
     @Test("fork: transcript under a stale slug or behind a cached miss is resumed, not refused",
           arguments: [false, true])
     func forkFindsTranscriptTheSlugLookupMisses(cachedMiss: Bool) async throws {
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let tmux = TmuxManager(dryRun: true)
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
         defer { Task { await cleanup(db) } }
         let manager = isolatedConfigDirManager()
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: manager)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: manager),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
             actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
 
         let createResp = await router.handle(try RPCRequest(
@@ -2004,54 +1410,22 @@ struct ModelProfileSpawnTests {
         try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
             .write(to: projectDir.appendingPathComponent("\(sessionID).jsonl"), atomically: true, encoding: .utf8)
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil, mode: .fork)
         ))
         #expect(swapResp.success, "\(swapResp.error ?? "")")
-        let joined = Array(recorder.calls.dropFirst(beforeSwap))
-            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        let joined = holder.spawned(from: beforeSwap)
         #expect(joined.contains("claude --resume \(sessionID)"), "got: \(joined)")
         #expect(joined.contains("--fork-session"), "got: \(joined)")
-    }
-
-    /// `.inPlace` on the tmux transport is deliberately unchanged: a session
-    /// with NO transcript on disk still plans fresh and lands on the new
-    /// account — the refusal is `.fork`'s alone.
-    @Test("in-place swap over a missing transcript: still spawns fresh on the new account")
-    func inPlaceOverMissingTranscriptStillSpawnsFresh() async throws {
-        let (router, db, recorder) = makeFixture()
-        defer { Task { await cleanup(db) } }
-        let (_, wt) = try await seedRepoAndWorktree(db)
-        let b = try await seedOAuthProfile(db, name: "B")
-
-        let createResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
-        ))
-        let oldTerm = try createResp.decodeResult(Terminal.self)
-        #expect(oldTerm.transcriptPath == nil)
-
-        let beforeSwap = recorder.calls.count
-        let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
-        ))
-        #expect(swapResp.success, "\(swapResp.error ?? "")")
-        let after = try #require(try await db.terminals.get(id: oldTerm.id))
-        #expect(after.profileID == b.id)
-        let joined = Array(recorder.calls.dropFirst(beforeSwap))
-            .map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(joined.contains("claude --session-id"), "got: \(joined)")
-        #expect(!joined.contains("claude --resume"), "got: \(joined)")
     }
 
     // MARK: - Swap: to nil
 
     @Test("fork: to nil forks new tab with no env prefix; old tab untouched")
     func swapToNil() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -2066,7 +1440,7 @@ struct ModelProfileSpawnTests {
         let blankDir = try await seedBlankTranscript(db, oldTerm)
         defer { try? FileManager.default.removeItem(at: blankDir) }
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
 
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -2080,14 +1454,15 @@ struct ModelProfileSpawnTests {
         let oldAfter = try await db.terminals.get(id: oldTerm.id)
         #expect(oldAfter?.profileID == a.id)
 
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        let joined = holder.spawned(from: beforeSwap)
         // Blank session → fresh --session-id, never --resume.
         #expect(joined.contains("claude --session-id"))
         #expect(!joined.contains("claude --resume"))
         #expect(!joined.contains("CLAUDE_CODE_OAUTH_TOKEN"))
         #expect(!joined.contains("CLAUDE_CONFIG_DIR"))
-        #expect(!joined.contains("C-c"))
+        // The old tab's session is never torn down.
+        let abandonedIDs = holder.abandonments.map { $0.terminalID }
+        #expect(!abandonedIDs.contains(oldTerm.id))
     }
 
     // MARK: - Swap: non-claude terminal errors
@@ -2126,13 +1501,13 @@ struct ModelProfileSpawnTests {
         "swap: a shell tab carrying a session id is refused, and nothing is spawned",
         arguments: [TerminalSwapMode.inPlace, .fork])
     func swapRefusesShellTabCarryingSessionID(mode: TerminalSwapMode) async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let target = try await seedOAuthProfile(db, name: "B")
         let shell = try await seedShellTerminalCarryingSessionID(router, db, worktreeID: wt.id)
         let rowsBefore = try await db.terminals.list(worktreeID: wt.id).count
-        let callsBefore = recorder.calls.count
+        let launchesBefore = holder.launches.count
 
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -2144,11 +1519,9 @@ struct ModelProfileSpawnTests {
         let reason = try #require(swapResp.error)
         #expect(!reason.contains("\n"), "the refusal must be one line; got: \(reason)")
         #expect(reason.contains("shell"), "the refusal must name the tab's kind; got: \(reason)")
-        let postSwap = Array(recorder.calls.dropFirst(callsBefore))
-            .map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(!postSwap.contains("claude"), "the refused swap spawned something: \(postSwap)")
-        #expect(!postSwap.contains("respawn-window") && !postSwap.contains("new-window"),
-                "the refused swap touched tmux: \(postSwap)")
+        #expect(holder.launches.count == launchesBefore,
+                "the refused swap spawned something: \(holder.spawned(from: launchesBefore))")
+        #expect(holder.abandonments.isEmpty, "the refused swap tore the tab's session down")
         #expect(try await db.terminals.list(worktreeID: wt.id).count == rowsBefore,
                 "the refused swap created a row")
         let after = try #require(try await db.terminals.get(id: shell.id))
@@ -2161,14 +1534,14 @@ struct ModelProfileSpawnTests {
     /// shell tab carrying a session id is refused the same way.
     @Test("swap: a parked shell tab carrying a session id is refused, not re-homed")
     func swapRefusesParkedShellTabCarryingSessionID() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let target = try await seedOAuthProfile(db, name: "B")
         let shell = try await seedShellTerminalCarryingSessionID(router, db, worktreeID: wt.id)
         let sessionID = try #require(shell.claudeSessionID)
         try await db.terminals.setHibernated(id: shell.id, sessionID: sessionID, reason: .exited)
-        let callsBefore = recorder.calls.count
+        let launchesBefore = holder.launches.count
 
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -2179,7 +1552,7 @@ struct ModelProfileSpawnTests {
         let after = try #require(try await db.terminals.get(id: shell.id))
         #expect(after.profileID == nil, "the refused cold swap moved the row to another account")
         #expect(after.isParked)
-        #expect(recorder.calls.count == callsBefore, "the refused cold swap touched tmux")
+        #expect(holder.launches.count == launchesBefore, "the refused cold swap spawned something")
     }
 
     /// A shell terminal whose row carries a Claude session id and a non-blank
@@ -2217,7 +1590,7 @@ struct ModelProfileSpawnTests {
     /// on the row.
     @Test("a shell tab joined by descent is still refused by swap and not resumed by wake")
     func shellTabJoinedByDescentIsStillRefusedBySwapAndWake() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let target = try await seedOAuthProfile(db, name: "B")
@@ -2243,7 +1616,7 @@ struct ModelProfileSpawnTests {
         #expect(afterJoin.claudeSessionID == nil, "the join wrote a session id onto the row")
         #expect(afterJoin.kind == .shell)
 
-        let callsBefore = recorder.calls.count
+        let launchesBefore = holder.launches.count
         let plainSwap = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: tab.id, newProfileID: target.id)))
@@ -2273,9 +1646,8 @@ struct ModelProfileSpawnTests {
                 "the refused wake recorded a new holder")
         #expect(after.pendingSessionIncarnationID == nil,
                 "the refused wake reserved a replacement launch")
-        #expect(!recorder.calls.dropFirst(callsBefore)
-            .map { $0.joined(separator: " ") }.joined().contains("claude"),
-                "something was spawned")
+        #expect(holder.launches.count == launchesBefore,
+                "something was spawned: \(holder.spawned(from: launchesBefore))")
     }
 
     // MARK: - Swap: unknown token id
@@ -2301,12 +1673,12 @@ struct ModelProfileSpawnTests {
 
     // MARK: - Cold profile swap (parked session re-home without waking)
 
-    /// Swapping a PARKED (hibernated) session's profile must NOT wake it: no
-    /// respawn-window / new-window is issued, the profile_id updates, and the
-    /// parked timestamps + snapshot are left untouched.
+    /// Swapping a PARKED (hibernated) session's profile must NOT wake it:
+    /// nothing is spawned or torn down, the profile_id updates, and the parked
+    /// timestamps + snapshot are left untouched.
     @Test("cold swap: parked (hibernated) session re-homes profile without respawn")
     func coldSwapParkedDoesNotRespawn() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -2326,7 +1698,7 @@ struct ModelProfileSpawnTests {
         let parkedBefore = try await db.terminals.get(id: term.id)
         let hibAt = parkedBefore?.hibernatedAt
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: b.id)
@@ -2338,12 +1710,10 @@ struct ModelProfileSpawnTests {
         #expect(result.profileID == b.id)
         #expect(result.isParked, "cold swap must leave the session parked")
 
-        // No spawn of any kind.
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(!joined.contains("respawn-window"), "cold swap must not respawn; got: \(joined)")
-        #expect(!joined.contains("new-window"), "cold swap must not spawn a new window; got: \(joined)")
-        #expect(!joined.contains("C-c"), "cold swap must not interrupt the pane; got: \(joined)")
+        // No spawn of any kind, and the parked session's holder is left alone.
+        #expect(holder.launches.count == beforeSwap,
+                "cold swap must not spawn; got: \(holder.spawned(from: beforeSwap))")
+        #expect(holder.abandonments.isEmpty, "cold swap must not tear the parked session down")
 
         // Parked timestamps + snapshot untouched.
         let after = try await db.terminals.get(id: term.id)
@@ -2356,7 +1726,7 @@ struct ModelProfileSpawnTests {
     /// not a respawn.
     @Test("cold swap: legacy-suspended session also re-homes without respawn")
     func coldSwapLegacySuspendedDoesNotRespawn() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -2372,7 +1742,7 @@ struct ModelProfileSpawnTests {
         // Legacy park: only suspendedAt.
         try await db.terminals.setSuspended(id: term.id, sessionID: term.claudeSessionID ?? "s")
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: b.id)
@@ -2382,10 +1752,9 @@ struct ModelProfileSpawnTests {
         #expect(result.profileID == b.id)
         #expect(result.isParked)
 
-        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
-        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(!joined.contains("respawn-window"))
-        #expect(!joined.contains("new-window"))
+        #expect(holder.launches.count == beforeSwap,
+                "cold swap must not spawn; got: \(holder.spawned(from: beforeSwap))")
+        #expect(holder.abandonments.isEmpty, "cold swap must not tear the parked session down")
 
         let after = try await db.terminals.get(id: term.id)
         #expect(after?.suspendedAt != nil, "legacy suspendedAt stays set (still parked)")
@@ -2393,10 +1762,10 @@ struct ModelProfileSpawnTests {
     }
 
     /// After a cold swap, waking the session resumes under the NEW profile's
-    /// config dir — verified by the wake respawn carrying B's CLAUDE_CONFIG_DIR.
+    /// config dir — verified by the wake's launch carrying B's CLAUDE_CONFIG_DIR.
     @Test("cold swap then wake: resumes under the new profile's config dir")
     func wakeAfterColdSwapUsesNewProfileConfigDir() async throws {
-        let (router, db, recorder) = makeFixture()
+        let (router, db, holder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
@@ -2408,6 +1777,13 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
         ))
         let term = try createResp.decodeResult(Terminal.self)
+        // Parked as the coordinator's park leaves a holder session: its holder
+        // let go first, so the wake below starts a new one. A row parked in the
+        // database alone would still name the live session, and the registry
+        // refuses a second spawn of a live id.
+        let started = try #require(holder.launch(for: term.id))
+        let registry = try #require(router.holderRegistry)
+        await registry.abandon(terminalID: term.id, handle: started.handle, reason: .park)
         try await db.terminals.setHibernated(id: term.id, sessionID: "sess-cold")
 
         // Cold swap to B.
@@ -2417,16 +1793,17 @@ struct ModelProfileSpawnTests {
         ))
         #expect(try await db.terminals.get(id: term.id)?.profileID == b.id)
 
-        // Now wake via the unified coordinator (the router's own instance).
-        let beforeWake = recorder.calls.count
+        // Now wake via the unified coordinator (the router's own instance),
+        // wired to the same holder spawn double the router spawns through.
+        await router.hibernationCoordinator.setHolderRegistry(router.holderRegistry)
+        let beforeWake = holder.launches.count
         let wakeResult = await router.hibernationCoordinator.wake(terminalID: term.id)
-        #expect(wakeResult.isOk)
+        #expect(wakeResult.isOk, "\(wakeResult)")
 
-        let postWake = Array(recorder.calls.dropFirst(beforeWake))
-        let joined = postWake.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        // Wake must respawn `claude --resume` under B's config dir. The config
+        let joined = holder.spawned(from: beforeWake)
+        // Wake must launch `claude --resume` under B's config dir. The config
         // dir path embeds the profile's (lowercased) UUID, so asserting B's UUID
-        // appears in a CLAUDE_CONFIG_DIR arg proves the resume targets B — not A.
+        // appears in the launch proves the resume targets B — not A.
         #expect(joined.contains("claude --resume sess-cold"))
         #expect(joined.contains("CLAUDE_CONFIG_DIR="),
                 "wake must inject a profile config dir; got: \(joined)")
@@ -2449,22 +1826,26 @@ struct ModelProfileSpawnTests {
         // One config-dir manager for the router and the lifecycle, so the
         // test can look inside profile B's config dir for the carried
         // transcript (as `forkFindsTranscriptUnderSourceConfigDir` does).
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let tmux = TmuxManager(dryRun: true)
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
         defer { Task { await cleanup(db) } }
         let manager = isolatedConfigDirManager()
         defer { try? FileManager.default.removeItem(at: manager.ambientConfigDirectory.deletingLastPathComponent()) }
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: manager)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: manager),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: manager,
             actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
         let (_, wt) = try await seedRepoAndWorktree(db)
         let a = try await seedOAuthProfile(db, name: "A")
         let b = try await seedOAuthProfile(db, name: "B")
@@ -2484,7 +1865,7 @@ struct ModelProfileSpawnTests {
         let transcript = URL(fileURLWithPath: transcriptPath)
         defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
 
-        let beforeSwap = recorder.calls.count
+        let beforeSwap = holder.launches.count
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
             params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
@@ -2501,15 +1882,15 @@ struct ModelProfileSpawnTests {
         let expectedRowIDs: Set<UUID> = [oldTerm.id, forked.id]
         #expect(rowIDs == expectedRowIDs, "the fork did not leave exactly the parked row and one new row")
 
-        // It resumes the parked conversation as a fork, in a new window, and
-        // never touches the parked pane.
-        let joined = Array(recorder.calls.dropFirst(beforeSwap))
-            .map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(joined.contains("new-window"), "the fork opened no window; got: \(joined)")
+        // It resumes the parked conversation as a fork, in one new session,
+        // and never touches the parked one.
+        let forkedIDs = holder.launches.dropFirst(beforeSwap).map { $0.terminalID }
+        #expect(forkedIDs == [forked.id], "the fork did not start exactly one new session")
+        let joined = holder.spawned(from: beforeSwap)
         #expect(joined.contains("claude --resume \(sessionID)"), "got: \(joined)")
         #expect(joined.contains("--fork-session"), "got: \(joined)")
-        #expect(!joined.contains("respawn-window"), "the fork respawned the parked pane; got: \(joined)")
-        #expect(!joined.contains("C-c"), "the fork interrupted the parked pane; got: \(joined)")
+        let abandonedIDs = holder.abandonments.map { $0.terminalID }
+        #expect(!abandonedIDs.contains(oldTerm.id), "the fork tore down the parked session")
 
         // The new tab runs under B's config dir. The config dir path embeds
         // the profile's lowercased UUID, so B's UUID in the spawn, and A's
@@ -2584,6 +1965,7 @@ struct ModelProfileSpawnTests {
     private struct LoginFixture {
         let router: RPCRouter
         let db: TBDDatabase
+        let holder: FakeHolderLaunch
         let tmux: TmuxRecorder
         let captures: CaptureCounter
         let deltas: DeltaRecorder
@@ -2602,9 +1984,10 @@ struct ModelProfileSpawnTests {
     }
 
     /// Fixture whose identity watcher is test-tuned (50 ms poll, bounded life
-    /// so tests don't leave 30-minute poll tasks behind), whose dry-run tmux
-    /// serves a pane that is ready for `/login` and counts every capture of
-    /// it, and whose broadcasts are recorded.
+    /// so tests don't leave 30-minute poll tasks behind), whose sessions open
+    /// on a holder spawn double, whose dry-run tmux serves a pane that is
+    /// ready for `/login` and counts every capture of it, and whose broadcasts
+    /// are recorded.
     ///
     /// `identityPollTimeout` is short by default: only the badge test needs the
     /// watcher alive long enough to see a credential appear.
@@ -2631,9 +2014,12 @@ struct ModelProfileSpawnTests {
             }
             return true
         }
-        let lifecycle = WorktreeLifecycle(
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -2648,8 +2034,9 @@ struct ModelProfileSpawnTests {
             )),
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
         return LoginFixture(
-            router: router, db: db, tmux: recorder, captures: captures,
+            router: router, db: db, holder: holder, tmux: recorder, captures: captures,
             deltas: deltas, configDirManager: configDirManager)
     }
 
@@ -2668,12 +2055,12 @@ struct ModelProfileSpawnTests {
     /// REGRESSION (profile env clobbered by shell rc files): the profile's
     /// CLAUDE_CONFIG_DIR must ride in the shell command as an inline `export`
     /// (post-rc, can't be clobbered by ~/.zshenv account switchers), not only
-    /// as tmux `-e` env. Also pins the login-session shape: label=login,
+    /// as process env. Also pins the login-session shape: label=login,
     /// profileID persisted on the DB row.
     @Test("login session: label=login, profileID persisted, config dir inline-exported")
     func loginSessionSpawn() async throws {
         let fixture = makeLoginFixture()
-        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
+        let (router, db, holder) = (fixture.router, fixture.db, fixture.holder)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Login")
@@ -2695,9 +2082,10 @@ struct ModelProfileSpawnTests {
         #expect(row.profileID == profile.id)
         #expect(row.label == TerminalLabel.login)
 
-        // Inline export survives rc files; -e env still present too.
-        #expect(recorder.shellBodies.contains("export CLAUDE_CONFIG_DIR="))
-        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
+        // Inline export survives rc files; the process env carries it too.
+        let launch = try #require(holder.launch(for: term.id))
+        #expect(launch.commandLine?.contains("export CLAUDE_CONFIG_DIR=") == true)
+        #expect(launch.request.environment["CLAUDE_CONFIG_DIR"] != nil)
     }
 
     /// Branch guard: the same spawn WITHOUT the loginSession flag keeps the
@@ -2730,7 +2118,7 @@ struct ModelProfileSpawnTests {
     @Test("login session: bare --name, never recorded, counted or titled on a prompt")
     func loginSessionIsNeverTitled() async throws {
         let fixture = makeLoginFixture()
-        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
+        let (router, db, holder) = (fixture.router, fixture.db, fixture.holder)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Login")
@@ -2749,8 +2137,8 @@ struct ModelProfileSpawnTests {
                 overrideProfileID: profile.id, loginSession: true)))
         #expect(resp.success)
         let login = try resp.decodeResult(Terminal.self)
-        #expect(recorder.joinedAll.contains("--name 'wt'"))
-        #expect(!recorder.joinedAll.contains("--name 'wt · "))
+        #expect(holder.spawnedArgv().contains("--name 'wt'"))
+        #expect(!holder.spawnedArgv().contains("--name 'wt · "))
         #expect(await titles.lastApplied(terminalID: login.id) == nil)
         #expect(await titles.isReserved(terminalID: login.id) == false)
 
@@ -2772,13 +2160,13 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(
                 worktreeID: wt.id, type: .claude, overrideProfileID: profile.id)))
         #expect(next.success)
-        #expect(recorder.joinedAll.contains("--name 'wt · 2'"))
+        #expect(holder.spawnedArgv().contains("--name 'wt · 2'"))
     }
 
-    @Test("login session: missing/unknown profile fails loud, no window spawned")
+    @Test("login session: missing/unknown profile fails loud, nothing spawned")
     func loginSessionUnknownProfile() async throws {
         let fixture = makeLoginFixture()
-        let (router, db, recorder) = (fixture.router, fixture.db, fixture.tmux)
+        let (router, db, holder) = (fixture.router, fixture.db, fixture.holder)
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let missing = UUID()
@@ -2792,8 +2180,8 @@ struct ModelProfileSpawnTests {
         ))
         #expect(!resp.success)
         #expect(resp.error == "Model profile \(missing.uuidString) does not exist. Run tbd profile list to see the profiles.")
-        // ensureServer may have run, but no window was created and no row inserted.
-        #expect(!recorder.joinedAll.contains("new-window"))
+        // Nothing was spawned and no row inserted.
+        #expect(holder.launches.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 

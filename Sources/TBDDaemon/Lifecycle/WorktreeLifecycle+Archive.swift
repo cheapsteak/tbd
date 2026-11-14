@@ -485,7 +485,7 @@ extension WorktreeLifecycle {
 
     // MARK: - Revive
 
-    /// Revives an archived worktree, re-creating the git worktree and tmux windows.
+    /// Revives an archived worktree, re-creating the git worktree and its terminals.
     ///
     /// Legacy synchronous contract (CLI + tests): the returned worktree is
     /// fully set up and `.active`. When a `preSession` hook gates the primary
@@ -557,6 +557,17 @@ extension WorktreeLifecycle {
         let tabs = try await archivedRestorePlan(worktreeID: worktreeID, preferred: preferred)
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
         let missingTabs = missingArchivedAgentTabs(tabs, terminals: terminals)
+        // The spawn gate, asked before the revive writes anything: every tab a
+        // revive opens needs a pty holder, so a daemon that cannot start one
+        // refuses the revive before it records the restore plan, prepares a
+        // Codex launch, or touches git and the disk. A refused revive leaves
+        // the row archived; asked after the re-add, the gate would leave the
+        // checkout on disk, the row revived and no tab open. A retry re-adds
+        // nothing and opens a tab only for an archived session that still has
+        // none, so it is asked only then.
+        if !isRetry || (!skipClaude && !missingTabs.isEmpty) {
+            _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
+        }
         let preparedArchivedCodexLaunches = try prepareArchivedCodexLaunches(skipClaude ? [] : missingTabs)
         let config = try await db.config.get()
         let preparedCodexLaunch = !skipClaude && tabs.isEmpty && config.primaryAgentPreference == .codex

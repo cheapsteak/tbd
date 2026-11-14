@@ -16,6 +16,9 @@ import TBDShared
 /// **Switch and fork put a session under other credentials.** A switch
 /// restarts a running session under the profile, in its own tab, and moves a
 /// parked one to the profile, where it stays parked until its next wake. A
+/// running session still on the tmux transport cannot be switched, because
+/// TBD no longer starts processes there, so its switch is `unsupported` with
+/// `PhoneSessionStatus.switchOnTmuxReason`, as the sessions list says. A
 /// fork copies the conversation, running or parked, into a new tab under the
 /// profile and leaves the session as it is. Both act only on a session the
 /// phone can see and can do this to: a local Claude session in a local

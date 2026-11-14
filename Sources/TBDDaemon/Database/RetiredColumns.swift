@@ -50,5 +50,8 @@ enum RetiredColumns {
         // The starter-note setting, added by `20260824214437_auto_create_notes_setting`
         // as `INTEGER` with no default. New worktrees get no starter note.
         RetiredColumn(table: "config", column: "auto_create_notes_enabled", epoch: 7),
+        // The pty-holder transport gate, added by `20260831055718_config_pty_holder`
+        // as `INTEGER` with no default. Every session opens on the pty holder.
+        RetiredColumn(table: "config", column: "pty_holder_enabled", epoch: 8),
     ]
 }

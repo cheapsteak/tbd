@@ -176,12 +176,11 @@ extension TBDHomeSerialized {
 
     private static let repoFragment = #"{"skillOverrides":{"x":"off"}}"#
 
-    /// A parked Claude terminal in a worktree whose path exists on disk (wake
-    /// refuses to respawn into a missing directory), in a repo whose settings
-    /// fragment makes every overlay it spawns per-session.
-    private func parkedTerminal(
-        _ scratch: Scratch, db: TBDDatabase, transport: TerminalTransport
-    ) async throws -> Terminal {
+    /// A parked Claude terminal on the holder transport, in a worktree whose
+    /// path exists on disk (wake refuses to respawn into a missing directory),
+    /// in a repo whose settings fragment makes every overlay it spawns
+    /// per-session.
+    private func parkedTerminal(_ scratch: Scratch, db: TBDDatabase) async throws -> Terminal {
         let repoPath = scratch.home.appendingPathComponent("repo", isDirectory: true).path
         try FileManager.default.createDirectory(atPath: repoPath, withIntermediateDirectories: true)
         let repo = try await db.repos.create(
@@ -195,33 +194,45 @@ extension TBDHomeSerialized {
             repoID: repo.id, name: "wt", branch: "main", path: repoPath,
             tmuxServer: "tbd-replacement-overlay")
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
             label: "claude", claudeSessionID: "sess-wake", kind: .claude,
-            transport: transport)
+            transport: .holder)
         try await db.terminals.setHibernated(
             id: terminal.id, sessionID: "sess-wake", reason: .auto)
         return try #require(try await db.terminals.get(id: terminal.id))
     }
 
-    private func wake(_ terminal: Terminal, db: TBDDatabase, _ scratch: Scratch) async throws -> WakeResult {
+    /// Wakes `terminal` through a coordinator wired to `registry`; nil wires
+    /// none.
+    private func wake(
+        _ terminal: Terminal, db: TBDDatabase, _ scratch: Scratch, registry: HolderRegistry?
+    ) async throws -> WakeResult {
         let sessions = scratch.home.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(), sessionsDir: sessions,
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        await coordinator.setHolderRegistry(registry)
         return await coordinator.wake(terminalID: terminal.id)
     }
 
+    /// Launched through the holder spawn double, which records the command
+    /// the wake started instead of starting it.
     @Test func aWakeThatLaunchesRewritesTheOverlay() async throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let db = try TBDDatabase(inMemory: true)
-        let terminal = try await parkedTerminal(scratch, db: db, transport: .tmux)
+        let terminal = try await parkedTerminal(scratch, db: db)
         let overlayPath = try seedOverlay(sessionKey: terminal.id.uuidString, Self.runningOverlay)
+        let holder = FakeHolderLaunch()
 
-        #expect(try await wake(terminal, db: db, scratch).isOk)
+        #expect(try await wake(
+            terminal, db: db, scratch, registry: makeHolderRegistryDouble(launch: holder)).isOk)
 
+        let command = try #require(holder.launch(for: terminal.id)?.commandLine)
+        #expect(command.contains(" --settings \(shellEscape(overlayPath))"),
+                "the launched command does not name the per-session overlay: \(command)")
         #expect(try Data(contentsOf: URL(fileURLWithPath: overlayPath))
                 == (try ClaudeHookOverlay.generateBody(
                     extraSettings: ["skillOverrides": ["x": "off"]])),
@@ -237,10 +248,10 @@ extension TBDHomeSerialized {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let db = try TBDDatabase(inMemory: true)
-        let terminal = try await parkedTerminal(scratch, db: db, transport: .holder)
+        let terminal = try await parkedTerminal(scratch, db: db)
         let overlayPath = try seedOverlay(sessionKey: terminal.id.uuidString, Self.runningOverlay)
 
-        let result = try await wake(terminal, db: db, scratch)
+        let result = try await wake(terminal, db: db, scratch, registry: nil)
 
         guard case .respawnFailed(let reason) = result else {
             Issue.record("expected the registry-less holder wake to refuse, got \(result)")

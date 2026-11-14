@@ -148,9 +148,10 @@ import Testing
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: cloneRepoDir)
 
         let wt = try await lifecycle.createWorktree(
@@ -185,9 +186,10 @@ import Testing
         #expect(originalSHA != prSHA)
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: cloneRepoDir)
 
         let wt = try await lifecycle.createWorktree(
@@ -217,9 +219,10 @@ import Testing
         let branchSHA = try await GitManager().headSHA(repoPath: repoDir.path, ref: "refs/heads/feature-x")
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         // prNumber stamped, checkoutPRHead omitted (defaults false).

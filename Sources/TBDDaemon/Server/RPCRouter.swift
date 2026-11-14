@@ -21,9 +21,6 @@ public final class RPCRouter: Sendable {
     /// Exact-token SessionStart rendezvous for Codex-to-Claude replacement
     /// and its Codex rollback/recovery process.
     let continueInClaudeReadiness = ContinueInClaudeReadinessCoordinator()
-    /// Behavior deadline for one replacement or rollback readiness wait.
-    /// Production keeps the design's 15-second bound; focused tests shorten it.
-    nonisolated(unsafe) var continueInClaudeReadinessTimeout: Duration = .seconds(15)
     /// Append-only record of every state-changing actuation this router
     /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
     /// the whole daemon writes one file. Handlers append a request row before
@@ -339,18 +336,17 @@ public final class RPCRouter: Sendable {
     /// replace it with a stated process table and file system.
     nonisolated(unsafe) var phoneAppBinaryCheck: PhoneAppBinaryCheck = .production
 
-    /// How the swap paths build the scheduler that recaptures a resumed
+    /// How the fork swap builds the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
-    /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
-    /// `WorktreeLifecycle.sessionRecaptureFactory`, for the same reason.
+    /// `SessionRecaptureScheduler(db:tmux:)`.
     ///
-    /// A seam because the branch it feeds — which target a fork tab's recapture
-    /// is scheduled against — is otherwise unobservable from outside. A real
-    /// scheduler's only trace is a database write five wall seconds later, made
-    /// only if a live Claude process answers; "it was scheduled against the
-    /// pane" and "it was scheduled against the holder's child" look identical
-    /// from the row. Injecting the scheduler makes the decision itself the
-    /// observable, on virtual time.
+    /// A seam because the decision it feeds — whether a fork tab's recapture
+    /// is scheduled, and against which holder child — is otherwise
+    /// unobservable from outside. A real scheduler's only trace is a database
+    /// write five wall seconds later, made only if a live Claude process
+    /// answers; "it was never scheduled" and "it was scheduled and found
+    /// nothing" look identical from the row. Injecting the scheduler makes the
+    /// decision itself the observable, on virtual time.
     nonisolated(unsafe) var sessionRecaptureFactory: (
         @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
     )?
@@ -1169,8 +1165,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetUpdateMode:
                 return try await handleConfigSetUpdateMode(request.paramsData)
-            case RPCMethod.configSetPtyHolderEnabled:
-                return try await handleConfigSetPtyHolderEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptStreamingEnabled:
                 return try await handleConfigSetTranscriptStreamingEnabled(request.paramsData)
             case RPCMethod.peerStatus:
@@ -1232,13 +1226,10 @@ public final class RPCRouter: Sendable {
             claudeCloudLive: claudeCloudLive,
             remoteDeleteEnabled: config.remoteDeleteEnabled,
             updateMode: config.updateMode,
-            ptyHolderEnabled: config.ptyHolderEnabled,
-            // The same second half the spawn gate asks
-            // (`WorktreeLifecycle+Create`): a registry can exist and still be
-            // unable to start a holder, and with the flag on that combination
-            // falls back to tmux silently. Reported so Settings can say so,
-            // and so it can grey the switch out in the one state where neither
-            // direction would change anything.
+            // The question the spawn gate asks
+            // (`TerminalSpawnTransport.decide`): a registry can exist and still
+            // be unable to start a holder, and then every new session is
+            // refused. Reported so Settings can say why.
             ptyHolderSupported: holderRegistry?.canSpawn == true)
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces

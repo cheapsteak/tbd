@@ -48,6 +48,15 @@ extension RPCRouter {
             return RPCResponse(error: refusal)
         }
 
+        // The spawn gate, asked here for the same reason: a daemon that cannot
+        // start a pty holder can open none of this worktree's tabs, and a
+        // refusal from detached phase 2 would reach a caller that does not wait
+        // only as a failed create. Asked before phase 1, so nothing is made or
+        // recorded; phase 2 asks it again for its other callers.
+        if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
+            return RPCResponse(error: refusal.message)
+        }
+
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
         let pending = try await lifecycle.beginCreateWorktree(
             repoID: params.repoID,
@@ -685,6 +694,14 @@ extension RPCRouter {
             AgentSessionIdentity(agentKind: .claude, sessionID: $0)
         }
         let archivedTabs = try await lifecycle.archivedRestorePlan(worktreeID: params.worktreeID, preferred: preferred)
+        // The spawn gate, asked before the actuation row and start admission,
+        // as `worktree.create` asks it: a daemon that cannot start a pty
+        // holder can open none of the revived worktree's tabs, so the person
+        // is told that, not a hold reason for a start that could never run.
+        // The lifecycle asks again for its other callers.
+        if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
+            return RPCResponse(error: refusal.message)
+        }
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
@@ -752,6 +769,12 @@ extension RPCRouter {
             throw WorktreeLifecycleError.invalidOperation(
                 "Cannot revive a conversation on a fresh branch without a repository."
             )
+        }
+
+        // The spawn gate, asked before the actuation row and start admission,
+        // as in `handleWorktreeRevive`.
+        if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
+            return RPCResponse(error: refusal.message)
         }
 
         // As in `handleWorktreeRevive`: the new worktree and its terminals are

@@ -474,12 +474,35 @@ struct TableTranscriptPaneView: View {
         terminal: Terminal?, worktree: Worktree?
     ) -> ComposerMount? {
         guard let worktree else { return nil }
-        let state = ComposerState.resolve(
+        let state = composerState(
             terminal: terminal, isRemoteWorktree: !worktree.location.isLocal)
         guard state != .hidden, let terminal, let local = LocalWorktree(worktree) else {
             return nil
         }
         return ComposerMount(terminal: terminal, worktree: local, state: state)
+    }
+
+    /// The note a composer shows for a session parked on the tmux transport,
+    /// in the parked pane's words (`HibernatedBannerModel.parkedOnTmuxInstruction`).
+    static let parkedOnTmuxComposerNote =
+        HibernatedBannerModel.parkedOnTmuxInstruction + ", then send to resume it."
+
+    /// What the composer offers for `terminal`: `ComposerState.resolve`,
+    /// except for a session parked on the tmux transport, which is
+    /// `.unavailable` with `parkedOnTmuxComposerNote`.
+    ///
+    /// Sending to a parked session wakes it, and the daemon refuses every wake
+    /// of a row parked on tmux, so an enabled send there could only meet that
+    /// refusal. The composer stays mounted, disabled, with a note that says how
+    /// to move the session first, as the phone's sessions list says for the
+    /// same row. A running tmux session and every holder session keep what
+    /// the resolver says.
+    static func composerState(terminal: Terminal?, isRemoteWorktree: Bool) -> ComposerState {
+        let resolved = ComposerState.resolve(terminal: terminal, isRemoteWorktree: isRemoteWorktree)
+        guard case .notRunning = resolved, let terminal, terminal.transport != .holder else {
+            return resolved
+        }
+        return .unavailable(message: parkedOnTmuxComposerNote)
     }
 
     /// The composer's "prompt above" hint action, or nil when no open card can

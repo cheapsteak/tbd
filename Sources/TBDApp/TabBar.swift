@@ -738,6 +738,20 @@ enum SwapProfileMenu {
         return interruptsRunCaption
     }
 
+    /// Whether an in-place account switch is offered for `terminal`.
+    ///
+    /// Not for a running row still on the tmux transport: the switch replaces
+    /// the session's process, TBD no longer starts processes on tmux, and the
+    /// daemon refuses it (`RPCErrorCode.terminalOnTmux`). Such a row is offered
+    /// only a fork, which opens a new tab on the pty holder and leaves the row
+    /// alone. A parked tmux row keeps the switch: switching it re-homes the
+    /// row and starts nothing. With no row to judge, the switch is offered and
+    /// the daemon decides.
+    static func offersInPlaceSwitch(for terminal: TBDShared.Terminal?) -> Bool {
+        guard let terminal else { return true }
+        return terminal.transport == .holder || terminal.isParked
+    }
+
     /// Formats a swap-profile menu item label with compact usage stats appended.
     /// Examples: "Gmail", "Gmail — 5h 40% · wk 16%", "Gmail — no data".
     /// Appends live session count when present (design 2026-09-05 §8.2).
@@ -812,25 +826,6 @@ enum ContinueInCodexMenu {
     static func isVisible(for terminal: Terminal?) -> Bool {
         terminal?.isClaudeResumable == true
             && terminal?.transcriptPath?.isEmpty == false
-    }
-}
-
-/// Pure policy for the Codex-to-Claude replacement menu. The app uses cached
-/// metadata only to shape the affordance; the daemon repeats every check
-/// before it interrupts the source process.
-enum ContinueInClaudeMenu {
-    static func isVisible(for terminal: Terminal?) -> Bool {
-        terminal?.isCodexTerminal == true
-            && terminal?.transport == .tmux
-            && terminal?.transcriptPath?.isEmpty == false
-    }
-
-    /// Every visible item is enabled. A tmux Codex row carries no agent
-    /// status, so the cached row cannot say whether a turn is open; the
-    /// daemon reads the rollout before it replaces anything and refuses a
-    /// busy turn with `terminalBusy`.
-    static func isEnabled(for terminal: Terminal?) -> Bool {
-        isVisible(for: terminal)
     }
 }
 
@@ -1305,37 +1300,6 @@ private struct TabBarItem: View {
         }
     }
 
-    @ViewBuilder
-    private func continueInClaudeMenuItems() -> some View {
-        let enabled = ContinueInClaudeMenu.isEnabled(for: terminal)
-
-        Button("Default (logged in)") {
-            guard let terminalID = terminal?.id else { return }
-            Task {
-                await appState.continueInClaude(
-                    sourceTerminalID: terminalID,
-                    profileID: nil)
-            }
-        }
-        .disabled(!enabled)
-
-        if !appState.modelProfiles.isEmpty {
-            Divider()
-
-            ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                Button(formatProfileSubmenuLabel(entry)) {
-                    guard let terminalID = terminal?.id else { return }
-                    Task {
-                        await appState.continueInClaude(
-                            sourceTerminalID: terminalID,
-                            profileID: entry.profile.id)
-                    }
-                }
-                .disabled(!enabled)
-            }
-        }
-    }
-
     /// The file this tab's Copy Path, Reveal in Finder and Open With act on,
     /// and the copy item's wording (`WorkspaceTabFileMenu`); nil for a tab
     /// with no file, which offers none of them. A transcript tab's file is
@@ -1396,7 +1360,7 @@ private struct TabBarItem: View {
                 guard let terminalID = terminal?.id else { return }
                 Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }
             } label: {
-                Label(TransportMigrationMenu.title, systemImage: "arrow.right.square")
+                Label(TransportMigrationVocabulary.menuTitle, systemImage: "arrow.right.square")
             }
 
             Divider()
@@ -1406,8 +1370,10 @@ private struct TabBarItem: View {
             Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)
 
-            Menu("Swap profile") {
-                swapProfileMenuItems(mode: .inPlace)
+            if SwapProfileMenu.offersInPlaceSwitch(for: terminal) {
+                Menu("Swap profile") {
+                    swapProfileMenuItems(mode: .inPlace)
+                }
             }
 
             Divider()
@@ -1462,16 +1428,6 @@ private struct TabBarItem: View {
                 } label: {
                     Label("Cancel Scheduled Resume", systemImage: "clock.badge.xmark")
                 }
-            }
-
-            Divider()
-        }
-
-        if ContinueInClaudeMenu.isVisible(for: terminal) {
-            Menu {
-                continueInClaudeMenuItems()
-            } label: {
-                Label("Continue in Claude", systemImage: "arrow.right.circle")
             }
 
             Divider()

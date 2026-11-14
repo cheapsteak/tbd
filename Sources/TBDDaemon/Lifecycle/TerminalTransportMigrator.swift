@@ -34,8 +34,10 @@ enum TransportMigrationOutcome: Sendable, Equatable {
     ///
     /// **It does not promise that nothing happened.** Most skips are refusals
     /// taken before anything was touched, but a park that succeeded and was
-    /// then overtaken skips with the session's program already stopped, and
-    /// such a session resumes on tmux when it is next woken. The reason says
+    /// then overtaken skips with the session's program already stopped. Such a
+    /// session stays parked on tmux, where no wake starts it; the next run of
+    /// the migration finds it parked and moves it without interrupting
+    /// anything, and a wake then resumes it on the pty holder. The reason says
     /// which of the two it was.
     case skipped(reason: String)
     /// The migration could not be attempted or could not be finished. Carries
@@ -150,6 +152,21 @@ actor TerminalTransportMigrator {
     static let holderUnspawnableRefusal =
         "The TBDHolder helper is missing beside the daemon, so no holder can be started for this session; nothing was changed."
 
+    /// The refusal for a request that would start, restart or replace the
+    /// process behind a row still on the tmux transport: a wake, a window
+    /// recreate, an in-place profile swap, Continue in Claude.
+    ///
+    /// TBD opens sessions only on the pty holder, so none of those can run on
+    /// such a row; migrating it is the way forward, and this says how. It names
+    /// the session, because `tbd terminal migrate` takes its id. `retry` is the
+    /// action to take again once the row is on the holder, written to follow
+    /// "then", as in "wake it again".
+    static func migrateFirstRefusal(terminalID: UUID, retry: String) -> String {
+        "Terminal \(terminalID.uuidString) runs on the tmux transport, which TBD no longer "
+            + "starts sessions on. Run `tbd terminal migrate \(terminalID.uuidString)` "
+            + "(or `tbd terminal migrate --all`) to move it to the pty holder, then \(retry)."
+    }
+
     /// The skip when the compare-and-set found the row had moved. Nothing was
     /// written, and the row is consistent whichever way the race went.
     static let raceSkip = "Session changed while migrating"
@@ -165,9 +182,12 @@ actor TerminalTransportMigrator {
 
     /// The skip for a row that parked and then could not be read back. The one
     /// skip that says the session's program was stopped, so it has to say what
-    /// becomes of it.
+    /// becomes of it: the row stays parked on tmux, which no wake resumes, and
+    /// running the migration again moves the parked row, after which a wake
+    /// resumes it on the pty holder.
     static let unreadableAfterParkSkip =
-        "This session was paused, but its row could not be read back, so it was not moved; it resumes on tmux when woken."
+        "This session was paused, but its row could not be read back, so it was not moved. "
+        + "It stays parked: run the migration again to move it to the pty holder, then wake it."
 
     private let db: TBDDatabase
     private let operations: Operations
@@ -220,8 +240,8 @@ actor TerminalTransportMigrator {
         // which is still a shell and moves as one.
         // What keeps it to SHELLS is `TransportMigrationEligibility`, above:
         // the four kinds of row that name no conversation and must not become
-        // a bare login shell — a Codex tab, a Claude tab whose session has not
-        // begun, and a hook tab of either kind — are each skipped there with
+        // a bare login shell — a running Codex tab, a Claude tab whose session
+        // has not begun, and a hook tab of either kind — are each skipped there with
         // their own reason, so by here "nothing to resume" means "a shell". A
         // running Claude session with a conversation still goes park, rewrite,
         // wake.
