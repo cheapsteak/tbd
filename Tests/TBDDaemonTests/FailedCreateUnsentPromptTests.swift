@@ -25,10 +25,15 @@ struct FailedCreateUnsentPromptTests: ~Copyable {
 
     deinit { try? FileManager.default.removeItem(at: reposDir) }
 
+    /// A lifecycle whose spawns go through the holder spawn double, as the
+    /// daemon's go through its registry. Recovery of an interrupted revive
+    /// opens the saved conversations' tabs, and with no registry wired the
+    /// spawn gate refuses every one of them.
     private func makeLifecycle() throws -> (WorktreeLifecycle, TBDDatabase) {
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         return (lifecycle, db)
     }
 
