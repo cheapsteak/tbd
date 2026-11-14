@@ -325,7 +325,8 @@ its reader owns, and the flag is a column on an existing row. No reconciler is n
   the fork but keeps two parsers. It also depends on upstream accepting patches that TBD
   needs now.
 - **Port the control-mode panels to libghostty.** Control mode exists only to drive tmux,
-  which is leaving. Issue #851 deletes the two together.
+  which is leaving. Issue #851 deletes control mode first and the tmux legs second, so a
+  port would serve no panel that outlives the first step.
 - **Move the daemon without a flag.** A regression would reach every install at once, and
   the only way back would be the whole previous app. Replacing a load-bearing path needs a
   default-off flag.
