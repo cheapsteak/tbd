@@ -160,16 +160,17 @@ extension RPCRouter {
         }
         let command = Self.devServerShellCommand(server.command)
         let label = TerminalLabel.userSupplied(server.displayLabel) ?? server.name
+
+        // The spawn gate, asked before anything is changed: a daemon that
+        // cannot start a holder fails this server only, and leaves its old tab
+        // where it was and its saved last output still speaking for it.
+        let transport = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
+
         // A new run supersedes the last one's saved output: the entry stays
         // in Closed Terminals but no longer speaks for the server. Before
         // the spawn, never after: a run that dies at once has its own exit
         // recorded by then, and a detach after the spawn would erase it.
         await db.terminalHistory.detachServerOutput(worktreeID: worktree.id, serverName: server.name)
-
-        // The spawn gate, asked before an exited tab is closed: a daemon that
-        // cannot start a holder fails this server only, and leaves its old tab
-        // where it was.
-        let transport = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
 
         // A server whose tab exited is started again in a new tab. A session
         // is never restarted in place: close the exited tab — its final output

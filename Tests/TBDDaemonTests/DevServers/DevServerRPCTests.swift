@@ -71,17 +71,20 @@ struct DevServerRPCTests {
         toml: String,
         runner: FakeDevServerCommandRunner = FakeDevServerCommandRunner(),
         processes: [Int32: DevServerProcessInfo] = [:],
-        signalling: FakeDevServerSignalling = FakeDevServerSignalling()
+        signalling: FakeDevServerSignalling = FakeDevServerSignalling(),
+        holderCanSpawn: Bool = true
     ) async throws -> Fixture {
         let home = fencedScratchRoot(prefix: "tbdsrv")
         let tmux = TmuxManager(dryRun: true)
         let spawns = HookedHolderLaunch()
+        // With `holderCanSpawn` false the registry has neither a spawner nor
+        // the double: a daemon whose `TBDHolder` binary has gone.
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: FakeHolderLaunch.scratchEnvironment(),
             listTerminals: { [] },
             spawner: nil,
-            spawnFabricator: spawns)
+            spawnFabricator: holderCanSpawn ? spawns : nil)
         // An explicit history dir: stop closes tabs, and a tab close writes
         // Closed Terminals history, which must never resolve to the real store.
         let db = try TBDDatabase(inMemory: true, terminalHistoryDir: home + "/terminal-history")
@@ -648,6 +651,33 @@ struct DevServerRPCTests {
             .decodeResult(DevServerActionResult.self)
         #expect(result.outcomes.first?.status == .started)
         #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktree.id).isEmpty)
+    }
+
+    /// The spawn gate is asked before the saved last output is detached, so a
+    /// daemon that cannot start a holder fails the start and changes nothing:
+    /// the server still reads *Exited* with its code and its saved output,
+    /// and no holder was asked for.
+    @Test func aStartTheSpawnGateRefusesKeepsTheSavedLastOutput() async throws {
+        let f = try await Self.makeFixture(toml: Self.webTOML, holderCanSpawn: false)
+        defer { f.tearDown() }
+        let tab = try await savedExit(f, code: 3)
+
+        let result = try await f.call(RPCMethod.serverStart,
+                                      DevServerActionParams(worktreeID: f.worktree.id, names: ["web"]))
+            .decodeResult(DevServerActionResult.self)
+
+        let outcome = try #require(result.outcomes.first)
+        #expect(outcome.status == .failed)
+        #expect(outcome.message == TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(f.holder.launches.isEmpty, "a holder was asked for past a refusing gate")
+        let saved = try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktree.id)
+        #expect(saved["web"]?.id == tab.id, "the refused start detached the saved last output")
+        let server = try #require(try await f.call(RPCMethod.serverList,
+                                                   DevServerListParams(worktreeID: f.worktree.id, runStatusCommands: false))
+            .decodeResult(DevServerListResult.self).servers.first)
+        #expect(server.state == .exited)
+        #expect(server.exitCode == 3)
+        #expect(server.lastOutputID == tab.id)
     }
 
     @Test func summaryReturnsTheProvidersIDs() async throws {
