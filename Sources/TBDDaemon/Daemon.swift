@@ -1404,14 +1404,6 @@ public final class Daemon: Sendable {
         rpcRouter.holderInjectionCourier = holderInjectionCourier
         rpcRouter.holderScreenResolver = holderScreenResolver
         rpcRouter.devServerTabInspector = devServerTabInspector
-        // The wake path recreates a terminal's tmux server/window when the
-        // window is gone (e.g. post-reboot); give the recreated server the
-        // same gated control-mode connection as every other ensureServer
-        // call site.
-        await rpcRouter.hibernationCoordinator.setOnServerCreated { server in
-            await controlModeBridge.enableIfGated(serverName: server)
-        }
-
         // 8a. Wire the merged-PR transition fan-out. When a worktree's cached PR
         // state transitions into `.merged`, the dispatcher evaluates auto-archive
         // (archive supersedes hibernate) and, if the worktree survives, auto-park

@@ -211,7 +211,9 @@ struct HolderSpawnOracle: Sendable {
 ///   7. Mark parked via `hibernatedAt` (the authoritative timestamp) and
 ///      persist the snapshot.
 ///
-/// Wake `respawn-window`s the same pane back to `claude --resume`. It is the ONE
+/// That is the park of a row still on the tmux transport. Wake starts a fresh
+/// pty holder running `claude --resume`, and only for a holder row: a row
+/// parked on tmux refuses and names `tbd terminal migrate`. Wake is the ONE
 /// resume path for auto-parked, manually-parked, and (via reconcile) died
 /// sessions; it clears BOTH `hibernatedAt` and any legacy `suspendedAt`.
 ///
@@ -246,14 +248,6 @@ public actor HibernationCoordinator {
     /// spawn two `claude --resume` processes into the same window.
     // Not private: `HibernationCoordinator+Holder` claims both.
     var wakesInFlight: Set<UUID> = []
-
-    /// Invoked after EVERY `ensureServer` on the wake-recreate path (whether or
-    /// not a server was actually created — the downstream control-mode
-    /// `enableIfGated` is idempotent, so firing on an existing server is a
-    /// no-op). Daemon.swift wires this to the control-mode bridge so a freshly
-    /// recreated server gets the same gated `tmux -CC` connection as every
-    /// other `ensureServer()` call site.
-    private var onServerCreated: (@Sendable (String) async -> Void)?
 
     /// Terminal ids with an in-flight hibernate, so a manual "Hibernate now"
     /// racing the idle sweep (or two sweeps) can't respawn-to-shell twice.
@@ -417,13 +411,15 @@ public actor HibernationCoordinator {
     /// do not exercise it.
     let programStatus: ProgramStatusStore?
 
-    /// What a person is told when a tmux-backed session cannot be woken because
-    /// tmux cannot serve. Names the gesture that moves the session, **and the
-    /// session**: this string is the entire product of the backstop — it exists
-    /// to hand a stranded person a command they can run — so the id is
-    /// interpolated rather than left as a placeholder to be looked up.
+    /// What a person is told when a session parked on the tmux transport is
+    /// asked to wake. TBD opens sessions only on the pty holder, so such a row
+    /// never wakes where it is, whether or not tmux is installed. Names the
+    /// gesture that moves the session, **and the session**: this string is the
+    /// entire product of the backstop — it exists to hand a stranded person a
+    /// command they can run — so the id is interpolated rather than left as a
+    /// placeholder to be looked up.
     static func tmuxWakeUnavailableReason(terminalID: UUID) -> String {
-        "This session still runs on the tmux transport, and tmux is not available here. "
+        "This session was parked on the tmux transport, which TBD no longer runs sessions on. "
         + "Run `tbd terminal migrate \(terminalID.uuidString)` (or `tbd terminal migrate --all`) "
         + "to move it to the pty holder, then wake it again."
     }
@@ -495,13 +491,6 @@ public actor HibernationCoordinator {
         }
         return configDirManager.ambientConfigDirectory
             .appendingPathComponent("projects", isDirectory: true)
-    }
-
-    /// Wire the post-`ensureServer` hook (see `onServerCreated`). Set once by
-    /// Daemon.swift right after construction, mirroring how the RPC router's
-    /// `controlMode` is wired post-construction.
-    public func setOnServerCreated(_ hook: (@Sendable (String) async -> Void)?) {
-        onServerCreated = hook
     }
 
     /// Wire the pty-holder registry. Set once by Daemon.swift after
@@ -873,8 +862,8 @@ public actor HibernationCoordinator {
     /// Every failure lands the session in one of two states and no third: the
     /// row untouched with its program still running, or the row untouched with
     /// its window dead — the ordinary window-died state the app's recovery
-    /// banner already owns, and which `handleTerminalRecreateWindow` can still
-    /// repair precisely because the row has not been rewritten.
+    /// banner already owns. Neither rewrites the row, so a later migration
+    /// still sees exactly what it saw this time.
     /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`.
     func moveRunningShellToHolder(terminal: Terminal) async -> ShellTransportMoveOutcome {
         // Before anything is touched. A session whose holder cannot be started
@@ -1613,8 +1602,8 @@ public actor HibernationCoordinator {
     /// row would make tmux authoritative over the parked flag, and then one
     /// false-negative probe destroys a live session's in-flight work.
     /// Auto-recovery needs a human design decision and is tracked in #586, not
-    /// decided here. Recovery today stays the parked-row path below and the
-    /// explicit `terminal.recreateWindow` RPC.
+    /// decided here. Recovery today is migrating the row to the pty holder
+    /// (`tbd terminal migrate`), after which it wakes like any holder row.
     private func classifyUnparkedWake(_ terminal: Terminal) async -> WakeResult {
         // No worktree row means no server name to probe with, so nothing can be
         // proven and the benign historical answer stands.
@@ -1678,25 +1667,20 @@ public actor HibernationCoordinator {
         return .sessionGone(paneID: terminal.tmuxPaneID, detail: disagreement)
     }
 
-    /// Respawn `claude --resume <sessionID>` in the hibernated terminal's
-    /// kept-alive window. Idempotent: a non-hibernated terminal is a no-op, and
-    /// concurrent wakes for the same terminal collapse to one respawn.
+    /// Resume a parked session: spawn a fresh pty holder running
+    /// `claude --resume <sessionID>` (or the Codex resume) for the row, which
+    /// keeps its identity. Idempotent: a non-hibernated terminal is a no-op,
+    /// and concurrent wakes for the same terminal collapse to one respawn.
     ///
-    /// For a PARKED row whose window is GONE (killed, or the whole tmux server
-    /// died — e.g. a machine reboot), the window is recreated (ensureServer +
-    /// createWindow) and the same resume command spawned there; the terminal
-    /// row keeps its identity and gets the new window/pane ids persisted.
+    /// **Only a holder row wakes.** A row parked on the tmux transport refuses
+    /// with `tmuxWakeUnavailableReason`, which names `tbd terminal migrate`,
+    /// and stays parked: TBD no longer starts sessions on tmux.
     ///
-    /// That recovery covers parked rows ONLY, because it lives downstream of
-    /// the parked check below. An UNPARKED row whose session died is reported
-    /// (`.sessionGone`) but not repaired — see `classifyUnparkedWake`.
-    ///
-    /// **Transport decides which mechanic runs, never whether one may.** A
-    /// parked holder row wakes by spawning a fresh holder running
-    /// `claude --resume`; a parked tmux row respawns its window. An UNPARKED
-    /// holder row is classified against the process table rather than against a
-    /// pane, because a holder row's pane id is the empty string by construction
-    /// and tmux answers for it by reporting the pane gone.
+    /// An UNPARKED row whose session died is reported (`.sessionGone`) but not
+    /// repaired — see `classifyUnparkedWake`. An unparked holder row is
+    /// classified against the process table rather than against a pane,
+    /// because a holder row's pane id is the empty string by construction and
+    /// tmux answers for it by reporting the pane gone.
     ///
     /// `condition` limits a wake to the rows its caller chose. A parked row that
     /// no longer meets it answers `.conditionNotMet`. A row that changes after
@@ -1750,16 +1734,16 @@ public actor HibernationCoordinator {
         if resumePlan.identity.agentKind == .codex, let initialPrompt, !initialPrompt.isEmpty {
             return .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session.")
         }
-        // The backstop for a tmux row whose leg cannot serve the wake. Refusing
-        // here, before anything is touched, leaves the row parked with its
-        // session id, so a wake after `tbd terminal migrate` succeeds on the
-        // holder. Today the leg cannot serve when tmux is not installed; once
-        // the tmux path is deleted it can never serve and this is the answer.
-        if terminal.transport != .holder, !tmux.canServeTmux {
+        // The backstop for a row parked on tmux. TBD starts sessions only on
+        // the pty holder, so a tmux row never wakes where it is, whether or not
+        // tmux is installed. Refusing here, before anything is touched, leaves
+        // the row parked with its session id, so a wake after
+        // `tbd terminal migrate` succeeds on the holder.
+        if terminal.transport != .holder {
             // `.notice`, not `.error`: a retrying focus-wake reaches this on
             // every attempt, and a state the person can act on is not a daemon
             // fault.
-            logger.notice("wake: terminal \(terminal.id, privacy: .public) is on the tmux transport and tmux is unavailable; refusing and leaving it parked")
+            logger.notice("wake: terminal \(terminal.id, privacy: .public) is parked on the tmux transport; refusing and leaving it parked")
             return .respawnFailed(
                 reason: Self.tmuxWakeUnavailableReason(terminalID: terminal.id))
         }
@@ -1776,70 +1760,14 @@ public actor HibernationCoordinator {
             logger.info("wake: terminal \(terminal.id, privacy: .public) no longer meets this wake's condition; leaving it as it is")
             return .conditionNotMet
         }
-        // Never respawn into a missing directory: tmux's `-c` silently falls
-        // back to $HOME, and the resumed claude would neither find its session
-        // (resume is cwd-scoped) nor belong to this worktree. Leave the row
-        // parked so a retry after the path is restored can still wake it.
+        // Never respawn into a missing directory: the resumed claude would
+        // neither find its session (resume is cwd-scoped) nor belong to this
+        // worktree. Leave the row parked so a retry after the path is restored
+        // can still wake it.
         guard FileManager.default.fileExists(atPath: worktree.path) else {
             logger.error("wake: worktree path missing on disk for terminal \(terminal.id, privacy: .public): \(worktree.path, privacy: .public) — refusing respawn (would fall back to $HOME)")
             return .worktreeMissing(path: worktree.path)
         }
-        let server = worktree.tmuxServer
-        let paneID = terminal.tmuxPaneID
-
-        // ─── An exit-stamped row whose pane is busy is not ours to replace ───
-        //
-        // `.exited` parks the row while the pane's SHELL stays alive and usable
-        // — that is the whole point of the stamp — and wake is
-        // `respawn-window -k`, which kills whatever occupies the pane. For every
-        // other park reason that costs nothing: hibernate put an inert shell
-        // there itself. For an exit stamp the pane is the one the person was
-        // sitting in when the agent left, and they may have started something in
-        // it since.
-        //
-        // The app-side exclusion — `.exited` is not auto-woken on focus or tab
-        // activation — is the first line and stays the first line. It is not the
-        // only line, because it lives in the app: `docs/updating.md`'s
-        // `--no-app` makes "daemon newer than app" a supported skew, and an app
-        // binary older than this change reads `.exited` through the lenient
-        // `HibernateReason` decoder as `.auto` and auto-wakes it. So the daemon
-        // defends the respawn itself, and it does so for every caller — an old
-        // app, the CLI, the composer — rather than trusting who asked.
-        //
-        // Asked of the process table, never the rendered screen. The pane's own
-        // pid answering means an idle interactive shell and the wake proceeds
-        // exactly as before; a different pid means something is running under
-        // it. An unreadable pid proceeds too: a pane tmux cannot answer for is
-        // not evidence that a process is there, and refusing on it would strand
-        // an exit-stamped row behind a probe failure with no way back.
-        //
-        // tmux-only, for the same reason the cwd assertion below is: a holder
-        // row's pane id is the empty string and names no tmux coordinate.
-        if let busyPID = await exitStampedPaneBusyPID(
-            terminal: terminal, server: server, paneID: paneID) {
-            logger.info("wake: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(busyPID, privacy: .public) in pane \(paneID, privacy: .public) — refusing the respawn rather than killing it")
-            return .paneBusy(pid: busyPID)
-        }
-
-        // Assert that the process about to be resumed will run in THIS
-        // worktree. Not a lookup concern: `claude --resume <id>` is not
-        // cwd-scoped — measured on claude 2.1.261, a resume from another
-        // directory succeeds and appends to the original project directory's
-        // JSONL. What the check is for is belonging: a session resumed outside
-        // its worktree would edit the wrong tree while writing to the right
-        // transcript, which is the harder failure to notice. The respawn `-c`s
-        // into the worktree path regardless, so this only reports.
-        //
-        // tmux-only, and the guard is not decoration: a holder row's pane id is
-        // the empty string, so this would ask a tmux server — starting one, on
-        // a worktree whose sessions deliberately have none — about a
-        // coordinate that names nothing.
-        if terminal.transport != .holder,
-           let paneCwd = try? await tmux.paneCurrentPath(server: server, paneID: paneID),
-           paneCwd != worktree.path {
-            logger.warning("wake: pane cwd \(paneCwd, privacy: .public) != worktree path \(worktree.path, privacy: .public) for terminal \(terminal.id, privacy: .public); respawn will -c into the worktree path")
-        }
-
         let config = try? await db.config.get()
         let repo: Repo?
         if let rid = worktree.repoID {
@@ -1868,8 +1796,8 @@ public actor HibernationCoordinator {
             // the WRONG account, which reads to the user as "the session won't wake".
             // Refuse and surface `.profileMissing` so the app can offer an explicit
             // default-profile fallback (mirrors how `.worktreeMissing` fails loudly
-            // just above rather than resuming into $HOME). This is BEFORE the tmux
-            // mutation section, so a refusal never disturbs the pane. Pass
+            // just above rather than resuming into $HOME). This is BEFORE any
+            // spawn, so a refusal changes nothing. Pass
             // `allowDefaultProfileFallback` to opt back into the ambient-login resume.
             var resolvedProfile: ResolvedModelProfile? = nil
             if let profileID = terminal.profileID, let resolver = modelProfileResolver {
@@ -2005,353 +1933,20 @@ public actor HibernationCoordinator {
         }
 
         let env = preparedEnv
-        // Both transports consume the same provider-prepared command. Only
-        // Claude carries a title, overlay, and session-mod preparation.
-        if terminal.transport == .holder {
-            return await wakeHolderSection(
-                terminal: terminal,
-                worktree: worktree,
-                sessionID: sessionID,
-                expectedReplacementState: expectedReplacementState,
-                spawnCommand: spawnCommand,
-                env: env,
-                sensitiveEnv: sensitiveEnv,
-                cols: cols,
-                rows: rows,
-                spawnTitle: spawnTitle,
-                overlay: overlay)
-        }
-
-        // The window/pane the rest of wake must reference: the original ones
-        // when the window survived, or the recreated window's fresh ones.
-        let livePaneID: String
-        let liveWindowID: String
-        let liveServer: String
-        let liveIncarnationID: UUID
-
-        // The whole decide-then-mutate tmux section (ownership check +
-        // windowExists + respawn/create/kill/persist) runs under the
-        // per-server lock: `wakesInFlight` above only dedupes wakes for the
-        // SAME terminal, while this closes the cross-terminal TOCTOU on a
-        // shared server (see `TmuxManager.withWorktreeServerLock`). The lock
-        // is NOT held around the delayed session-recapture Task below.
-        let outcome: WakeTmuxOutcome
-        do {
-            outcome = try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-            ) { currentWorktree in
-                guard let currentTerminal = try await self.db.terminals.get(
-                    id: terminal.id),
-                      expectedReplacementState.matches(currentTerminal) else {
-                    return .failed(.respawnFailed(
-                        reason: "terminal changed while wake was preparing; retry"))
-                }
-                return await self.wakeTmuxSection(
-                    terminal: currentTerminal,
-                    sessionID: sessionID,
-                    worktree: currentWorktree.worktree,
-                    server: currentWorktree.tmuxServer,
-                    windowID: currentTerminal.tmuxWindowID,
-                    paneID: currentTerminal.tmuxPaneID,
-                    spawnCommand: spawnCommand,
-                    env: env,
-                    sensitiveEnv: sensitiveEnv,
-                    cols: cols,
-                    rows: rows,
-                    overlay: overlay
-                )
-            }
-        } catch {
-            await sessionTitles.release(spawnTitle)
-            return .notFound
-        }
-        switch outcome {
-        case .failed(let result):
-            await sessionTitles.release(spawnTitle)
-            return result
-        case .launchedUnrecorded(let result):
-            // The replacement is running under the reserved name; only the
-            // row's un-park failed. The session carries the name, so confirm.
-            await sessionTitles.confirm(spawnTitle)
-            return result
-        case .respawned(
-            let newPaneID,
-            let newWindowID,
-            let currentServer,
-            let incarnationID
-        ):
-            livePaneID = newPaneID
-            liveWindowID = newWindowID
-            liveServer = currentServer
-            liveIncarnationID = incarnationID
-        }
-        idleSince[terminal.id] = nil
-        await sessionTitles.confirm(spawnTitle)
-        // Carry the LIVE window/pane ids on the un-park broadcast so the app
-        // updates its cached row before (together with) the hibernated flip —
-        // otherwise the terminal view rebuilds keyed on the dead window and
-        // its failed attach re-parks the row (wake flap).
-        await broadcastHibernation(
-            terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
-            tmuxWindowID: liveWindowID, tmuxPaneID: livePaneID
-        )
-
-        // `claude --resume <id>` forks into a NEW session file; re-capture the
-        // fresh id so subsequent hibernate/wake reference the live session.
-        if case .claude = resumePlan {
-            SessionRecaptureScheduler(db: db, tmux: tmux, clock: clock).schedule(
-                terminalID: terminal.id,
-                paneID: livePaneID,
-                server: liveServer,
-                expectedIncarnationID: liveIncarnationID)
-        }
-        logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
-        return .ok(sessionIncarnationID: liveIncarnationID)
-    }
-
-    /// Outcome of `wakeTmuxSection`: the live pane/window ids the rest of
-    /// `wake()` should reference, or the `WakeResult` to return verbatim.
-    private enum WakeTmuxOutcome {
-        case respawned(
-            paneID: String,
-            windowID: String,
-            server: String,
-            incarnationID: UUID
-        )
-        case failed(WakeResult)
-        /// The replacement agent launched, but clearing the parked marker
-        /// failed afterwards. Returned to the caller verbatim like `.failed`,
-        /// but the session is running under this wake's `--name`.
-        case launchedUnrecorded(WakeResult)
-    }
-
-    /// The decide-then-mutate tmux section of `wake()` — ownership check,
-    /// `windowExists`, and the in-place respawn OR recreate mutations. Must
-    /// only be entered under `TmuxManager.withWorktreeServerLock` (see the call
-    /// site in `wake()`), otherwise two concurrent wakes on the same server can
-    /// interleave across the awaits below and hijack each other's windows.
-    private func wakeTmuxSection(
-        terminal: Terminal,
-        sessionID: String,
-        worktree: Worktree,
-        server: String,
-        windowID: String,
-        paneID: String,
-        spawnCommand: String,
-        env: [String: String],
-        sensitiveEnv: [String: String],
-        cols: Int?,
-        rows: Int?,
-        // The overlay `spawnCommand` was composed with, written by each launch
-        // below from the session mod that launch is actually given.
-        overlay: ReplacementSpawnOverlay?
-    ) async -> WakeTmuxOutcome {
-        // Post-reboot a fresh tmux server reissues window ids from @1 again,
-        // so a stale parked row's window id can equal a window that ANOTHER
-        // terminal's wake just created on the same server. `windowExists`
-        // alone is therefore not ownership: if any other terminal currently
-        // claims this id, ours is necessarily the stale claim (it predates
-        // the reboot) and respawning in place would hijack that terminal's
-        // live session. Treat the window as gone and recreate instead.
-        let claimedByOther = await windowClaimedByAnotherTerminal(
-            server: server, windowID: windowID, excluding: terminal.id
-        )
-        if claimedByOther {
-            logger.info("wake: window \(windowID, privacy: .public) on \(server, privacy: .public) is claimed by another terminal — recreating instead of respawning in place for terminal \(terminal.id, privacy: .public)")
-        }
-
-        // Tri-state, because the `else` arm below `killWindow`s the old window
-        // once its replacement exists — its own comment calls that out as "a
-        // transient windowExists misclassification must not leak a live
-        // window", and a timed-out probe is exactly such a misclassification.
-        // Acting on it destroys a window on ignorance. A server that is
-        // genuinely gone (the reboot case this recreate path exists for) still
-        // answers `.absent`, so only the unanswerable case changes: the wake
-        // fails and the row stays parked for the next focus or menu retry,
-        // which is what every other tmux failure on this path already does.
-        let windowPresence = claimedByOther
-            ? TmuxPresence.absent
-            : await tmux.probeWindow(server: server, windowID: windowID)
-        if windowPresence == .unknown {
-            logger.warning("wake: tmux gave no usable answer about window \(windowID, privacy: .public) on \(server, privacy: .public) for terminal \(terminal.id, privacy: .public) — leaving the row parked rather than recreating and killing on ignorance")
-            return .failed(.respawnFailed(
-                reason: "tmux did not answer whether window \(windowID) is still there; the row is unchanged — retry"))
-        }
-        if !claimedByOther, windowPresence == .alive {
-            do {
-                guard let incarnationID = try await db.terminals.prepareHibernatedAgentRespawn(
-                    id: terminal.id,
-                    expectedState: TerminalReplacementSnapshot(terminal: terminal),
-                    at: now()) else {
-                    return .failed(.respawnFailed(
-                        reason: "terminal changed before wake could launch; retry"))
-                }
-                let replacementEnv = AgentProcessEnvironment.replacement(
-                    base: env, incarnationID: incarnationID)
-                let sessionMod = overlay == nil ? nil : SessionModSpawn.prepare(
-                    config: try? await db.config.get(),
-                    claudeSessionID: sessionID, incarnationID: incarnationID,
-                    sessionsDir: sessionsDir, now: now())
-                let launchCommand = overlay?.settle(command: spawnCommand) ?? spawnCommand
-                try await tmux.respawnWindow(
-                    server: server,
-                    windowID: windowID,
-                    cwd: worktree.localPath,
-                    shellCommand: launchCommand,
-                    env: replacementEnv,
-                    sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
-                    cols: cols,
-                    rows: rows
-                )
-                do {
-                    try await db.terminals.clearHibernated(id: terminal.id)
-                } catch {
-                    // Keep the live replacement parked. Startup reconciliation
-                    // detects parked+live-agent and clears this marker without
-                    // erasing a SessionStart that arrived during launch.
-                    logger.warning("wake: launched the replacement agent for terminal \(terminal.id, privacy: .public), but failed to clear its parked marker: \(error.localizedDescription, privacy: .public)")
-                    return .launchedUnrecorded(.respawnFailed(
-                        reason: "replacement agent launched, but clearing the parked marker failed: \(error.localizedDescription)"))
-                }
-                return .respawned(
-                    paneID: paneID,
-                    windowID: windowID,
-                    server: server,
-                    incarnationID: incarnationID)
-            } catch {
-                // Leave the row hibernated so the next focus/menu retry can wake it.
-                logger.warning("wake: respawn-agent failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                return .failed(.respawnFailed(reason: "failed to respawn agent in window \(windowID): \(error.localizedDescription)"))
-            }
-        } else {
-            // The window is GONE — killed, the whole tmux server died (a
-            // machine reboot destroys every server; `windowExists` returns
-            // false on any tmux error, covering both), or its id is owned by
-            // another terminal (see above). Recreate the window and spawn the
-            // same `claude --resume` there: transcripts live on disk, so
-            // resume works fine in a fresh window. Mirrors
-            // `handleTerminalRecreateWindow`. Tabs are keyed by terminal id,
-            // so keeping the same terminal row preserves the tab.
-            do {
-                let resolvedCols = cols ?? TmuxManager.defaultCols
-                let resolvedRows = rows ?? TmuxManager.defaultRows
-                let bootstrapWindowID = try await tmux.ensureServer(
-                    server: server,
-                    session: "main",
-                    cwd: worktree.localPath,
-                    cols: resolvedCols,
-                    rows: resolvedRows
-                )
-                await onServerCreated?(server)
-                let window = try await tmux.createWindow(
-                    server: server,
-                    session: "main",
-                    cwd: worktree.localPath,
-                    // Stage an inert pane first. Launching Claude here would
-                    // let its SessionStart arrive before the replacement tmux
-                    // IDs and lifecycle fence commit below.
-                    shellCommand: "exec /usr/bin/tail -f /dev/null",
-                    env: env,
-                    sensitiveEnv: sensitiveEnv,
-                    cols: resolvedCols,
-                    rows: resolvedRows
-                )
-                // Clean up the old window if it somehow still exists (a
-                // transient windowExists misclassification must not leak a
-                // live window; usually it's already dead so this no-ops).
-                // Skip when another terminal owns the id — killing it would
-                // tear down THEIR live window. This must happen AFTER
-                // createWindow: if the row ever held the session's only
-                // remaining window (e.g. the bootstrap window id), killing
-                // it first would destroy the session and make createWindow
-                // fail on every retry; killing after the new window exists
-                // can never leave the session windowless.
-                // A restarted tmux server can reuse the parked row's stale id
-                // for the replacement we just created. In that ABA shape the
-                // old and replacement ids are textually identical, so cleanup
-                // must not kill the fresh inert pane before it is respawned.
-                if !claimedByOther, windowID != window.windowID {
-                    try? await tmux.killWindow(server: server, windowID: windowID)
-                }
-                // ensureServer returns the untracked bootstrap window id when
-                // it just created the server; kill it now that the real
-                // window exists (mirrors WorktreeLifecycle+PreSession).
-                if let bootstrapWindowID, !bootstrapWindowID.isEmpty,
-                   bootstrapWindowID != window.windowID {
-                    try? await tmux.killWindow(server: server, windowID: bootstrapWindowID)
-                }
-                let preparedIncarnationID: UUID?
-                do {
-                    preparedIncarnationID = try await db.terminals
-                        .prepareHibernatedAgentRespawn(
-                        id: terminal.id,
-                        expectedState: TerminalReplacementSnapshot(terminal: terminal),
-                        windowID: window.windowID,
-                        paneID: window.paneID,
-                        at: now())
-                } catch {
-                    // Don't leave an orphaned claude the DB doesn't know
-                    // about: best-effort kill of the just-created window,
-                    // and a reason that names the REAL failure (the window
-                    // was created fine; persisting the ids failed).
-                    try? await tmux.killWindow(server: server, windowID: window.windowID)
-                    logger.warning("wake: created window \(window.windowID, privacy: .public) but failed to persist tmux ids for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    return .failed(.respawnFailed(reason: "recreated tmux window \(window.windowID), but persisting the new tmux ids failed: \(error.localizedDescription)"))
-                }
-                guard let incarnationID = preparedIncarnationID else {
-                    try? await tmux.killWindow(
-                        server: server, windowID: window.windowID)
-                    return .failed(.respawnFailed(
-                        reason: "terminal changed before wake could launch; retry"))
-                }
-                let replacementEnv = AgentProcessEnvironment.replacement(
-                    base: env, incarnationID: incarnationID)
-                // Only the agent launch carries the mod; the inert staging
-                // pane above is not a Claude spawn.
-                let sessionMod = overlay == nil ? nil : SessionModSpawn.prepare(
-                    config: try? await db.config.get(),
-                    claudeSessionID: sessionID, incarnationID: incarnationID,
-                    sessionsDir: sessionsDir, now: now())
-                let launchCommand = overlay?.settle(command: spawnCommand) ?? spawnCommand
-                do {
-                    try await tmux.respawnWindow(
-                        server: server,
-                        windowID: window.windowID,
-                        cwd: worktree.localPath,
-                        shellCommand: launchCommand,
-                        env: replacementEnv,
-                        sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
-                        cols: resolvedCols,
-                        rows: resolvedRows)
-                } catch {
-                    // The row already owns this inert replacement window and
-                    // remains parked, so startup reconciliation or a later wake
-                    // can safely recover it.
-                    logger.warning("wake: staged window \(window.windowID, privacy: .public) but failed to launch its agent for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    return .failed(.respawnFailed(
-                        reason: "recreated tmux window \(window.windowID), but launching the agent failed: \(error.localizedDescription)"))
-                }
-                do {
-                    try await db.terminals.clearHibernated(id: terminal.id)
-                } catch {
-                    // Keep the live replacement parked for startup
-                    // reconciliation; identity and process token stay intact.
-                    logger.warning("wake: launched a replacement agent in \(window.windowID, privacy: .public), but failed to clear the parked marker for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    return .launchedUnrecorded(.respawnFailed(
-                        reason: "replacement agent launched in \(window.windowID), but clearing the parked marker failed: \(error.localizedDescription)"))
-                }
-                logger.info("wake: window \(windowID, privacy: .public) was gone for terminal \(terminal.id, privacy: .public); recreated as \(window.windowID, privacy: .public) (pane \(window.paneID, privacy: .public))")
-                return .respawned(
-                    paneID: window.paneID,
-                    windowID: window.windowID,
-                    server: server,
-                    incarnationID: incarnationID)
-            } catch {
-                // Leave the row hibernated so the next focus/menu retry can wake it.
-                logger.warning("wake: recreate-window failed for terminal \(terminal.id, privacy: .public) (old window \(windowID, privacy: .public)): \(error.localizedDescription, privacy: .public)")
-                return .failed(.respawnFailed(reason: "tmux window \(windowID) is gone and could not be recreated: \(error.localizedDescription)"))
-            }
-        }
+        // Both providers consume the same prepared command. Only Claude
+        // carries a title, overlay, and session-mod preparation.
+        return await wakeHolderSection(
+            terminal: terminal,
+            worktree: worktree,
+            sessionID: sessionID,
+            expectedReplacementState: expectedReplacementState,
+            spawnCommand: spawnCommand,
+            env: env,
+            sensitiveEnv: sensitiveEnv,
+            cols: cols,
+            rows: rows,
+            spawnTitle: spawnTitle,
+            overlay: overlay)
     }
 
     // MARK: - Idle sweep (auto-hibernate)
@@ -2610,25 +2205,6 @@ public actor HibernationCoordinator {
     }
 
     // MARK: - Helpers
-
-    /// True when any OTHER terminal row whose worktree lives on the same tmux
-    /// server currently claims `windowID`. A fresh (post-reboot) server
-    /// reissues window ids from @1, so a stale parked row can collide with a
-    /// window a different terminal's wake just created — and the other row's
-    /// claim is necessarily the fresher one. Worktrees can share a per-repo
-    /// server, so ownership is resolved across every worktree on that server.
-    private func windowClaimedByAnotherTerminal(
-        server: String, windowID: String, excluding terminalID: UUID
-    ) async -> Bool {
-        guard let terminals = try? await db.terminals.list(),
-              let worktrees = try? await db.worktrees.listLocal() else { return false }
-        let serverWorktreeIDs = Set(worktrees.filter { $0.tmuxServer == server }.map(\.id))
-        return terminals.contains {
-            $0.id != terminalID
-                && $0.tmuxWindowID == windowID
-                && serverWorktreeIDs.contains($0.worktreeID)
-        }
-    }
 
     /// Announce the activity columns `terminalID`'s row holds, read back after
     /// a commit that changed them with no park or wake broadcast to carry
