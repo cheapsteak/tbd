@@ -261,8 +261,8 @@ struct BoundedProcessRunnerTests {
     }
 
     /// The reported terminal geometry is wide ON PURPOSE and a comment alone
-    /// cannot stop someone "restoring" it to the 24x80 that
-    /// `TmuxControlConnection` uses. A pty never wraps by itself — `winsize` is
+    /// cannot stop someone "restoring" it to the conventional 24x80. A pty
+    /// never wraps by itself — `winsize` is
     /// advisory metadata — but a child that reads `TIOCGWINSZ` formats to it and
     /// inserts REAL newlines at the wrap, which then corrupt the captured bytes.
     /// At 80 columns the headroom over a realistic output line was six

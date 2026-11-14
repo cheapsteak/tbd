@@ -500,10 +500,6 @@ public final class GhosttyTerminalView: NSView {
     /// moved. Unlike `onFocusChanged`, a window gaining or losing key status does not call it.
     public var onFirstResponderChanged: (@MainActor (Bool) -> Void)?
 
-    /// Offered a paste's text, or a drop's, before the terminal brackets it. Returning `true`
-    /// consumes it: the view sends nothing. `false`, or no hook, pastes as usual.
-    public var onPaste: (@MainActor (String) -> Bool)?
-
     /// ⌘W while this view is the first responder. Without it ⌘W goes on through the responder
     /// chain to the menu.
     public var onCloseTab: (@MainActor () -> Void)?
@@ -1462,24 +1458,18 @@ public final class GhosttyTerminalView: NSView {
         if terminal.selectAll() { requestFrame() }
     }
 
-    /// Edit > Paste: the pasteboard's text, bracketed and checked by libghostty. `onPaste` sees
-    /// the text first.
+    /// Edit > Paste: the pasteboard's text, bracketed and checked by libghostty.
     @objc func paste(_ sender: Any?) {
-        if let onPaste, let text = mouseController.pasteboard.string(forType: .string), !text.isEmpty,
-           onPaste(text) {
-            return
-        }
         mouseController.pasteFromPasteboard()
     }
 
     // MARK: - Drop
 
-    /// Text a drop produced, such as the shell-quoted paths of dropped files. `onPaste` sees it
-    /// first; otherwise it is sent as typed, unbracketed, as SwiftTerm sends a drop. Split from
-    /// `performDragOperation` so a test can drive it: `NSDraggingInfo` cannot be built in one.
+    /// Text a drop produced, such as the shell-quoted paths of dropped files. It is sent as
+    /// typed, unbracketed, as SwiftTerm sends a drop. Split from `performDragOperation` so a
+    /// test can drive it: `NSDraggingInfo` cannot be built in one.
     public func deliverDroppedText(_ text: String) {
         guard !text.isEmpty else { return }
-        if let onPaste, onPaste(text) { return }
         send(Array(text.utf8))
     }
 

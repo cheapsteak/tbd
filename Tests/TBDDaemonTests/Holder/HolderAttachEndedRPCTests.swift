@@ -37,8 +37,8 @@ struct HolderAttachEndedRPCTests {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
             transport: .holder, holderPID: holderPID, childPID: holderPID.map { $0 + 1 })
-        router.controlMode = TmuxControlModeBridge(
-            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: FDVendingServer())
+        router.attachSidecar = AttachSidecar(
+            fdVending: FDVendingServer())
         router.holderRegistry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],

@@ -35,7 +35,7 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
         case .rpcError(let msg, _):
             return "RPC error: \(msg)"
         case .attachUnavailable(let status):
-            return "Control-mode attach unavailable (status: \(status))"
+            return "Attach unavailable (status: \(status))"
         }
     }
 
@@ -45,24 +45,6 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     var rpcCode: String? {
         if case .rpcError(_, let code) = self { return code }
         return nil
-    }
-}
-
-/// `openAttach` failed AFTER `attach.request` succeeded — the daemon minted
-/// an attach (generation known, sink allocated) but the vended fd never
-/// arrived on the sidecar (timeout, supersession, or disconnect). The minted
-/// generation rides the error (R6-H2) so the caller's failure teardown stays
-/// generation-scoped: a nil-generation `pane.detach` here is UNCONDITIONAL
-/// and can kill a healthy racing re-attach's fresh sink (the 56029f5b class,
-/// from a different throw site). `generation` is nil only when an older
-/// daemon minted none.
-struct AttachFDVendError: LocalizedError {
-    let generation: UInt64?
-    let underlying: any Error
-
-    var errorDescription: String? {
-        let gen = generation.map(String.init) ?? "none"
-        return "Attach fd vend failed (generation: \(gen)): \(underlying.localizedDescription)"
     }
 }
 
@@ -80,10 +62,10 @@ actor DaemonClient {
     /// `sidecarReconnectBackoff` paces on.
     private let elapsed: @Sendable () -> Duration
 
-    /// Sidecar for receiving vended pane fds. Connected eagerly right after
+    /// Sidecar for receiving vended pty fds. Connected eagerly right after
     /// the RPC socket, so the daemon's accept has completed long before the
-    /// first attach needs it. Failure is non-fatal: control-mode attaches
-    /// will fail and fall back to grouped sessions.
+    /// first attach needs it. Failure is non-fatal: a holder attach reconnects
+    /// it before sending its request (`reconnectSidecarIfDown`).
     let fdSidecar = FDSidecarClient()
 
     /// Upper bound a single one-shot RPC waits for the daemon's response
@@ -151,15 +133,14 @@ actor DaemonClient {
     /// Connect the FD-vending sidecar right after the RPC socket comes up.
     /// Eager (not lazy-on-first-attach) so the daemon's accept has completed
     /// long before any `attach.request` needs `send()` to work. Best-effort:
-    /// on failure control-mode attaches fail and fall back to grouped
-    /// sessions. Idempotent — `FDSidecarClient.connect` no-ops when already
+    /// on failure `reconnectSidecarIfDown` tries again. Idempotent — `FDSidecarClient.connect` no-ops when already
     /// connected, so reconnect retries are safe.
     private func connectSidecar() {
         do {
             try fdSidecar.connect(path: vendSocketPath)
         } catch {
             daemonClientLogger.warning(
-                "FD sidecar connect failed (control-mode attach unavailable): \(error.localizedDescription, privacy: .public)")
+                "FD sidecar connect failed (holder attach unavailable): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -173,7 +154,7 @@ actor DaemonClient {
     /// connected: the daemon handing it to a second app instance, the frame
     /// scanner desyncing, or a daemon restart quick enough that no RPC failed
     /// in between. Until something reconnects it, every new holder tab fails
-    /// to attach and every control-mode keystroke is dropped.
+    /// to attach.
     ///
     /// - Returns: Whether the sidecar is connected afterwards.
     @discardableResult
@@ -1202,16 +1183,6 @@ actor DaemonClient {
         try await callVoidAsync(method: method, params: params)
     }
 
-    /// Persist the tmux control-mode opt-in (M5). Applies to newly created
-    /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
-    /// the gate on regardless of this flag.
-    func setControlMode(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetControlMode,
-            params: ConfigSetControlModeParams(enabled: enabled)
-        )
-    }
-
     /// Ask the daemon to run one update check now and answer with the result.
     ///
     /// In `auto` mode this is not merely a question: a check that finds the
@@ -1686,19 +1657,18 @@ actor DaemonClient {
         )
     }
 
-    /// Request an attach for one pane or one holder-backed session; the fd
-    /// arrives separately on the sidecar (see `openAttach`).
+    /// Request an attach for one holder-backed session; the fd arrives
+    /// separately on the sidecar (see `HolderAttachClient.attach`).
     ///
     /// `terminalID` is what names a HOLDER session: its `paneID`, `windowID`
     /// and server are the empty string by construction, so nothing else in
-    /// these params can identify the row the daemon must branch on. Nil (the
-    /// default) is the control-mode caller, which names its pane.
+    /// these params can identify the row the daemon must branch on.
     ///
     /// `grid` is the size of the terminal a holder snapshot will be fed into;
     /// see `AttachRequestParams.cols`.
     func attachRequest(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil, attachSeq: UInt64? = nil,
+        terminalID: UUID, attachSeq: UInt64? = nil,
         grid: (cols: Int, rows: Int)? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
@@ -1726,62 +1696,15 @@ actor DaemonClient {
         )
     }
 
-    /// Request an attach and receive the vended fd via the sidecar. Returns
-    /// the read fd (ownership passes to the caller's reader) plus the attach
-    /// generation the daemon minted (echo it back in `paneDetach` so a stale
-    /// detach cannot kill a newer attach's sink; nil from older daemons).
-    /// Does NOT send `attach.ready` — the caller does that after wiring the
-    /// reader.
+    /// Ack that the app's reader is draining the vended fd, which transfers
+    /// ownership of the pty to this viewer.
     ///
-    /// Ordering: the sidecar expectation is registered BEFORE the RPC is
-    /// issued, so the vended fd can never race past its waiter; the header
-    /// demux (`FDSidecarClient`) is what keeps concurrent attaches for
-    /// different panes from cross-delivering fds.
-    func openAttach(
-        worktreeID: UUID, paneID: String, windowID: String
-    ) async throws -> (fd: Int32, generation: UInt64?) {
-        // Fresh nonce per attach: the daemon echoes it in the vend header, so
-        // a superseded attach's stale fd can never be delivered to this one.
-        let attachID = UUID()
-        let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID, attachID: attachID)
-        let generation: UInt64?
-        do {
-            let result = try await attachRequest(
-                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID)
-            guard result.status == "pending" else {
-                promise.cancel()
-                throw DaemonClientError.attachUnavailable(result.status)
-            }
-            generation = result.generation
-        } catch {
-            promise.cancel()
-            throw error
-        }
-        do {
-            return (try await promise.value(timeout: .seconds(5)), generation)
-        } catch {
-            // attach.request already succeeded, so the daemon-minted
-            // generation is known — it must survive this throw (R6-H2): the
-            // caller's failure teardown detaches by it, and losing it here
-            // would force the unconditional nil-generation detach that can
-            // kill a healthy racing re-attach.
-            throw AttachFDVendError(generation: generation, underlying: error)
-        }
-    }
-
-    /// Ack that the app's reader is draining the vended fd — opens the
-    /// daemon-side write gate. Pass the `generation` from `openAttach` so the
-    /// daemon runs the replay sequence only if this attach still owns the
-    /// pane — a stale ready (superseded by a faster re-attach) must not
-    /// pause/unpause the pane out from under the successor's sequence; nil
-    /// (unknown generation) acks unchecked, as before.
-    ///
-    /// `terminalID` names a holder-backed session the way it does on
-    /// `attachRequest`, and a holder ack is REFUSED without a generation —
+    /// `terminalID` names the holder-backed session the way it does on
+    /// `attachRequest`, and the ack is REFUSED without a generation —
     /// there would be nothing to check the ack against, and confirming the
     /// wrong attach would release a reader a live attach depends on.
     func attachReady(
-        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID
     ) async throws {
         try await callVoidAsync(
             method: RPCMethod.attachReady,
@@ -1791,20 +1714,16 @@ actor DaemonClient {
         )
     }
 
-    /// Tell the daemon this pane is no longer rendered; the daemon closes the
-    /// pipe write end and the app-side reader sees EOF. Pass the `generation`
-    /// from `openAttach` so the daemon detaches generation-checked — a stale
-    /// detach from a closing view must not kill a newer attach's sink; nil
-    /// (unknown generation) detaches unconditionally, as before.
+    /// Tell the daemon this session is no longer rendered.
     ///
     /// `terminalID` names a holder-backed session, which has no pipe and no
-    /// pane: there the detach is a *handback* — the daemon takes the pty back
-    /// and puts a drain on it — and `snapshotPreamble` is the screen the viewer
+    /// pane: the detach is a *handback* — the daemon takes the pty back and
+    /// puts a drain on it — and `snapshotPreamble` is the screen the viewer
     /// was showing, so the session's model is not left frozen at the instant
-    /// the viewer arrived. Both are nil on the control-mode path.
+    /// the viewer arrived.
     func paneDetach(
         worktreeID: UUID, paneID: String, generation: UInt64? = nil,
-        terminalID: UUID? = nil, snapshotPreamble: Data? = nil
+        terminalID: UUID, snapshotPreamble: Data? = nil
     ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneDetach,
@@ -1814,15 +1733,13 @@ actor DaemonClient {
         )
     }
 
-    /// Tell the daemon the desired size for one control-mode window. Debounced
-    /// by the caller; the daemon arbitrates the `resize-window` with echo
-    /// suppression (addendum §4). Fire-and-forget from the app's view: errors
+    /// Tell the daemon the size of one holder-backed session's viewer.
+    /// Debounced by the caller. Fire-and-forget from the app's view: errors
     /// are dropped because the resize is re-fired repeatedly and the next tick
     /// self-heals.
-    /// `terminalID` names a holder-backed session, which has no window to key
-    /// on; it is nil for the control-mode path, which does.
+    /// `terminalID` names the session, which has no window to key on.
     func paneResize(
-        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
+        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID
     ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneResize,
@@ -1832,8 +1749,7 @@ actor DaemonClient {
         )
     }
 
-    /// Fetch daemon feature flags (e.g. whether the tmux control-mode gate is
-    /// on). The app cannot read the daemon's env itself — it is launched via
+    /// Fetch daemon feature flags. The app cannot read the daemon's env itself — it is launched via
     /// `open`, which drops shell env.
     func daemonCapabilities() async throws -> DaemonCapabilitiesResult {
         try await callNoParamsAsync(

@@ -394,7 +394,7 @@ struct HolderInjectionRoutingTests {
     /// The cap the injection path had none of. Over it, nothing is framed and
     /// nothing is written: a frame past the app scanner's 4 MiB hard cap is
     /// read there as corruption and closes the sidecar, which takes every
-    /// pane's control-mode input with it.
+    /// holder attach's descriptor vend with it.
     ///
     /// The at-cap control on the same path is what makes the refusal evidence
     /// rather than a panel that refuses everything.

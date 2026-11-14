@@ -1,10 +1,9 @@
-// M4.0 — SwiftTerm mode-escape smoke test (GATE for the control-mode replay writer).
+// SwiftTerm mode-escape smoke test.
 //
-// The Phase A replay writer (spec: docs/specs/2026-07-02-tmux-control-mode-phase-a-addendum.md §3)
-// will synthesize mode escapes from captured tmux pane state and write them into the pane's
-// vended fd; the app feeds those bytes to SwiftTerm via `Terminal.feed`. Before building that
-// writer we verify, headlessly (no NSView, no UI), that SwiftTerm actually APPLIES every escape
-// we plan to emit.
+// A screen restored from a snapshot (`TerminalSnapshotWriter`) carries mode escapes that
+// re-establish the session's terminal state, and the app feeds those bytes to SwiftTerm via
+// `Terminal.feed`. This verifies, headlessly (no NSView, no UI), that SwiftTerm actually
+// APPLIES every such escape.
 //
 // Inspectability map (SwiftTerm revision dae32cc, see Package.swift pin):
 //
@@ -82,7 +81,7 @@ private struct TerminalHarness {
     }
 }
 
-@Suite("SwiftTerm mode-escape smoke (M4.0 replay gate)")
+@Suite("SwiftTerm mode-escape smoke")
 struct SwiftTermModeEscapeSmokeTests {
 
     // MARK: 1049 — alternate screen buffer
@@ -203,8 +202,9 @@ struct SwiftTermModeEscapeSmokeTests {
         h.feed("\u{1b}[3;20r")
         #expect(h.terminal.buffer.scrollTop == 2)
         #expect(h.terminal.buffer.scrollBottom == 19)
-        // DECSTBM homes the cursor — the replay writer must emit DECSTBM BEFORE
-        // the final cursor-position escape, or the restored cursor gets clobbered.
+        // DECSTBM homes the cursor — a writer restoring a screen must emit
+        // DECSTBM BEFORE the final cursor-position escape, or the restored
+        // cursor gets clobbered.
         #expect(h.terminal.buffer.x == 0)
         #expect(h.terminal.buffer.y == 0)
 

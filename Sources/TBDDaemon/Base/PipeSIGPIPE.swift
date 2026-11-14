@@ -2,7 +2,7 @@ import Darwin
 import os
 
 /// Per-descriptor suppression of SIGPIPE for the pipes the daemon writes into a
-/// child's stdin, and for the pane fanout's pipes to the app.
+/// child's stdin.
 ///
 /// A write to a pipe whose reading end has closed fails with `EPIPE` and also
 /// raises `SIGPIPE`. XNU raises that signal at the process, not at the writing

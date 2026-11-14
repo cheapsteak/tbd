@@ -39,7 +39,7 @@ struct TranscriptStreamingFlagTests {
     func capabilityOnEnables() async {
         await withAppState { state in
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, transcriptStreamingEnabled: true)
+                transcriptStreamingEnabled: true)
 
             #expect(state.transcriptStreamingEnabled)
         }
@@ -52,7 +52,7 @@ struct TranscriptStreamingFlagTests {
     func capabilityOffDisables() async {
         await withAppState { state in
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, transcriptStreamingEnabled: false)
+                transcriptStreamingEnabled: false)
 
             #expect(state.transcriptStreamingEnabled == false)
         }

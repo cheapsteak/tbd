@@ -5,7 +5,7 @@ import Testing
 /// Proves M4.4's scrollback guarantee end-to-end against a real throwaway
 /// tmux server: the production server-create path (`TmuxManager.ensureServer`)
 /// must apply `history-limit 50000` BEFORE any window exists, so every pane's
-/// ceiling supports the control-mode replay's `capture-pane -S -50000`.
+/// scrollback ceiling is 50,000 lines.
 ///
 /// tmux resolves `history_limit` per pane at window-creation time — setting
 /// the option after a window exists does nothing for it. `newServerCommand`

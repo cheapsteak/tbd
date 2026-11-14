@@ -84,9 +84,8 @@ WHAT IT CANNOT SHOW
   terminal is broken out per terminal so the contamination is visible. Engine
   mode always restricts to its two ids.
 - A draw wait under SwiftTerm's Metal renderer (`viewWillDraw` is not on that
-  frame path, so it emits no draw lines at all), or anything on the
-  control-mode attach path. libghostty always draws with Metal, and does emit
-  draw lines.
+  frame path, so it emits no draw lines at all). libghostty always draws with
+  Metal, and does emit draw lines.
 
 THE VERDICT LINES
 -----------------
@@ -379,7 +378,7 @@ def percentile(values: list[float], fraction: float) -> float:
 
     `ceil`, not `round(p*n + 0.5)`: Python rounds half to even, so that form
     overshoots -- at n=100 it puts p99 on rank 100, reporting the maximum.
-    Matches `commit-latency-report.py` and the daemon's InputLatencyRecorder.
+    Matches `commit-latency-report.py`.
     """
     if not values:
         return float("nan")

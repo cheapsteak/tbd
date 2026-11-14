@@ -69,7 +69,7 @@ struct QueuedPromptOnCreateTests {
     }
 
     private func capabilities(queuedPrompt: Bool) -> DaemonCapabilitiesResult {
-        DaemonCapabilitiesResult(controlModeEnabled: false, queuedPromptEnabled: queuedPrompt)
+        DaemonCapabilitiesResult(queuedPromptEnabled: queuedPrompt)
     }
 
     private func daemonWorktree(repoID: UUID, name: String = "daemon-name") -> Worktree {

@@ -308,12 +308,9 @@ public final class Daemon: Sendable {
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
-    /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
-    /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
-    /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
-    let controlModeSupervisor = TmuxControlSupervisor()
-    /// Sidecar Unix socket server that vends per-pane file descriptors to the
-    /// app (SCM_RIGHTS). Owned here so it can be stopped on shutdown.
+    /// Sidecar Unix socket server that vends holder-backed sessions' pty
+    /// descriptors to the app (SCM_RIGHTS). Owned here so it can be stopped on
+    /// shutdown.
     let fdVendingServer = FDVendingServer()
     public let pidFile: PIDFile
     public let startTime: Date
@@ -1052,37 +1049,6 @@ public final class Daemon: Sendable {
         )
         let pendingQuestions = PendingPromptStore()
 
-        // The control-mode bridge is shared by lifecycle + router so every
-        // `ensureServer()` call site can open a gated control connection
-        // through a single supervisor. When the gate is off (the default),
-        // `enableIfGated` is a no-op.
-        let tmuxExecutableResolver = TmuxExecutableResolver()
-        // Input router with the health sink wired to the state-delta broadcast
-        // (#318 polish): edge-triggered per-pane input-delivery transitions
-        // ride the same subscription channel the app already listens on.
-        let controlModeInputRouter = ControlModeInputRouter(
-            commandProvider: { [supervisor = controlModeSupervisor] server in
-                await supervisor.command(server: server)
-            },
-            onHealthChange: { [subs] worktreeID, paneID, healthy, generation in
-                subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
-                    worktreeID: worktreeID, paneID: paneID, healthy: healthy,
-                    generation: generation)))
-            }
-        )
-        let controlModeBridge = TmuxControlModeBridge(
-            supervisor: controlModeSupervisor,
-            tmuxExecutableResolver: tmuxExecutableResolver,
-            fdVending: fdVendingServer,
-            inputRouter: controlModeInputRouter,
-            // Live provider, not a snapshot: the gate re-reads the persisted
-            // Settings flag on every attach decision (M5), so a toggle takes
-            // effect without a daemon restart.
-            persistedFlagProvider: { [config = database.config] in
-                (try? await config.get().controlModeEnabled) ?? false
-            }
-        )
-
         // The Program Status Protocol (OSC 7501) store, built first because the
         // registry's readers feed it and the RPC router serves it: both must
         // hold ONE store, or a report the daemon's reader accepts would be
@@ -1126,8 +1092,8 @@ public final class Daemon: Sendable {
         // Built from the registry (which knows who owns each pty and holds the
         // daemon's own reader) and the fd sidecar (the one channel to the app),
         // so it exists exactly when a holder session can exist. Its ack sink is
-        // installed at step 8g, before the sidecar listens, for the same reason
-        // `onInput`'s is: a connection captures its sinks at adopt time.
+        // installed at step 8g, before the sidecar listens, because a
+        // connection captures its sinks at adopt time.
         let holderInjectionCourier: HolderInjectionCourier? = holderRegistry.map { registry in
             HolderInjectionCourier(
                 sendFrame: { [fdVendingServer] frame in
@@ -1196,7 +1162,6 @@ public final class Daemon: Sendable {
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
         )
-        lifecycle.controlMode = controlModeBridge
         lifecycle.holderRegistry = holderRegistry
         // The history-keeping teardowns go through the resolver so a viewed
         // tab's Closed Terminals entry carries the screen the person was
@@ -1395,7 +1360,7 @@ public final class Daemon: Sendable {
         if let pendingPromptCoordinator {
             await rpcRouter.attachPendingPromptCoordinator(pendingPromptCoordinator)
         }
-        rpcRouter.controlMode = controlModeBridge
+        rpcRouter.attachSidecar = AttachSidecar(fdVending: fdVendingServer)
         // `terminal.output` renders a holder-backed session from the same
         // reader the spawn path registered, so the router and the lifecycle
         // must hold ONE registry — two would each drain their own dup of the
@@ -1621,19 +1586,10 @@ public final class Daemon: Sendable {
             rpcRouter.phoneBridge = bridge
         }
 
-        // 8g. Install the app → daemon input sink BEFORE the sidecar listens:
-        // each adopted connection captures `onInput` at adopt time (M2.1
-        // contract), so wiring it after `listen` would miss the app's connect.
-        // The router is the bridge's (built above with the health sink, wired
-        // to `controlModeSupervisor`'s correlators).
-        await fdVendingServer.setOnInput { [inputRouter = controlModeBridge.inputRouter] header, bytes in
-            inputRouter.enqueue(header: header, bytes: bytes)
-        }
-        // Bulk pastes ride the SAME router (and thus the same ordered stream) so
-        // a keystroke after a paste stays FIFO-behind it (the M2 paste ruling).
-        await fdVendingServer.setOnPaste { [inputRouter = controlModeBridge.inputRouter] header, bytes in
-            inputRouter.enqueuePaste(header: header, bytes: bytes)
-        }
+        // 8g. Install the app → daemon sinks BEFORE the sidecar listens: each
+        // adopted connection captures its sinks at adopt time, so wiring one
+        // after `listen` would miss the app's connect.
+        //
         // The app's answer to a daemon injection into a holder-backed session
         // it has attached. Nil-safe by construction: with no courier there is
         // no holder transport in this daemon, so no ack can arrive for it.
@@ -1691,8 +1647,8 @@ public final class Daemon: Sendable {
         }
 
         // 8h. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
-        // app). Failure is non-fatal: control-mode attaches will fail and the
-        // app falls back to grouped sessions.
+        // app). Failure is non-fatal to the daemon: holder attaches fail at the
+        // vend, and tmux-backed tabs, which attach without it, are unaffected.
         //
         // **Before the RPC socket, never after it.** The app connects its
         // sidecar exactly once, straight after its first RPC is answered
@@ -2449,9 +2405,6 @@ public final class Daemon: Sendable {
         if let router = self.router {
             await router.prPollDriverSwitch.stopAll()
         }
-
-        // Stop any tmux control-mode connections (no-op when the gate is off).
-        await controlModeSupervisor.stopAll()
 
         // Stop the FD-vending sidecar (closes the listener + any client).
         await fdVendingServer.stop()

@@ -3,7 +3,7 @@
 TBD parses terminal output with two emulators. The app's viewer runs on SwiftTerm by
 default, or on libghostty-vt when the Experimental engine setting is on
 ([design](2026-11-07-libghostty-terminal-engine-design.md)). The daemon keeps every
-pty-holder session in a headless SwiftTerm, and tmux control-mode panels draw through
+pty-holder session in a headless SwiftTerm, and tmux panels draw through
 SwiftTerm. This design moves all of it onto libghostty-vt, then deletes SwiftTerm and TBD's
 fork of it. The work runs in four streams:
 
@@ -24,7 +24,7 @@ fork of it. The work runs in four streams:
   - a new terminal identity. TBD keeps its DA1, DA2 and XTVERSION answers byte for byte
     ("Device identity").
   - ligatures and BiDi, which stay unsupported
-  - porting tmux control mode, which issue #851 deletes together with tmux
+  - porting tmux control mode, which issue #851 deletes before the rest of tmux
 
 ## Why
 
@@ -80,15 +80,16 @@ fork of it. The work runs in four streams:
 ## B – tmux leaves
 
 - **The work** – B continues issue #851 from where it stands: any Phase 2 item still open,
-  then Phase 4, which deletes the tmux legs and control mode in one step, then Phase 5,
-  which removes the test fence and the CI installs.
-- **Sessions still on tmux** – Phase 4 waits until no tmux rows remain, which TBD cannot
-  observe on other installs. The
+  then Phase 4, then Phase 5, which removes the test fence and the CI installs. Phase 4
+  runs in two steps. The first deletes tmux control mode, and a session that used it
+  draws through the standard tmux panel. The second deletes the tmux legs.
+- **Sessions still on tmux** – The second step waits until no tmux rows remain, which TBD
+  cannot observe on other installs. The
   [migration design](2026-10-11-holder-transport-migration-design.md) covers that case: a
   person moves a session with the migrate action, and after the tmux path is gone a
   leftover row refuses to wake, with a reason that names the action.
-- **What D needs from B** – `TmuxBridge` and the control-mode panels are gone. They are the
-  last viewers that have to draw through SwiftTerm.
+- **What D needs from B** – `TmuxBridge` and its panels are gone. They are the last viewers
+  that have to draw through SwiftTerm.
 
 ## C – the daemon's emulator moves to libghostty-vt
 
@@ -324,7 +325,8 @@ its reader owns, and the flag is a column on an existing row. No reconciler is n
   the fork but keeps two parsers. It also depends on upstream accepting patches that TBD
   needs now.
 - **Port the control-mode panels to libghostty.** Control mode exists only to drive tmux,
-  which is leaving. Issue #851 deletes the two together.
+  which is leaving. Issue #851 deletes control mode first and the tmux legs second, so a
+  port would serve no panel that outlives the first step.
 - **Move the daemon without a flag.** A regression would reach every install at once, and
   the only way back would be the whole previous app. Replacing a load-bearing path needs a
   default-off flag.

@@ -4,194 +4,52 @@ import TBDShared
 import TBDKernel
 import os
 
-private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 
 extension RPCRouter {
-    /// Handle `attach.request`: gate → resolve worktree → allocate pipe →
-    /// vend fd → schedule the ready-timeout cancel → return status.
+    /// Handle `attach.request`: resolve the row, then hand a holder-backed
+    /// session to `handleHolderAttachRequest`.
     ///
-    /// Ordering is the spec's non-negotiable attach handshake: the fd must
-    /// reach the app before any bytes are written, and writes stay gated
-    /// until the app's `attach.ready` ack — otherwise the first burst can
-    /// land in a pipe nobody reads.
+    /// Only a holder-backed terminal can be attached. A request that names no
+    /// terminal, or a row on another transport, is answered "unavailable": a
+    /// tmux-backed tab is viewed through its own `tmux attach` client and never
+    /// asks for a descriptor.
+    ///
+    /// A read that throws is answered as an error, not as "unavailable": the
+    /// app takes "unavailable" as permanent — no retry, no Retry button — for
+    /// what is usually a moment of `SQLITE_BUSY` under a write. An error is
+    /// what the app retries.
     func handleAttachRequest(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachRequestParams.self, from: paramsData)
-        // The holder branch comes first, and before the control-mode gate as
-        // well as before the tmux server resolution. A holder-backed row has no
-        // tmux coordinates to resolve — `tmuxServer` and `tmuxWindowID` are the
-        // empty string — and the control-mode gate asks a question about tmux's
-        // version that has nothing to say about this transport. The row's
-        // transport is the whole gate: a holder row was born on a holder or
-        // moved onto one by `tbd terminal migrate`, and a tmux row stays on
-        // tmux until it is migrated.
-        //
-        // A read that throws is answered as an error, not swallowed into the
-        // control-mode path: that path answers "unavailable" with its gate
-        // off, which the app takes as permanent — no retry, no Retry button —
-        // for what is usually a moment of `SQLITE_BUSY` under a write. An
-        // error is what the app retries. A row that is simply absent still
-        // falls through, as before.
-        if let terminalID = params.terminalID {
-            let terminal: Terminal?
-            do {
-                terminal = try await db.terminals.get(id: terminalID)
-            } catch {
-                logger.error("""
-                    attach.request could not read terminal \
-                    \(terminalID.uuidString, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
-                return RPCResponse(
-                    error: "attach failed: the terminal could not be read: "
-                        + error.localizedDescription)
-            }
-            if let terminal, terminal.transport == .holder {
-                return try await handleHolderAttachRequest(params: params, terminal: terminal)
-            }
-        }
-        // Gate evaluated per attach (env || persisted flag): a Settings
-        // toggle affects the next attach without a daemon restart.
-        guard let bridge = controlMode, await bridge.gateEnabled() else {
+        guard let terminalID = params.terminalID else {
             return try RPCResponse(result: AttachRequestResult(status: "unavailable"))
         }
-        guard let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) else {
-            return RPCResponse(error: "Worktree not found")
-        }
-        let server = worktree.tmuxServer
-        let paneID = params.paneID
+        let terminal: TBDShared.Terminal?
         do {
-            // An attach means a pane on this server is about to render via
-            // control mode — make sure the `tmux -CC` connection (the event
-            // producer feeding the fanout) exists. `enableIfGated` only fires
-            // on worktree/terminal CREATION paths, so panes that already
-            // existed before the daemon started would otherwise get a sink
-            // with no producer: a permanently blank pane. Idempotent.
-            await bridge.supervisor.ensureConnection(serverName: server)
-            // Establish this WINDOW as daemon-sized before the pane renders:
-            // `window-size manual` hands sizing authority to our `resize-window`
-            // commands (addendum §4). Set per-window, NEVER server-wide — the
-            // same server hosts grouped-session viewers for other windows.
-            // `params.windowID` (#317 put it on the wire) becomes load-bearing
-            // here. A failed option set degrades to Phase-2 behavior and never
-            // blocks the attach, so it's tolerated + logged-and-continued.
-            // Deferred (addendum §4 open question): whether detach restores
-            // `window-size latest` so a grouped viewer regains sizing control —
-            // decide when the fallback interplay (§5) is testable; not done here.
-            //
-            // Fire-and-forget via `sendList`, NOT the awaited `send`: `send`
-            // suspends until a REPLY block arrives (or the connection closes), so
-            // a tmux that accepts the connection but stops replying (wedged-but-
-            // alive stream) would hang the whole attach RPC forever — fd never
-            // vends, the app's openAttach never returns, no fallback. `sendList`
-            // returns after the STREAM WRITE and never waits for the reply, so the
-            // attach handshake stays hang-proof against a mute-but-alive tmux.
-            // Enqueue order through the client actor still guarantees this command
-            // precedes any later `resize-window` from `pane.resize`.
-            if let client = await bridge.supervisor.command(server: server) {
-                let windowID = params.windowID
-                await client.sendList([
-                    TmuxCommand(
-                        text: "set-window-option -t \(windowID) window-size manual",
-                        tolerateErrors: true
-                    ) { [logger] result in
-                        // A failed option set is tolerated: degrade to Phase-2
-                        // sizing, never block the attach.
-                        if case .failure(let error) = result {
-                            logger.debug("""
-                                window-size manual set failed for \(server, privacy: .public)/\
-                                \(windowID, privacy: .public) (window race): \
-                                \(String(describing: error), privacy: .public)
-                                """)
-                        }
-                    }
-                ])
-            }
-            // Encode the vend header BEFORE the attach: it needs only `params`,
-            // and hoisting it out keeps every throw AFTER `attach` succeeds
-            // inside the inner do/catch that owns the undo (close readFD,
-            // unregister, detach). Encoding here previously sat between the
-            // attach and that do/catch, so an encode throw leaked the fd, the
-            // orphan pipe, and the input-router registration.
-            let header = try JSONEncoder().encode(
-                FDVendHeader(worktreeID: params.worktreeID, paneID: paneID, attachID: params.attachID))
-            let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
-            // Route this pane's future input frames to `server`. Registered now
-            // (before the vend) so the vend-failure path can undo it alongside
-            // the fanout detach. The ready-timeout expiry deliberately does NOT
-            // unregister — it has no hook here, and it's harmless: input to a
-            // timed-out pane still resolves to the live tmux pane, and a
-            // re-attach overwrites this entry. The attach generation rides the
-            // route (R6-M7) so input-health deltas are stamped with it — a
-            // stale attach's failure cannot flag a fresh attach app-side.
-            bridge.inputRouter.register(
-                worktreeID: params.worktreeID, paneID: paneID, server: server,
-                generation: generation)
-            do {
-                try await bridge.fdVending.send(fd: readFD, header: header)
-            } catch {
-                // Vend failed — undo the attach so no orphan pipe lingers.
-                // Generation-checked: if a concurrent re-attach already
-                // replaced this sink, the undo must not EOF the successor's
-                // pipe — and must leave its input route (same key, same
-                // values) in place, so the unregister is scoped to a
-                // successful detach.
-                Darwin.close(readFD)
-                if await bridge.supervisor.detachIfGeneration(
-                    server: server, paneID: paneID, generation: generation) {
-                    bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
-                }
-                throw error
-            }
-            // The kernel duplicated the fd into the app's table; drop ours.
-            Darwin.close(readFD)
-
-            // Spec (pane lifecycle): "App fails to send attach.ready within
-            // timeout (e.g. 5 s) → daemon cancels attach" — otherwise an app
-            // that died mid-attach leaks the pipe and a permanently-gated sink.
-            // Generation-scoped so a timer outliving a superseded attach can't
-            // kill the fresh attach that replaced it.
-            let timeout = bridge.readyTimeout
-            Task { [supervisor = bridge.supervisor, clock = bridge.clock] in
-                // `try?` is HEAD's shape, kept bit-for-bit. Note what it does
-                // NOT mean: on cancellation the sleep throws, `try?` swallows
-                // it, and control FALLS THROUGH to the detach below — so a
-                // cancelled timer runs the teardown IMMEDIATELY rather than
-                // skipping it. Latent today (nothing retains this Task handle,
-                // so nothing can cancel it), and harmless if it ever isn't —
-                // BECAUSE `detachIfNotReady` is generation-scoped and a no-op
-                // once the attach is acked. That "because" is the invariant
-                // this relies on, not a passing remark: if `detachIfNotReady`
-                // ever stops checking the generation, or a side effect is
-                // added AHEAD of that check, an early-fired timer starts
-                // tearing down a live attach. Spelled out because the opposite
-                // reading of `try?` is the natural one.
-                try? await clock.sleep(for: timeout)
-                await supervisor.detachIfNotReady(server: server, paneID: paneID, generation: generation)
-            }
-            // The generation rides the result so the app can echo it back in
-            // `pane.detach` — a closing view's detach can race a new view's
-            // attach for the same pane, and only a generation-checked detach
-            // keeps the stale one from killing the fresh sink.
-            return try RPCResponse(result: AttachRequestResult(status: "pending", generation: generation))
+            terminal = try await db.terminals.get(id: terminalID)
         } catch {
             logger.error("""
-                attach.request failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
+                attach.request could not read terminal \
+                \(terminalID.uuidString, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
                 """)
-            return RPCResponse(error: "attach failed: \(error.localizedDescription)")
+            return RPCResponse(
+                error: "attach failed: the terminal could not be read: "
+                    + error.localizedDescription)
         }
+        guard let terminal, terminal.transport == .holder else {
+            return try RPCResponse(result: AttachRequestResult(status: "unavailable"))
+        }
+        return try await handleHolderAttachRequest(params: params, terminal: terminal)
     }
 
     /// The holder half of `attach.request`: quiesce, snapshot, vend a `dup` of
     /// the session's pty master.
     ///
-    /// The choreography is the control-mode path's, deliberately — request, an
-    /// fd over `SCM_RIGHTS`, then `attach.ready` carrying the generation back —
-    /// because it is proven and because a second handshake would be a second
-    /// set of races to get right. What differs is what is vended (the pty
-    /// itself, not the read end of a fanout pipe) and what ownership means: the
-    /// daemon stops reading here, at the vend, and `HolderRegistry.beginAttach`
-    /// records why.
+    /// The choreography is a three-step handshake — request, an fd over
+    /// `SCM_RIGHTS`, then `attach.ready` carrying the generation back. What is
+    /// vended is the pty itself, and the vend is an ownership edge: the daemon
+    /// stops reading here, and `HolderRegistry.beginAttach` records why.
     ///
     /// Failure is reported to the caller rather than degraded into a fallback:
     /// there is no second way to render a holder-backed session, so an attach
@@ -212,10 +70,9 @@ extension RPCRouter {
         guard let registry = holderRegistry else {
             return try RPCResponse(result: AttachRequestResult(status: "unavailable"))
         }
-        // The fd sidecar is the vend channel for both transports; it is the one
-        // thing the holder path borrows from the control-mode bridge, and it is
-        // listening whenever the daemon is, independent of that gate.
-        guard let vending = controlMode?.fdVending else {
+        // The fd sidecar is the vend channel. It is listening whenever the
+        // daemon is.
+        guard let sidecar = attachSidecar else {
             return RPCResponse(error: "the fd sidecar is not configured in this daemon")
         }
 
@@ -223,8 +80,7 @@ extension RPCRouter {
         let header: Data
         do {
             // Encoded before the attach, so a throw from it cannot leave a
-            // vended descriptor and a suspended drain behind — the same
-            // hoisting, for the same reason, as the control-mode path above.
+            // vended descriptor and a suspended drain behind.
             header = try JSONEncoder().encode(
                 FDVendHeader(
                     worktreeID: params.worktreeID, paneID: params.paneID,
@@ -273,7 +129,7 @@ extension RPCRouter {
 
         let recipient: ProcessIdentity?
         do {
-            recipient = try await vending.sendReportingRecipient(fd: vend.ptyFD, header: header)
+            recipient = try await sidecar.fdVending.sendReportingRecipient(fd: vend.ptyFD, header: header)
         } catch {
             Darwin.close(vend.ptyFD)
             await registry.cancelPendingAttach(
@@ -298,13 +154,19 @@ extension RPCRouter {
         await registry.recordAttachRecipient(
             recipient, terminalID: terminal.id, generation: vend.generation)
 
-        // Same ready-timeout as control mode, pointed at this registry's own
-        // cancel. It is generation-scoped, so a timer outliving the attach it
-        // was started for is a no-op — and note what it does NOT do: an attach
-        // that timed out is not resumed, because the app has the descriptor and
-        // a lost ack cannot be told from a lost app.
-        let timeout = controlMode?.readyTimeout ?? .seconds(5)
-        let clock = controlMode?.clock ?? ContinuousClock()
+        // The ready-timeout, pointed at this registry's own cancel: an app
+        // that died mid-attach would otherwise leave the session suspended
+        // behind a descriptor nobody reads. It is generation-scoped, so a timer
+        // outliving the attach it was started for is a no-op — and note what it
+        // does NOT do: an attach that timed out is not resumed, because the app
+        // has the descriptor and a lost ack cannot be told from a lost app.
+        //
+        // `try?` swallows a cancellation and falls through to the cancel. That
+        // is harmless only because the cancel is generation-scoped and a no-op
+        // once the attach is acknowledged; nothing retains this task, so
+        // nothing cancels it today.
+        let timeout = sidecar.readyTimeout
+        let clock = sidecar.clock
         let terminalID = terminal.id
         let generation = vend.generation
         Task {
@@ -370,80 +232,19 @@ extension RPCRouter {
         }
     }
 
-    /// Handle `attach.ready`: the app's reader is draining the vended fd —
-    /// run the replay sequence (M4.3, addendum §3): pause → capture → replay
-    /// → gate → unpause. The write gate opens only AFTER the replay bytes are
-    /// in the pipe, so live output lands strictly behind the replay.
-    ///
-    /// Error surface:
-    /// - `.superseded` (a newer attach owns the pane) is a benign race — RPC
-    ///   SUCCESS; the stale viewer is gone, no fallback wanted.
-    /// - Everything else (no sink, no command client, capture `%error`,
-    ///   malformed capture, replay write failure/deadline) is an attach
-    ///   failure: detach + unregister the input route and return an RPC
-    ///   ERROR, which the app's catch in `startControlModeClient` turns into
-    ///   the grouped-sessions fallback. The cleanup is GENERATION-CHECKED: a
-    ///   stale sequence's failure can surface after a re-attach for the same
-    ///   pane has already completed, and an unconditional detach here would
-    ///   EOF the healthy successor's pipe (and drop its input route).
+    /// Handle `attach.ready`: the app has the vended descriptor, so the
+    /// holder-backed session becomes the viewer's. A request that names no
+    /// holder-backed terminal is an error: nothing was vended for it to
+    /// acknowledge.
     func handleAttachReady(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachReadyParams.self, from: paramsData)
-        // The holder branch, first and for the same reasons as on the request:
-        // no tmux coordinates to resolve, and no tmux gate to consult.
-        if let terminalID = params.terminalID,
-           let terminal = try? await db.terminals.get(id: terminalID),
-           terminal.transport == .holder {
-            return await handleHolderAttachReady(params: params, terminal: terminal)
+        guard let terminalID = params.terminalID,
+              let terminal = try? await db.terminals.get(id: terminalID),
+              terminal.transport == .holder
+        else {
+            return RPCResponse(error: "attach.ready names no holder-backed terminal")
         }
-        guard let bridge = controlMode else {
-            return RPCResponse(error: "control mode not configured")
-        }
-        guard let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) else {
-            return RPCResponse(error: "Worktree not found")
-        }
-        let server = worktree.tmuxServer
-        let paneID = params.paneID
-        let orchestrator = AttachReplayOrchestrator(
-            supervisor: bridge.supervisor, commandProvider: bridge.commandProvider)
-        do {
-            // Both outcomes are RPC success: `.ready` is the happy path;
-            // `.superseded` means a newer attach owns the pane and runs its
-            // own sequence — the stale caller just goes away quietly. The
-            // echoed generation (when the app sent one) makes that detection
-            // possible BEFORE anything is sent on the shared correlator.
-            _ = try await orchestrator.performAttachReady(
-                server: server, paneID: paneID, expectedGeneration: params.generation)
-            return .ok()
-        } catch let failure as AttachReplayFailure {
-            logger.error("""
-                attach.ready replay failed for \(server, privacy: .public)/\(paneID, privacy: .public) \
-                gen=\(failure.generation): \(String(describing: failure.underlying), privacy: .public)
-                """)
-            // Detach ONLY the attach whose sequence failed. If a newer attach
-            // owns the sink by now (fast tab-switch re-attach completed while
-            // this sequence's delayed reply was in flight), the stale failure
-            // must not EOF the successor's healthy pipe — nor unregister the
-            // input route the successor relies on (same key, same values), so
-            // the unregister is scoped to a successful detach.
-            if await bridge.supervisor.detachIfGeneration(
-                server: server, paneID: paneID, generation: failure.generation) {
-                bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
-            }
-            return RPCResponse(error: "attach replay failed: \(failure.underlying)")
-        } catch {
-            // Failure BEFORE the sequence acquired a generation
-            // (`AttachReplayError.notAttached`: no sink at acknowledge time).
-            // Nothing to clean up: the sink either doesn't exist or belongs
-            // to a different attach, so detaching blindly here could kill it.
-            // The input route likewise stays — a re-attach overwrites it, and
-            // a route without a sink is harmless (same reasoning as the
-            // ready-timeout path in `handleAttachRequest`).
-            logger.error("""
-                attach.ready replay failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
-                \(String(describing: error), privacy: .public)
-                """)
-            return RPCResponse(error: "attach replay failed: \(error)")
-        }
+        return await handleHolderAttachReady(params: params, terminal: terminal)
     }
 
     /// What a failed vend proves about where the descriptor is, which is the
@@ -479,7 +280,7 @@ extension RPCRouter {
     /// retained — it is the session's screen and its mode oracle for as long as
     /// the viewer holds the descriptor.
     ///
-    /// There is no replay sequence to run here — the screen went out with the
+    /// There is nothing to replay here — the screen went out with the
     /// request, as the snapshot preamble — so this is only the ownership edge,
     /// plus the jiggle `confirmAttach` performs while it still holds the
     /// descriptor.
@@ -514,39 +315,15 @@ extension RPCRouter {
         }
     }
 
-    /// Handle `pane.detach`: close the pipe write end so the app's reader
-    /// sees EOF. Best-effort — an unknown worktree or unconfigured bridge is
-    /// a no-op, not an error (detach is fired on every view teardown).
-    ///
-    /// When the params carry the attach `generation` (echoed from
-    /// `AttachRequestResult`), the detach is generation-checked: a closing
-    /// view's detach can arrive AFTER a new view's attach for the same pane,
-    /// and the stale detach must not kill the fresh sink (or its input
-    /// route). Absent generation (older app) → unconditional, as before.
+    /// Handle `pane.detach`: a viewer has let go of a holder-backed session.
+    /// Best-effort — a request that names no holder-backed terminal is a
+    /// no-op, not an error, because a detach is fired on every view teardown.
     func handlePaneDetach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneDetachParams.self, from: paramsData)
-        // The holder branch, first and for the same reasons as on the attach:
-        // no tmux coordinates to resolve, and no tmux gate to consult. Reaching
-        // the arm below with a holder row is not merely useless — it resolves
-        // nothing and returns ok, which is exactly the silence that leaves a
-        // closed tab's session claimed by a viewer that no longer exists.
         if let terminalID = params.terminalID,
            let terminal = try? await db.terminals.get(id: terminalID),
            terminal.transport == .holder {
             return await handleHolderPaneDetach(params: params, terminal: terminal)
-        }
-        if let bridge = controlMode,
-           let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) {
-            let server = worktree.tmuxServer
-            if let generation = params.generation {
-                if await bridge.supervisor.detachIfGeneration(
-                    server: server, paneID: params.paneID, generation: generation) {
-                    bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
-                }
-            } else {
-                bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
-                await bridge.supervisor.detach(server: server, paneID: params.paneID)
-            }
         }
         return .ok()
     }
@@ -560,8 +337,8 @@ extension RPCRouter {
     /// about another process's file table — which is why the app-side test
     /// asserts the close has already happened at the instant this call is made.
     ///
-    /// **Every outcome is RPC success**, matching the control-mode arm, and the
-    /// reason is stronger here than "best effort": a detach fires on every view
+    /// **Every outcome is RPC success**, and the reason is stronger than "best
+    /// effort": a detach fires on every view
     /// teardown, the app has already released everything it held by the time it
     /// sends one, and there is no recovery it could run on a refusal. So a
     /// refusal is logged, not returned — and the log line means one of two
@@ -675,31 +452,17 @@ extension RPCRouter {
                 takenBack: sweep.takenBack, wouldTakeBack: sweep.wouldTakeBack))
     }
 
-    /// Handle `pane.resize`: the app's debounced desired size for one window.
-    /// Best-effort and tolerant like `handlePaneDetach` — this fires on every
-    /// window-drag tail, so an unknown worktree or unconfigured bridge is an
-    /// ok-noop, not an error. The coordinator arbitrates the actual
-    /// `resize-window` + echo fence (addendum §4).
+    /// Handle `pane.resize`: the app's debounced desired size for a
+    /// holder-backed session. Best-effort and tolerant like
+    /// `handlePaneDetach` — this fires on every window-drag tail, so a request
+    /// that names no terminal is an ok-noop, not an error. The registry
+    /// decides which half of the resize is still the daemon's.
     func handlePaneResize(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneResizeParams.self, from: paramsData)
-        // Branched before the window lookup, because a holder row has no window
-        // to look up: its `windowID` is the empty string, so the control-mode
-        // arm below resolves nothing and drops the resize without a word. The
-        // registry decides which half of the resize is still the daemon's.
         if let terminalID = params.terminalID {
             await holderRegistry?.applyViewerResize(
                 terminalID: terminalID, columns: params.cols, rows: params.rows)
-            return .ok()
-        }
-        if let bridge = controlMode,
-           let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) {
-            await bridge.resizeCoordinator.resize(
-                server: worktree.tmuxServer,
-                windowID: params.windowID,
-                cols: params.cols,
-                rows: params.rows)
         }
         return .ok()
     }
-
 }

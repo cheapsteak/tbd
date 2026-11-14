@@ -260,13 +260,13 @@ public final class RPCRouter: Sendable {
     /// the daemon's lifetime, which is why it is a stored collaborator rather
     /// than something the handler builds per request.
     let completionInventory: CompletionInventoryService
-    /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
-    /// one (tests, older callers); when present, terminal handlers open a gated
-    /// logging-only `tmux -CC` connection after each `ensureServer()`.
+    /// The fd sidecar a holder attach vends its pty through, with the attach
+    /// ready-timeout. `nil` when the daemon did not provide one (tests that
+    /// never attach); a holder attach is then answered with an error.
     ///
     /// Set by `Daemon` after construction (`internal`, so the public init's
-    /// signature does not leak the internal bridge type).
-    nonisolated(unsafe) var controlMode: TmuxControlModeBridge?
+    /// signature does not leak the internal sidecar type).
+    nonisolated(unsafe) var attachSidecar: AttachSidecar?
 
     /// The daemon's single owner of every live `HolderReader`. `terminal.output`
     /// renders a holder-backed session from it; every other transport ignores
@@ -639,7 +639,7 @@ public final class RPCRouter: Sendable {
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
-        self.controlMode = nil
+        self.attachSidecar = nil
         self.claudeCredentialsKeychain = claudeCredentialsKeychain
         self.loginSessions = loginSessions
         self.panelCoordinator = PanelCoordinator(
@@ -1062,8 +1062,6 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalSetKeepWarm(request.paramsData)
             case RPCMethod.configSetAutoHibernate:
                 return try await handleConfigSetAutoHibernate(request.paramsData)
-            case RPCMethod.configSetControlMode:
-                return try await handleConfigSetControlMode(request.paramsData)
             case RPCMethod.configSetDeliveryVerification:
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetQueuedPrompt:
@@ -1196,26 +1194,13 @@ public final class RPCRouter: Sendable {
     // MARK: - Capabilities
 
     /// Report daemon feature flags the app cannot derive locally. The app is
-    /// launched via `open` (LaunchServices), which drops shell env — so the
-    /// control-mode gate state must be asked for, not mirrored. The gate is
-    /// re-evaluated per call (env || persisted flag), so a Settings toggle is
-    /// visible on the next fetch without a daemon restart.
+    /// launched via `open` (LaunchServices), which drops shell env, so gate
+    /// state must be asked for, not mirrored. Every field is re-read per call,
+    /// so a Settings toggle is visible on the next fetch without a daemon
+    /// restart.
     func handleDaemonCapabilities() async throws -> RPCResponse {
-        let enabled: Bool
-        let version: TmuxVersion?
-        if let bridge = controlMode {
-            let gateState = await bridge.currentGateState()
-            enabled = gateState.enabled
-            version = gateState.tmuxVersion
-        } else {
-            enabled = false
-            version = nil
-        }
         let config = try await db.config.get()
         var result = DaemonCapabilitiesResult(
-            controlModeEnabled: enabled,
-            tmuxVersion: version?.description,
-            controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
             deliveryVerificationEnabled: config.deliveryVerificationEnabled,
             autoTrustWorktrees: config.autoTrustWorktrees,

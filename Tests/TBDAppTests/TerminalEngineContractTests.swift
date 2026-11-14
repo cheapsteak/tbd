@@ -14,8 +14,7 @@ import TestSupport
 /// do, and observes it only through the protocol and a recording
 /// `TerminalEngineDelegate`, so a second engine joins the suite by joining
 /// `availableKinds`, which holds libghostty wherever this machine has a Metal
-/// device for it to draw with. The routing test drives its paste through the
-/// engine's headless drop entry, the one each view's real drop calls. Design:
+/// device for it to draw with. Design:
 /// `docs/specs/2026-11-07-libghostty-terminal-engine-design.md`.
 ///
 /// **Report payloads are compared parsed.** SwiftTerm forwards a report's raw
@@ -510,14 +509,9 @@ struct TerminalEngineContractTests {
 
     /// A click is a left mouse-down and its release; a focus change is the view
     /// becoming first responder and giving it up. Both run for every engine.
-    ///
-    /// A control-mode paste is driven as a drop, which asks the same paste
-    /// hook a pasteboard paste does, because a paste reads the general
-    /// pasteboard and a test must not write it. The drop goes through the
-    /// engine's `deliverDroppedText`, the entry each view's real drop calls.
-    @Test("With click routing and paste interception off, no click, focus change or paste reaches the delegate; on, each does",
+    @Test("With click routing off, no click or focus change reaches the delegate; on, each does",
           arguments: TerminalEngineFactory.availableKinds)
-    func routingOffReportsNoClickFocusOrPaste(kind: TerminalEngineKind) async throws {
+    func routingOffReportsNoClickOrFocus(kind: TerminalEngineKind) async throws {
         let fixture = await makeFixture(kind: kind)
         defer { fixture.tearDown() }
         let window = Self.mount(fixture.engine.view)
@@ -540,21 +534,6 @@ struct TerminalEngineContractTests {
         let clickCalls = fixture.recorder.calls
         #expect(clickCalls.contains("mouseDownClaimsFocus"), "a click with routing on must ask the delegate; observed \(clickCalls)")
         #expect(clickCalls.contains("focusChanged"), "a focus change with routing on must be reported; observed \(clickCalls)")
-
-        fixture.recorder.reset()
-        fixture.engine.setControlModePasteInterception(enabled: false)
-        fixture.engine.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
-        await settle()
-        #expect(!fixture.recorder.calls.contains("controlModePaste"),
-                "paste interception is off, yet the paste was offered: \(fixture.recorder.calls)")
-
-        // Positive control: on, the same drop is offered to the delegate.
-        fixture.recorder.reset()
-        fixture.engine.setControlModePasteInterception(enabled: true)
-        fixture.engine.deliverDroppedText("/tmp/tbd-engine-contract-drop.txt")
-        await settle()
-        #expect(fixture.recorder.calls.contains("controlModePaste"),
-                "a paste with interception on must be offered; observed \(fixture.recorder.calls)")
     }
 
     // MARK: - Factory
@@ -881,10 +860,5 @@ private final class RecordingEngineDelegate: TerminalEngineDelegate {
 
     func engineMovedToWindow(_ e: any TerminalEngine) {
         calls.append("movedToWindow")
-    }
-
-    func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool {
-        calls.append("controlModePaste")
-        return false
     }
 }

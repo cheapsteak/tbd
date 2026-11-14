@@ -38,9 +38,9 @@ final class FDSidecarClient: @unchecked Sendable {
     private let lock = NSLock()
     private var socketFD: Int32 = -1
     private var waiters: [String: (Int32?, Error?) -> Void] = [:]
-    /// Serial queue for app → daemon input frames. Keeps `sendInput` off the
-    /// caller's thread (SwiftTerm calls it on the main thread) and serializes
-    /// writes so two frames never interleave on the socket.
+    /// Serial queue for app → daemon frames. Keeps the socket write off the
+    /// caller's thread (the main actor) and serializes writes so two frames
+    /// never interleave on the socket.
     private let sendQueue = DispatchQueue(label: "fd-sidecar-send")
     /// Sink for daemon → app `.injection` frames: a daemon-originated write
     /// for a holder-backed session whose pty this app owns. Guarded by `lock`
@@ -179,105 +179,10 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.lock(); waiters[key] = nil; lock.unlock()
     }
 
-    /// Send keystroke `bytes` for a pane to the daemon as an `.input`
-    /// frame. Never blocks the caller: encodes inline (cheap) then enqueues the
-    /// write on `sendQueue`. Errors — including a disconnected socket — are
-    /// logged and dropped; the receive loop's EOF path handles daemon death and
-    /// `DaemonClient` owns reconnect.
-    ///
-    /// Returns whether the frame was **handed to `sendQueue`** — `false` for
-    /// either refusal that is knowable at call time (over-cap payload, encode
-    /// failure). It is deliberately not a delivery receipt: the socket write
-    /// happens later on `sendQueue`, so a disconnected socket or a
-    /// `FDChannel.sendData` throw is logged there and cannot be reported to
-    /// this caller. `TerminalPanelView.performOutgoingWrite` narrows that
-    /// residue by checking `isConnected` before calling, and the daemon's
-    /// fail-open injection deadline is what covers the rest — see the
-    /// `.sidecarInput` arm's comment for the whole argument.
-    ///
-    /// `@discardableResult` because the keystroke path is fire-and-forget by
-    /// design and the tests that exercise the side effect ignore the value.
-    @discardableResult
-    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) -> Bool {
-        // Defense-in-depth cap (R6-H3), mirroring `sendPaste`'s guard: a
-        // single `.input` frame that couldn't fit the daemon scanner's 4 MiB
-        // hard cap would desync the ONE app-wide sidecar connection and kill
-        // control-mode input everywhere (no Phase A reconnect). Keystrokes
-        // are tiny — anything near the cap is a bug or abuse upstream (the
-        // drag-drop and paste paths both route through PasteInterception),
-        // so refusing is strictly safer than writing.
-        guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
-            logger.fault("""
-                sidecar: sendInput payload \(bytes.count, privacy: .public) bytes exceeds cap \
-                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (input this large is a routing bug)
-                """)
-            return false
-        }
-        let frame: Data
-        do {
-            frame = try SidecarFrameCodec.encodeInput(
-                header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
-        } catch {
-            logger.error("sidecar: failed to encode input frame, dropping \(bytes.count, privacy: .public) bytes")
-            return false
-        }
-        sendQueue.async { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
-            guard fd >= 0 else {
-                self.logger.error("sidecar: sendInput while disconnected, dropping \(bytes.count, privacy: .public) bytes")
-                return
-            }
-            do {
-                try FDChannel.sendData(frame, over: fd)
-            } catch {
-                self.logger.error("sidecar: input send failed: \(String(describing: error), privacy: .public)")
-            }
-        }
-        return true
-    }
-
-    /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
-    /// paste ruling v2: every control-mode paste rides this path). Same serial
-    /// `sendQueue` + inline-encode pattern as `sendInput`, so a paste and a
-    /// following keystroke stay FIFO-ordered on the wire. Oversize payloads are
-    /// dropped defensively — the view-level `PasteInterception` gate already
-    /// refuses them before they reach here.
-    func sendPaste(worktreeID: UUID, paneID: String, bytes: Data) {
-        guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
-            logger.fault("""
-                sidecar: sendPaste payload \(bytes.count, privacy: .public) bytes exceeds cap \
-                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (view gate should have prevented this)
-                """)
-            return
-        }
-        let frame: Data
-        do {
-            frame = try SidecarFrameCodec.encodePaste(
-                header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
-        } catch {
-            logger.error("sidecar: failed to encode paste frame, dropping \(bytes.count, privacy: .public) bytes")
-            return
-        }
-        sendQueue.async { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
-            guard fd >= 0 else {
-                self.logger.error("sidecar: sendPaste while disconnected, dropping \(bytes.count, privacy: .public) bytes")
-                return
-            }
-            do {
-                try FDChannel.sendData(frame, over: fd)
-            } catch {
-                self.logger.error("sidecar: paste send failed: \(String(describing: error), privacy: .public)")
-            }
-        }
-    }
-
     /// Answer one daemon injection: whether this app wrote its bytes.
     ///
-    /// Same inline-encode + `sendQueue` shape as `sendInput`, so an ack and a
-    /// keystroke stay FIFO-ordered on the wire. Deliberately **not** gated on
+    /// Encodes inline, then writes on `sendQueue`, so acks and screen replies
+    /// stay FIFO-ordered on the wire. Deliberately **not** gated on
     /// `isConnected`: an ack is a report the daemon is already waiting on with
     /// a deadline, so the cheapest correct thing to do with a dead socket is
     /// try and let the write block log its own failure — refusing early would
@@ -385,9 +290,8 @@ final class FDSidecarClient: @unchecked Sendable {
             // `SCM_RIGHTS` is inheritable unless somebody says otherwise, and
             // darwin has no `MSG_CMSG_CLOEXEC` to ask for anything else on the
             // `recvmsg` itself. What comes through here is a session's pty
-            // master — vended for a holder attach (`HolderAttachClient`) or a
-            // control-mode attach (`DaemonClient.openAttach`), both of which
-            // register through `expectFD` and are settled by this one loop —
+            // master — vended for a holder attach (`HolderAttachClient`), which
+            // registers through `expectFD` and is settled by this one loop —
             // and it lives as long as the session does. This app spawns
             // children constantly: every local-PTY panel is a `forkpty`, and
             // the git and PR-status tools it shells out to are more. One such
@@ -423,9 +327,9 @@ final class FDSidecarClient: @unchecked Sendable {
                     handleInjection(payload: frame.payload)
                 case .screenRequest:
                     handleScreenRequest(payload: frame.payload)
-                case .input, .paste, .injectionAck, .screenReply:
-                    // The daemon must never send input, paste, ack or screen
-                    // reply frames — those directions are app → daemon only.
+                case .injectionAck, .screenReply:
+                    // The daemon must never send ack or screen reply frames —
+                    // those directions are app → daemon only.
                     logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
                 }
             }
@@ -441,7 +345,7 @@ final class FDSidecarClient: @unchecked Sendable {
         let pending = waiters; waiters = [:]
         socketFD = -1
         lock.unlock()
-        // Barrier before close: a `sendInput` write block may be mid-`write()` on
+        // Barrier before close: a `sendQueue` write block may be mid-`write()` on
         // this same fd right now. `sendFD` was already set to -1 above, so any
         // block that has NOT yet started sees the guard and drops; this barrier
         // waits out the one that's already inside `FDChannel.sendData`. Closing

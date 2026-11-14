@@ -193,7 +193,7 @@ enum DaemonFlagToggle: String, CaseIterable, Sendable, CustomTestStringConvertib
 
     /// A capabilities reply that reports this flag as `enabled`.
     func capabilities(reporting enabled: Bool) -> DaemonCapabilitiesResult {
-        var result = DaemonCapabilitiesResult(controlModeEnabled: false)
+        var result = DaemonCapabilitiesResult()
         switch self {
         case .prPollSchedule: result.prPollScheduleEnabled = enabled
         case .sessionModUsage: result.sessionModUsageEnabled = enabled

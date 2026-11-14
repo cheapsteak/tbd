@@ -49,17 +49,16 @@ if params.submit == true {
 `sendKeys` → `send-keys -l -t <pane> <text>` (literal), `sendKey` →
 `send-keys -t <pane> Enter` (key name → `\r`). Two separate `tmux` subprocess
 invocations, sequential. This is the **only** send path that pushes
-arbitrary-size text through raw `send-keys -l`. It is unconditional — no
-control-mode branch, no size threshold. (`LimitResumeActuator` and any other
+arbitrary-size text through raw `send-keys -l`. It is unconditional — no size
+threshold. (`LimitResumeActuator` and any other
 daemon-originated sends go through the same two `TmuxManager` methods, so they
 share the bug.)
 
-Note the contrast with the **GUI paste path**, which already does the right
-thing: app-level paste interception → `.paste` sidecar frame →
-`ControlModeInputRouter.deliverPaste` → `PasteExecutor.paste` →
-`load-buffer` + `paste-buffer -d -p` (bracketed), and the user's Enter arrives
-later as a separate `.input` keystroke frame. That path is robust; the CLI path
-is not.
+Note the contrast with tmux's own paste mechanism: `load-buffer` +
+`paste-buffer -d -p` delivers the body as one bracketed paste whenever the
+pane's application enabled bracketed-paste mode, so an Enter sent afterwards as
+a separate keystroke lands outside the paste. That mechanism is robust; raw
+`send-keys -l` is not.
 
 ## Evidence (reproductions)
 
@@ -142,11 +141,11 @@ then `send-keys Enter`.
 - **Pros:** root-cause fix — the explicit `ESC[201~` terminator puts the Enter
   provably outside the paste, so it can't be absorbed (no timing dependence).
   TUI-agnostic (standard bracketed-paste protocol; both Claude Code and Codex
-  enable `?2004h` — see `SwiftTermModeEscapeSmokeTests`). Mirrors the
-  already-working GUI paste path (`PasteExecutor`). Mode-aware → no shell
+  enable `?2004h` — see `SwiftTermModeEscapeSmokeTests`). Uses tmux's own
+  bracketed-paste mechanism (`paste-buffer -p`). Mode-aware → no shell
   regression (evidence #5). Verified to submit large messages (evidence #4). Low
   complexity; implementable over the plain `tmux -L` subprocess path already used
-  by `handleTerminalSend`, so **no new coupling to the `-CC` control connection.**
+  by `handleTerminalSend`, so it needs no new connection to tmux.
 - **Cons:** slightly changes `--text` semantics for embedded escape/control
   bytes (they'd be literal pasted text) — but `send-keys -l` already treats
   `--text` as literal, so this is near-equivalent in practice. Does not by itself
@@ -203,10 +202,9 @@ waiting for it to "settle." Bracketing removes the race; waiting only narrows it
 
 ## Implementation sketch (if Option 2 approved)
 
-- Add a `TmuxManager.pasteBuffer(server:paneID:bytes:)` helper mirroring
-  `PasteExecutor`'s temp-file → `load-buffer` → `paste-buffer -d -p` →
-  best-effort `delete-buffer` dance, but over the plain `runTmux` subprocess path
-  (not the `-CC` command client), consistent with how `handleTerminalSend`
+- Add a `TmuxManager.pasteBuffer(server:paneID:bytes:)` helper: temp file →
+  `load-buffer` → `paste-buffer -d -p` → best-effort `delete-buffer`, over the
+  plain `runTmux` subprocess path, consistent with how `handleTerminalSend`
   already talks to tmux.
 - In `handleTerminalSend`, replace `tmux.sendKeys(text:)` with the new paste
   helper; keep the `if submit { sendKey("Enter") }` exactly as is (now safe).

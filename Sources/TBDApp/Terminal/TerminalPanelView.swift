@@ -145,8 +145,7 @@ struct TerminalRecoveryGuidance: Equatable, Sendable {
 }
 
 /// Sendable wrapper for a weak terminal engine reference, used to pass the
-/// reference into an `NSEvent` local monitor closure, and into the control-mode
-/// reader, under strict concurrency.
+/// reference into an `NSEvent` local monitor closure under strict concurrency.
 private final class WeakEngineRef: @unchecked Sendable {
     weak var engine: (any TerminalEngine)?
     init(_ engine: any TerminalEngine) { self.engine = engine }
@@ -230,14 +229,6 @@ struct TerminalPanelView: View {
             .first(where: { $0.id == terminalID })?.profileID
     }
 
-    /// This terminal's control-mode pane key, for the input-health indicator.
-    /// `nil` while AppState hasn't loaded the terminal yet.
-    private var controlModePaneKey: ControlModePaneKey? {
-        appState.terminals.values.flatMap({ $0 })
-            .first(where: { $0.id == terminalID })
-            .map { ControlModePaneKey(worktreeID: $0.worktreeID, paneID: $0.tmuxPaneID) }
-    }
-
     /// The recovery banner's Retry. A retry the daemon refuses replaces the
     /// banner with what the daemon said, so the person reads the reason rather
     /// than a Retry that silently does nothing.
@@ -265,22 +256,6 @@ struct TerminalPanelView: View {
                 }
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
-            }
-            // Passive input-delivery indicator (#318 polish): shows only while
-            // this pane is control-mode attached AND the daemon has flagged
-            // its input failing (edge-triggered deltas); clears itself on the
-            // recovery delta or on detach — no dismiss affordance.
-            if let paneKey = controlModePaneKey, appState.isInputDeliveryFailing(paneKey) {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text("Input not being delivered — keystrokes are not reaching this pane")
-                        .font(.caption)
-                    Spacer()
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.orange.opacity(0.18))
             }
             if let recoveryGuidance {
                 TerminalRetryBanner(
@@ -619,18 +594,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         let snapshot = initialSnapshot
         let suspendedOnCreate = isSuspendedSnapshot
         let parkedMessage = parkedNoticeMessage
-        // Control-mode branch (Phase 2, opt-in): gate on the DAEMON-reported
-        // capability — the app cannot read TBD_TMUX_CONTROL_MODE itself (it is
-        // launched via `open`, which drops shell env). Resolve the terminal's
-        // worktreeID + paneID up front; if the lookup fails, fall back to the
-        // grouped-sessions path.
-        let controlModeAttach: (worktreeID: UUID, paneID: String)? =
-            appState.daemonCapabilities?.controlModeEnabled == true
-                ? appState.terminals.values.flatMap({ $0 })
-                    .first(where: { $0.id == terminalID })
-                    .map { ($0.worktreeID, $0.tmuxPaneID) }
-                : nil
-        let appStateRef = appState
         // Start tmux client as soon as the view has real dimensions from layout
         coordinator.onEngineReady = { [weak coordinator] engine in
             // PARKED pane: compose the hibernate notice INTO the snapshot as
@@ -668,26 +631,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `@MainActor` once the tmux args come back.
             Task { [weak coordinator, weak engine] in
                 guard let coordinator, let engine else { return }
-                if let controlModeAttach {
-                    await coordinator.startControlModeClient(
-                        engine: engine,
-                        appState: appStateRef,
-                        worktreeID: controlModeAttach.worktreeID,
-                        paneID: controlModeAttach.paneID,
-                        bridge: tmuxBridge,
-                        server: tmuxServer,
-                        windowID: tmuxWindowID,
-                        panelID: terminalID
-                    )
-                } else {
-                    await coordinator.startTmuxClient(
-                        engine: engine,
-                        bridge: tmuxBridge,
-                        server: tmuxServer,
-                        windowID: tmuxWindowID,
-                        panelID: terminalID
-                    )
-                }
+                await coordinator.startTmuxClient(
+                    engine: engine,
+                    bridge: tmuxBridge,
+                    server: tmuxServer,
+                    windowID: tmuxWindowID,
+                    panelID: terminalID
+                )
             }
         }
 
@@ -790,8 +740,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var panelID: UUID = UUID()
         /// This coordinator's own successful `prepareSession` — the bridge that
         /// tracks the view session and the generation naming that preparation
-        /// — empty until one succeeds (and forever for a control-mode panel,
-        /// which has no tmux view session). Both teardown paths reclaim
+        /// — empty until one succeeds (and forever for a holder panel, which
+        /// has no tmux view session). Both teardown paths reclaim
         /// through it, so a stale teardown cannot kill a session a *newer*
         /// coordinator prepared for the same `panelID`: `panelID` is the
         /// terminal's id and survives the SwiftUI view rebuild that waking a
@@ -844,16 +794,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// leaves behind — a panel that still owns its engine and can no
         /// longer read a byte back.
         var viewHolderForTesting: TerminalViewHolder { viewHolder }
-        /// Drains the vended pty for a holder-backed panel. Held here rather
-        /// than in the app-scoped `ControlModeReaderRegistry` because a holder
-        /// reader has nothing to outlive the view for: it feeds THIS view, and
-        /// there is no EOF to end it, so `cleanup()` stopping it is the only
-        /// thing that ever releases the descriptor.
+        /// Drains the vended pty for a holder-backed panel. Held by the panel
+        /// because the reader has nothing to outlive the view for: it feeds
+        /// THIS view, and there is no EOF to end it, so `cleanup()` stopping it
+        /// is the only thing that ever releases the descriptor.
         private var holderReader: HolderStreamReader?
         /// A write-only `dup` of this holder session's pty master, and the
         /// app's write destination for one (`performOutgoingWrite`'s
         /// `.localPTY` arm). Without it a holder-backed panel has nowhere to
-        /// put a byte: it has no `LocalProcess` and no control-mode attach.
+        /// put a byte: it has no `LocalProcess`.
         ///
         /// A `dup` that fails leaves the panel read-only: every write reports
         /// `.unwritable`, the queue holds nothing, and the daemon keeps
@@ -1031,15 +980,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// monitor, on main; a fresh install starts it over.
         private var wheelAccumulator = ScrollWheelAccumulator()
         private var fedPreparationMessages: Set<String> = []
-        /// Set while this panel renders through the control-mode path (Phase 2
-        /// FD vending). `cleanup()` uses these to pair the teardown correctly:
-        /// `pane.detach` RPC first (daemon EOFs the pipe), then flag the
-        /// reader stopped — the reader closes its own fd when the EOF lands.
-        /// `windowID` is carried for `pane.resize` (M3.2): the daemon sizes per
-        /// WINDOW, so resize RPCs need it.
-        private var controlModeAttach:
-            (worktreeID: UUID, paneID: String, windowID: String, routingKey: String, generation: UInt64?)?
-        /// Debounces control-mode `pane.resize` RPCs (M3.2). Cancel-and-replace
+        /// Debounces holder `pane.resize` RPCs. Cancel-and-replace
         /// so only the tail of a window-drag flurry reaches the daemon; cancelled
         /// in `cleanup()`.
         private var resizeDebounceTask: Task<Void, Never>?
@@ -1049,12 +990,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// confined like `resizeDebounceTask` — mutated only from the
         /// `@MainActor` debounce path.
         private var resizeSerializer = TerminalResizeSerializer()
-        /// Set (permanently) by `cleanup()` when the view is torn down. The
-        /// attach establishment in `startControlModeClient` re-checks it
-        /// after every `await` resumption and self-detaches anything it
-        /// committed after the teardown ran (review H2) — `cleanup()`'s own
-        /// attach teardown only covers an attach that had already landed in
-        /// `controlModeAttach`. MainActor-confined: `cleanup()` is called
+        /// Set (permanently) by `cleanup()` when the view is torn down. Both
+        /// transports' attach paths re-check it after every `await`
+        /// resumption, so a client is never (re)started, and nothing is
+        /// committed, for a view that is gone. MainActor-confined: `cleanup()` is called
         /// from `dismantleNSView` and every reader is a `@MainActor` method,
         /// so plain-var access is race-free.
         private var isTornDown = false
@@ -1337,9 +1276,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// share. Returns `true` when it took over — the caller must then
         /// prepare and attach nothing.
         ///
-        /// The tmux and control-mode paths are the other two arms; each keeps
-        /// its own body. Only the "is this even a tmux session" question is
-        /// common, and it is answered here.
+        /// The tmux path is the other arm and keeps its own body. Only the "is
+        /// this even a tmux session" question is common, and it is answered
+        /// here.
         @MainActor
         private func handleHolderTransport(into engine: any TerminalEngine) async -> Bool {
             guard panelTransport() == .holder else { return false }
@@ -1368,9 +1307,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Render a holder-backed session, trying the attach again on
         /// `HolderAttachRetry`'s backoff when it does not go through.
         ///
-        /// A failure that outlasts the retries falls back to the placard,
-        /// unlike the control-mode path's fallback to grouped sessions: there
-        /// is no second way to render a holder-backed session, so an attach
+        /// A failure that outlasts the retries falls back to the placard:
+        /// there is no second way to render a holder-backed session, so an attach
         /// that could not happen has to say so. The retries end early on a
         /// permanent refusal (`HolderAttachRetry.isPermanentRefusal`) — the
         /// session ended, above all — which paints its own placard, and on a
@@ -1550,7 +1488,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the child.
             let grid = engine.gridSize
             let attachGrid: (cols: Int, rows: Int)? = TerminalResizeGate.shouldSend(
-                targetAttached: true, cols: grid.cols, rows: grid.rows) ? grid : nil
+                cols: grid.cols, rows: grid.rows) ? grid : nil
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
@@ -1622,10 +1560,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 return nil
             }
             // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
-            // path does — deliberately NOT the control-mode path's
-            // `DispatchQueue.main.async` per chunk. That hop is the shape the
-            // terminal-lag investigation implicates in paint starvation; do not
-            // "tidy" this into looking like its neighbour.
+            // path does — deliberately NOT a `DispatchQueue.main.async` per
+            // chunk. That hop is the shape the terminal-lag investigation
+            // implicates in paint starvation.
             viewHolder.set(engine)
             installLatencyTap(on: engine, transport: .holder)
             // Taken BEFORE the reader owns the descriptor, because the reader
@@ -1824,8 +1761,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 return self.answerScreenRequest(request)
             }
             // One resize at the view's real size, now that this panel owns the
-            // pty — the holder twin of the control-mode path's initial resize.
-            // Usually a no-op, since the attach above carried the grid this
+            // pty. Usually a no-op, since the attach above carried the grid this
             // view had then. It matters when the view changed size while the
             // attach was in flight, when the daemon is too old to resize at
             // attach, or when the grid was below the floor and none was sent:
@@ -2326,11 +2262,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         @MainActor
-        func controlModeViewerDidStart() {
-            appState?.terminalViewerDidStart(terminalID: panelID)
-        }
-
-        @MainActor
         func worktreeIDForDiagnostics() -> UUID? {
             appState?.terminals.values
                 .lazy
@@ -2413,10 +2344,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// scroll events and forwards them to the session as mouse button
         /// presses.
         ///
-        /// Every transport installs this — the tmux subprocess attach
-        /// (`startTmuxClient`), the pty holder (`startHolderClient`) and
-        /// control mode (`startControlModeClient`) — and each needs it for
-        /// the same reason: they all render into the one `TBDTerminalView`,
+        /// Both transports install this — the tmux subprocess attach
+        /// (`startTmuxClient`) and the pty holder (`startHolderClient`) — and
+        /// each needs it for the same reason: they render into the one
+        /// `TBDTerminalView`,
         /// which keeps `allowMouseReporting` off so click-drag selects text
         /// locally — except on a holder panel, where reporting is on
         /// (`reportsMouseToApps`) and the wheel still stays on this monitor,
@@ -2456,8 +2387,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// view to the engine, the engine to `engine(_:send:)` on this
         /// coordinator, and from there they take the same route as keystrokes
         /// on whichever transport this panel is on — `performOutgoingWrite`
-        /// picks the holder pty, the local process, or the sidecar `.input`
-        /// frame.
+        /// picks the holder pty or the local process.
         ///
         /// Idempotent: a monitor already installed is removed first, so a
         /// transport that starts after another one on the same coordinator
@@ -2591,7 +2521,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // NSEvent monitors committed after it would leak (cleanup()
             // already ran; only deinit would remove the monitors, nothing
             // would terminate the process).
-            guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
+            guard !isTornDown else { return }
             // A session that is not carried by tmux is settled here, before any
             // tmux subprocess runs and before any classification — see
             // `transportPreparationNotice(for:)`.
@@ -2617,7 +2547,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // already run and `deinit` would find nil, so nothing else would
             // ever kill it: a fast tab close would leak the view session and,
             // with it, the linked worktree window and its pane process.
-            guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else {
+            guard !isTornDown else {
                 if case .success(let preparation) = result {
                     bridge.cleanupSession(panelID: panelID, generation: preparation.generation)
                 }
@@ -2754,31 +2684,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // by a viewer that no longer exists — nothing draining it, no
             // injection deliverable, and every later attach refused.
             detachHolderSession()
-            engine?.setControlModePasteInterception(enabled: false)
-            if let attach = controlModeAttach, let appState {
-                controlModeAttach = nil
-                Task {
-                    // Clear the attach record + any failing-input flag first
-                    // so the indicator vanishes with the pane (#318 polish).
-                    // Generation-scoped like the daemon-side detach below: a
-                    // closing view's clear racing a new view's attach for the
-                    // same pane must not drop the fresh attach's record.
-                    appState.controlModePaneDetached(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID,
-                        generation: attach.generation)
-                    // Order matters: detach first so the daemon closes the
-                    // pipe's write end (EOF unblocks the reader thread), then
-                    // flag the reader — it closes its own fd on exit. The
-                    // generation scopes the detach to THIS attach: a closing
-                    // view's detach racing a new view's attach for the same
-                    // pane must not kill the fresh sink.
-                    try? await appState.daemonClient.paneDetach(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID,
-                        generation: attach.generation)
-                    await appState.controlModeReaders.remove(
-                        routingKey: attach.routingKey, generation: attach.generation)
-                }
-            }
             // Release the PTY child's `LocalProcess` and reap the child.
             //
             // How the child dies is unchanged by this block. In practice the
@@ -2795,8 +2700,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // never calls `waitpid` itself, so without the reap the child
             // stays `<defunct>` under TBDApp forever.
             //
-            // Control-mode panels have no `LocalProcess` at all, so
-            // `ptyChildPid` is 0 for them and `shouldReap` rejects it.
+            // Holder panels have no `LocalProcess` at all, so `ptyChildPid` is
+            // 0 for them and `shouldReap` rejects it.
             //
             // Clear the holder BEFORE releasing the process: a late IO batch
             // then reads nil and drops instead of feeding an engine whose
@@ -2812,242 +2717,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             if !holderHandbackInFlight && !holderAckInFlight { viewHolder.clear() }
             localProcess = nil
             ChildReaper.reap(pid: ptyChildPid, unless: childExitObservation)
-        }
-
-        /// Render this panel through the control-mode path: request an attach
-        /// (fd arrives via the sidecar), wire a long-lived reader that feeds
-        /// the engine, then ack `attach.ready` to open the daemon's write gate.
-        /// Any failure falls back to the grouped-sessions path — Phase 2 is
-        /// opt-in and read-only, so degradation must be invisible.
-        @MainActor
-        func startControlModeClient(
-            engine: any TerminalEngine,
-            appState: AppState,
-            worktreeID: UUID,
-            paneID: String,
-            bridge: TmuxBridge,
-            server: String,
-            windowID: String,
-            panelID: UUID
-        ) async {
-            // Same branch as the grouped-sessions path: a holder-backed session
-            // has no pane for control mode to attach to, and falling through to
-            // the fallback would only reach the tmux classifier by a longer
-            // route. It attaches to its own pty instead.
-            if await handleHolderTransport(into: engine) { return }
-            // Reader-registry key: one reader per PANE (worktree/pane), not per
-            // attach — a re-attach replaces the pane's reader. Distinct from
-            // the sidecar's per-request demux key, which also carries the
-            // attach nonce.
-            let routingKey = "\(worktreeID.uuidString)/\(paneID)"
-            do {
-                let (fd, generation) = try await appState.daemonClient.openAttach(
-                    worktreeID: worktreeID, paneID: paneID, windowID: windowID)
-                // The view can be torn down while ANY of this function's
-                // awaits is in flight, and `cleanup()`'s attach teardown
-                // only covers an attach that already landed in
-                // `controlModeAttach` — so every resumption that committed
-                // a resource re-checks the teardown flag and unwinds what
-                // it just acquired (review H2). Here: the fd (nothing owns
-                // it yet) and the daemon-side attach.
-                if let undo = ControlModeAttachAbort.undo(tornDown: isTornDown, at: .openAttachResolved) {
-                    abortLateAttach(undo, fd: fd, appState: appState, worktreeID: worktreeID,
-                                    paneID: paneID, routingKey: routingKey, generation: generation)
-                    return
-                }
-                controlModeAttach = (worktreeID, paneID, windowID, routingKey, generation)
-                let weakEngine = WeakEngineRef(engine)
-                await appState.controlModeReaders.registerReader(
-                    routingKey: routingKey, fd: fd, generation: generation) { chunk in
-                        let bytes = [UInt8](chunk)
-                        DispatchQueue.main.async {
-                            weakEngine.engine?.feed(bytes[...])
-                        }
-                    }
-                // Teardown during registration: cleanup() ran its attach
-                // teardown, but its reader removal can have raced AHEAD of
-                // the registration that just completed — remove again.
-                if let undo = ControlModeAttachAbort.undo(tornDown: isTornDown, at: .readerRegistered) {
-                    abortLateAttach(undo, fd: fd, appState: appState, worktreeID: worktreeID,
-                                    paneID: paneID, routingKey: routingKey, generation: generation)
-                    return
-                }
-                // Echo this attach's generation so a stale ready — superseded
-                // by a faster re-attach for the same pane — sends nothing on
-                // the daemon's shared command client (no pause/unpause under
-                // the successor's sequence).
-                try await appState.daemonClient.attachReady(
-                    worktreeID: worktreeID, paneID: paneID, generation: generation)
-                // Teardown during the ready ack: the daemon's gate is open
-                // but no viewer exists — detach before wiring anything else.
-                if let undo = ControlModeAttachAbort.undo(tornDown: isTornDown, at: .attachReadyAcked) {
-                    abortLateAttach(undo, fd: fd, appState: appState, worktreeID: worktreeID,
-                                    paneID: paneID, routingKey: routingKey, generation: generation)
-                    return
-                }
-                // Send one initial resize at the view's real size: the window is
-                // otherwise stuck at whatever size it had until the user first
-                // drags, so fullscreen Claude would render at the wrong width.
-                // Same debounced path as live resizes.
-                let dims = engine.gridSize
-                scheduleDaemonResize(cols: dims.cols, rows: dims.rows)
-                // Intercept ALL pastes at the view level while attached (the
-                // paste ruling v2) and ship them as a `.paste` sidecar frame.
-                // Interception happens BEFORE SwiftTerm brackets the content,
-                // so the daemon-side `paste-buffer -p` is the SOLE wrapping
-                // authority — SwiftTerm's own 2004 tracking can be stale after
-                // a tab-switch re-attach, so no size rides the keystroke path.
-                // That sole-authority claim is CONTINGENT, not unconditional:
-                // `-p` wraps in ESC[200~/ESC[201~ only because the pane's
-                // application has enabled bracketed-paste mode (DECSET 2004).
-                // Against a pane that has NOT, the same `-p` delivers the bytes
-                // verbatim with no markers — measured on tmux 3.6a (22 wrapped
-                // bytes vs 10 bare). If an agent TUI ever stops setting 2004,
-                // nothing here wraps. Asserted nightly by probe P3 in
-                // scripts/nightly-tmux-probes.sh (PR #523), a two-arm probe:
-                // 2004 on → wrapped, 2004 off → verbatim.
-                // Returns true → the paste is consumed here (frame sent, or
-                // oversize refused); false → not attached, SwiftTerm's normal
-                // local paste runs. The decision is
-                // `engine(_:controlModePaste:)`, below.
-                engine.setControlModePasteInterception(enabled: true)
-                // Wheel events are claimed from here on: `controlModeAttach` is
-                // set, so the reports go out as sidecar `.input` frames like
-                // any keystroke.
-                installScrollMonitor(on: engine)
-                logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
-                // Gate the input-health indicator open for this pane (#318
-                // polish): failing deltas only surface while attached. The
-                // generation scopes the record to THIS attach so a stale
-                // clear can't drop it (M3 review fix).
-                appState.controlModePaneAttached(
-                    worktreeID: worktreeID, paneID: paneID, generation: generation)
-                controlModeViewerDidStart()
-            } catch {
-                logger.warning("""
-                    control-mode attach failed for pane \(paneID, privacy: .public); \
-                    falling back to grouped sessions: \(error.localizedDescription, privacy: .public)
-                    """)
-                // The failure can equally resolve AFTER the view was torn
-                // down (review H2's analog hazard). Two things must NOT run
-                // then: the grouped-sessions fallback (a PTY + NSEvent
-                // monitors for a dead view — nothing would ever terminate
-                // that attach client), and the UNCONDITIONAL nil-generation
-                // teardown below — cleanup() already tore down anything that
-                // had committed (generation-scoped), and a nil-generation
-                // detach here could kill a SUCCESSOR view's fresh attach for
-                // the same pane (the stale-cleanup class of 56029f5b).
-                guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else {
-                    logger.info("""
-                        skipping grouped-sessions fallback for pane \
-                        \(paneID, privacy: .public) — the view was torn down while the \
-                        attach was in flight
-                        """)
-                    // cleanup() only tears down an attach that had committed
-                    // into `controlModeAttach` — a failure whose generation
-                    // was minted INSIDE openAttach (AttachFDVendError from
-                    // the fd-vend wait) committed a daemon-side attach that
-                    // cleanup() never saw, and without a detach here that
-                    // attach + its router/health registration leak (R10-1).
-                    // Generation-scoped ONLY: nil means nothing daemon-side
-                    // exists, and an unconditional detach from a dead view
-                    // could kill a successor's fresh attach for the same
-                    // pane (56029f5b class) — send nothing then. No reader
-                    // exists for this attach (registration happens after
-                    // commit), so there is nothing registry-side to remove.
-                    let tornDownGeneration = ControlModeAttachAbort.tornDownTeardownGeneration(
-                        committed: controlModeAttach?.generation, error: error)
-                    controlModeAttach = nil
-                    engine.setControlModePasteInterception(enabled: false)
-                    if let tornDownGeneration {
-                        // Mirrors abortLateAttach's post-await teardown: clear
-                        // any generation-scoped AppState record, then the
-                        // generation-scoped daemon detach (idempotent against
-                        // cleanup()'s own for the same generation).
-                        appState.controlModePaneDetached(
-                            worktreeID: worktreeID, paneID: paneID, generation: tornDownGeneration)
-                        Task {
-                            try? await appState.daemonClient.paneDetach(
-                                worktreeID: worktreeID, paneID: paneID,
-                                generation: tornDownGeneration)
-                        }
-                    }
-                    return
-                }
-                // Scope the teardown detach to THIS attach when its generation
-                // is known: from the committed attach record, or — when the
-                // fd-vend wait timed out inside openAttach AFTER attach.request
-                // minted one — from the AttachFDVendError that carries it
-                // (R6-H2). Only a failure before attach.request succeeded
-                // (truly no generation) falls back to the unconditional detach.
-                let failedGeneration = ControlModeAttachAbort.teardownGeneration(
-                    committed: controlModeAttach?.generation, error: error)
-                controlModeAttach = nil
-                engine.setControlModePasteInterception(enabled: false)
-                // Clear any attach record / stale failing flag for this pane
-                // — the indicator must never show over the grouped-sessions
-                // fallback rendering. Scoped to this attach's generation when
-                // known (nil → unconditional): a concurrent fresh attach's
-                // record must survive this stale failure's cleanup.
-                appState.controlModePaneDetached(
-                    worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
-                // Best-effort teardown of any half-completed attach (e.g. fd
-                // received and reader registered, but attach.ready failed):
-                // detach so the daemon EOFs the pipe, then flag the reader.
-                Task {
-                    try? await appState.daemonClient.paneDetach(
-                        worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
-                    await appState.controlModeReaders.remove(
-                        routingKey: routingKey, generation: failedGeneration)
-                }
-                await startTmuxClient(
-                    engine: engine,
-                    bridge: bridge,
-                    server: server,
-                    windowID: windowID,
-                    panelID: panelID
-                )
-            }
-        }
-
-        /// Unwind a late-resolving control-mode attach: the view was torn
-        /// down while one of `startControlModeClient`'s awaits was in flight
-        /// (review H2). Undoes exactly what the interrupted stage had
-        /// committed — `undo` (see `ControlModeAttachAbort`) says who owns
-        /// the fd — plus the unconditional parts: the generation-scoped
-        /// daemon detach (idempotent against `cleanup()`'s own, harmless to
-        /// a successor attach) and any AppState bookkeeping.
-        @MainActor
-        private func abortLateAttach(
-            _ undo: ControlModeAttachAbort.Undo, fd: Int32, appState: AppState,
-            worktreeID: UUID, paneID: String, routingKey: String, generation: UInt64?
-        ) {
-            logger.info("""
-                control-mode attach for pane \(paneID, privacy: .public) resolved after \
-                view teardown — self-detaching (gen \(generation ?? 0, privacy: .public))
-                """)
-            controlModeAttach = nil
-            engine?.setControlModePasteInterception(enabled: false)
-            // Clear any attach record / failing-input flag (generation-scoped;
-            // normally none exists yet — the record is created only after the
-            // last teardown checkpoint).
-            appState.controlModePaneDetached(
-                worktreeID: worktreeID, paneID: paneID, generation: generation)
-            if undo.closeFD {
-                Darwin.close(fd)
-            }
-            Task {
-                // Order matters (same as cleanup()): detach first so the
-                // daemon closes the pipe's write end (EOF unblocks the reader
-                // thread), then flag the reader — it closes its own fd on
-                // exit.
-                try? await appState.daemonClient.paneDetach(
-                    worktreeID: worktreeID, paneID: paneID, generation: generation)
-                if undo.removeReader {
-                    await appState.controlModeReaders.remove(
-                        routingKey: routingKey, generation: generation)
-                }
-            }
         }
 
         deinit {
@@ -3067,7 +2736,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // reference drops.
             //
             // Only the tmux session is reclaimed here. The pid capture, the
-            // PTY reap and the control-mode detach stay in `cleanup()`, which
+            // PTY reap and the holder handback stay in `cleanup()`, which
             // documents why they must happen exactly once.
             //
             // Safe from a non-isolated `deinit`, and idempotent, by
@@ -3195,17 +2864,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Everything this panel writes goes through one queue (Task 10),
             // so a daemon injection — once one can arrive, over the fd
             // sidecar while a holder-backed session is attached — can never
-            // land inside a user paste's ESC[200~/ESC[201~ brackets.
-            //
-            // Pastes NEVER reach here while control-mode attached: every
-            // paste, any size, is intercepted at the view level and shipped
-            // as a `.paste` frame (or refused when oversize) BEFORE SwiftTerm
-            // brackets it (see TBDTerminalView.paste + the
-            // `onControlModePaste` wiring in startControlModeClient). So the
-            // marker detection below only ever fires for the local-PTY /
-            // holder passthrough path, which is exactly the path where the
-            // app itself can write an injection to the same fd — the case
-            // this queue exists for.
+            // land inside a user paste's ESC[200~/ESC[201~ brackets. The
+            // marker detection below fires on both transports; the holder is
+            // the one where the app itself can write an injection to the same
+            // fd — the case this queue exists for.
             //
             // Whole-payload equality, not a prefix or a search: a chunk IS a
             // marker or it is not. SwiftTerm hands the marker to
@@ -3281,8 +2943,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         ///
         /// `nil` on every panel that is not holder-backed: a `LocalProcess`
         /// panel writes through `DispatchIO`, which owns its own completion,
-        /// and a control-mode panel writes frames to the sidecar. Neither can
-        /// short-write to this actor, so neither needs a drain.
+        /// so it cannot short-write to this actor and needs no drain.
         private var drainNotifier: (any OutgoingDrainNotifier)?
 
         /// Publishes this panel's backpressure state: the queued byte count
@@ -3293,101 +2954,38 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
 
         /// Delivers one chunk `outgoingQueue` has decided may go out now, and
-        /// reports what took it. Same two destinations `engine(_:send:)`
-        /// used before the queue existed — `OutgoingInputRoute.decide` is
-        /// unchanged, and it still runs in the same main-actor turn the bytes
-        /// arrived in, so a tab switch cannot nil `controlModeAttach` between
-        /// the decision and the write.
+        /// reports what took it: the holder session's pty, or the tmux
+        /// viewer's `LocalProcess`.
         ///
-        /// A holder-backed panel has neither `localProcess` nor
-        /// `controlModeAttach`, so it falls into `.localPTY` — and there it
-        /// writes to its own `dup` of the session's pty master
-        /// (`holderWriteFD`), which is what makes the app the attached
-        /// session's only writer and the daemon's injection path worth having.
+        /// A holder-backed panel has no `localProcess`; it writes to its own
+        /// `dup` of the session's pty master (`holderWriteFD`), which is what
+        /// makes the app the attached session's only writer and the daemon's
+        /// injection path worth having.
         ///
         /// **`.accepted` and `.refused` both mean handed off**, which is the
-        /// strongest claim available synchronously and the meaning this seam
-        /// has always carried: the `localProcess` arm hands bytes to
-        /// `DispatchIO` and the sidecar arm to the client's own send queue, and
-        /// neither can report a failure that happens after this returns — the
-        /// daemon's fail-open deadline is what covers that residue. The pty arm
-        /// now joins them: `.refused` means the kernel took a prefix (possibly
-        /// none) and `outgoingQueue` owns the rest and will finish it on
-        /// write-readiness. Only `.unwritable` is a report of loss — no
-        /// descriptor, a dead or exited child, a missing attach, a disconnected
-        /// sidecar, an over-cap payload, an encode failure — and it is the only
-        /// answer that reaches the daemon as `written: false`.
+        /// strongest claim available synchronously: the `localProcess` arm
+        /// hands bytes to `DispatchIO`, which cannot report a failure that
+        /// happens after this returns — the daemon's fail-open deadline is what
+        /// covers that residue. On the pty arm `.refused` means the kernel took
+        /// a prefix (possibly none) and `outgoingQueue` owns the rest and will
+        /// finish it on write-readiness. Only `.unwritable` is a report of loss
+        /// — no descriptor, a dead or exited child — and it is the only answer
+        /// that reaches the daemon as `written: false`.
         private func performOutgoingWrite(_ data: Data) -> OutgoingInputQueue.WriteAttempt {
-            switch OutgoingInputRoute.decide(
-                controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
-            case .localPTY:
-                // The holder arm first, and it is exclusive by construction: a
-                // holder-backed panel never builds a `LocalProcess`, and a
-                // local-PTY panel never attaches a holder. Reading it first
-                // keeps the shape "one destination per panel" rather than a
-                // fallthrough whose order matters.
-                if holderWriteFD >= 0 { return writeToHolderPTY(data) }
-                // `running` counts as much as non-nil: `LocalProcess.send`
-                // silently drops everything once the child has exited, so
-                // reporting `.accepted` for a dead child would be the same
-                // fabricated ack in a different shape.
-                guard let localProcess, localProcess.running else {
-                    return .unwritable(written: 0)
-                }
-                localProcess.send(data: [UInt8](data)[...])
-                return .accepted
-            case .sidecarInput:
-                // `isConnected` belongs in the guard for the same reason
-                // `running` does above: the sidecar client drops an `.input`
-                // frame whose socket is gone, so an `.accepted` here would be a
-                // *systematic* fabricated ack for as long as the drop lasts,
-                // not a rare one.
-                //
-                // How long that is depends on which socket died. For the
-                // common failure — the daemon dying or being restarted — the
-                // sidecar does come back on its own, within about a poll:
-                // the next RPC throws `.daemonNotRunning`/`.connectionFailed`,
-                // `AppState.handleConnectionError` clears `isConnected`
-                // (`AppState+Notifications.swift:87`), the 2-second poll calls
-                // `daemonClient.connect()` (`AppState.swift:2779`), that calls
-                // `connectSidecar()` (`DaemonClient.swift:105`/`121`), and
-                // `FDSidecarClient.connect` proceeds rather than no-opping
-                // because the receive loop already set `socketFD = -1` on EOF
-                // (`FDSidecarClient.swift:264`). A *sidecar-only* death with
-                // the RPC socket intact — the frame scanner desyncing, the
-                // protocol-violation `break`, a second app instance taking the
-                // sidecar — clears no `isConnected`, and is reconnected by the
-                // same poll through `DaemonClient.reconnectSidecarIfDown(.poll)`
-                // instead, which backs off when the drops keep coming. So the
-                // drop is an episode of a few seconds in the common case and
-                // can stretch to minutes in a fight; either way it is an
-                // episode the app cannot see the end of from in here, which is
-                // why the ack must not be fabricated.
-                //
-                // It narrows the window without closing it: the socket is
-                // read again on the client's own send queue, so a
-                // disconnection between this check and that read is a TOCTOU
-                // this arm cannot see. Acceptable for exactly the reason the
-                // `.localPTY` arm's residue is — `.accepted` means handed off,
-                // and the daemon's fail-open deadline is the cover — and a
-                // synchronous answer that waited for the queue would put a
-                // socket write in a keystroke's main-actor turn.
-                //
-                // Corollary for whoever reads the queue's diagnostic:
-                // `isConnected` is a *socket* fact, not an *attach* fact. A
-                // reconnected sidecar satisfies it even when this panel's
-                // `controlModeAttach` names a pane the daemon no longer vends
-                // for, so `OutgoingInputQueue.noteUserWriteOutcome`'s recovery
-                // line ("user input is reaching a transport again") can fire
-                // on a transport that will not deliver. It carries exactly the
-                // strength this `.accepted` does — handed off — and no more.
-                guard let attach = controlModeAttach, let appState,
-                    appState.daemonClient.fdSidecar.isConnected
-                else { return .unwritable(written: 0) }
-                return appState.daemonClient.fdSidecar.sendInput(
-                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
-                    ? .accepted : .unwritable(written: 0)
+            // The holder arm first, and it is exclusive by construction: a
+            // holder-backed panel never builds a `LocalProcess`, and a
+            // local-PTY panel never attaches a holder. Reading it first keeps
+            // the shape "one destination per panel" rather than a fallthrough
+            // whose order matters.
+            if holderWriteFD >= 0 { return writeToHolderPTY(data) }
+            // `running` counts as much as non-nil: `LocalProcess.send` silently
+            // drops everything once the child has exited, so reporting
+            // `.accepted` for a dead child would be a fabricated ack.
+            guard let localProcess, localProcess.running else {
+                return .unwritable(written: 0)
             }
+            localProcess.send(data: [UInt8](data)[...])
+            return .accepted
         }
 
         /// Write one chunk to this holder session's pty, and report what the
@@ -3407,7 +3005,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// every stream behind it and finishes it when the pty is next
         /// writable. So a short write is no longer a failure to report; it is
         /// the ordinary shape of writing to a busy tty, and the ack the caller
-        /// carries to the daemon means what it means on the other two arms of
+        /// carries to the daemon means what it means on the other arm of
         /// `performOutgoingWrite` — accepted by a writer that will complete or
         /// report.
         ///
@@ -3468,13 +3066,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // already has. The engine drops it before it gets here.
             //
             // The engine delivers delegate callbacks on the main thread; the
-            // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`,
-            // `controlModeAttach`) is MainActor-confined like the rest of the
-            // coordinator — same guard as `getWindowSize`.
+            // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`)
+            // is MainActor-confined like the rest of the coordinator — same
+            // guard as `getWindowSize`.
             MainActor.assumeIsolated {
-                // Grouped / local-PTY path (UNCHANGED): propagate resize to the PTY so
-                // tmux/shell gets SIGWINCH. In control mode `localProcess` is nil, so
-                // this is a no-op there and the daemon-authoritative path below runs.
+                // Local-PTY path: propagate resize to the PTY so tmux/shell gets
+                // SIGWINCH. A holder panel has no `localProcess`, so this is a
+                // no-op there and the holder arm below runs.
                 if newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 {
                     var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
                     _ = ioctl(fd, TIOCSWINSZ, &size)
@@ -3498,12 +3096,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // round trip; two ioctls signal the child twice and, until they
                 // agree, at a geometry nobody is painting. Narrow, not zero.
                 setHolderWindowSize(cols: newCols, rows: newRows)
-                // The daemon is told either way, and for a different reason per
-                // transport: for a control-mode window it is the sole size
-                // authority (M3.2, addendum §4); for a holder session it is the
-                // emulator behind `terminal.output` and the next re-adoption,
-                // which must not be left at the size the viewer arrived at.
-                // Debounced so only the tail of a drag flurry lands.
+                // The daemon is told too, for a holder session: its emulator is
+                // what `terminal.output` and the next re-adoption read, and it
+                // must not be left at the size the viewer arrived at. Debounced
+                // so only the tail of a drag flurry lands.
                 scheduleDaemonResize(cols: newCols, rows: newRows)
             }
         }
@@ -3532,11 +3128,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             debugLog("PANEL: holder resize -> \(cols)x\(rows)")
         }
 
-        /// Debounced `pane.resize` for whichever daemon-side size authority this
-        /// panel has — a control-mode window, or a holder session by name.
-        /// No-op unless it has one. Cancel-and-replace ~100ms debounce so a
-        /// window-drag flurry collapses to one RPC. Errors are dropped: the resize
-        /// is re-sent on the next tick and self-heals (the daemon is authoritative).
+        /// Debounced `pane.resize` for this panel's holder session, by name.
+        /// No-op unless the panel owns a holder pty. Cancel-and-replace ~100ms
+        /// debounce so a window-drag flurry collapses to one RPC. Errors are
+        /// dropped: the resize is re-sent on the next tick and self-heals.
         ///
         /// Cross-call ordering (R5-M3): cancel-and-replace only stops the
         /// debounce wrapper — an RPC already in flight rides its own socket
@@ -3546,21 +3141,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// the stash on completion (looping until quiescent).
         @MainActor
         private func scheduleDaemonResize(cols: Int, rows: Int) {
-            // The floor is the same for both transports and exists for the same
-            // reason: SwiftTerm emits transient 0/1-cell sizes mid-layout that
-            // must reach neither a daemon nor a child. `targetAttached` is
-            // passed as `true` because the question it stands for — is there a
-            // daemon-side authority at all — is what `resolve` has just
-            // answered.
+            // The floor keeps SwiftTerm's transient 0/1-cell mid-layout sizes
+            // from reaching the daemon's emulator. It does not guard the child:
+            // `setHolderWindowSize` has already set the child's tty size on this
+            // panel's own descriptor, skipping only a zero size, and the daemon's
+            // `applyViewerResize` applies whatever arrives.
             guard let target = TerminalResizeTarget.resolve(
                     holderPTYIsOwned: holderWriteFD >= 0,
                     worktreeID: worktreeIDForDiagnostics(),
-                    terminalID: panelID,
-                    controlMode: controlModeAttach.map {
-                        (worktreeID: $0.worktreeID, windowID: $0.windowID)
-                    }),
-                  TerminalResizeGate.shouldSend(
-                    targetAttached: true, cols: cols, rows: rows)
+                    terminalID: panelID),
+                  TerminalResizeGate.shouldSend(cols: cols, rows: rows)
             else { return }
             resizeDebounceTask?.cancel()
             let daemonClient = appState?.daemonClient
@@ -3583,18 +3173,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // dead view must stop draining (its stash is irrelevant; the
                 // next live view sends its own initial resize).
                 while TerminalResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
-                    switch target {
-                    case .controlModeWindow(let worktreeID, let windowID):
-                        try? await daemonClient?.paneResize(
-                            worktreeID: worktreeID, windowID: windowID,
-                            cols: size.cols, rows: size.rows)
-                    case .holderSession(let worktreeID, let terminalID):
-                        // `windowID` is the empty string a holder row carries;
-                        // `terminalID` is what the daemon resolves.
-                        try? await daemonClient?.paneResize(
-                            worktreeID: worktreeID, windowID: "",
-                            cols: size.cols, rows: size.rows, terminalID: terminalID)
-                    }
+                    // `windowID` is the empty string a holder row carries;
+                    // `terminalID` is what the daemon resolves.
+                    try? await daemonClient?.paneResize(
+                        worktreeID: target.worktreeID, windowID: "",
+                        cols: size.cols, rows: size.rows, terminalID: target.terminalID)
                     guard let next = self.resizeSerializer.completedInFlight() else { return }
                     size = next
                 }
@@ -3691,50 +3274,5 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A panel's view has no window hook of its own; focus on a tab switch
         /// comes from `AppState.focusTerminalAfterSelectionChange`.
         func engineMovedToWindow(_ e: any TerminalEngine) {}
-
-        /// Intercept ALL pastes at the view level while attached (the paste
-        /// ruling v2) and ship them as a `.paste` sidecar frame. Asked only
-        /// while `startControlModeClient` has turned interception on. Returns
-        /// true → the paste is consumed here (frame sent, or oversize
-        /// refused); false → not attached, SwiftTerm's normal local paste runs.
-        ///
-        /// The pane is `controlModeAttach`'s: interception is turned on right
-        /// after that attach is recorded and off wherever it is cleared, and a
-        /// paste is only intercepted while it is set.
-        func engine(_ e: any TerminalEngine, controlModePaste data: Data) -> Bool {
-            switch PasteInterception.decide(
-                controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
-            case .passthrough:
-                return false
-            case .interceptAsPaste:
-                // Empty pasteboard → consume with no frame: there is
-                // nothing to paste and zero-byte `.paste` frames are
-                // never sent — but SwiftTerm must not run either.
-                if !data.isEmpty, let attach = controlModeAttach {
-                    // The one write that does NOT go through
-                    // `outgoingQueue` (Task 10). Defensible: in
-                    // control mode the daemon injects into tmux
-                    // rather than through the app, so the two writers
-                    // this queue serializes never coexist on this
-                    // path — but it is a second writer on paper, and
-                    // worth naming as one.
-                    appState?.daemonClient.fdSidecar.sendPaste(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
-                }
-                return true
-            case .refuseOversize:
-                logger.error("""
-                    control-mode paste refused: \(data.count, privacy: .public) bytes \
-                    exceeds the \(SidecarFrameCodec.maxPasteBytes, privacy: .public)-byte \
-                    cap; paste dropped — split the content into smaller pastes
-                    """)
-                // The log alone is invisible to the user — surface the
-                // refusal in the pane itself, same "\r\n[...]\r\n"
-                // status-line style as processTerminated's messages.
-                e.writeLocalText(PasteInterception.refusalMessage(byteCount: data.count))
-                return true
-            }
-        }
-
     }
 }

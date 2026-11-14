@@ -5,24 +5,15 @@ import Testing
 @testable import TBDApp
 import TestSupport
 
-/// R6-H3: file URLs dropped onto the terminal synthesize shell-quoted path
-/// text that used to bypass `PasteInterception` and ride `send()` — while
-/// control-mode attached that means ONE arbitrarily large `.input` sidecar
-/// frame, and an oversize frame trips the daemon-side scanner's desync,
-/// tearing down the app-wide shared sidecar connection (no Phase A
-/// reconnect). Dropped paths are a paste-shaped bulk insert, so they must
-/// ride the SAME decision path as a pasteboard paste.
-///
-/// These pin the routing branches of `TBDTerminalView.deliverDroppedText`
-/// (split from `performDragOperation`, whose `NSDraggingInfo` is not
-/// constructible headlessly): attached → the control-mode paste handler owns
-/// the bytes; detached → the local keystroke path, byte-for-byte unchanged.
+/// File URLs dropped onto the terminal synthesize shell-quoted path text. This
+/// pins where `TBDTerminalView.deliverDroppedText` (split from
+/// `performDragOperation`, whose `NSDraggingInfo` is not constructible
+/// headlessly) sends it: the local keystroke path, byte for byte.
 @MainActor
 @Suite("Drag-drop paste routing")
 struct DragDropPasteRoutingTests {
 
-    /// Records what reaches the local keystroke path (the pre-control-mode
-    /// destination of a drop).
+    /// Records what reaches the local keystroke path.
     private final class SendRecorder: TerminalViewDelegate {
         var sent: [[UInt8]] = []
         func send(source: TerminalView, data: ArraySlice<UInt8>) { sent.append([UInt8](data)) }
@@ -52,41 +43,12 @@ struct DragDropPasteRoutingTests {
         body(view, recorder)
     }
 
-    @Test("attached: the control-mode paste handler consumes the drop — nothing rides the keystroke path")
-    func attachedDropRidesPastePath() {
+    @Test("a drop rides send() unchanged")
+    func dropUsesLocalPath() {
         withView { view, recorder in
-            var handlerReceived: [Data] = []
-            view.onControlModePaste = { data in
-                handlerReceived.append(data)
-                return true   // consumed: shipped as a .paste frame (or refused oversize)
-            }
-
             view.deliverDroppedText("'/tmp/a file.txt' /tmp/b.txt")
 
-            #expect(handlerReceived == [Data("'/tmp/a file.txt' /tmp/b.txt".utf8)])
-            #expect(recorder.sent.isEmpty, "a consumed drop must not ALSO ride send()")
-        }
-    }
-
-    @Test("handler declines (not attached): the drop falls through to the keystroke path")
-    func decliningHandlerFallsThrough() {
-        withView { view, recorder in
-            view.onControlModePaste = { _ in false }   // PasteInterception said .passthrough
-
-            view.deliverDroppedText("/tmp/plain.txt")
-
-            #expect(recorder.sent == [[UInt8]("/tmp/plain.txt".utf8)])
-        }
-    }
-
-    @Test("no handler (detached): pre-control-mode behavior, bytes ride send() unchanged")
-    func detachedDropUsesLocalPath() {
-        withView { view, recorder in
-            view.onControlModePaste = nil
-
-            view.deliverDroppedText("/tmp/detached.txt")
-
-            #expect(recorder.sent == [[UInt8]("/tmp/detached.txt".utf8)])
+            #expect(recorder.sent == [[UInt8]("'/tmp/a file.txt' /tmp/b.txt".utf8)])
         }
     }
 }

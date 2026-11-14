@@ -80,7 +80,7 @@ enum RPCVolumeDiagnosticPreferences {
 ///
 /// `DaemonClient`'s two receive paths, and nothing else.
 /// `FDSidecarClient.handleFDVend` also decodes daemon-pushed JSON — a small
-/// `FDVendHeader` per control-mode attach, not a hot path — and is deliberately
+/// `FDVendHeader` per holder attach, not a hot path — and is deliberately
 /// left uninstrumented, so the totals here are the app's RPC traffic rather
 /// than every byte the daemon sends it.
 final class RPCVolumeProbe: Sendable {
@@ -349,7 +349,6 @@ extension StateDelta {
         case .terminalProfileChanged: return "terminalProfileChanged"
         case .worktreeMoved: return "worktreeMoved"
         case .terminalHibernationChanged: return "terminalHibernationChanged"
-        case .controlModeInputHealthChanged: return "controlModeInputHealthChanged"
         case .reapRecordsChanged: return "reapRecordsChanged"
         case .panelSurfaceChanged: return "panelSurfaceChanged"
         case .remoteSessionsChanged: return "remoteSessionsChanged"

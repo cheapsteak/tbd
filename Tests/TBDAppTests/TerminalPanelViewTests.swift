@@ -43,10 +43,10 @@ struct TerminalPanelViewTests {
     //
     // These cover the pure decision (`transportPreparationNotice(for:)`) and
     // the `panelTransport()` lookup under it, and nothing more: they would all
-    // stay green if the `handleHolderTransport` branch were dropped from
-    // either attach path. `TerminalHolderTransportGateTests` is the suite that
-    // drives `startTmuxClient` and `startControlModeClient` themselves and
-    // pins that the branch is actually taken, and taken first.
+    // stay green if the `handleHolderTransport` branch were dropped from the
+    // attach path. `TerminalHolderTransportGateTests` is the suite that drives
+    // `startTmuxClient` itself and pins that the branch is actually taken, and
+    // taken first.
 
     @Test("a holder-backed session is never prepared through tmux")
     func holderTransportSkipsTmuxPreparation() {
@@ -224,24 +224,6 @@ struct TerminalPanelViewTests {
             clientAttached: true,
             processGeneration: liveGeneration
         ))
-        #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
-            .claimed(attempt: 1))
-    }
-
-    @MainActor
-    @Test("control-mode live attachment resets the automatic recovery budget")
-    func controlModeAttachmentResetsRecoveryBudget() {
-        let state = AppState()
-        let terminalID = UUID()
-        seedTerminal(terminalID, in: state)
-        _ = state.claimAutomaticTerminalRecreation(terminalID: terminalID)
-        state.finishTerminalRecreation(terminalID: terminalID)
-
-        let coordinator = TerminalPanelRepresentable.Coordinator()
-        coordinator.appState = state
-        coordinator.panelID = terminalID
-        coordinator.controlModeViewerDidStart()
-
         #expect(state.claimAutomaticTerminalRecreation(terminalID: terminalID) ==
             .claimed(attempt: 1))
     }

@@ -1578,10 +1578,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// Minutes a Claude session must sit idle-at-rest before the auto-hibernate
     /// timer terminates its process. Clamped to a sane floor by the daemon.
     public var hibernateIdleMinutes: Int
-    /// Persisted opt-in for the tmux control-mode render path. The effective
-    /// gate is `env || flag` (a truthy `TBD_TMUX_CONTROL_MODE` is the
-    /// developer override) AND tmux >= 3.2; applies to newly created panes.
-    public var controlModeEnabled: Bool
     /// Global gate for transient-API-error auto-resume (spec 2026-07-08).
     /// Sibling of `autoResumeOnLimitReset` but governs `ScheduledResume` rows
     /// classified as `ScheduledResume.apiErrorLimitType` rather than a hard
@@ -2041,7 +2037,6 @@ public struct Config: Codable, Sendable, Equatable {
                 scratchProfileOverrideID: UUID? = nil,
                 autoHibernateEnabled: Bool = false,
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
-                controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
                 autoCloseSetupEnabled: Bool = Config.autoCloseSetupDefault,
                 autoTrustWorktrees: Bool = true,
@@ -2077,7 +2072,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.scratchProfileOverrideID = scratchProfileOverrideID
         self.autoHibernateEnabled = autoHibernateEnabled
         self.hibernateIdleMinutes = hibernateIdleMinutes
-        self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
@@ -2125,8 +2119,6 @@ public struct Config: Codable, Sendable, Equatable {
         autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? false
         hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
             ?? Config.defaultHibernateIdleMinutes
-        controlModeEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .controlModeEnabled) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
         // Absent means the sender knew nothing about the flag, the NULL

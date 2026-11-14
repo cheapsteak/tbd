@@ -987,7 +987,7 @@ struct RowActionMenuCallSiteTests {
             let terminal = holderTerminal(worktreeID: worktree.id)
             state.terminals[worktree.id] = [terminal]
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, ptyHolderSupported: true)
+                ptyHolderSupported: true)
             // The claim a panel takes the instant `attach.ready` is accepted.
             let registration = state.terminalInjections.register(
                 terminalID: terminal.id) { _, _ in true }
@@ -1009,7 +1009,7 @@ struct RowActionMenuCallSiteTests {
                 tmuxPaneID: "%1", claudeSessionID: "session-1", kind: .claude,
                 activityState: .idle)
             state.terminals[worktree.id] = [terminal]
-            state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false)
+            state.daemonCapabilities = DaemonCapabilitiesResult()
             _ = state.terminalInjections.register(terminalID: terminal.id) { _, _ in true }
 
             #expect(actions(state, worktree).context().hasHibernatableClaude)

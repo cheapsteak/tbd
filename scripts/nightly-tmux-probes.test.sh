@@ -54,7 +54,7 @@ test_clean_run_passes_every_claim_and_exits_zero() {
   # matches has cost this program five separate times; same shape, same guard.
   local checked
   checked="$(printf '%s' "$out" | sed -n 's/^═══ \([0-9]*\) claims checked.*/\1/p')"
-  assert_eq "the run actually checked the expected number of claims" "16" "$checked"
+  assert_eq "the run actually checked the expected number of claims" "8" "$checked"
 }
 
 test_every_listed_probe_function_exists() {

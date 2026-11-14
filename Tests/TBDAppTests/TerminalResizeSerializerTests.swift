@@ -2,7 +2,7 @@ import Testing
 
 @testable import TBDApp
 
-/// R5-M3: control-mode resize RPCs need latest-wins serialization — the
+/// R5-M3: holder resize RPCs need latest-wins serialization — the
 /// debounce collapses a drag flurry, but each `paneResize` rides its own
 /// socket task, so without cross-call ordering a stale in-flight resize can be
 /// processed AFTER a newer one and wedge the pane at the stale size.
