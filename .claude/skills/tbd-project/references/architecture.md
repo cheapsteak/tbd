@@ -104,7 +104,7 @@ GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migrati
 
 ## Tmux Architecture
 
-Every new session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. This section covers the sessions that still run on tmux, which TBD serves — send, output, park, view — until `tbd terminal migrate` moves them. TBD opens no new tmux window for them: a parked tmux session refuses to wake, and `terminal.recreateWindow` refuses every row.
+Every new session opens on the pty holder (`TerminalSpawnTransport.decide`); a daemon with no `TBDHolder` beside it refuses the spawn. This section covers the sessions that still run on tmux, which TBD serves — send, output, park, view — until `tbd terminal migrate` moves them. TBD opens no new tmux window for them: a parked tmux session refuses to wake, and an in-place account switch of a running one is refused. `terminal.recreateWindow` opens no window: it parks a tmux agent tab whose window has gone and whose session can be resumed, so a migration followed by a wake brings it back on the holder, and it refuses every other row.
 
 **Grouped sessions** (not control mode). Rationale in `docs/tmux-integration.md`.
 

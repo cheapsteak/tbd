@@ -6,8 +6,11 @@ TBD opens every new session on the pty holder
 ([`specs/2026-08-30-pty-holder-session-transport-design.md`](specs/2026-08-30-pty-holder-session-transport-design.md)).
 What follows describes the sessions that still run on tmux, which TBD keeps
 serving until `tbd terminal migrate` moves them to the holder. TBD starts no
-new tmux window for them: a parked tmux session refuses to wake, and
-`terminal.recreateWindow` refuses every row.
+new tmux window for them: a parked tmux session refuses to wake, and an
+in-place account switch of a running one is refused. `terminal.recreateWindow`
+opens no window: it parks a tmux agent tab whose window has gone and whose
+session can be resumed, so a migration followed by a wake brings it back on
+the holder, and it refuses every other row.
 
 ## Architecture: One Linked Window Per Viewer + Direct PTY
 
