@@ -199,13 +199,52 @@ struct CodexExecutableResolverTests {
 struct CodexLaunchPreparationTests {
     private typealias Prepared = Result<CodexLaunchPreparation, any Error>
 
-    /// Set from inside a synchronous seam and read by a poll. A locked class
-    /// rather than an actor because the seams cannot await.
+    /// How long the observer waits for each signal. Its waits block a
+    /// gate-executor thread until another gate-executor thread signals it, so
+    /// no timer and no cooperative-pool job sits between the two, the pass's
+    /// scheduling latency does not reach them, and a healthy wait takes
+    /// milliseconds. The bound only has to sit well inside `TestGate.deadline`,
+    /// so that a regression is reported by the observer, with what it saw,
+    /// before the held resolver's gate expires. Two thirds of the gate leaves
+    /// the other third as margin.
+    private static let observerWaitBound: Duration = TestGate.deadline * 2 / 3
+
+    /// Set once from inside a synchronous seam. The test body polls `value`;
+    /// the observer, on a thread it may block, waits for `set()` with
+    /// `blockUntilSet(within:)`, which needs no timer to wake it. A locked
+    /// class rather than an actor because the seams cannot await.
     private final class Flag: @unchecked Sendable {
         private let lock = NSLock()
         private var isSet = false
+        private let raised = DispatchSemaphore(value: 0)
         var value: Bool { lock.withLock { isSet } }
-        func set() { lock.withLock { isSet = true } }
+
+        func set() {
+            lock.withLock { isSet = true }
+            raised.signal()
+        }
+
+        /// Blocks the calling thread, so only a thread the tests own may call
+        /// it. Returns whether the flag was set within `bound`.
+        func blockUntilSet(within bound: Duration) -> Bool {
+            let seconds = Double(bound.components.seconds)
+                + Double(bound.components.attoseconds) / 1e18
+            return raised.wait(timeout: .now() + seconds) == .success
+        }
+    }
+
+    /// An observer wait that expired, with the state seen at its bound. An
+    /// `Error` so that `Issue.record` puts the text on the primary failure
+    /// line.
+    private struct ObserverWaitTimeout: Error, CustomStringConvertible {
+        let what: String
+        let observed: String?
+        let bound: Duration
+
+        var description: String {
+            let seen = observed.map { " — observed \($0)" } ?? ""
+            return "timed out waiting for \(what)\(seen) after blocking up to \(bound)"
+        }
     }
 
     /// What the observer saw while the first preparation's resolver was held,
@@ -216,14 +255,31 @@ struct CodexLaunchPreparationTests {
         var other: Task<Prepared, Never>?
         var heldHomeEnsured = false
         var heldFinished = false
-        var offPool = false
+        var observerThread: String?
     }
 
-    /// Which thread is running this continuation. Synchronous on purpose:
-    /// `Thread.current` is unavailable from an async context because the
-    /// answer changes across a suspension point, and that is what is read.
+    /// Which thread is running this code. Synchronous because
+    /// `Thread.current` is unavailable from an async context.
     private static func runningThreadName() -> String? {
         Thread.current.name
+    }
+
+    /// Blocks until `flag` is set, for at most `observerWaitBound`. On expiry
+    /// it records `what` with the state `observed` reports. That state is
+    /// read before one last check of the flag, so a flag set in the meantime
+    /// passes rather than contradicting the report.
+    private static func observerWait(
+        until flag: Flag, _ what: String,
+        observed: (() -> String)? = nil,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) -> Bool {
+        if flag.blockUntilSet(within: observerWaitBound) { return true }
+        let seen = observed?()
+        if flag.value { return true }
+        Issue.record(
+            ObserverWaitTimeout(what: what, observed: seen, bound: observerWaitBound),
+            sourceLocation: sourceLocation)
+        return false
     }
 
     /// The preparation lock serialises only the home ensurer. Every launch
@@ -261,26 +317,21 @@ struct CodexLaunchPreparationTests {
 
         let otherResolved = Flag()
         let otherFinished = Flag()
-        // The whole hold runs on the executor the held side uses: waiting for
-        // the first resolver to stall, starting the second preparation,
-        // waiting for it, and the release. This is the shape of
-        // `BoundedGateWaitTests.gateHoldersDoNotStarveDispatchWorkers`. Every
-        // poll resumption is a scheduling hop, and on the pool at pass start a
-        // hop costs the pass's per-test latency, so two chained polls there
-        // would put more of it inside the hold than `TestGate.deadline` was
-        // derived to dominate. The executor preference carries across each
-        // resumption (SE-0417), and the thread-name read after the last poll
-        // pins that. The release is the observer's `defer`, so it happens on
-        // every path out of it, and the test body awaits the observer before
-        // anything else, so no exit leaves the held thread parked. `waitFor`
-        // throws only on cancellation, which nothing delivers to this
-        // unstructured task.
+        // The whole hold runs in this one observer on the gate executor:
+        // waiting for the first resolver to stall, starting the second
+        // preparation, waiting for it, and the release in its `defer`. It
+        // never suspends. Each wait blocks its thread until a preparation's
+        // own gate-executor thread sets the flag, so nothing between the stall
+        // and the release is a timer or a job on the cooperative pool, and the
+        // pass's scheduling latency cannot stretch the hold. A poll would not
+        // do: the wake-up from `Task.sleep` is a pool job even when the poller
+        // prefers another executor. The test body awaits the observer before
+        // anything else, so no exit leaves the held thread parked.
         let observer = gateHoldingTask { () -> HoldObservation in
             defer { releaseHeldResolver.signal() }
-            let entered = (try? await waitFor("the first preparation to enter its executable resolver") {
-                heldResolverEntered.value
-            }) ?? false
-            guard entered else { return HoldObservation() }
+            guard Self.observerWait(
+                until: heldResolverEntered, "the first preparation to enter its executable resolver")
+            else { return HoldObservation() }
 
             let other = gateHoldingTask { () -> Prepared in
                 defer { otherFinished.set() }
@@ -295,26 +346,28 @@ struct CodexLaunchPreparationTests {
                         })
                 }
             }
-            _ = try? await waitFor(
+            _ = Self.observerWait(
+                until: otherFinished,
                 "a second preparation to finish while the first one's executable resolver is stalled",
                 observed: {
                     "second resolver ran: \(otherResolved.value), first resolver still held: \(!heldFinished.value)"
-                }
-            ) { otherFinished.value }
+                })
             return HoldObservation(
                 other: other,
                 heldHomeEnsured: heldHomeEnsured.value,
                 heldFinished: heldFinished.value,
-                offPool: Self.runningThreadName() == GateExecutor.threadName)
+                observerThread: Self.runningThreadName())
         }
         let hold = await observer.value
         guard let other = hold.other else { return }
         // The second preparation overlapped the stall rather than following it.
         #expect(!hold.heldHomeEnsured, "the first preparation reached its home ensurer before the gate was released")
         #expect(!hold.heldFinished, "the first preparation finished before the gate was released")
+        // The observer's waits block the thread they run on, so that thread
+        // must be one the tests own and not a cooperative-pool thread.
         #expect(
-            hold.offPool,
-            "the observer must stay on the gate executor across its polls; back on the pool, the hold would span the pass's scheduling latency again"
+            hold.observerThread == GateExecutor.threadName,
+            "the observer blocked a thread outside the gate executor"
         )
 
         let bothFinished = try await waitFor(
