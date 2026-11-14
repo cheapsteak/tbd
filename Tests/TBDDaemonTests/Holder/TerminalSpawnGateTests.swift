@@ -133,4 +133,60 @@ struct TerminalSpawnGateTests {
         #expect(try await db.worktrees.list(repoID: repo.id).isEmpty,
                 "the refused create wrote a worktree row")
     }
+
+    /// The revive entry points that ask start admission.
+    enum ReviveEntry: CaseIterable, Sendable {
+        case revive
+        case reviveConversationFresh
+    }
+
+    /// A revive on a daemon that cannot start a holder answers with the gate's
+    /// refusal before start admission is asked, even with admission set to
+    /// hold. The person learns the helper is missing instead of reading a hold
+    /// reason for a start that could never run, and the worktree stays
+    /// archived.
+    @Test(arguments: ReviveEntry.allCases)
+    func aReviveIsRefusedBeforeStartAdmission(_ entry: ReviveEntry) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            actuationLog: makeTestActuationLog())
+        router.holderRegistry = Self.registry(spawner: nil)
+        let admission = StubAdmission(.hold(reason: "camera in use"))
+        router.startAdmission = admission
+        try await db.config.setStartAdmissionEnabled(true)
+        let scratch = fencedScratchRoot(prefix: "tbdgate")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let repo = try await db.repos.create(
+            path: "\(scratch)/repo", displayName: "acme", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "tbd/wt",
+            path: "\(scratch)/wt", tmuxServer: "tbd-gate-test")
+        try await db.worktrees.archive(id: worktree.id)
+
+        let request: RPCRequest
+        switch entry {
+        case .revive:
+            request = try RPCRequest(
+                method: RPCMethod.worktreeRevive,
+                params: WorktreeReviveParams(worktreeID: worktree.id))
+        case .reviveConversationFresh:
+            request = try RPCRequest(
+                method: RPCMethod.worktreeReviveConversationFresh,
+                params: WorktreeReviveConversationFreshParams(
+                    archivedWorktreeID: worktree.id, sessionID: "acme-session"))
+        }
+        let response = await router.handle(request)
+
+        #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(response.errorCode != RPCErrorCode.startHeld.rawValue)
+        #expect(admission.requests.isEmpty,
+                "start admission was asked about a revive that cannot start")
+        #expect(try await db.worktrees.get(id: worktree.id)?.status == .archived,
+                "the refused revive changed the row's status")
+    }
 }
