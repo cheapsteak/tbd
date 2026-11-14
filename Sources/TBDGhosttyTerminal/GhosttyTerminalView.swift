@@ -486,6 +486,13 @@ public final class GhosttyTerminalView: NSView {
     /// a press the host declined (`onMouseDownClaimFocus`).
     public var onCommandClickText: (@MainActor (GhosttyClickedText) -> Bool)?
 
+    /// Asked, while Command is held with the pointer over plain text and no OSC 8 link under it,
+    /// for the link the host finds there, which the view underlines as it underlines an OSC 8
+    /// link. Given the screen's text read as a ⌘-press reads it, with the hovered cell as the
+    /// pressed one, and answers in that text's rows. The host decides which links earn the
+    /// underline. nil, or no hook, underlines nothing.
+    public var onCommandHoverText: (@MainActor (GhosttyClickedText) -> GhosttyTextLink?)?
+
     /// The view became the first responder (`true`) or stopped being it (`false`), however focus
     /// moved. Unlike `onFocusChanged`, a window gaining or losing key status does not call it.
     public var onFirstResponderChanged: (@MainActor (Bool) -> Void)?
@@ -814,6 +821,8 @@ public final class GhosttyTerminalView: NSView {
         }
         applyPendingGridResize()
         startBlinkIfNeeded()
+        // No render signal reached the view while it was detached.
+        mouseController.screenMayHaveChanged()
     }
 
     /// Detaches the surface and the view's half of the attachment. Also run when the surface is
@@ -882,13 +891,15 @@ public final class GhosttyTerminalView: NSView {
     /// The terminal's render signal, on the main thread, with the hint the relay folded from every
     /// signal since the last delivery. `close()` signals one last time, and the view stops its
     /// cursor blink then and asks for no frame, so nothing keeps waking a view that will never draw
-    /// again.
+    /// again. Every delivery tells the mouse controller the screen may have changed, for its
+    /// ⌘-hover underline.
     ///
     /// Otherwise the delivery decides once, by `LeadingEdgePolicy`, whether to draw now. It draws
     /// with the tick's own `renderTick(now:)`, inside this delivery, so the leading edge adds no
     /// main-queue hop, and its frame drops at the drawable limit as the policy does. Anything else
     /// asks the display link for a frame.
     private func renderSignalled(_ hint: RenderHint) {
+        mouseController.screenMayHaveChanged()
         guard !terminal.isClosed else {
             stopBlink()
             return
@@ -962,7 +973,12 @@ public final class GhosttyTerminalView: NSView {
 
     /// A mouse event's location in **device pixels**, top-left origin (the view is flipped).
     func devicePixels(of event: NSEvent) -> CGPoint {
-        let point = convert(event.locationInWindow, from: nil)
+        devicePixels(atWindowLocation: event.locationInWindow)
+    }
+
+    /// `location`, a point in the window's coordinates, in **device pixels**, top-left origin.
+    func devicePixels(atWindowLocation location: CGPoint) -> CGPoint {
+        let point = convert(location, from: nil)
         let scale = backingScale
         return CGPoint(x: point.x * scale, y: point.y * scale)
     }
@@ -1512,9 +1528,14 @@ public final class GhosttyTerminalView: NSView {
     /// sibling drawn over it at that point. `NSTrackingArea` does not check either, so a hover
     /// handler has to. Outside a window there is nothing to be covered by.
     func isPointerTarget(_ event: NSEvent) -> Bool {
+        isPointerTarget(atWindowLocation: event.locationInWindow)
+    }
+
+    /// `isPointerTarget(_:)` for a pointer at `location`, a point in the window's coordinates.
+    func isPointerTarget(atWindowLocation location: CGPoint) -> Bool {
         guard !isHiddenOrHasHiddenAncestor else { return false }
         guard let window, let content = window.contentView else { return true }
-        guard let hit = content.hitTest(event.locationInWindow) else { return false }
+        guard let hit = content.hitTest(location) else { return false }
         return hit === self || hit.isDescendant(of: self)
     }
 

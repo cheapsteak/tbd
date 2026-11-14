@@ -175,4 +175,136 @@ struct TerminalCommandClickTests {
         let pastTheColumns = SwiftTermLinkDetector.link(in: clicked(rows, column: 40, row: 0, columns: 40))
         #expect(pastTheColumns == nil)
     }
+
+    // MARK: - The cells SwiftTerm's link covers, for the ⌘-hover underline
+
+    @Test func aPrintedURLCoversItsOwnCells() throws {
+        let text = "see https://example.com/acme now"
+        let link = SwiftTermLinkDetector.textLink(in: clicked(
+            [(text, false)], column: try column(of: "example", in: text), row: 0, columns: 40))
+        #expect(link == GhosttyTextLink(text: "https://example.com/acme", spans: [.init(row: 0, columns: 4..<28)]))
+    }
+
+    @Test func plainWordsCoverNoCells() {
+        let link = SwiftTermLinkDetector.textLink(in: clicked(
+            [("just some words", false)], column: 2, row: 0, columns: 40))
+        #expect(link == nil)
+    }
+
+    /// The URL runs past the end of the first row and on at the start of the second.
+    @Test func aSoftWrappedURLCoversBothRowsFromEither() {
+        let wrapped = [("see https://example.", false), ("com/acme/wrapped now", true), ("", false)]
+        let expected = GhosttyTextLink(
+            text: "https://example.com/acme/wrapped",
+            spans: [.init(row: 0, columns: 4..<20), .init(row: 1, columns: 0..<16)])
+        let fromBelow = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 2, row: 1, columns: 20))
+        #expect(fromBelow == expected)
+        let fromAbove = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 6, row: 0, columns: 20))
+        #expect(fromAbove == expected)
+    }
+
+    /// A program that wraps its own lines ends the row with a newline and indents the next, which
+    /// SwiftTerm joins when the first row's text reaches near its end. The indent is not the link's.
+    @Test func aURLItsProgramWrappedCoversBothRowsFromEither() {
+        let wrapped = [("see https://example.com/", false), ("  acme/wrapped now", false), ("", false)]
+        let expected = GhosttyTextLink(
+            text: "https://example.com/acme/wrapped",
+            spans: [.init(row: 0, columns: 4..<24), .init(row: 1, columns: 2..<14)])
+        let fromBelow = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 5, row: 1, columns: 24))
+        #expect(fromBelow == expected)
+        let fromAbove = SwiftTermLinkDetector.textLink(in: clicked(wrapped, column: 10, row: 0, columns: 24))
+        #expect(fromAbove == expected)
+    }
+
+    /// The same URL ends one row and starts the next, rows SwiftTerm does not join: the first row's
+    /// text stops short of the end. Each is a link of its own.
+    @Test func theSameURLOnTheNextRowIsAnotherLink() {
+        let url = "https://example.com/acme"
+        let rows = [("see \(url)", false), ("\(url) again", false), ("", false)]
+        let upper = SwiftTermLinkDetector.textLink(in: clicked(rows, column: 10, row: 0, columns: 40))
+        #expect(upper == GhosttyTextLink(text: url, spans: [.init(row: 0, columns: 4..<28)]))
+        let lower = SwiftTermLinkDetector.textLink(in: clicked(rows, column: 10, row: 1, columns: 40))
+        #expect(lower == GhosttyTextLink(text: url, spans: [.init(row: 1, columns: 0..<24)]))
+    }
+
+    /// Two wide characters before the URL take two columns each, so its cells are the screen's.
+    @Test func wideCharactersLeaveTheLinksCellsWhereTheyAreOnScreen() throws {
+        let text = "\u{65E5}\0\u{672C}\0 https://example.com/acme"
+        let link = SwiftTermLinkDetector.textLink(in: clicked(
+            [(text, false)], column: try column(of: "https", in: text), row: 0, columns: 40))
+        #expect(link == GhosttyTextLink(text: "https://example.com/acme", spans: [.init(row: 0, columns: 5..<29)]))
+    }
+
+    /// The hover asks about every cell the pointer crosses. One screen is written once, whatever
+    /// is asked about it, and a screen that changed is written again rather than answered from
+    /// the old one.
+    @Test func hoverLinksWritesEachScreenOnce() {
+        let hover = SwiftTermLinkDetector.HoverLinks()
+        let screen = [("see https://example.com/acme and /srv/acme/notes.txt", false)]
+        let url = hover.textLink(in: clicked(screen, column: 10, row: 0, columns: 60))
+        #expect(url == GhosttyTextLink(text: "https://example.com/acme", spans: [.init(row: 0, columns: 4..<28)]))
+        let sameURL = hover.textLink(in: clicked(screen, column: 20, row: 0, columns: 60))
+        #expect(sameURL == url)
+        let path = hover.textLink(in: clicked(screen, column: 40, row: 0, columns: 60))
+        #expect(path == GhosttyTextLink(text: "/srv/acme/notes.txt", spans: [.init(row: 0, columns: 33..<52)]))
+        let between = hover.textLink(in: clicked(screen, column: 30, row: 0, columns: 60))
+        #expect(between == nil)
+        #expect(hover.screensWritten == 1)
+
+        let changed = hover.textLink(in: clicked([("see nothing here", false)], column: 10, row: 0, columns: 60))
+        #expect(changed == nil)
+        #expect(hover.screensWritten == 2)
+    }
+
+    /// SwiftTerm scans the whole line for each cell it is asked about. On a line of 20,000
+    /// characters, soft-wrapped over 200 rows, a URL crossing a row end in the middle takes a few
+    /// questions, not one for each of its cells and those either side.
+    @Test func aLinkOnALongLineTakesAFewLookups() throws {
+        let url = "https://example.com/acme"
+        let columns = 100
+        // The URL starts 10,090 characters in, at column 90 of row 100, and runs on into row 101.
+        let text = String(repeating: "word ", count: 2_018) + url + " " + String(repeating: "word ", count: 1_977)
+        let characters = Array(text)
+        try #require(characters.count == 20_000)
+        let rows = (0..<200).map { index in
+            GhosttyClickedText.Row(
+                text: String(characters[(index * columns)..<((index + 1) * columns)]), isWrapContinuation: index > 0)
+        }
+        let screen = try #require(SwiftTermLinkDetector.Screen(rows: rows, columns: columns))
+
+        let link = screen.textLink(column: 5, row: 101)
+
+        #expect(link == GhosttyTextLink(
+            text: url, spans: [.init(row: 100, columns: 90..<100), .init(row: 101, columns: 0..<14)]))
+        #expect(screen.lookups <= 8, "\(screen.lookups) lookups")
+    }
+
+    /// A letter outside ASCII is one column wide unless it is a wide character. At the end of a
+    /// link with nothing written after it, the empty cell after it is no part of the link, as
+    /// SwiftTerm sees it, so the hover there finds nothing.
+    @Test func aNarrowAccentedLetterEndsItsLinkAtItsOwnCell() {
+        let url = "https://fr.wikipedia.org/wiki/Caf\u{E9}"
+        let screen = [("see \(url)", false), ("next", false)]
+        let hover = SwiftTermLinkDetector.HoverLinks()
+        let link = hover.textLink(in: clicked(screen, column: 10, row: 0, columns: 60))
+        #expect(link == GhosttyTextLink(text: url, spans: [.init(row: 0, columns: 4..<38)]))
+        let pastTheAccent = hover.textLink(in: clicked(screen, column: 38, row: 0, columns: 60))
+        #expect(pastTheAccent == nil)
+    }
+
+    /// SwiftTerm starts a soft-wrapped row at its first cell that is not blank, as it does a row
+    /// an editor's hard wrap joins, and the line `located` reads keeps the blanks. The link is not
+    /// in that line, so its cells are found by asking about each: more questions than the five
+    /// `located` asks about a link no hard wrap crosses.
+    @Test func aLinkNotInTheLinesTextIsFoundCellByCell() throws {
+        let wrapped = [("see https://example.", false), ("  com/acme now", true)]
+        let rows = clicked(wrapped, column: 0, row: 0, columns: 20).rows
+        let screen = try #require(SwiftTermLinkDetector.Screen(rows: rows, columns: 20))
+
+        let link = screen.textLink(column: 4, row: 1)
+
+        #expect(link == GhosttyTextLink(
+            text: "https://example.com/acme", spans: [.init(row: 0, columns: 4..<20), .init(row: 1, columns: 2..<10)]))
+        #expect(screen.lookups > 5, "\(screen.lookups) lookups: the cells were not asked about one by one")
+    }
 }

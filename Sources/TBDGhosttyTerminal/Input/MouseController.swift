@@ -1,6 +1,6 @@
 // Adapted from tkzmux c961533 Sources/TkzTerminalView/MouseController.swift (MIT, see LICENSE-tkzmux.txt).
-// MouseController — the AppKit half of mouse reporting, selection, clipboard, scrolling and OSC 8
-// links.
+// MouseController — the AppKit half of mouse reporting, selection, clipboard, scrolling and the
+// ⌘-hover link underline.
 //
 // Everything that needs a decision lives here; everything that needs libghostty lives behind the
 // terminal's input seam (`InputBinding.swift`). The routing policy (report vs select, click
@@ -15,6 +15,8 @@
 //     first (`commandClickTarget`): an OSC 8 URI goes to its `onOpenLink`, and the host decides
 //     what a program-supplied URI may open; plain text goes to its `onCommandClickText`, and the
 //     host decides what the text names.
+//   * It finds no link in plain text. Under a ⌘-hover it asks the view's `onCommandHoverText`,
+//     and the host decides which text is a link.
 //   * It never clears `surface.needsDisplay`; it only ever asks the view for a frame.
 
 import AppKit
@@ -204,8 +206,11 @@ final class MouseController: NSObject {
     private(set) var isSelecting = false
     /// True when the last selection drag was Option-held (rectangle).
     private(set) var isRectangleDrag = false
-    /// The URI currently underlined by a ⌘-hover, if any.
+    /// The link currently underlined by a ⌘-hover, if any: an OSC 8 URI, or the link the host
+    /// found in plain text.
     private(set) var hoveredLink: String?
+    /// How many times a ⌘-hover has read the screen's text. Tests only.
+    private(set) var screenReads = 0
     /// The geometry last pushed to the terminal, so a resize or scale change is detected per event.
     private(set) var pushedGeometry: TerminalPixelGeometry?
 
@@ -225,7 +230,17 @@ final class MouseController: NSObject {
     /// The last move handled, and whether it was consumed. The tracking area and the responder
     /// chain both deliver a move, as the same `NSEvent`; whichever comes second is a repeat.
     private var lastMoved: (event: NSEvent, consumed: Bool)?
-    private var linkOverlay: CALayer?
+    /// The hover underline: one layer per row of the link, with the cells it is drawn under.
+    private var linkOverlays: [LinkOverlay] = []
+    /// Counts the changes to what the viewport shows: program output, a reset and a resize (each
+    /// raises the terminal's render signal), a viewport scroll, a new geometry, and the surface
+    /// attaching after time detached, when no signal reached the view. A read of the screen, and a
+    /// lookup made from one, holds for one value (`screenMayHaveChanged()`).
+    private var screenGeneration = 0
+    /// The last read of the screen's text for a ⌘-hover.
+    private var hoverRead: HoverRead?
+    /// The last ⌘-hover lookup.
+    private var hoverLookup: HoverLookup?
 
     init(clock: any Clock<Duration> = ContinuousClock()) {
         self.clock = clock
@@ -242,7 +257,7 @@ final class MouseController: NSObject {
     ///
     /// `.inVisibleRect` means the rect argument is ignored and AppKit keeps it in sync with the
     /// visible rect, so a resize needs no `updateTrackingAreas` override on the view.
-    /// `.activeAlways` so hovering an inactive window still updates the cursor and OSC 8 underline.
+    /// `.activeAlways` so hovering an inactive window still updates the cursor and link underline.
     func attach(to view: GhosttyTerminalView) {
         detach()
         self.view = view
@@ -297,6 +312,9 @@ final class MouseController: NSObject {
         guard geometry != pushedGeometry else { return false }
         pushedGeometry = geometry
         view.terminal.setMousePixelGeometry(geometry)
+        // The underline's layers were placed by the old geometry, and a cell's pixels have moved.
+        screenGeneration &+= 1
+        clearLinkOverlay()
         return true
     }
 
@@ -305,7 +323,12 @@ final class MouseController: NSObject {
     /// Clamping matters for the release of a drag that ended outside the view: AppKit still routes
     /// that `mouseUp` here, with a negative or over-wide location.
     func surfacePoint(of event: NSEvent, in view: GhosttyTerminalView) -> SurfacePoint {
-        let pixels = view.devicePixels(of: event)
+        surfacePoint(atWindowLocation: event.locationInWindow, in: view)
+    }
+
+    /// `surfacePoint(of:in:)` for `location`, a point in the window's coordinates.
+    func surfacePoint(atWindowLocation location: CGPoint, in view: GhosttyTerminalView) -> SurfacePoint {
+        let pixels = view.devicePixels(atWindowLocation: location)
         let geometry = pushedGeometry ?? pixelGeometry(of: view)
         let maxX = Double(max(1, geometry.screenWidth)) - 1
         let maxY = Double(max(1, geometry.screenHeight)) - 1
@@ -464,14 +487,9 @@ final class MouseController: NSObject {
         let mods = terminalModifiers(from: event.modifierFlags)
         let position = surfacePoint(of: event, in: view)
 
-        // ⌘-hover: underline the OSC 8 run under the pointer and offer the pointing hand.
-        if mods.contains(.command), view.onOpenLink != nil {
-            if let run = terminal.hyperlinkRun(at: position) {
-                showLinkOverlay(run: run, in: view)
-                NSCursor.pointingHand.set()
-                return true
-            }
-            clearLinkOverlay()
+        // ⌘-hover: underline the link under the pointer and offer the pointing hand.
+        if mods.contains(.command) {
+            if showCommandHover(at: position, in: view) { return true }
         } else if hoveredLink != nil {
             clearLinkOverlay()
         }
@@ -482,6 +500,210 @@ final class MouseController: NSObject {
         send(terminal.encodeMouse(
             MousePress(action: .motion, button: nil, mods: mods, position: position)))
         return true
+    }
+
+    // MARK: ⌘-hover
+
+    /// Where the pointer is, in the window's coordinates, for a ⌘-hover that begins with no move.
+    /// Replaced in tests, which cannot move the pointer.
+    var pointerLocation: @MainActor (GhosttyTerminalView) -> CGPoint? = { view in
+        view.window?.mouseLocationOutsideOfEventStream
+    }
+
+    /// The modifier keys changed (the view's `flagsChanged`). Pressing Command underlines the link
+    /// already under the pointer, and letting it go clears the underline, so neither waits for the
+    /// pointer to move, as in SwiftTerm. A press reads the screen afresh, so whatever changed it
+    /// unseen since the last read cannot outlast the press.
+    func modifierFlagsChanged(_ flags: NSEvent.ModifierFlags) {
+        guard let view else { return }
+        guard flags.contains(.command), view.onOpenLink != nil || view.onCommandHoverText != nil,
+              let location = pointerLocation(view), view.isPointerTarget(atWindowLocation: location) else {
+            if hoveredLink != nil { clearLinkOverlay() }
+            return
+        }
+        syncGeometry()
+        hoverRead = nil
+        hoverLookup = nil
+        showCommandHover(at: surfacePoint(atWindowLocation: location, in: view), in: view)
+    }
+
+    /// What the viewport shows may have changed (`screenGeneration`). The ⌘-hover's reads and
+    /// lookups are dropped, and an underline the screen no longer bears out is cleared: the next
+    /// move looks again. One that still stands stays, so output elsewhere on the screen, a
+    /// spinner's, say, does not take it away under a still pointer, and its lookup holds for the
+    /// screen as it is now, so a move within its cell does not look again.
+    func screenMayHaveChanged() {
+        screenGeneration &+= 1
+        guard hoveredLink != nil else { return }
+        if let view, let hoverLookup, underlineStands(hoverLookup, in: view) {
+            self.hoverLookup?.generation = screenGeneration
+            return
+        }
+        clearLinkOverlay()
+    }
+
+    /// Underlines the link under `position` and offers the pointing hand: the OSC 8 run there, or
+    /// with none, the link the host finds in the plain text there (`onCommandHoverText`). With
+    /// neither, clears the underline and returns false.
+    ///
+    /// A move within the cell last looked up, on the same screen, looks up nothing: the underline
+    /// already shows what is there.
+    @discardableResult
+    private func showCommandHover(at position: SurfacePoint, in view: GhosttyTerminalView) -> Bool {
+        let cell = hoverCell(at: position)
+        let lookup: HoverLookup
+        let isNew: Bool
+        if let last = hoverLookup, let cell, last.cell == cell, last.generation == screenGeneration {
+            lookup = last
+            isNew = false
+        } else {
+            lookup = lookUpHover(at: position, cell: cell, in: view)
+            hoverLookup = lookup
+            isNew = true
+        }
+        guard let link = lookup.link else {
+            clearLinkOverlay()
+            return false
+        }
+        if isNew || hoveredLink == nil { showLinkOverlay(link: link.text, spans: link.spans, in: view) }
+        NSCursor.pointingHand.set()
+        return true
+    }
+
+    /// The link under `position`: the OSC 8 run there, or with none, the link the host finds in
+    /// the plain text there. An OSC 8 cell is its link's alone, so with no `onOpenLink` it has none.
+    private func lookUpHover(at position: SurfacePoint, cell: HoverCell?, in view: GhosttyTerminalView) -> HoverLookup {
+        var lookup = HoverLookup(cell: cell, generation: screenGeneration, position: position)
+        guard view.onOpenLink != nil || view.onCommandHoverText != nil else { return lookup }
+        if let link = hyperlink(at: position, in: view) {
+            lookup.link = view.onOpenLink == nil ? nil : link
+        } else if let found = plainTextLink(at: position, cell: cell, in: view) {
+            lookup.link = found.link
+            lookup.rows = found.rows
+        }
+        return lookup
+    }
+
+    /// Whether the screen as it is now still bears out the underline `lookup` drew: the same OSC 8
+    /// run at its position or, for a link found in the plain text, the same text on the rows it
+    /// is drawn on and on any row either side it could have run on into since.
+    private func underlineStands(_ lookup: HoverLookup, in view: GhosttyTerminalView) -> Bool {
+        guard let link = lookup.link else { return false }
+        guard let rows = lookup.rows else { return hyperlink(at: lookup.position, in: view) == link }
+        let now = view.terminal.withLocked { state in
+            rows.map { GhosttyClickedText.Row(state.gridRow(.viewport, $0.row)) }
+        }
+        return now == rows.map { $0.text }
+    }
+
+    /// The OSC 8 run under `position`, as a one-row link.
+    private func hyperlink(at position: SurfacePoint, in view: GhosttyTerminalView) -> GhosttyTextLink? {
+        guard let run = view.terminal.hyperlinkRun(at: position) else { return nil }
+        let columns = Int(run.columns.lowerBound)..<(Int(run.columns.upperBound) + 1)
+        return GhosttyTextLink(text: run.uri, spans: [GhosttyTextLink.Span(row: Int(run.row), columns: columns)])
+    }
+
+    /// The link the host finds in the plain text under `position` (`onCommandHoverText`), its
+    /// spans moved onto the viewport's rows and cut to them, with the text of the viewport rows
+    /// it is on and of those either side it could run on into, as read. nil with no hook, over an
+    /// OSC 8 cell, and when the host finds nothing on view.
+    private func plainTextLink(
+        at position: SurfacePoint, cell: HoverCell?, in view: GhosttyTerminalView
+    ) -> (link: GhosttyTextLink, rows: [(row: Int, text: GhosttyClickedText.Row)])? {
+        guard let findLink = view.onCommandHoverText,
+              let (hovered, hoveredRow, rows) = hoveredText(at: position, cell: cell, in: view),
+              let link = findLink(hovered) else { return nil }
+        // The text read holds rows past the viewport's edges too, so its rows are shifted by the
+        // ones above the viewport: its hovered row is the viewport's.
+        let shift = hovered.row - hoveredRow
+        let spans = link.spans.compactMap { span -> GhosttyTextLink.Span? in
+            let row = span.row - shift
+            guard (0..<rows).contains(row), !span.columns.isEmpty else { return nil }
+            return GhosttyTextLink.Span(row: row, columns: span.columns)
+        }
+        guard let first = spans.first, let last = spans.last else { return nil }
+        // The rows either side the link could run on into, as SwiftTerm joins rows: the one above
+        // when it starts its row's text, and the one below when it ends its row's text.
+        var top = first.row, bottom = last.row
+        let firstRow = Array(hovered.rows[first.row + shift].text)
+        if let start = firstRow.firstIndex(where: { $0 != "\0" && !$0.isWhitespace }), first.columns.lowerBound <= start {
+            top -= 1
+        }
+        let lastRow = Array(hovered.rows[last.row + shift].text)
+        if let end = lastRow.lastIndex(where: { $0 != "\0" }), last.columns.upperBound > end {
+            bottom += 1
+        }
+        let checked = max(0, top)...min(rows - 1, bottom)
+        return (link: GhosttyTextLink(text: link.text, spans: spans),
+                rows: checked.map { (row: $0, text: hovered.rows[$0 + shift]) })
+    }
+
+    /// The plain text around `position` for the host, with the cell under it marked, the viewport
+    /// row of that cell, and the viewport's height. nil over an OSC 8 cell and with no geometry.
+    ///
+    /// The screen is read once for each value of `screenGeneration`, under the terminal's lock:
+    /// the viewport's rows and those its lines run on into. A move to another cell of a screen
+    /// already read marks that cell in the same read.
+    private func hoveredText(
+        at position: SurfacePoint, cell: HoverCell?, in view: GhosttyTerminalView
+    ) -> (text: GhosttyClickedText, row: Int, rows: Int)? {
+        guard let cell else { return nil }
+        if let read = hoverRead, read.generation == screenGeneration {
+            var text = read.text
+            let row = min(max(cell.row, 0), read.viewportRows - 1)
+            text.column = min(max(cell.column, 0), text.columns - 1)
+            text.row = read.rowsAbove + row
+            return (text, row, read.viewportRows)
+        }
+        guard case .text(let text)? = view.terminal.commandClickTarget(at: position, readsText: true) else {
+            return nil
+        }
+        screenReads += 1
+        let rows = view.terminal.withLocked { $0.rows }
+        // The row the terminal marked, by the same rule: the cell's, clamped onto the grid.
+        let row = min(max(cell.row, 0), rows - 1)
+        let rowsAbove = text.row - row
+        // Every row of the viewport is in the read, or it is not one this can mark cells in.
+        guard rows > 0, rowsAbove >= 0, rowsAbove + rows <= text.rows.count else { return nil }
+        hoverRead = HoverRead(text: text, rowsAbove: rowsAbove, viewportRows: rows, generation: screenGeneration)
+        return (text, row, rows)
+    }
+
+    /// The cell under `position`, by the rule the terminal's own lookups use
+    /// (`SelectionController.gridPoint(at:)`) but not yet clamped onto the grid. nil with no
+    /// geometry pushed.
+    private func hoverCell(at position: SurfacePoint) -> HoverCell? {
+        guard let geometry = pushedGeometry, geometry.cellWidth > 0, geometry.cellHeight > 0 else { return nil }
+        let column = ((position.x - Double(geometry.paddingLeft)) / Double(geometry.cellWidth)).rounded(.down)
+        let row = ((position.y - Double(geometry.paddingTop)) / Double(geometry.cellHeight)).rounded(.down)
+        guard column.isFinite, row.isFinite else { return nil }
+        return HoverCell(column: Int(column), row: Int(row))
+    }
+
+    /// A cell of the viewport, as `hoverCell(at:)` finds it.
+    private struct HoverCell: Equatable {
+        var column: Int
+        var row: Int
+    }
+
+    /// One read of the screen's text, on screen `generation`: the viewport's rows and those its
+    /// lines run on into, `rowsAbove` of them above the viewport, which is `viewportRows` high.
+    private struct HoverRead {
+        var text: GhosttyClickedText
+        var rowsAbove: Int
+        var viewportRows: Int
+        var generation: Int
+    }
+
+    /// One ⌘-hover lookup, at `position` in `cell` on screen `generation`, and what it found.
+    private struct HoverLookup {
+        var cell: HoverCell?
+        var generation: Int
+        var position: SurfacePoint
+        var link: GhosttyTextLink?
+        /// For a link found in the plain text, the viewport rows `underlineStands` checks, with
+        /// their text as read. nil for an OSC 8 link.
+        var rows: [(row: Int, text: GhosttyClickedText.Row)]?
     }
 
     // MARK: Wheel
@@ -547,6 +769,7 @@ final class MouseController: NSObject {
             let sent = sendBounded(key, count: count, at: timestamp)
             return sent > 0 ? .cursorKeys(key: key, count: sent) : .none
         case .scrolledViewport:
+            screenMayHaveChanged()
             view.requestFrame()
         case .none:
             break
@@ -693,6 +916,7 @@ final class MouseController: NSObject {
         if scrolled == 0 {
             stopAutoscroll()
         } else {
+            screenMayHaveChanged()
             view.requestFrame()
         }
     }
@@ -752,39 +976,47 @@ final class MouseController: NSObject {
         pasteboard.canReadItem(withDataConformingToTypes: [UTType.image.identifier])
     }
 
-    // MARK: - OSC 8 overlay
+    // MARK: - Link underline
 
-    /// Draws (or moves) the hover underline under the link run.
+    /// One row of the hover underline: its layer and the viewport cells it is drawn under.
+    private struct LinkOverlay {
+        var span: GhosttyTextLink.Span
+        let layer: CALayer
+    }
+
+    /// Draws (or moves) the hover underline under `spans`, viewport cells, one layer per row.
     ///
-    /// A `CALayer` sublayer rather than a renderer feature: the underline is transient hover
+    /// `CALayer` sublayers rather than a renderer feature: the underline is transient hover
     /// decoration, not terminal content, and this keeps the frame path untouched.
-    private func showLinkOverlay(
-        run: (uri: String, columns: ClosedRange<UInt16>, row: UInt32),
-        in view: GhosttyTerminalView
-    ) {
-        hoveredLink = run.uri
+    private func showLinkOverlay(link: String, spans: [GhosttyTextLink.Span], in view: GhosttyTerminalView) {
+        hoveredLink = link
         guard let host = view.layer else { return }
         let scale = max(1, Double(view.backingScale))
         let grid = view.gridGeometry
         let cellW = Double(grid.cellSizePx.x), cellH = Double(grid.cellSizePx.y)
         let thickness = max(1.0, (cellH / 14).rounded())
 
-        let x = (Double(grid.originPx.x) + Double(run.columns.lowerBound) * cellW) / scale
-        let width = Double(run.columns.count) * cellW / scale
-        let y = (Double(grid.originPx.y) + Double(run.row + 1) * cellH - thickness) / scale
-
-        let layer = linkOverlay ?? {
-            let created = CALayer()
-            created.actions = ["position": NSNull(), "bounds": NSNull(), "hidden": NSNull()]
-            created.zPosition = 1
-            host.addSublayer(created)
-            linkOverlay = created
-            return created
-        }()
-        layer.contentsScale = view.backingScale
-        layer.backgroundColor = NSColor.linkColor.cgColor
-        layer.frame = CGRect(x: x, y: y, width: width, height: thickness / scale)
-        layer.isHidden = false
+        while linkOverlays.count > spans.count {
+            linkOverlays.removeLast().layer.removeFromSuperlayer()
+        }
+        for (index, span) in spans.enumerated() {
+            if index == linkOverlays.count {
+                let created = CALayer()
+                created.actions = ["position": NSNull(), "bounds": NSNull(), "hidden": NSNull()]
+                created.zPosition = 1
+                host.addSublayer(created)
+                linkOverlays.append(LinkOverlay(span: span, layer: created))
+            }
+            linkOverlays[index].span = span
+            let x = (Double(grid.originPx.x) + Double(span.columns.lowerBound) * cellW) / scale
+            let width = Double(span.columns.count) * cellW / scale
+            let y = (Double(grid.originPx.y) + Double(span.row + 1) * cellH - thickness) / scale
+            let layer = linkOverlays[index].layer
+            layer.contentsScale = view.backingScale
+            layer.backgroundColor = NSColor.linkColor.cgColor
+            layer.frame = CGRect(x: x, y: y, width: width, height: thickness / scale)
+            layer.isHidden = false
+        }
     }
 
     private func clearLinkOverlay() {
@@ -792,12 +1024,15 @@ final class MouseController: NSObject {
         // pointing hand sticks until the pointer leaves the view entirely.
         if hoveredLink != nil, view?.window?.isKeyWindow ?? false { NSCursor.iBeam.set() }
         hoveredLink = nil
-        linkOverlay?.removeFromSuperlayer()
-        linkOverlay = nil
+        for overlay in linkOverlays { overlay.layer.removeFromSuperlayer() }
+        linkOverlays = []
     }
 
-    /// The hover underline, while one is shown. Tests only.
-    var linkUnderlineLayer: CALayer? { linkOverlay }
+    /// The viewport cells the hover underline is drawn under, one span per row, top row first:
+    /// those of its layers that are in the view's layer and showing. Tests only.
+    var underlinedSpans: [GhosttyTextLink.Span] {
+        linkOverlays.filter { $0.layer.superlayer != nil && !$0.layer.isHidden }.map(\.span)
+    }
 
     // MARK: - Plumbing
 
