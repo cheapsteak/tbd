@@ -24,7 +24,7 @@ fork of it. The work runs in four streams:
   - a new terminal identity. TBD keeps its DA1, DA2 and XTVERSION answers byte for byte
     ("Device identity").
   - ligatures and BiDi, which stay unsupported
-  - porting tmux control mode, which issue #851 deletes together with tmux
+  - porting tmux control mode, which issue #851 deletes before the rest of tmux
 
 ## Why
 
@@ -80,10 +80,11 @@ fork of it. The work runs in four streams:
 ## B – tmux leaves
 
 - **The work** – B continues issue #851 from where it stands: any Phase 2 item still open,
-  then Phase 4, which deletes the tmux legs and control mode in one step, then Phase 5,
-  which removes the test fence and the CI installs.
-- **Sessions still on tmux** – Phase 4 waits until no tmux rows remain, which TBD cannot
-  observe on other installs. The
+  then Phase 4, then Phase 5, which removes the test fence and the CI installs. Phase 4
+  runs in two steps. The first deletes tmux control mode, and a session that used it
+  draws through the standard tmux panel. The second deletes the tmux legs.
+- **Sessions still on tmux** – The second step waits until no tmux rows remain, which TBD
+  cannot observe on other installs. The
   [migration design](2026-10-11-holder-transport-migration-design.md) covers that case: a
   person moves a session with the migrate action, and after the tmux path is gone a
   leftover row refuses to wake, with a reason that names the action.
