@@ -139,6 +139,18 @@ enum PhoneSessionStatus {
     static let cannotTakeMessagesReason = "This session cannot take messages."
     static let answerTurnedOffReason = "Answering prompts is turned off in TBD's settings on the laptop."
     static let answerSettingUnreadReason = "TBD could not read its setting for answering prompts."
+    /// Why a running session on the tmux transport offers no switch: the
+    /// switch restarts the session's process, and TBD no longer starts
+    /// processes on tmux. A fork opens a new tab on the pty holder.
+    static let switchOnTmuxReason =
+        "This session runs on tmux, so it cannot switch profiles in place. Fork it to the profile instead."
+    /// Why a session parked on the tmux transport takes no message: sending
+    /// to a parked session wakes it, and TBD wakes only sessions on the pty
+    /// holder.
+    static let parkedOnTmuxReason =
+        "This session is parked on tmux, which TBD no longer resumes sessions on. "
+        + "Move it to the pty holder on the laptop first: Move to Holder in its tab's menu, "
+        + "or `tbd terminal migrate`."
 
     /// A local session's capabilities. A Claude session has all six; a Codex
     /// session shows its status only. A tab in a remote lane's row has none,
@@ -154,6 +166,14 @@ enum PhoneSessionStatus {
     /// running one, and neither wakes it: the switch moves the parked session
     /// to the profile, to resume there at its next wake, and the fork copies
     /// its conversation into a new tab and leaves it parked.
+    ///
+    /// **A session still on the tmux transport** loses what TBD no longer
+    /// does there, as the laptop's tab menu and limit banner do: a running
+    /// one cannot switch in place (`switchOnTmuxReason`), since the switch
+    /// restarts its process, though it can still fork; and a parked one takes
+    /// no message or model (`parkedOnTmuxReason`), since sending would wake it
+    /// and only a holder session wakes. A parked one still switches, which
+    /// moves the row and starts nothing.
     ///
     /// `answer` also follows the laptop's setting for answering prompts,
     /// `promptAnswerEnabled`, nil when it could not be read
@@ -180,17 +200,21 @@ enum PhoneSessionStatus {
                 transcript: unavailable(codexTranscriptReason), send: statusOnly, answer: statusOnly,
                 switchProfile: statusOnly, fork: statusOnly, model: statusOnly)
         }
+        let onHolder = terminal.transport == .holder
         let messages: PhoneCapability
         switch ComposerState.resolve(terminal: terminal, isRemoteWorktree: isRemoteWorktree) {
         case .hidden, .unavailable:
             messages = unavailable(cannotTakeMessagesReason)
+        case .notRunning where !onHolder:
+            messages = unavailable(parkedOnTmuxReason)
         case .running, .notRunning, .blocked:
             messages = available
         }
+        let switchProfile = onHolder || terminal.isParked ? available : unavailable(switchOnTmuxReason)
         return PhoneCapabilities(
             transcript: available, send: messages,
             answer: answerCapability(available, promptAnswerEnabled: promptAnswerEnabled),
-            switchProfile: available, fork: available, model: messages)
+            switchProfile: switchProfile, fork: available, model: messages)
     }
 
     /// A session's `answer` under the laptop's setting for answering prompts

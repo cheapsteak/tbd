@@ -91,15 +91,13 @@ struct PhoneSendTests {
         #expect(h.actions.calls == [FakeSessionActions.Call(method: .wake, deviceID: h.peer.deviceID)])
     }
 
-    /// A long message goes to the wake whole, whatever transport the parked
-    /// row names: the phone holds it to no first-message limit of its own. A
-    /// wake respawns on the pty holder, and a tmux row's wake is the daemon's
-    /// to refuse. 20,000 bytes is past the roughly 16 KB a tmux command
-    /// could carry.
-    @Test(arguments: [TerminalTransport.tmux, .holder])
-    func aLongWakeMessageGoesToTheWakeWhole(_ transport: TerminalTransport) async throws {
+    /// A long message goes to the wake whole: the phone holds it to no
+    /// first-message limit of its own, since a wake respawns on the pty
+    /// holder. 20,000 bytes is past the roughly 16 KB a tmux command could
+    /// carry.
+    @Test func aLongWakeMessageGoesToTheWakeWhole() async throws {
         let h = try await PhoneServiceHarness.make()
-        let terminal = try await h.seedTerminal(transport: transport)
+        let terminal = try await h.seedTerminal(transport: .holder)
         try await h.park(terminal.id)
         h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
         let outbox = await h.connect()
@@ -118,7 +116,7 @@ struct PhoneSendTests {
     /// the session, not carried in a command.
     @Test func aRunningTmuxSessionTakesALongMessage() async throws {
         let h = try await PhoneServiceHarness.make()
-        let terminal = try await h.seedTerminal()
+        let terminal = try await h.seedTerminal(transport: .tmux)
         let outbox = await h.connect()
         let message = String(repeating: "a", count: 20_000)
 
@@ -128,6 +126,32 @@ struct PhoneSendTests {
         #expect(reply.error == nil)
         let sends = h.actions.sends.map(SendShape.init)
         #expect(sends == [Self.composerSend(terminal.id, message)])
+    }
+
+    /// A session parked on tmux takes no message and no model: either would
+    /// wake it, and only a holder session wakes. Both are `unsupported` with
+    /// the reason the sessions list shows, and no wake reaches the daemon.
+    @Test(arguments: [false, true])
+    func aSessionParkedOnTmuxIsRefusedBeforeAnyWake(setsModel: Bool) async throws {
+        let h = try await PhoneServiceHarness.make()
+        let terminal = try await h.seedTerminal(transport: .tmux)
+        try await h.park(terminal.id)
+        h.actions.respond(to: .wake, with: try RPCResponse(result: TerminalWakeResult(woken: true)))
+        let outbox = await h.connect()
+        let session = PhoneSessionRef.local(terminalID: terminal.id)
+
+        let reply: PhoneTestReply
+        if setsModel {
+            reply = try await h.request(
+                .sessionSetModel, params: SessionSetModelParams(session: session, model: "opus"), on: outbox).reply
+        } else {
+            reply = try await h.request(.messageSend, params: Self.message(session, "hi"), on: outbox).reply
+        }
+
+        #expect(reply.error == PhoneAppError(code: .unsupported, message: PhoneSessionStatus.parkedOnTmuxReason))
+        #expect(h.actions.wakes.isEmpty)
+        #expect(h.actions.sends.isEmpty)
+        #expect(h.actions.calls.isEmpty)
     }
 
     @Test func aWakeThatFindsItRunningIsRefused() async throws {

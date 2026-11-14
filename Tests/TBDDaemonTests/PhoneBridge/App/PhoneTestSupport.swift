@@ -553,11 +553,12 @@ struct PhoneServiceHarness: Sendable {
     /// worktree, or with `inRemoteLane` a remote lane's row, whose location
     /// is a provider's session. A Claude terminal has a Claude session ID, so
     /// it can be parked. `profileID` is the terminal's model profile, and
-    /// `transport` the one it was born on; a holder row has empty tmux IDs,
-    /// as it does when TBD makes one.
+    /// `transport` the one it was born on: the pty holder unless a test asks
+    /// for tmux, since TBD opens every new session on the holder. A holder
+    /// row has empty tmux IDs, as it does when TBD makes one.
     func seedTerminal(
         kind: TerminalKind = .claude, inRemoteLane: Bool = false, profileID: UUID? = nil,
-        transport: TerminalTransport = .tmux
+        transport: TerminalTransport = .holder
     ) async throws -> TBDShared.Terminal {
         let repo = try await db.repos.create(
             path: "/acme/widgets-\(UUID().uuidString)", displayName: "acme", defaultBranch: "main")

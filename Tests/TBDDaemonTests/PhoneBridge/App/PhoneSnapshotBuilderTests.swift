@@ -45,13 +45,19 @@ struct PhoneSnapshotBuilderTests {
             parentWorktreeID: parent, location: location)
     }
 
+    /// A terminal on `transport`: the pty holder unless a test asks for
+    /// tmux, since TBD opens every new session on the holder. A holder row
+    /// has empty tmux IDs, as it does when TBD makes one.
     private static func terminal(
         in worktreeID: UUID, kind: TerminalKind?, createdAt: Date = base,
-        claudeSessionID: String? = "acme-session", profileID: UUID? = nil
+        claudeSessionID: String? = "acme-session", profileID: UUID? = nil,
+        transport: TerminalTransport = .holder
     ) -> TBDShared.Terminal {
-        TBDShared.Terminal(
-            worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1", createdAt: createdAt,
-            claudeSessionID: claudeSessionID, profileID: profileID, kind: kind)
+        let onHolder = transport == .holder
+        return TBDShared.Terminal(
+            worktreeID: worktreeID, tmuxWindowID: onHolder ? "" : "@1", tmuxPaneID: onHolder ? "" : "%1",
+            createdAt: createdAt, claudeSessionID: claudeSessionID, profileID: profileID, kind: kind,
+            transport: transport)
     }
 
     private static func remote(
@@ -287,6 +293,37 @@ struct PhoneSnapshotBuilderTests {
             switchProfile: Self.available, fork: Self.available, model: Self.available)
         #expect(sessions[0].capabilities == everything)
         #expect(sessions[1].capabilities == everything)
+    }
+
+    /// A Claude session still on the tmux transport loses what TBD no longer
+    /// does there, as the laptop's tab menu does. A running one cannot switch
+    /// in place, since the switch restarts its process, but can fork; a
+    /// parked one takes no message or model, since either would wake it, but
+    /// can switch, which moves the row and starts nothing.
+    @Test func aTmuxSessionOffersOnlyWhatTmuxStillDoes() throws {
+        let a = UUID()
+        let w = Self.worktree("fix-login", repo: a)
+        let running = Self.terminal(in: w.id, kind: .claude, transport: .tmux)
+        var parked = Self.terminal(
+            in: w.id, kind: .claude, createdAt: Self.base.addingTimeInterval(1), transport: .tmux)
+        parked.hibernatedAt = Self.base
+
+        let s = PhoneSnapshotBuilder.build(Self.input(
+            repos: [Repo(id: a, path: "/tmp/acme", displayName: "acme")], worktrees: [w],
+            terminals: [running, parked]))
+
+        let sessions = try Self.row(w.id.uuidString, in: s).sessions
+        try #require(sessions.count == 2)
+        let noSwitch = PhoneCapability(available: false, reason: PhoneSessionStatus.switchOnTmuxReason)
+        #expect(sessions[0].capabilities == PhoneCapabilities(
+            transcript: Self.available, send: Self.available, answer: Self.available,
+            switchProfile: noSwitch, fork: Self.available, model: Self.available))
+        let noWake = PhoneCapability(available: false, reason: PhoneSessionStatus.parkedOnTmuxReason)
+        #expect(sessions[1].capabilities == PhoneCapabilities(
+            transcript: Self.available, send: noWake, answer: Self.available,
+            switchProfile: Self.available, fork: Self.available, model: noWake))
+        #expect(PhoneSessionStatus.parkedOnTmuxReason.utf8.count <= PhoneText.fieldLimit)
+        #expect(PhoneSessionStatus.switchOnTmuxReason.utf8.count <= PhoneText.fieldLimit)
     }
 
     @Test func everyStateMapsToItsChip() {
