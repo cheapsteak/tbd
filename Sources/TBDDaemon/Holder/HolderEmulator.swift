@@ -82,14 +82,17 @@ protocol HolderEmulator: AnyObject, Sendable {
     ///
     /// Not called where no viewer read the pty, because there the child's
     /// next bytes do finish the sequence: a cancelled attach, a descriptor
-    /// delivered to an app already confirmed gone, and a detach with an empty
-    /// preamble, which the app sends when it never received the descriptor or
-    /// tore its view down before its reader started. Two cases come out the
-    /// other way, as the lesser harm. An app that refuses its ack after its
-    /// reader started also detaches with an empty preamble, so the sequence
-    /// is kept although its viewer read. A claim sweep after a lost attach
-    /// reply abandons a sequence nobody read. Telling either apart needs the
-    /// app to report whether it read, a protocol change outside this flag.
+    /// delivered to an app already confirmed gone while its attach was still
+    /// pending, and a detach with an empty preamble, which the app sends when
+    /// it never received the descriptor or tore its view down before its
+    /// reader started. Two kinds of case come out the other way, as the lesser
+    /// harm: an empty preamble from a viewer that read keeps the sequence, and
+    /// a death pass or a sweep after an attach nobody read abandons it. The
+    /// first comes from an app whose ack is refused or lost after its reader
+    /// started, and from the app's libghostty engine when its snapshot writer
+    /// throws; the second from an unacknowledged attach whose reply was lost,
+    /// or a lost empty-preamble release. Telling them apart needs the app to
+    /// report whether it read, a protocol change outside this flag.
     func abandonOpenSequence()
 
     /// The kind this emulator is. Fixed at construction; it can differ from

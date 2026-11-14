@@ -200,16 +200,20 @@ the snapshot could otherwise end only by dropping the rest.
   feeds a muted CAN and an OSC 8 close instead, since a cut `ESC]8;;URL` that CAN
   dispatches would leave its link on the pen, but only when its caller says a viewer may
   have read the pty (`viewerMayHaveRead`):
-  - **Abandoned** – an app that died holding the pty (`seizeFromDeadApp`) and a claim
-    sweep (`reconcileClaims`).
+  - **Abandoned** – an app that died holding the pty (`seizeFromDeadApp`), a claim
+    sweep (`reconcileClaims`), and a late delivery (`takeBackLateDelivery`) whose attach
+    was already a claim, from an ack or a ready-timeout.
   - **Kept, for the child's next bytes to finish** – a detach with an empty preamble,
     which the app sends when it never received the descriptor or tore its view down
-    before its reader started; a descriptor delivered to an app already confirmed gone
-    (`takeBackLateDelivery`); and a cancelled attach.
-  - **The lesser harm** – an app that refuses its ack after its reader started also
-    detaches with an empty preamble, so its sequence is kept although it read, and a
-    claim sweep after a lost attach reply abandons a sequence nobody read. Telling either
-    apart needs the app to report whether it read, a protocol change outside this flag.
+    before its reader started; a late delivery whose attach was still pending; and a
+    cancelled attach.
+  - **The lesser harm** – an empty preamble from a viewer that read keeps the sequence,
+    and a death pass or a sweep after an attach nobody read abandons it. The first comes
+    from an app whose ack is refused or lost after its reader started, and from the
+    app's libghostty engine when its snapshot writer throws; the second from an
+    unacknowledged attach whose reply was lost, or a lost empty-preamble release.
+    Telling them apart needs the app to report whether it read, a protocol change
+    outside this flag.
 - **No binary snapshot** – libghostty's own snapshot format is outside its 1.0 ABI promise,
   and an update hands over between a daemon and an app built from different commits.
 - **Receivers** – until D, a person who turned the app engine off still views with

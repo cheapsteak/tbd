@@ -114,10 +114,11 @@ struct HolderAppDeathSeizureTests {
     }
 
     /// The twin that keeps the sequence. A descriptor delivered to an app
-    /// already confirmed gone was never read, so nothing finished the
-    /// sequence the attach left the daemon's parser inside, and the child's
-    /// next bytes are its tail (`viewerMayHaveRead` false): `h` completes
-    /// `ESC[4h`, and only `X` prints.
+    /// already confirmed gone, while its attach was still pending, was never
+    /// read, so nothing finished the sequence the attach left the daemon's
+    /// parser inside, and the child's next bytes are its tail
+    /// (`viewerMayHaveRead` false): `h` completes `ESC[4h`, and only `X`
+    /// prints.
     @Test func aLateDeliveryKeepsTheSequenceForTheChildToFinish() async throws {
         let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: .ghostty)
         defer { fixture.tearDown() }
@@ -141,6 +142,41 @@ struct HolderAppDeathSeizureTests {
         let screen = await resumed.renderScreen()
         #expect(screen.contains("X") && !screen.contains("hX"), """
             the take-back abandoned a sequence no viewer read, so its tail printed: \
+            \(screen.debugDescription)
+            """)
+    }
+
+    /// The late delivery's other arm, which `recordAttachRecipient` keeps
+    /// although no production ordering reaches it; the test acks before the
+    /// record to get there. The attach is already a claim, with no owner for
+    /// the death's pass to match, so the record is what takes it back. A
+    /// viewer may have read that pty, so the take-back abandons the sequence
+    /// (`viewerMayHaveRead` true): `hX` prints.
+    @Test func aLateDeliveryToAnAcknowledgedAttachAbandonsTheSequence() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: .ghostty)
+        defer { fixture.tearDown() }
+        await fixture.reader.feedChildOutputForTesting(Data("\u{1b}[4".utf8))
+
+        let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        try await fixture.registry.confirmAttach(
+            terminalID: fixture.terminalID, generation: vend.generation)
+        Darwin.close(vend.ptyFD)
+        await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == vend.generation,
+                "the death's pass took a claim that named no owner")
+        let takeBack = try #require(
+            await fixture.registry.recordAttachRecipient(
+                HandbackFixture.viewerApp, terminalID: fixture.terminalID,
+                generation: vend.generation),
+            "a delivery to an app already confirmed gone started no take-back")
+        await takeBack.value
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining, "the daemon took the session back without reading it")
+        await resumed.feedChildOutputForTesting(Data("hX".utf8))
+        let screen = await resumed.renderScreen()
+        #expect(screen.contains("hX"), """
+            the child's next bytes finished a sequence a viewer may already have finished: \
             \(screen.debugDescription)
             """)
     }

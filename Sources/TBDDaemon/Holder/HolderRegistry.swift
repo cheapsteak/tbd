@@ -3040,7 +3040,10 @@ actor HolderRegistry {
     ) -> Task<Void, Never>? {
         guard let recipient else { return nil }
         let recipientIsGone = appsConfirmedGone.contains(recipient)
+        let viewerMayHaveRead: Bool
         if var pending = pendingAttaches[terminalID], pending.generation == generation {
+            // Still pending, so the dead app never read the descriptor.
+            viewerMayHaveRead = false
             pending.recipient = recipient
             if recipientIsGone {
                 // Its acknowledgement cannot come now, so it is settled the
@@ -3059,7 +3062,9 @@ actor HolderRegistry {
             // after it; and a death's pass settles only attaches whose
             // recipient is already recorded. Kept so that an ordering that does
             // reach it still records the owner a death needs, rather than
-            // leaving the claim ownerless.
+            // leaving the claim ownerless. A claim came from an ack or a
+            // ready-timeout, so its viewer may have read.
+            viewerMayHaveRead = true
             viewerAttachments[terminalID]?.owner = recipient
         } else {
             return nil
@@ -3074,7 +3079,8 @@ actor HolderRegistry {
             """)
         return Task {
             await self.takeBackLateDelivery(
-                terminalID: terminalID, generation: generation, recipient: recipient)
+                terminalID: terminalID, generation: generation, recipient: recipient,
+                viewerMayHaveRead: viewerMayHaveRead)
         }
     }
 
@@ -3082,14 +3088,16 @@ actor HolderRegistry {
     /// an app already confirmed gone: that one session, under the generation
     /// the record named. Generation-checked through `seizeFromDeadApp`, so an
     /// attach that moved on before this ran — released, or re-attached by a
-    /// live app — is left alone.
+    /// live app — is left alone. `viewerMayHaveRead` is the record's: false
+    /// for an attach still pending, true for one already a claim.
     private func takeBackLateDelivery(
-        terminalID: UUID, generation: UInt64, recipient: ProcessIdentity
+        terminalID: UUID, generation: UInt64, recipient: ProcessIdentity,
+        viewerMayHaveRead: Bool
     ) async {
         do {
-            // Delivered to an app already dead, so no viewer read the pty.
             try await seizeFromDeadApp(
-                terminalID: terminalID, generation: generation, viewerMayHaveRead: false)
+                terminalID: terminalID, generation: generation,
+                viewerMayHaveRead: viewerMayHaveRead)
             Self.logger.notice(
                 """
                 took session \(terminalID.uuidString, privacy: .public) back from attach \
@@ -3202,18 +3210,23 @@ actor HolderRegistry {
     /// inside a sequence, and `viewerMayHaveRead` says whose it is to finish.
     /// True, a viewer may have read the pty and finished it, so the reader
     /// abandons it first (`HolderReader.abandonOpenSequence`): an app's death
-    /// (`seizeFromDeadApp`) and a claim sweep (`reconcileClaims`). False, no
-    /// viewer read the pty and the child's next bytes finish it, so it is kept:
-    /// a detach with an empty preamble, which the app sends when it never
-    /// received the descriptor or tore its view down before its reader started,
-    /// and a descriptor delivered to an app already confirmed gone
-    /// (`takeBackLateDelivery`). The caller states it because nothing here can
-    /// see it. Two cases fall the wrong way, as the lesser harm: an app that
-    /// refuses its ack after its reader started detaches with an empty
-    /// preamble too, and a claim sweep can follow a lost attach reply nobody
-    /// read. Telling them apart needs the app to report whether it read, a
-    /// protocol change outside the daemon's libghostty flag. A non-empty
-    /// preamble ends the sequence through its own ingest either way.
+    /// (`seizeFromDeadApp`), a claim sweep (`reconcileClaims`), and a late
+    /// delivery whose attach was already a claim. False, no viewer read the pty
+    /// and the child's next bytes finish it, so it is kept: a detach with an
+    /// empty preamble, which the app sends when it never received the
+    /// descriptor or tore its view down before its reader started, and a late
+    /// delivery whose attach was still pending (`takeBackLateDelivery`). The
+    /// caller states it because nothing here can see it.
+    ///
+    /// Two kinds of case fall the wrong way, as the lesser harm: an empty
+    /// preamble from a viewer that read, or a death pass or a sweep after an
+    /// attach nobody read. The first comes from an app whose ack is refused or
+    /// lost after its reader started, and from the app's libghostty engine
+    /// when its snapshot writer throws; the second from an unacknowledged
+    /// attach whose reply was lost, or a lost empty-preamble release. Telling
+    /// them apart needs the app to report whether it read, a protocol change
+    /// outside the daemon's libghostty flag. A non-empty preamble ends the
+    /// sequence through its own ingest either way.
     ///
     /// **One take-back per attach at a time.** Because the claim stands until
     /// the resume lands, a second take-back of the same attach — the viewer's
@@ -3369,8 +3382,8 @@ actor HolderRegistry {
     /// land after a live one has attached the same session.
     ///
     /// `viewerMayHaveRead` is passed to `takeBackFromViewer`: true for an app
-    /// that died holding the pty (`reclaimSessions`), false for a descriptor
-    /// that reached an app already dead (`takeBackLateDelivery`).
+    /// that died holding the pty (`reclaimSessions`); from a late delivery
+    /// (`takeBackLateDelivery`), false while its attach was still pending.
     func seizeFromDeadApp(
         terminalID: UUID, generation: UInt64, viewerMayHaveRead: Bool
     ) async throws {
