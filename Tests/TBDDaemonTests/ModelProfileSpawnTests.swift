@@ -1777,6 +1777,13 @@ struct ModelProfileSpawnTests {
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
         ))
         let term = try createResp.decodeResult(Terminal.self)
+        // Parked as the coordinator's park leaves a holder session: its holder
+        // let go first, so the wake below starts a new one. A row parked in the
+        // database alone would still name the live session, and the registry
+        // refuses a second spawn of a live id.
+        let started = try #require(holder.launch(for: term.id))
+        let registry = try #require(router.holderRegistry)
+        await registry.abandon(terminalID: term.id, handle: started.handle, reason: .park)
         try await db.terminals.setHibernated(id: term.id, sessionID: "sess-cold")
 
         // Cold swap to B.
