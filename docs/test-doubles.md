@@ -1,8 +1,9 @@
 # Test doubles: stand-ins for external dependencies and TBD's own state
 
-TBD's development loop leans on four fakes. Three replace an external
-dependency and one replaces TBD's own state; each answers a different question,
-and picking the wrong one wastes an afternoon, so this is the index. Two test
+TBD's development loop leans on five fakes. Four replace something outside the
+process under test — an external dependency, or a process TBD launches — and one
+replaces TBD's own state; each answers a different question, and picking the
+wrong one wastes an afternoon, so this is the index. Two test
 **harnesses** follow them: not fakes of anything, but the rig that mounts the
 real SwiftUI views where a test can measure and photograph them.
 
@@ -33,6 +34,19 @@ real SwiftUI views where a test can measure and photograph them.
   it. Reach for it when a test's behavior turns on the tmux version and must
   not depend on the host's `PATH` or the developer's saved fallback — a live
   tmux is the other tool, and slower.
+- **Holder spawn double** — `FakeHolderLaunch` and
+  `makeHolderRegistryDouble(launch:)` in
+  `Tests/TBDDaemonTests/HolderSpawnDoubleTestSupport.swift`. Fakes the
+  `TBDHolder` process for daemon unit tests: a real `HolderRegistry` whose
+  spawns start no process and open no socket, recording each launch's argv,
+  working directory, environment and size and handing back pids no real process
+  can hold. Wire it as `router.holderRegistry` or `lifecycle.holderRegistry`
+  with `pty_holder_enabled` on, and every path through
+  `WorktreeLifecycle.spawnTerminal` writes an ordinary holder row. Reach for it
+  when a test needs a session on the holder transport but not a live one:
+  there is no reader, so `terminal.output`, sends and attach are not served,
+  and every liveness probe reads the session as ended. A live holder is
+  `Tests/TBDDaemonLiveTests`' job.
 
 ## Harnesses for the app's own views
 

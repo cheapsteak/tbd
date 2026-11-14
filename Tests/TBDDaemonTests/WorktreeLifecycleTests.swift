@@ -107,18 +107,25 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
     try await db.config.setPrimaryAgentPreference(.codex)
-    let lifecycle = WorktreeLifecycle(
+    // On the holder transport, through the spawn double: the tab order does
+    // not depend on the transport, and no process is started.
+    try await db.config.setPtyHolderEnabled(true)
+    let holder = FakeHolderLaunch()
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
     let terminals = try await db.terminals.list(worktreeID: result.id)
     let primary = try #require(terminals.first)
 
+    #expect(primary.transport == .holder)
+    #expect(Set(holder.launches.map(\.terminalID)) == Set(terminals.map(\.id)))
     #expect(primary.kind == .codex)
     #expect(primary.label == "Codex")
     // The tab order holds only the terminals.
