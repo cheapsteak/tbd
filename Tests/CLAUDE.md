@@ -377,7 +377,7 @@ When the halves' tails drift apart, re-cut from a whole-pass profile, not from
 test counts.
 
 **Wall-clock handshake deadlines are hang-catchers sized against the population
-of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`),
+of the day.** `ciSafeDeadline` (the deadline of the daemon tests' `waitFor`),
 the `timeout` of `EventDrivenTestClock`'s arming waits
 (`Tests/TestSupport/EventDrivenTestClock.swift`) and `.clockDriven`'s limit
 (`Tests/TestSupport/ClockTestSupport.swift`) bound a hang; they assert nothing
@@ -389,17 +389,16 @@ rate on `main` with **zero** logic assertions failing.
 **Derive the three together, and know the invariant.** They are
 `ciSafeDeadline` 120 s (`TestDeadlines.saturatedPass`), the arming waits 45 s,
 `.clockDriven` `.timeLimit(.minutes(5))` = 300 s. The suite limit and the two
-wait deadlines race each other for real: `AttachRPCOrchestrationTests` and
-`PaneRepairCoordinatorTests` are both `.clockDriven` **and** consume
-`ciSafeDeadline`, across 44 `waitFor` call sites. Every one of those sites is
-unguarded — `waitFor` is `@discardableResult` and non-throwing on timeout, so
-the test continues and chained waits are real (the `try` covers only the inner
+wait deadlines race each other for real wherever a `.clockDriven` suite also
+consumes `ciSafeDeadline`, as `HibernationCoordinatorTests` and
+`PRStatusManagerBindingTests` do. Every `waitFor` call site is unguarded —
+`waitFor` is `@discardableResult` and non-throwing on timeout, so the test
+continues and chained waits are real (the `try` covers only the inner
 `Task.sleep`).
 
 The rule is **not** "all N chained waits must fit inside the suite limit". That
-was never satisfiable — the deepest chain is 6 waits in one
-`PaneRepairCoordinator` test, and 6 × 30 s already blew the old one-minute
-limit. The rule is:
+was never satisfiable — a test with a chain of 6 waits, 6 × 30 s, already blew
+the old one-minute limit. The rule is:
 
 > The suite limit must afford the **first** full deadline plus the rest of an
 > ordinary test. The first timeout's `Issue.record` fires immediately and
@@ -425,7 +424,7 @@ sleeper was armed when it advanced; it cannot prove the loop *observes* the
 state the test just created on the probe that follows. Where the code under test
 probes external state and re-arms if it is not there yet, one advance stakes the
 run on one probe, and a probe that reads "keep waiting" re-arms a sleep nothing
-will ever advance again. `PaneRepairCoordinatorTests`' broken-pipe test wedged
+will ever advance again. A broken-pipe repair test wedged
 in CI that way for a full 240 s limit — one write, `repairing` still set —
 and had already done so once before, on a diff that touched only
 `Sources/TBDCLI`. Drive those with `EventDrivenTestClock.advanceUntil`, which
@@ -454,13 +453,11 @@ run. So the real worst case is one 45 s guard, and the 270 s tally describes a
 run that cannot happen — the 30 s of room under the limit is not what keeps it
 safe. That is a property of these chains' *shape*, not of strictness alone:
 put a `next()` mid-chain and its 45 s becomes payable on top of whatever
-follows. And counting each `ciSafeDeadline` wait (`waitFor` and the
-suite's `readUntil`) at 120 s plus each clock wait at 45 s, **10 of the 13**
-`PaneRepairCoordinatorTests` have a worst case above 300 s — not just the
-6-`waitFor` chain usually cited, which with its two `readUntil` reads is 960 s.
-Every one of those is still consistent with the invariant, because only an
-already-failing test walks a full chain of timeouts and the first diagnostic is
-already recorded by then.
+follows. And counting each `ciSafeDeadline` wait at 120 s plus each clock wait
+at 45 s, any test with three `waitFor`s has a worst case above 300 s. Every such
+test is still consistent with the invariant, because only an already-failing
+test walks a full chain of timeouts and the first diagnostic is already recorded
+by then.
 
 **The remedy if they start tripping is to shorten the chain, not to raise the
 limit.** The limit is derived from `TestDeadlines.saturatedPass` through the
@@ -542,7 +539,7 @@ database ran the whole migration chain, pass 1 reported 111.7 s in 1a and
 pool stall below) is what keeps pass 1 clear of 120 s.
 
 One more thing a reader should not have to mine a log for: the **"72 known
-issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
+issues" pass 1 reports on every run, and the 10 in pass 2, are deliberate
 self-tests wrapped in `withKnownIssue`, not hidden failures.** Pass 1's are
 almost all `EventDrivenTestClockSelfTests` driving its own hang guards to their
 diagnostics, plus `BoundedGateWaitTests`' unsignalled gate and
@@ -550,8 +547,7 @@ diagnostics, plus `BoundedGateWaitTests`' unsignalled gate and
 records of the suites in `AppStatePublishFrequencyTests.swift`, plus one
 teardown self-test, and each lands in the half its suite's name selects:
 
-- **2a reports 7** – `DeltaIngestionTests` 4, `ControlModeAttachTests` 2 and
-  `NotificationDeltaTests` 1.
+- **2a reports 5** – `DeltaIngestionTests` 4 and `NotificationDeltaTests` 1.
 - **2b reports 5** – `TerminalPollTickTests` 2, `RemoteRefreshTests` 1,
   `SelectionCascadeTests` 1, and `UserDefaultsTestSupportTests`' "teardown
   records a refused name as a failure and leaves the suite alone" 1.
@@ -684,18 +680,15 @@ production seams hand their work to an unstructured task on purpose —
 other callers await — and that work is then scheduled on the cooperative pool
 however the test started the call. It is not pinning a thread, and no
 `gateHoldingTask` can move it. Where the test owns the callee, inject the
-executor into the callee instead: `ShutdownLatch(executor:)`,
-`SocketServer`'s `shutdownExecutor:` (which forwards to its latch) and
-`ControlModeInputRouter(executor:)` are those seams, and
-`ServerShutdownLatchTests`, `SocketServerSocketOwnershipTests` and the two
-control-mode input suites build on `GateExecutor.shared` so their work leaves
-the shared queue altogether. The
-router's case shows the reach: its consumer is one unstructured task, but the
-preference carries from there into the `TmuxControlCommandClient` actor and the
-paste sends beyond it, so injecting at that single seam takes the whole
-delivery pipeline off the pass's queue. Each seam is pinned by a test that
-reads `Thread.current.name` from inside the moved work, so dropping the
-argument goes red instead of quietly returning to the pool.
+executor into the callee instead: `ShutdownLatch(executor:)` and
+`SocketServer`'s `shutdownExecutor:` (which forwards to its latch) are those
+seams, and `ServerShutdownLatchTests` and `SocketServerSocketOwnershipTests`
+build on `GateExecutor.shared` so their work leaves the shared queue
+altogether. Injecting at one seam reaches everything behind it: the preference
+carries from the unstructured task into every default actor it calls, so a
+single seam can take a whole pipeline off the pass's queue. Each seam is pinned
+by a test that reads `Thread.current.name` from inside the moved work, so
+dropping the argument goes red instead of quietly returning to the pool.
 
 **What starves such a handshake is hop count, not priority.** Every task in a
 test pass runs at one priority: a test body, a `Task { }`, a `Task.detached { }`
@@ -1041,12 +1034,10 @@ front.
   socket with `SO_NOSIGPIPE`, a fixture's pipe write end with `F_SETNOSIGPIPE`.
 
   No test raises a SIGPIPE on purpose. Every pipe the daemon writes through to
-  a child's stdin or to a viewer is marked `F_SETNOSIGPIPE` where it is
+  a child's stdin is marked `F_SETNOSIGPIPE` where it is
   created, and each has a test that reads the flag back on that descriptor:
   - **Bounded runner's stdin** –
     `BoundedProcessRunnerTests.childExitingBeforeReadingLargeStdinFailsTheCallNotTheProcess`.
-  - **Pane fanout's write end** –
-    `PaneFanoutFlowControlTests.routeHardErrorCountsDroppedRemainder`.
   - **Peer link's stdin pipe** –
     `PeerLinkSupervisorTests.aFrameWrittenAfterTheProviderClosesItsStdinFailsWithEPIPEAndRaisesNoSIGPIPE`.
   - **Shadow peer helper's stdin** –
@@ -1275,7 +1266,7 @@ runners and fuzzers need an outer timeout of their own.
 
 One caution on waiters that record an `Issue` and continue rather than
 throwing: that is safe *only* for a waiter that returns no value. A
-non-throwing waiter that does return something — `ControlModeTestSupport.waitFor`
+non-throwing waiter that does return something — the daemon tests' `waitFor`
 (PR #415) — also keeps going after recording, so anything you index out of its
 result must be `#require`-guarded or the test crashes instead of failing
 cleanly. Don't generalize "non-throwing" into "no `#require` needed".

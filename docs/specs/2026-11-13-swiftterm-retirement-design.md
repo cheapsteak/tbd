@@ -3,7 +3,7 @@
 TBD parses terminal output with two emulators. The app's viewer runs on SwiftTerm by
 default, or on libghostty-vt when the Experimental engine setting is on
 ([design](2026-11-07-libghostty-terminal-engine-design.md)). The daemon keeps every
-pty-holder session in a headless SwiftTerm, and tmux control-mode panels draw through
+pty-holder session in a headless SwiftTerm, and tmux panels draw through
 SwiftTerm. This design moves all of it onto libghostty-vt, then deletes SwiftTerm and TBD's
 fork of it. The work runs in four streams:
 
@@ -87,8 +87,8 @@ fork of it. The work runs in four streams:
   [migration design](2026-10-11-holder-transport-migration-design.md) covers that case: a
   person moves a session with the migrate action, and after the tmux path is gone a
   leftover row refuses to wake, with a reason that names the action.
-- **What D needs from B** – `TmuxBridge` and the control-mode panels are gone. They are the
-  last viewers that have to draw through SwiftTerm.
+- **What D needs from B** – `TmuxBridge` and its panels are gone. They are the last viewers
+  that have to draw through SwiftTerm.
 
 ## C – the daemon's emulator moves to libghostty-vt
 
