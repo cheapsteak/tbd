@@ -226,13 +226,16 @@ is worth saying which states it can leave behind. There are two, and no third.
   left as that writer left it.
 
 Killing before the write is the opposite of the parked path's order, and it is
-safe for a different reason: the write is a compare-and-set, so a recovery that
-notices the dead window first makes this write a no-op. Both outcomes are
-consistent, and nothing can leave a row naming a transport its live process is
-not on. Everything that can turn the move away is settled *before* the kill —
-no holder can be started, a worktree that gives no local directory, a pane that
-cannot be proven to be this terminal's, a pane running something other than its
-own shell — and each leaves the session the program it has.
+safe for a different reason: the write is a compare-and-set. The window's
+recovery cannot race it, because `terminal.recreateWindow` refuses a tmux shell
+row and writes nothing. A writer that does change the row in the gap, such as a
+reconcile that removes a shell whose window is gone or the tab being closed,
+makes this write a no-op. Both outcomes are consistent, and nothing can leave a
+row naming a transport its live process is not on. Everything that can turn the
+move away is settled *before* the kill — no holder can be started, a worktree
+that gives no local directory, a pane that cannot be proven to be this
+terminal's, a pane running something other than its own shell — and each
+leaves the session the program it has.
 
 Two kill outcomes are not failures and must not be reported as any. A kill that
 tmux refuses while the window is still there, or while tmux cannot say, is a
@@ -283,11 +286,23 @@ TBD starts programs only on the pty holder. So a parked row still recorded as
 id (`tbd terminal migrate <id>`), whether or not tmux is installed, instead of
 failing obscurely inside a path that no longer exists. The row stays parked
 with its session id, so a wake after the migration resumes it on the holder.
-The other gestures that would start a program in a tmux window refuse the same
-way: recreating a dead window, and switching a running tmux session's account
-in place. This is a refusal and nothing more: no migration logic, no flag, a
-handful of lines. It is what keeps "a session never silently breaks" true
-without a daemon-initiated migration.
+Switching a running tmux session's account in place would start a program in a
+tmux window too, and it refuses the same way.
+
+A dead window parks an agent session instead of refusing it. Recreating the
+window would start a program, but its program is already gone, and a park keeps
+what a later wake needs. So `terminal.recreateWindow` parks a tmux agent row
+whose window tmux says is gone, keeping its session id, and the session waits
+for the migration like any other parked tmux row. A tmux row with no session to
+park is refused and left as it was. A shell is told to run the migration, which
+moves it. A tab the migration always skips — a running Codex tab with no
+thread, a Claude tab whose session never began, a setup or pre-session hook tab
+— is given the migration's own reason for skipping it: close the tab and open a
+new one, or, for a hook tab, that there is nothing to move.
+
+None of this is migration logic: each is a refusal or a park, with no flag. It
+is what keeps "a session never silently breaks" true without a
+daemon-initiated migration.
 
 ## Out of scope
 
