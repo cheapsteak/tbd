@@ -557,6 +557,17 @@ extension WorktreeLifecycle {
         let tabs = try await archivedRestorePlan(worktreeID: worktreeID, preferred: preferred)
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
         let missingTabs = missingArchivedAgentTabs(tabs, terminals: terminals)
+        // The spawn gate, asked before the revive writes anything: every tab a
+        // revive opens needs a pty holder, so a daemon that cannot start one
+        // refuses the revive before it records the restore plan, prepares a
+        // Codex launch, or touches git and the disk. A refused revive leaves
+        // the row archived; asked after the re-add, the gate would leave the
+        // checkout on disk, the row revived and no tab open. A retry re-adds
+        // nothing and opens a tab only for an archived session that still has
+        // none, so it is asked only then.
+        if !isRetry || (!skipClaude && !missingTabs.isEmpty) {
+            _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
+        }
         let preparedArchivedCodexLaunches = try prepareArchivedCodexLaunches(skipClaude ? [] : missingTabs)
         let config = try await db.config.get()
         let preparedCodexLaunch = !skipClaude && tabs.isEmpty && config.primaryAgentPreference == .codex
@@ -573,14 +584,6 @@ extension WorktreeLifecycle {
             return try await completeArchivedRestore(worktree: worktree.worktree, repo: repo, tabs: tabs,
                 prepared: preparedArchivedCodexLaunches, cols: cols, rows: rows)
         }
-
-        // The spawn gate, asked before git or the disk is touched: every tab a
-        // revive opens needs a pty holder, so a daemon that cannot start one
-        // refuses the revive while the row is still archived and nothing has
-        // been re-added. Asking it later would leave the checkout re-added,
-        // the row revived and no tab open. A retry above re-adds nothing, and
-        // its tab spawns ask the gate themselves.
-        _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
 
         // Create parent directory if needed
         let parentDir = (worktree.localPath as NSString).deletingLastPathComponent

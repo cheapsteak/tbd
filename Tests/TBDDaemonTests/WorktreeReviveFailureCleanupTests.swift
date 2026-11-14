@@ -184,10 +184,13 @@ import Testing
 
     // MARK: - The spawn gate
 
-    /// A daemon that cannot start a pty holder refuses a revive before git
-    /// runs: the row stays archived, and no checkout is re-added. Asked only at
-    /// the tab spawn, the gate would refuse after the re-add, leaving the
-    /// checkout on disk and the row revived with no tab open.
+    /// A daemon that cannot start a pty holder refuses a revive before it
+    /// writes anything: the row stays archived, its restore plan is not
+    /// rewritten, and no checkout is re-added. Asked only at the tab spawn, the
+    /// gate would refuse after the re-add, leaving the checkout on disk and the
+    /// row revived with no tab open. The revive picks a session, which makes
+    /// it record a new restore plan before git runs, so a gate asked after that
+    /// write is caught too.
     @Test func aReviveTheSpawnGateRefusesTouchesNoGit() async throws {
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -196,17 +199,25 @@ import Testing
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedWorktree(lifecycle: lifecycle, repoID: repo.id)
+        let chosen = AgentSessionIdentity(agentKind: .claude, sessionID: "chosen")
+        try await db.localAgentSessions.upsert(LocalAgentSession(
+            worktreeID: archived.id, identity: chosen,
+            firstObservedAt: .distantPast, lastObservedAt: .distantPast))
+        let planBefore = try await db.worktrees.archivedAgentTabsForRevive(id: archived.id)
         // The same daemon after its `TBDHolder` binary went missing.
         var withoutRegistry = lifecycle
         withoutRegistry.holderRegistry = nil
         let refusing = withoutRegistry
 
         await #expect(throws: TerminalSpawnRefusal.holderUnavailable) {
-            _ = try await refusing.reviveWorktree(worktreeID: archived.id, skipClaude: true)
+            _ = try await refusing.reviveWorktree(
+                worktreeID: archived.id, skipClaude: true, preferredSession: chosen)
         }
 
         #expect(try await db.worktrees.get(id: archived.id)?.status == .archived,
                 "the refused revive changed the row's status")
+        let planAfter = try await db.worktrees.archivedAgentTabsForRevive(id: archived.id)
+        #expect(planAfter == planBefore, "the refused revive rewrote the restore plan")
         #expect(!FileManager.default.fileExists(atPath: archived.localPath),
                 "the refused revive re-added the checkout at \(archived.localPath)")
         let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
