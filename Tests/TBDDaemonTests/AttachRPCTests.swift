@@ -99,4 +99,30 @@ struct AttachRPCTests {
         let response = await router.handle(request)
         #expect(response.success)
     }
+
+    /// `pane.detach` answers ok on every path, because a detach fires on every
+    /// view teardown and the app can do nothing with a refusal. So no answer
+    /// shows whether a tmux-backed row was turned away by the router's
+    /// transport clause or went down the holder path. What stops such a row
+    /// from being taken back is the transport check in
+    /// `HolderRegistry.acceptHandback`, which the router's clause duplicates,
+    /// and this pins that check. Without it the same call is still refused,
+    /// as a superseded handback, because the registry holds no claim for the
+    /// row. Only the refusal's case tells the two apart.
+    @Test("a handback naming a tmux-backed row is refused as not a holder session")
+    func handbackNamingATmuxRowIsNotAHolderSession() async throws {
+        let (_, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db)
+        let tmuxRow = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@7", tmuxPaneID: "%7")
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],
+            listTerminals: { [] })
+
+        await #expect(throws: HolderRegistry.Error.notAHolderSession(terminalID: tmuxRow.id)) {
+            try await registry.acceptHandback(
+                terminal: tmuxRow, generation: 1, preamble: Data("ACME".utf8))
+        }
+    }
 }
