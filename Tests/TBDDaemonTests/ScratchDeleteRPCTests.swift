@@ -32,9 +32,9 @@ struct ScratchDeleteRPCTests {
     }
 
     /// A router on `tmux` whose registry is the holder spawn double, so
-    /// `scratch.create` passes the spawn gate. The holder tests below clear the
-    /// primary terminal it opens and put the registry under test in its place
-    /// before the delete.
+    /// `scratch.create` passes the spawn gate. The transport tests below clear
+    /// the primary terminal it opens and put the registry under test in its
+    /// place before the delete.
     private static func routerPastTheSpawnGate(db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
         let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
@@ -332,10 +332,7 @@ struct ScratchDeleteRPCTests {
         let tmux = TmuxManager(
             dryRun: true, dryRunRecorder: { recorded.append($0) },
             dryRunWindowIsDead: { _ in true })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = Self.routerPastTheSpawnGate(db: db, tmux: tmux)
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "tmux-scratch")))
         let wt = try created.decodeResult(Worktree.self)
