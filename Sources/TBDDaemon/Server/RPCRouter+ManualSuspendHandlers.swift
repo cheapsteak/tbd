@@ -170,7 +170,15 @@ extension RPCRouter {
         // without asking again. A held terminal stays parked. The call then
         // reports the first hold, so a caller that woke nothing is not told it
         // succeeded.
+        //
+        // A row parked on tmux never wakes where it is, and its refusal names
+        // `tbd terminal migrate`. When nothing woke, the call answers with the
+        // first such refusal, so that advice reaches the caller instead of
+        // only the actuation log. A resume that woke another session still
+        // succeeds, as it does when any other row fails.
         var firstHold: RPCResponse?
+        var firstTmuxRefusal: String?
+        var wokeAny = false
         for terminal in parked {
             let actuationID = try await beginActuation(
                 .worktreeResume, actor: actor,
@@ -185,8 +193,19 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, ActuationOutcome.classify(result),
                 error: ActuationOutcome.detail(result))
+            switch result {
+            case .ok:
+                wokeAny = true
+            case .respawnFailed(let reason)
+                where reason == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id):
+                firstTmuxRefusal = firstTmuxRefusal ?? reason
+            default:
+                break
+            }
         }
 
-        return firstHold ?? .ok()
+        if let firstHold { return firstHold }
+        if !wokeAny, let firstTmuxRefusal { return RPCResponse(error: firstTmuxRefusal) }
+        return .ok()
     }
 }

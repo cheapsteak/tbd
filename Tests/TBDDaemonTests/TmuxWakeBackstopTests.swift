@@ -8,7 +8,8 @@ import TestSupport
 /// A parked tmux row never wakes: TBD starts sessions only on the pty holder.
 /// The refusal names the migration gesture, leaves the row parked with its
 /// session id, and touches nothing — whether or not tmux is installed. A
-/// parked holder row wakes as before.
+/// parked holder row wakes as before. `worktree.resume` hands the refusal to
+/// its caller when it woke nothing.
 @Suite("Tmux wake backstop")
 struct TmuxWakeBackstopTests {
     private static let sessionID = "sess-backstop"
@@ -67,19 +68,36 @@ struct TmuxWakeBackstopTests {
     }
 
     private static func parkedRow(
-        _ f: Fixture, transport: TerminalTransport
+        _ f: Fixture, transport: TerminalTransport, session: String = sessionID
     ) async throws -> Terminal {
         let created = try await f.db.terminals.create(
             worktreeID: f.worktree.id,
             tmuxWindowID: transport == .holder ? "" : "@3",
             tmuxPaneID: transport == .holder ? "" : "%3",
             label: TerminalLabel.claudeCode,
-            claudeSessionID: sessionID,
+            claudeSessionID: session,
             kind: .claude,
             transport: transport)
         try await f.db.terminals.setHibernated(
-            id: created.id, sessionID: sessionID, reason: .auto)
+            id: created.id, sessionID: session, reason: .auto)
         return try #require(try await f.db.terminals.get(id: created.id))
+    }
+
+    /// A router on the fixture's database whose coordinator wakes holder rows
+    /// through the fixture's spawn double.
+    private static func makeRouter(_ f: Fixture) async -> RPCRouter {
+        let tmux = TmuxManager(dryRun: true)
+        let registry = makeHolderRegistryDouble(launch: f.holder)
+        var lifecycle = WorktreeLifecycle(
+            db: f.db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
+            db: f.db, lifecycle: lifecycle, tmux: tmux,
+            configDirManager: makeIsolatedConfigDirManager(tag: "tmux-backstop-router"),
+            actuationLog: makeTestActuationLog(tag: "tmux-backstop-router"))
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
+        return router
     }
 
     /// The refusal, and that it changed nothing: the row is still parked on
@@ -145,5 +163,47 @@ struct TmuxWakeBackstopTests {
         let launch = try #require(f.holder.launch(for: row.id))
         #expect(launch.commandLine?.contains(Self.sessionID) == true,
                 "the wake did not resume the row's session: \(launch.commandLine ?? "nil")")
+    }
+
+    // MARK: - worktree.resume
+
+    /// A resume whose only parked row is on tmux wakes nothing, so it answers
+    /// with the refusal that names the migration rather than with success, and
+    /// the row stays parked.
+    @Test func aResumeThatWokeNothingAnswersWithTheMigration() async throws {
+        let f = try await Self.makeFixture(tmuxResolvable: true)
+        defer { f.tearDown() }
+        let row = try await Self.parkedRow(f, transport: .tmux)
+        let router = await Self.makeRouter(f)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeResume,
+            params: WorktreeResumeParams(worktreeID: f.worktree.id)))
+
+        #expect(!response.success, "a resume that woke nothing reported success")
+        #expect(response.error == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: row.id))
+        #expect(try await f.db.terminals.get(id: row.id)?.isParked == true)
+        #expect(f.holder.launches.isEmpty, "a tmux row's wake started a holder")
+    }
+
+    /// The other branch: a resume that woke another session succeeds, as it
+    /// does when any other row fails, and the tmux row stays parked.
+    @Test func aResumeThatWokeAnotherSessionStillSucceeds() async throws {
+        let f = try await Self.makeFixture(tmuxResolvable: true)
+        defer { f.tearDown() }
+        let tmuxRow = try await Self.parkedRow(f, transport: .tmux)
+        let holderRow = try await Self.parkedRow(
+            f, transport: .holder, session: "sess-backstop-holder")
+        let router = await Self.makeRouter(f)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeResume,
+            params: WorktreeResumeParams(worktreeID: f.worktree.id)))
+
+        #expect(response.success, "a resume that woke a session failed: \(response.error ?? "")")
+        #expect(try await f.db.terminals.get(id: holderRow.id)?.isParked == false,
+                "the holder row did not wake")
+        #expect(try await f.db.terminals.get(id: tmuxRow.id)?.isParked == true,
+                "the tmux row woke")
     }
 }

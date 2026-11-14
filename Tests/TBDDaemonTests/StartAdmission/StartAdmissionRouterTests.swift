@@ -375,12 +375,8 @@ struct StartAdmissionRouterTests {
 
         #expect(fixture.stub.requests.isEmpty, "admission was asked about a wake that starts nothing")
         #expect(response.errorCode != RPCErrorCode.startHeld.rawValue)
-        // `worktree.resume` reports holds only; each terminal's own answer is
-        // its actuation outcome, checked below for every entry point.
-        if entry != .worktreeResume {
-            #expect(response.error
-                == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id))
-        }
+        #expect(response.error
+            == HibernationCoordinator.tmuxWakeUnavailableReason(terminalID: terminal.id))
         let outcome = try #require(try rows(at: fixture.logPath).last)
         #expect(outcome["reason"] as? String != "held")
         let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
