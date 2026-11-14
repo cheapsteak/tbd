@@ -1724,16 +1724,6 @@ public final class Daemon: Sendable {
             rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
             try await sock.start()
 
-            // Pending provider replacements recover only after the socket is live:
-            // Codex readiness arrives through the SessionStart hook RPC, so a
-            // pre-bind recovery would always time out despite a healthy process.
-            // The durable row remains Codex throughout the pass. It is NOT run
-            // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
-            // for that hook, serially, so awaiting it would hold every later boot
-            // step behind N × 15 s. The maintenance task in step 11a-gc runs the
-            // same pass immediately after boot, off the critical path, and then
-            // hourly.
-
             // 9a. Finish the holder sessions the startup budget did not reach.
             //
             // Past startup a session is adopted only when something asks for it —
@@ -1954,11 +1944,9 @@ public final class Daemon: Sendable {
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
                 self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
-                    // Sweep once immediately (cold recovery), then every hour.
-                    // The immediate pass is also the post-socket recovery of any
-                    // Continue in Claude transaction a crash left pending: it
-                    // waits on hook-delivered readiness, so it runs here, off
-                    // the boot path, rather than serially before the listeners.
+                    // Sweep once immediately (cold recovery), then every hour,
+                    // with what an earlier build's interrupted Continue in
+                    // Claude left behind.
                     await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,

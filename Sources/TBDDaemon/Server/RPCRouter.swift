@@ -21,9 +21,6 @@ public final class RPCRouter: Sendable {
     /// Exact-token SessionStart rendezvous for Codex-to-Claude replacement
     /// and its Codex rollback/recovery process.
     let continueInClaudeReadiness = ContinueInClaudeReadinessCoordinator()
-    /// Behavior deadline for one replacement or rollback readiness wait.
-    /// Production keeps the design's 15-second bound; focused tests shorten it.
-    nonisolated(unsafe) var continueInClaudeReadinessTimeout: Duration = .seconds(15)
     /// Append-only record of every state-changing actuation this router
     /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
     /// the whole daemon writes one file. Handlers append a request row before
