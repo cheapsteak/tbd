@@ -99,7 +99,7 @@ extension RPCRouter {
             scratchLogger.warning("scratch.create: primary terminal spawn failed for \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             // The RPC still succeeds (pre-existing contract — the row and the
             // folder exist and the user can add a terminal by hand), but the
-            // record must not claim a spawn that failed inside tmux.
+            // record must not claim a spawn that failed or was refused.
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
         }
 

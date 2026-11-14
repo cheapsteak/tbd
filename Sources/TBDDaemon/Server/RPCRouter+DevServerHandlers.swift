@@ -6,18 +6,10 @@ private let devServerLogger = Logger(subsystem: "com.tbd.daemon", category: "dev
 
 enum DevServerStartError: LocalizedError {
     case cwdMissing(String)
-    /// The exited tab the start meant to reuse is no longer that tab.
-    case tabChanged(UUID)
-    /// The exited tab's pane could not be proved to be the server's.
-    case paneNotOwned(UUID, String)
     var errorDescription: String? {
         switch self {
         case .cwdMissing(let path):
             return "working directory does not exist: \(path)"
-        case .tabChanged(let id):
-            return "the server's tab \(id) changed while it was being started; try again"
-        case .paneNotOwned(let id, let detail):
-            return "the server's tab \(id) was left untouched: \(detail)"
         }
     }
 }
@@ -153,7 +145,7 @@ extension RPCRouter {
         return names.filter { seen.insert($0).inserted }
     }
 
-    /// Opens (or, for an exited tmux tab, respawns in place) one server's tab.
+    /// Opens one server's tab, replacing a tab of it that has exited.
     private func startDevServer(
         _ server: DeclaredDevServer,
         worktree: LocalWorktree,
@@ -174,33 +166,24 @@ extension RPCRouter {
         // recorded by then, and a detach after the spawn would erase it.
         await db.terminalHistory.detachServerOutput(worktreeID: worktree.id, serverName: server.name)
 
-        // A server whose tab exited is started again in that same tab.
+        // The spawn gate, asked before an exited tab is closed: a daemon that
+        // cannot start a holder fails this server only, and leaves its old tab
+        // where it was.
+        let transport = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
+
+        // A server whose tab exited is started again in a new tab. A session
+        // is never restarted in place: close the exited tab — its final output
+        // was saved when it exited, or is captured by the close on a tab still
+        // on tmux — then open a new one. A failed close throws, which fails
+        // this server only.
         if let existing, case .exited = existing.status {
-            switch existing.terminal.transport {
-            case .tmux:
-                var env = operations.commandEnvironment(server: server, worktree: worktree, repoPath: repoPath)
-                env["TBD_TERMINAL_ID"] = existing.terminal.id.uuidString
-                try await respawnExitedServerTab(
-                    existing.terminal, serverName: server.name, worktree: worktree, cwd: cwd,
-                    command: command, env: env, tabInspector: operations.tabInspector)
-                // The window was created with `remain-on-exit on` (that is
-                // what kept its dead pane), and a respawn keeps the option.
-                return existing.terminal
-            case .holder:
-                // A holder session cannot be respawned in place: close the
-                // exited tab — its final output was saved when its child
-                // exited — then open a new one. A failed close throws, which
-                // fails this server only.
-                let (cleanupFailure, refusal) = try await closeTerminalTab(existing.terminal, actuationID: nil)
-                logTabCloseProblems(existing.terminal, cleanupFailure, refusal)
-            }
+            let (cleanupFailure, refusal) = try await closeTerminalTab(existing.terminal, actuationID: nil)
+            logTabCloseProblems(existing.terminal, cleanupFailure, refusal)
         }
 
         let terminalID = UUID()
         var env = operations.commandEnvironment(server: server, worktree: worktree, repoPath: repoPath)
         env["TBD_TERMINAL_ID"] = terminalID.uuidString
-        let config = try? await db.config.get()
-        let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
         let cols = TmuxManager.defaultCols
         let rows = TmuxManager.defaultRows
         let serverName = server.name
@@ -208,9 +191,8 @@ extension RPCRouter {
         let terminal = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
         ) { current in
-            try await self.prepareTmuxServer(for: transport, worktree: current, cols: cols, rows: rows)
-            return try await self.lifecycle.spawnTerminal(
-                id: terminalID, worktreeID: current.id, tmuxServer: current.tmuxServer,
+            try await self.lifecycle.spawnTerminal(
+                id: terminalID, worktreeID: current.id,
                 workingDirectory: cwd, command: command, env: spawnEnv, sensitiveEnv: [:],
                 cols: cols, rows: rows, label: label, claudeSessionID: nil, profileID: nil,
                 kind: .shell, transport: transport,
@@ -219,38 +201,6 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label)))
         return terminal
-    }
-
-    /// `respawn-window -k` on an exited server tab, under the worktree's tmux
-    /// server lock and the same guards every other window-destroying path
-    /// takes: the row is read again and must still be this server's tab at
-    /// the same coordinates, its pane must still be dead, and
-    /// `TmuxManager.paneOwnership` must prove the pane is this terminal's —
-    /// the snapshot that chose the tab can be a `status` timeout old, and `-k`
-    /// kills whatever the pane runs.
-    private func respawnExitedServerTab(
-        _ expected: Terminal, serverName: String, worktree: LocalWorktree, cwd: String,
-        command: String, env: [String: String], tabInspector: any DevServerTabInspecting
-    ) async throws {
-        try await tmux.withWorktreeServerLock(
-            db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
-        ) { current in
-            guard let row = try await self.db.terminals.get(id: expected.id),
-                  row.serverName == serverName, row.transport == .tmux,
-                  row.tmuxWindowID == expected.tmuxWindowID, row.tmuxPaneID == expected.tmuxPaneID
-            else { throw DevServerStartError.tabChanged(expected.id) }
-            guard case .exited = await tabInspector.status(of: row, tmuxServer: current.tmuxServer) else {
-                throw DevServerStartError.tabChanged(expected.id)
-            }
-            let ownership = await self.tmux.paneOwnership(
-                terminalID: row.id, server: current.tmuxServer, paneID: row.tmuxPaneID)
-            guard ownership.permitsTeardown else {
-                throw DevServerStartError.paneNotOwned(row.id, ownership.refusalDetail ?? "ownership unknown")
-            }
-            try await self.tmux.respawnWindow(
-                server: current.tmuxServer, windowID: row.tmuxWindowID,
-                cwd: cwd, shellCommand: command, env: env)
-        }
     }
 
     func handleServerStop(_ paramsData: Data, actor: ActuationActor? = nil) async throws -> RPCResponse {

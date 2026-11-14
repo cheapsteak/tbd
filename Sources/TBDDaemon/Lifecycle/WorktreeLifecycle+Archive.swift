@@ -485,7 +485,7 @@ extension WorktreeLifecycle {
 
     // MARK: - Revive
 
-    /// Revives an archived worktree, re-creating the git worktree and tmux windows.
+    /// Revives an archived worktree, re-creating the git worktree and its terminals.
     ///
     /// Legacy synchronous contract (CLI + tests): the returned worktree is
     /// fully set up and `.active`. When a `preSession` hook gates the primary

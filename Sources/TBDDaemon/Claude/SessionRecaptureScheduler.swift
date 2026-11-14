@@ -89,19 +89,4 @@ struct SessionRecaptureScheduler: Sendable {
             return Task { await body() }
         }
     }
-
-    /// The tmux spelling of `schedule(terminalID:target:expectedIncarnationID:)`,
-    /// for the call sites that address a pane and nothing else.
-    @discardableResult
-    func schedule(
-        terminalID: UUID,
-        paneID: String,
-        server: String,
-        expectedIncarnationID: UUID?
-    ) -> Task<Void, Never> {
-        schedule(
-            terminalID: terminalID,
-            target: .tmuxPane(server: server, paneID: paneID),
-            expectedIncarnationID: expectedIncarnationID)
-    }
 }

@@ -9,8 +9,7 @@ import TBDShared
 /// `Server/RPCRouter+PhoneSessionActions.swift`, the daemon's root hands it to
 /// the bridge, and the bridge's tests use a fake.
 ///
-/// **Each method is an existing RPC, minus its socket edge**, except
-/// `phoneSpawnsOnHolder`, which answers the question every spawn path asks.
+/// **Each method is an existing RPC, minus its socket edge.**
 /// It returns the
 /// `RPCResponse` that RPC returns, refusal text and code included, so the
 /// phone service decides from the code the app reads (`RPCErrorCode`), and a
@@ -106,14 +105,6 @@ protocol PhoneSessionActions: Sendable {
     /// has already logged the action. A nil or empty first message is no
     /// message and goes to the handler as it came.
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse
-
-    /// Whether a session spawned now goes onto the pty-holder transport, as
-    /// every spawn path decides it (`TerminalSpawnTransport.decide`): the
-    /// holder flag is on and a holder can be started. A config that cannot
-    /// be read means tmux, as it does for a spawn. Not an RPC: the phone app
-    /// service reads it to hold a new worktree's first message to
-    /// `PhoneAppConstants.firstPromptMaxBytes` on tmux alone.
-    func phoneSpawnsOnHolder() async -> Bool
 
     /// `remote.providers`. A `RemoteProvidersResult`. Like the RPC, it first
     /// re-reads the provider registry file, registering and enrolling a

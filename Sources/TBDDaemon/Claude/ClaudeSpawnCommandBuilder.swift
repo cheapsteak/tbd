@@ -53,18 +53,18 @@ private let pluginDirLogger = Logger(subsystem: "com.tbd.daemon", category: "cla
 /// - oauth: `CLAUDE_CONFIG_DIR=<profileDir>` (no auth token; user `/login`s into this dir)
 /// - oauth token: `CLAUDE_CODE_OAUTH_TOKEN=<secret>` + `CLAUDE_CONFIG_DIR=<profileDir>`
 ///   (same isolated dir as oauth; the stored `claude setup-token` authenticates
-///   it instead of a `/login`). The token rides tmux's `-e` only — like
-///   `ANTHROPIC_API_KEY` it is never a routing key, so it never lands in the
-///   pane's `ps` argv.
+///   it instead of a `/login`). The token rides the process environment only —
+///   like `ANTHROPIC_API_KEY` it is never a routing key, so it never lands in
+///   the session's `ps` argv.
 /// - api key (direct or proxy): `ANTHROPIC_API_KEY=<secret>` + `CLAUDE_CONFIG_DIR=<profileDir>`
 ///   (+ `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` for proxy)
 /// - bedrock: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_REGION` + optional `AWS_PROFILE`
 ///   + `ANTHROPIC_MODEL` (no token; AWS SDK credential chain handles auth)
 ///
 /// Secrets are **never** embedded in the returned `command` string — callers
-/// must pass `sensitiveEnv` through `TmuxManager.createWindow(sensitiveEnv:)`
-/// so tmux's `-e KEY=VALUE` flag puts it directly into the spawned window's
-/// environment without appearing in the long-running shell command's `ps` argv.
+/// must pass `sensitiveEnv` through `WorktreeLifecycle.spawnTerminal(sensitiveEnv:)`,
+/// which makes it the holder job's process environment, so it never appears
+/// in the long-running shell command's `ps` argv.
 ///
 /// `sessionModEnvironment` (from `SessionModSpawn.prepare`) is merged into
 /// `sensitiveEnv` on both claude branches; it is empty when every session-mod

@@ -10,11 +10,11 @@ import TBDKernel
 /// is, sized for tests that spawn through `WorktreeLifecycle.spawnTerminal`,
 /// directly or through the RPC handlers and worktree-creation paths that call
 /// it. Without one, such a test can avoid launching `TBDHolder` only by
-/// building no registry, which sends the spawn down that function's tmux arm.
+/// building no registry, which makes the spawn gate refuse the session.
 ///
 /// It sits inside `HolderRegistry` rather than in front of it because every
 /// one of those paths holds a concrete `HolderRegistry?` — the router's, the
-/// lifecycle's, the one `TerminalSpawnTransport.holder` carries — and goes on
+/// lifecycle's, the one `TerminalSpawnTransport` carries — and goes on
 /// using that same registry after the spawn: to tear the session down, to ask
 /// for its reader, to mark it let go. A registry that fabricates its spawns is
 /// still the real registry for all of that, so `TerminalSpawnTransport.decide`

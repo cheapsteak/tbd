@@ -168,10 +168,9 @@ public struct WorktreeLifecycle: Sendable {
 
     /// The daemon's single owner of every live `HolderReader`, and the only
     /// thing that can put a session on the holder transport. `nil` when the
-    /// daemon did not wire one (mock mode, tests that do not exercise the
-    /// transport), and the spawn gate then falls back to tmux even with
-    /// `pty_holder_enabled` on — the honest answer when there is nothing to
-    /// hold a pty master.
+    /// daemon did not wire one (tests that do not exercise a spawn), and the
+    /// spawn gate then refuses every new session — the honest answer when
+    /// there is nothing to hold a pty master.
     ///
     /// An actor reference, so every value copy of this struct shares one
     /// registry — the same reason `conflictSweepCache` is one, and here it is
@@ -181,10 +180,9 @@ public struct WorktreeLifecycle: Sendable {
 
     /// Which of the transport's two stores answers a machine read, wired
     /// post-construction by `Daemon.swift` the way `holderRegistry` is. `nil`
-    /// in mock mode, in a tmux-only daemon, and in every test that does not
-    /// exercise the pull — and a disposal then captures from the daemon's own
-    /// reader alone, which is what every history-keeping teardown did before
-    /// a viewer could be asked.
+    /// in every test that does not exercise the pull — and a disposal then
+    /// captures from the daemon's own reader alone, which is what every
+    /// history-keeping teardown did before a viewer could be asked.
     var holderScreenResolver: HolderScreenResolver?
 
     /// Stops a worktree's dev servers before archive tears its tabs down
@@ -193,21 +191,6 @@ public struct WorktreeLifecycle: Sendable {
     /// mock mode and in tests that do not exercise it, where archive behaves
     /// exactly as it did before dev servers existed.
     var devServerOperations: DevServerOperations?
-
-    /// How the create path builds the scheduler that recaptures a resumed
-    /// session's ID. `nil` in production, which builds the ordinary
-    /// `SessionRecaptureScheduler(db:tmux:)`.
-    ///
-    /// A seam because the branch it feeds — recapture is scheduled for a tmux
-    /// primary and not for a holder one — is otherwise unobservable from
-    /// outside. A real scheduler's only trace is a database write five wall
-    /// seconds later, made only if a tmux pane answers with a live Claude
-    /// process; "it was never scheduled" and "it was scheduled and found
-    /// nothing" look identical from the row. Injecting the scheduler makes the
-    /// decision itself the observable, on virtual time.
-    var sessionRecaptureFactory: (
-        @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
-    )?
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {

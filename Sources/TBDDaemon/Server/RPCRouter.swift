@@ -339,18 +339,17 @@ public final class RPCRouter: Sendable {
     /// replace it with a stated process table and file system.
     nonisolated(unsafe) var phoneAppBinaryCheck: PhoneAppBinaryCheck = .production
 
-    /// How the swap paths build the scheduler that recaptures a resumed
+    /// How the fork swap builds the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
-    /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
-    /// `WorktreeLifecycle.sessionRecaptureFactory`, for the same reason.
+    /// `SessionRecaptureScheduler(db:tmux:)`.
     ///
-    /// A seam because the branch it feeds — which target a fork tab's recapture
-    /// is scheduled against — is otherwise unobservable from outside. A real
-    /// scheduler's only trace is a database write five wall seconds later, made
-    /// only if a live Claude process answers; "it was scheduled against the
-    /// pane" and "it was scheduled against the holder's child" look identical
-    /// from the row. Injecting the scheduler makes the decision itself the
-    /// observable, on virtual time.
+    /// A seam because the decision it feeds — whether a fork tab's recapture
+    /// is scheduled, and against which holder child — is otherwise
+    /// unobservable from outside. A real scheduler's only trace is a database
+    /// write five wall seconds later, made only if a live Claude process
+    /// answers; "it was never scheduled" and "it was scheduled and found
+    /// nothing" look identical from the row. Injecting the scheduler makes the
+    /// decision itself the observable, on virtual time.
     nonisolated(unsafe) var sessionRecaptureFactory: (
         @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
     )?

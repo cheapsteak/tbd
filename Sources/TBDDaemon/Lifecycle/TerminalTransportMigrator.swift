@@ -150,6 +150,21 @@ actor TerminalTransportMigrator {
     static let holderUnspawnableRefusal =
         "The TBDHolder helper is missing beside the daemon, so no holder can be started for this session; nothing was changed."
 
+    /// The refusal for a request that would start, restart or replace the
+    /// process behind a row still on the tmux transport: a wake, a window
+    /// recreate, an in-place profile swap, Continue in Claude.
+    ///
+    /// TBD opens sessions only on the pty holder, so none of those can run on
+    /// such a row; migrating it is the way forward, and this says how. It names
+    /// the session, because `tbd terminal migrate` takes its id. `retry` is the
+    /// action to take again once the row is on the holder, written to follow
+    /// "then", as in "wake it again".
+    static func migrateFirstRefusal(terminalID: UUID, retry: String) -> String {
+        "Terminal \(terminalID.uuidString) runs on the tmux transport, which TBD no longer "
+            + "starts sessions on. Run `tbd terminal migrate \(terminalID.uuidString)` "
+            + "(or `tbd terminal migrate --all`) to move it to the pty holder, then \(retry)."
+    }
+
     /// The skip when the compare-and-set found the row had moved. Nothing was
     /// written, and the row is consistent whichever way the race went.
     static let raceSkip = "Session changed while migrating"
