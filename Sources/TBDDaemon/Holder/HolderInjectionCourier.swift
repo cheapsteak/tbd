@@ -126,8 +126,8 @@ actor HolderInjectionCourier {
     private let clock: any Clock<Duration>
 
     /// The largest injection this courier will put on the sidecar — the
-    /// same cap `sendInput` and `sendPaste` enforce, for two reasons that are
-    /// both worse than the send being refused.
+    /// tagged-frame payload cap, `SidecarFrameCodec.maxTaggedPayloadBytes` —
+    /// for two reasons that are both worse than the send being refused.
     ///
     /// The app's frame scanner reads a declared length past its 4 MiB hard cap
     /// as corruption: it sets `isDesynced` and the receive loop closes the
@@ -141,7 +141,7 @@ actor HolderInjectionCourier {
     /// front end is unconfirmed — which is the reason to have the cap rather
     /// than a reason to skip it: an unreachable refusal costs nothing, and the
     /// failure it prevents is not local to the send that caused it.
-    static let maxInjectionBytes = SidecarFrameCodec.maxPasteBytes
+    static let maxInjectionBytes = SidecarFrameCodec.maxTaggedPayloadBytes
 
     /// Injections whose ack has not arrived and whose deadline has not fired.
     /// Keyed by the injection's own id, so an ack can be matched to exactly

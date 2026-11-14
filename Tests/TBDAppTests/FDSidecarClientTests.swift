@@ -210,156 +210,8 @@ struct FDSidecarClientTests {
         #expect(Data(buffer[0..<Int(n)]) == Data("split-ok".utf8))
     }
 
-    @Test("sendInput writes a decodable input frame to the daemon side")
-    func sendInputWritesFrame() async throws {
-        let (daemonSide, appSide) = try makeSocketPair()
-        defer { Darwin.close(daemonSide) }
-        let client = FDSidecarClient()
-        client.adopt(fd: appSide)
-
-        let worktreeID = UUID()
-        client.sendInput(worktreeID: worktreeID, paneID: "%in", bytes: Data("hi\r".utf8))
-
-        // Read the framed input on the daemon side and decode it.
-        let scanner = SidecarFrameScanner()
-        var decoded: (header: SidecarInputHeader, bytes: Data)?
-        let deadline = ContinuousClock.now + .seconds(2)
-        while decoded == nil && ContinuousClock.now < deadline {
-            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
-            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
-                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
-            }
-        }
-        let result = try #require(decoded)
-        #expect(result.header.worktreeID == worktreeID)
-        #expect(result.header.paneID == "%in")
-        #expect(result.bytes == Data("hi\r".utf8))
-    }
-
-    @Test("sendPaste writes a decodable paste frame to the daemon side")
-    func sendPasteWritesFrame() async throws {
-        let (daemonSide, appSide) = try makeSocketPair()
-        defer { Darwin.close(daemonSide) }
-        let client = FDSidecarClient()
-        client.adopt(fd: appSide)
-
-        let worktreeID = UUID()
-        let payload = Data("pasted content\n".utf8)
-        client.sendPaste(worktreeID: worktreeID, paneID: "%pa", bytes: payload)
-
-        // Read the framed paste on the daemon side and decode it.
-        let scanner = SidecarFrameScanner()
-        var decoded: (header: SidecarInputHeader, bytes: Data)?
-        let deadline = ContinuousClock.now + .seconds(2)
-        while decoded == nil && ContinuousClock.now < deadline {
-            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
-            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.paste.rawValue {
-                decoded = try SidecarFrameCodec.decodeTagged(payload: frame.payload)
-            }
-        }
-        let result = try #require(decoded)
-        #expect(result.header.worktreeID == worktreeID)
-        #expect(result.header.paneID == "%pa")
-        #expect(result.bytes == payload)
-    }
-
-    @Test("sendInput refuses an oversize payload — the frame is never written (R6-H3)")
-    func sendInputOversizeRefused() async throws {
-        let (daemonSide, appSide) = try makeSocketPair()
-        defer { Darwin.close(daemonSide) }
-        let client = FDSidecarClient()
-        client.adopt(fd: appSide)
-
-        let worktreeID = UUID()
-        // One byte past the cap: had this been encoded and written, the
-        // daemon-side scanner would desync and the whole shared sidecar
-        // connection would tear down.
-        let oversize = Data(repeating: 0x41, count: SidecarFrameCodec.maxPasteBytes + 1)
-        client.sendInput(worktreeID: worktreeID, paneID: "%big", bytes: oversize)
-        // A small frame follows on the SAME serial send queue: the first
-        // frame the daemon side sees must be this one — proof the oversize
-        // frame was refused, not merely delayed.
-        client.sendInput(worktreeID: worktreeID, paneID: "%ok", bytes: Data("k".utf8))
-
-        let scanner = SidecarFrameScanner()
-        var decoded: (header: SidecarInputHeader, bytes: Data)?
-        let deadline = ContinuousClock.now + .seconds(2)
-        while decoded == nil && ContinuousClock.now < deadline {
-            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
-            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
-                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
-                break
-            }
-        }
-        let result = try #require(decoded)
-        #expect(result.header.paneID == "%ok", "the oversize frame must never hit the wire")
-        #expect(result.bytes == Data("k".utf8))
-        #expect(!scanner.isDesynced)
-    }
-
-    @Test("sendInput reports its synchronous refusals instead of fabricating an ack (R19)")
-    func sendInputReturnsWhetherTheFrameWasHandedOff() throws {
-        let (daemonSide, appSide) = try makeSocketPair()
-        defer { Darwin.close(daemonSide) }
-        let client = FDSidecarClient()
-        client.adopt(fd: appSide)
-
-        let worktreeID = UUID()
-        // The return value is the ack `TerminalPanelView.performOutgoingWrite`
-        // hands to `OutgoingInputQueue`, and from there to the daemon's
-        // injection path. A `sendInput` that returned nothing (or always
-        // `true`) made the `.sidecarInput` arm fabricate "written" for a
-        // payload it had just dropped, so the daemon would not fall back and
-        // the prompt would be lost invisibly.
-        let oversize = Data(repeating: 0x41, count: SidecarFrameCodec.maxPasteBytes + 1)
-        #expect(client.sendInput(worktreeID: worktreeID, paneID: "%big", bytes: oversize) == false)
-
-        // And a payload that IS handed to the send queue says so — otherwise
-        // a mutation returning a constant `false` would satisfy the line
-        // above and silently route every keystroke through the daemon's
-        // fallback.
-        #expect(client.sendInput(worktreeID: worktreeID, paneID: "%ok", bytes: Data("k".utf8)) == true)
-
-        // Draining the frame is not decoration: `sendInput` returns as soon
-        // as the write is QUEUED, so on its own the `true` above only says
-        // "accepted for writing" — it does not say the bytes reached the
-        // wire. Reading blocks until the write has landed and decodes what
-        // arrived, which is what turns that `true` into an assertion about
-        // the frame rather than about the queue. Deleting the drain would
-        // leave the `#expect(... == true)` above satisfiable by a `sendInput`
-        // that queued a block which then failed.
-        //
-        // It is *not* what keeps the process alive, so do not propagate the
-        // pattern to a test that only needs to survive an un-drained write:
-        // `adopt` sets `SO_NOSIGPIPE` on this fd (see
-        // `SocketSIGPIPETests.adoptedSidecarSocketIsProtected`), so a write
-        // racing the `defer`'s close returns `EPIPE` to the send queue's
-        // `catch`, which logs and drops it.
-        let scanner = SidecarFrameScanner()
-        var decoded: (header: SidecarInputHeader, bytes: Data)?
-        let deadline = ContinuousClock.now + .seconds(2)
-        while decoded == nil && ContinuousClock.now < deadline {
-            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
-            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
-                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
-                break
-            }
-        }
-        let result = try #require(decoded)
-        #expect(result.header.paneID == "%ok")
-    }
-
-    @Test("sendInput while disconnected is dropped without crashing")
-    func sendInputWhileDisconnectedDrops() async throws {
-        let client = FDSidecarClient()   // never connected
-        client.sendInput(worktreeID: UUID(), paneID: "%x", bytes: Data("bytes".utf8))
-        // Give the send queue a beat; reaching here without a crash is the point.
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(!client.isConnected)
-    }
-
-    @Test("sendInput after the receive loop exits is dropped without crashing")
-    func sendInputAfterLoopExitDrops() async throws {
+    @Test("an ack sent after the receive loop exits is dropped without crashing")
+    func ackAfterLoopExitDrops() async throws {
         let (daemonSide, appSide) = try makeSocketPair()
         let client = FDSidecarClient()
         client.adopt(fd: appSide)
@@ -374,9 +226,10 @@ struct FDSidecarClientTests {
         }
         #expect(!client.isConnected)
 
-        // Post-exit send races the just-closed fd: the disconnected guard must
-        // drop it silently — no write into a recycled fd, no crash.
-        client.sendInput(worktreeID: UUID(), paneID: "%late", bytes: Data("late".utf8))
+        // Post-exit send races the just-closed fd: the write block's
+        // disconnected guard must drop it silently — no write into a recycled
+        // fd, no crash.
+        client.sendInjectionAck(injectionID: UUID(), written: true)
         try await Task.sleep(for: .milliseconds(50))
         #expect(!client.isConnected)
     }

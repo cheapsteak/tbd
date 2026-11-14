@@ -1092,8 +1092,8 @@ public final class Daemon: Sendable {
         // Built from the registry (which knows who owns each pty and holds the
         // daemon's own reader) and the fd sidecar (the one channel to the app),
         // so it exists exactly when a holder session can exist. Its ack sink is
-        // installed at step 8g, before the sidecar listens, for the same reason
-        // `onInput`'s is: a connection captures its sinks at adopt time.
+        // installed at step 8g, before the sidecar listens, because a
+        // connection captures its sinks at adopt time.
         let holderInjectionCourier: HolderInjectionCourier? = holderRegistry.map { registry in
             HolderInjectionCourier(
                 sendFrame: { [fdVendingServer] frame in

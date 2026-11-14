@@ -37,17 +37,21 @@ struct SidecarScreenFramingTests {
 
     /// The seam the injection path relied on when it added a frame type:
     /// both receive loops return an unrecognized type byte instead of
-    /// desyncing, and three suites drive that with byte 99. Two new cases must
-    /// not claim a byte somebody is already using as "unknown", and must not
-    /// collide with each other or with the five that existed.
-    @Test("the new type bytes are distinct and leave the unknown-byte seam intact")
+    /// desyncing, and three suites drive that with byte 99. The screen cases
+    /// must not claim a byte somebody is already using as "unknown", and must
+    /// not collide with each other or with any other case. Bytes 2 and 3 stay
+    /// unclaimed: a build with tmux control mode sent keystroke and paste
+    /// frames under them.
+    @Test("the type bytes are distinct and leave the unknown-byte seam intact")
     func typeBytesAreDistinctAndLeaveRoom() {
         let claimed: [SidecarFrameType] = [
-            .fdVend, .input, .paste, .injection, .injectionAck, .screenRequest, .screenReply,
+            .fdVend, .injection, .injectionAck, .screenRequest, .screenReply,
         ]
         #expect(Set(claimed.map(\.rawValue)).count == claimed.count)
         #expect(SidecarFrameType.screenRequest.rawValue == 6)
         #expect(SidecarFrameType.screenReply.rawValue == 7)
+        #expect(SidecarFrameType(rawValue: 2) == nil)
+        #expect(SidecarFrameType(rawValue: 3) == nil)
         #expect(SidecarFrameType(rawValue: 99) == nil)
     }
 

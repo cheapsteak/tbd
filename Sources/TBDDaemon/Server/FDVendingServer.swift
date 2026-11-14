@@ -53,8 +53,9 @@ private final class MonotonicCounter: @unchecked Sendable {
 /// M2.1 promotes the sidecar to a **bidirectional framed data channel**:
 /// - daemon → app: `send(fd:header:)` vends a pane read fd wrapped in a
 ///   length-prefixed `.fdVend` frame (unchanged semantics, now framed).
-/// - app → daemon: keystroke `.input` and bulk `.paste` frames, decoded on a
-///   dedicated receive `Thread` and delivered via `onInput`/`onPaste`.
+/// - app → daemon: `.injectionAck` and `.screenReply` frames, decoded on a
+///   dedicated receive `Thread` and delivered via `onInjectionAck` /
+///   `onScreenReply`.
 ///
 /// **fd ownership: readers signal, the actor closes.** Each adopted connection
 /// gets a receive thread, but the thread NEVER closes the connection fd. On loop
@@ -94,8 +95,8 @@ actor FDVendingServer {
     /// thread, so the check must not hop to the actor. This closes the
     /// reconnect interleave hole: an old thread past its `read()` and mid-loop
     /// over buffered frames could otherwise keep delivering into the SAME
-    /// `onInput`/`onPaste` sinks concurrently with the new thread, breaking
-    /// wire order == stream order.
+    /// sinks concurrently with the new thread, breaking wire order == stream
+    /// order.
     private let epochBox = MonotonicCounter()
     /// Path of the listening socket, when one is bound. Nil when the server is
     /// running purely off adopted fds (unit tests).
@@ -156,22 +157,10 @@ actor FDVendingServer {
         self.clock = clock
     }
 
-    /// Sink for app → daemon input frames. Set once by the daemon wiring BEFORE
-    /// `listen`/`adoptConnection` (M2.2 delivers keystrokes here). Captured per
-    /// connection at adopt time. When nil, input frames are logged and dropped.
-    var onInput: (@Sendable (SidecarInputHeader, Data) -> Void)?
-
-    /// Sink for app → daemon bulk `.paste` frames (the M2 paste ruling). Same
-    /// contract as `onInput`: set once by the daemon wiring BEFORE
-    /// `listen`/`adoptConnection`, captured per connection at adopt time. When
-    /// nil, paste frames are logged and dropped. Delivered from the SAME receive
-    /// thread as `onInput`, so wire order is preserved into the sinks.
-    var onPaste: (@Sendable (SidecarInputHeader, Data) -> Void)?
-
     /// Sink for app → daemon `.injectionAck` frames: the app's answer to one
-    /// daemon injection for a holder-backed session whose pty it owns. Same
-    /// contract as `onInput` — set once by the daemon wiring BEFORE
-    /// `listen`/`adoptConnection`, captured per connection at adopt time. When
+    /// daemon injection for a holder-backed session whose pty it owns. Set
+    /// once by the daemon wiring BEFORE `listen`/`adoptConnection`, and
+    /// captured per connection at adopt time. When
     /// nil, acks are logged and dropped, which is survivable rather than fatal:
     /// an unanswered injection reaches the courier's deadline and is written
     /// directly (see `HolderInjectionCourier`).
@@ -179,7 +168,7 @@ actor FDVendingServer {
 
     /// Sink for app → daemon `.screenReply` frames: a viewer's answer to one
     /// screen request for a session whose pty it holds. Same contract as
-    /// `onInput` — installed by the daemon wiring BEFORE
+    /// `onInjectionAck` — installed by the daemon wiring BEFORE
     /// `listen`/`adoptConnection`, captured per connection at adopt time. When
     /// nil, replies are logged and dropped, which is survivable rather than
     /// fatal: an unanswered pull reaches `HolderScreenPull`'s bound and the
@@ -233,18 +222,6 @@ actor FDVendingServer {
     /// is cleared and the fd closed, so once it fires the stale fd is fully gone —
     /// tests can await deterministic post-cleanup state instead of sleeping.
     var onReceiveLoopExit: (@Sendable () -> Void)?
-
-    /// Install the input sink. Must be called BEFORE `listen`/`adoptConnection`
-    /// — each connection captures the current sink at adopt time.
-    func setOnInput(_ handler: (@Sendable (SidecarInputHeader, Data) -> Void)?) {
-        onInput = handler
-    }
-
-    /// Install the paste sink. Must be called BEFORE `listen`/`adoptConnection`
-    /// — each connection captures the current sink at adopt time.
-    func setOnPaste(_ handler: (@Sendable (SidecarInputHeader, Data) -> Void)?) {
-        onPaste = handler
-    }
 
     /// Install the injection-ack sink. Must be called BEFORE
     /// `listen`/`adoptConnection` — each connection captures the current sink
@@ -481,7 +458,7 @@ actor FDVendingServer {
         // per-frame epoch check fails and it drops out (R5-M2).
         let epoch = epochBox.advance()
         startReceiveThread(
-            fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste,
+            fd: fd, epoch: epoch,
             injectionAckSink: onInjectionAck, screenReplySink: onScreenReply,
             connectionLostSink: onConnectionLost)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
@@ -736,19 +713,18 @@ actor FDVendingServer {
     }
 
     /// Spawn the receive thread for one connection. The thread reads framed
-    /// bytes, decodes `.input` frames to `inputSink` and `.paste` frames to
-    /// `pasteSink`, and on exit (EOF, read error, scanner desync, or a stale
-    /// epoch) signals `receiveLoopExited(fd:)` — it never closes `fd` itself.
-    /// The actor is the sole closer (see the type doc). Both sinks are driven
-    /// from THIS one thread, so `.input`/`.paste` frames reach their sinks in
-    /// wire order — and the per-frame epoch check guarantees at most one
-    /// LIVE thread ever delivers, so a reconnect cannot interleave a
-    /// superseded thread's buffered frames with the successor's (R5-M2).
+    /// bytes, decodes `.injectionAck` frames to `injectionAckSink` and
+    /// `.screenReply` frames to `screenReplySink`, and on exit (EOF, read
+    /// error, scanner desync, or a stale epoch) signals
+    /// `receiveLoopExited(fd:)` — it never closes `fd` itself. The actor is the
+    /// sole closer (see the type doc). Every sink is driven from THIS one
+    /// thread, so frames reach their sinks in wire order — and the per-frame
+    /// epoch check guarantees at most one LIVE thread ever delivers, so a
+    /// reconnect cannot interleave a superseded thread's buffered frames with
+    /// the successor's (R5-M2).
     private nonisolated func startReceiveThread(
         fd: Int32,
         epoch: UInt64,
-        inputSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
-        pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
         injectionAckSink: (@Sendable (SidecarInjectionAck) -> Void)?,
         screenReplySink: (@Sendable (SidecarScreenReply, UInt64) -> Void)?,
         connectionLostSink: (@Sendable (UInt64) -> Void)?
@@ -779,26 +755,6 @@ actor FDVendingServer {
                         continue
                     }
                     switch type {
-                    case .input:
-                        guard let (header, bytes) = try? SidecarFrameCodec.decodeTagged(payload: frame.payload) else {
-                            logger.error("sidecar: undecodable input frame, dropping")
-                            continue
-                        }
-                        if let inputSink {
-                            inputSink(header, bytes)
-                        } else {
-                            logger.debug("sidecar: input frame with no onInput handler, dropping \(bytes.count, privacy: .public) bytes")
-                        }
-                    case .paste:
-                        guard let (header, bytes) = try? SidecarFrameCodec.decodeTagged(payload: frame.payload) else {
-                            logger.error("sidecar: undecodable paste frame, dropping")
-                            continue
-                        }
-                        if let pasteSink {
-                            pasteSink(header, bytes)
-                        } else {
-                            logger.debug("sidecar: paste frame with no onPaste handler, dropping \(bytes.count, privacy: .public) bytes")
-                        }
                     case .injectionAck:
                         guard let ack = try? SidecarFrameCodec.decodeInjectionAck(
                             payload: frame.payload) else {

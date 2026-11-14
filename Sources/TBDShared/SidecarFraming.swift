@@ -2,13 +2,7 @@ import Foundation
 
 /// Frame discriminator for the bidirectional sidecar data channel (M2.1).
 /// daemon → app carries `.fdVend` (a JSON `FDVendHeader` alongside an
-/// `SCM_RIGHTS` fd); app → daemon carries `.input` (keystroke bytes) and
-/// `.paste` (bulk paste bytes), both tagged with a `SidecarInputHeader`.
-///
-/// `.input` and `.paste` share ONE payload sub-format and ride the SAME
-/// ordered channel: a paste and a following keystroke are FIFO-ordered
-/// end-to-end (the M2 paste ruling — the daemon runs the paste through the
-/// correlator so a keystroke enqueued after it lands strictly after).
+/// `SCM_RIGHTS` fd).
 ///
 /// `.injection` (daemon → app) and `.injectionAck` (app → daemon) carry a
 /// daemon-originated write for a holder-backed session whose pty a viewer
@@ -30,26 +24,16 @@ import Foundation
 /// so a peer built before a case existed skips the frame and logs it. That
 /// forward-compat seam is why the injection path could be a new frame type
 /// rather than a new socket.
+///
+/// **Raw values 2 and 3 are reserved.** Builds with tmux control mode sent
+/// keystroke and paste frames under them; a receiver skips them as unknown,
+/// and a new case must not reuse them.
 public enum SidecarFrameType: UInt8, Sendable {
     case fdVend = 1
-    case input = 2
-    case paste = 3
     case injection = 4
     case injectionAck = 5
     case screenRequest = 6
     case screenReply = 7
-}
-
-/// Header prefixing every app → daemon input frame: identifies which pane the
-/// keystroke bytes belong to. `paneID` is only unique within one tmux server,
-/// so the daemon resolves `worktreeID` → server before issuing `send-keys`.
-public struct SidecarInputHeader: Codable, Sendable, Equatable {
-    public let worktreeID: UUID
-    public let paneID: String
-    public init(worktreeID: UUID, paneID: String) {
-        self.worktreeID = worktreeID
-        self.paneID = paneID
-    }
 }
 
 /// Header prefixing every daemon → app injection frame.
@@ -208,7 +192,7 @@ public struct SidecarScreenReply: Codable, Sendable, Equatable {
     }
 }
 
-/// Errors from decoding an input frame payload.
+/// Errors from decoding a frame payload.
 public enum SidecarFramingError: LocalizedError, Equatable {
     case truncatedPayload      // payload ended before the declared header/bytes
     case undecodableHeader     // header sub-region wasn't valid JSON
@@ -247,22 +231,15 @@ private func appendUInt32LE(_ data: inout Data, _ value: UInt32) {
 /// Outer frame: `[UInt32 LE frameLength][UInt8 type][payload]`, where
 /// `frameLength = 1 + payload.count` (it covers the type byte).
 ///
-/// Tagged payload sub-format (shared by `.input` and `.paste`):
+/// Tagged payload sub-format (used by `.injection`):
 /// `[UInt32 LE headerLength][JSON header][raw bytes]`.
 public enum SidecarFrameCodec {
 
-    /// Largest paste that rides a `.paste` frame. Sits under the scanner's 4 MiB
-    /// hard cap with 64 KiB of headroom for the JSON header + outer framing, so
-    /// even a max-size payload's encoded frame never trips `isDesynced`.
-    ///
-    /// Pastes LARGER than this are REFUSED at the app's view level — a
-    /// user-visible error log, then the paste is dropped (the paste ruling v2).
-    /// They are NOT split across frames (each `.paste` frame is its own
-    /// `paste-buffer` call, which tmux would bracket as a separate paste), and
-    /// they NEVER fall back to the keystroke path: SwiftTerm's bracketed-paste
-    /// tracking can be stale after a re-attach, so tmux must remain the sole
-    /// bracketing authority while attached.
-    public static let maxPasteBytes = 4 * 1024 * 1024 - 64 * 1024
+    /// Largest raw-byte payload a tagged frame may carry. Sits under the
+    /// scanner's 4 MiB hard cap with 64 KiB of headroom for the JSON header +
+    /// outer framing, so even a max-size payload's encoded frame never trips
+    /// `isDesynced`.
+    public static let maxTaggedPayloadBytes = 4 * 1024 * 1024 - 64 * 1024
 
     /// Wrap `payload` in an outer frame with the given `type`.
     public static func encode(type: SidecarFrameType, payload: Data) -> Data {
@@ -273,9 +250,8 @@ public enum SidecarFrameCodec {
         return out
     }
 
-    /// Build the shared sub-payload: JSON-encode `header`, prefix it with its
-    /// length, append `bytes`. The single sub-format implementation behind both
-    /// `.input` and `.paste`.
+    /// Build the tagged sub-payload: JSON-encode `header`, prefix it with its
+    /// length, append `bytes`.
     private static func encodeSubPayload<Header: Encodable>(header: Header, bytes: Data) throws -> Data {
         let headerJSON = try JSONEncoder().encode(header)
         var payload = Data(capacity: 4 + headerJSON.count + bytes.count)
@@ -285,26 +261,9 @@ public enum SidecarFrameCodec {
         return payload
     }
 
-    /// Encode a tagged frame (`.input` or `.paste`) around the shared sub-format.
-    public static func encodeTagged(
-        type: SidecarFrameType, header: SidecarInputHeader, bytes: Data) throws -> Data {
-        encode(type: type, payload: try encodeSubPayload(header: header, bytes: bytes))
-    }
-
-    /// Encode a keystroke `.input` frame.
-    public static func encodeInput(header: SidecarInputHeader, bytes: Data) throws -> Data {
-        try encodeTagged(type: .input, header: header, bytes: bytes)
-    }
-
-    /// Encode a bulk `.paste` frame (same sub-format as `.input`).
-    public static func encodePaste(header: SidecarInputHeader, bytes: Data) throws -> Data {
-        try encodeTagged(type: .paste, header: header, bytes: bytes)
-    }
-
     /// Decode a tagged frame's payload back into its header and raw bytes.
     /// Throws `SidecarFramingError` on a truncated or undecodable payload. The
-    /// sub-format is header-type-agnostic — one decoder serves `.input`,
-    /// `.paste` and `.injection`.
+    /// sub-format is header-type-agnostic.
     private static func decodeSubPayload<Header: Decodable>(
         _ headerType: Header.Type, payload: Data
     ) throws -> (header: Header, bytes: Data) {
@@ -323,19 +282,8 @@ public enum SidecarFrameCodec {
         return (header, bytes)
     }
 
-    /// Decode an `.input`/`.paste` frame's payload back into its header and raw
-    /// bytes.
-    public static func decodeTagged(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
-        try decodeSubPayload(SidecarInputHeader.self, payload: payload)
-    }
-
-    /// Decode an `.input` frame's payload (alias of `decodeTagged`).
-    public static func decodeInput(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
-        try decodeTagged(payload: payload)
-    }
-
-    /// Encode a daemon → app `.injection` frame: the same tagged sub-format as
-    /// `.input`, over an injection header.
+    /// Encode a daemon → app `.injection` frame: the tagged sub-format over an
+    /// injection header.
     public static func encodeInjection(
         header: SidecarInjectionHeader, bytes: Data) throws -> Data {
         encode(type: .injection, payload: try encodeSubPayload(header: header, bytes: bytes))
