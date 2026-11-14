@@ -1,7 +1,9 @@
 # tmux control mode — Phase B addendum (flow control)
 
+Status: **retired.** TBD's tmux control mode is retired: its implementation has been removed, and this document is kept as the design record.
+
 **Date:** 2026-07-07
-**Status:** Implemented (M1–M3 of Phase B). Extends [`2026-05-17-tmux-control-mode-design.md`](./2026-05-17-tmux-control-mode-design.md) §"Flow control — Policy B" and [`2026-07-02-tmux-control-mode-phase-a-addendum.md`](./2026-07-02-tmux-control-mode-phase-a-addendum.md) §3. Tracking: #318 · dogfood evidence that pulled this forward: #376 · Phase A: #364.
+**Extends:** [`2026-05-17-tmux-control-mode-design.md`](./2026-05-17-tmux-control-mode-design.md) §"Flow control — Policy B" and [`2026-07-02-tmux-control-mode-phase-a-addendum.md`](./2026-07-02-tmux-control-mode-phase-a-addendum.md) §3. Tracking: #318 · dogfood evidence that pulled this forward: #376 · Phase A: #364.
 
 ## 1. What changed versus the base spec — and why
 

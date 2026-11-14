@@ -1,5 +1,7 @@
 # Review: tmux control mode integration design
 
+Status: **retired.** TBD's tmux control mode is retired: its implementation has been removed, and this review is kept as part of the design record.
+
 **Date:** 2026-05-17
 **Reviewed doc:** [`2026-05-17-tmux-control-mode-design.md`](./2026-05-17-tmux-control-mode-design.md)
 

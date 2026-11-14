@@ -1,7 +1,9 @@
 # tmux control mode — Phase A addendum (input + resize + replay)
 
+Status: **retired.** TBD's tmux control mode is retired: its implementation has been removed, and this document is kept as the design record.
+
 **Date:** 2026-07-02
-**Status:** Design addendum. Extends [`2026-05-17-tmux-control-mode-design.md`](./2026-05-17-tmux-control-mode-design.md) with the transport and ordering decisions for Phase A (the spec's phases 3+4+5, shipped as one PR) plus two learnings from the Phase 1–2 implementation (#317). Validated against iTerm2's production `-CC` client (local checkout, `sources/tmux/` — `TmuxGateway.m`, `TmuxController.m`, `TmuxWindowOpener.m`, `PTYSession.m`). Tracking: #318.
+**Extends:** [`2026-05-17-tmux-control-mode-design.md`](./2026-05-17-tmux-control-mode-design.md) with the transport and ordering decisions for Phase A (the spec's phases 3+4+5, shipped as one PR) plus two learnings from the Phase 1–2 implementation (#317). Validated against iTerm2's production `-CC` client (local checkout, `sources/tmux/` — `TmuxGateway.m`, `TmuxController.m`, `TmuxWindowOpener.m`, `PTYSession.m`). Tracking: #318.
 **Phase grouping:** Phase A = input + resize + replay (the usability line: gate-on daily driving is viable). Phase B = flow control + crash recovery (the default-on line).
 
 ## 1. Command transport: everything over the `-CC` stream
