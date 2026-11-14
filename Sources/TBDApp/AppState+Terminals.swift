@@ -812,40 +812,6 @@ extension AppState {
         }
     }
 
-    /// Replace an idle Codex process with Claude in the same terminal row and
-    /// tmux window. The daemon owns eligibility and rollback; this layer keeps
-    /// the UI on the existing tab and adopts the returned replacement row.
-    func continueInClaude(sourceTerminalID: UUID, profileID: UUID?) async {
-        guard let source = terminals.values
-            .flatMap({ $0 })
-            .first(where: { $0.id == sourceTerminalID }) else {
-            showAlert("Couldn't continue in Claude: source terminal not found.", isError: true)
-            return
-        }
-
-        do {
-            let size = mainAreaTerminalSize()
-            let updated = try await daemonClient.continueInClaude(
-                sourceTerminalID: sourceTerminalID,
-                profileID: profileID,
-                cols: size.cols,
-                rows: size.rows)
-            guard updated.id == source.id,
-                  updated.worktreeID == source.worktreeID,
-                  updated.tmuxWindowID == source.tmuxWindowID else {
-                throw DaemonClientError.invalidResponse
-            }
-            adoptProviderReplacement(updated)
-        } catch {
-            logger.error(
-                "Continue in Claude failed: \(error.localizedDescription, privacy: .public)")
-            showAlert(
-                "Couldn't continue in Claude: \(error.localizedDescription)",
-                isError: true)
-            handleConnectionError(error)
-        }
-    }
-
     /// Toggle pin state for a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async {
         // Optimistic local update

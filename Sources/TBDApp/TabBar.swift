@@ -815,25 +815,6 @@ enum ContinueInCodexMenu {
     }
 }
 
-/// Pure policy for the Codex-to-Claude replacement menu. The app uses cached
-/// metadata only to shape the affordance; the daemon repeats every check
-/// before it interrupts the source process.
-enum ContinueInClaudeMenu {
-    static func isVisible(for terminal: Terminal?) -> Bool {
-        terminal?.isCodexTerminal == true
-            && terminal?.transport == .tmux
-            && terminal?.transcriptPath?.isEmpty == false
-    }
-
-    /// Every visible item is enabled. A tmux Codex row carries no agent
-    /// status, so the cached row cannot say whether a turn is open; the
-    /// daemon reads the rollout before it replaces anything and refuses a
-    /// busy turn with `terminalBusy`.
-    static func isEnabled(for terminal: Terminal?) -> Bool {
-        isVisible(for: terminal)
-    }
-}
-
 // MARK: - Tab controls
 
 /// The terminal pin's item in a workspace tab's right-click menu (panel tabs
@@ -1305,37 +1286,6 @@ private struct TabBarItem: View {
         }
     }
 
-    @ViewBuilder
-    private func continueInClaudeMenuItems() -> some View {
-        let enabled = ContinueInClaudeMenu.isEnabled(for: terminal)
-
-        Button("Default (logged in)") {
-            guard let terminalID = terminal?.id else { return }
-            Task {
-                await appState.continueInClaude(
-                    sourceTerminalID: terminalID,
-                    profileID: nil)
-            }
-        }
-        .disabled(!enabled)
-
-        if !appState.modelProfiles.isEmpty {
-            Divider()
-
-            ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                Button(formatProfileSubmenuLabel(entry)) {
-                    guard let terminalID = terminal?.id else { return }
-                    Task {
-                        await appState.continueInClaude(
-                            sourceTerminalID: terminalID,
-                            profileID: entry.profile.id)
-                    }
-                }
-                .disabled(!enabled)
-            }
-        }
-    }
-
     /// The file this tab's Copy Path, Reveal in Finder and Open With act on,
     /// and the copy item's wording (`WorkspaceTabFileMenu`); nil for a tab
     /// with no file, which offers none of them. A transcript tab's file is
@@ -1462,16 +1412,6 @@ private struct TabBarItem: View {
                 } label: {
                     Label("Cancel Scheduled Resume", systemImage: "clock.badge.xmark")
                 }
-            }
-
-            Divider()
-        }
-
-        if ContinueInClaudeMenu.isVisible(for: terminal) {
-            Menu {
-                continueInClaudeMenuItems()
-            } label: {
-                Label("Continue in Claude", systemImage: "arrow.right.circle")
             }
 
             Divider()
