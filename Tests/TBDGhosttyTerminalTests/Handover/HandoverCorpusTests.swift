@@ -3,6 +3,7 @@ import SwiftTerm
 @testable import TBDGhosttyCore
 @testable import TBDGhosttyTerminal
 import TBDTerminalSerialization
+import TerminalCorpus
 import TestSupport
 import Testing
 
@@ -746,6 +747,8 @@ struct HandoverCorpusTests {
     }
 }
 
+// `public` because the corpus declares `HandoverState` public in its own target, so this
+// conformance is public too.
 extension HandoverState: CustomTestStringConvertible {
-    var testDescription: String { name }
+    public var testDescription: String { name }
 }

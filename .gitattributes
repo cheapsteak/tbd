@@ -1,1 +1,3 @@
 Sources/TBDDaemon/Resources/phone-app/app.js linguist-generated=true
+# Recorded terminal output: the exact bytes are the test input (CRs included), so never normalize them.
+Tests/TBDDaemonTests/Fixtures/EmulatorParity/*.vt binary

@@ -6,6 +6,7 @@ import SwiftTerm
 import TBDGhosttyCore
 import TBDGhosttyTerminal
 import TBDTerminalSerialization
+import TerminalCorpus
 
 /// The scrollback both stores keep and both handovers carry: `HolderReader.scrollbackLines` and
 /// `HolderHandback.handbackScrollbackLines`.

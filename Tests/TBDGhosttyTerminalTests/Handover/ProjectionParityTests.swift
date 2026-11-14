@@ -5,6 +5,7 @@ import SwiftTerm
 // Scoped, so a bare `Terminal` cannot mean TBDShared's row model.
 import struct TBDShared.TerminalScreen
 import TBDTerminalSerialization
+import TerminalCorpus
 import TestSupport
 import Testing
 

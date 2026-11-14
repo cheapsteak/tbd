@@ -1,0 +1,213 @@
+[?1049h[26;1H[?1h=[1mbuild log[0m [2m(generated for the emulator parity corpus)[0m[m
+[m
+[2m[0001][0m [32mok[0m      fetch module_1 round 1 [36m###[0m[m
+[2m[0002][0m [32mok[0m      fetch module_2 round 1 [36m######[0m[m
+[2m[0003][0m [32mok[0m      fetch module_3 round 1 [36m#########[0m[m
+[2m[0004][0m [32mok[0m      fetch module_4 round 1 [36m############[0m[m
+[2m[0005][0m [32mok[0m      fetch module_5 round 1 [36m###############[0m[m
+[2m[0006][0m [32mok[0m      fetch module_6 round 1 [36m##################[0m[m
+[2m[0007][0m [32mok[0m      resolve module_1 round 1 [36m###[0m[m
+[2m[0008][0m [32mok[0m      resolve module_2 round 1 [36m######[0m[m
+[2m[0009][0m [32mok[0m      resolve module_3 round 1 [36m#########[0m[m
+[2m[0010][0m [32mok[0m      resolve module_4 round 1 [36m############[0m[m
+[2m[0011][0m [33m[1mwarning[0m resolve module_5 round 1: [33munused value[0m in item 5[m
+[2m[0012][0m [32mok[0m      resolve module_6 round 1 [36m##################[0m[m
+[2m[0013][0m [32mok[0m      compile module_1 round 1 [36m###[0m[m
+[2m[0014][0m [32mok[0m      compile module_2 round 1 [36m######[0m[m
+[2m[0015][0m [32mok[0m      compile module_3 round 1 [36m#########[0m[m
+[2m[0016][0m [32mok[0m      compile module_4 round 1 [36m############[0m[m
+[2m[0017][0m [32mok[0m      compile module_5 round 1 [36m###############[0m[m
+[2m[0018][0m [32mok[0m      compile module_6 round 1 [36m##################[0m[m
+[2m[0019][0m [32mok[0m      link module_1 round 1 [36m###[0m[m
+[2m[0020][0m [32mok[0m      link module_2 round 1 [36m######[0m[m
+[2m[0021][0m [32mok[0m      link module_3 round 1 [36m#########[0m[m
+[2m[0022][0m [33m[1mwarning[0m link module_4 round 1: [33munused value[0m in item 4[m
+[2m[0023][0m [32mok[0m      link module_5 round 1 [36m###############[0m[m
+[7mbuild.log[27m[K[K[2m[0024][0m [32mok[0m      link module_6 round 1 [36m##################[0m[m
+[2m[0025][0m [32mok[0m      test module_1 round 1 [36m###[0m[m
+[2m[0026][0m [32mok[0m      test module_2 round 1 [36m######[0m[m
+[2m[0027][0m [32mok[0m      test module_3 round 1 [36m#########[0m[m
+[2m[0028][0m [32mok[0m      test module_4 round 1 [36m############[0m[m
+[2m[0029][0m [31m[1merror[0m   test module_5 round 1: [31mmissing symbol[0m [4mstep_05[24m[m
+[2m[0030][0m [32mok[0m      test module_6 round 1 [36m##################[0m[m
+[2m[0031][0m [32mok[0m      package module_1 round 1 [36m###[0m[m
+[2m[0032][0m [32mok[0m      package module_2 round 1 [36m######[0m[m
+[2m[0033][0m [33m[1mwarning[0m package module_3 round 1: [33munused value[0m in item 3[m
+[2m[0034][0m [32mok[0m      package module_4 round 1 [36m############[0m[m
+[2m[0035][0m [32mok[0m      package module_5 round 1 [36m###############[0m[m
+[2m[0036][0m [32mok[0m      package module_6 round 1 [36m##################[0m[m
+[2m--- round 1 done: 漢字 ✓ café ---[0m[m
+[2m[0037][0m [32mok[0m      fetch module_1 round 2 [36m###[0m[m
+[2m[0038][0m [32mok[0m      fetch module_2 round 2 [36m######[0m[m
+[2m[0039][0m [32mok[0m      fetch module_3 round 2 [36m#########[0m[m
+[2m[0040][0m [32mok[0m      fetch module_4 round 2 [36m############[0m[m
+[2m[0041][0m [32mok[0m      fetch module_5 round 2 [36m###############[0m[m
+[2m[0042][0m [32mok[0m      fetch module_6 round 2 [36m##################[0m[m
+[2m[0043][0m [32mok[0m      resolve module_1 round 2 [36m###[0m[m
+[2m[0044][0m [33m[1mwarning[0m resolve module_2 round 2: [33munused value[0m in item 2[m
+[2m[0045][0m [32mok[0m      resolve module_3 round 2 [36m#########[0m[m
+[2m[0046][0m [32mok[0m      resolve module_4 round 2 [36m############[0m[m
+[2m[0047][0m [32mok[0m      resolve module_5 round 2 [36m###############[0m[m
+:[K[K[2m[0048][0m [32mok[0m      resolve module_6 round 2 [36m##################[0m[m
+[2m[0049][0m [32mok[0m      compile module_1 round 2 [36m###[0m[m
+[2m[0050][0m [32mok[0m      compile module_2 round 2 [36m######[0m[m
+[2m[0051][0m [32mok[0m      compile module_3 round 2 [36m#########[0m[m
+[2m[0052][0m [32mok[0m      compile module_4 round 2 [36m############[0m[m
+[2m[0053][0m [32mok[0m      compile module_5 round 2 [36m###############[0m[m
+[2m[0054][0m [32mok[0m      compile module_6 round 2 [36m##################[0m[m
+[2m[0055][0m [33m[1mwarning[0m link module_1 round 2: [33munused value[0m in item 1[m
+[2m[0056][0m [32mok[0m      link module_2 round 2 [36m######[0m[m
+[2m[0057][0m [32mok[0m      link module_3 round 2 [36m#########[0m[m
+[2m[0058][0m [31m[1merror[0m   link module_4 round 2: [31mmissing symbol[0m [4mstep_04[24m[m
+[2m[0059][0m [32mok[0m      link module_5 round 2 [36m###############[0m[m
+[2m[0060][0m [32mok[0m      link module_6 round 2 [36m##################[0m[m
+[2m[0061][0m [32mok[0m      test module_1 round 2 [36m###[0m[m
+[2m[0062][0m [32mok[0m      test module_2 round 2 [36m######[0m[m
+[2m[0063][0m [32mok[0m      test module_3 round 2 [36m#########[0m[m
+[2m[0064][0m [32mok[0m      test module_4 round 2 [36m############[0m[m
+[2m[0065][0m [32mok[0m      test module_5 round 2 [36m###############[0m[m
+[2m[0066][0m [33m[1mwarning[0m test module_6 round 2: [33munused value[0m in item 6[m
+[2m[0067][0m [32mok[0m      package module_1 round 2 [36m###[0m[m
+[2m[0068][0m [32mok[0m      package module_2 round 2 [36m######[0m[m
+[2m[0069][0m [32mok[0m      package module_3 round 2 [36m#########[0m[m
+[2m[0070][0m [32mok[0m      package module_4 round 2 [36m############[0m[m
+[2m[0071][0m [32mok[0m      package module_5 round 2 [36m###############[0m[m
+[2m[0072][0m [32mok[0m      package module_6 round 2 [36m##################[0m[m
+:[K[K/[Kee[Krr[Krr[Koo[Krr[K[1;1H[K[2m[0048][0m [32mok[0m      resolve module_6 round 2 [36m##################[0m[m
+[2;1H[K[2m[0049][0m [32mok[0m      compile module_1 round 2 [36m###[0m[m
+[3;1H[K[2m[0050][0m [32mok[0m      compile module_2 round 2 [36m######[0m[m
+[4;1H[K[2m[0051][0m [32mok[0m      compile module_3 round 2 [36m#########[0m[m
+[5;1H[K[2m[0052][0m [32mok[0m      compile module_4 round 2 [36m############[0m[m
+[6;1H[K[2m[0053][0m [32mok[0m      compile module_5 round 2 [36m###############[0m[m
+[7;1H[K[2m[0054][0m [32mok[0m      compile module_6 round 2 [36m##################[0m[m
+[8;1H[K[2m[0055][0m [33m[1mwarning[0m link module_1 round 2: [33munused value[0m in item 1[m
+[9;1H[K[2m[0056][0m [32mok[0m      link module_2 round 2 [36m######[0m[m
+[10;1H[K[2m[0057][0m [32mok[0m      link module_3 round 2 [36m#########[0m[m
+[11;1H[K[2m[0058][0m [31m[1merror[0m   link module_4 round 2: [31mmissing symbol[0m [4mstep_04[24m[m
+[12;1H[K[2m[0059][0m [32mok[0m      link module_5 round 2 [36m###############[0m[m
+[13;1H[K[2m[0060][0m [32mok[0m      link module_6 round 2 [36m##################[0m[m
+[14;1H[K[2m[0061][0m [32mok[0m      test module_1 round 2 [36m###[0m[m
+[15;1H[K[2m[0062][0m [32mok[0m      test module_2 round 2 [36m######[0m[m
+[16;1H[K[2m[0063][0m [32mok[0m      test module_3 round 2 [36m#########[0m[m
+[17;1H[K[2m[0064][0m [32mok[0m      test module_4 round 2 [36m############[0m[m
+[18;1H[K[2m[0065][0m [32mok[0m      test module_5 round 2 [36m###############[0m[m
+[19;1H[K[2m[0066][0m [33m[1mwarning[0m test module_6 round 2: [33munused value[0m in item 6[m
+[20;1H[K[2m[0067][0m [32mok[0m      package module_1 round 2 [36m###[0m[m
+[21;1H[K[2m[0068][0m [32mok[0m      package module_2 round 2 [36m######[0m[m
+[22;1H[K[2m[0069][0m [32mok[0m      package module_3 round 2 [36m#########[0m[m
+[23;1H[K[2m[0070][0m [32mok[0m      package module_4 round 2 [36m############[0m[m
+[24;1H[K[2m[0071][0m [32mok[0m      package module_5 round 2 [36m###############[0m[m
+[25;1H[K[2m[0072][0m [32mok[0m      package module_6 round 2 [36m##################[0m[m
+[26;1H[1;1H[K[2m[0048][0m [32mok[0m      resolve module_6 round 2 [36m##################[0m[m
+[2;1H[K[2m[0049][0m [32mok[0m      compile module_1 round 2 [36m###[0m[m
+[3;1H[K[2m[0050][0m [32mok[0m      compile module_2 round 2 [36m######[0m[m
+[4;1H[K[2m[0051][0m [32mok[0m      compile module_3 round 2 [36m#########[0m[m
+[5;1H[K[2m[0052][0m [32mok[0m      compile module_4 round 2 [36m############[0m[m
+[6;1H[K[2m[0053][0m [32mok[0m      compile module_5 round 2 [36m###############[0m[m
+[7;1H[K[2m[0054][0m [32mok[0m      compile module_6 round 2 [36m##################[0m[m
+[8;1H[K[2m[0055][0m [33m[1mwarning[0m link module_1 round 2: [33munused value[0m in item 1[m
+[9;1H[K[2m[0056][0m [32mok[0m      link module_2 round 2 [36m######[0m[m
+[10;1H[K[2m[0057][0m [32mok[0m      link module_3 round 2 [36m#########[0m[m
+[11;1H[K[2m[0058][0m [31m[1m[7merror[27m[0m[31m[1m[0m   link module_4 round 2: [31mmissing symbol[0m [4mstep_04[24m[m
+[12;1H[K[2m[0059][0m [32mok[0m      link module_5 round 2 [36m###############[0m[m
+[13;1H[K[2m[0060][0m [32mok[0m      link module_6 round 2 [36m##################[0m[m
+[14;1H[K[2m[0061][0m [32mok[0m      test module_1 round 2 [36m###[0m[m
+[15;1H[K[2m[0062][0m [32mok[0m      test module_2 round 2 [36m######[0m[m
+[16;1H[K[2m[0063][0m [32mok[0m      test module_3 round 2 [36m#########[0m[m
+[17;1H[K[2m[0064][0m [32mok[0m      test module_4 round 2 [36m############[0m[m
+[18;1H[K[2m[0065][0m [32mok[0m      test module_5 round 2 [36m###############[0m[m
+[19;1H[K[2m[0066][0m [33m[1mwarning[0m test module_6 round 2: [33munused value[0m in item 6[m
+[20;1H[K[2m[0067][0m [32mok[0m      package module_1 round 2 [36m###[0m[m
+[21;1H[K[2m[0068][0m [32mok[0m      package module_2 round 2 [36m######[0m[m
+[22;1H[K[2m[0069][0m [32mok[0m      package module_3 round 2 [36m#########[0m[m
+[23;1H[K[2m[0070][0m [32mok[0m      package module_4 round 2 [36m############[0m[m
+[24;1H[K[2m[0071][0m [32mok[0m      package module_5 round 2 [36m###############[0m[m
+[25;1H[K[2m[0072][0m [32mok[0m      package module_6 round 2 [36m##################[0m[m
+[26;1H[2m--- round 2 done: 漢字 ✓ café ---[0m[m
+[2m[0073][0m [32mok[0m      fetch module_1 round 3 [36m###[0m[m
+[2m[0074][0m [32mok[0m      fetch module_2 round 3 [36m######[0m[m
+[2m[0075][0m [32mok[0m      fetch module_3 round 3 [36m#########[0m[m
+[2m[0076][0m [32mok[0m      fetch module_4 round 3 [36m############[0m[m
+[2m[0077][0m [33m[1mwarning[0m fetch module_5 round 3: [33munused value[0m in item 5[m
+[2m[0078][0m [32mok[0m      fetch module_6 round 3 [36m##################[0m[m
+[2m[0079][0m [32mok[0m      resolve module_1 round 3 [36m###[0m[m
+[2m[0080][0m [32mok[0m      resolve module_2 round 3 [36m######[0m[m
+[2m[0081][0m [32mok[0m      resolve module_3 round 3 [36m#########[0m[m
+:[K[K/[K...skipping...
+[2m[0087][0m [31m[1m[7merror[27m[0m[31m[1m[0m   compile module_3 round 3: [31mmissing symbol[0m [4mstep_03[24m[m
+[2m[0088][0m [33m[1mwarning[0m compile module_4 round 3: [33munused value[0m in item 4[m
+[2m[0089][0m [32mok[0m      compile module_5 round 3 [36m###############[0m[m
+[2m[0090][0m [32mok[0m      compile module_6 round 3 [36m##################[0m[m
+[2m[0091][0m [32mok[0m      link module_1 round 3 [36m###[0m[m
+[2m[0092][0m [32mok[0m      link module_2 round 3 [36m######[0m[m
+[2m[0093][0m [32mok[0m      link module_3 round 3 [36m#########[0m[m
+[2m[0094][0m [32mok[0m      link module_4 round 3 [36m############[0m[m
+[2m[0095][0m [32mok[0m      link module_5 round 3 [36m###############[0m[m
+[2m[0096][0m [32mok[0m      link module_6 round 3 [36m##################[0m[m
+[2m[0097][0m [32mok[0m      test module_1 round 3 [36m###[0m[m
+[2m[0098][0m [32mok[0m      test module_2 round 3 [36m######[0m[m
+[2m[0099][0m [33m[1mwarning[0m test module_3 round 3: [33munused value[0m in item 3[m
+[2m[0100][0m [32mok[0m      test module_4 round 3 [36m############[0m[m
+[2m[0101][0m [32mok[0m      test module_5 round 3 [36m###############[0m[m
+[2m[0102][0m [32mok[0m      test module_6 round 3 [36m##################[0m[m
+[2m[0103][0m [32mok[0m      package module_1 round 3 [36m###[0m[m
+[2m[0104][0m [32mok[0m      package module_2 round 3 [36m######[0m[m
+[2m[0105][0m [32mok[0m      package module_3 round 3 [36m#########[0m[m
+[2m[0106][0m [32mok[0m      package module_4 round 3 [36m############[0m[m
+[2m[0107][0m [32mok[0m      package module_5 round 3 [36m###############[0m[m
+[2m[0108][0m [32mok[0m      package module_6 round 3 [36m##################[0m[m
+[2m--- round 3 done: 漢字 ✓ café ---[0m[m
+[2m[0109][0m [32mok[0m      fetch module_1 round 4 [36m###[0m[m
+[2m[0110][0m [33m[1mwarning[0m fetch module_2 round 4: [33munused value[0m in item 2[m
+:[K[K...skipping...
+[2m[0158][0m [32mok[0m      compile module_2 round 5 [36m######[0m[m
+[2m[0159][0m [32mok[0m      compile module_3 round 5 [36m#########[0m[m
+[2m[0160][0m [32mok[0m      compile module_4 round 5 [36m############[0m[m
+[2m[0161][0m [32mok[0m      compile module_5 round 5 [36m###############[0m[m
+[2m[0162][0m [32mok[0m      compile module_6 round 5 [36m##################[0m[m
+[2m[0163][0m [32mok[0m      link module_1 round 5 [36m###[0m[m
+[2m[0164][0m [32mok[0m      link module_2 round 5 [36m######[0m[m
+[2m[0165][0m [33m[1mwarning[0m link module_3 round 5: [33munused value[0m in item 3[m
+[2m[0166][0m [32mok[0m      link module_4 round 5 [36m############[0m[m
+[2m[0167][0m [32mok[0m      link module_5 round 5 [36m###############[0m[m
+[2m[0168][0m [32mok[0m      link module_6 round 5 [36m##################[0m[m
+[2m[0169][0m [32mok[0m      test module_1 round 5 [36m###[0m[m
+[2m[0170][0m [32mok[0m      test module_2 round 5 [36m######[0m[m
+[2m[0171][0m [32mok[0m      test module_3 round 5 [36m#########[0m[m
+[2m[0172][0m [32mok[0m      test module_4 round 5 [36m############[0m[m
+[2m[0173][0m [32mok[0m      test module_5 round 5 [36m###############[0m[m
+[2m[0174][0m [31m[1m[7merror[27m[0m[31m[1m[0m   test module_6 round 5: [31mmissing symbol[0m [4mstep_06[24m[m
+[2m[0175][0m [32mok[0m      package module_1 round 5 [36m###[0m[m
+[2m[0176][0m [33m[1mwarning[0m package module_2 round 5: [33munused value[0m in item 2[m
+[2m[0177][0m [32mok[0m      package module_3 round 5 [36m#########[0m[m
+[2m[0178][0m [32mok[0m      package module_4 round 5 [36m############[0m[m
+[2m[0179][0m [32mok[0m      package module_5 round 5 [36m###############[0m[m
+[2m[0180][0m [32mok[0m      package module_6 round 5 [36m##################[0m[m
+[2m--- round 5 done: 漢字 ✓ café ---[0m[m
+[1m[32mbuild finished[0m[m
+[7m(END)[27m[K[K[H[2J[HM[2m[0023][0m [32mok[0m      link module_5 round 1 [36m###############[0m[m
+[HM[2m[0022][0m [33m[1mwarning[0m link module_4 round 1: [33munused value[0m in item 4[m
+[HM[2m[0021][0m [32mok[0m      link module_3 round 1 [36m#########[0m[m
+[HM[2m[0020][0m [32mok[0m      link module_2 round 1 [36m######[0m[m
+[HM[2m[0019][0m [32mok[0m      link module_1 round 1 [36m###[0m[m
+[HM[2m[0018][0m [32mok[0m      compile module_6 round 1 [36m##################[0m[m
+[HM[2m[0017][0m [32mok[0m      compile module_5 round 1 [36m###############[0m[m
+[HM[2m[0016][0m [32mok[0m      compile module_4 round 1 [36m############[0m[m
+[HM[2m[0015][0m [32mok[0m      compile module_3 round 1 [36m#########[0m[m
+[HM[2m[0014][0m [32mok[0m      compile module_2 round 1 [36m######[0m[m
+[HM[2m[0013][0m [32mok[0m      compile module_1 round 1 [36m###[0m[m
+[HM[2m[0012][0m [32mok[0m      resolve module_6 round 1 [36m##################[0m[m
+[HM[2m[0011][0m [33m[1mwarning[0m resolve module_5 round 1: [33munused value[0m in item 5[m
+[HM[2m[0010][0m [32mok[0m      resolve module_4 round 1 [36m############[0m[m
+[HM[2m[0009][0m [32mok[0m      resolve module_3 round 1 [36m#########[0m[m
+[HM[2m[0008][0m [32mok[0m      resolve module_2 round 1 [36m######[0m[m
+[HM[2m[0007][0m [32mok[0m      resolve module_1 round 1 [36m###[0m[m
+[HM[2m[0006][0m [32mok[0m      fetch module_6 round 1 [36m##################[0m[m
+[HM[2m[0005][0m [32mok[0m      fetch module_5 round 1 [36m###############[0m[m
+[HM[2m[0004][0m [32mok[0m      fetch module_4 round 1 [36m############[0m[m
+[HM[2m[0003][0m [32mok[0m      fetch module_3 round 1 [36m#########[0m[m
+[HM[2m[0002][0m [32mok[0m      fetch module_2 round 1 [36m######[0m[m
+[HM[2m[0001][0m [32mok[0m      fetch module_1 round 1 [36m###[0m[m
+[HM[m
+[HM[1mbuild log[0m [2m(generated for the emulator parity corpus)[0m[m
+[26;1H[K:[K[K[?1l>[?1049l

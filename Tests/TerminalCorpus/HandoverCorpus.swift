@@ -9,26 +9,37 @@
 // real sessions that were captured to disk, not generated, so they cannot be rebuilt from code. Its
 // `ascii` workload read the repository's own Swift sources, which change with every commit, so it is
 // not deterministic. What is left is 81 scenarios and 5 workloads cut at 6 points each: 111 states.
+//
+// The corpus is a target of its own, `TerminalCorpus`, so that the libghostty engine's suites and
+// the daemon's suites feed the same bytes. Its pins stay with the handover suites, in
+// Tests/TBDGhosttyTerminalTests/Handover/Corpus/HandoverCorpusPinTests.swift.
 import Foundation
 
 /// One state: the bytes that reach it, fed to a fresh terminal of this size.
-struct HandoverState: Sendable {
-    let name: String
-    let bytes: [UInt8]
-    let cols: Int
-    let rows: Int
+public struct HandoverState: Sendable {
+    public let name: String
+    public let bytes: [UInt8]
+    public let cols: Int
+    public let rows: Int
+
+    public init(name: String, bytes: [UInt8], cols: Int, rows: Int) {
+        self.name = name
+        self.bytes = bytes
+        self.cols = cols
+        self.rows = rows
+    }
 }
 
-enum HandoverCorpus {
-    static let scenarioCols = 80
-    static let scenarioRows = 24
-    static let workloadCols = 200
-    static let workloadRows = 60
+public enum HandoverCorpus {
+    public static let scenarioCols = 80
+    public static let scenarioRows = 24
+    public static let workloadCols = 200
+    public static let workloadRows = 60
 
     /// Where each workload is cut. The proof of concept cut a 1,000,000-byte prefix at each sixth
     /// and moved every cut forward to the next byte at which libghostty's parser was at ground, so
     /// no state ends inside an escape sequence or a UTF-8 character. These are its cut points.
-    static let checkpoints: [(workload: String, offsets: [Int])] = [
+    public static let checkpoints: [(workload: String, offsets: [Int])] = [
         ("colors", [166_666, 333_339, 500_006, 666_682, 833_335, 1_000_006]),
         ("cursor", [166_666, 333_333, 500_002, 666_666, 833_335, 1_000_003]),
         ("scroll", [166_666, 333_333, 500_000, 666_666, 833_335, 1_000_000]),
@@ -37,10 +48,10 @@ enum HandoverCorpus {
     ]
 
     /// Every state's name: the scenarios, then `<workload>@<byte offset>`.
-    static let names: [String] = scenarios.map(\.name)
+    public static let names: [String] = scenarios.map(\.name)
         + checkpoints.flatMap { entry in entry.offsets.map { "\(entry.workload)@\($0)" } }
 
-    static func state(named name: String) -> HandoverState {
+    public static func state(named name: String) -> HandoverState {
         if let scenario = scenarioByName[name] { return scenario }
         let parts = name.split(separator: "@")
         guard parts.count == 2, let end = Int(parts[1]) else { preconditionFailure("no corpus state named \(name)") }
@@ -50,7 +61,7 @@ enum HandoverCorpus {
     }
 
     /// A whole workload, a little past its last cut point.
-    static func workloadBytes(_ workload: String) -> [UInt8] {
+    public static func workloadBytes(_ workload: String) -> [UInt8] {
         switch workload {
         case "colors": return colors
         case "cursor": return cursor
@@ -74,7 +85,7 @@ enum HandoverCorpus {
 
     /// What a receiver may hold before a preamble arrives: a viewer reused by a session like vim,
     /// and one left in everything the reset prelude never names.
-    static let priorLives: [(name: String, bytes: [UInt8])] = {
+    public static let priorLives: [(name: String, bytes: [UInt8])] = {
         let vim = fill(40) + "\(e)[?1049h\(e)[?1h\(e)=\(e)[?1000h\(e)[?1006h\(e)[?2004h\(e)[?25l\(e)[3;20r\(e)[1;33;44m\(e)[2Jjunk text\(e)[?1004h"
         let everything = fill(40) + [
             "\(e)[>1u", "\(e)[3g", "\(e)(0", "\(e))0", "\u{0e}", "\(e)[?45h", "\(e)[?69h\(e)[5;40s", "\(e)[?1005h", "\(e)[?1015h",
@@ -95,7 +106,7 @@ enum HandoverCorpus {
     }
 
     /// Each state reached by real escape sequences. Grid 80x24.
-    static let scenarios: [HandoverState] = {
+    public static let scenarios: [HandoverState] = {
         let cases: [(String, String)] = [
             ("primary-fresh", "hello"),
             ("primary-scrollback", fill(60) + "prompt$ "),

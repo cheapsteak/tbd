@@ -387,6 +387,14 @@ let package = Package(
             ],
             path: "Tests/DaemonTestSupport"
         ),
+        // The handover corpus: the libghostty proof of concept's generated terminal states, as
+        // named byte sequences. A target of its own, depending on nothing, so the libghostty
+        // engine's suites and the daemon's feed the same bytes without either test target
+        // depending on the other. Test-only.
+        .target(
+            name: "TerminalCorpus",
+            path: "Tests/TerminalCorpus"
+        ),
         // User defaults the test process must register before any test runs,
         // as the app registers them in `applicationWillFinishLaunching`: a
         // constructor in this target runs when the test bundle loads. AppKit
@@ -431,10 +439,18 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // The emulator parity suite feeds the handover corpus to both
+                // daemon emulators, and reads each one's snapshot back through
+                // a headless libghostty viewer.
+                "TerminalCorpus",
                 // Declared because the libghostty holder emulator's suite holds
                 // the daemon's answers to the core's own constants: the frozen
-                // device identity and the snapshot writer's reset prelude.
+                // device identity and the snapshot writer's reset prelude. The
+                // parity suite also reads its viewer through the core.
                 "TBDGhosttyCore",
+                // The parity suite reads a viewer's cursor shape through a
+                // libghostty render state, which only the C API offers.
+                "GhosttyVt",
                 // The test host's SIGPIPE handler is in the bundle either way;
                 // the dependency lets these suites check the handler in their
                 // own two passes. See the target.
@@ -535,6 +551,8 @@ let package = Package(
                 "TestSupport",
                 // The handover suites hold the libghostty walks and handback to SwiftTerm's.
                 "TBDTerminalSerialization",
+                // The states the handover suites run, shared with the daemon's suites.
+                "TerminalCorpus",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
