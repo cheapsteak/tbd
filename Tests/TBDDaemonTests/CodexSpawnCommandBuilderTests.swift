@@ -197,6 +197,8 @@ struct CodexExecutableResolverTests {
 
 @Suite("CodexLaunchPreparation")
 struct CodexLaunchPreparationTests {
+    private typealias Prepared = Result<CodexLaunchPreparation, any Error>
+
     /// Set from inside a synchronous seam and read by a poll. A locked class
     /// rather than an actor because the seams cannot await.
     private final class Flag: @unchecked Sendable {
@@ -204,6 +206,24 @@ struct CodexLaunchPreparationTests {
         private var isSet = false
         var value: Bool { lock.withLock { isSet } }
         func set() { lock.withLock { isSet = true } }
+    }
+
+    /// What the observer saw while the first preparation's resolver was held,
+    /// read before it released the gate.
+    private struct HoldObservation: Sendable {
+        /// The second preparation, or nil when the first never reached its
+        /// resolver and no second one was started.
+        var other: Task<Prepared, Never>?
+        var heldHomeEnsured = false
+        var heldFinished = false
+        var offPool = false
+    }
+
+    /// Which thread is running this continuation. Synchronous on purpose:
+    /// `Thread.current` is unavailable from an async context because the
+    /// answer changes across a suspension point, and that is what is read.
+    private static func runningThreadName() -> String? {
+        Thread.current.name
     }
 
     /// The preparation lock serialises only the home ensurer. Every launch
@@ -222,12 +242,8 @@ struct CodexLaunchPreparationTests {
         let heldHomeEnsured = Flag()
         let heldFinished = Flag()
         let releaseHeldResolver = DispatchSemaphore(value: 0)
-        // Release on every exit, so an early return cannot leave the held
-        // thread parked until the gate's own deadline. The release below makes
-        // this a second signal on the normal path; it finds no waiter.
-        defer { releaseHeldResolver.signal() }
 
-        let held = gateHoldingTask { () -> Result<CodexLaunchPreparation, any Error> in
+        let held = gateHoldingTask { () -> Prepared in
             defer { heldFinished.set() }
             return Result {
                 try CodexLaunchPreparation.prepare(
@@ -242,37 +258,65 @@ struct CodexLaunchPreparationTests {
                     })
             }
         }
-        let entered = try await waitFor("the first preparation to enter its executable resolver") {
-            heldResolverEntered.value
-        }
-        guard entered else { return }
 
         let otherResolved = Flag()
         let otherFinished = Flag()
-        let other = gateHoldingTask { () -> Result<CodexLaunchPreparation, any Error> in
-            defer { otherFinished.set() }
-            return Result {
-                try CodexLaunchPreparation.prepare(
-                    executableResolver: {
-                        otherResolved.set()
-                        return "/opt/acme/bin/codex-other"
-                    },
-                    homeEnsurer: {
-                        URL(fileURLWithPath: "/nonexistent/acme/codex-home-other", isDirectory: true)
-                    })
-            }
-        }
-        try await waitFor(
-            "a second preparation to finish while the first one's executable resolver is stalled",
-            observed: {
-                "second resolver ran: \(otherResolved.value), first resolver still held: \(!heldFinished.value)"
-            }
-        ) { otherFinished.value }
-        // The second preparation overlapped the stall rather than following it.
-        #expect(!heldHomeEnsured.value, "the first preparation reached its home ensurer before the gate was released")
-        #expect(!heldFinished.value, "the first preparation finished before the gate was released")
+        // The whole hold runs on the executor the held side uses: waiting for
+        // the first resolver to stall, starting the second preparation,
+        // waiting for it, and the release. This is the shape of
+        // `BoundedGateWaitTests.gateHoldersDoNotStarveDispatchWorkers`. Every
+        // poll resumption is a scheduling hop, and on the pool at pass start a
+        // hop costs the pass's per-test latency, so two chained polls there
+        // would put more of it inside the hold than `TestGate.deadline` was
+        // derived to dominate. The executor preference carries across each
+        // resumption (SE-0417), and the thread-name read after the last poll
+        // pins that. The release is the observer's `defer`, so it happens on
+        // every path out of it, and the test body awaits the observer before
+        // anything else, so no exit leaves the held thread parked. `waitFor`
+        // throws only on cancellation, which nothing delivers to this
+        // unstructured task.
+        let observer = gateHoldingTask { () -> HoldObservation in
+            defer { releaseHeldResolver.signal() }
+            let entered = (try? await waitFor("the first preparation to enter its executable resolver") {
+                heldResolverEntered.value
+            }) ?? false
+            guard entered else { return HoldObservation() }
 
-        releaseHeldResolver.signal()
+            let other = gateHoldingTask { () -> Prepared in
+                defer { otherFinished.set() }
+                return Result {
+                    try CodexLaunchPreparation.prepare(
+                        executableResolver: {
+                            otherResolved.set()
+                            return "/opt/acme/bin/codex-other"
+                        },
+                        homeEnsurer: {
+                            URL(fileURLWithPath: "/nonexistent/acme/codex-home-other", isDirectory: true)
+                        })
+                }
+            }
+            _ = try? await waitFor(
+                "a second preparation to finish while the first one's executable resolver is stalled",
+                observed: {
+                    "second resolver ran: \(otherResolved.value), first resolver still held: \(!heldFinished.value)"
+                }
+            ) { otherFinished.value }
+            return HoldObservation(
+                other: other,
+                heldHomeEnsured: heldHomeEnsured.value,
+                heldFinished: heldFinished.value,
+                offPool: Self.runningThreadName() == GateExecutor.threadName)
+        }
+        let hold = await observer.value
+        guard let other = hold.other else { return }
+        // The second preparation overlapped the stall rather than following it.
+        #expect(!hold.heldHomeEnsured, "the first preparation reached its home ensurer before the gate was released")
+        #expect(!hold.heldFinished, "the first preparation finished before the gate was released")
+        #expect(
+            hold.offPool,
+            "the observer must stay on the gate executor across its polls; back on the pool, the hold would span the pass's scheduling latency again"
+        )
+
         let bothFinished = try await waitFor(
             "both preparations to finish once the stalled resolver is released",
             observed: { "first finished: \(heldFinished.value), second finished: \(otherFinished.value)" }
