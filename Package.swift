@@ -448,6 +448,9 @@ let package = Package(
                 // device identity and the snapshot writer's reset prelude. The
                 // parity suite also reads its viewer through the core.
                 "TBDGhosttyCore",
+                // The parity suite reads a viewer's cursor shape through a
+                // libghostty render state, which only the C API offers.
+                "GhosttyVt",
                 // The test host's SIGPIPE handler is in the bundle either way;
                 // the dependency lets these suites check the handler in their
                 // own two passes. See the target.

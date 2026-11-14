@@ -55,16 +55,39 @@ enum EmulatorParity {
 
         var testDescription: String { chunkSize.map { "\($0)-byte chunks" } ?? "whole" }
 
-        /// The key of a miss that holds for this plan only: `<recording>/<chunk size>`.
-        func missKey(for name: String) -> String? { chunkSize.map { "\(name)/\($0)" } }
+        /// What a miss key adds after the recording's name for this plan alone: `whole`, or the
+        /// chunk size.
+        var keySuffix: String { chunkSize.map { "\($0)" } ?? "whole" }
+
+        /// The key of a miss that holds for this plan only: `<recording>/<plan>`. A miss keyed by
+        /// the recording's bare name holds for every plan.
+        func missKey(for name: String) -> String { "\(name)/\(keySuffix)" }
+    }
+
+    /// A clock the suite moves by hand, so the age an emulator reports says when it last stamped
+    /// a byte: an emulator that stopped stamping in `feed` reports the age of its construction.
+    final class HandClock: Sendable {
+        private let instant = Mutex(ContinuousClock.now)
+
+        var now: ContinuousClock.Instant { instant.withLock { $0 } }
+
+        func advance(by duration: Duration) {
+            instant.withLock { $0 = $0.advanced(by: duration) }
+        }
     }
 
     /// Both daemon emulators for one stream, each built as `HolderEmulatorKind.makeEmulator`
     /// builds a reader's, with the daemon's scrollback, a program-status tap and a reply sink of
-    /// its own, and a clock that never moves, so both report an age of 0 ms.
+    /// its own, and one hand-moved clock: built at t0, each feed `feedDelay` after the last
+    /// event, each comparison `readDelay` after the last feed. Both emulators then report an age
+    /// of `readDelay`, and one that stopped stamping its feeds reports a longer one.
     struct Pair {
+        static let feedDelay: Duration = .seconds(7)
+        static let readDelay: Duration = .seconds(3)
+
         let cols: Int
         let rows: Int
+        let clock: HandClock
         let swiftTerm: any HolderEmulator
         let ghostty: any HolderEmulator
         let swiftTermSink: Sink
@@ -73,16 +96,18 @@ enum EmulatorParity {
         /// Throws when libghostty could not make its terminal: the kind falls back to SwiftTerm
         /// then, and two SwiftTerm emulators would agree on everything.
         init(cols: Int, rows: Int) throws {
+            let clock = HandClock()
             let swiftTermSink = Sink()
             let ghosttySink = Sink()
-            let swiftTerm = Self.emulator(.swiftTerm, cols: cols, rows: rows, sink: swiftTermSink)
-            let ghostty = Self.emulator(.ghostty, cols: cols, rows: rows, sink: ghosttySink)
+            let swiftTerm = Self.emulator(.swiftTerm, cols: cols, rows: rows, clock: clock, sink: swiftTermSink)
+            let ghostty = Self.emulator(.ghostty, cols: cols, rows: rows, clock: clock, sink: ghosttySink)
             guard swiftTerm.kind == .swiftTerm, ghostty.kind == .ghostty else {
                 throw Failure(
                     description: "the libghostty emulator fell back to \(ghostty.kind), so there is nothing to compare")
             }
             self.cols = cols
             self.rows = rows
+            self.clock = clock
             self.swiftTerm = swiftTerm
             self.ghostty = ghostty
             self.swiftTermSink = swiftTermSink
@@ -90,22 +115,23 @@ enum EmulatorParity {
         }
 
         private static func emulator(
-            _ kind: HolderEmulatorKind, cols: Int, rows: Int, sink: Sink
+            _ kind: HolderEmulatorKind, cols: Int, rows: Int, clock: HandClock, sink: Sink
         ) -> any HolderEmulator {
-            let start = ContinuousClock.now
-            return kind.makeEmulator(
+            kind.makeEmulator(
                 sessionID: UUID(),
                 columns: cols,
                 rows: rows,
                 scrollback: HolderReader.scrollbackLines,
                 observedChildFromStart: true,
-                monotonicNow: { start },
+                monotonicNow: { clock.now },
                 programStatus: HolderProgramStatusTap(deliver: { sink.report($0) }),
                 reply: { sink.reply($0) })
         }
 
-        /// Feeds both emulators the same bytes, whole or in chunks of `chunkSize`.
+        /// Feeds both emulators the same bytes, whole or in chunks of `chunkSize`, `feedDelay`
+        /// after the last event.
         func feed(_ bytes: ArraySlice<UInt8>, chunkSize: Int? = nil) {
+            clock.advance(by: Self.feedDelay)
             for emulator in [swiftTerm, ghostty] {
                 guard let chunkSize else {
                     emulator.feed(bytes)
@@ -121,11 +147,13 @@ enum EmulatorParity {
         }
 
         /// Every field in which the libghostty emulator's answer differs from SwiftTerm's, with
-        /// its first difference. `stream` is every byte fed so far, which says how a viewer on an
-        /// alternate screen leaves it.
+        /// its first difference, read `readDelay` after the last feed. `stream` is every byte fed
+        /// so far, which says how a viewer on an alternate screen leaves it.
         func differences(stream: ArraySlice<UInt8>) throws -> [String: String] {
-            let expected = try observe(swiftTerm, sink: swiftTermSink, stream: stream)
-            let actual = try observe(ghostty, sink: ghosttySink, stream: stream)
+            clock.advance(by: Self.readDelay)
+            var expected = try observe(swiftTerm, sink: swiftTermSink, stream: stream)
+            var actual = try observe(ghostty, sink: ghosttySink, stream: stream)
+            EmulatorParity.narrowReplyOrder(&expected, &actual)
             return EmulatorParity.differences(expected, actual)
         }
 
@@ -144,6 +172,12 @@ enum EmulatorParity {
         /// Many lines, or a run of bytes. A failure prints where they first differ.
         case text(String)
 
+        var string: String {
+            switch self {
+            case .value(let string), .text(let string): return string
+            }
+        }
+
         static func == (lhs: Observed, rhs: Observed) -> Bool {
             switch (lhs, rhs) {
             case (.value(let left), .value(let right)), (.text(let left), .text(let right)):
@@ -159,15 +193,18 @@ enum EmulatorParity {
         "screen.lines", "screen.viewportStart", "screen.cursor", "screen.cursorVisible", "screen.size", "screen.modes",
         "screen.provenance", "render", "capture",
     ]
-    /// Comparison 2: what the emulator sent, the replies to the child and the program-status reports.
-    static let sentFields = ["replies", "reports"]
+    /// Comparison 2: what the emulator sent. The replies to the child, one field per kind of
+    /// reply (`replyKind`), each reply on a line of its own, and `replies.order`, the order of
+    /// the kinds both emulators sent; then the program-status reports.
+    static let sentFields = replyKinds.map { "replies." + $0 } + ["replies.order", "reports"]
 
     /// Comparison 3: what a viewer restores from the snapshot, read under `prefix`.
     static func viewerFields(prefix: String) -> [String] {
-        let read = ["text", "styled", "cursor", "pendingWrap", "cursorVisible", "alternateScreen"]
+        let read = ["text", "styled", "cursor", "pendingWrap", "cursorVisible", "cursorStyle", "alternateScreen"]
             + viewerModes.map { "mode." + $0.name }
             + ["mouseTracking", "mouseEncoding", "region", "kittyFlags"]
             + viewerExtras.map { $0.name }
+            + ["savedCursor"]
         return read.map { prefix + $0 }
     }
 
@@ -201,8 +238,15 @@ enum EmulatorParity {
                 + "source \(screen.source.rawValue), age \(screen.ageMilliseconds) ms")
         fields["render"] = .text(trimmedRender(emulator.renderScreen()))
         fields["capture"] = .text(emulator.styledCapture(maxScrollbackLines: captureScrollback))
-        fields["replies"] = .text(String(decoding: sink.replies, as: UTF8.self))
-        fields["reports"] = .text(sink.reports.map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n"))
+        let replies = splitReplies(sink.replies)
+        let kinds = replies.map { replyKind($0) }
+        for kind in replyKinds {
+            let sent = zip(replies, kinds).filter { $0.1 == kind }.map { escaped($0.0) }
+            fields["replies." + kind] = .text(sent.joined(separator: "\n"))
+        }
+        // Every reply's kind in turn: `narrowReplyOrder` keeps the kinds both emulators sent.
+        fields["replies.order"] = .text(kinds.joined(separator: "\n"))
+        fields["reports"] = .text(sink.reports.map { escaped($0) }.joined(separator: "\n"))
 
         // The attach path waits for this before it asks such an emulator for a snapshot.
         if emulator.snapshotNeedsSequenceBoundary, !emulator.isAtSequenceBoundary {
@@ -251,17 +295,160 @@ enum EmulatorParity {
         }
     }
 
+    // MARK: - Replies
+
+    /// The kinds of reply `replyKind` tells apart, each compared as a field of its own.
+    static let replyKinds = [
+        "DA1", "DA2", "XTVERSION", "DSR", "CPR", "DECRQM", "7501probe", "OSC10", "OSC11", "windowOps",
+        "kittyGraphics", "other",
+    ]
+
+    /// An emulator's reply bytes as one sequence per reply, however its writes cut them: each CSI,
+    /// OSC, DCS, APC, PM or SOS sequence whole, any other escape sequence as its two bytes, and a
+    /// run of bytes outside any sequence as one entry.
+    static func splitReplies(_ bytes: [UInt8]) -> [[UInt8]] {
+        var replies: [[UInt8]] = []
+        var start = 0
+        while start < bytes.count {
+            let end = sequenceEnd(bytes, from: start)
+            replies.append(Array(bytes[start..<end]))
+            start = end
+        }
+        return replies
+    }
+
+    /// Where the reply that starts at `start` ends: a CSI at its final byte, a string sequence at
+    /// its ST (or, for an OSC, its BEL), and a run of plain bytes at the next ESC. A sequence the
+    /// bytes leave unfinished runs to their end.
+    private static func sequenceEnd(_ bytes: [UInt8], from start: Int) -> Int {
+        guard bytes[start] == 0x1b, start + 1 < bytes.count else {
+            var end = start + 1
+            while end < bytes.count, bytes[end] != 0x1b { end += 1 }
+            return end
+        }
+        let introducer = bytes[start + 1]
+        var end = start + 2
+        switch introducer {
+        case UInt8(ascii: "["):
+            while end < bytes.count, !(0x40...0x7e).contains(bytes[end]) { end += 1 }
+            return min(end + 1, bytes.count)
+        case UInt8(ascii: "]"), UInt8(ascii: "P"), UInt8(ascii: "_"), UInt8(ascii: "^"), UInt8(ascii: "X"):
+            while end < bytes.count {
+                if introducer == UInt8(ascii: "]"), bytes[end] == 0x07 { return end + 1 }
+                if bytes[end] == 0x1b, end + 1 < bytes.count, bytes[end + 1] == UInt8(ascii: "\\") { return end + 2 }
+                end += 1
+            }
+            return end
+        default:
+            return end
+        }
+    }
+
+    /// What a reply answers, by its form: DA1 `CSI ? … c`, DA2 `CSI > … c`, XTVERSION
+    /// `DCS > | … ST`, DSR `CSI … n`, CPR `CSI … R`, DECRQM `CSI … $ y`, the OSC 7501 probe, the
+    /// OSC 10 and 11 colours, window ops `CSI … t`, a kitty graphics `APC G … ST`, and anything
+    /// else.
+    static func replyKind(_ reply: [UInt8]) -> String {
+        guard reply.count >= 3, reply[0] == 0x1b else { return "other" }
+        let body = reply.dropFirst(2)
+        func starts(_ prefix: String) -> Bool { body.starts(with: prefix.utf8) }
+        switch reply[1] {
+        case UInt8(ascii: "["):
+            let parameters = body.dropLast()
+            switch reply[reply.count - 1] {
+            case UInt8(ascii: "c") where parameters.first == UInt8(ascii: "?"): return "DA1"
+            case UInt8(ascii: "c") where parameters.first == UInt8(ascii: ">"): return "DA2"
+            case UInt8(ascii: "n") where parameters.first != UInt8(ascii: "?"): return "DSR"
+            case UInt8(ascii: "R"): return "CPR"
+            case UInt8(ascii: "y") where parameters.last == UInt8(ascii: "$"): return "DECRQM"
+            case UInt8(ascii: "t"): return "windowOps"
+            default: return "other"
+            }
+        case UInt8(ascii: "]"):
+            if starts("7501;") { return "7501probe" }
+            if starts("10;") { return "OSC10" }
+            if starts("11;") { return "OSC11" }
+            return "other"
+        case UInt8(ascii: "P"):
+            return starts(">|") ? "XTVERSION" : "other"
+        case UInt8(ascii: "_"):
+            return starts("G") ? "kittyGraphics" : "other"
+        default:
+            return "other"
+        }
+    }
+
+    /// Keeps, in each reading's `replies.order`, only the kinds both emulators sent, with a run of
+    /// one kind as one entry: a kind only one of them sent already differs under its own field,
+    /// and the order then compares the rest.
+    static func narrowReplyOrder(_ expected: inout [String: Observed], _ actual: inout [String: Observed]) {
+        func kinds(_ observed: Observed?) -> [String] {
+            guard let text = observed?.string, !text.isEmpty else { return [] }
+            return text.components(separatedBy: "\n")
+        }
+        let left = kinds(expected["replies.order"])
+        let right = kinds(actual["replies.order"])
+        let shared = Set(left).intersection(right)
+        func narrowed(_ order: [String]) -> Observed {
+            var runs: [String] = []
+            for kind in order where shared.contains(kind) && runs.last != kind {
+                runs.append(kind)
+            }
+            return .text(runs.joined(separator: "\n"))
+        }
+        expected["replies.order"] = narrowed(left)
+        actual["replies.order"] = narrowed(right)
+    }
+
+    /// `bytes` as text, each byte that is not part of a well-formed UTF-8 character written as
+    /// `\xNN`, so two different malformed runs never read the same.
+    static func escaped(_ bytes: [UInt8]) -> String {
+        var text = ""
+        var index = 0
+        while index < bytes.count {
+            let length = utf8Length(lead: bytes[index])
+            if length > 0, index + length <= bytes.count {
+                let character = Array(bytes[index..<(index + length)])
+                let decoded = String(decoding: character, as: UTF8.self)
+                if decoded.utf8.elementsEqual(character) {
+                    text += decoded
+                    index += length
+                    continue
+                }
+            }
+            text += String(format: "\\x%02X", UInt32(bytes[index]))
+            index += 1
+        }
+        return text
+    }
+
+    /// How many bytes a UTF-8 character with this first byte has, or 0 for a byte no character
+    /// starts with.
+    private static func utf8Length(lead: UInt8) -> Int {
+        switch lead {
+        case 0x00...0x7f: return 1
+        case 0xc2...0xdf: return 2
+        case 0xe0...0xef: return 3
+        case 0xf0...0xf4: return 4
+        default: return 0
+        }
+    }
+
     // MARK: - Reading a viewer
 
     /// The modes a viewer's reading names, each read with `mode(_:ansi:)`: the handover suites'
     /// list (`handoverComparedModes`) without the mouse modes, which `mouseTracking` and
     /// `mouseEncoding` read as the one in effect, and without DECTCEM, which is `cursorVisible`;
-    /// and the modes the recordings set that the list leaves out.
+    /// and the modes the recordings set that the list leaves out, and the keyboard, autorepeat,
+    /// extended reverse wrap and in-band size report modes libghostty's formatter writes.
     static let viewerModes: [(name: String, value: UInt16, ansi: Bool)] = [
         ("DECCKM", 1, false), ("DECOM", 6, false), ("DECAWM", 7, false), ("cursorBlink", 12, false),
         ("reverseWrap", 45, false), ("DECNKM", 66, false), ("DECLRMM", 69, false), ("focus1004", 1004, false),
         ("altScroll1007", 1007, false), ("bracketedPaste", 2004, false), ("syncOutput", 2026, false),
         ("graphemeClusters", 2027, false), ("colorSchemeReports", 2031, false), ("reverseVideo", 5, false),
+        ("DECARM", 8, false), ("ignoreKeypadWithNumLock1035", 1035, false), ("altEscPrefix1036", 1036, false),
+        ("altSendsEscape1039", 1039, false), ("reverseWrapExtended1045", 1045, false),
+        ("inBandSizeReports2048", 2048, false),
         ("IRM", 4, true), ("LNM", 20, true),
     ]
 
@@ -276,23 +463,41 @@ enum EmulatorParity {
 
     /// Saves the cursor with its pen and character sets, erases the screen in the default style
     /// and then the scrollback, and puts the cursor back: the screen and history are gone, so the
-    /// formatter runs for the extras are short, and the state they restore is untouched.
+    /// formatter runs for the extras are short, and the state they restore is untouched. It
+    /// overwrites the saved cursor, which `savedCursor` therefore reads from a viewer of its own.
     private static let blankOut = Array("\u{1b}7\u{1b}[0m\u{1b}[2J\u{1b}[3J\u{1b}8".utf8)
 
-    /// A fresh headless libghostty viewer of the stream's size, fed `bytes` muted, as the app's
-    /// viewer ingests a snapshot: what it then holds.
+    /// DECRC: makes the saved cursor the cursor, so a viewer's readings of the cursor read it.
+    private static let restoreCursor = Array("\u{1b}8".utf8)
+
+    /// What a fresh headless libghostty viewer of the stream's size holds once fed `bytes` muted,
+    /// as the app's viewer ingests a snapshot. `savedCursor` comes from a second viewer fed the
+    /// same bytes and then DECRC, because the first viewer's blank-out overwrites the saved cursor.
     static func viewerReading(_ bytes: [UInt8], cols: Int, rows: Int, prefix: String) throws -> [String: Observed] {
+        var fields = try withViewer(bytes, cols: cols, rows: rows) { (viewer) throws -> [String: Observed] in
+            var read = try viewer.withLocked { try viewerState($0, prefix: prefix) }
+            viewer.feed(blankOut[...])
+            let extras = try viewer.withLocked { try extraState($0, prefix: prefix) }
+            read.merge(extras) { _, extra in extra }
+            return read
+        }
+        let saved = try withViewer(bytes + restoreCursor + blankOut, cols: cols, rows: rows) { viewer in
+            try viewer.withLocked { try savedCursorState($0) }
+        }
+        fields[prefix + "savedCursor"] = .value(saved)
+        return fields
+    }
+
+    private static func withViewer<Value>(
+        _ bytes: [UInt8], cols: Int, rows: Int, _ body: (TBDGhosttyCore.GhosttyTerminal) throws -> Value
+    ) throws -> Value {
         let viewer = try TBDGhosttyCore.GhosttyTerminal(
             cols: cols, rows: rows, scrollbackLines: HolderReader.scrollbackLines,
             callbacks: TBDGhosttyCore.GhosttyTerminalCallbacks())
         defer { viewer.close() }
         viewer.isMuted = true
         viewer.feed(bytes[...])
-        var fields = try viewer.withLocked { try viewerState($0, prefix: prefix) }
-        viewer.feed(blankOut[...])
-        let extras = try viewer.withLocked { try extraState($0, prefix: prefix) }
-        fields.merge(extras) { _, extra in extra }
-        return fields
+        return try body(viewer)
     }
 
     /// One viewer's screen and modes, read in one hold. The screen goes through libghostty's
@@ -303,19 +508,26 @@ enum EmulatorParity {
         _ state: TBDGhosttyCore.GhosttyTerminalState, prefix: String
     ) throws -> [String: Observed] {
         var fields: [String: Observed] = [:]
-        fields[prefix + "text"] = .text(state.formatted(.plain, trim: true, unwrap: false) ?? "<the formatter failed>")
+        guard let text = state.formatted(.plain, trim: true, unwrap: false) else {
+            throw Failure(description: "libghostty's plain-text formatter failed on a viewer")
+        }
+        fields[prefix + "text"] = .text(text)
         let styled = try state.formattedVT(extras: 0, unwrap: true, trim: true)
         fields[prefix + "styled"] = .text(String(decoding: styled, as: UTF8.self))
         let cursor = state.cursor
         fields[prefix + "cursor"] = .value("column \(cursor.col), row \(cursor.row)")
         fields[prefix + "pendingWrap"] = .value("\(state.cursorPendingWrap)")
         fields[prefix + "cursorVisible"] = .value("\(state.isCursorVisible)")
+        fields[prefix + "cursorStyle"] = .value(try cursorShape(state))
         fields[prefix + "alternateScreen"] = .value("\(state.isAlternateScreen)")
         for mode in viewerModes {
             fields[prefix + "mode." + mode.name] = .value("\(state.mode(mode.value, ansi: mode.ansi))")
         }
-        fields[prefix + "mouseTracking"] = .value(state.mouseTrackingInEffect.map { "\($0)" } ?? "unread")
-        fields[prefix + "mouseEncoding"] = .value(state.mouseEncodingInEffect.map { "\($0)" } ?? "unread")
+        guard let tracking = state.mouseTrackingInEffect, let encoding = state.mouseEncodingInEffect else {
+            throw Failure(description: "libghostty could not say which mouse tracking mode and encoding a viewer is in")
+        }
+        fields[prefix + "mouseTracking"] = .value("\(tracking)")
+        fields[prefix + "mouseEncoding"] = .value("\(encoding)")
         fields[prefix + "region"] = .value(try region(state))
         fields[prefix + "kittyFlags"] = .value("\(state.kittyKeyboardFlags)")
         return fields
@@ -329,9 +541,27 @@ enum EmulatorParity {
         var fields: [String: Observed] = [:]
         for extra in viewerExtras {
             let output = try state.formattedVT(extras: extra.bits, unwrap: false, trim: true)
-            fields[prefix + extra.name] = .value(String(decoding: added(output, to: base), as: UTF8.self))
+            fields[prefix + extra.name] = .value(escaped(added(output, to: base)))
         }
         return fields
+    }
+
+    /// What DECRC restores, read from a viewer that restored it and then blanked out: where the
+    /// cursor goes, whether a wrap is pending, origin mode, and the pen, character sets and
+    /// protection, each as the formatter writes it. On the primary screen this is the primary
+    /// screen's saved cursor; a reading on an alternate screen has its `viewer.leave.` twin for that.
+    private static func savedCursorState(_ state: TBDGhosttyCore.GhosttyTerminalState) throws -> String {
+        let base = try state.formattedVT(extras: 0, unwrap: false, trim: true)
+        func extra(_ bits: UInt32) throws -> String {
+            let output = try state.formattedVT(extras: bits, unwrap: false, trim: true)
+            return escaped(added(output, to: base))
+        }
+        let pen = try extra(GhosttyVTFormat.style)
+        let charsets = try extra(GhosttyVTFormat.charsets)
+        let protection = try extra(GhosttyVTFormat.protection)
+        let cursor = state.cursor
+        return "column \(cursor.col), row \(cursor.row), pendingWrap \(state.cursorPendingWrap), "
+            + "origin \(state.mode(6)), pen \(pen), charsets \(charsets), protection \(protection)"
     }
 
     /// The bytes `output` has that `base` does not: what lies between their common prefix and

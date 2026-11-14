@@ -904,7 +904,7 @@ while [ $i -lt 64 ]; do
 done
 printf '%s\n' "$line"
 
-info "attributes: ${e}[1mbold${e}[22m ${e}[2mfaint${e}[22m ${e}[3mitalic${e}[23m ${e}[4munderline${e}[24m ${e}[5mblink${e}[25m ${e}[7minverse${e}[27m ${e}[8mhidden${e}[28m ${e}[9mstrike${e}[29m ${e}[53moverline${e}[55m"
+info "attributes: ${e}[1mbold${e}[22m ${e}[2mfaint${e}[22m ${e}[3mitalic${e}[23m ${e}[4munderline${e}[24m ${e}[5mblink${e}[25m ${e}[7minverse${e}[27m ${e}[8mhidden${e}[28m ${e}[9mstrike${e}[29m"
 info "underline styles: ${e}[4:1msingle${e}[4:0m ${e}[4:2mdouble${e}[4:0m ${e}[21mdouble21${e}[24m ${e}[4:3mcurly${e}[4:0m ${e}[4:4mdotted${e}[4:0m ${e}[4:5mdashed${e}[4:0m"
 info "underline colours: ${e}[4:3;58;5;196mcurly red${e}[59;4:0m ${e}[4;58;2;0;200;255msingle cyan${e}[59;24m ${e}[4:3;58:2::255:160:0mcurly orange${e}[59;4:0m"
 info "combined: ${e}[1;3;4;38;5;208mbold italic underline orange${e}[0m ${e}[7;38;2;40;200;120mtruecolor inverse${e}[0m ${e}[1;2mbold+faint${e}[22m ${e}[3;9mitalic strike${e}[0m"

@@ -11,17 +11,21 @@ import Testing
 ///
 /// 1. **What the daemon reads**: `screen(maxLines:source:)` field by field, `renderScreen()` and
 ///    `styledCapture(maxScrollbackLines:)`. Renders are compared with the spaces at the end of a
-///    row trimmed (`EmulatorParity.trimmedRender`).
-/// 2. **What the emulator sends**: the replies it writes to the child and the OSC 7501 reports it
-///    delivers, each in order. A recording is also fed in 64- and 4,096-byte chunks, so sequences
-///    and characters split across reads as a pty splits them, and all three comparisons are made
-///    again.
+///    row trimmed (`EmulatorParity.trimmedRender`). Both emulators share a clock the suite moves
+///    by hand, so the screen's age says when each last stamped a byte.
+/// 2. **What the emulator sends**: the replies it writes to the child, split into one per reply
+///    and compared by kind (`EmulatorParity.replyKind`) with the order of the kinds both sent,
+///    and the OSC 7501 reports it delivers, in order. A recording is also fed in 64- and
+///    4,096-byte chunks, so sequences and characters split across reads as a pty splits them,
+///    and all three comparisons are made again. A stream of the queries every program may send
+///    must be answered identically, with no miss (`theQueriesTheDaemonAnswersMatch`).
 /// 3. **What a viewer restores**: each emulator's attach snapshot is fed, muted, to a fresh
 ///    headless libghostty viewer, as the app's viewer ingests one, and the two viewers' screens
-///    and scrollback, cursors, modes, regions and pens are compared, with the state the formatter
-///    alone can read: the open hyperlink, tab stops, character sets, modifyOtherKeys and
-///    protection. A viewer left on an alternate screen also leaves it, the way the stream
-///    entered it, and is compared again under `viewer.leave.`.
+///    and scrollback, cursors and cursor shapes, modes, regions and pens are compared, with the
+///    state the formatter alone can read: the open hyperlink, tab stops, character sets,
+///    modifyOtherKeys and protection, and the cursor DECRC restores. A viewer left on an
+///    alternate screen also leaves it, the way the stream entered it, and is compared again
+///    under `viewer.leave.`.
 ///
 /// A stream may differ only in the fields `misses` lists for it, each listed with its reason, and
 /// the list is exact: a difference it does not list fails, and so does a listed field that stops
@@ -68,7 +72,8 @@ struct HolderEmulatorParityTests {
     // MARK: - The misses
 
     /// Keyed by stream: a corpus state's name, a workload cut's `<workload>@<offset>`, or a
-    /// recording's name. A key `<recording>/<chunk size>` adds fields for one feed plan only.
+    /// recording's name, which holds for every feed plan. A key `<recording>/<plan>`, the plan
+    /// `whole` or a chunk size, adds fields for that one plan.
     static let misses: [String: [Miss]] = [
         // Comparison 1, with what follows from it in comparison 3.
         "scroll-up-down": [Miss(
@@ -90,10 +95,10 @@ struct HolderEmulatorParityTests {
             fields: ["reports"])],
         "claude-stub": [Miss(
             reason: "SwiftTerm answers the kitty graphics query and reports a cell size for `CSI 16 t`; the daemon's libghostty has kitty graphics off and a cell size of zero",
-            fields: ["replies"])],
+            fields: ["replies.kittyGraphics", "replies.windowOps"])],
         "vim": [Miss(
             reason: "SwiftTerm answers the OSC 10 and OSC 11 colour queries with its default colours; the daemon's libghostty has no colours set to answer with",
-            fields: ["replies"])],
+            fields: ["replies.OSC10", "replies.OSC11"])],
 
         // Comparison 3: what SwiftTerm's snapshot does not carry.
         "pending-wrap": [pendingWrapLost],
@@ -136,7 +141,7 @@ struct HolderEmulatorParityTests {
             reason: "SwiftTerm's snapshot writes no OSC 8 hyperlinks, so the linked cells arrive unlinked and the link the program left open is closed",
             fields: ["viewer.styled", "viewer.link"])],
         "overline": [noOverline],
-        "colour-log": [noOverline],
+        "colour-log": [wideCharacterWrapped],
         "wide-at-edge": [wideCharacterWrapped],
         "wide-in-scrollback": [wideCharacterWrapped],
 
@@ -201,6 +206,49 @@ struct HolderEmulatorParityTests {
         }
     }
 
+    /// The queries a program may send and the daemon answers for it, each of which the two
+    /// emulators must answer byte for byte: DA1, DA2 and XTVERSION, the frozen device identity;
+    /// DSR's operating status and the cursor position, away from the home cell; DECRQM for modes
+    /// both emulators know, synchronized output both reset and set, since Claude Code wraps its
+    /// frames in it only on a "set" answer; and the OSC 7501 probe, which turns on Claude Code's
+    /// program-status reports. Here and not in the corpus, because no other suite reads replies.
+    static let queries = Array(
+        ("\u{1b}[c" + "\u{1b}[>c" + "\u{1b}[>q" + "\u{1b}[5n" + "\u{1b}[5;10H\u{1b}[6n"
+            + "\u{1b}[?1$p\u{1b}[?7$p\u{1b}[?25$p\u{1b}[?2004$p\u{1b}[?2026$p"
+            + "\u{1b}[?2026h\u{1b}[?2026$p\u{1b}[?2026l"
+            + "\u{1b}]7501;?\u{07}").utf8)
+
+    /// How many replies of each kind `queries` asks for.
+    static let queryReplies = ["DA1": 1, "DA2": 1, "XTVERSION": 1, "DSR": 1, "CPR": 1, "DECRQM": 6, "7501probe": 1]
+
+    /// No miss is listed for the queries, so every field, every kind of reply among them, must
+    /// match; and each emulator must send each reply, so a kind neither sends cannot pass.
+    @Test func theQueriesTheDaemonAnswersMatch() async throws {
+        try await EmulatorParity.onOwnThread {
+            let pair = try EmulatorParity.Pair(cols: 80, rows: 24)
+            pair.feed(Self.queries[...])
+            Self.expectOutcome("queries", plan: nil, differences: try pair.differences(stream: Self.queries[...]))
+            for (emulator, sink) in [(pair.swiftTerm, pair.swiftTermSink), (pair.ghostty, pair.ghosttySink)] {
+                let kinds = EmulatorParity.splitReplies(sink.replies).map { EmulatorParity.replyKind($0) }
+                let counts = Dictionary(kinds.map { ($0, 1) }, uniquingKeysWith: +)
+                #expect(counts == Self.queryReplies, "the \(emulator.kind) emulator sent \(kinds)")
+            }
+        }
+    }
+
+    /// Both emulators stamp each feed, so the age they report counts from the last byte fed and
+    /// not from their construction. The comparison catches one emulator that stops stamping; this
+    /// catches both.
+    @Test func theAgeCountsFromTheLastByteFed() throws {
+        let pair = try EmulatorParity.Pair(cols: 80, rows: 24)
+        pair.feed(Array("a line\r\n".utf8)[...])
+        pair.clock.advance(by: .milliseconds(1_500))
+        for emulator in [pair.swiftTerm, pair.ghostty] {
+            let age = try emulator.screen(maxLines: 0, source: .daemon).ageMilliseconds
+            #expect(age == 1_500, "the \(emulator.kind) emulator reports an age of \(age) ms")
+        }
+    }
+
     // MARK: - The list itself
 
     /// The suite covers the corpus: its scenarios and workload cuts are every state the
@@ -216,8 +264,10 @@ struct HolderEmulatorParityTests {
     /// suite reads.
     @Test func everyMissNamesAStreamAndFieldsTheSuiteReads() {
         let recordingPlans = EmulatorParity.Recordings.names.flatMap { name in
-            EmulatorParity.FeedPlan.chunkSizes.map { "\(name)/\($0)" }
+            EmulatorParity.FeedPlan.all.map { $0.missKey(for: name) }
         }
+        #expect(recordingPlans.contains("claude-stub/whole"), "\(recordingPlans)")
+        #expect(recordingPlans.contains("claude-stub/64"), "\(recordingPlans)")
         let streams = Set(HandoverCorpus.names + EmulatorParity.Recordings.names + recordingPlans)
         for (stream, entries) in Self.misses {
             #expect(streams.contains(stream), "\(stream) is listed as a miss but is not a stream the suite feeds")
@@ -252,7 +302,8 @@ struct HolderEmulatorParityTests {
     @Test func theOutcomeHoldsTheListExact() {
         let misses = [
             "fake": [Miss(reason: "a fake miss", fields: ["render", "capture"])],
-            "fake/64": [Miss(reason: "a fake chunked miss", fields: ["replies"])],
+            "fake/64": [Miss(reason: "a fake chunked miss", fields: ["replies.other"])],
+            "fake/whole": [Miss(reason: "a fake whole-feed miss", fields: ["reports"])],
         ]
         let both = ["render": "fake difference", "capture": "fake difference"]
         let passing = Self.outcomeFailures("fake", keys: ["fake"], differences: both, misses: misses)
@@ -262,20 +313,43 @@ struct HolderEmulatorParityTests {
         #expect(stale.count == 1, "\(stale)")
         #expect(stale.first?.contains("now match in [\"capture\"]") == true, "\(stale)")
 
-        let extra = both.merging(["replies": "SwiftTerm \"a\", libghostty \"b\""]) { $1 }
+        let extra = both.merging(["replies.other": "SwiftTerm \"a\", libghostty \"b\""]) { $1 }
         let unlisted = Self.outcomeFailures("fake", keys: ["fake"], differences: extra, misses: misses)
         #expect(unlisted.count == 1, "\(unlisted)")
-        #expect(unlisted.first?.contains("replies: SwiftTerm \"a\", libghostty \"b\"") == true, "\(unlisted)")
+        #expect(unlisted.first?.contains("replies.other: SwiftTerm \"a\", libghostty \"b\"") == true, "\(unlisted)")
 
         let chunked = Self.outcomeFailures("fake, chunked", keys: ["fake", "fake/64"], differences: extra, misses: misses)
         #expect(chunked.isEmpty, "\(chunked)")
+
+        // The whole feed's own key adds to the bare name's, and only for that plan.
+        let wholeKeys = ["fake", EmulatorParity.FeedPlan(chunkSize: nil).missKey(for: "fake")]
+        let whole = both.merging(["reports": "fake difference"]) { $1 }
+        let wholePassing = Self.outcomeFailures("fake, whole", keys: wholeKeys, differences: whole, misses: misses)
+        #expect(wholePassing.isEmpty, "\(wholePassing)")
+        let wholeOnly = Self.outcomeFailures("fake, chunked", keys: ["fake", "fake/64"], differences: whole, misses: misses)
+        #expect(wholeOnly.count == 1, "\(wholeOnly)")
+    }
+
+    /// A reply split and sorted by kind: sequences cut across writes are rejoined, each reply's
+    /// kind is read from its form, and a byte that is not UTF-8 is written as `\xNN`.
+    @Test func repliesAreSplitAndSortedByKind() {
+        let bytes = Array(
+            ("\u{1b}[?65;1c\u{1b}[>65;20;1c\u{1b}P>|name\u{1b}\\\u{1b}[0n\u{1b}[5;10R\u{1b}[?2026;2$y"
+                + "\u{1b}]7501;?\u{07}\u{1b}]10;rgb:0/0/0\u{1b}\\\u{1b}]11;rgb:f/f/f\u{07}\u{1b}[6;16;10t"
+                + "\u{1b}_Gi=31;OK\u{1b}\\\u{1b}[?0u").utf8)
+        let replies = EmulatorParity.splitReplies(bytes)
+        #expect(replies.map { EmulatorParity.replyKind($0) } == [
+            "DA1", "DA2", "XTVERSION", "DSR", "CPR", "DECRQM", "7501probe", "OSC10", "OSC11", "windowOps",
+            "kittyGraphics", "other",
+        ])
+        #expect(EmulatorParity.escaped([0x61, 0xff, 0xe2, 0x9c, 0x93, 0xe2, 0x9c]) == "a\\xFF✓\\xE2\\x9C")
     }
 
     // MARK: - The outcome
 
     private static func expectOutcome(_ name: String, plan: EmulatorParity.FeedPlan?, differences: [String: String]) {
-        let label = plan?.chunkSize.map { "\(name), fed in \($0)-byte chunks" } ?? name
-        let keys = [name] + [plan?.missKey(for: name)].compactMap { $0 }
+        let label = plan.map { "\(name), fed \($0.testDescription)" } ?? name
+        let keys = [name] + (plan.map { [$0.missKey(for: name)] } ?? [])
         for failure in outcomeFailures(label, keys: keys, differences: differences, misses: misses) {
             Issue.record(EmulatorParity.Failure(description: failure))
         }
@@ -283,8 +357,8 @@ struct HolderEmulatorParityTests {
 
     /// Why a stream's differences fail, one message each: fields no miss under `keys` names, and
     /// fields one names that no longer differ, which leaves the list stale. Empty when the
-    /// differences are what the list says. `keys` is the stream's own and, for a recording fed
-    /// in chunks, its plan's, whose fields add to the stream's.
+    /// differences are what the list says. `keys` is the stream's own and, for a recording, its
+    /// feed plan's, whose fields add to the stream's.
     static func outcomeFailures(
         _ label: String, keys: [String], differences: [String: String], misses: [String: [Miss]]
     ) -> [String] {
