@@ -322,8 +322,11 @@ struct HolderAttachUndelivered: Error, LocalizedError {
 /// would be acking on behalf of a reader that does not exist yet.
 struct HolderAttachClient: HolderAttaching {
     let daemonClient: DaemonClient
-    /// How long to wait for the vended descriptor. Matches the daemon's
-    /// `AttachSidecar.readyTimeout` default.
+    /// How long to wait, after `attach.request` is answered, for the vended
+    /// descriptor to arrive on the sidecar. Its own literal, unrelated to the
+    /// daemon's `AttachSidecar.readyTimeout`: that one bounds how long the
+    /// daemon waits for `attach.ready` after the vend, a different wait on the
+    /// other side of the handshake. Both happen to be 5 s.
     var fdTimeout: Duration = .seconds(5)
     /// The waits between resends of a handback or release; see
     /// `HolderAttaching.resendDelays`.

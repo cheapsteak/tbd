@@ -51,8 +51,8 @@ private final class MonotonicCounter: @unchecked Sendable {
 /// adopted at a time; a new adoption replaces the old one.
 ///
 /// M2.1 promotes the sidecar to a **bidirectional framed data channel**:
-/// - daemon → app: `send(fd:header:)` vends a pane read fd wrapped in a
-///   length-prefixed `.fdVend` frame (unchanged semantics, now framed).
+/// - daemon → app: `sendReportingRecipient(fd:header:)` vends a holder
+///   session's pty descriptor wrapped in a length-prefixed `.fdVend` frame.
 /// - app → daemon: `.injectionAck` and `.screenReply` frames, decoded on a
 ///   dedicated receive `Thread` and delivered via `onInjectionAck` /
 ///   `onScreenReply`.
@@ -68,9 +68,9 @@ private final class MonotonicCounter: @unchecked Sendable {
 ///
 /// Making the actor the sole closer closes a stale-fd hole: if the reader closed
 /// the fd on EOF while `clientFD` still held that number, the kernel could recycle
-/// the number for an unrelated pipe/accept/open, and a later `send(fd:header:)`
-/// would `sendmsg()` a vend frame into that UNRELATED fd (cross-fd corruption).
-/// By clearing `clientFD` before/with the close, `send()` sees `clientFD < 0` and
+/// the number for an unrelated pipe/accept/open, and a later vend would
+/// `sendmsg()` its frame into that UNRELATED fd (cross-fd corruption). By
+/// clearing `clientFD` before/with the close, the vend sees `clientFD < 0` and
 /// refuses with `.notConnected` instead of writing into a recycled fd.
 ///
 /// The accept loop and each receive loop run on dedicated `Thread`s — the house
@@ -109,10 +109,11 @@ actor FDVendingServer {
     /// `SocketServer` checks the RPC socket's identity before removing it.
     private var boundSocketIdentity: SocketFileIdentity?
 
-    /// How many times `send(fd:header:)` checks for an adopted client before
-    /// giving up, and how long it waits between checks. `retryAttempts` checks
-    /// are separated by `retryAttempts - 1` waits, so the default 10/50 ms pair
-    /// is a 450 ms window — the pre-seam behaviour, unchanged.
+    /// How many times `sendReportingRecipient(fd:header:)` checks for an
+    /// adopted client before giving up, and how long it waits between checks.
+    /// `retryAttempts` checks are separated by `retryAttempts - 1` waits, so
+    /// the default 10/50 ms pair is a 450 ms window — the pre-seam behaviour,
+    /// unchanged.
     private let retryAttempts: Int
     private let retryInterval: Duration
     /// Reads the identity of the process at the other end of an adopted socket.
@@ -639,33 +640,30 @@ actor FDVendingServer {
     }
 
     /// Send `fd` plus `header` to the currently connected app client, wrapped in
-    /// a `.fdVend` frame. Retries briefly while no client is adopted — the app
-    /// connects eagerly at startup, so this only papers over a connect-vs-accept
-    /// race measured in milliseconds. `retryAttempts` connection checks spaced
-    /// by `retryInterval` (see those properties for the window arithmetic).
+    /// a `.fdVend` frame, and answer **who the descriptor went to**: the
+    /// identity recorded for the connection the frame was written on, or nil
+    /// when that peer could not be identified at adopt time.
+    ///
+    /// Retries briefly while no client is adopted — the app connects eagerly at
+    /// startup, so this only papers over a connect-vs-accept race measured in
+    /// milliseconds. `retryAttempts` connection checks spaced by
+    /// `retryInterval` (see those properties for the window arithmetic).
     ///
     /// `clientFD` is re-read on EVERY iteration, never captured before the
     /// loop, so a client adopted mid-window is picked up and — just as
     /// importantly — a connection torn down mid-window is NOT vended into after
     /// its fd number was closed and possibly recycled. The frame is encoded once
     /// up front because it depends only on `header`, not on the connection.
-    func send(fd: Int32, header: Data) async throws {
-        _ = try await sendReportingRecipient(fd: fd, header: header)
-    }
-
-    /// `send(fd:header:)`, answering **who the descriptor went to**: the
-    /// identity recorded for the connection the frame was written on, or nil
-    /// when that peer could not be identified at adopt time.
     ///
-    /// Read here, in the same isolated stretch as the write and with no
-    /// `await` between them, for the reason `sendFrame` reads its epoch here:
-    /// `adoptConnection` is isolated to this actor too, so no reconnect can
-    /// land between the two. An identity the caller looked up *before* the
-    /// send would be exactly that race — a reconnect in between hands the
-    /// descriptor to one app while the caller records another as holding it,
-    /// and a later verdict that the recorded app is dead would seize a pty the
-    /// other one is reading. The holder attach path records this answer as the
-    /// claim's owner.
+    /// The identity is read here, in the same isolated stretch as the write
+    /// and with no `await` between them, for the reason `sendFrame` reads its
+    /// epoch here: `adoptConnection` is isolated to this actor too, so no
+    /// reconnect can land between the two. An identity the caller looked up
+    /// *before* the send would be exactly that race — a reconnect in between
+    /// hands the descriptor to one app while the caller records another as
+    /// holding it, and a later verdict that the recorded app is dead would
+    /// seize a pty the other one is reading. The holder attach path records
+    /// this answer as the claim's owner.
     func sendReportingRecipient(fd: Int32, header: Data) async throws -> ProcessIdentity? {
         let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
         for attempt in 0..<retryAttempts {
@@ -690,12 +688,13 @@ actor FDVendingServer {
     /// Send one already-encoded frame to the connected app client, with no
     /// descriptor attached and no retry.
     ///
-    /// No retry, unlike `send(fd:header:)`, and the difference is deliberate:
-    /// that one papers over a connect-vs-accept race at app startup, while this
-    /// one is only ever called for a session a viewer is already attached to —
-    /// which means the app connected long ago. A throw here says the sidecar is
-    /// gone, and the caller (`HolderInjectionCourier`) answers it by writing
-    /// the bytes itself rather than by waiting.
+    /// No retry, unlike `sendReportingRecipient(fd:header:)`, and the
+    /// difference is deliberate: that one papers over a connect-vs-accept race
+    /// at app startup, while this one is only ever called for a session a
+    /// viewer is already attached to — which means the app connected long ago.
+    /// A throw here says the sidecar is gone, and the caller
+    /// (`HolderInjectionCourier`) answers it by writing the bytes itself rather
+    /// than by waiting.
     ///
     /// **Returns the connection epoch the frame went out on**, which is what
     /// lets a caller awaiting an answer scope its wait to that connection. The
