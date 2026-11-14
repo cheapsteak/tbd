@@ -361,6 +361,38 @@ struct HolderEmulatorParityTests {
         #expect(wholeOnly.count == 1, "\(wholeOnly)")
     }
 
+    /// The reply order holds every reply of each kind whose own field agrees, run for run, so
+    /// the same replies sent in another order differ; a kind whose replies already differ under
+    /// their own field drops out of the order.
+    @Test func theReplyOrderComparesEveryReplyOfTheKindsThatAgree() {
+        typealias Reading = [String: EmulatorParity.Observed]
+        func reading(_ order: [String], cpr: String) -> Reading {
+            let decrqm: [String] = Array(repeating: "\u{1b}[?2026;2$y", count: 3)
+            return [
+                "replies.order": .text(order.joined(separator: "\n")),
+                "replies.DECRQM": .text(decrqm.joined(separator: "\n")),
+                "replies.CPR": .text(cpr),
+            ]
+        }
+        let first: [String] = ["DECRQM", "DECRQM", "CPR", "DECRQM"]
+        let second: [String] = ["DECRQM", "CPR", "DECRQM", "DECRQM"]
+        var expected: Reading = reading(first, cpr: "\u{1b}[1;1R")
+        var actual: Reading = reading(second, cpr: "\u{1b}[1;1R")
+        EmulatorParity.narrowReplyOrder(&expected, &actual)
+        let firstOrder: EmulatorParity.Observed = .text(first.joined(separator: "\n"))
+        let secondOrder: EmulatorParity.Observed = .text(second.joined(separator: "\n"))
+        #expect(expected["replies.order"] == firstOrder)
+        #expect(actual["replies.order"] == secondOrder)
+        #expect(expected["replies.order"] != actual["replies.order"])
+
+        var differingCPR: Reading = reading(first, cpr: "\u{1b}[1;1R")
+        var otherCPR: Reading = reading(second, cpr: "\u{1b}[2;1R")
+        EmulatorParity.narrowReplyOrder(&differingCPR, &otherCPR)
+        let decrqmOnly: EmulatorParity.Observed = .text("DECRQM\nDECRQM\nDECRQM")
+        #expect(differingCPR["replies.order"] == decrqmOnly)
+        #expect(otherCPR["replies.order"] == decrqmOnly)
+    }
+
     /// A reply split and sorted by kind: sequences cut across writes are rejoined, each reply's
     /// kind is read from its form, and a byte that is not UTF-8 is written as `\xNN`.
     @Test func repliesAreSplitAndSortedByKind() {

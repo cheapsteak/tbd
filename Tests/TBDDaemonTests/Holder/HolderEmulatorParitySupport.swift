@@ -244,7 +244,7 @@ enum EmulatorParity {
             let sent = zip(replies, kinds).filter { $0.1 == kind }.map { escaped($0.0) }
             fields["replies." + kind] = .text(sent.joined(separator: "\n"))
         }
-        // Every reply's kind in turn: `narrowReplyOrder` keeps the kinds both emulators sent.
+        // Every reply's kind in turn: `narrowReplyOrder` keeps the kinds whose replies agree.
         fields["replies.order"] = .text(kinds.joined(separator: "\n"))
         fields["reports"] = .text(sink.reports.map { escaped($0) }.joined(separator: "\n"))
 
@@ -380,26 +380,22 @@ enum EmulatorParity {
         }
     }
 
-    /// Keeps, in each reading's `replies.order`, only the kinds both emulators sent, with a run of
-    /// one kind as one entry: a kind only one of them sent already differs under its own field,
-    /// and the order then compares the rest.
+    /// Keeps, in each reading's `replies.order`, every reply of the kinds whose own
+    /// `replies.<kind>` fields agree, so both orders hold the same replies and compare only the
+    /// order they were sent in. A kind whose replies differ already differs under its own field.
     static func narrowReplyOrder(_ expected: inout [String: Observed], _ actual: inout [String: Observed]) {
         func kinds(_ observed: Observed?) -> [String] {
             guard let text = observed?.string, !text.isEmpty else { return [] }
             return text.components(separatedBy: "\n")
         }
-        let left = kinds(expected["replies.order"])
-        let right = kinds(actual["replies.order"])
-        let shared = Set(left).intersection(right)
-        func narrowed(_ order: [String]) -> Observed {
-            var runs: [String] = []
-            for kind in order where shared.contains(kind) && runs.last != kind {
-                runs.append(kind)
-            }
-            return .text(runs.joined(separator: "\n"))
+        let left: [String] = kinds(expected["replies.order"])
+        let right: [String] = kinds(actual["replies.order"])
+        var agreeing: Set<String> = []
+        for kind in Set(left + right) where expected["replies." + kind] == actual["replies." + kind] {
+            agreeing.insert(kind)
         }
-        expected["replies.order"] = narrowed(left)
-        actual["replies.order"] = narrowed(right)
+        expected["replies.order"] = .text(left.filter { agreeing.contains($0) }.joined(separator: "\n"))
+        actual["replies.order"] = .text(right.filter { agreeing.contains($0) }.joined(separator: "\n"))
     }
 
     /// `bytes` as text, each byte that is not part of a well-formed UTF-8 character written as
