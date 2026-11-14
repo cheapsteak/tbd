@@ -155,7 +155,6 @@ struct HolderEmulatorParityTests {
             reason: "SwiftTerm's snapshot writes no OSC 8 hyperlinks, so the linked cells arrive unlinked and the link the program left open is closed",
             fields: ["viewer.styled", "viewer.link"])],
         "overline": [noOverline],
-        "colour-log": [wideCharacterWrapped],
         "wide-at-edge": [wideCharacterWrapped],
         "wide-in-scrollback": [wideCharacterWrapped],
 

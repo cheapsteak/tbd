@@ -35,7 +35,6 @@
 [36mThe quick brown fox jumps over the lazy dog, [1mthen keeps running[22m past the right margin so the emulator has to wrap it onto a second row, and then a third row for good measure.[39m
 [2m0016[22m [32mINFO[39m  a wide character at the wrap boundary:[0m
 123456789012345678901234567890123456789012345678901234567890123456789012345678漢字
-1234567890123456789012345678901234567890123456789012345678901234567890123456789漢
 [2m0017[22m [32mINFO[39m  a line exactly as wide as the screen:[0m
 [44m12345678901234567890123456789012345678901234567890123456789012345678901234567890[49m
 [2m0018[22m [32mINFO[39m  background erase:[0m
