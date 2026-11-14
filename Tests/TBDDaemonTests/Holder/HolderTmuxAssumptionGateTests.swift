@@ -419,23 +419,28 @@ struct HolderTmuxAssumptionGateTests {
         case codexWithoutThread
         case claudeWithoutSession
         case setupHookTab
+        case preSessionHookTab
 
         var skip: String {
             switch self {
             case .codexWithoutThread: return TransportMigrationEligibility.codexSkip
             case .claudeWithoutSession: return TransportMigrationEligibility.claudeWithoutConversationSkip
             case .setupHookTab: return TransportMigrationEligibility.setupSkip
+            case .preSessionHookTab: return TransportMigrationEligibility.preSessionSkip
             }
         }
     }
 
     /// A tmux row whose window is gone and which the migration would skip is
-    /// refused with the migration's own advice, not told to run a migration
-    /// that would turn it away. The code stays `terminalOnTmux`, so the app
-    /// still offers no Retry, and the row is left as it was.
-    @Test("recreateWindow gives a tmux row the migration skips the migration's advice",
+    /// told to close the tab and open a new one, not to run a migration that
+    /// would turn it away. Nor is it given the migration's own skip, which is
+    /// written for a live window: it would tell a pre-session tab whose hook
+    /// has died that the tab closes itself, and a dead Codex tab that its
+    /// session is running. The code stays `terminalOnTmux`, so the app still
+    /// offers no Retry, and the row is left as it was.
+    @Test("recreateWindow tells a tmux row the migration skips to close the tab",
           arguments: UnmovableTmuxRow.allCases)
-    func recreateWindowGivesAnUnmovableTmuxRowTheMigrationsAdvice(_ kind: UnmovableTmuxRow) async throws {
+    func recreateWindowTellsAnUnmovableTmuxRowToCloseTheTab(_ kind: UnmovableTmuxRow) async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -455,6 +460,10 @@ struct HolderTmuxAssumptionGateTests {
             terminal = try await db.terminals.create(
                 worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
                 label: TerminalLabel.setup, kind: .shell)
+        case .preSessionHookTab:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.preSession, kind: .shell)
         }
         #expect(TransportMigrationEligibility.decide(terminal) == .skip(reason: kind.skip),
                 "the fixture is not a row the migration skips")
@@ -466,8 +475,10 @@ struct HolderTmuxAssumptionGateTests {
 
         #expect(!response.success)
         #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
-        #expect(response.error?.hasSuffix(kind.skip) == true,
-                "the refusal did not give the migration's advice: \(response.error ?? "nil")")
+        #expect(response.error?.hasSuffix(RPCRouter.unmovableTmuxRecreateAdvice) == true,
+                "the refusal did not tell the person to close the tab: \(response.error ?? "nil")")
+        #expect(response.error?.contains(kind.skip) == false,
+                "the refusal gave the migration's skip, which is written for a live window")
         #expect(response.error?.contains("tbd terminal migrate") == false,
                 "the refusal sent the person to a migration that skips this row")
         #expect(response.knownErrorCode == .terminalOnTmux,

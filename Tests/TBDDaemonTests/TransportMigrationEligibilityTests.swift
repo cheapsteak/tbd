@@ -38,7 +38,7 @@ import Testing
     }
 
     /// `nothingToResumeSkip` names only the rows no migration will ever move,
-    /// which other refusals give the migration's advice. A busy session is
+    /// for which other refusals name no migration. A busy session is
     /// skipped only until its turn ends, and a shell is moved, so neither has
     /// one; a tab the migration always skips has the same reason `decide`
     /// gives it.

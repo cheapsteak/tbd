@@ -78,9 +78,11 @@ enum TransportMigrationEligibility: Equatable {
     /// Each of those reasons tells the person what to do instead of migrating,
     /// because no run of the migration will ever move the row. So another
     /// refusal that would otherwise name `tbd terminal migrate` asks this
-    /// first, and gives the same advice for these rows: a window recreate
-    /// (`RPCRouter.tmuxRecreateRefusal(for:)`). The busy skips in `decide`
-    /// are not among them: they clear when the turn ends.
+    /// first, and names no migration for these rows: a window recreate
+    /// (`RPCRouter.tmuxRecreateRefusal(for:)`). That refusal words its own
+    /// advice, because these reasons describe a row whose window is alive.
+    /// The busy skips in `decide` are not among them: they clear when the
+    /// turn ends.
     ///
     /// Judges the row whatever its transport; `decide` asks the transport
     /// first.

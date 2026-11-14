@@ -295,10 +295,13 @@ what a later wake needs. So `terminal.recreateWindow` parks a tmux agent row
 whose window tmux says is gone, keeping its session id, and the session waits
 for the migration like any other parked tmux row. A tmux row with no session to
 park is refused and left as it was. A shell is told to run the migration, which
-moves it. A tab the migration always skips — a running Codex tab with no
-thread, a Claude tab whose session never began, a setup or pre-session hook tab
-— is given the migration's own reason for skipping it: close the tab and open a
-new one, or, for a hook tab, that there is nothing to move.
+moves it. A tab the migration always skips — a Codex tab with no thread, a
+Claude tab whose session never began, a setup or pre-session hook tab — is told
+that nothing that ran in its window can move, and to close the tab and open a
+new one, which starts on the pty holder. It is not given the migration's own
+reason for skipping it, because those reasons describe a live window: a hook
+tab that closes itself when its hook finishes, a Codex session still running.
+Once the window is gone, neither is true.
 
 None of this is migration logic: each is a refusal or a park, with no flag. It
 is what keeps "a session never silently breaks" true without a

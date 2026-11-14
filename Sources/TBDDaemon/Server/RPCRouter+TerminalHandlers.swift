@@ -1449,21 +1449,29 @@ extension RPCRouter {
     ///
     /// - **A shell** can be moved, so the refusal names
     ///   `tbd terminal migrate <id>`.
-    /// - **A tab the migration always skips** — a running Codex tab with no
-    ///   thread, a Claude tab whose session never began, a setup or
-    ///   pre-session hook tab — gets the migration's own advice for it,
-    ///   which is to close the tab and open a new one, or that there is
-    ///   nothing to move. The rows and the words are the migration's
-    ///   (`TransportMigrationEligibility.nothingToResumeSkip`), so the two
-    ///   refusals cannot disagree about a row.
+    /// - **A tab the migration always skips** — a Codex tab with no thread, a
+    ///   Claude tab whose session never began, a setup or pre-session hook tab
+    ///   — is told to close the tab and open a new one. The rows are the
+    ///   migration's (`TransportMigrationEligibility.nothingToResumeSkip`), so
+    ///   this refusal never names a migration that would turn the row away.
+    ///   The words are not the migration's: those are written for a row whose
+    ///   window is alive, and say that a hook tab closes itself or that a
+    ///   Codex session is running. Here the window is gone, so whatever ran in
+    ///   it has ended, and closing the tab is the only thing left to do.
     static func tmuxRecreateRefusal(for terminal: Terminal) -> String {
-        guard let reason = TransportMigrationEligibility.nothingToResumeSkip(terminal) else {
+        guard TransportMigrationEligibility.nothingToResumeSkip(terminal) != nil else {
             return TerminalTransportMigrator.migrateFirstRefusal(
                 terminalID: terminal.id, retry: "open it again")
         }
         return "Terminal \(terminal.id.uuidString) runs on the tmux transport, which TBD no longer "
-            + "starts sessions on, so its window cannot be recreated. \(reason)"
+            + "starts sessions on, so its window cannot be recreated. \(unmovableTmuxRecreateAdvice)"
     }
+
+    /// What `tmuxRecreateRefusal(for:)` tells a person about a tab the
+    /// migration always skips, once its window has gone.
+    static let unmovableTmuxRecreateAdvice =
+        "This tab's window is gone, and nothing that ran in it can move to the pty holder; "
+        + "close the tab and open a new one, which starts on the pty holder."
 
     /// A sibling of `holderRecreateRefusal` for the same reason: one named
     /// factory per refusal, so the app, the CLI and the tests assert the same
