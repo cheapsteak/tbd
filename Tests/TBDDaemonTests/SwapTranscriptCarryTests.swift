@@ -11,7 +11,7 @@ import TestSupport
 /// resume fails with "No conversation found with session ID".
 ///
 /// These tests exercise the pure filesystem helpers (`ensureTranscriptReachable`,
-/// `resolveSwapSourceTranscript`) plus one end-to-end swap through
+/// `resolveSwapSourceTranscript`) plus one end-to-end fork swap through
 /// `handleTerminalSwapProfile` with an injected `ClaudeProfileConfigDirManager`
 /// pointed at temp dirs — no `TBD_HOME` mutation, so no serialization needed.
 @Suite("Swap Transcript Carry")
@@ -197,7 +197,7 @@ struct SwapTranscriptCarryTests {
 
     // MARK: - End-to-end: ambient → profile swap carries the transcript
 
-    @Test("ambient→profile swap copies the live transcript into the profile config dir")
+    @Test("ambient→profile fork swap copies the live transcript into the profile config dir")
     func ambientToProfileSwapCarriesTranscript() async throws {
         // Inject a config-dir manager pointed at temp base/host dirs so the
         // swap's carry writes into a directory we can assert on, without
@@ -212,7 +212,11 @@ struct SwapTranscriptCarryTests {
 
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true)
-        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        // The fork opens its new tab on the holder, through the spawn double.
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -222,6 +226,7 @@ struct SwapTranscriptCarryTests {
             configDirManager: manager,
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
 
         // Seed repo + worktree.
         let repo = try await db.repos.create(path: "/tmp/r-\(UUID().uuidString)", displayName: "r", defaultBranch: "main")
@@ -252,12 +257,15 @@ struct SwapTranscriptCarryTests {
         )
         try await db.terminals.updateSession(id: term.id, sessionID: sessionID, transcriptPath: transcript.path)
 
-        // Swap ambient → Dest profile.
+        // Fork ambient → Dest profile: the new tab resumes the conversation
+        // under the destination config dir, so the carry must run first.
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: dest.id)
+            params: TerminalSwapProfileParams(
+                terminalID: term.id, newProfileID: dest.id, mode: .fork)
         ))
-        #expect(swapResp.success)
+        #expect(swapResp.success, "swap errored: \(swapResp.error ?? "")")
+        #expect(holder.launches.count == 1, "the fork opened no holder tab")
 
         // The transcript must now be reachable under the DEST profile's config
         // dir projects tree, at the same slug/file the ambient source used.

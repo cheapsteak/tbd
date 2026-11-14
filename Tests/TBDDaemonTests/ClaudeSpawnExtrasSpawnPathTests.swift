@@ -14,44 +14,42 @@ extension TBDHomeSerialized {
 /// `terminal.create` and `worktree.create` with plugin folders and a settings
 /// overlay: what they refuse, what they store on the new rows, and what
 /// reaches the spawned command, fresh and resuming — and the later starts that
-/// read them back: a wake from hibernation and each account switch arm from
-/// the row, a reopen from Closed Terminals from the history entry, and each
-/// worktree revive from the archived worktree's map. Tier 2: an in-memory
-/// database, a dry-run tmux and a real scratch directory (a real git repo for
-/// `worktree.create` and revive); nothing is spawned.
+/// read them back: a wake from hibernation, a fork and a cold account switch
+/// from the row, a reopen from Closed Terminals from the history entry, and
+/// each worktree revive from the archived worktree's map. Tier 2: an in-memory
+/// database, the holder spawn double and a real scratch directory (a real git
+/// repo for `worktree.create` and revive); nothing is spawned.
 @Suite("Starts of a Claude terminal keep its plugin folders and settings overlay")
 struct ClaudeSpawnExtrasSpawnPathTests {
-    /// Every tmux argv the dry-run manager would have run.
-    final class TmuxRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [[String]] = []
-        func record(_ args: [String]) { lock.withLock { _calls.append(args) } }
-        var calls: [[String]] { lock.withLock { _calls } }
-        /// The shell command of each `new-window` call: its last argv element,
-        /// the spawn command with only the inline exports in front of it.
-        var newWindowCommands: [String] {
-            calls.filter { $0.contains("new-window") }.compactMap(\.last)
-        }
-        /// The shell command of every `new-window` or `respawn-window` call
-        /// from the `start`th call on that launches Claude.
-        func claudeCommands(since start: Int) -> [String] {
-            calls.dropFirst(start)
-                .filter { $0.contains("new-window") || $0.contains("respawn-window") }
-                .compactMap(\.last)
-                .filter { $0.contains("claude --") }
-        }
-    }
-
     struct Fixture {
         let router: RPCRouter
         let lifecycle: WorktreeLifecycle
         let db: TBDDatabase
-        let recorder: TmuxRecorder
+        /// The holder spawn double every start goes through.
+        let holder: FakeHolderLaunch
         let repo: Repo
         let repoDir: URL
         let worktree: Worktree
         let scratch: URL
         let actuationLogPath: String
+
+        /// The command line of each holder launch, in order: the spawn command
+        /// with only the inline exports in front of it.
+        var spawnCommands: [String] {
+            holder.launches.compactMap(\.commandLine)
+        }
+
+        /// How many launches the double has answered, so a test can read only
+        /// the ones a later step makes.
+        var launchCount: Int { holder.launches.count }
+
+        /// The command line of every launch from the `start`th on that
+        /// launches Claude.
+        func claudeCommands(since start: Int) -> [String] {
+            holder.launches.dropFirst(start)
+                .compactMap(\.commandLine)
+                .filter { $0.contains("claude --") }
+        }
 
         /// A real folder under this test's scratch directory, never under `~`.
         func makePluginDir(_ name: String) throws -> String {
@@ -77,16 +75,17 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                     terminalID: terminalID, newProfileID: profileID, mode: mode)))
         }
 
-        /// A Claude row carrying `extras`, parked the way hibernation leaves
-        /// one, on `profileID` when given. Written straight to the database,
-        /// so no settings file exists for it until a start writes one.
+        /// A holder-backed Claude row carrying `extras`, parked the way
+        /// hibernation leaves one, on `profileID` when given. Written straight
+        /// to the database, so no settings file exists for it until a start
+        /// writes one, and it names no process, so a wake starts a new one.
         func parkedClaudeTerminal(
             sessionID: String, extras: ClaudeSpawnExtras?, profileID: UUID? = nil
         ) async throws -> Terminal {
             let terminal = try await db.terminals.create(
-                worktreeID: worktree.id, tmuxWindowID: "@90", tmuxPaneID: "%90",
+                worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
                 label: "claude", claudeSessionID: sessionID, profileID: profileID, kind: .claude,
-                claudeSpawnExtras: extras)
+                transport: .holder, claudeSpawnExtras: extras)
             try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
             return try #require(try await db.terminals.get(id: terminal.id))
         }
@@ -258,8 +257,9 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             at: actuationDirectory, withIntermediateDirectories: true)
         let actuationLogPath = actuationDirectory.appendingPathComponent("actuations.jsonl").path
 
-        let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let tmux = TmuxManager(dryRun: true)
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
         let db = try TBDDatabase(inMemory: true)
         func configDirManager(_ tag: String) -> ClaudeProfileConfigDirManager {
             let base = scratch.appendingPathComponent("claude-\(tag)", isDirectory: true)
@@ -267,10 +267,16 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 baseDirectory: base.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: base.appendingPathComponent("claude-host", isDirectory: true))
         }
-        let lifecycle = WorktreeLifecycle(
+        // A pre-session hook tab's wait reads "still running" from its job's
+        // pid, and the double's pids name no process: this signaller answers
+        // that every job the double started is running, so the hook ends only
+        // when the test writes its marker.
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager("lifecycle"),
-            preSessionPollInterval: 0.05)
+            preSessionPollInterval: 0.05,
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning)
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -280,6 +286,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             configDirManager: configDirManager("router"),
             sessionsDir: scratch.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: ActuationLog(path: actuationLogPath))
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
 
         let repoDir = scratch.appendingPathComponent("repo", isDirectory: true)
         let repo: Repo
@@ -302,7 +310,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             path: worktreePath, tmuxServer: "tbd-test")
 
         try await body(Fixture(
-            router: router, lifecycle: lifecycle, db: db, recorder: recorder,
+            router: router, lifecycle: lifecycle, db: db, holder: holder,
             repo: repo, repoDir: repoDir,
             worktree: worktree, scratch: scratch, actuationLogPath: actuationLogPath))
     }
@@ -351,7 +359,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(terminal.claudeSpawnExtras == expected)
             #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == expected)
 
-            let command = try #require(f.recorder.newWindowCommands.last)
+            let command = try #require(f.spawnCommands.last)
             #expect(command.contains("claude --session-id"), "\(command)")
             let extraFlag = " --plugin-dir \(shellEscape(plug))"
             #expect(command.contains(extraFlag), "\(command)")
@@ -387,7 +395,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(settings["acmeSetting"] as? String == "on")
             #expect(settings["hooks"] != nil)
 
-            let command = try #require(f.recorder.newWindowCommands.last)
+            let command = try #require(f.spawnCommands.last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminal.id.uuidString)
             #expect(command.contains(" --settings \(shellEscape(path))"), "\(command)")
@@ -414,7 +422,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(terminal.claudeSpawnExtras == nil)
             #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == nil)
 
-            let command = try #require(f.recorder.newWindowCommands.last)
+            let command = try #require(f.spawnCommands.last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(!command.contains(olderPlug), "\(command)")
             let withoutOwn = command.replacingOccurrences(of: Self.ownPluginFlag, with: "")
@@ -435,7 +443,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(!resp.success)
             #expect(resp.error == "plugin folder path must be absolute or start with ~/: rel")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCommands.isEmpty)
+            #expect(f.spawnCommands.isEmpty)
             try f.expectRefusedActuation(resp)
         }
     }
@@ -449,7 +457,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(!resp.success)
             #expect(resp.error == "plugin folder does not exist: \(missing)")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCommands.isEmpty)
+            #expect(f.spawnCommands.isEmpty)
             try f.expectRefusedActuation(resp)
         }
     }
@@ -464,7 +472,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(resp.error == TerminalCreateParams.pluginDirsRequireClaudeMessage)
             #expect(resp.error == "pluginDirs require a Claude terminal")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
-            #expect(f.recorder.newWindowCommands.isEmpty)
+            #expect(f.spawnCommands.isEmpty)
             // Refused as a bad request, beside the model refusal, before any
             // actuation row is written.
             #expect(try f.actuationRows().isEmpty)
@@ -480,7 +488,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(resp.success, "\(resp.error ?? "")")
             let terminal = try resp.decodeResult(Terminal.self)
             #expect(terminal.claudeSpawnExtras == nil)
-            #expect(f.recorder.newWindowCommands.count == 1)
+            #expect(f.spawnCommands.count == 1)
         }
     }
 
@@ -494,7 +502,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(terminal.claudeSpawnExtras == nil)
             #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == nil)
 
-            let command = try #require(f.recorder.newWindowCommands.last)
+            let command = try #require(f.spawnCommands.last)
             #expect(command.contains("claude --session-id"), "\(command)")
             let withoutOwn = command.replacingOccurrences(of: Self.ownPluginFlag, with: "")
             #expect(!withoutOwn.contains("--plugin-dir"), "\(command)")
@@ -522,11 +530,11 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let primary = try #require(terminals.first { $0.kind == .claude })
             #expect(primary.claudeSpawnExtras
                 == ClaudeSpawnExtras(claudeSettingsOverlay: Self.overlay, pluginDirs: [plug]))
-            // The setup tab is a shell and keeps nothing.
+            // Every other tab is a shell and keeps nothing.
             #expect(terminals.filter { $0.id != primary.id }.allSatisfy { $0.claudeSpawnExtras == nil })
 
             let command = try #require(
-                f.recorder.newWindowCommands.first { $0.contains("claude --session-id") })
+                f.spawnCommands.first { $0.contains("claude --session-id") })
             let extraFlag = " --plugin-dir \(shellEscape(plug))"
             #expect(command.contains(extraFlag), "\(command)")
             if let own = command.range(of: Self.ownPluginFlag),
@@ -542,7 +550,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
     /// A relative or missing folder is refused before phase 1, so nothing of
     /// the create exists: no worktree row, no git worktree, no branch, no
-    /// actuation row, no tmux call.
+    /// actuation row, no spawn.
     @Test func worktreeCreateRefusesBadPluginDirBeforeCreating() async throws {
         try await withFixture(gitRepo: true) { f in
             let missing = f.scratch.appendingPathComponent("plugins/absent").path
@@ -563,8 +571,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(try await git.worktreeList(repoPath: f.repoDir.path).count == 1)
             #expect(try await git.localBranchExists(repoPath: f.repoDir.path, name: "tbd/refused") == false)
             #expect(try f.actuationRows().isEmpty)
-            #expect(f.recorder.newWindowCommands.isEmpty)
-            #expect(!f.recorder.calls.contains { $0.contains("new-session") })
+            #expect(f.holder.launches.isEmpty)
         }
     }
 
@@ -602,7 +609,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(terminals.contains { $0.kind == .codex })
             #expect(!terminals.contains { $0.kind == .claude })
             #expect(terminals.allSatisfy { $0.claudeSpawnExtras == nil })
-            #expect(!f.recorder.newWindowCommands.contains { $0.contains(plug) })
+            #expect(!f.spawnCommands.contains { $0.contains(plug) })
         }
     }
 
@@ -620,12 +627,12 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(
                 sessionKey: terminal.id.uuidString)
             #expect(!FileManager.default.fileExists(atPath: settingsPath))
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
             #expect(result.isOk, "\(result)")
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
             if let own = command.range(of: Self.ownPluginFlag),
@@ -648,12 +655,12 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let sessionID = UUID().uuidString
             let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: extras)
             try FileManager.default.removeItem(atPath: gone)
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
             #expect(result.isOk, "\(result)")
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.pluginFlag(kept)), "\(command)")
             #expect(!command.contains(gone), "\(command)")
@@ -669,12 +676,12 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         try await withFixture { f in
             let sessionID = UUID().uuidString
             let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: nil)
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
             #expect(result.isOk, "\(result)")
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             let withoutOwn = command.replacingOccurrences(of: Self.ownPluginFlag, with: "")
             #expect(!withoutOwn.contains("--plugin-dir"), "\(command)")
@@ -687,35 +694,6 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
     // MARK: - Account switch
 
-    /// In place: the same row is respawned under the other account, and the
-    /// replacement reads that row's values.
-    @Test func inPlaceSwapReappliesExtras() async throws {
-        try await withFixture { f in
-            let plug = try f.makePluginDir("plug")
-            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plug])
-            let terminal = try await f.liveClaudeTerminalWithConversation(extras: extras)
-            let sessionID = try #require(terminal.claudeSessionID)
-            let profile = try await f.otherProfile()
-            let start = f.recorder.calls.count
-
-            let resp = try await f.swapProfile(terminal.id, to: profile.id, mode: .inPlace)
-            #expect(resp.success, "\(resp.error ?? "")")
-            let swapped = try resp.decodeResult(Terminal.self)
-            #expect(swapped.id == terminal.id)
-            #expect(swapped.profileID == profile.id)
-            #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).count == 1)
-
-            // Respawned in its own window: no new tab.
-            #expect(!f.recorder.calls.dropFirst(start).contains { $0.contains("new-window") })
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
-            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
-            #expect(!command.contains("--fork-session"), "\(command)")
-            #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
-            try expectHookOverlayApplied(terminal.id, command: command)
-            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
-        }
-    }
-
     /// Fork: a new row under a new terminal id. The source's values are copied
     /// onto it, so its own later starts reapply them, and its first command
     /// carries them; the source row is left as it was.
@@ -726,7 +704,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let source = try await f.liveClaudeTerminalWithConversation(extras: extras)
             let sessionID = try #require(source.claudeSessionID)
             let profile = try await f.otherProfile()
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let resp = try await f.swapProfile(source.id, to: profile.id, mode: .fork)
             #expect(resp.success, "\(resp.error ?? "")")
@@ -737,7 +715,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(try await f.db.terminals.get(id: fork.id)?.claudeSpawnExtras == extras)
             #expect(try await f.db.terminals.get(id: source.id)?.claudeSpawnExtras == extras)
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID) --fork-session"), "\(command)")
             #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
             try expectHookOverlayApplied(fork.id, command: command)
@@ -753,7 +731,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let sessionID = UUID().uuidString
             let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: extras)
             let profile = try await f.otherProfile()
-            let beforeSwap = f.recorder.calls.count
+            let beforeSwap = f.launchCount
 
             let resp = try await f.swapProfile(terminal.id, to: profile.id, mode: .inPlace)
             #expect(resp.success, "\(resp.error ?? "")")
@@ -762,13 +740,13 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(rehomed.profileID == profile.id)
             #expect(rehomed.claudeSpawnExtras == extras)
             #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
-            #expect(f.recorder.claudeCommands(since: beforeSwap).isEmpty)
+            #expect(f.claudeCommands(since: beforeSwap).isEmpty)
 
-            let beforeWake = f.recorder.calls.count
+            let beforeWake = f.launchCount
             let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
             #expect(result.isOk, "\(result)")
 
-            let command = try #require(f.recorder.claudeCommands(since: beforeWake).last)
+            let command = try #require(f.claudeCommands(since: beforeWake).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
             try expectHookOverlayApplied(terminal.id, command: command)
@@ -790,7 +768,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 in: f.worktree.id, sessionID: sessionID, extras: extras)
             await f.db.terminalHistory.recordOnClose(terminal: closing, capture: nil)
             try await f.db.terminals.delete(id: closing.id)
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let resp = try await f.reopen(closing.id)
             #expect(resp.success, "\(resp.error ?? "")")
@@ -800,7 +778,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(reopened.claudeSpawnExtras == extras)
             #expect(try await f.db.terminals.get(id: reopened.id)?.claudeSpawnExtras == extras)
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
             try expectHookOverlayApplied(reopened.id, command: command)
@@ -823,7 +801,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 claudeSpawnExtras: ClaudeSpawnExtras(
                     claudeSettingsOverlay: Self.overlay, pluginDirs: [plug]))
             try await f.db.writerForTests.write { try TerminalHistoryRecord(from: entry).insert($0) }
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let resp = try await f.reopen(entry.id)
             #expect(resp.success, "\(resp.error ?? "")")
@@ -832,8 +810,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(reopened.claudeSpawnExtras == nil)
             #expect(try await f.db.terminals.get(id: reopened.id)?.claudeSpawnExtras == nil)
 
-            let command = try #require(f.recorder.calls.dropFirst(start)
-                .filter { $0.contains("new-window") }.compactMap(\.last).last)
+            let command = try #require(f.holder.launches.dropFirst(start).last?.commandLine)
             #expect(command.contains("restored from close on"), "\(command)")
             #expect(!command.contains("claude --"), "\(command)")
             #expect(!command.contains(plug), "\(command)")
@@ -872,7 +849,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         #expect(restored.claudeSpawnExtras == session.extras)
 
         let command = try #require(
-            f.recorder.newWindowCommands.last { $0.contains("claude --resume \(session.sessionID)") })
+            f.spawnCommands.last { $0.contains("claude --resume \(session.sessionID)") })
         #expect(command.contains(Self.pluginFlag(session.pluginDir)), "\(command)")
         #expect(!command.contains(other.pluginDir), "\(command)")
         let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: restored.id.uuidString)
@@ -1002,7 +979,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 let restored = try #require(terminals.first { $0.claudeSessionID == sessionID })
                 #expect(restored.claudeSpawnExtras == nil)
                 let command = try #require(
-                    f.recorder.newWindowCommands.last { $0.contains("claude --resume \(sessionID)") })
+                    f.spawnCommands.last { $0.contains("claude --resume \(sessionID)") })
                 let withoutOwn = command.replacingOccurrences(of: Self.ownPluginFlag, with: "")
                 #expect(!withoutOwn.contains("--plugin-dir"), "\(command)")
                 #expect(!command.contains("claude-overlay-session-"), "\(command)")
@@ -1039,7 +1016,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(terminal.claudeSpawnExtras == expected)
             #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == expected)
 
-            let command = try #require(f.recorder.newWindowCommands.last)
+            let command = try #require(f.spawnCommands.last)
             #expect(command.contains(resume ? "claude --resume \(sessionID)" : "claude --session-id"),
                     "\(command)")
             #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
@@ -1059,7 +1036,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(resp.success, "\(resp.error ?? "")")
             let terminal = try resp.decodeResult(TBDShared.Terminal.self)
             #expect(terminal.claudeSpawnExtras == nil)
-            let command = try #require(f.recorder.newWindowCommands.last)
+            let command = try #require(f.spawnCommands.last)
             #expect(command.contains(Self.modelExport("acme-sonnet")), "\(command)")
             #expect(!command.contains(Self.modelExport("  ")), "\(command)")
         }
@@ -1099,7 +1076,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(primary.claudeSpawnExtras == expected)
 
             let command = try #require(
-                f.recorder.newWindowCommands.first { $0.contains("claude --session-id") })
+                f.spawnCommands.first { $0.contains("claude --session-id") })
             #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
         }
     }
@@ -1135,8 +1112,9 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(terminals.contains { $0.kind == .codex })
             #expect(!terminals.contains { $0.kind == .claude })
             #expect(terminals.allSatisfy { $0.claudeSpawnExtras == nil })
-            let exported = f.recorder.calls.contains { call in
-                call.contains { $0.contains("ANTHROPIC_MODEL") }
+            let exported = f.holder.launches.contains { launch in
+                launch.argv.contains { $0.contains("ANTHROPIC_MODEL") }
+                    || launch.request.environment["ANTHROPIC_MODEL"] != nil
             }
             #expect(!exported)
         }
@@ -1151,12 +1129,12 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let extras = ClaudeSpawnExtras(model: "acme-opus")
             let terminal = try await f.parkedClaudeTerminal(
                 sessionID: sessionID, extras: extras, profileID: profile.id)
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
             #expect(result.isOk, "\(result)")
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
             #expect(!command.contains("acme-sonnet"), "\(command)")
@@ -1172,38 +1150,14 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let sessionID = UUID().uuidString
             let terminal = try await f.parkedClaudeTerminal(
                 sessionID: sessionID, extras: nil, profileID: profile.id)
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
             #expect(result.isOk, "\(result)")
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.modelExport("acme-sonnet")), "\(command)")
-        }
-    }
-
-    /// An account switch keeps the tab's model, ahead of the new profile's.
-    @Test func swapKeepsSavedModel() async throws {
-        try await withFixture { f in
-            // The overlay gives the create a settings file of its own, which
-            // the helper removes.
-            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.overlay, model: "acme-opus")
-            let terminal = try await f.liveClaudeTerminalWithConversation(extras: extras)
-            let sessionID = try #require(terminal.claudeSessionID)
-            let profile = try await f.db.modelProfiles.create(
-                name: "B", kind: .oauth, model: "acme-sonnet")
-            let start = f.recorder.calls.count
-
-            let resp = try await f.swapProfile(terminal.id, to: profile.id, mode: .inPlace)
-            #expect(resp.success, "\(resp.error ?? "")")
-            #expect(try resp.decodeResult(TBDShared.Terminal.self).profileID == profile.id)
-
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
-            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
-            #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
-            #expect(!command.contains("acme-sonnet"), "\(command)")
-            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
         }
     }
 
@@ -1217,14 +1171,14 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 in: f.worktree.id, sessionID: sessionID, extras: extras)
             await f.db.terminalHistory.recordOnClose(terminal: closing, capture: nil)
             try await f.db.terminals.delete(id: closing.id)
-            let start = f.recorder.calls.count
+            let start = f.launchCount
 
             let resp = try await f.reopen(closing.id)
             #expect(resp.success, "\(resp.error ?? "")")
             let reopened = try resp.decodeResult(TBDShared.Terminal.self)
             #expect(reopened.claudeSpawnExtras == extras)
 
-            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            let command = try #require(f.claudeCommands(since: start).last)
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.modelExport("acme-opus")), "\(command)")
         }
@@ -1252,7 +1206,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 let restored = try #require(terminals.first { $0.claudeSessionID == session.id })
                 #expect(restored.claudeSpawnExtras == ClaudeSpawnExtras(model: session.model))
                 let command = try #require(
-                    f.recorder.newWindowCommands.last { $0.contains("claude --resume \(session.id)") })
+                    f.spawnCommands.last { $0.contains("claude --resume \(session.id)") })
                 #expect(command.contains(Self.modelExport(session.model)), "\(command)")
                 let others = sessions.filter { $0.id != session.id }.map { $0.model }
                 #expect(others.allSatisfy { !command.contains($0) }, "\(command)")

@@ -523,9 +523,8 @@ struct RunningShellTransportMoveTests {
 
     /// The first of the two states a failed move lands in: the row untouched,
     /// still naming the window that is now dead. That is the ordinary
-    /// window-died state the app's recovery banner already owns, and
-    /// `terminal.recreateWindow` can still repair it precisely because the row
-    /// has not been rewritten.
+    /// window-died state the app's recovery banner already owns, and the row
+    /// reads exactly as it did before the move because nothing rewrote it.
     @Test("a spawn that fails leaves the row on tmux with its coordinates intact")
     func aSpawnThatFailsLeavesTheRowOnTmux() async throws {
         let fixture = try await Self.makeFixture(spawnThrows: true)

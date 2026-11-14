@@ -25,8 +25,7 @@ struct SessionRecaptureSchedulerTests {
 
         let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
-            paneID: "%7",
-            server: "tbd-recapture",
+            target: .tmuxPane(server: "tbd-recapture", paneID: "%7"),
             expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
@@ -49,8 +48,7 @@ struct SessionRecaptureSchedulerTests {
 
         let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
-            paneID: "%7",
-            server: "tbd-recapture",
+            target: .tmuxPane(server: "tbd-recapture", paneID: "%7"),
             expectedIncarnationID: fixture.terminal.sessionIncarnationID
         )
 
@@ -73,8 +71,7 @@ struct SessionRecaptureSchedulerTests {
 
         let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
-            paneID: "%7",
-            server: "tbd-recapture",
+            target: .tmuxPane(server: "tbd-recapture", paneID: "%7"),
             expectedIncarnationID: fixture.terminal.sessionIncarnationID)
 
         try await clock.requireAdvanceWhenArmed(by: .seconds(5))
@@ -112,8 +109,7 @@ struct SessionRecaptureSchedulerTests {
 
         let recapture = scheduler.schedule(
             terminalID: fixture.terminal.id,
-            paneID: "%7",
-            server: "tbd-recapture",
+            target: .tmuxPane(server: "tbd-recapture", paneID: "%7"),
             expectedIncarnationID: fixture.terminal.sessionIncarnationID)
 
         try await clock.requireAdvanceWhenArmed(by: .seconds(5))

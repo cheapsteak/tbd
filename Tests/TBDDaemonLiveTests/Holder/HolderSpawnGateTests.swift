@@ -8,19 +8,16 @@ import Testing
 @testable import TBDShared
 import TBDKernel
 
-/// The gate that decides which transport a new session is born onto, and the
-/// read that renders it afterwards.
+/// The gate that puts every new session on a real pty holder, and the read
+/// that renders it afterwards.
 ///
-/// Both branches, because `pty_holder_enabled` is a behaviour-gating
-/// conditional. The two that carry the most weight are not the happy paths:
-///
-///   - `terminalOutputReadsTheHolderEmulator` asserts that `capture-pane` was
-///     **never called**. A handler that rendered the emulator *and* captured a
-///     pane would satisfy every assertion about the returned text while still
-///     shelling out to a tmux server the holder transport exists to avoid.
-///   - `flagFlipDoesNotMigrateRunningSessions` flips the flag off under a live
-///     session. The flag gates spawning, not servicing: a running holder owns a
-///     pty that already exists, and no preference can un-own it.
+/// Both of the gate's branches: a daemon with a `TBDHolder` beside it spawns
+/// every kind of session onto a holder, and one without refuses the spawn. The
+/// assertion that carries the most weight is not a happy path:
+/// `terminalOutputReadsTheHolderEmulator` asserts that `capture-pane` was
+/// **never called**. A handler that rendered the emulator *and* captured a
+/// pane would satisfy every assertion about the returned text while still
+/// shelling out to a tmux server the holder transport exists to avoid.
 ///
 /// Every holder here runs a **controlled** program, never the developer's login
 /// shell or a real agent. The lever is the registry's `environment`: it is the
@@ -33,44 +30,14 @@ struct HolderSpawnGateTests {
 
     // MARK: - The gate
 
-    /// Flag off: today's behaviour, unchanged, and no rendezvous anywhere.
-    ///
-    /// The socket assertion is the one that would catch a gate that spawned a
-    /// holder *and* a window: the row would still read `.tmux`, and only the
-    /// absence of the rendezvous says nothing was started behind it.
-    @Test func flagOffSpawnsOntoTmux() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
-
-        let created = try await fixture.spawnPrimaryTerminals()
-
-        let primary = try #require(try await fixture.db.terminals.get(id: created[0].id))
-        #expect(primary.transport == .tmux)
-        #expect(!primary.tmuxWindowID.isEmpty, "a tmux session was created with no window")
-        #expect(primary.holderPID == nil)
-        #expect(primary.childPID == nil)
-
-        let socketPath = try HolderRendezvous.socketPath(
-            sessionID: primary.id, environment: fixture.environment)
-        #expect(
-            !FileManager.default.fileExists(atPath: socketPath),
-            "a holder rendezvous was created for a tmux-transport session")
-
-        // The unchanged half of the setup-hook decision: with the flag off the
-        // Setup tab is created whether or not the repo has a hook, exactly as
-        // it always has been.
-        #expect(created.count == 2)
-        #expect(created[1].label == TerminalLabel.setup)
-    }
-
-    /// Flag on: a real holder, a real job, and a row that names both.
+    /// A real holder, a real job, and a row that names both.
     ///
     /// `holderPID` and `childPID` are asserted separately and both are checked
     /// for liveness, because holder death is deliberately not child death — a
     /// row that recorded one pid twice would look fine here and be unable to
     /// reclaim anything later.
-    @Test func flagOnSpawnsOntoHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+    @Test func aPrimarySpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let created = try await fixture.spawnPrimaryTerminals()
@@ -100,9 +67,9 @@ struct HolderSpawnGateTests {
             await reader.modeReading().modesObserved,
             "a freshly spawned reader reported its child's modes as unobserved")
 
-        // The other half of the setup-hook decision: this repo has no setup
-        // hook, so on the holder path no tmux server is started for a bare
-        // shell — and no `new-window` was ever issued.
+        // The setup-hook decision: this repo has no setup hook, so no Setup tab
+        // is opened for a bare shell — and no tmux server or window was ever
+        // asked for.
         #expect(created.count == 1)
         let issued = fixture.tmuxCommands()
         #expect(
@@ -130,7 +97,7 @@ struct HolderSpawnGateTests {
     /// release that stopped the reader without dropping the count would put the
     /// peak at 2 here.
     @Test func aSpawnedSessionCountsItsDrainLoopLikeAnAdoptedOne() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let created = try await fixture.spawnPrimaryTerminals()
@@ -154,79 +121,47 @@ struct HolderSpawnGateTests {
             """)
     }
 
-    /// Flag on, registry present, but nothing to spawn with: the create still
-    /// succeeds, on tmux.
+    /// Registry present, but nothing to spawn with: the spawn is refused with
+    /// the gate's reason, before any row, holder or tmux server exists.
     ///
     /// This is the shape a real daemon has whenever its `TBDHolder` binary is
     /// missing — an upgrade that moved it, a partial build — because
     /// `Daemon.swift` builds the registry regardless: adoption of an
     /// already-running holder needs no executable, and a user whose sessions are
     /// live must not lose them. So the gate cannot read "registry present" as
-    /// "can spawn". If it does, `spawn` throws `holderExecutableUnavailable`
-    /// with nothing catching it and the whole worktree create fails — a flag
-    /// that is merely on takes the user's ability to open a worktree away.
-    @Test func missingHolderBinaryFallsBackToTmuxInsteadOfFailingTheCreate() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true, spawnerAvailable: false)
+    /// "can spawn", and with no tmux to fall back to, the honest answer is a
+    /// refusal that names the missing helper.
+    @Test func missingHolderBinaryRefusesTheSpawn() async throws {
+        let fixture = try await GateFixture.make(spawnerAvailable: false)
         defer { fixture.tearDown() }
 
         #expect(
             fixture.registry.canSpawn == false,
             "the fixture did not reproduce a registry with no spawner")
 
-        let created = try await fixture.spawnPrimaryTerminals()
+        await #expect(throws: TerminalSpawnRefusal.holderUnavailable) {
+            _ = try await fixture.spawnPrimaryTerminals()
+        }
 
-        let primary = try #require(try await fixture.db.terminals.get(id: created[0].id))
-        #expect(primary.transport == .tmux)
-        #expect(!primary.tmuxWindowID.isEmpty)
-        #expect(primary.holderPID == nil)
-        #expect(primary.childPID == nil)
-
-        let socketPath = try HolderRendezvous.socketPath(
-            sessionID: primary.id, environment: fixture.environment)
+        #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
+        let issued = fixture.tmuxCommands()
         #expect(
-            !FileManager.default.fileExists(atPath: socketPath),
-            "a holder rendezvous was created by a registry that cannot spawn")
-
-        // And the fallback is the tmux path *whole*, not a half-taken holder
-        // path: the Setup tab is created unconditionally there, exactly as with
-        // the flag off.
-        #expect(created.count == 2)
-        #expect(created[1].label == TerminalLabel.setup)
+            !issued.contains(where: { $0.contains("new-window") || $0.contains("new-session") }),
+            "a refused spawn reached tmux: \(issued)")
     }
 
     // MARK: - Extra terminals
 
-    /// `terminal.create` with the flag off: today's behaviour, unchanged — a
-    /// tmux window, a tmux row, no rendezvous anywhere.
-    @Test func terminalCreateFlagOffStaysOnTmux() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
-
-        let terminal = try await fixture.terminalCreate(
-            TerminalCreateParams(worktreeID: fixture.worktree.id, cmd: "htop"))
-
-        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
-        #expect(row.transport == .tmux)
-        #expect(!row.tmuxWindowID.isEmpty)
-        #expect(row.holderPID == nil)
-        #expect(row.childPID == nil)
-        let socketPath = try HolderRendezvous.socketPath(
-            sessionID: row.id, environment: fixture.environment)
-        #expect(
-            !FileManager.default.fileExists(atPath: socketPath),
-            "a holder rendezvous was created for a tmux-transport extra terminal")
-    }
-
-    /// `terminal.create` with the flag on: an extra terminal is born onto a
-    /// real holder exactly as a primary is — a holder, a job, a row naming
+    /// `terminal.create`: an extra terminal is born onto a real holder exactly
+    /// as a primary is — a holder, a job, a row naming
     /// both, an empty tmux coordinate, and no tmux server started for it.
     ///
     /// A shell command, because the holder runs any command and the gate must
     /// not be Claude-shaped: a port that routed only `type: .claude` to the
     /// holder would pass every Claude-typed assertion and leave every plain
     /// terminal on tmux.
-    @Test func terminalCreateFlagOnSpawnsAnExtraTerminalOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+    @Test func terminalCreateSpawnsAnExtraTerminalOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let terminal = try await fixture.terminalCreate(
@@ -262,7 +197,7 @@ struct HolderSpawnGateTests {
     /// An extra Claude terminal takes the holder exactly as a primary session
     /// does: a holder, a job, and a row naming both.
     @Test func terminalCreateSpawnsAnExtraClaudeTerminalOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let terminal = try await fixture.terminalCreate(
@@ -278,8 +213,8 @@ struct HolderSpawnGateTests {
     /// A Codex extra terminal takes the holder too, as the primary path's
     /// Codex branch does. The executable is a stub path: the job is the pinned
     /// gate shell, which ignores its argv.
-    @Test func terminalCreateFlagOnSpawnsACodexTerminalOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+    @Test func terminalCreateSpawnsACodexTerminalOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let terminal = try await fixture.terminalCreate(
@@ -295,9 +230,9 @@ struct HolderSpawnGateTests {
     }
 
     /// `terminal.continueInCodex` spawns through the same function, so the
-    /// resumed Codex terminal is born onto the holder with the flag on.
-    @Test func continueInCodexFlagOnSpawnsOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+    /// resumed Codex terminal is born onto the holder.
+    @Test func continueInCodexSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         let source = try await fixture.seedClaudeSourceTerminal()
 
@@ -331,7 +266,7 @@ struct HolderSpawnGateTests {
     /// it, which a counter alone would report as a pass if the count assertion
     /// were ever relaxed.
     @Test func terminalOutputReadsTheHolderEmulator() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let created = try await fixture.spawnPrimaryTerminals()
@@ -349,135 +284,18 @@ struct HolderSpawnGateTests {
             "terminal.output shelled out to tmux capture-pane for a holder session")
     }
 
-    /// A tmux row still reads through `capture-pane`.
-    ///
-    /// The branch's other arm: without this, a read that always rendered the
-    /// emulator (or always answered "no reader") would pass every assertion
-    /// above.
-    @Test func terminalOutputStillCapturesPanesForTmuxSessions() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
+    // MARK: - Archived-session restores
 
-        let created = try await fixture.spawnPrimaryTerminals()
-        let rendered = try await fixture.terminalOutput(terminalID: created[0].id)
-
-        #expect(rendered.contains(GateFixture.poisonedPaneText))
-        #expect(fixture.capturePaneCalls() == 1)
-    }
-
-    // MARK: - The flag gates spawning, not servicing
-
-    /// Flipping the flag off does not migrate a session that is already
-    /// running.
-    ///
-    /// Its pty exists, its job is attached to it, and a preference cannot undo
-    /// either. So the row must still read `.holder` and must still serve its
-    /// screen — and a *new* session created afterwards must land on tmux, which
-    /// is what proves the flip took effect at all rather than being ignored.
-    @Test func flagFlipDoesNotMigrateRunningSessions() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
-        defer { fixture.tearDown() }
-
-        let created = try await fixture.spawnPrimaryTerminals()
-        let terminalID = created[0].id
-        let served = try await pollUntil("the holder session's first output") {
-            try await fixture.terminalOutput(terminalID: terminalID).contains("GATE-OK")
-        }
-        #expect(served)
-
-        try await fixture.db.config.setPtyHolderEnabled(false)
-
-        let afterFlip = try #require(try await fixture.db.terminals.get(id: terminalID))
-        #expect(afterFlip.transport == .holder, "flipping the flag migrated a live session")
-        #expect(afterFlip.holderPID != nil)
-        let stillServed = try await fixture.terminalOutput(terminalID: terminalID)
-        #expect(
-            stillServed.contains("GATE-OK"),
-            "a live holder session stopped serving output when the flag went off")
-        #expect(fixture.capturePaneCalls() == 0)
-
-        // And the flip is not a no-op: the next session lands on tmux.
-        let second = try await fixture.spawnPrimaryTerminals()
-        let secondPrimary = try #require(try await fixture.db.terminals.get(id: second[0].id))
-        #expect(secondPrimary.transport == .tmux)
-    }
-
-    // MARK: - What the holder path deliberately does NOT do
-
-    /// Session recapture is scheduled for a tmux primary and not for a holder
-    /// one.
-    ///
-    /// Recapture reads a tmux pane's process, and a holder row's `paneID` is
-    /// empty by construction, so scheduling it there polls a coordinate that
-    /// can never resolve — and, worse, would then write whatever it *did* find
-    /// onto the holder row.
-    ///
-    /// **Both arms run in one test, in this order, and that is the whole
-    /// instrument.** The negative alone would pass just as well against a
-    /// recapture that never fires for anybody. The holder session is created
-    /// first, and the probe's clock is immediate, so a recapture armed for it
-    /// would have recorded its pane before the tmux control's did; observing
-    /// the control's write is therefore proof that the holder's absence is real
-    /// and not merely early. The target list is asserted whole rather than
-    /// searched, so a recapture armed for the holder session alongside the tmux
-    /// one still fails — whichever coordinate it was given.
-    @Test func recaptureIsScheduledForTmuxSessionsAndNotForHolderOnes() async throws {
-        let recapture = RecaptureProbe()
-        let fixture = try await GateFixture.make(flagEnabled: true, recapture: recapture)
-        defer { fixture.tearDown() }
-
-        let holderCreated = try await fixture.spawnClaudePrimaryTerminals(
-            carryover: ConversationCarryover(
-                sourceSessionID: "HOLDER-SOURCE", notesSeed: "# carried\n"))
-        let holderID = holderCreated[0].id
-        let holderRow = try #require(try await fixture.db.terminals.get(id: holderID))
-        #expect(holderRow.transport == .holder)
-        #expect(holderRow.tmuxPaneID.isEmpty)
-
-        try await fixture.db.config.setPtyHolderEnabled(false)
-        let tmuxCreated = try await fixture.spawnClaudePrimaryTerminals(
-            carryover: ConversationCarryover(
-                sourceSessionID: "TMUX-SOURCE", notesSeed: "# carried\n"))
-        let tmuxID = tmuxCreated[0].id
-        let tmuxRow = try #require(try await fixture.db.terminals.get(id: tmuxID))
-        #expect(tmuxRow.transport == .tmux)
-
-        // The control. Its scheduler runs on virtual time, so this waits only
-        // for the recapture task to be *scheduled*, not for a delay to elapse.
-        // The deadline is a hang-catcher sized against the fast parallel pass,
-        // where a runnable task can sit behind thousands of others — the
-        // suite's 20 s default timed out on a box at load average 30 with the
-        // capture never having run. It costs a passing run nothing.
-        let landed = try await pollUntil(
-            "the tmux session's recapture to write", timeout: 90
-        ) {
-            try await fixture.db.terminals.get(id: tmuxID)?.claudeSessionID
-                == RecaptureProbe.detectedSessionID
-        }
-        #expect(landed)
-        #expect(recapture.targets == [
-            .tmuxPane(server: fixture.worktree.tmuxServer, paneID: tmuxRow.tmuxPaneID)
-        ])
-
-        let holderAfter = try #require(try await fixture.db.terminals.get(id: holderID))
-        #expect(
-            holderAfter.claudeSessionID == "HOLDER-SOURCE",
-            """
-            recapture ran against a holder session and overwrote its session ID \
-            with \(holderAfter.claudeSessionID ?? "nil")
-            """)
-    }
-
-    /// Archived-session restores follow the primary's transport.
+    /// Archived-session restores land on the holder too.
     ///
     /// The restore decides through the same gate and spawns through the same
-    /// function as every other tab, so under a holder primary the restored row
-    /// is a holder row too — and, critically, NO tmux server is started for it.
+    /// function as every other tab, so the restored row is a holder row — and,
+    /// critically, NO tmux server is started for it.
     /// The `new-session` assertion is the one that would catch a restore that
     /// still asked for a server it no longer needs: the row would look right
     /// and a tmux server would be running behind it.
     @Test func archivedSessionRestoresFollowTheHolderPrimary() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
 
         let created = try await fixture.spawnClaudePrimaryTerminals(
@@ -511,42 +329,12 @@ struct HolderSpawnGateTests {
             "the restore created a tmux window: \(issued)")
     }
 
-    /// The other arm: with the flag off a restore is a tmux window, resuming
-    /// the session it was archived with. Without this, a restore that always
-    /// took the holder — or never restored at all — would pass above.
-    @Test func archivedSessionRestoresStayOnTmuxWithTheFlagOff() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
-
-        _ = try await fixture.spawnClaudePrimaryTerminals(
-            archivedClaudeSessions: ["ARCHIVED-PRIMARY", "ARCHIVED-RESTORED"])
-
-        let restored = try #require(
-            try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
-                .first { $0.claudeSessionID == "ARCHIVED-RESTORED" },
-            "the second archived session was never restored")
-        #expect(restored.transport == .tmux)
-        #expect(!restored.tmuxWindowID.isEmpty)
-        #expect(restored.holderPID == nil)
-        #expect(restored.childPID == nil)
-
-        let issued = fixture.tmuxCommands()
-        #expect(
-            issued.contains(where: { $0.contains("new-session") }),
-            "the restore ran without a tmux server: \(issued)")
-        #expect(
-            issued.contains(where: {
-                $0.contains("new-window") && $0.contains("--resume ARCHIVED-RESTORED")
-            }),
-            "no tmux window was created to resume the archived session: \(issued)")
-    }
-
     // MARK: - Revive from history
 
-    /// `terminalHistory.revive` with the flag on: the revived tab is born onto
-    /// a real holder, with no tmux server anywhere behind it.
-    @Test func historyReviveFlagOnSpawnsOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+    /// `terminalHistory.revive`: the revived tab is born onto a real holder,
+    /// with no tmux server anywhere behind it.
+    @Test func historyReviveSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         let entryID = try await fixture.seedClosedShellHistoryEntry()
 
@@ -577,27 +365,6 @@ struct HolderSpawnGateTests {
             "the revive started a tmux server: \(issued)")
     }
 
-    /// The other arm, unchanged: a revive with the flag off is a tmux window
-    /// in a tmux server.
-    @Test func historyReviveFlagOffStaysOnTmux() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
-        let entryID = try await fixture.seedClosedShellHistoryEntry()
-
-        let revived = try await fixture.historyRevive(entryID: entryID)
-
-        let row = try #require(try await fixture.db.terminals.get(id: revived.id))
-        #expect(row.transport == .tmux)
-        #expect(!row.tmuxWindowID.isEmpty)
-        #expect(row.holderPID == nil)
-        #expect(row.childPID == nil)
-        let socketPath = try HolderRendezvous.socketPath(
-            sessionID: row.id, environment: fixture.environment)
-        #expect(
-            !FileManager.default.fileExists(atPath: socketPath),
-            "a holder rendezvous was created for a tmux-transport revive")
-    }
-
     // MARK: - Profile login tab
 
     /// Every write a recording injection courier was asked to make, frame or
@@ -615,15 +382,13 @@ struct HolderSpawnGateTests {
         }
     }
 
-    /// The profile login tab with the flag on: born onto a real holder like
-    /// every other spawn, with no tmux server behind it.
+    /// The profile login tab: born onto a real holder like every other spawn,
+    /// with no tmux server behind it.
     ///
-    /// It was the one spawn kind pinned to tmux, so the row's transport is the
-    /// assertion that matters here; the rendezvous socket and the two live pids
-    /// are what say a holder actually started rather than a row being labelled
-    /// as though one had.
-    @Test func loginTabFlagOnSpawnsOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+    /// The rendezvous socket and the two live pids are what say a holder
+    /// actually started rather than a row being labelled as though one had.
+    @Test func loginTabSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
         // The daemon's only path for typing into a holder session. A login tab
@@ -675,43 +440,18 @@ struct HolderSpawnGateTests {
             "the daemon typed into a login tab: \(courierWrites.writes)")
     }
 
-    /// The other arm, unchanged: with the flag off a login tab is a tmux
-    /// window in a tmux server.
-    @Test func loginTabFlagOffStaysOnTmux() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
-        let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
-
-        let terminal = try await fixture.terminalCreate(
-            TerminalCreateParams(
-                worktreeID: fixture.worktree.id, type: .claude,
-                overrideProfileID: profile.id, loginSession: true))
-
-        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
-        #expect(row.transport == .tmux)
-        #expect(row.label == TerminalLabel.login)
-        #expect(!row.tmuxWindowID.isEmpty)
-        #expect(row.holderPID == nil)
-        #expect(row.childPID == nil)
-        let socketPath = try HolderRendezvous.socketPath(
-            sessionID: row.id, environment: fixture.environment)
-        #expect(
-            !FileManager.default.fileExists(atPath: socketPath),
-            "a holder rendezvous was created for a tmux-transport login tab")
-    }
-
     // MARK: - Fork-session swap
 
-    /// A `.fork` swap with the flag on lands on a real holder, and its session
-    /// recapture addresses the holder's CHILD rather than a pane.
+    /// A `.fork` swap lands on a real holder, and its session recapture
+    /// addresses the holder's CHILD rather than a pane.
     ///
     /// The target assertion is the load-bearing half. A holder row's pane id is
     /// the empty string by construction, so a fork that kept scheduling
     /// `.tmuxPane` would poll a coordinate that can never resolve — and would
     /// write whatever it happened to find onto the row.
-    @Test func forkSwapFlagOnSpawnsOntoTheHolderAndRecapturesItsChild() async throws {
+    @Test func forkSwapSpawnsOntoTheHolderAndRecapturesItsChild() async throws {
         let recapture = RecaptureProbe()
-        let fixture = try await GateFixture.make(flagEnabled: true, recapture: recapture)
+        let fixture = try await GateFixture.make(recapture: recapture)
         defer { fixture.tearDown() }
         let source = try await fixture.seedClaudeSourceTerminal()
 
@@ -753,10 +493,10 @@ struct HolderSpawnGateTests {
 
     // MARK: - Hook tabs
 
-    /// The pre-session hook tab is born onto the holder with the flag on, and
-    /// the descriptor phase 3 carries records the pids it will need.
+    /// The pre-session hook tab is born onto the holder, and the descriptor
+    /// phase 3 carries records the pids it will need.
     @Test func preSessionHookTabSpawnsOntoTheHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         try fixture.installWorktreeHook(.preSession)
 
@@ -787,11 +527,11 @@ struct HolderSpawnGateTests {
     /// With a setup hook installed, the setup tab is a holder row beside the
     /// primary — still no tmux server, and two holders rather than one.
     ///
-    /// The hook-less case is `flagOnSpawnsOntoHolder`'s `created.count == 1`:
-    /// without a hook the tab is a bare shell and a second holder process
-    /// nobody asked for.
+    /// The hook-less case is `aPrimarySpawnsOntoTheHolder`'s
+    /// `created.count == 1`: without a hook the tab would be a bare shell and a
+    /// second holder process nobody asked for.
     @Test func setupHookTabFollowsTheHolderPrimary() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         // Auto-close ships on, and this hook exits 0: off, the tab stays for
         // the assertions below instead of closing under them.
@@ -836,12 +576,8 @@ struct HolderSpawnGateTests {
     /// `disposeHolder`: a teardown that deleted the row through the tmux arm
     /// would satisfy every assertion about the row while leaving a holder, a
     /// job and a socket that nothing names any more.
-    ///
-    /// The other arm of that same `remain-on-exit` decision is
-    /// `AutoCloseSetupTests.flagOnCleanExitClosesSetupTab`, which asserts the
-    /// property is set exactly once and targets the setup window.
     @Test func setupAutoCloseOnTheHolderClosesTheTabAndReclaimsItsHolder() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         try await fixture.db.config.setAutoCloseSetup(enabled: true)
         try fixture.installWorktreeHook(.setup)
@@ -927,7 +663,7 @@ struct HolderSpawnGateTests {
     /// a removed rendezvous socket is the proof it was taken. No `kill-window`,
     /// because a holder row's window id names nothing.
     @Test func phase3ReclaimsAHolderHookTabWhenTheWorktreeRowVanishes() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: true)
+        let fixture = try await GateFixture.make()
         defer { fixture.tearDown() }
         try fixture.installWorktreeHook(.preSession)
 
@@ -971,29 +707,12 @@ struct HolderSpawnGateTests {
         }
     }
 
-    /// The setup tab's other arm: with the flag off it is a tmux window, hook
-    /// or no hook, exactly as it always has been.
-    @Test func setupHookTabStaysOnTmuxWithTheFlagOff() async throws {
-        let fixture = try await GateFixture.make(flagEnabled: false)
-        defer { fixture.tearDown() }
-        // Auto-close ships on; off, the setup tab stays for the assertions.
-        try await fixture.db.config.setAutoCloseSetup(enabled: false)
-        try fixture.installWorktreeHook(.setup)
-
-        let created = try await fixture.spawnPrimaryTerminals()
-
-        #expect(created.count == 2)
-        let setup = try #require(try await fixture.db.terminals.get(id: created[1].id))
-        #expect(setup.transport == .tmux)
-        #expect(!setup.tmuxWindowID.isEmpty)
-        #expect(setup.holderPID == nil)
-    }
 }
 
 // MARK: - Recapture probe
 
-/// The scheduler the create path is given in place of the real one, and the
-/// record of every pane it was asked about.
+/// The scheduler the fork swap is given in place of the real one, and the
+/// record of every target it was asked about.
 ///
 /// Two things it deliberately does not do. It never reaches
 /// `ClaudeStateDetector`, which would read a session file at a **process-wide**
@@ -1146,7 +865,6 @@ private final class GateFixture {
     ///   binary sits beside it: `Daemon.swift` still builds the registry, so
     ///   the gate sees a non-nil one that cannot start anything.
     static func make(
-        flagEnabled: Bool,
         spawnerAvailable: Bool = true,
         recapture: RecaptureProbe? = nil
     ) async throws -> GateFixture {
@@ -1169,7 +887,6 @@ private final class GateFixture {
             })
 
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPtyHolderEnabled(flagEnabled)
 
         let spawner: HolderSpawner?
         if spawnerAvailable {
@@ -1216,11 +933,6 @@ private final class GateFixture {
             preSessionTimeout: 30,
             preSessionPollInterval: 0.05)
         lifecycle.holderRegistry = registry
-        if let recapture {
-            lifecycle.sessionRecaptureFactory = { db, tmux in
-                recapture.scheduler(db: db, tmux: tmux)
-            }
-        }
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
@@ -1233,8 +945,8 @@ private final class GateFixture {
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
         if let recapture {
-            // The router builds its own scheduler for the swap paths, so the
-            // probe has to be wired into both seams to observe a fork.
+            // The router builds its own scheduler for the fork swap, the one
+            // path that schedules a recapture.
             router.sessionRecaptureFactory = { db, tmux in
                 recapture.scheduler(db: db, tmux: tmux)
             }

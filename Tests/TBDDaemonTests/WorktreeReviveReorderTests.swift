@@ -44,6 +44,7 @@ struct MixedReviveSelectionTests {
             firstObservedAt: .distantPast, lastObservedAt: .distantPast))
         let router = RPCRouter(db: db, lifecycle: lc, tmux: TmuxManager(dryRun: true), startTime: Date(),
             actuationLog: ActuationLog(path: home.appendingPathComponent("actuations.jsonl").path))
+        router.holderRegistry = lc.holderRegistry
         let admission = StubAdmission(.admit)
         router.startAdmission = admission
         try await db.config.setStartAdmissionEnabled(true)

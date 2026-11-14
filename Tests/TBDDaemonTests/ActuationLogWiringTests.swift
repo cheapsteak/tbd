@@ -31,18 +31,24 @@ struct ActuationLogWiringTests {
 
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: paneTarget)
+        // Spawns go through the holder spawn double, so `terminal.create`
+        // opens a session without starting a process.
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        )
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                tmux: tmux,
-                hooks: HookResolver()
-            ),
+            lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             actuationLog: ActuationLog(path: path)
         )
+        router.holderRegistry = registry
         return Fixture(router: router, db: db, logPath: path)
     }
 

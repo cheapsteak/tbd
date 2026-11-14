@@ -10,16 +10,15 @@ import TestSupport
 /// need no `TBDHolder` binary. The branch that does, a real holder behind a
 /// revived tab, is `HolderSpawnGateTests` in the live target.
 ///
-/// A revive used to be pinned to tmux whatever the flag said. What is pinned
-/// here instead is that it decides like every other spawn, and that the
-/// decision reaches the *tmux* half of the spawn too: the flag-on failure case
-/// asserts no `new-session` was issued, because `prepareTmuxServer` is a no-op
-/// for a holder decision and a revive that started a server before failing
-/// would leave the very resource the transport exists to remove.
+/// What is pinned here is that a revive asks the gate like every other spawn,
+/// and that neither of its failures touches tmux: no `new-session` and no
+/// `new-window` is issued, because a revive that started a server before
+/// failing would leave the very resource the holder transport exists to
+/// remove.
 ///
 /// The failing spawner is a `HolderSpawner` whose executable does not exist:
-/// `canSpawn` is decided from the spawner's presence alone, so the gate takes
-/// the holder path, and `posix_spawn` then fails before any holder exists.
+/// `canSpawn` is decided from the spawner's presence alone, so the gate grants
+/// the holder, and `posix_spawn` then fails before any holder exists.
 @Suite("terminalHistory.revive transport gate")
 struct TerminalReviveTransportGateTests {
 
@@ -71,7 +70,6 @@ struct TerminalReviveTransportGateTests {
     }
 
     private static func makeFixture(
-        holderFlag: Bool,
         spawner: HolderSpawner?
     ) async throws -> Fixture {
         // Short and under the run's scratch root: the rendezvous socket the
@@ -90,7 +88,6 @@ struct TerminalReviveTransportGateTests {
         let db = try TBDDatabase(
             inMemory: true,
             terminalHistoryDir: (home as NSString).appendingPathComponent("history"))
-        try await db.config.setPtyHolderEnabled(holderFlag)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "terminal-revive-gate")
         let lifecycle = WorktreeLifecycle(
@@ -133,61 +130,32 @@ struct TerminalReviveTransportGateTests {
             worktreePath: worktreePath)
     }
 
-    private func expectTmuxRow(_ terminal: Terminal, in fixture: Fixture) async throws {
-        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
-        #expect(row.transport == .tmux)
-        #expect(!row.tmuxWindowID.isEmpty)
-        #expect(row.holderPID == nil)
-        #expect(row.childPID == nil)
-        #expect(fixture.recorder.count("new-window") == 1)
-        // No rendezvous-absence assertion here: every fixture in this suite is
-        // built with either no spawner or one whose executable does not exist,
-        // so nothing in it can bind a socket and the absence would hold for a
-        // revive that had taken the holder path too. The live suite
-        // (`HolderSpawnGateTests`) is where that assertion discriminates.
-    }
-
-    // MARK: - Flag off
-
-    /// Today's behaviour, exactly: a tmux server, one tmux window, a tmux row.
-    @Test("flag off: a revived terminal spawns onto tmux")
-    func flagOffSpawnsOntoTmux() async throws {
-        let fixture = try await Self.makeFixture(
-            holderFlag: false, spawner: Self.unspawnableSpawner())
-        defer { fixture.tearDown() }
-
-        let response = try await fixture.revive()
-        #expect(response.success, "\(response.error ?? "")")
-        let terminal = try response.decodeResult(Terminal.self)
-        try await expectTmuxRow(terminal, in: fixture)
-        #expect(terminal.kind == .shell)
-    }
-
-    // MARK: - Flag on, nothing to spawn with
+    // MARK: - Nothing to spawn with
 
     /// A registry with no spawner — a daemon whose `TBDHolder` binary an
-    /// upgrade moved away. The flag is on and the answer is still tmux, the
-    /// same fallback every other spawn path takes.
-    @Test("flag on with a registry that cannot spawn falls back to tmux")
-    func flagOnWithoutASpawnerFallsBackToTmux() async throws {
-        let fixture = try await Self.makeFixture(holderFlag: true, spawner: nil)
+    /// upgrade moved away. The revive is refused with the gate's reason, and
+    /// nothing is written or started.
+    @Test("a registry that cannot spawn refuses the revive")
+    func aRegistryThatCannotSpawnRefusesTheRevive() async throws {
+        let fixture = try await Self.makeFixture(spawner: nil)
         defer { fixture.tearDown() }
 
         let response = try await fixture.revive()
-        #expect(response.success, "\(response.error ?? "")")
-        let terminal = try response.decodeResult(Terminal.self)
-        try await expectTmuxRow(terminal, in: fixture)
+        #expect(!response.success)
+        #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(try await fixture.db.terminals.list(worktreeID: fixture.worktree.id).isEmpty)
+        #expect(
+            fixture.recorder.count("new-window") == 0 && fixture.recorder.count("new-session") == 0,
+            "a refused revive reached tmux: \(fixture.recorder.all)")
     }
 
-    // MARK: - Flag on, the holder spawn fails
+    // MARK: - The holder spawn fails
 
-    /// The request fails the way a tmux spawn failure fails today — an error
-    /// response and no row — and, because the decision reached
-    /// `prepareTmuxServer` too, no tmux server was started on the way there.
+    /// The request fails with an error response and no row, and no tmux
+    /// server was started on the way there.
     @Test("a holder revive spawn failure fails the request and starts no tmux server")
     func holderSpawnFailureFailsTheRevive() async throws {
-        let fixture = try await Self.makeFixture(
-            holderFlag: true, spawner: Self.unspawnableSpawner())
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
         defer { fixture.tearDown() }
 
         let response = try await fixture.revive()

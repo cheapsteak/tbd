@@ -333,10 +333,13 @@ import Testing
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
     }
 
-    /// The `new-window` shell command recorded by a dryRun tmux (the last
-    /// element of the recorded args is the full command string).
-    private func newWindowCommand(_ recorded: [[String]]) -> String? {
-        recorded.first(where: { $0.contains("new-window") })?.last
+    /// A router whose spawns go through the holder spawn double, which records
+    /// each spawn's command line instead of starting it.
+    private func makeHolderRouter(db: TBDDatabase) -> (RPCRouter, FakeHolderLaunch) {
+        let holder = FakeHolderLaunch()
+        let router = makeRouter(db: db, tmux: TmuxManager(dryRun: true))
+        router.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        return (router, holder)
     }
 
     @Test func shellReviveOpensFreshShellWithCapture() async throws {
@@ -355,12 +358,7 @@ import Testing
             worktreeID: fx.worktree.id, terminalID: shellTerm.id)
         #expect(FileManager.default.fileExists(atPath: capturePath))
 
-        let recorder = PreSessionRecordedCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunCapturePane: { _, _ in "" })
-        let router = makeRouter(db: fx.db, tmux: tmux)
+        let (router, holder) = makeHolderRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalHistoryRevive,
@@ -368,9 +366,10 @@ import Testing
         #expect(resp.success)
         let revived = try resp.decodeResult(Terminal.self)
 
-        // New terminal row, kind shell, in this worktree.
+        // New terminal row, kind shell, in this worktree, on the holder.
         #expect(revived.kind == .shell)
         #expect(revived.worktreeID == fx.worktree.id)
+        #expect(revived.transport == .holder)
         #expect(try await fx.db.terminals.get(id: revived.id) != nil)
 
         // Tab order appended + active set to the new terminal.
@@ -378,14 +377,11 @@ import Testing
         #expect(try await fx.db.worktrees.getActiveTabID(worktreeID: fx.worktree.id) == revived.id)
 
         // Spawn command: banner + cat of the capture file + exec shell.
-        let command = try #require(newWindowCommand(recorder.snapshot()))
+        let command = try #require(holder.launch(for: revived.id)?.commandLine)
         #expect(command.contains("restored from close on"))
         #expect(command.contains("/bin/cat"))
         #expect(command.contains(capturePath))
         #expect(command.contains("exec "))
-        #expect(
-            recorder.snapshot().filter { $0.contains("new-session") }.count == 1,
-            "history revive must bootstrap tmux only inside the server-resource lock")
 
         // History row survives revive.
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id)
@@ -401,12 +397,7 @@ import Testing
         await fx.db.terminalHistory.store(
             terminal: fx.terminal, text: "claude scrollback\n", closedAt: Date())
 
-        let recorder = PreSessionRecordedCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunCapturePane: { _, _ in "" })
-        let router = makeRouter(db: fx.db, tmux: tmux)
+        let (router, holder) = makeHolderRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalHistoryRevive,
@@ -418,7 +409,7 @@ import Testing
         #expect(revived.claudeSessionID == "sess-xyz")
 
         // Spawn command resumes the session (no scrollback cat).
-        let command = try #require(newWindowCommand(recorder.snapshot()))
+        let command = try #require(holder.launch(for: revived.id)?.commandLine)
         #expect(command.contains("claude --resume sess-xyz"))
         #expect(!command.contains("/bin/cat"))
     }
@@ -439,20 +430,16 @@ import Testing
             worktreeID: fx.worktree.id, terminalID: shellTerm.id)
         try FileManager.default.removeItem(atPath: capturePath)
 
-        let recorder = PreSessionRecordedCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorder.append($0) },
-            dryRunCapturePane: { _, _ in "" })
-        let router = makeRouter(db: fx.db, tmux: tmux)
+        let (router, holder) = makeHolderRouter(db: fx.db)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalHistoryRevive,
             params: TerminalHistoryReviveParams(worktreeID: fx.worktree.id, id: shellTerm.id)))
         #expect(resp.success)
+        let revived = try resp.decodeResult(Terminal.self)
 
         // Banner + shell, but no cat (file missing).
-        let command = try #require(newWindowCommand(recorder.snapshot()))
+        let command = try #require(holder.launch(for: revived.id)?.commandLine)
         #expect(command.contains("restored from close on"))
         #expect(!command.contains("/bin/cat"))
         #expect(command.contains("exec "))

@@ -58,29 +58,6 @@ struct RPCRouterPhoneSessionActionsTests {
             path: "/tmp/acme-wt-\(UUID().uuidString)", tmuxServer: "tbd-acme")
     }
 
-    // MARK: - The spawn transport
-
-    /// `phoneSpawnsOnHolder` answers as every spawn path decides: tmux with
-    /// no registry, or with the flag off; the holder with the flag on and a
-    /// registry that can spawn.
-    @Test func phoneSpawnsOnHolderFollowsTheSpawnTransportGate() async throws {
-        let f = try makeFixture()
-        #expect(await f.actions.phoneSpawnsOnHolder() == false)
-
-        let home = fencedScratchRoot(prefix: "tbd-phone-holder")
-        defer { try? FileManager.default.removeItem(atPath: home) }
-        f.router.holderRegistry = HolderRegistry(
-            owner: HolderOwnerToken(rawValue: "acme-installation"),
-            environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
-            listTerminals: { [] },
-            spawner: HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder")))
-        try await f.db.config.setPtyHolderEnabled(true)
-        #expect(await f.actions.phoneSpawnsOnHolder() == true)
-
-        try await f.db.config.setPtyHolderEnabled(false)
-        #expect(await f.actions.phoneSpawnsOnHolder() == false)
-    }
-
     // MARK: - Handler-backed methods carry the phone actor
 
     @Test func phoneWakeRecordsThePhoneActor() async throws {

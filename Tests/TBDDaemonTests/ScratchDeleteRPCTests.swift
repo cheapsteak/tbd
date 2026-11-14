@@ -16,13 +16,25 @@ struct ScratchDeleteRPCTests {
         return (home, { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) })
     }
 
+    /// A router whose spawns go through the holder spawn double, wired into
+    /// both the router and the lifecycle it copies, so `scratch.create` opens
+    /// the scratch space's primary terminal as the daemon does.
+    private func makeHolderBackedRouter(db: TBDDatabase) -> RPCRouter {
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
+            db: db, lifecycle: lifecycle,
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
+        return router
+    }
+
     @Test func deletesRowAndTrashesFolder() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = makeHolderBackedRouter(db: db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "gone")))
         let wt = try created.decodeResult(Worktree.self)
         #expect(FileManager.default.fileExists(atPath: wt.localPath))
@@ -36,10 +48,7 @@ struct ScratchDeleteRPCTests {
     @Test func closesTerminalsAndTabsBeforeDeleting() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = makeHolderBackedRouter(db: db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-terminal")))
         let wt = try created.decodeResult(Worktree.self)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
@@ -70,10 +79,7 @@ struct ScratchDeleteRPCTests {
     @Test func keepsRowWhenTrashFails() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = makeHolderBackedRouter(db: db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "undeletable")))
         let wt = try created.decodeResult(Worktree.self)
 
@@ -94,10 +100,7 @@ struct ScratchDeleteRPCTests {
     @Test func deletesAssociatedScratchpadWhenGCEnabled() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = makeHolderBackedRouter(db: db)
 
         let scratchpadBase = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratchdel-claudebase-\(UUID().uuidString)")
@@ -131,10 +134,7 @@ struct ScratchDeleteRPCTests {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(false)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = makeHolderBackedRouter(db: db)
 
         let scratchpadBase = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-scratchdel-claudebase-\(UUID().uuidString)")

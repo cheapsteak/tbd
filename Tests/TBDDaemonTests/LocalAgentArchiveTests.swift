@@ -11,17 +11,24 @@ extension TBDHomeSerialized {
 /// and real Git repositories created under scratch directories.
 @Suite("Mixed local agent archive and revive")
 struct LocalAgentArchiveTests {
+    /// Spawns go to the holder spawn double (`holder.launches`), and a hook
+    /// tab's job reads as running until the test writes its marker: the
+    /// double's pids name no process.
     func lifecycle(_ db: TBDDatabase, _ recorder: PreSessionRecordedCommands,
-                   home: URL, failPreparation: Bool = false) -> WorktreeLifecycle {
-        WorktreeLifecycle(db: db, git: GitManager(),
+                   home: URL, failPreparation: Bool = false,
+                   holder: FakeHolderLaunch = FakeHolderLaunch()) -> WorktreeLifecycle {
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(),
             tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }),
             hooks: HookResolver(), configDirManager: makeIsolatedConfigDirManager(tag: "archive"),
             preSessionTimeout: 2, preSessionPollInterval: 0.01,
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
             codexExecutableResolver: { "/usr/bin/true" },
             codexHomeEnsurer: {
                 if failPreparation { throw CocoaError(.fileNoSuchFile) }
                 return home.appendingPathComponent("codex")
             })
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        return lifecycle
     }
 
     func seedSnapshot(_ db: TBDDatabase, id: UUID) async throws -> [ArchivedAgentTab] {
@@ -209,8 +216,8 @@ struct LocalAgentArchiveTests {
         if preSession { try await installPreSessionHook(repoDir: repoDir) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let recorder = PreSessionRecordedCommands()
-        let lc = lifecycle(db, recorder, home: home)
+        let holder = FakeHolderLaunch()
+        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home, holder: holder)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -232,7 +239,7 @@ struct LocalAgentArchiveTests {
         #expect(restored.archivedAgentTabs == nil)
         #expect(restored.archivedClaudeSessions == nil)
         #expect(restored.archivedClaudeSpawnExtras == nil)
-        let commands = recorder.snapshot().filter { $0.contains("new-window") }.compactMap(\.last)
+        let commands = holder.launches.compactMap(\.commandLine)
         #expect(commands.contains { $0.contains("resume") && $0.contains("codex-A") && $0.contains("model-a") })
         #expect(commands.contains { $0.contains("resume") && $0.contains("codex-C") && $0.contains("model-c") })
     }
@@ -375,8 +382,8 @@ struct LocalAgentArchiveTests {
         let (home, cleanup) = isolateTBDHome(); defer { cleanup() }
         let (db, repoDir, wt, _) = try await makeWorktreeFixture(status: .creating)
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
-        let recorder = PreSessionRecordedCommands()
-        let lc = lifecycle(db, recorder, home: home)
+        let holder = FakeHolderLaunch()
+        let lc = lifecycle(db, PreSessionRecordedCommands(), home: home, holder: holder)
         try await db.writerForTests.write { conn in
             try conn.execute(sql: "UPDATE worktree SET archived_agent_tabs = '{invalid' WHERE id = ?", arguments: [wt.id.uuidString])
         }
@@ -384,7 +391,7 @@ struct LocalAgentArchiveTests {
         try writeMarker(worktreeID: wt.id, exitCode: 0)
         let tasks = await lc.recoverCreatingWorktrees()
         for task in tasks { await task.value }
-        #expect(!recorder.snapshot().contains { $0.contains("new-window") })
+        #expect(holder.launches.isEmpty)
         #expect(try await db.worktrees.get(id: wt.id)?.status == .creating)
     }
 
@@ -402,17 +409,19 @@ struct LocalAgentArchiveTests {
         }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await makeTestRepo(db: db, tempDir: temp, repoDir: repoDir)
-        let recorder = PreSessionRecordedCommands()
+        let holder = FakeHolderLaunch()
         let preparations = PreSessionRecordedCommands()
-        let lc = WorktreeLifecycle(db: db, git: GitManager(),
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }), hooks: HookResolver(),
+        var lc = WorktreeLifecycle(db: db, git: GitManager(),
+            tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "prepared-archive"),
             preSessionTimeout: 2, preSessionPollInterval: 0.01,
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
             codexExecutableResolver: {
                 preparations.append(["prepare"])
                 if preparations.snapshot().count > 2 { throw CocoaError(.fileNoSuchFile) }
                 return "/usr/bin/true"
             }, codexHomeEnsurer: { throw CocoaError(.fileNoSuchFile) })
+        lc.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let wt = try await lc.beginCreateWorktree(repoID: repo.id)
         try await db.worktrees.updateStatus(id: wt.id, status: .archived)
         try await shell("git branch '\(wt.branch)'", at: repoDir)
@@ -427,13 +436,13 @@ struct LocalAgentArchiveTests {
         try writeMarker(worktreeID: wt.id, exitCode: 0)
         await task.value
         #expect(preparations.snapshot().count == 2)
-        let launches = recorder.snapshot().filter { $0.contains("new-window") && ($0.last?.contains("same-thread") ?? false) }
+        let launches = holder.launches.filter { $0.commandLine?.contains("same-thread") ?? false }
         #expect(launches.count == 2)
         for (index, launch) in launches.enumerated() {
-            #expect(launch.contains("CODEX_HOME=\(homes[index].path)"))
-            #expect(launch.contains("DISABLE_AUTO_UPDATE=true"))
-            #expect(launch.last?.contains("model-\(index)") == true)
-            #expect(launch.last?.contains(" -- '") == false)
+            #expect(launch.request.environment["CODEX_HOME"] == homes[index].path)
+            #expect(launch.request.environment["DISABLE_AUTO_UPDATE"] == "true")
+            #expect(launch.commandLine?.contains("model-\(index)") == true)
+            #expect(launch.commandLine?.contains(" -- '") == false)
         }
     }
 
@@ -443,11 +452,12 @@ struct LocalAgentArchiveTests {
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
         let first = try await db.modelProfiles.create(name: "first", kind: .oauth)
         let second = try await db.modelProfiles.create(name: "second", kind: .oauth)
-        let recorder = PreSessionRecordedCommands()
-        let lc = WorktreeLifecycle(db: db, git: GitManager(),
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }), hooks: HookResolver(),
+        let holder = FakeHolderLaunch()
+        var lc = WorktreeLifecycle(db: db, git: GitManager(),
+            tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             modelProfileResolver: ModelProfileResolver(profiles: db.modelProfiles, repos: db.repos, config: db.config),
             configDirManager: makeIsolatedConfigDirManager(tag: "archive-profiles"))
+        lc.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let tabs = [
             ArchivedAgentTab(identity: .init(agentKind: .claude, sessionID: "first"), ordinal: 0,
                 isPrimary: false, profileID: first.id),
@@ -459,7 +469,8 @@ struct LocalAgentArchiveTests {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         #expect(terminals.first { $0.claudeSessionID == "first" }?.profileID == first.id)
         #expect(terminals.first { $0.claudeSessionID == "second" }?.profileID == second.id)
-        #expect(!recorder.snapshot().contains { $0.last?.contains("do-not-send-on-resume") == true })
+        #expect(holder.launches.count == terminals.count)
+        #expect(!holder.launches.contains { $0.commandLine?.contains("do-not-send-on-resume") == true })
     }
 
     @Test func newArchiveDoesNotReconstructAgentsFromAnOldProjection() async throws {

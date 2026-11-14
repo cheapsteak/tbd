@@ -159,12 +159,13 @@ import TestSupport
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create and archive a worktree, then arm it.
@@ -190,12 +191,13 @@ import TestSupport
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create and archive a worktree, then arm both merge overrides.

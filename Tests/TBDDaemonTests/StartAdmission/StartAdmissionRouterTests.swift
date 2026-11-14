@@ -48,10 +48,16 @@ struct StartAdmissionRouterTests {
         let path = directory.appendingPathComponent("actuations.jsonl").path
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true)
+        // Spawns go through the holder spawn double, so an admitted
+        // `terminal.create` opens a session without starting a process.
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: tmux, startTime: Date(), actuationLog: ActuationLog(path: path))
+        router.holderRegistry = registry
         let stub = StubAdmission(verdict)
         router.startAdmission = stub
         if let flag { try await db.config.setStartAdmissionEnabled(flag) }
@@ -278,7 +284,7 @@ struct StartAdmissionRouterTests {
             params: TerminalWakeParams(terminalID: terminal.id)))
         #expect(try await fixture.db.terminals.get(id: terminal.id)?.startHeldReason != nil)
 
-        // A wake the app makes is never held. Whether the dry-run respawn then
+        // A wake the app makes is never held. Whether that wake then
         // succeeds is not this test's concern; the marker's lifetime is the
         // un-park, which every wake path ends in.
         try await fixture.db.terminals.clearHibernated(id: terminal.id)
@@ -509,40 +515,5 @@ struct StartAdmissionRouterTests {
         #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .codex, session: nil)) == nil)
         #expect(RPCRouter.startAdmissionAgent(
             forMigrating: row(kind: .claude, session: "s", transport: .holder)) == nil)
-    }
-
-    @Test("a held Codex window recreate leaves the tab as it was, and the app's is never asked",
-          arguments: [nil, ActuationActor.app])
-    func codexRecreate(actor: ActuationActor?) async throws {
-        let fixture = try await makeFixture()
-        fixture.router.codexExecutableResolver = { "/opt/test/bin/codex" }
-        let codexHome = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-start-admission-codex-\(UUID().uuidString)", isDirectory: true)
-        fixture.router.codexHomeEnsurer = { codexHome }
-        let worktree = try await makeWorktree(in: fixture.db)
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: TerminalLabel.codex, kind: .codex)
-
-        let response = await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminal.id), actor: actor))
-
-        guard actor == nil else {
-            #expect(response.errorCode != RPCErrorCode.startHeld.rawValue)
-            #expect(fixture.stub.requests.isEmpty)
-            return
-        }
-        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
-        #expect(response.error == Self.holdReason)
-        #expect(fixture.stub.requests.map(\.agent) == [.codex])
-        #expect(fixture.stub.requests.first?.kind == .wake)
-        #expect(fixture.stub.requests.first?.terminalID == terminal.id)
-        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
-        #expect(row.tmuxWindowID == "@1")
-        #expect(row.tmuxPaneID == "%1")
-        let outcome = try #require(try rows(at: fixture.logPath).last)
-        #expect(outcome["result"] as? String == "refused")
-        #expect(outcome["reason"] as? String == "held")
     }
 }

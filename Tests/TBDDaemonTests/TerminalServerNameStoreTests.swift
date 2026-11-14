@@ -39,9 +39,9 @@ struct TerminalServerNameStoreTests {
         #expect(try await db.terminals.list(worktreeID: wt.id).first?.serverName == "web")
     }
 
-    /// `terminal.recreateWindow` rebuilds a dead server tab as a plain login
-    /// shell. The row must stop naming the server, or the shell would read as
-    /// the running server and stop or archive would signal its group.
+    /// `replaceRecreatedShellWindow` re-points a server tab's row at a plain
+    /// login shell. The row must stop naming the server, or the shell would
+    /// read as the running server and stop or archive would signal its group.
     @Test func recreatingAServerTabAsAShellClearsItsServerName() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await makeWorktree(db)

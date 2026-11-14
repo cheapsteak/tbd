@@ -291,10 +291,10 @@ struct PhoneCreateTests {
         #expect(h.actions.worktreeCreates.isEmpty)
     }
 
-    /// A first message over `firstPromptMaxBytes` is `bad_request` when the
-    /// new session would spawn on tmux, and creates nothing; on the
-    /// pty-holder transport the same message creates the worktree with it.
-    @Test func aFirstMessageTooLongForTmuxIsABadRequestOnlyOnTmux() async throws {
+    /// A first message over `firstPromptMaxBytes` creates the worktree with
+    /// it: a new session opens on the pty holder, whose spawn takes the
+    /// message whole.
+    @Test func aFirstMessageOverTheTmuxCapCreates() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
         let worktree = try await Self.seedCreatedWorktree(h, in: repo)
@@ -303,59 +303,8 @@ struct PhoneCreateTests {
         let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes + 1)
         let params = PhoneWorktreeCreateParams(repoID: repo.id, message: message)
 
-        h.actions.spawnsOnHolder = false
-        let (onTmux, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
-        #expect(onTmux.error == PhoneAppError(code: .badRequest, message: PhoneAppService.firstMessageTooLongReason))
-        #expect(h.actions.worktreeCreates.isEmpty)
-
-        h.actions.spawnsOnHolder = true
-        let (onHolder, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
-        #expect(onHolder.error == nil)
-        let prompts = h.actions.worktreeCreates.map(\.prompt)
-        #expect(prompts == [message])
-    }
-
-    /// A first message whose shell-quoted form (the text and its two outer
-    /// quotes) is exactly `firstPromptMaxBytes` creates the worktree on tmux.
-    @Test func aFirstMessageAtTheTmuxCapCreates() async throws {
-        let h = try await PhoneServiceHarness.make()
-        let repo = try await Self.seedRepo(h)
-        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
-        _ = try await Self.seedTab(h, in: worktree, kind: .claude)
-        h.actions.spawnsOnHolder = false
-        let outbox = await h.connect()
-        let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes - 2)
-
-        let (reply, _) = try await h.request(
-            .worktreeCreate, params: PhoneWorktreeCreateParams(repoID: repo.id, message: message), on: outbox)
-
+        let (reply, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
         #expect(reply.error == nil)
-        let prompts = h.actions.worktreeCreates.map(\.prompt)
-        #expect(prompts == [message])
-    }
-
-    /// The tmux cap holds the first message's shell-quoted form, where each
-    /// `'` takes four bytes: 11,000 bytes with 2,000 apostrophes quote to
-    /// 17,002, so they create nothing on tmux, and the same message creates
-    /// the worktree on the pty-holder transport.
-    @Test func aFirstMessageOfApostrophesIsMeasuredShellQuoted() async throws {
-        let h = try await PhoneServiceHarness.make()
-        let repo = try await Self.seedRepo(h)
-        let worktree = try await Self.seedCreatedWorktree(h, in: repo)
-        _ = try await Self.seedTab(h, in: worktree, kind: .claude)
-        let outbox = await h.connect()
-        let message = String(repeating: "it's ", count: 2_000) + String(repeating: "a", count: 1_000)
-        #expect(message.utf8.count == 11_000)
-        let params = PhoneWorktreeCreateParams(repoID: repo.id, message: message)
-
-        h.actions.spawnsOnHolder = false
-        let (onTmux, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
-        #expect(onTmux.error == PhoneAppError(code: .badRequest, message: PhoneAppService.firstMessageTooLongReason))
-        #expect(h.actions.worktreeCreates.isEmpty)
-
-        h.actions.spawnsOnHolder = true
-        let (onHolder, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
-        #expect(onHolder.error == nil)
         let prompts = h.actions.worktreeCreates.map(\.prompt)
         #expect(prompts == [message])
     }

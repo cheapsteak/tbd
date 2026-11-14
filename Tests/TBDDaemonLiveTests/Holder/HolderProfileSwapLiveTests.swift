@@ -745,7 +745,6 @@ private final class SwapFixture {
         let environment = ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": shell]
 
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPtyHolderEnabled(true)
 
         let executable = try #require(
             HolderProcessFixture.locateExecutable(),

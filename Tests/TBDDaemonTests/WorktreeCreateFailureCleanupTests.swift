@@ -86,10 +86,14 @@ import Testing
             .map { String($0.dropFirst("refs/heads/".count)) }
     }
 
+    /// Spawns go through the holder spawn double, so a create that gets past
+    /// `git worktree add` opens its tabs without starting a process.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
-        WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        return lifecycle
     }
 
     /// The SHA a local branch currently points at — what a caller hands the
@@ -863,7 +867,14 @@ import Testing
         #expect(row.branch == checkout.branch)
         #expect(row.localPath != pending.localPath)
 
-        try await lifecycle.reconcile(
+        // Reconciled by a lifecycle with no holder registry, which keeps every
+        // holder row rather than judging it: the double's sessions have no
+        // rendezvous and dead pids, so a registry-backed pass would reclaim the
+        // tabs as ended sessions and the terminal check below would stop
+        // telling an archive apart from that.
+        var reconciler = lifecycle
+        reconciler.holderRegistry = nil
+        try await reconciler.reconcile(
             repoID: repo.id, actuationLog: makeTestActuationLog(),
             reapSharedScratchTmuxResources: true)
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active,

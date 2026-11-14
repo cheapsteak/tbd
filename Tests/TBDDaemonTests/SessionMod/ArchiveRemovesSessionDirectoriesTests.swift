@@ -378,10 +378,14 @@ struct ArchiveRemovesSessionDirectoriesTests {
             terminalHistoryDir: home.appendingPathComponent("history", isDirectory: true).path)
         try await db.config.setComposerDraftEnabled(true)
         try await db.config.setPrimaryAgentPreference(.claude)
-        let lifecycle = WorktreeLifecycle(
+        // Both spawns go through the holder spawn double; archive disposes of
+        // the first through the same registry.
+        let holder = FakeHolderLaunch()
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver(),
             configDirManager: makeIsolatedConfigDirManager(tag: "archrev"),
             sessionsDir: sessionsDir)
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
@@ -391,6 +395,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
         try Self.seedSessionDirectory(sessionsDir, sessionID: sessionID)
 
         try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+        let disposed = holder.abandonments.map(\.terminalID)
+        #expect(disposed.contains(primary.id), "archive never disposed of the primary's holder")
         #expect(!FileManager.default.fileExists(
             atPath: sessionsDir.appendingPathComponent(sessionID, isDirectory: true).path))
 

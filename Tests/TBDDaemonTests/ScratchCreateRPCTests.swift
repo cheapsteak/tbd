@@ -16,13 +16,26 @@ struct ScratchCreateRPCTests {
         return (home, { restoreTBDHome(priorTBDHome); try? FileManager.default.removeItem(at: home) })
     }
 
+    /// A router whose spawns go through the holder spawn double, wired into
+    /// both the router and the lifecycle it copies, as the daemon wires its
+    /// registry.
+    private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, holder: FakeHolderLaunch) {
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
+            db: db, lifecycle: lifecycle,
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
+        return (router, holder)
+    }
+
     @Test func createsRepoLessWorktreeRowAndDirectory() async throws {
         let iso = isolateTBDHome(); defer { iso.cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let (router, _) = makeRouter(db: db)
 
         let request = try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil))
         let response = await router.handle(request)
@@ -44,10 +57,7 @@ struct ScratchCreateRPCTests {
     @Test func spawnsSingleDefaultClaudePrimaryTerminal() async throws {
         let iso = isolateTBDHome(); defer { iso.cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let (router, holder) = makeRouter(db: db)
 
         let response = await router.handle(
             try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
@@ -61,6 +71,9 @@ struct ScratchCreateRPCTests {
         #expect(primary.kind == .claude)          // default primaryAgentPreference
         #expect(primary.label == TerminalLabel.claudeCode)
         #expect(!terminals.contains { $0.label == TerminalLabel.setup })
+        #expect(primary.transport == .holder)
+        let launched = holder.launches.map(\.terminalID)
+        #expect(launched == [primary.id])
 
         // Tab order + active tab are that single terminal.
         let tabOrder = try await db.worktrees.getTabOrder(worktreeID: wt.id)
@@ -85,10 +98,7 @@ struct ScratchCreateRPCTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let (router, holder) = makeRouter(db: db)
 
         let response = await router.handle(
             try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
@@ -100,15 +110,14 @@ struct ScratchCreateRPCTests {
         let primary = try #require(terminals.first)
         #expect(primary.kind == .codex)
         #expect(primary.label == TerminalLabel.codex)
+        let launched = holder.launches.map(\.terminalID)
+        #expect(launched == [primary.id])
     }
 
     @Test func honorsExplicitNameAndRegeneratesOnCollision() async throws {
         let iso = isolateTBDHome(); defer { iso.cleanup() }
         let db = try TBDDatabase(inMemory: true)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
-            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let (router, _) = makeRouter(db: db)
 
         let r1 = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "notes")))
         let w1 = try r1.decodeResult(Worktree.self)

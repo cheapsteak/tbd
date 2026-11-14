@@ -54,6 +54,18 @@ func installPreSessionHook(
     try await installHook(named: "preSession", repoDir: repoDir, script: script)
 }
 
+/// A lifecycle over dry-run tmux whose spawns go to the holder spawn double.
+///
+/// Every session opens on a pty holder, so the lifecycle is wired with a
+/// registry built on `holder` (`makeHolderRegistryDouble`): pass your own
+/// `FakeHolderLaunch` to read what was spawned (`holder.launches`). A suite
+/// that needs the no-registry branch sets `holderRegistry = nil` on the result.
+///
+/// `processSignaller` is the liveness seam the hook-tab wait reads: a hook tab
+/// is a holder tab, so "is the hook still running" is its row plus its job's
+/// pid. The double's pids name no process, so the default answers that every
+/// job the double started is still running — the hook only ends when the test
+/// writes its marker — and every other pid is gone.
 func makeLifecycle(
     db: TBDDatabase,
     recorder: PreSessionRecordedCommands? = nil,
@@ -61,17 +73,14 @@ func makeLifecycle(
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
     windowIsDead: (@Sendable (String) -> Bool)? = nil,
     listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil,
-    // The liveness seam the holder branch of the hook-tab wait reads: a
-    // holder-backed tab has no tmux window to look for, so "is it still there"
-    // is the row plus the job's own pid. Defaulted so no existing caller
-    // changes; only the holder suites pass one.
-    processSignaller: ProcessSignaller = ProductionProcessSignaller()
+    processSignaller: ProcessSignaller = ScriptedLivenessSignaller.doubleJobsRunning,
+    holder: FakeHolderLaunch = FakeHolderLaunch()
 ) -> WorktreeLifecycle {
     var dryRunRecorder: (@Sendable ([String]) -> Void)?
     if let recorder {
         dryRunRecorder = { args in recorder.append(args) }
     }
-    return WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(
@@ -86,6 +95,36 @@ func makeLifecycle(
         preSessionPollInterval: 0.05,
         processSignaller: processSignaller
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
+    return lifecycle
+}
+
+/// A `ProcessSignaller` that answers liveness from `probe` and signals nothing.
+///
+/// The wait for a hook tab's marker reads "is the hook still running" from the
+/// job's pid, and the holder spawn double's pids name no process, so a real
+/// signaller reads every hook as already gone. This one lets a test say what
+/// the job is doing.
+struct ScriptedLivenessSignaller: ProcessSignaller {
+    let probe: @Sendable (Int32) -> Bool
+
+    /// Every job the holder spawn double started reads as running; every other
+    /// pid — including the `0` a dry-run tmux answers for a pane's pid — reads
+    /// as gone.
+    static let doubleJobsRunning = ScriptedLivenessSignaller(probe: {
+        $0 > FakeHolderLaunch.pidFloor
+    })
+
+    /// Every pid reads as gone: the hook's job has exited.
+    static let everyJobGone = ScriptedLivenessSignaller(probe: { _ in false })
+
+    func isAlive(_ pid: Int32) -> Bool { probe(pid) }
+    func terminate(_ pid: Int32) {}
+    func forceKill(_ pid: Int32) {}
+    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+    func commandLine(_ pid: Int32) -> String? { nil }
+    func stat(_ pid: Int32) -> String? { nil }
+    func startTime(_ pid: Int32) -> Date? { nil }
 }
 
 /// Builds a DB + repo + worktree fixture whose `path` IS `repoDir` (no real
@@ -118,7 +157,7 @@ func writeMarker(worktreeID: UUID, exitCode: Int) throws {
 }
 
 /// Thread-safe collector for TmuxManager dryRun recorded args. Shared because
-/// both pre-session suites assert on window-creation call order/content.
+/// several suites assert that a path issued, or did not issue, a tmux command.
 /// Named distinctly from other files' file-private `RecordedCommands` types
 /// (e.g. `TBDWorktreeIDLeakTests.swift`) since this one must be visible
 /// module-wide to be shared.

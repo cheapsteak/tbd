@@ -31,7 +31,8 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
 @Suite("HibernationCoordinator", .clockDriven)
 struct HibernationCoordinatorTests {
 
-    /// In-memory DB + repo + worktree + an idle Claude terminal.
+    /// In-memory DB + repo + worktree + an idle Claude terminal. A `.holder`
+    /// row carries the empty tmux coordinates every holder row carries.
     private func setup(
         activityState: TerminalActivityState = .idle,
         keepWarm: Bool = false,
@@ -50,8 +51,9 @@ struct HibernationCoordinatorTests {
             repoID: repo.id, name: "wt", branch: "main",
             path: "/tmp/hib-repo", tmuxServer: "tbd-hib"
         )
+        let holder = transport == .holder
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            worktreeID: wt.id, tmuxWindowID: holder ? "" : "@0", tmuxPaneID: holder ? "" : "%0",
             label: "claude", claudeSessionID: sessionID, kind: kind,
             transport: transport, sessionIncarnationID: sessionIncarnationID
         )
@@ -70,8 +72,30 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
     }
 
+    /// Wires the holder spawn double into `coordinator`, so a parked holder
+    /// row's wake launches through it instead of a real `TBDHolder`. Only a
+    /// holder row wakes: a parked tmux row refuses (`TmuxWakeBackstopTests`).
+    @discardableResult
+    private func wireHolderDouble(_ coordinator: HibernationCoordinator) async -> FakeHolderLaunch {
+        let holder = FakeHolderLaunch()
+        await coordinator.setHolderRegistry(makeHolderRegistryDouble(launch: holder))
+        return holder
+    }
+
+    /// Moves a row a tmux park left parked onto the holder transport, the way
+    /// `tbd terminal migrate` does, so the test can wake it through the holder
+    /// spawn double. Only the transport and the tmux coordinates change.
+    @discardableResult
+    private func moveParkedRowToHolder(_ db: TBDDatabase, _ terminalID: UUID) async throws -> Terminal {
+        let parked = try #require(try await db.terminals.get(id: terminalID))
+        return try #require(try await db.terminals.setParkedTransport(
+            id: terminalID,
+            expectedState: TerminalReplacementSnapshot(terminal: parked),
+            transport: .holder))
+    }
+
     @Test func codexWakeResumesRecordedOptionsWithoutClaudeWork() async throws {
-        let (db, worktreeID, terminalID) = try await setup(kind: .codex)
+        let (db, worktreeID, terminalID) = try await setup(kind: .codex, transport: .holder)
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("acme-codex-wake-\(UUID().uuidString)").resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -89,18 +113,18 @@ struct HibernationCoordinatorTests {
         try await db.repos.setEnvOverrides(id: try #require(worktree.repoID), overrides: ["DISABLE_AUTO_UPDATE": "false", "REPO_ONLY": "repo", "COLLISION": "repo"])
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1", reason: .recovery)
         let before = try #require(try await db.terminals.get(id: terminalID))
-        let recorded = RecordedTmuxCommands()
         let clock = EventDrivenTestClock()
         let titles = ClaudeSessionTitleStore()
         let coord = HibernationCoordinator(db: db,
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(), clock: clock,
             sessionTitles: titles, actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coord)
         try await db.config.setComposerDraftEnabled(true)
         let refused = await coord.wake(terminalID: terminalID, initialPrompt: "must not be sent")
         #expect(refused == .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session."))
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
-        #expect(!recorded.snapshot().contains { $0.contains("respawn-window") })
+        #expect(holder.launches.isEmpty, "the refused wake started a holder")
         let result = await coord.wake(terminalID: terminalID)
         #expect(result.isOk)
         let after = try #require(try await db.terminals.get(id: terminalID))
@@ -110,40 +134,42 @@ struct HibernationCoordinatorTests {
         #expect(after.sessionOrderObservedAt == nil)
         #expect(await titles.lastApplied(terminalID: terminalID) == nil)
         #expect(await titles.isReserved(terminalID: terminalID) == false)
-        let call = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
-        let command = try #require(call.last)
+        let launch = try #require(holder.launch(for: terminalID))
+        let command = try #require(launch.commandLine)
+        // The job's process environment: the merged overrides, with the
+        // guarded home and the forced auto-update switch on top.
+        let environment = launch.request.environment
         #expect(command.contains("resume 'sess-1'"))
         #expect(command.contains("model=\"acme-model\""))
         #expect(command.contains("--disable 'acme-feature'"))
         #expect(command.contains("CODEX_HOME='\(home.path)'"))
-        #expect(call.contains("CODEX_HOME=\(home.path)"))
-        #expect(call.contains("GLOBAL_ONLY=global"))
-        #expect(call.contains("REPO_ONLY=repo"))
-        #expect(call.contains("COLLISION=repo"))
-        #expect(call.contains("DISABLE_AUTO_UPDATE=true"))
-        #expect(!call.contains("DISABLE_AUTO_UPDATE=false"))
+        #expect(environment["CODEX_HOME"] == home.path)
+        #expect(environment["GLOBAL_ONLY"] == "global")
+        #expect(environment["REPO_ONLY"] == "repo")
+        #expect(environment["COLLISION"] == "repo")
+        #expect(environment["DISABLE_AUTO_UPDATE"] == "true")
         #expect(command.contains("TBD_WORKTREE_ID='\(worktreeID.uuidString)'"))
         #expect(command.contains("TBD_TERMINAL_ID='\(terminalID.uuidString)'"))
         #expect(!command.contains("must not be sent"))
         #expect(!command.contains("--settings"))
         #expect(!command.contains("--name"))
-        #expect(!call.contains { $0.hasPrefix("TBD_MOD_FEATURES=") })
+        #expect(environment[SessionModSpawn.featuresVariable] == nil)
         #expect(!(await watchForSleeper(on: clock)), "Codex must wait for SessionStart, not schedule Claude recapture")
     }
 
-    @Test(arguments: ["{broken", #"{"codexHome":"/missing/acme-home"}"#], [TerminalTransport.tmux, .holder])
-    func codexWakeRefusesUnsafeStoredOptions(raw: String, transport: TerminalTransport) async throws {
-        let (db, _, terminalID) = try await setup(kind: .codex, transport: transport)
+    @Test(arguments: ["{broken", #"{"codexHome":"/missing/acme-home"}"#])
+    func codexWakeRefusesUnsafeStoredOptions(raw: String) async throws {
+        let (db, _, terminalID) = try await setup(kind: .codex, transport: .holder)
         try await db.writerForTests.write { db in
             try db.execute(sql: "UPDATE terminal SET codex_launch_options = ? WHERE id = ?", arguments: [raw, terminalID.uuidString])
         }
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1", reason: .recovery)
         let before = try #require(try await db.terminals.get(id: terminalID))
-        let recorded = RecordedTmuxCommands()
         let coord = HibernationCoordinator(db: db,
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coord)
         guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
             Issue.record("unsafe stored Codex options must refuse preparation"); return
         }
@@ -151,25 +177,24 @@ struct HibernationCoordinatorTests {
         #expect(after.isParked)
         #expect(after.sessionIncarnationID == before.sessionIncarnationID)
         #expect(after.claudeSessionID == before.claudeSessionID)
-        #expect(!recorded.snapshot().contains { $0.contains("respawn-window") || $0.contains("send-keys") })
+        #expect(holder.launches.isEmpty, "a refused preparation started a holder")
     }
 
-    @Test(arguments: [TerminalTransport.tmux, .holder])
-    func codexWakeMissingExecutableKeepsTheOriginalPark(transport: TerminalTransport) async throws {
+    @Test func codexWakeMissingExecutableKeepsTheOriginalPark() async throws {
         let (db, worktreeID, _) = try await setup()
         let terminal = try await db.terminals.create(worktreeID: worktreeID,
-            tmuxWindowID: "@2", tmuxPaneID: "%2", claudeSessionID: "acme-thread",
-            kind: .codex, transport: transport)
+            tmuxWindowID: "", tmuxPaneID: "", claudeSessionID: "acme-thread",
+            kind: .codex, transport: .holder)
         try await db.terminals.setHibernated(id: terminal.id, sessionID: "acme-thread", reason: .recovery)
         let before = try #require(try await db.terminals.get(id: terminal.id))
         struct MissingExecutable: Error {}
-        let recorded = RecordedTmuxCommands()
         let coord = HibernationCoordinator(db: db,
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            tmux: TmuxManager(dryRun: true),
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog(),
             codexExecutableResolver: { throw MissingExecutable() },
             codexHomeEnsurer: { Issue.record("home preparation must follow executable resolution"); throw MissingExecutable() })
+        let holder = await wireHolderDouble(coord)
         guard case .respawnFailed(let reason) = await coord.wake(terminalID: terminal.id) else {
             Issue.record("missing Codex executable must refuse preparation"); return
         }
@@ -178,7 +203,7 @@ struct HibernationCoordinatorTests {
         #expect(after.isParked)
         #expect(after.sessionIncarnationID == before.sessionIncarnationID)
         #expect(after.claudeSessionID == before.claudeSessionID)
-        #expect(!recorded.snapshot().contains { $0.contains("respawn-window") || $0.contains("send-keys") })
+        #expect(holder.launches.isEmpty, "a refused preparation started a holder")
     }
 
     @Test func codexHolderWakeLosesChangedRowBeforeSpawning() async throws {
@@ -231,7 +256,8 @@ struct HibernationCoordinatorTests {
     /// A park writes `.idle` and a wake resets the column to `.unknown` for
     /// the incarnation it mints; no activity delta announces either, so each
     /// one's hibernation delta carries the activity columns it committed, read
-    /// back from the row.
+    /// back from the row. The park runs on tmux; the parked row then moves to
+    /// the holder, where a wake runs.
     @Test func parkAndWakeDeltasCarryTheCommittedActivityColumns() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let deltas = RecordedHibernationDeltas()
@@ -242,6 +268,7 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
+        await wireHolderDouble(coord)
 
         #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
         let parked = try #require(try await db.terminals.get(id: terminalID))
@@ -251,6 +278,7 @@ struct HibernationCoordinatorTests {
         #expect(parkActivity.activityStateObservedAt == parked.activityStateObservedAt)
         #expect(parkActivity.activityStateOrderObservedAt == parked.activityStateOrderObservedAt)
 
+        try await moveParkedRowToHolder(db, terminalID)
         #expect(await coord.wake(terminalID: terminalID).isOk)
         let awake = try #require(try await db.terminals.get(id: terminalID))
         let wakeActivity = try #require(deltas.snapshot().last { !$0.hibernated }?.activity)
@@ -309,148 +337,6 @@ struct HibernationCoordinatorTests {
         #expect(unchanged.transcriptPath == parked.transcriptPath)
         #expect(unchanged.sessionIncarnationID == parked.sessionIncarnationID)
         #expect(unchanged.isHibernated)
-    }
-
-    @Test func staleHibernateCannotParkAProfileReplacement() async throws {
-        let (db, _, terminalID) = try await setup(activityState: .idle)
-        try await db.terminals.updateSession(
-            id: terminalID,
-            sessionID: "profile-source-session",
-            transcriptPath: "/tmp/profile-source-session.jsonl")
-        let replacementProfile = try await db.modelProfiles.create(
-            name: "Replacement", kind: .oauth)
-        let preLockGate = BlockingPreLockPark()
-        let commands = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: commands.append)
-        let deltas = RecordedHibernationDeltas()
-        let coordinator = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            subscriptions: deltas.subscriptions(),
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-        await coordinator.setTmuxParkWillAwaitServerLock(preLockGate.hold)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: isolatedConfigDirManager()),
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            actuationLog: makeTestActuationLog())
-
-        let hibernate = gateHoldingTask {
-            await coordinator.manualHibernate(terminalID: terminalID)
-        }
-        guard await waitUntil({ preLockGate.isBlocked }) else {
-            preLockGate.release()
-            _ = await hibernate.value
-            Issue.record("hibernate never reached the point where it waits for the server lock")
-            return
-        }
-
-        let profileResponse = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(
-                terminalID: terminalID,
-                newProfileID: replacementProfile.id,
-                mode: .inPlace)))
-        #expect(profileResponse.success)
-        let replacement = try #require(try await db.terminals.get(id: terminalID))
-        let respawnsAfterProfile = commands.snapshot().filter { $0.contains("respawn-window") }.count
-        #expect(respawnsAfterProfile == 1)
-
-        preLockGate.release()
-        #expect(await hibernate.value != .ok)
-
-        let unchanged = try #require(try await db.terminals.get(id: terminalID))
-        #expect(unchanged.sessionIncarnationID == replacement.sessionIncarnationID)
-        #expect(unchanged.tmuxWindowID == replacement.tmuxWindowID)
-        #expect(unchanged.tmuxPaneID == replacement.tmuxPaneID)
-        #expect(unchanged.profileID == replacement.profileID)
-        #expect(unchanged.claudeSessionID == replacement.claudeSessionID)
-        #expect(unchanged.transcriptPath == replacement.transcriptPath)
-        #expect(unchanged.activityState == replacement.activityState)
-        #expect(unchanged.activityStateSource == replacement.activityStateSource)
-        #expect(unchanged.activityStateObservedAt == replacement.activityStateObservedAt)
-        #expect(unchanged.activityStateOrderObservedAt
-                == replacement.activityStateOrderObservedAt)
-        #expect(!unchanged.isParked)
-        #expect(commands.snapshot().filter { $0.contains("respawn-window") }.count
-                == respawnsAfterProfile)
-        #expect(deltas.snapshot().isEmpty)
-    }
-
-    @Test func profileReplacementRevalidatesAfterHibernationWinsServerLock() async throws {
-        let (db, _, terminalID) = try await setup(activityState: .idle)
-        try await db.terminals.updateSession(
-            id: terminalID,
-            sessionID: "profile-source-session",
-            transcriptPath: "/tmp/profile-source-session.jsonl")
-        let replacementProfile = try await db.modelProfiles.create(
-            name: "Replacement", kind: .apiKey)
-        let keychainGate = BlockingKeychainLookup()
-        let resolver = ModelProfileResolver(
-            profiles: db.modelProfiles,
-            repos: db.repos,
-            config: db.config,
-            keychain: keychainGate.load)
-        let commands = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: commands.append)
-        let coordinator = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: isolatedConfigDirManager()),
-            tmux: tmux,
-            modelProfileResolver: resolver,
-            configDirManager: isolatedConfigDirManager(),
-            actuationLog: makeTestActuationLog())
-
-        let swapRequest = try RPCRequest(
-            method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(
-                terminalID: terminalID,
-                newProfileID: replacementProfile.id,
-                mode: .inPlace))
-        let swap = gateHoldingTask { await router.handle(swapRequest) }
-        guard await waitUntil({ keychainGate.isBlocked }) else {
-            keychainGate.release()
-            _ = await swap.value
-            Issue.record("profile replacement never reached credential resolution")
-            return
-        }
-
-        #expect(await coordinator.manualHibernate(terminalID: terminalID) == .ok)
-        let hibernated = try #require(try await db.terminals.get(id: terminalID))
-        let respawnsAfterHibernate = commands.snapshot()
-            .filter { $0.contains("respawn-window") }.count
-        #expect(respawnsAfterHibernate == 2)
-
-        keychainGate.release()
-        #expect(!(await swap.value).success)
-
-        let unchanged = try #require(try await db.terminals.get(id: terminalID))
-        #expect(unchanged.sessionIncarnationID == hibernated.sessionIncarnationID)
-        #expect(unchanged.tmuxWindowID == hibernated.tmuxWindowID)
-        #expect(unchanged.tmuxPaneID == hibernated.tmuxPaneID)
-        #expect(unchanged.profileID == hibernated.profileID)
-        #expect(unchanged.claudeSessionID == hibernated.claudeSessionID)
-        #expect(unchanged.transcriptPath == hibernated.transcriptPath)
-        #expect(unchanged.activityState == hibernated.activityState)
-        #expect(unchanged.activityStateSource == hibernated.activityStateSource)
-        #expect(unchanged.isParked)
-        #expect(commands.snapshot().filter { $0.contains("respawn-window") }.count
-                == respawnsAfterHibernate)
     }
 
     @Test func hibernateDoesNotReportSuccessWhenPostShellCommitFails() async throws {
@@ -1018,6 +904,9 @@ struct HibernationCoordinatorTests {
         #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil,
                 "the pendingResumeAt mirror must clear with the park write")
 
+        // Only a holder row wakes: move the parked row there first.
+        await wireHolderDouble(coord)
+        try await moveParkedRowToHolder(db, terminalID)
         let woke = await coord.wake(terminalID: terminalID)
         #expect(woke.isOk)
         #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil,
@@ -1040,26 +929,13 @@ struct HibernationCoordinatorTests {
     }
 
     // MARK: - Wake
+    //
+    // Only a holder row wakes; a parked tmux row refuses before anything is
+    // touched (`TmuxWakeBackstopTests`). The wakes below run on holder rows,
+    // through the holder spawn double.
 
-    @Test func wakeClearsHibernatedAndRespawnsResume() async throws {
-        let (db, _, terminalID) = try await setup()
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        _ = await coord.manualHibernate(terminalID: terminalID)
-        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
-
-        let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake.isOk)
-        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
-
-        // A respawn-window with `claude --resume` must have been issued.
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
-                "expected a respawn-window carrying claude --resume; got: \(joined)")
-    }
-
+    /// The park runs on tmux and mints the parked incarnation; the parked row
+    /// then moves to the holder, where the wake mints the replacement's.
     @Test func wakeRespawnPreservesRetryIdentityAndRejectsParkedIncarnation() async throws {
         let (db, _, terminalID) = try await setup()
         try await db.terminals.updateSession(
@@ -1067,8 +943,9 @@ struct HibernationCoordinatorTests {
             sessionID: "sess-1",
             transcriptPath: "/tmp/hibernation-wake-old-session.jsonl")
         let coord = coordinator(db)
+        await wireHolderDouble(coord)
         #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
-        let parked = try #require(try await db.terminals.get(id: terminalID))
+        let parked = try await moveParkedRowToHolder(db, terminalID)
 
         let wakeResult = await coord.wake(terminalID: terminalID)
         #expect(wakeResult.isOk)
@@ -1255,27 +1132,12 @@ struct HibernationCoordinatorTests {
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
     }
 
-    /// A parked row still takes the existing recovery path, not the new
-    /// reporting one — `.sessionGone` is reachable only from the unparked gate.
-    @Test func parkedRowWithGoneWindowStillRecoversRatherThanReporting() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
-                               dryRunPaneSendTarget: { _, _ in .absent })
-        let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-        #expect((await coord.wake(terminalID: terminalID)).isOk)
-        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
-    }
-
     /// A wake whose replacement agent launched but whose row could not be
     /// un-parked still launched a session under its `--name`, so the title
     /// store must hold that name as given — releasing it would put back an
     /// entry the running session no longer carries.
     @Test func wakeThatLaunchedButCouldNotUnparkConfirmsItsTitle() async throws {
-        let (db, worktreeID, terminalID) = try await setup()
+        let (db, worktreeID, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         try await db.writerForTests.write { conn in
             try conn.execute(sql: """
@@ -1288,18 +1150,18 @@ struct HibernationCoordinatorTests {
         }
         let titles = ClaudeSessionTitleStore()
         await titles.record(terminalID: terminalID, worktreeID: worktreeID, title: "before-wake")
-        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
-                               dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            db: db, tmux: TmuxManager(dryRun: true), configDirManager: isolatedConfigDirManager(),
             sessionTitles: titles,
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coord)
 
         let result = await coord.wake(terminalID: terminalID)
         guard case .respawnFailed(let reason) = result, reason.contains("launched") else {
             Issue.record("expected the launched-but-still-parked failure, got \(result)")
             return
         }
+        #expect(holder.launch(for: terminalID) != nil, "the wake never launched its replacement")
         // The worktree's display name, the only Claude terminal's title.
         #expect(await titles.lastApplied(terminalID: terminalID) == "wt",
                 "a wake that launched under its --name did not keep that name")
@@ -1317,7 +1179,7 @@ struct HibernationCoordinatorTests {
     /// that still has a stale suspendedAt) fully un-parks. Here we set both, wake,
     /// and assert both are nil.
     @Test func wakeClearsBothHibernatedAndLegacySuspended() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         // Mark hibernated (authoritative) AND stamp a legacy suspendedAt.
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         try await db.terminals.setSuspended(id: terminalID, sessionID: "sess-1")
@@ -1328,7 +1190,9 @@ struct HibernationCoordinatorTests {
         #expect(before?.hibernatedAt != nil)
         #expect(before?.suspendedAt != nil)
 
-        let wake = await coordinator(db).wake(terminalID: terminalID)
+        let coord = coordinator(db)
+        await wireHolderDouble(coord)
+        let wake = await coord.wake(terminalID: terminalID)
         #expect(wake.isOk)
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt == nil, "wake must clear hibernatedAt")
@@ -1340,10 +1204,9 @@ struct HibernationCoordinatorTests {
     /// guard checks `isParked`, not `hibernatedAt` alone — otherwise these rows
     /// show a Wake button that silently no-ops and the pane is stuck forever.
     @Test func wakeUnparksLegacySuspendedOnlyRow() async throws {
-        let (db, _, terminalID) = try await setup()
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        let (db, _, terminalID) = try await setup(transport: .holder)
+        let coord = coordinator(db)
+        let holder = await wireHolderDouble(coord)
 
         // Legacy park: only suspendedAt set, hibernatedAt nil.
         try await db.terminals.setSuspended(id: terminalID, sessionID: "sess-1")
@@ -1357,9 +1220,9 @@ struct HibernationCoordinatorTests {
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.isParked == false, "row fully un-parked (both columns nil)")
 
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
-                "expected a respawn-window carrying claude --resume; got: \(joined)")
+        let command = holder.launch(for: terminalID)?.commandLine
+        #expect(command?.contains("claude --resume sess-1") == true,
+                "expected a holder launch carrying claude --resume; got: \(command ?? "nil")")
     }
 
     // MARK: - Wake and park: a tab that is not Claude's
@@ -1493,163 +1356,6 @@ struct HibernationCoordinatorTests {
         #expect(after.hibernateReason == .exited)
     }
 
-    // MARK: - Wake: the exit-stamped pane-busy guard
-    //
-    // An exit stamp parks the row while the pane's SHELL stays alive and
-    // usable — unlike every other park reason, whose pane holds an inert shell
-    // hibernate put there. Wake is `respawn-window -k`, so waking such a row
-    // kills whatever occupies that pane.
-    //
-    // The app excludes `.exited` from focus/tab auto-wake, and that stays the
-    // first line. It cannot be the only one: `docs/updating.md`'s `--no-app`
-    // makes "daemon newer than app" a supported skew, and an app binary older
-    // than the stamp decodes `.exited` through the lenient `HibernateReason`
-    // decoder as `.auto` and auto-wakes it. The three cases below pin the
-    // daemon-side guard, which answers the same way no matter who asked.
-
-    /// RED without the guard: an old app's focus-wake reaches a busy pane and
-    /// `respawn-window -k` kills the process running in it.
-    @Test func exitStampedWakeIsRefusedWhenThePaneIsBusy() async throws {
-        let (db, _, terminalID) = try await setup()
-        #expect(try await db.terminals.stampSessionExited(
-            id: terminalID, reportedIncarnationID: nil,
-            at: Date(timeIntervalSince1970: 1_800_000_000)))
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true, dryRunRecorder: recorded.append,
-            dryRunPanePID: { _, _ in "4242" })
-        let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        #expect(await coord.wake(terminalID: terminalID) == .paneBusy(pid: 9999))
-        #expect(recorded.snapshot().filter { $0.contains("respawn-window") }.isEmpty,
-                "the refusal must not touch the pane")
-        let after = try #require(try await db.terminals.get(id: terminalID))
-        #expect(after.isExitStamped, "the row stays exit-stamped so a later retry still wakes")
-    }
-
-    /// The positive control, and the ordinary case: nothing is running in the
-    /// pane, so the pane's own pid owns the foreground group and the wake
-    /// proceeds exactly as it did before the guard.
-    @Test func exitStampedWakeProceedsWhenThePaneIsAnIdleShell() async throws {
-        let (db, _, terminalID) = try await setup()
-        #expect(try await db.terminals.stampSessionExited(
-            id: terminalID, reportedIncarnationID: nil,
-            at: Date(timeIntervalSince1970: 1_800_000_000)))
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true, dryRunRecorder: recorded.append,
-            dryRunPanePID: { _, _ in "4242" })
-        let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 4242),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        #expect(await coord.wake(terminalID: terminalID).isOk)
-        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
-                "expected the ordinary respawn; got: \(joined)")
-    }
-
-    /// The guard is scoped to the exit stamp and to nothing else. A deliberate
-    /// park's pane holds the inert shell hibernate respawned into it, so a
-    /// foreground process there is that shell's own business and must not cost
-    /// the row its wake.
-    @Test func aDeliberatelyParkedRowIsUnaffectedByTheBusyPaneGuard() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(
-            id: terminalID, sessionID: "sess-1", reason: .manual,
-            at: Date(timeIntervalSince1970: 1_800_000_000))
-        let tmux = TmuxManager(dryRun: true, dryRunPanePID: { _, _ in "4242" })
-        let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        #expect(await coord.wake(terminalID: terminalID).isOk)
-        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
-    }
-
-    // MARK: - Wake: window-gone recreate branch
-    //
-    // A reboot destroys every tmux server, leaving parked rows pointing at
-    // dead windows. Wake must detect the dead window and RECREATE it (server +
-    // window) instead of failing "Terminal not found". Both sides of the
-    // `windowExists` gate are covered.
-
-    /// Window ALIVE (dryRun default): the existing respawn-in-place path runs
-    /// unchanged — same window/pane ids, `respawn-window` issued, never
-    /// `new-window` — and the recreate-only server hook does NOT fire.
-    @Test func wakeWithLiveWindowRespawnsInPlaceKeepingIDs() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorded = RecordedTmuxCommands()
-        let serverHookCalls = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-        await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
-
-        let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake.isOk)
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.isParked == false, "row must be un-parked")
-        #expect(after?.tmuxWindowID == "@0", "live-window wake must keep the window id")
-        #expect(after?.tmuxPaneID == "%0", "live-window wake must keep the pane id")
-
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("respawn-window") },
-                "expected respawn-window; got: \(joined)")
-        #expect(!joined.contains { $0.contains("new-window") },
-                "a live window must NOT be recreated; got: \(joined)")
-        #expect(serverHookCalls.snapshot().isEmpty,
-                "onServerCreated must only fire on the recreate branch")
-    }
-
-    /// Window DEAD (post-reboot / killed): wake recreates the server + window,
-    /// persists the NEW window/pane ids, stages an inert `new-window`, then
-    /// respawns the same `claude --resume` into that replacement. The
-    /// server hook fires so a recreated server gets its control-mode connection.
-    @Test func wakeRecreatesDeadWindowAndPersistsNewIDs() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorded = RecordedTmuxCommands()
-        let serverHookCalls = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { $0 == "@0" }
-        )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-        await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
-
-        let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake.isOk)
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.isParked == false, "row must be un-parked")
-        #expect(after?.tmuxWindowID == "@mock-0", "recreate must persist the new window id")
-        #expect(after?.tmuxPaneID == "%mock-0", "recreate must persist the new pane id")
-
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("new-window") && $0.contains("-c /tmp/hib-repo") && $0.contains("tail -f /dev/null") },
-                "expected an inert staged new-window in the worktree cwd; got: \(joined)")
-        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("@mock-0") && $0.contains("--resume sess-1") },
-                "expected a respawn into the replacement window; got: \(joined)")
-        #expect(!joined.contains { $0.contains("respawn-window") && $0.contains("-t @0") },
-                "a dead window must NOT be respawned into; got: \(joined)")
-        // Old-window cleanup: a transient windowExists misclassification must
-        // not leak a live old window (usually already dead — kill no-ops).
-        #expect(joined.contains { $0.contains("kill-window") && $0.contains("@0") },
-                "expected a best-effort kill of the old window; got: \(joined)")
-        #expect(serverHookCalls.snapshot() == [["tbd-hib"]],
-                "onServerCreated must fire once with the recreated server name")
-    }
-
     // MARK: - Session mod on wake
 
     /// A draft the mod saved before the park, byte for byte as it wrote it.
@@ -1671,42 +1377,30 @@ struct HibernationCoordinatorTests {
 
     /// With the flag on, a wake launches the replacement with the three mod
     /// variables in its process environment and rewrites `spawn.json` to name
-    /// the incarnation the row now holds — on both of wake's launch sites, the
-    /// in-place respawn of a live window and the respawn into a recreated one.
-    /// The rest of the session's directory, the saved draft above all, is
-    /// untouched: the woken mod restores from it.
-    @Test(arguments: [false, true])
-    func wakeWithTheFlagOnExportsTheModAndRewritesSpawn(windowIsDead: Bool) async throws {
-        let (db, _, terminalID) = try await setup()
+    /// the incarnation the row now holds. The rest of the session's directory,
+    /// the saved draft above all, is untouched: the woken mod restores from it.
+    @Test func wakeWithTheFlagOnExportsTheModAndRewritesSpawn() async throws {
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         try await db.config.setComposerDraftAsTheOnlyModFeature(true)
         let sessionsDir = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: sessionsDir) }
         let directory = try seedSessionFiles(sessionsDir)
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { windowIsDead && $0 == "@0" })
         let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            db: db, tmux: TmuxManager(dryRun: true), configDirManager: isolatedConfigDirManager(),
             sessionsDir: sessionsDir, sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coord)
 
         #expect(await coord.wake(terminalID: terminalID).isOk)
 
         let awake = try #require(try await db.terminals.get(id: terminalID))
         let incarnation = try #require(awake.sessionIncarnationID)
-        let launch = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
-        let launchEnv = tmuxEnvironmentFlags(launch)
+        let launch = try #require(holder.launch(for: terminalID))
+        let launchEnv = launch.request.environment
         #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
         #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
         #expect(launchEnv[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
-        if windowIsDead {
-            // The inert staging pane is not a Claude spawn and carries no mod.
-            let staged = try #require(recorded.snapshot().first { $0.contains("new-window") })
-            #expect(tmuxEnvironmentFlags(staged)[SessionModSpawn.featuresVariable] == nil)
-        }
 
         let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "sess-1"))
         #expect(spawn.sessionId == "sess-1")
@@ -1722,120 +1416,39 @@ struct HibernationCoordinatorTests {
     /// the launch's process environment and nothing written under the sessions
     /// directory.
     @Test func wakeWithTheFlagOffExportsNothing() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         try await db.config.setEverySessionModFeatureOff()
         let sessionsDir = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: sessionsDir) }
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
         let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            db: db, tmux: TmuxManager(dryRun: true), configDirManager: isolatedConfigDirManager(),
             sessionsDir: sessionsDir, sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coord)
 
         #expect(await coord.wake(terminalID: terminalID).isOk)
 
-        let launch = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
-        let launchEnv = tmuxEnvironmentFlags(launch)
+        let launch = try #require(holder.launch(for: terminalID))
+        let launchEnv = launch.request.environment
         #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
         #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
         #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
         #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
     }
 
-    /// A restarted tmux server may assign the replacement the same numeric id
-    /// stored by the dead pre-reboot window. Cleanup must distinguish identity
-    /// from that reused coordinate and leave the fresh replacement alive for
-    /// the agent respawn.
-    @Test func wakeDoesNotKillReplacementWhenTmuxReusesOldWindowID() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.updateTmuxIDs(
-            id: terminalID, windowID: "@mock-0", paneID: "%mock-0")
+    // MARK: - Wake: the launch gap
+
+    /// The wake persists the replacement's incarnation before it starts the
+    /// agent, and the launch carries that token. A SessionStart the router
+    /// handles in the gap between the two names no incarnation, so it is the
+    /// old process's and is fenced; the replacement's own, naming the token,
+    /// attaches. The gap is observed from inside the holder double's spawn,
+    /// which runs after the row is staged and before the launch is answered.
+    @Test func wakeFencesSessionStartHandledDuringTheLaunchGap() async throws {
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorded.append,
-            dryRunWindowIsDead: { $0 == "@mock-0" })
-        let coord = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        let wake = await coord.wake(terminalID: terminalID)
-
-        let after = try #require(try await db.terminals.get(id: terminalID))
-        #expect(wake == .ok(sessionIncarnationID: after.sessionIncarnationID))
-        #expect(!after.isParked)
-        #expect(after.tmuxWindowID == "@mock-0")
-        #expect(after.tmuxPaneID == "%mock-0")
-        let commands = recorded.snapshot()
-        #expect(!commands.contains {
-            $0.contains("kill-window") && $0.contains("@mock-0")
-        }, "cleanup killed the freshly-created replacement: \(commands)")
-        #expect(commands.contains {
-            $0.contains("respawn-window") && $0.contains("@mock-0")
-        }, "replacement was not respawned: \(commands)")
-    }
-
-    @Test func wakeDoesNotKillBootstrapWindowWhenTmuxReusesID() async throws {
-        let (db, _, terminalID) = try await setup()
-        // Stale row: window "@mock-1" is dead, so the first guard
-        // (windowID != window.windowID) does not prevent kill, and only the
-        // bootstrap guard is under test.
-        try await db.terminals.updateTmuxIDs(
-            id: terminalID, windowID: "@mock-1", paneID: "%mock-1")
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorded = RecordedTmuxCommands()
-        // Bootstrap window ID "@mock-0" matches the replacement window ID
-        // (first createWindow call in dry-run). This is the ABA scenario: tmux
-        // restarted and the new window got the old bootstrap ID. The guard
-        // should prevent killing it.
-        let bootstrapWindowID = "@mock-0"
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorded.append,
-            dryRunWindowIsDead: { $0 == "@mock-1" },
-            dryRunEnsureServerWindowID: { _ in bootstrapWindowID })
-        let coord = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        let wake = await coord.wake(terminalID: terminalID)
-
-        #expect(wake.isOk)
-        let after = try #require(try await db.terminals.get(id: terminalID))
-        #expect(!after.isParked)
-        let commands = recorded.snapshot()
-        // The bootstrap window should not be killed because tmux reused the
-        // bootstrap ID for the replacement window we just created.
-        #expect(!commands.contains {
-            $0.contains("kill-window") && $0.contains("@mock-0")
-        }, "cleanup killed the replacement window: \(commands)")
-        // But respawn should have happened on @mock-0.
-        #expect(commands.contains {
-            $0.contains("respawn-window") && $0.contains("@mock-0")
-        }, "replacement was not respawned: \(commands)")
-    }
-
-    @Test func deadWindowWakePersistsReplacementTokenBeforeAgentLaunch() async throws {
-        let (db, _, terminalID) = try await setup()
-        // Dry-run recreation returns these same coordinates, exercising the
-        // ABA shape where tmux IDs and the label cannot distinguish processes.
-        try await db.terminals.updateTmuxIDs(
-            id: terminalID, windowID: "@mock-0", paneID: "%mock-0")
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorder = BlockingRespawnRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorder.record,
-            dryRunWindowIsDead: { $0 == "@mock-0" })
+        let tmux = TmuxManager(dryRun: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -1844,87 +1457,10 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
-
-        recorder.arm(matching: "claude --resume sess-1")
-        let wake = gateHoldingTask {
-            await router.hibernationCoordinator.wake(terminalID: terminalID)
-        }
-        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
-            recorder.release()
-            _ = await wake.value
-            Issue.record("wake never reached the replacement agent launch")
-            return
-        }
-
-        let staged = try #require(try await db.terminals.get(id: terminalID))
-        #expect(staged.tmuxWindowID == "@mock-0")
-        #expect(staged.tmuxPaneID == "%mock-0")
-        #expect(staged.label == "claude")
-        #expect(staged.isParked)
-        let replacementToken = try #require(staged.sessionIncarnationID)
-        #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
-        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
-        #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
-
-        let staleHook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminalID,
-                sessionID: "stale-session",
-                transcriptPath: "/tmp/stale-session.jsonl",
-                source: "startup"))
-        #expect((await router.handle(staleHook)).success)
-        #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID == "sess-1")
-        recorder.release()
-        #expect((await wake.value).isOk)
-
-        let replacementHook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminalID,
-                sessionID: "replacement-session",
-                transcriptPath: "/tmp/replacement-session.jsonl",
-                source: "startup",
-                sessionIncarnationID: replacementToken))
-        #expect((await router.handle(replacementHook)).success)
-        let attached = try #require(try await db.terminals.get(id: terminalID))
-        #expect(attached.claudeSessionID == "replacement-session")
-        #expect(attached.transcriptPath == "/tmp/replacement-session.jsonl")
-    }
-
-    @Test func liveWindowWakeFencesSessionStartHandledDuringRespawnGap() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorder = BlockingRespawnRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder.record)
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-                configDirManager: isolatedConfigDirManager()),
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            actuationLog: makeTestActuationLog())
-
-        recorder.arm(matching: "claude --resume sess-1")
-        let wake = gateHoldingTask {
-            await router.hibernationCoordinator.wake(terminalID: terminalID)
-        }
-        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
-            recorder.release()
-            _ = await wake.value
-            Issue.record("wake never reached the in-place respawn")
-            return
-        }
-        let staged = try #require(try await db.terminals.get(id: terminalID))
-        let replacementToken = try #require(staged.sessionIncarnationID)
-        #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
-        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
-        #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
+        let launches = WakeGapHolderLaunch()
+        let registry = launches.registry()
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
 
         let gapEvent = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
@@ -1933,11 +1469,34 @@ struct HibernationCoordinatorTests {
                 sessionID: "old-process-gap-session",
                 transcriptPath: "/tmp/old-process-gap-session.jsonl",
                 source: "startup"))
-        #expect((await router.handle(gapEvent)).success)
-        #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID == "sess-1")
+        let staged = WakeGapValue<Terminal>()
+        let gapHandled = WakeGapValue<Bool>()
+        let sessionAfterGap = WakeGapValue<String>()
+        launches.onSpawn { id in
+            guard id == terminalID else { return }
+            if let row = try? await db.terminals.get(id: terminalID) {
+                staged.set(row)
+            }
+            gapHandled.set(await router.handle(gapEvent).success)
+            if let session = try? await db.terminals.get(id: terminalID)?.claudeSessionID {
+                sessionAfterGap.set(session)
+            }
+        }
 
-        recorder.release()
-        #expect((await wake.value).isOk)
+        #expect((await router.hibernationCoordinator.wake(terminalID: terminalID)).isOk)
+
+        let stagedRow = try #require(staged.value, "the wake never reached the launch")
+        #expect(stagedRow.isParked, "the row was un-parked before its replacement launched")
+        #expect(stagedRow.label == "claude")
+        let replacementToken = try #require(stagedRow.sessionIncarnationID)
+        let command = try #require(launches.inner.launch(for: terminalID)?.commandLine)
+        #expect(command.contains("TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'"))
+        let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
+        #expect(command.contains("TBD_CLI_PATH=\(shellEscape(matchedCLIPath))"))
+        #expect(gapHandled.value == true)
+        #expect(sessionAfterGap.value == "sess-1",
+                "a SessionStart from the launch gap replaced the resumed session")
+
         let finalized = try #require(try await db.terminals.get(id: terminalID))
         #expect(!finalized.isParked)
         #expect(finalized.claudeSessionID == "sess-1")
@@ -1952,136 +1511,73 @@ struct HibernationCoordinatorTests {
                 source: "startup",
                 sessionIncarnationID: replacementToken))
         #expect((await router.handle(replacementEvent)).success)
-        #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID
-                == "replacement-session")
+        let attached = try #require(try await db.terminals.get(id: terminalID))
+        #expect(attached.claudeSessionID == "replacement-session")
+        #expect(attached.transcriptPath == "/tmp/replacement-session.jsonl")
     }
 
+    /// A wake whose replacement launched but whose final un-park write failed
+    /// does not report success and broadcasts no un-park. Nor does it abandon
+    /// the replacement: the row stays parked naming the running holder's pids,
+    /// which startup reconciliation heals.
     @Test func wakeDoesNotReportSuccessWhenPostLaunchMarkerClearFails() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorder = BlockingRespawnRecorder()
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER reject_unpark BEFORE UPDATE ON terminal
+                WHEN OLD.hibernatedAt IS NOT NULL AND NEW.hibernatedAt IS NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'unpark rejected');
+                END;
+                """)
+        }
         let deltas = RecordedHibernationDeltas()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder.record)
         let coord = HibernationCoordinator(
             db: db,
-            tmux: tmux,
+            tmux: TmuxManager(dryRun: true),
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coord)
 
-        recorder.arm(matching: "claude --resume sess-1")
-        let wake = gateHoldingTask {
-            await coord.wake(terminalID: terminalID)
-        }
-        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
-            recorder.release()
-            _ = await wake.value
-            Issue.record("wake never reached the replacement launch")
-            return
-        }
-        try await db.terminals.delete(id: terminalID)
-        recorder.release()
-
-        #expect(!(await wake.value).isOk)
+        #expect(!(await coord.wake(terminalID: terminalID)).isOk)
         #expect(deltas.snapshot().isEmpty,
                 "a wake whose final durable marker clear failed must not broadcast success")
-        let joined = recorder.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.filter { $0.contains("respawn-window") }.count == 1,
+        let launch = try #require(holder.launch(for: terminalID),
+                                  "the wake never launched its replacement")
+        #expect(holder.launches.count == 1)
+        #expect(holder.abandonments.isEmpty,
                 "marker failure must not erase an already-running replacement")
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(after.isParked)
+        #expect(after.childPID == launch.handle.childPID,
+                "the parked row does not name the replacement it launched")
     }
 
-    // MARK: - Wake: window-id ownership (post-reboot id recycling)
-    //
-    // A fresh tmux server reissues window ids from @1, so a stale parked
-    // row's id can equal a window ANOTHER terminal's wake just created.
-    // `windowExists` alone is not ownership — both sides of the claim gate
-    // are covered.
-
-    /// Collision + windowExists true: another terminal on the same server
-    /// claims this row's window id, so respawning in place would hijack that
-    /// terminal's live session. Wake must take the RECREATE branch — and must
-    /// NOT kill the other terminal's window.
-    @Test func wakeRecreatesWhenWindowIDClaimedByAnotherTerminal() async throws {
-        let (db, wtID, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        // The OTHER terminal (fresher claim — e.g. its wake just created @0
-        // on the rebooted server). Same worktree → same tmux server.
-        _ = try await db.terminals.create(
-            worktreeID: wtID, tmuxWindowID: "@0", tmuxPaneID: "%9",
-            label: "claude", claudeSessionID: "sess-2", kind: .claude
-        )
-        let recorded = RecordedTmuxCommands()
-        // No dryRunWindowIsDead: the window EXISTS — ownership must win.
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake.isOk)
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.isParked == false)
-        #expect(after?.tmuxWindowID == "@mock-0", "collision must force a recreate with fresh ids")
-        #expect(after?.tmuxPaneID == "%mock-0")
-
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("new-window") },
-                "expected the recreate branch (new-window); got: \(joined)")
-        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("@mock-0") },
-                "the replacement window must receive the agent; got: \(joined)")
-        #expect(!joined.contains { $0.contains("respawn-window") && $0.contains("-t @0") },
-                "must never respawn into a window another terminal owns; got: \(joined)")
-        #expect(!joined.contains { $0.contains("kill-window") && $0.contains("@0") },
-                "must never kill the other terminal's live window; got: \(joined)")
-    }
-
-    /// No collision: another terminal exists on the same server but claims a
-    /// DIFFERENT window id — the respawn-in-place branch runs unchanged.
-    @Test func wakeRespawnsInPlaceWhenOtherTerminalHoldsDifferentWindow() async throws {
-        let (db, wtID, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        _ = try await db.terminals.create(
-            worktreeID: wtID, tmuxWindowID: "@7", tmuxPaneID: "%7",
-            label: "claude", claudeSessionID: "sess-2", kind: .claude
-        )
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake.isOk)
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.tmuxWindowID == "@0", "no collision → in-place respawn keeps the ids")
-        #expect(after?.tmuxPaneID == "%0")
-
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("respawn-window") },
-                "expected the in-place respawn branch; got: \(joined)")
-        #expect(!joined.contains { $0.contains("new-window") },
-                "a non-colliding live window must not be recreated; got: \(joined)")
-    }
-
-    // MARK: - Wake: cross-terminal serialization (per-server lock)
+    // MARK: - Wake: the same-terminal claim, and the server-resource lock
     //
     // Actors are reentrant across awaits and SocketServer runs RPCs
-    // concurrently, so two wakes for DIFFERENT terminals on the SAME server
-    // must be serialized by the tmux server-resource lock — `wakesInFlight` only dedupes
-    // the same terminal. Both branches of the lock gate are covered: same
-    // server serializes (and loses no wake), different servers don't.
+    // concurrently, so `wakesInFlight` claims a terminal before its first
+    // suspension: a second wake of the same terminal is refused as in flight
+    // rather than launching a second replacement. The lock tests cover the
+    // tmux server-resource lock the tmux park takes: same key serializes,
+    // different keys don't.
 
     @Test func concurrentWakesForSameTerminalClaimBeforeDatabaseLookup() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         let parked = try #require(try await db.terminals.get(id: terminalID))
-        let recorded = RecordedTmuxCommands()
         let deltas = RecordedHibernationDeltas()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorded.append)
         let coordinator = HibernationCoordinator(
             db: db,
-            tmux: tmux,
+            tmux: TmuxManager(dryRun: true),
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coordinator)
         let databaseGate = BlockingDatabaseWriter()
         let heldWriter = databaseGate.hold(db)
         guard await waitUntil({ databaseGate.isHolding }) else {
@@ -2119,13 +1615,13 @@ struct HibernationCoordinatorTests {
         let after = try #require(try await db.terminals.get(id: terminalID))
         #expect(after.sessionIncarnationID != parked.sessionIncarnationID)
         #expect(!after.isParked)
-        let replacementCommands = recorded.snapshot().filter { command in
-            let body = command.joined(separator: " ")
-            return body.contains("respawn-window")
-                && body.contains("claude --resume sess-1")
-                && body.contains("deliver exactly once")
+        let replacementLaunches = holder.launches.filter { launch in
+            let command = launch.commandLine ?? ""
+            return command.contains("claude --resume sess-1")
+                && command.contains("deliver exactly once")
         }
-        #expect(replacementCommands.count == 1)
+        #expect(holder.launches.count == 1)
+        #expect(replacementLaunches.count == 1)
         #expect(deltas.snapshot().filter { !$0.hibernated }.count == 1)
     }
 
@@ -2133,116 +1629,22 @@ struct HibernationCoordinatorTests {
         let (db, worktreeID, _) = try await setup()
         let terminalID = UUID()
         let subject = coordinator(db)
+        await wireHolderDouble(subject)
 
         #expect(await subject.wake(terminalID: terminalID) == .notFound)
 
         _ = try await db.terminals.create(
             id: terminalID,
             worktreeID: worktreeID,
-            tmuxWindowID: "@retry",
-            tmuxPaneID: "%retry",
+            tmuxWindowID: "",
+            tmuxPaneID: "",
             label: "claude",
             claudeSessionID: "sess-retry",
-            kind: .claude)
+            kind: .claude,
+            transport: .holder)
         try await db.terminals.setHibernated(
             id: terminalID, sessionID: "sess-retry")
         #expect((await subject.wake(terminalID: terminalID)).isOk)
-    }
-
-    /// Two concurrent wakes, two parked terminals, SAME server, both windows
-    /// dead: both must succeed with DISTINCT fresh window ids and exactly two
-    /// new-window commands — no lost wake, no hijack, no deadlock.
-    @Test func concurrentWakesOnSameServerBothRecreateDistinctWindows() async throws {
-        let (db, wtID, terminalA) = try await setup()
-        try await db.terminals.setHibernated(id: terminalA, sessionID: "sess-1")
-        let terminalB = try await db.terminals.create(
-            worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", claudeSessionID: "sess-2", kind: .claude
-        )
-        try await db.terminals.setHibernated(id: terminalB.id, sessionID: "sess-2")
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { _ in true }
-        )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        async let wakeA = coord.wake(terminalID: terminalA)
-        async let wakeB = coord.wake(terminalID: terminalB.id)
-        let (resultA, resultB) = await (wakeA, wakeB)
-        #expect(resultA.isOk)
-        #expect(resultB.isOk)
-
-        let afterA = try await db.terminals.get(id: terminalA)
-        let afterB = try await db.terminals.get(id: terminalB.id)
-        #expect(afterA?.isParked == false)
-        #expect(afterB?.isParked == false)
-        #expect(afterA?.tmuxWindowID.hasPrefix("@mock-") == true)
-        #expect(afterB?.tmuxWindowID.hasPrefix("@mock-") == true)
-        #expect(afterA?.tmuxWindowID != afterB?.tmuxWindowID,
-                "serialized wakes must mint DISTINCT windows; got \(String(describing: afterA?.tmuxWindowID)) and \(String(describing: afterB?.tmuxWindowID))")
-
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        let newWindowCount = joined.filter { $0.contains("new-window") }.count
-        #expect(newWindowCount == 2,
-                "expected exactly two new-window commands (one per wake); got \(newWindowCount) in: \(joined)")
-        #expect(joined.filter { $0.contains("respawn-window") && $0.contains("@mock-") }.count == 2,
-                "each replacement must receive one respawn; got: \(joined)")
-        #expect(!joined.contains { command in
-            command.contains("respawn-window")
-                && (command.contains("-t @0") || command.contains("-t @1"))
-        }, "dead windows must never be respawned into; got: \(joined)")
-    }
-
-    /// Two concurrent wakes on DIFFERENT servers: the per-server lock must
-    /// not serialize (or deadlock) across servers — both complete `.ok` and
-    /// each server saw its own new-window.
-    @Test func concurrentWakesOnDifferentServersDoNotSerialize() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        // wake() refuses to respawn into a missing directory, so the (shared,
-        // idempotently created) fixture paths must exist on disk.
-        for path in ["/tmp/hib-repo", "/tmp/hib-repo-a", "/tmp/hib-repo-b"] {
-            try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
-        }
-        let repo = try await db.repos.create(path: "/tmp/hib-repo", displayName: "test", defaultBranch: "main")
-        let wtA = try await db.worktrees.create(
-            repoID: repo.id, name: "wt-a", branch: "a",
-            path: "/tmp/hib-repo-a", tmuxServer: "tbd-hib-a"
-        )
-        let wtB = try await db.worktrees.create(
-            repoID: repo.id, name: "wt-b", branch: "b",
-            path: "/tmp/hib-repo-b", tmuxServer: "tbd-hib-b"
-        )
-        let terminalA = try await db.terminals.create(
-            worktreeID: wtA.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude
-        )
-        let terminalB = try await db.terminals.create(
-            worktreeID: wtB.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-2", kind: .claude
-        )
-        try await db.terminals.setHibernated(id: terminalA.id, sessionID: "sess-1")
-        try await db.terminals.setHibernated(id: terminalB.id, sessionID: "sess-2")
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: { recorded.append($0) },
-            dryRunWindowIsDead: { _ in true }
-        )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        async let wakeA = coord.wake(terminalID: terminalA.id)
-        async let wakeB = coord.wake(terminalID: terminalB.id)
-        let (resultA, resultB) = await (wakeA, wakeB)
-        #expect(resultA.isOk, "different servers must not serialize/deadlock each other")
-        #expect(resultB.isOk, "different servers must not serialize/deadlock each other")
-
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("new-window") && $0.contains("-L tbd-hib-a") },
-                "server A must have recorded its own recreate; got: \(joined)")
-        #expect(joined.contains { $0.contains("new-window") && $0.contains("-L tbd-hib-b") },
-                "server B must have recorded its own recreate; got: \(joined)")
     }
 
     /// Focused lock-helper semantics: a second acquirer of the SAME key waits
@@ -2305,168 +1707,43 @@ struct HibernationCoordinatorTests {
         #expect(nextAcquirerRan, "a thrown operation must structurally release the server lock")
     }
 
-    /// Recreate FAILS (window dead + createWindow errors): result is
-    /// `.respawnFailed` with a reason naming the dead window, the row STAYS
-    /// parked for a later retry, and the tmux ids are unchanged.
-    @Test func wakeReturnsRespawnFailedWhenRecreateFails() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunWindowIsDead: { $0 == "@0" },
-            dryRunCreateWindowError: { _ in TmuxError.unexpectedOutput("no server running") }
-        )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        let wake = await coord.wake(terminalID: terminalID)
-        guard case .respawnFailed(let reason) = wake else {
-            Issue.record("expected .respawnFailed, got \(wake)")
-            return
-        }
-        #expect(reason.contains("@0"), "reason must name the gone window; got: \(reason)")
-        #expect(reason.contains("could not be recreated"), "reason must say recreate failed; got: \(reason)")
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.isParked == true, "a failed wake must leave the row parked for retry")
-        #expect(after?.tmuxWindowID == "@0", "tmux ids must be unchanged on failure")
-    }
-
+    /// A wake whose replacement fails to start reports the failure and leaves
+    /// the row parked with the session id and transcript it resumes, so the
+    /// next wake resumes the same conversation.
     @Test(arguments: [TerminalKind.claude, .codex])
-    func deadWindowWakeReportsStaleStateAsRetryable(kind: TerminalKind) async throws {
-        let (db, _, terminalID) = try await setup(kind: kind)
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let recorder = BlockingRespawnRecorder()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorder.record,
-            dryRunWindowIsDead: { $0 == "@0" })
-        let coord = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        recorder.arm(matching: "new-window")
-        let wake = gateHoldingTask { await coord.wake(terminalID: terminalID) }
-        guard await waitUntil({ recorder.isBlocked }, timeout: ciSafeDeadline) else {
-            recorder.release()
-            _ = await wake.value
-            Issue.record("wake never reached replacement window creation")
-            return
-        }
-        try await db.terminals.updateSessionID(
-            id: terminalID, sessionID: "replacement-session")
-        recorder.release()
-
-        #expect(await wake.value == .respawnFailed(
-            reason: "terminal changed before wake could launch; retry"))
-        let unchanged = try #require(try await db.terminals.get(id: terminalID))
-        #expect(unchanged.tmuxWindowID == "@0")
-        #expect(unchanged.tmuxPaneID == "%0")
-        #expect(unchanged.isParked)
-    }
-
-    /// Respawn FAILS (window alive but respawn-window errors): result is
-    /// `.respawnFailed` naming the respawn, and the row stays parked.
-    @Test func wakeReturnsRespawnFailedWhenRespawnFails() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRespawnWindowError: { $0 == "@0" ? TmuxError.unexpectedOutput("pane died") : nil }
-        )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
-
-        let wake = await coord.wake(terminalID: terminalID)
-        guard case .respawnFailed(let reason) = wake else {
-            Issue.record("expected .respawnFailed, got \(wake)")
-            return
-        }
-        #expect(reason.contains("respawn"), "reason must name the respawn failure; got: \(reason)")
-        #expect(reason.contains("@0"), "reason must name the window; got: \(reason)")
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.isParked == true, "a failed wake must leave the row parked for retry")
-    }
-
-    @Test(arguments: [TerminalKind.claude, .codex])
-    func liveWindowLaunchFailurePreservesResumeIdentityForRetry(kind: TerminalKind) async throws {
-        let (db, _, terminalID) = try await setup(kind: kind)
+    func launchFailurePreservesResumeIdentityForRetry(kind: TerminalKind) async throws {
+        let (db, _, terminalID) = try await setup(kind: kind, transport: .holder)
         try await db.terminals.updateSession(
             id: terminalID,
             sessionID: "sess-1",
             transcriptPath: "/tmp/live-wake-retry.jsonl")
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let failures = FailFirstRespawn()
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorded.append,
-            dryRunRespawnWindowError: failures.error)
-        let coord = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
+        let coord = coordinator(db)
+        let holder = await wireHolderDouble(coord)
+        holder.failNextSpawn()
 
-        guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
-            Issue.record("first live-window wake must expose the launch failure")
+        guard case .respawnFailed(let reason) = await coord.wake(terminalID: terminalID) else {
+            Issue.record("the first wake must expose the launch failure")
             return
         }
+        #expect(reason.contains("starting a holder for this session failed"),
+                "the failure does not name the launch: \(reason)")
         let failed = try #require(try await db.terminals.get(id: terminalID))
         #expect(failed.isParked)
         #expect(failed.claudeSessionID == "sess-1")
         #expect(failed.transcriptPath == "/tmp/live-wake-retry.jsonl")
+        #expect(holder.failedSpawns == [terminalID])
+        #expect(holder.launches.isEmpty)
 
         #expect((await coord.wake(terminalID: terminalID)).isOk)
         let retried = try #require(try await db.terminals.get(id: terminalID))
         #expect(!retried.isParked)
         #expect(retried.claudeSessionID == "sess-1")
         #expect(retried.transcriptPath == "/tmp/live-wake-retry.jsonl")
-        #expect(recorded.snapshot().filter {
-            $0.contains("respawn-window") && $0.last?.contains(kind == .codex ? "resume 'sess-1'" : "--resume sess-1") == true
-        }.count == 2)
-    }
-
-    @Test func deadWindowLaunchFailurePreservesResumeIdentityForRetry() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.updateSession(
-            id: terminalID,
-            sessionID: "sess-1",
-            transcriptPath: "/tmp/dead-wake-retry.jsonl")
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-        let failures = FailFirstRespawn()
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorded.append,
-            dryRunWindowIsDead: { $0 == "@0" },
-            dryRunRespawnWindowError: failures.error)
-        let coord = HibernationCoordinator(
-            db: db,
-            tmux: tmux,
-            configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
-            Issue.record("first dead-window wake must expose the launch failure")
-            return
-        }
-        let failed = try #require(try await db.terminals.get(id: terminalID))
-        #expect(failed.isParked)
-        #expect(failed.tmuxWindowID == "@mock-0")
-        #expect(failed.claudeSessionID == "sess-1")
-        #expect(failed.transcriptPath == "/tmp/dead-wake-retry.jsonl")
-
-        #expect((await coord.wake(terminalID: terminalID)).isOk)
-        let retried = try #require(try await db.terminals.get(id: terminalID))
-        #expect(!retried.isParked)
-        #expect(retried.claudeSessionID == "sess-1")
-        #expect(retried.transcriptPath == "/tmp/dead-wake-retry.jsonl")
-        #expect(recorded.snapshot().filter {
-            $0.contains("respawn-window") && $0.last?.contains("--resume sess-1") == true
-        }.count == 2)
+        #expect(holder.launches.count == 1)
+        let command = holder.launch(for: terminalID)?.commandLine ?? ""
+        let resume = kind == .codex ? "resume 'sess-1'" : "--resume sess-1"
+        #expect(command.contains(resume), "the retry did not resume sess-1: \(command)")
     }
 
     /// The wake transcript sync must resolve the ambient (nil-profile)
@@ -2475,7 +1752,7 @@ struct HibernationCoordinatorTests {
     /// parked under an old munged dir inside the injected root gets mirrored
     /// into the dir derived from the worktree's current path.
     @Test func wakeSyncsTranscriptViaInjectedConfigDirManager() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
 
         let home = FileManager.default.temporaryDirectory
@@ -2497,6 +1774,7 @@ struct HibernationCoordinatorTests {
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog()
         )
+        await wireHolderDouble(coord)
         let wake = await coord.wake(terminalID: terminalID)
         #expect(wake.isOk)
 
@@ -2517,40 +1795,46 @@ struct HibernationCoordinatorTests {
     // check only fires when a resolver is present (no regression for daemon
     // without a resolver).
 
-    private func coordinatorWithResolver(_ db: TBDDatabase) -> HibernationCoordinator {
-        HibernationCoordinator(
+    /// A coordinator with a profile resolver, wired to the holder spawn double
+    /// so a parked holder row's wake launches through it.
+    private func coordinatorWithResolver(
+        _ db: TBDDatabase
+    ) async -> (HibernationCoordinator, FakeHolderLaunch) {
+        let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config,
                 keychain: { _ in nil }),
             configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        return (coordinator, await wireHolderDouble(coordinator))
     }
 
     /// Wake refuses when the pinned profile ID no longer exists, returning
     /// `.profileMissing` with the profile id. The row stays parked, retryable.
     @Test func wakeRefusesWhenPinnedProfileMissing() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         let bogusProfileID = UUID()
         try await db.terminals.setProfileID(id: terminalID, profileID: bogusProfileID)
 
-        let coord = coordinatorWithResolver(db)
+        let (coord, holder) = await coordinatorWithResolver(db)
         let wake = await coord.wake(terminalID: terminalID)
 
         #expect(wake == .profileMissing(profileID: bogusProfileID))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt != nil, "row must stay parked and retryable")
+        #expect(holder.launches.isEmpty, "a refused wake started a holder")
     }
 
     /// Wake succeeds when `allowDefaultProfileFallback: true` is passed, even
     /// if the pinned profile is missing. The row is un-parked.
     @Test func wakeWithFallbackResumesDespiteMissingProfile() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         let bogusProfileID = UUID()
         try await db.terminals.setProfileID(id: terminalID, profileID: bogusProfileID)
 
-        let coord = coordinatorWithResolver(db)
+        let (coord, _) = await coordinatorWithResolver(db)
         let wake = await coord.wake(terminalID: terminalID, allowDefaultProfileFallback: true)
 
         #expect(wake.isOk)
@@ -2561,14 +1845,14 @@ struct HibernationCoordinatorTests {
     /// Wake succeeds (and doesn't return `.profileMissing`) when the pinned
     /// profile actually resolves. Tests the happy path isn't broken by the check.
     @Test func wakeSucceedsWhenPinnedProfileResolves() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
 
         // Create a real oauth profile (oauth resolves without a keychain secret).
         let profile = try await db.modelProfiles.create(name: "test", kind: .oauth)
         try await db.terminals.setProfileID(id: terminalID, profileID: profile.id)
 
-        let coord = coordinatorWithResolver(db)
+        let (coord, _) = await coordinatorWithResolver(db)
         let wake = await coord.wake(terminalID: terminalID)
 
         #expect(wake.isOk)
@@ -2577,7 +1861,7 @@ struct HibernationCoordinatorTests {
     }
 
     @Test func coldProfileSwapWinsBeforeWakeLaunch() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         let oldProfile = try await db.modelProfiles.create(name: "Old", kind: .apiKey)
         let newProfile = try await db.modelProfiles.create(name: "New", kind: .oauth)
         try await db.terminals.setProfileID(id: terminalID, profileID: oldProfile.id)
@@ -2610,6 +1894,7 @@ struct HibernationCoordinatorTests {
             subscriptions: subscriptions,
             configDirManager: configDirs,
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coordinator)
 
         let wake = gateHoldingTask { await coordinator.wake(terminalID: terminalID) }
         guard await waitUntil({ keychainGate.isBlocked }) else {
@@ -2634,6 +1919,8 @@ struct HibernationCoordinatorTests {
         #expect(unchanged == swapped)
         #expect(commands.snapshot().count == commandCount,
                 "a wake prepared for the old profile must not launch")
+        #expect(holder.launches.isEmpty,
+                "a wake prepared for the old profile started a holder")
         #expect(deltas.snapshot().filter { delta in
             if case .terminalHibernationChanged = delta { return true }
             return false
@@ -2641,7 +1928,7 @@ struct HibernationCoordinatorTests {
     }
 
     @Test func wakeWinsBeforeColdProfileSwapCommit() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         let oldProfile = try await db.modelProfiles.create(name: "Old", kind: .oauth)
         let newProfile = try await db.modelProfiles.create(name: "New", kind: .apiKey)
         try await db.terminals.setProfileID(id: terminalID, profileID: oldProfile.id)
@@ -2680,6 +1967,7 @@ struct HibernationCoordinatorTests {
             modelProfileResolver: swapResolver,
             configDirManager: configDirs,
             actuationLog: makeTestActuationLog())
+        let holder = await wireHolderDouble(coordinator)
 
         let swapRequest = try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -2697,6 +1985,7 @@ struct HibernationCoordinatorTests {
         let woken = try #require(try await db.terminals.get(id: terminalID))
         #expect(!woken.isParked)
         #expect(woken.profileID == oldProfile.id)
+        #expect(holder.launches.count == 1)
         let commandCount = commands.snapshot().count
         keychainGate.release()
 
@@ -2704,6 +1993,7 @@ struct HibernationCoordinatorTests {
         let unchanged = try #require(try await db.terminals.get(id: terminalID))
         #expect(unchanged == woken)
         #expect(commands.snapshot().count == commandCount)
+        #expect(holder.launches.count == 1, "the rejected cold swap started a holder")
         #expect(deltas.snapshot().filter { delta in
             if case .terminalProfileChanged = delta { return true }
             return false
@@ -2714,55 +2004,19 @@ struct HibernationCoordinatorTests {
     /// profileID is pinned. This pins that the plain `coordinator(db)` (used by
     /// other tests) is unaffected.
     @Test func wakeIgnoresProfileCheckWhenNoResolverInjected() async throws {
-        let (db, _, terminalID) = try await setup()
+        let (db, _, terminalID) = try await setup(transport: .holder)
         try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
         let bogusProfileID = UUID()
         try await db.terminals.setProfileID(id: terminalID, profileID: bogusProfileID)
 
         // Plain coordinator with no resolver.
         let coord = coordinator(db)
+        await wireHolderDouble(coord)
         let wake = await coord.wake(terminalID: terminalID)
 
         #expect(wake.isOk, "without a resolver, no profile check fires")
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt == nil)
-    }
-
-    // MARK: - Wake and an unanswered window probe
-
-    /// The wake path's recreate arm `killWindow`s the old window once the
-    /// replacement exists — its own comment names "a transient windowExists
-    /// misclassification" as the thing that must not leak a live window, and a
-    /// timed-out probe is exactly such a misclassification. Acting on it
-    /// destroys a window on ignorance, so an unanswerable probe now fails the
-    /// wake and leaves the row parked for the next retry. A server that is
-    /// genuinely gone still answers `absent`, so reboot recovery is unchanged.
-    @Test func wakeRefusesToRecreateWhenTheWindowProbeGoesUnanswered() async throws {
-        let (db, _, terminalID) = try await setup()
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
-
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorded.append,
-            dryRunWindowPresence: { _, _ in .unknown })
-        let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            sessionTitles: ClaudeSessionTitleStore(),
-            actuationLog: makeTestActuationLog())
-
-        let result = await coord.wake(terminalID: terminalID)
-
-        guard case let .respawnFailed(reason) = result else {
-            Issue.record("an unanswered window probe produced \(result) instead of a retryable failure")
-            return
-        }
-        #expect(reason.contains("retry"), "the failure must read as retryable: \(reason)")
-        let after = try #require(try await db.terminals.get(id: terminalID))
-        #expect(after.isParked,
-                "an unanswered window probe un-parked a row it could not establish anything about")
-        #expect(!recorded.snapshot().contains { $0.contains("kill-window") },
-                "an unanswered window probe killed a window: \(recorded.snapshot())")
     }
 
     // MARK: - Startup reconciliation
@@ -3027,6 +2281,8 @@ struct HibernationCoordinatorTests {
 
     /// Wake: the un-park delta publishes nil snapshot/reason (the app clears
     /// its cached reason; the DB keeps the snapshot per `clearHibernated`).
+    /// The park runs on tmux and captures the snapshot; the parked row then
+    /// moves to the holder, where a wake runs.
     @Test func wakePublishesNilSnapshotAndReasonOnDelta() async throws {
         let (db, _, terminalID) = try await setup()
         let recorder = RecordedHibernationDeltas()
@@ -3035,8 +2291,10 @@ struct HibernationCoordinatorTests {
             db: db, tmux: tmux,
             subscriptions: recorder.subscriptions(),
             configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        await wireHolderDouble(coord)
 
         _ = await coord.manualHibernate(terminalID: terminalID)
+        try await moveParkedRowToHolder(db, terminalID)
         let wake = await coord.wake(terminalID: terminalID)
         #expect(wake.isOk)
 
@@ -3048,7 +2306,8 @@ struct HibernationCoordinatorTests {
 
     /// A park and a wake each mint a session incarnation, and the app forwards
     /// Program Status reports under its cached row's: both deltas carry the
-    /// incarnation the row holds once each has committed.
+    /// incarnation the row holds once each has committed. The park runs on
+    /// tmux; the parked row then moves to the holder, where a wake runs.
     @Test func parkAndWakeDeltasCarryTheCommittedIncarnation() async throws {
         let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
         let recorder = RecordedHibernationDeltas()
@@ -3056,6 +2315,7 @@ struct HibernationCoordinatorTests {
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: recorder.subscriptions(),
             configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        await wireHolderDouble(coord)
         let before = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
 
         #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
@@ -3063,6 +2323,7 @@ struct HibernationCoordinatorTests {
         #expect(parked != before)
         #expect(recorder.snapshot().last?.sessionIncarnationID == parked)
 
+        try await moveParkedRowToHolder(db, terminalID)
         #expect(await coord.wake(terminalID: terminalID).isOk)
         let woken = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
         #expect(woken != parked)
@@ -3676,23 +2937,18 @@ struct HibernationCoordinatorTests {
     }
 }
 
-/// `terminal.wake` RPC error mapping. The shared `RPCRouterTests` harness pins
-/// a plain dry-run TmuxManager, so this suite builds its own router with a
-/// failing tmux to drive the `.respawnFailed` path end-to-end.
+/// `terminal.wake` RPC error mapping. This suite builds its own router, wired
+/// to a holder spawn double scripted to fail, to drive the `.respawnFailed`
+/// path end-to-end.
 @Suite("RPCRouter terminal.wake error mapping")
 struct RPCRouterWakeErrorMappingTests {
 
-    /// A wake whose tmux window is gone AND cannot be recreated must surface
-    /// the REAL failure over RPC — naming the window — and never the
-    /// misleading "Terminal not found" (the terminal row exists; the WINDOW
-    /// is gone).
+    /// A wake whose replacement cannot be started must surface the REAL
+    /// failure over RPC — naming the launch — and never the misleading
+    /// "Terminal not found" (the terminal row exists; the launch failed).
     @Test func wakeRespawnFailureIsNotReportedAsTerminalNotFound() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunWindowIsDead: { $0 == "@0" },
-            dryRunCreateWindowError: { _ in TmuxError.unexpectedOutput("no server running") }
-        )
+        let tmux = TmuxManager(dryRun: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -3702,16 +2958,26 @@ struct RPCRouterWakeErrorMappingTests {
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog()
         )
+        // A wake refuses to launch into a missing directory, which would be a
+        // different failure from the one under test.
+        try FileManager.default.createDirectory(
+            atPath: "/tmp/hib-repo", withIntermediateDirectories: true)
         let repo = try await db.repos.create(path: "/tmp/hib-repo", displayName: "test", defaultBranch: "main")
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "main",
             path: "/tmp/hib-repo", tmuxServer: "tbd-hib"
         )
         let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude,
+            transport: .holder
         )
         try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
+        holder.failNextSpawn()
 
         let req = try RPCRequest(
             method: RPCMethod.terminalWake,
@@ -3720,9 +2986,10 @@ struct RPCRouterWakeErrorMappingTests {
         let resp = await router.handle(req)
         #expect(!resp.success)
         #expect(resp.error != "Terminal not found",
-                "a tmux failure must not masquerade as a missing terminal row")
-        #expect(resp.error?.contains("@0") == true,
-                "the RPC error must name the gone window; got: \(resp.error ?? "nil")")
+                "a launch failure must not masquerade as a missing terminal row")
+        #expect(resp.error?.contains("starting a holder for this session failed") == true,
+                "the RPC error must name the failed launch; got: \(resp.error ?? "nil")")
+        #expect(holder.failedSpawns == [terminal.id])
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == true,
                 "the row must stay parked so a retry can wake it")
     }
@@ -3747,39 +3014,47 @@ struct RPCRouterWakePromptDeliveryTests {
         )
     }
 
-    private func makeTerminal(db: TBDDatabase) async throws -> Terminal {
+    private func makeTerminal(
+        db: TBDDatabase, transport: TerminalTransport = .tmux
+    ) async throws -> Terminal {
         let repo = try await db.repos.create(path: "/tmp/wake-prompt-repo", displayName: "test", defaultBranch: "main")
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "main",
             path: "/tmp/wake-prompt-repo", tmuxServer: "tbd-wake-prompt"
         )
+        let holder = transport == .holder
         return try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude
+            worktreeID: wt.id, tmuxWindowID: holder ? "" : "@0", tmuxPaneID: holder ? "" : "%0",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude,
+            transport: transport
         )
     }
 
-    /// Parked terminal: the RPC reports `woken: true` and the respawned
+    /// Parked terminal: the RPC reports `woken: true` and the replacement's
     /// `claude --resume` command carries the prompt as a trailing argv.
     @Test func wakeOnParkedDeliversPromptAndReportsWokenTrue() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxCommands()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let tmux = TmuxManager(dryRun: true)
         try FileManager.default.createDirectory(atPath: "/tmp/wake-prompt-repo", withIntermediateDirectories: true)
-        let terminal = try await makeTerminal(db: db)
+        let terminal = try await makeTerminal(db: db, transport: .holder)
         try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+        let router = makeRouter(db: db, tmux: tmux)
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        router.holderRegistry = registry
+        await router.hibernationCoordinator.setHolderRegistry(registry)
 
         let req = try RPCRequest(
             method: RPCMethod.terminalWake,
             params: TerminalWakeParams(terminalID: terminal.id, prompt: "verify live state first")
         )
-        let resp = await makeRouter(db: db, tmux: tmux).handle(req)
+        let resp = await router.handle(req)
         #expect(resp.success)
         #expect(try resp.decodeResult(TerminalWakeResult.self).woken == true)
 
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        #expect(joined.contains { $0.contains("claude --resume sess-1") && $0.contains("'verify live state first'") },
-                "the respawn must carry the prompt as a trailing argv; got: \(joined)")
+        let command = holder.launch(for: terminal.id)?.commandLine ?? ""
+        #expect(command.contains("claude --resume sess-1") && command.contains("'verify live state first'"),
+                "the launch must carry the prompt as a trailing argv; got: \(command)")
     }
 
     /// Already-awake terminal (the race an autonomous caller must guard
@@ -3953,21 +3228,6 @@ private final class RecordedTmuxCommands: @unchecked Sendable {
     }
 }
 
-private final class FailFirstRespawn: @unchecked Sendable {
-    private let lock = NSLock()
-    private var hasFailed = false
-
-    var error: @Sendable (String) -> Error? {
-        { [self] _ in
-            lock.withLock {
-                guard !hasFailed else { return nil }
-                hasFailed = true
-                return TmuxError.unexpectedOutput("first replacement launch failed")
-            }
-        }
-    }
-}
-
 private final class FailRespawnOnAttempt: @unchecked Sendable {
     private let lock = NSLock()
     private let failingAttempt: Int
@@ -4010,6 +3270,53 @@ private final class BlockingDatabaseWriter: @unchecked Sendable {
     }
 }
 
+/// The holder spawn double with a hook that runs inside `spawn`, before the
+/// launch is answered: after a wake has staged its replacement's incarnation
+/// on the row and before it records the holder or un-parks the row.
+private final class WakeGapHolderLaunch: HolderSpawnFabricator, @unchecked Sendable {
+    let inner = FakeHolderLaunch()
+    private let lock = NSLock()
+    private var hook: (@Sendable (UUID) async -> Void)?
+
+    func onSpawn(_ body: @escaping @Sendable (UUID) async -> Void) {
+        lock.withLock { hook = body }
+    }
+
+    /// A real registry whose spawns and teardowns go through this double.
+    func registry() -> HolderRegistry {
+        HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: FakeHolderLaunch.scratchEnvironment(),
+            listTerminals: { [] },
+            spawner: nil,
+            spawnFabricator: self)
+    }
+
+    func spawn(
+        terminalID: UUID, launch: HolderLaunchRequest, environment: [String: String]
+    ) async throws -> HolderHandle {
+        let body = lock.withLock { hook }
+        await body?(terminalID)
+        return try await inner.spawn(terminalID: terminalID, launch: launch, environment: environment)
+    }
+
+    func abandon(terminalID: UUID, handle: HolderHandle) async {
+        await inner.abandon(terminalID: terminalID, handle: handle)
+    }
+}
+
+/// One value a hook records for the test to read once the wake returns.
+private final class WakeGapValue<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value?
+
+    var value: Value? { lock.withLock { stored } }
+
+    func set(_ newValue: Value) {
+        lock.withLock { stored = newValue }
+    }
+}
+
 private final class RecordedWakeResults: @unchecked Sendable {
     private let lock = NSLock()
     private var results: [WakeResult] = []
@@ -4020,28 +3327,6 @@ private final class RecordedWakeResults: @unchecked Sendable {
 
     func snapshot() -> [WakeResult] {
         lock.withLock { results }
-    }
-}
-
-/// Holds a tmux park at `tmuxParkWillAwaitServerLock`, after it has read the
-/// row and before it waits for the server lock, until the test releases it.
-/// Blocks the park's thread, so the park must run under `gateHoldingTask`.
-private final class BlockingPreLockPark: @unchecked Sendable {
-    private let lock = NSLock()
-    private let releaseGate = DispatchSemaphore(value: 0)
-    private var blocked = false
-
-    var isBlocked: Bool { lock.withLock { blocked } }
-
-    var hold: @Sendable (UUID) -> Void {
-        { [self] _ in
-            lock.withLock { blocked = true }
-            releaseGate.waitForGate("park before the server lock")
-        }
-    }
-
-    func release() {
-        releaseGate.signal()
     }
 }
 

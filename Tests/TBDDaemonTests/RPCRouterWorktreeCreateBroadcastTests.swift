@@ -29,6 +29,12 @@ struct RPCRouterWorktreeCreateBroadcastTests {
 
     /// Router whose lifecycle and handlers share one StateSubscriptionManager,
     /// with every broadcast delta captured in `deltas`.
+    ///
+    /// Sessions open through the holder spawn double, wired into both the
+    /// lifecycle and the router. The double's pids name no process, so the
+    /// lifecycle reads every job the double started as running: a pre-session
+    /// hook tab then stays up until its marker lands, as a real hook's would,
+    /// instead of reading as closed on the first poll.
     private func makeRouter(db: TBDDatabase) -> (router: RPCRouter, deltas: BroadcastDeltas) {
         let deltas = BroadcastDeltas()
         let subs = StateSubscriptionManager()
@@ -38,14 +44,17 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             }
             return true
         }
-        let lifecycle = WorktreeLifecycle(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             subscriptions: subs,
-            preSessionPollInterval: 0.05
+            preSessionPollInterval: 0.05,
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning
         )
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -53,6 +62,7 @@ struct RPCRouterWorktreeCreateBroadcastTests {
             subscriptions: subs,
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
         return (router, deltas)
     }
 

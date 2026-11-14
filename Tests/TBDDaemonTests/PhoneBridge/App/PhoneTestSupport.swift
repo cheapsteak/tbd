@@ -76,17 +76,8 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
     private var responses: [Method: RPCResponse] = [:]
     private var handlers: [Method: Handler] = [:]
     private var gates: [Method: PhoneTestGate] = [:]
-    private var holderSpawns = true
 
     init() {}
-
-    /// What `phoneSpawnsOnHolder` answers: true, the shipped default, unless
-    /// a test puts new sessions on tmux. Not recorded in `calls`, since it
-    /// acts on nothing.
-    var spawnsOnHolder: Bool {
-        get { lock.withLock { holderSpawns } }
-        set { lock.withLock { holderSpawns = newValue } }
-    }
 
     var calls: [Call] { lock.withLock { log.calls } }
     var answers: [PromptAnswerParams] { lock.withLock { log.answers } }
@@ -191,10 +182,6 @@ final class FakeSessionActions: PhoneSessionActions, @unchecked Sendable {
 
     func phoneCreateWorktree(_ p: WorktreeCreateParams, deviceID: UUID) async throws -> RPCResponse {
         record(.createWorktree, deviceID: deviceID) { $0.worktreeCreates.append(p) }
-    }
-
-    func phoneSpawnsOnHolder() async -> Bool {
-        spawnsOnHolder
     }
 
     func phoneRemoteProviders() async throws -> RPCResponse {

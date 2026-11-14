@@ -45,10 +45,14 @@ import Testing
             .map { String($0.dropFirst("refs/heads/".count)) }
     }
 
+    /// Spawns go through the holder spawn double, so create and revive open
+    /// their tabs without starting a process.
     private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
-        WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        return lifecycle
     }
 
     /// A created-then-archived worktree, which is how a row acquires the

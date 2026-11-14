@@ -13,12 +13,8 @@ extension RPCRouterTests {
 
     @Test("terminal.create and terminal.list work together")
     func terminalCreateAndList() async throws {
-        // On the holder transport, through the spawn double: listing does not
-        // depend on the transport, and no process is started.
-        let holder = FakeHolderLaunch()
-        router.holderRegistry = makeHolderRegistryDouble(launch: holder)
-        try await db.config.setPtyHolderEnabled(true)
-
+        // On the holder transport, through the fixture's spawn double: listing
+        // does not depend on the transport, and no process is started.
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)",
             displayName: "test-repo",
@@ -217,12 +213,9 @@ extension RPCRouterTests {
 
     @Test("terminal.create with type claude sets label and sessionID")
     func terminalCreateClaude() async throws {
-        // On the holder transport, through the spawn double: the label and the
-        // session id do not depend on the transport, and no process is started.
-        let holder = FakeHolderLaunch()
-        router.holderRegistry = makeHolderRegistryDouble(launch: holder)
-        try await db.config.setPtyHolderEnabled(true)
-
+        // On the holder transport, through the fixture's spawn double: the
+        // label and the session id do not depend on the transport, and no
+        // process is started.
         let repo = try await db.repos.create(
             path: "/tmp/test-repo-\(UUID().uuidString)",
             displayName: "test-repo",

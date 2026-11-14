@@ -43,6 +43,8 @@ struct ContinueInCodexRPCTests {
         let db: TBDDatabase
         let router: RPCRouter
         let recorder: Recorder
+        /// The holder spawn double the resumed Codex terminal opens on.
+        let holder: FakeHolderLaunch
         let worktree: Worktree
     }
 
@@ -61,14 +63,19 @@ struct ContinueInCodexRPCTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { recorder.command($0) })
+        let holder = FakeHolderLaunch()
+        let registry = makeHolderRegistryDouble(launch: holder)
+        var lifecycle = WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver())
+        lifecycle.holderRegistry = registry
         let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                tmux: tmux,
-                hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: tmux, actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
         router.codexExecutableResolver = {
             recorder.event("resolve")
             return "/opt/test/bin/codex"
@@ -97,6 +104,7 @@ struct ContinueInCodexRPCTests {
             db: db,
             router: router,
             recorder: recorder,
+            holder: holder,
             worktree: worktree)
     }
 
@@ -145,18 +153,17 @@ struct ContinueInCodexRPCTests {
         #expect(fixture.recorder.events.count == 3)
         #expect(fixture.recorder.events[2].hasPrefix("import:"))
 
-        let newWindows = fixture.recorder.commands.filter {
-            $0.contains("new-window")
-        }
-        #expect(newWindows.count == 1)
-        let launch = try #require(newWindows.first?.last)
+        #expect(target.transport == .holder)
+        let launchedIDs = fixture.holder.launches.map { $0.terminalID }
+        #expect(launchedIDs == [target.id])
+        let launch = try #require(fixture.holder.launch(for: target.id)?.commandLine)
         #expect(launch.contains("resume 'thread-native-123'"))
         #expect(!launch.contains("continue this"))
         #expect(!fixture.recorder.commands.contains { $0.contains("send-keys") })
         #expect(!fixture.recorder.commands.contains { $0.contains("paste-buffer") })
     }
 
-    @Test("start admission holds the continuation before any Codex window opens",
+    @Test("start admission holds the continuation before any Codex terminal opens",
           arguments: [true, false])
     func startAdmissionGatesTheContinuation(flagOn: Bool) async throws {
         let fixture = try await makeFixture()
@@ -175,7 +182,7 @@ struct ContinueInCodexRPCTests {
             #expect(response.error == "camera in use")
             #expect(stub.requests.map(\.kind) == [.create])
             #expect(stub.requests.first?.agent == .codex)
-            #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+            #expect(fixture.holder.launches.isEmpty)
             // Neither the Codex launch preparation nor the import ran.
             #expect(fixture.recorder.events.isEmpty)
             #expect(try await fixture.db.terminals.list(
@@ -207,11 +214,12 @@ struct ContinueInCodexRPCTests {
         #expect(response.error?.contains("requires a Claude terminal") == true)
         #expect(fixture.recorder.events.isEmpty)
         #expect(fixture.recorder.commands.isEmpty)
+        #expect(fixture.holder.launches.isEmpty)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == before)
     }
 
-    @Test("missing transcript fails before resolver, profile, import, and tmux")
+    @Test("missing transcript fails before resolver, profile, import, and spawn")
     func rejectsMissingTranscriptBeforeMutation() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -231,9 +239,10 @@ struct ContinueInCodexRPCTests {
         #expect(response.error?.contains("no transcript path") == true)
         #expect(fixture.recorder.events.isEmpty)
         #expect(fixture.recorder.commands.isEmpty)
+        #expect(fixture.holder.launches.isEmpty)
     }
 
-    @Test("executable failure precedes profile writes, import, and tmux")
+    @Test("executable failure precedes profile writes, import, and spawn")
     func resolverFailurePrecedesMutation() async throws {
         enum Expected: Error { case failure }
         let fixture = try await makeFixture()
@@ -251,6 +260,7 @@ struct ContinueInCodexRPCTests {
         #expect(!response.success)
         #expect(fixture.recorder.events == ["resolve"])
         #expect(fixture.recorder.commands.isEmpty)
+        #expect(fixture.holder.launches.isEmpty)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == [source])
     }
@@ -271,9 +281,10 @@ struct ContinueInCodexRPCTests {
         #expect(response.error?.contains("not active") == true)
         #expect(fixture.recorder.events.isEmpty)
         #expect(fixture.recorder.commands.isEmpty)
+        #expect(fixture.holder.launches.isEmpty)
     }
 
-    @Test("import failure creates no tmux window or terminal row")
+    @Test("import failure opens no terminal and writes no row")
     func importFailureIsAtomicForTBDState() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -290,6 +301,7 @@ struct ContinueInCodexRPCTests {
         #expect(!response.success)
         #expect(response.error?.contains("conversion failed") == true)
         #expect(fixture.recorder.commands.isEmpty)
+        #expect(fixture.holder.launches.isEmpty)
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == [source])
     }
@@ -313,14 +325,14 @@ struct ContinueInCodexRPCTests {
         return home
     }
 
-    /// The flag on with nothing to spawn with falls back to tmux, the same
-    /// answer every other spawn path gives: the resumed Codex terminal still
-    /// opens, on a window.
-    @Test("with the holder flag on and no spawner, the resumed terminal falls back to tmux")
-    func flagOnWithoutASpawnerFallsBackToTmux() async throws {
+    /// A registry that cannot start a holder — the daemon found no
+    /// `TBDHolder` beside it — refuses the continuation in the preflight,
+    /// the same answer every other spawn path gives: before the launch
+    /// preparation and the import write any Codex state, and with no row.
+    @Test("with no holder able to start, the continuation is refused before the import")
+    func noSpawnableHolderRefusesBeforeTheImport() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        try await fixture.db.config.setPtyHolderEnabled(true)
         let holderHome = attachRegistry(to: fixture, spawner: nil)
         defer { try? FileManager.default.removeItem(atPath: holderHome) }
         let source = try await createClaudeSource(in: fixture)
@@ -329,23 +341,18 @@ struct ContinueInCodexRPCTests {
             method: RPCMethod.terminalContinueInCodex,
             params: TerminalContinueInCodexParams(terminalID: source.id)))
 
-        #expect(response.success, "\(response.error ?? "")")
-        let result = try response.decodeResult(TerminalContinueInCodexResult.self)
-        let target = try #require(try await fixture.db.terminals.get(id: result.terminalID))
-        #expect(target.transport == .tmux)
-        #expect(!target.tmuxWindowID.isEmpty)
-        #expect(target.holderPID == nil)
-        #expect(fixture.recorder.commands.filter { $0.contains("new-window") }.count == 1)
+        #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(fixture.recorder.events.isEmpty)
+        #expect(try await fixture.db.terminals.list(
+            worktreeID: fixture.worktree.id) == [source])
     }
 
-    /// The flag on with a registry that can spawn takes the holder path — and
-    /// a holder that fails to start fails the request the way a tmux failure
-    /// does: an error, no row, and no window created behind it.
-    @Test("with the holder flag on, a holder spawn failure creates no window and no row")
-    func flagOnHolderSpawnFailureIsAtomic() async throws {
+    /// A holder that fails to start fails the request: an error, and no row
+    /// written behind it.
+    @Test("a holder spawn failure writes no row")
+    func holderSpawnFailureIsAtomic() async throws {
         let fixture = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
-        try await fixture.db.config.setPtyHolderEnabled(true)
         let holderHome = attachRegistry(
             to: fixture,
             spawner: HolderSpawner(
@@ -359,8 +366,7 @@ struct ContinueInCodexRPCTests {
 
         #expect(
             response.error?.contains("/nonexistent/TBDHolder") == true,
-            "the resumed terminal did not take the holder path: \(response.error ?? "success")")
-        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+            "the resumed terminal did not reach the holder spawner: \(response.error ?? "success")")
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == [source])
     }

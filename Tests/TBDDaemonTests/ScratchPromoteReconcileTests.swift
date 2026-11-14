@@ -32,11 +32,17 @@ struct ScratchPromoteReconcileTests {
         })
     }
 
+    /// Spawns go through the holder spawn double, wired into both the router
+    /// and the lifecycle it copies, so `scratch.create` opens its primary
+    /// terminal as the daemon does.
     private func makeRouter(_ db: TBDDatabase, home: URL) -> RPCRouter {
-        RPCRouter(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
             db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            lifecycle: lifecycle,
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             configDirManager: ClaudeProfileConfigDirManager(
@@ -45,6 +51,8 @@ struct ScratchPromoteReconcileTests {
             ),
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = registry
+        return router
     }
 
     /// Makes `path` a repo with one empty commit, so promote's `hasCommits`

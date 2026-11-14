@@ -8,7 +8,7 @@ import TestSupport
 
 /// The holder spawn double (`FakeHolderLaunch`) driven through the one spawn
 /// every path shares, `WorktreeLifecycle.spawnTerminal`, with the transport
-/// chosen by the production gate.
+/// granted by the production gate.
 ///
 /// What is pinned is the contract the double's doc comment states: a spawn
 /// writes an ordinary holder row carrying the double's pids and starts no
@@ -41,7 +41,6 @@ struct HolderSpawnDoubleTests {
     private static func makeFixture() async throws -> Fixture {
         let tmuxRecorder = TmuxArgvRecorder()
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPtyHolderEnabled(true)
         // Whole seconds, so the stamp survives the database round trip exactly.
         let spawnedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let launch = FakeHolderLaunch()
@@ -65,15 +64,13 @@ struct HolderSpawnDoubleTests {
             tmux: tmuxRecorder, worktree: worktree, spawnedAt: spawnedAt)
     }
 
-    /// A shell spawn whose transport the production gate decides.
+    /// A shell spawn whose transport the production gate grants.
     private static func spawn(
         in fixture: Fixture, id: UUID = UUID(), command: String = "htop"
     ) async throws -> TBDShared.Terminal {
-        let config = try await fixture.db.config.get()
-        return try await fixture.lifecycle.spawnTerminal(
+        try await fixture.lifecycle.spawnTerminal(
             id: id,
             worktreeID: fixture.worktree.id,
-            tmuxServer: fixture.worktree.tmuxServer,
             workingDirectory: fixture.worktree.localPath,
             command: command,
             env: ["TBD_TERMINAL_ID": id.uuidString],
@@ -84,24 +81,20 @@ struct HolderSpawnDoubleTests {
             claudeSessionID: nil,
             profileID: nil,
             kind: .shell,
-            transport: TerminalSpawnTransport.decide(config: config, registry: fixture.registry))
+            transport: try TerminalSpawnTransport.decide(registry: fixture.registry).get())
     }
 
     // MARK: - The gate
 
-    /// The double's registry reports that it can spawn, so the gate picks it
-    /// with the flag on and still falls back to tmux with the flag off.
-    @Test("the gate picks the double's registry only with the flag on")
-    func gatePicksTheDoubleOnlyWithTheFlagOn() async throws {
+    /// The double's registry reports that it can spawn, so the gate grants it,
+    /// carrying that very registry into the spawn.
+    @Test("the gate grants the double's registry")
+    func gateGrantsTheDoublesRegistry() async throws {
         let fixture = try await Self.makeFixture()
         #expect(fixture.registry.canSpawn)
 
-        let on = try await fixture.db.config.get()
-        #expect(TerminalSpawnTransport.decide(config: on, registry: fixture.registry).isHolder)
-
-        try await fixture.db.config.setPtyHolderEnabled(false)
-        let off = try await fixture.db.config.get()
-        #expect(!TerminalSpawnTransport.decide(config: off, registry: fixture.registry).isHolder)
+        let granted = try TerminalSpawnTransport.decide(registry: fixture.registry).get()
+        #expect(granted.registry === fixture.registry)
     }
 
     // MARK: - A spawn

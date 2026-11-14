@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 // Nested under TBDHomeSerialized: these tests mutate the process-global
 // `TBD_HOME` env var to isolate the hooks/default and runtime/presession
@@ -124,55 +125,42 @@ struct PreSessionHookTests {
 
     // MARK: - No hook: behavior identical to today (gating off-branch)
 
-    @Test func noHookSpawnsClaudeFirstThenSetup() async throws {
+    @Test func noHookSpawnsOnlyThePrimary() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
         #expect(wt.status == .active)
 
-        // Exactly the two historical terminals, no pre-session tab.
+        // No preSession hook and no setup hook: the primary agent is the only
+        // tab. A setup tab is opened only for a setup hook that resolves.
         let terminals = try await db.terminals.list(worktreeID: wt.id)
-        #expect(terminals.count == 2)
+        #expect(terminals.count == 1)
         #expect(!terminals.contains { $0.label == "pre-session" })
+        #expect(!terminals.contains { $0.label == "setup" })
         let claude = try #require(terminals.first { $0.label == "Claude Code" })
-        let setup = try #require(terminals.first { $0.label == "setup" })
 
-        // Window creation order: claude window first, setup window second.
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        #expect(windowCalls.count == 2)
-        #expect(windowCalls[0].last?.contains("claude --session-id") == true,
-                "first window must be the primary agent")
-        #expect(windowCalls[1].last?.contains("claude --session-id") == false,
-                "second window must be the setup hook/shell")
-        // omz-update suppression covers agent tabs (a spawned agent command
-        // must never block on the interactive update prompt) and hook panes;
-        // with no setup hook configured, the "Setup" tab is a plain shell
-        // for a human and must keep update checks.
-        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
-                "primary agent window must suppress the oh-my-zsh update prompt via -e")
-        #expect(!windowCalls[1].contains("DISABLE_AUTO_UPDATE=true"),
-                "hook-less setup tab is a regular shell and must keep omz update checks")
-        // Setup window carries the full documented hook env even with no
-        // preSession hook present.
-        let setupBody = windowCalls[1].last ?? ""
-        #expect(setupBody.contains("export TBD_EVENT='setup'"))
-        #expect(setupBody.contains("export TBD_WORKTREE_NAME='\(wt.name)'"))
-        #expect(setupBody.contains("export TBD_WORKTREE_PATH='\(wt.localPath)'"))
-        #expect(setupBody.contains("export TBD_REPO_PATH='\(repo.path)'"))
-        #expect(setupBody.contains("export TBD_BRANCH='\(wt.branch)'"))
+        let launches = holder.launches
+        #expect(launches.count == 1)
+        let claudeLaunch = try #require(holder.launch(for: claude.id))
+        #expect(claudeLaunch.commandLine?.contains("claude --session-id") == true,
+                "the only spawn must be the primary agent")
+        // A spawned agent command must never block on oh-my-zsh's interactive
+        // update prompt, so the suppression is in the job's process env.
+        #expect(claudeLaunch.request.environment["DISABLE_AUTO_UPDATE"] == "true",
+                "primary agent must suppress the oh-my-zsh update prompt in its process env")
 
-        // Tab order [claude, setup], active = claude; the create makes no
-        // note and opens no worktree panel.
+        // Tab order [claude], active = claude; the create makes no note and
+        // opens no worktree panel.
         #expect(try await db.notes.list(worktreeID: wt.id).isEmpty)
-        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id, setup.id])
+        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id])
         #expect(try await db.panelSurface.worktreePanels(worktreeID: wt.id).isEmpty)
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == claude.id)
         #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty)
@@ -188,27 +176,49 @@ struct PreSessionHookTests {
         // Auto-close off: this pins the plain setup command, and leaves no
         // 600 s marker watcher running after the test.
         try await db.config.setAutoCloseSetup(enabled: false)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installHook(named: "setup", repoDir: repoDir)
 
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
         #expect(wt.status == .active)
 
-        // Windows: [claude, setup]. With a setup hook resolved, the setup
-        // window must carry `-e DISABLE_AUTO_UPDATE=true` (process env, set
-        // before .zshrc runs) so the omz updater prompt can't delay the hook;
-        // the primary agent window carries it too — a spawned agent command
-        // must never block on the interactive update prompt.
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        #expect(windowCalls.count == 2)
-        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
-                "primary agent window must suppress the oh-my-zsh update prompt via -e")
-        #expect(hasProcessEnvFlag(windowCalls[1], "DISABLE_AUTO_UPDATE=true"),
-                "setup hook window must suppress the oh-my-zsh update prompt via -e")
-        #expect(windowCalls[1].last?.contains(".worktree-hooks/setup") == true,
-                "second window must run the setup hook")
+        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        #expect(terminals.count == 2)
+        #expect(!terminals.contains { $0.label == "pre-session" })
+        let claude = try #require(terminals.first { $0.label == "Claude Code" })
+        let setup = try #require(terminals.first { $0.label == "setup" })
+
+        // Spawns: [claude, setup]. With a setup hook resolved, the setup job's
+        // process environment carries DISABLE_AUTO_UPDATE=true (set before
+        // .zshrc runs) so the omz updater prompt can't delay the hook; the
+        // primary agent carries it too — a spawned agent command must never
+        // block on the interactive update prompt.
+        let launchedIDs = holder.launches.map { $0.terminalID }
+        #expect(launchedIDs == [claude.id, setup.id],
+                "the primary agent must spawn first and the setup hook second")
+        let claudeLaunch = try #require(holder.launch(for: claude.id))
+        let setupLaunch = try #require(holder.launch(for: setup.id))
+        #expect(claudeLaunch.request.environment["DISABLE_AUTO_UPDATE"] == "true",
+                "primary agent must suppress the oh-my-zsh update prompt in its process env")
+        #expect(setupLaunch.request.environment["DISABLE_AUTO_UPDATE"] == "true",
+                "setup hook must suppress the oh-my-zsh update prompt in its process env")
+        // The setup tab runs the hook and carries the full documented hook env
+        // even with no preSession hook present.
+        let setupBody = setupLaunch.commandLine ?? ""
+        #expect(setupBody.contains(".worktree-hooks/setup"),
+                "the second spawn must run the setup hook")
+        #expect(setupBody.contains("export TBD_EVENT='setup'"))
+        #expect(setupBody.contains("export TBD_TERMINAL_ID='\(setup.id.uuidString)'"))
+        #expect(setupBody.contains("export TBD_WORKTREE_NAME='\(wt.name)'"))
+        #expect(setupBody.contains("export TBD_WORKTREE_PATH='\(wt.localPath)'"))
+        #expect(setupBody.contains("export TBD_REPO_PATH='\(repo.path)'"))
+        #expect(setupBody.contains("export TBD_BRANCH='\(wt.branch)'"))
+
+        // Tab order [claude, setup], active = claude.
+        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id, setup.id])
+        #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == claude.id)
     }
 
     @Test func noHookCreateFailureStillDeletesRow() async throws {
@@ -248,10 +258,14 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        // Auto-close off: the setup hook below then runs the plain command, and
+        // no 600 s setup marker watcher is left running after the test.
+        try await db.config.setAutoCloseSetup(enabled: false)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
+        try await installHook(named: "setup", repoDir: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id)
@@ -266,18 +280,19 @@ struct PreSessionHookTests {
         let pre = try #require(terminals.first)
         #expect(pre.label == "pre-session")
         #expect(pre.kind == .shell)
+        #expect(pre.transport == .holder)
         #expect(try await db.worktrees.get(id: pending.id)?.status == .creating)
         #expect(try await db.worktrees.getTabOrder(worktreeID: pending.id) == [pre.id])
         #expect(try await db.worktrees.getActiveTabID(worktreeID: pending.id) == pre.id)
 
-        // The single window so far runs the wrapped hook command.
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        #expect(windowCalls.count == 1)
-        let body = windowCalls[0].last ?? ""
+        // The single spawn so far runs the wrapped hook command.
+        #expect(holder.launches.count == 1)
+        let preLaunch = try #require(holder.launch(for: pre.id))
+        let body = preLaunch.commandLine ?? ""
         #expect(body.contains(".worktree-hooks/preSession"))
         #expect(body.contains("runtime/presession"))
-        // Full documented hook env present on the window (exported in the
-        // command body) — docs/worktree-hooks.md promises all of these.
+        // Full documented hook env present on the spawn (exported in the
+        // command line) — docs/worktree-hooks.md promises all of these.
         let createdWtRow = try await db.worktrees.get(id: pending.id)
         let createdWt = try #require(createdWtRow)
         #expect(body.contains("export TBD_EVENT='preSession'"))
@@ -286,11 +301,12 @@ struct PreSessionHookTests {
         #expect(body.contains("export TBD_WORKTREE_PATH='\(createdWt.localPath)'"))
         #expect(body.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(body.contains("export TBD_BRANCH='\(createdWt.branch)'"))
-        // The pre-session window must carry `-e DISABLE_AUTO_UPDATE=true` so
-        // oh-my-zsh's updater prompt (fired by .zshrc, BEFORE the -c command
-        // and its export-prefix run) can't block the hook.
-        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
-                "pre-session hook window must suppress the oh-my-zsh update prompt via -e")
+        // The pre-session job's process environment must carry
+        // DISABLE_AUTO_UPDATE=true so oh-my-zsh's updater prompt (fired by
+        // .zshrc, BEFORE the command and its export prefix run) can't block
+        // the hook.
+        #expect(preLaunch.request.environment["DISABLE_AUTO_UPDATE"] == "true",
+                "pre-session hook must suppress the oh-my-zsh update prompt in its process env")
 
         // Still gated while the marker is absent.
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -322,18 +338,18 @@ struct PreSessionHookTests {
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: pending.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
 
-        // The parallel `setup` hook window gets the same documented env
-        // (TBD_EVENT=setup) — windows are [pre-session, claude, setup].
-        let allWindowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        #expect(allWindowCalls.count == 3)
-        // Hook panes and agent tabs suppress the omz updater; this fixture
-        // has no setup hook, so the "Setup" tab is a plain shell for a human
-        // and keeps update checks.
-        #expect(hasProcessEnvFlag(allWindowCalls[1], "DISABLE_AUTO_UPDATE=true"),
-                "primary agent window must suppress the oh-my-zsh update prompt via -e")
-        #expect(!allWindowCalls[2].contains("DISABLE_AUTO_UPDATE=true"),
-                "hook-less setup tab is a regular shell and must keep omz update checks")
-        let setupBody = allWindowCalls[2].last ?? ""
+        // The parallel `setup` hook gets the same documented env
+        // (TBD_EVENT=setup) — spawns are [pre-session, claude, setup].
+        let launchedIDs = holder.launches.map { $0.terminalID }
+        #expect(launchedIDs == [pre.id, claude.id, setup.id])
+        // Hook tabs and agent tabs suppress the omz updater.
+        let claudeLaunch = try #require(holder.launch(for: claude.id))
+        let setupLaunch = try #require(holder.launch(for: setup.id))
+        #expect(claudeLaunch.request.environment["DISABLE_AUTO_UPDATE"] == "true",
+                "primary agent must suppress the oh-my-zsh update prompt in its process env")
+        #expect(setupLaunch.request.environment["DISABLE_AUTO_UPDATE"] == "true",
+                "setup hook must suppress the oh-my-zsh update prompt in its process env")
+        let setupBody = setupLaunch.commandLine ?? ""
         #expect(setupBody.contains("export TBD_EVENT='setup'"))
         #expect(setupBody.contains("export TBD_TERMINAL_ID='\(setup.id.uuidString)'"))
         #expect(setupBody.contains("export TBD_WORKTREE_NAME='\(createdWt.name)'"))
@@ -363,8 +379,10 @@ struct PreSessionHookTests {
         try writeMarker(worktreeID: pending.id, exitCode: 1)
         await phase3.value
 
+        // A failed hook keeps its tab beside the primary.
         let terminals = try await db.terminals.list(worktreeID: pending.id)
-        #expect(terminals.count == 3, "non-zero exit must still spawn primary terminals")
+        #expect(terminals.count == 2, "non-zero exit must still spawn the primary terminal")
+        #expect(terminals.contains { $0.label == "Claude Code" })
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
 
         let notifications = try await db.notifications.unread(worktreeID: pending.id)
@@ -380,9 +398,9 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        // Short injected timeout; the marker is never written. (The killed-pane
-        // short-circuit can't fire under dryRun tmux — windowExists is always
-        // true — so the timeout path covers the no-completion case here.)
+        // Short injected timeout; the marker is never written, and the hook's
+        // job reads as still running (`makeLifecycle`'s default liveness), so
+        // the timeout path covers the no-completion case here.
         // 0.1 s leaves room for two polls at `makeLifecycle`'s 0.05 s interval,
         // and the outcome is `.timedOut` however many run, since nothing ever
         // writes the marker.
@@ -402,8 +420,10 @@ struct PreSessionHookTests {
         let wt = try await db.worktrees.get(id: pending.id)
         #expect(wt != nil, "timeout must not delete the worktree row")
         #expect(wt?.status == .active, "worktree must not be stuck in .creating")
+        // The timed-out hook keeps its tab beside the primary.
         let terminals = try await db.terminals.list(worktreeID: pending.id)
-        #expect(terminals.count == 3)
+        #expect(terminals.count == 2)
+        #expect(terminals.contains { $0.label == "Claude Code" })
 
         let notifications = try await db.notifications.unread(worktreeID: pending.id)
         #expect(notifications.count == 1)
@@ -430,8 +450,8 @@ struct PreSessionHookTests {
             worktree: worktree, repo: repo, worktreePath: worktree.localPath
         ))
         #expect(spawn.tmuxServer == worktree.tmuxServer)
-        // tmux is dry-run, so the hook never really runs. Stand in for its
-        // clean exit. Must come AFTER the spawn, which deletes any stale
+        // The holder double runs nothing, so the hook never really runs. Stand
+        // in for its clean exit. Must come AFTER the spawn, which deletes any stale
         // marker for this worktree ID.
         try writeMarker(worktreeID: worktree.id, exitCode: 0)
 
@@ -588,48 +608,55 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: repoDir.deletingLastPathComponent()) }
         try await installPreSessionHook(repoDir: repoDir)
 
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 2)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, timeout: 2, holder: holder)
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
             worktree: worktree, repo: nil, worktreePath: worktree.localPath
         ))
         #expect(try await db.terminals.get(id: spawn.terminalID) != nil)
 
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        let body = windowCalls.first?.last ?? ""
+        let body = holder.launch(for: spawn.terminalID)?.commandLine ?? ""
         #expect(body.contains("export TBD_REPO_PATH='\(worktree.localPath)'"),
                 "with no repo, TBD_REPO_PATH must fall back to the worktree's own path")
     }
 
-    // MARK: - Wait outcome races (marker vs. dead pane / deadline)
+    // MARK: - Wait outcome races (marker vs. dead hook job / deadline)
 
     @Test func markerWinsWhenPaneDiesInSameIteration() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
-        let db = try TBDDatabase(inMemory: true)
+        let fx = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
 
-        // The dead-window check fires AFTER the marker check in each poll
-        // iteration. Simulate the race deterministically: the windowExists
-        // probe itself writes the marker (hook finished + pane closed between
-        // the two checks) and reports the window dead. The wait must re-check
-        // the marker and honor its exit code instead of returning .paneKilled.
-        let worktreeID = UUID()
-        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
-        let lifecycle = makeLifecycle(db: db, windowIsDead: { _ in
-            try? FileManager.default.createDirectory(
-                atPath: (markerPath as NSString).deletingLastPathComponent,
-                withIntermediateDirectories: true
-            )
-            try? "0\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
-            return true
-        })
+        // The hook job's liveness probe fires AFTER the marker check in each
+        // poll iteration. Simulate the race deterministically: the probe
+        // itself writes the marker (hook finished and its job exited between
+        // the two checks) and reports the job gone. The wait must re-check the
+        // marker and honor its exit code instead of returning .paneKilled.
+        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: fx.worktree.id)
+        let lifecycle = makeLifecycle(
+            db: fx.db,
+            processSignaller: ScriptedLivenessSignaller(probe: { _ in
+                try? FileManager.default.createDirectory(
+                    atPath: (markerPath as NSString).deletingLastPathComponent,
+                    withIntermediateDirectories: true
+                )
+                try? "0\n".write(toFile: markerPath, atomically: true, encoding: .utf8)
+                return false
+            }))
+        // The probe reads the job's pid only while the hook tab's row exists.
+        let terminal = try await fx.db.terminals.create(
+            worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.preSession, kind: .shell,
+            transport: .holder, holderPID: 1_000_001, childPID: 1_000_002)
         let spawn = PreSessionSpawn(
-            terminalID: UUID(), tmuxServer: "test-server",
-            windowID: "@mock-0", paneID: "%mock-0",
-            markerPath: markerPath, hookPath: "/dev/null"
+            terminalID: terminal.id, tmuxServer: fx.worktree.tmuxServer,
+            windowID: "", paneID: "",
+            markerPath: markerPath, hookPath: "/dev/null",
+            transport: .holder, holderPID: 1_000_001, childPID: 1_000_002
         )
         let outcome = await lifecycle.waitForPreSessionCompletion(
-            preSession: spawn, tmuxServer: "tbd-test"
+            preSession: spawn, tmuxServer: fx.worktree.tmuxServer
         )
         #expect(outcome == .completed(exitCode: 0),
                 "a marker written in the same iteration must beat .paneKilled")
@@ -661,25 +688,6 @@ struct PreSessionHookTests {
         #expect(!FileManager.default.fileExists(atPath: markerPath))
     }
 
-    @Test func deadPaneWithoutMarkerIsPaneKilled() async throws {
-        let (_, cleanup) = isolateTBDHome()
-        defer { cleanup() }
-        let db = try TBDDatabase(inMemory: true)
-
-        let worktreeID = UUID()
-        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: worktreeID)
-        let lifecycle = makeLifecycle(db: db, windowIsDead: { _ in true })
-        let spawn = PreSessionSpawn(
-            terminalID: UUID(), tmuxServer: "test-server",
-            windowID: "@mock-0", paneID: "%mock-0",
-            markerPath: markerPath, hookPath: "/dev/null"
-        )
-        let outcome = await lifecycle.waitForPreSessionCompletion(
-            preSession: spawn, tmuxServer: "tbd-test"
-        )
-        #expect(outcome == .paneKilled)
-    }
-
     // MARK: - Killed pane (end-to-end)
 
     @Test func paneKilledStillSpawnsAndNotifies() async throws {
@@ -689,9 +697,10 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        // Every window reports dead and no marker is ever written → the wait
+        // The hook's job reads as gone and no marker is ever written → the wait
         // short-circuits to .paneKilled (user closed the hook terminal).
-        let lifecycle = makeLifecycle(db: db, windowIsDead: { _ in true })
+        let lifecycle = makeLifecycle(
+            db: db, processSignaller: ScriptedLivenessSignaller.everyJobGone)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -703,9 +712,11 @@ struct PreSessionHookTests {
         }
         await phase3.value
 
-        // Killed pane must still spawn the primary terminals and activate.
+        // Killed pane must still spawn the primary terminal and activate; the
+        // hook's tab is kept beside it.
         let terminals = try await db.terminals.list(worktreeID: pending.id)
-        #expect(terminals.count == 3, "killed pane must still spawn primary terminals")
+        #expect(terminals.count == 2, "killed pane must still spawn the primary terminal")
+        #expect(terminals.contains { $0.label == "Claude Code" })
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
 
         let notifications = try await db.notifications.unread(worktreeID: pending.id)
@@ -722,36 +733,40 @@ struct PreSessionHookTests {
     @Test func rowDeletedMidWaitSkipsPrimarySpawnAndCleansUp() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
-        let (tempDir, repoDir) = try await createTestRepo()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fx = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: fx.repoDir)
 
-        let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-        try await installPreSessionHook(repoDir: repoDir)
-
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
-        let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id)
-        guard case .preSessionPending(let phase3) = completion else {
-            Issue.record("expected .preSessionPending")
-            return
-        }
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: fx.db, timeout: 2, holder: holder)
+        let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
+            worktree: fx.worktree, repo: fx.repo, worktreePath: fx.worktree.localPath
+        ))
 
         // Repo removal mid-wait: deleteForRepo drops the .creating row (the
-        // terminal rows cascade). Phase 3 must notice and never spawn the
-        // primary terminals into the void.
-        try await db.worktrees.deleteForRepo(repoID: repo.id)
-        try writeMarker(worktreeID: pending.id, exitCode: 0)
-        await phase3.value
+        // terminal rows cascade), and the hook finishes afterwards. Phase 3 is
+        // driven directly so the wait's first poll sees both, in that order.
+        // It must notice and never spawn the primary terminals into the void.
+        try await fx.db.worktrees.deleteForRepo(repoID: fx.repo.id)
+        try writeMarker(worktreeID: fx.worktree.id, exitCode: 0)
+        await lifecycle.runPreSessionPhase3(
+            preSession: spawn, worktree: fx.worktree, repo: fx.repo,
+            worktreePath: fx.worktree.localPath, skipClaude: false,
+            completionAction: .markActive
+        )
 
-        #expect(try await db.worktrees.get(id: pending.id) == nil)
-        #expect(try await db.terminals.list(worktreeID: pending.id).isEmpty,
+        #expect(try await fx.db.worktrees.get(id: fx.worktree.id) == nil)
+        #expect(try await fx.db.terminals.list(worktreeID: fx.worktree.id).isEmpty,
                 "no terminal rows may be created for a deleted worktree")
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        #expect(windowCalls.count == 1,
-                "only the pre-session window may exist — no primary windows after the row vanished")
-        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: pending.id)
+        let launchedIDs = holder.launches.map { $0.terminalID }
+        #expect(launchedIDs == [spawn.terminalID],
+                "only the pre-session tab may be spawned — no primaries after the row vanished")
+        // The hook tab's row went with the worktree, so its holder is reclaimed
+        // from the pids the spawn descriptor carries.
+        let abandonedIDs = holder.abandonments.map { $0.terminalID }
+        #expect(abandonedIDs.contains(spawn.terminalID),
+                "the pre-session holder must be reclaimed when its worktree vanished")
+        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: fx.worktree.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath),
                 "the marker removed right after the wait must not reappear on the deleted-row early exit")
     }
@@ -763,8 +778,8 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -780,20 +795,22 @@ struct PreSessionHookTests {
         // Close the underlying GRDB connection mid-wait so the phase-3 row
         // existence check THROWS instead of returning nil. A thrown DB error
         // is not proof the row is gone — phase 3 must take the spawn path,
-        // not the deleted-row teardown that kills the live pre-session
-        // window of a perfectly valid worktree. (The spawn attempt itself
-        // then fails on the closed DB and is logged/swallowed — what matters
-        // here is which branch the guard took.) A non-zero exit keeps the
-        // hook "failed", so the separate close-on-success path (which would
-        // also kill this window, for an unrelated reason) never fires and
-        // can't be confused with the deleted-row teardown this test targets.
+        // not the deleted-row teardown that reclaims the live pre-session
+        // holder of a perfectly valid worktree. (The hook tab's own liveness
+        // read throws too, and is answered "still there" for the same reason;
+        // the spawn attempt itself then fails on the closed DB and is
+        // logged/swallowed — what matters here is which branch the guard
+        // took.) A non-zero exit keeps the hook "failed", so the separate
+        // close-on-success path (which would also reclaim this holder, for an
+        // unrelated reason) never fires and can't be confused with the
+        // deleted-row teardown this test targets.
         try db.writerForTests.close()
         try writeMarker(worktreeID: pending.id, exitCode: 1)
         await phase3.value
 
-        let kills = recorder.snapshot().filter { $0.contains("kill-window") }
-        #expect(!kills.contains { $0.contains(preTerminal.tmuxWindowID) },
-                "a transient DB error on the existence check must not kill the pre-session window")
+        let abandonedIDs = holder.abandonments.map { $0.terminalID }
+        #expect(!abandonedIDs.contains(preTerminal.id),
+                "a transient DB error on the existence check must not tear down the pre-session holder")
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: pending.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
     }
@@ -811,13 +828,15 @@ struct PreSessionHookTests {
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
-        // dryRun tmux never runs the hook, so phase 3 hits the short timeout;
-        // the synchronous method must still return a fully set-up worktree.
+        // The holder double never runs the hook, so phase 3 hits the short
+        // timeout; the synchronous method must still return a fully set-up
+        // worktree: the primary, beside the timed-out hook's tab.
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
         #expect(wt.status == .active)
         let terminals = try await db.terminals.list(worktreeID: wt.id)
-        #expect(terminals.count == 3)
+        #expect(terminals.count == 2)
         #expect(terminals.contains { $0.label == "pre-session" })
+        #expect(terminals.contains { $0.label == "Claude Code" })
     }
 
     @Test func legacyReviveWithHookAwaitsPhase3Inline() async throws {
@@ -835,11 +854,12 @@ struct PreSessionHookTests {
         try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
         // Legacy synchronous contract: fully set up on return (the inline
-        // await rides the short timeout since dryRun tmux never runs the hook).
+        // await rides the short timeout since the holder double never runs the
+        // hook): the primary, beside the timed-out hook's tab.
         let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
         #expect(revived.status == .active)
         let terminals = try await db.terminals.list(worktreeID: revived.id)
-        #expect(terminals.count == 3)
+        #expect(terminals.count == 2)
         #expect(terminals.contains { $0.label == "pre-session" })
     }
 
@@ -898,8 +918,9 @@ struct PreSessionHookTests {
         #expect(revived?.archivedClaudeSessions == ["aaaa-session"],
                 "skipClaude revive must preserve archived sessions for a later revive")
         terminals = try await db.terminals.list(worktreeID: wt.id)
-        // Exit 0 closes the pre-session tab: only the two primaries remain.
-        #expect(terminals.count == 2)
+        // Exit 0 closes the pre-session tab: only the primary remains (no
+        // setup hook, so no setup tab).
+        #expect(terminals.count == 1)
         #expect(!terminals.contains { $0.label == "pre-session" })
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
@@ -986,8 +1007,8 @@ struct PreSessionHookTests {
         let terminalLabels = snapshot.compactMap { delta -> String? in
             if case .terminalCreated(let d) = delta { return d.label } else { return nil }
         }
-        #expect(terminalLabels.sorted() == ["Claude Code", "pre-session", "setup"],
-                "terminalCreated must fire for the pre-session AND each primary terminal")
+        #expect(terminalLabels.sorted() == ["Claude Code", "pre-session"],
+                "terminalCreated must fire for the pre-session AND the primary terminal")
     }
 
     // MARK: - Startup recovery of `.creating` rows
@@ -1033,12 +1054,11 @@ struct PreSessionHookTests {
         #expect(after?.archivedAt == nil)
         #expect(after?.archivedClaudeSessions == nil)
         let terminals = try await db.terminals.list(worktreeID: wt.id)
-        // Exit 0 closes the resumed pre-session tab: only the two primaries
-        // remain.
-        #expect(terminals.count == 2,
-                "resumed phase 3 must spawn the primary terminals")
+        // Exit 0 closes the resumed pre-session tab: only the primary remains
+        // (no setup hook, so no setup tab).
+        #expect(terminals.count == 1,
+                "resumed phase 3 must spawn the primary terminal")
         #expect(terminals.contains { $0.label == "Claude Code" })
-        #expect(terminals.contains { $0.label == "setup" })
         #expect(!terminals.contains { $0.label == "pre-session" })
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
@@ -1112,17 +1132,15 @@ struct PreSessionHookTests {
     /// folder, and its settings file carries the overlay beside TBD's hooks.
     private func expectPrimaryStarted(
         with extras: ClaudeSpawnExtras, pluginDir: String,
-        worktreeID: UUID, db: TBDDatabase, recorder: PreSessionRecordedCommands
+        worktreeID: UUID, db: TBDDatabase, holder: FakeHolderLaunch
     ) async throws {
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
         let primary = try #require(terminals.first { $0.kind == .claude })
         #expect(primary.claudeSpawnExtras == extras)
         #expect(terminals.filter { $0.id != primary.id }.allSatisfy { $0.claudeSpawnExtras == nil })
 
-        let command = try #require(recorder.snapshot()
-            .filter { $0.contains("new-window") }
-            .compactMap(\.last)
-            .first { $0.contains("claude --session-id") })
+        let command = try #require(holder.launch(for: primary.id)?.commandLine)
+        #expect(command.contains("claude --session-id"), "\(command)")
         #expect(command.contains(" --plugin-dir \(shellEscape(pluginDir))"),
                 "\(command)")
 
@@ -1141,8 +1159,8 @@ struct PreSessionHookTests {
         let (extras, pluginDir) = try makeSpawnExtras(tempDir: tempDir)
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -1164,7 +1182,7 @@ struct PreSessionHookTests {
 
         #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
         try await expectPrimaryStarted(
-            with: extras, pluginDir: pluginDir, worktreeID: pending.id, db: db, recorder: recorder)
+            with: extras, pluginDir: pluginDir, worktreeID: pending.id, db: db, holder: holder)
     }
 
     /// Recovery after a daemon restart resumes the wait from rows alone and
@@ -1178,8 +1196,8 @@ struct PreSessionHookTests {
         let (extras, pluginDir) = try makeSpawnExtras(tempDir: tempDir)
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         // A daemon that died mid-wait: a .creating row whose checkout exists
@@ -1204,7 +1222,7 @@ struct PreSessionHookTests {
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
         try await expectPrimaryStarted(
-            with: extras, pluginDir: pluginDir, worktreeID: wt.id, db: db, recorder: recorder)
+            with: extras, pluginDir: pluginDir, worktreeID: wt.id, db: db, holder: holder)
     }
 
     // MARK: - Reconcile must not kill live `.creating` windows
@@ -1348,9 +1366,9 @@ struct PreSessionHookTests {
         for task in resumed { await task.value }
 
         #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
-        // Exit 0 closes the resumed pre-session tab: only the two primaries
-        // remain.
-        #expect(try await db.terminals.list(worktreeID: wt.id).count == 2)
+        // Exit 0 closes the resumed pre-session tab: only the primary remains
+        // (no setup hook, so no setup tab).
+        #expect(try await db.terminals.list(worktreeID: wt.id).count == 1)
         #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty,
                 "no spurious paneKilled notification may be recorded")
     }
@@ -1577,14 +1595,6 @@ struct PreSessionHookTests {
 }
 
 // MARK: - Helpers
-
-/// True when `args` sets `assignment` in the spawned window's process
-/// environment via tmux's `-e KEY=VALUE` flag (adjacency required — a bare
-/// substring match could false-positive on the shell command body).
-private func hasProcessEnvFlag(_ args: [String], _ assignment: String) -> Bool {
-    guard let index = args.firstIndex(of: assignment), index > 0 else { return false }
-    return args[index - 1] == "-e"
-}
 
 /// Thread-safe collector for broadcast StateDeltas.
 private final class CollectedDeltas: @unchecked Sendable {

@@ -76,8 +76,8 @@ struct AutoCloseSetupTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setAutoCloseSetup(enabled: false)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installHook(named: "setup", repoDir: repoDir)
 
@@ -85,21 +85,15 @@ struct AutoCloseSetupTests {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         let setup = try #require(terminals.first { $0.label == TerminalLabel.setup })
 
-        // The setup window runs the plain shellWrapped hook — no marker
+        // The setup tab runs the plain shellWrapped hook — no marker
         // machinery in the command.
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        let setupBody = try #require(
-            windowCalls.compactMap(\.last).first { $0.contains(".worktree-hooks/setup") }
-        )
+        let setupBody = try #require(holder.launch(for: setup.id)?.commandLine)
+        #expect(setupBody.contains(".worktree-hooks/setup"))
         #expect(!setupBody.contains("runtime/setup"),
                 "flag off must not wire the marker file into the setup command")
         #expect(!setupBody.contains("__tbd_rc"),
                 "flag off must keep the pre-existing shellWrapped command")
         #expect(setupBody.contains("exec "))
-
-        // Flag off never touches remain-on-exit — the pane stays a normal
-        // interactive shell window.
-        #expect(!recorder.snapshot().contains { $0.contains("remain-on-exit") })
 
         // No watcher was armed: a marker written by hand is never consumed
         // and the setup terminal stays.
@@ -126,8 +120,8 @@ struct AutoCloseSetupTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 5)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, timeout: 5, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installHook(named: "setup", repoDir: repoDir)
 
@@ -135,10 +129,8 @@ struct AutoCloseSetupTests {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         let setup = try #require(terminals.first { $0.label == TerminalLabel.setup })
 
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        let setupBody = try #require(
-            windowCalls.compactMap(\.last).first { $0.contains(".worktree-hooks/setup") }
-        )
+        let setupBody = try #require(holder.launch(for: setup.id)?.commandLine)
+        #expect(setupBody.contains(".worktree-hooks/setup"))
         #expect(setupBody.contains("runtime/setup"),
                 "a never-chosen flag must arm the marker-writing wrapper")
         #expect(setupBody.contains("if [ $__tbd_rc -ne 0 ]"))
@@ -162,8 +154,8 @@ struct AutoCloseSetupTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setAutoCloseSetup(enabled: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder, timeout: 5)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, timeout: 5, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installHook(named: "setup", repoDir: repoDir)
 
@@ -173,23 +165,13 @@ struct AutoCloseSetupTests {
         let setup = try #require(terminals.first { $0.label == TerminalLabel.setup })
         let primary = try #require(terminals.first { $0.id != setup.id })
 
-        // The setup window runs the marker-writing wrapper.
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        let setupBody = try #require(
-            windowCalls.compactMap(\.last).first { $0.contains(".worktree-hooks/setup") }
-        )
+        // The setup tab runs the marker-writing wrapper.
+        let setupBody = try #require(holder.launch(for: setup.id)?.commandLine)
+        #expect(setupBody.contains(".worktree-hooks/setup"))
         #expect(setupBody.contains("runtime/setup"))
         #expect(setupBody.contains("if [ $__tbd_rc -ne 0 ]"))
 
-        // Armed spawn must keep the dead pane around: the wrapper lets the
-        // pane exit on success, and without remain-on-exit the window dies
-        // with it before the teardown can capture scrollback history.
-        let remainCalls = recorder.snapshot().filter { $0.contains("remain-on-exit") }
-        #expect(remainCalls.count == 1)
-        #expect(remainCalls.first?.contains(setup.tmuxWindowID) == true,
-                "remain-on-exit must target the setup window")
-
-        // dryRun tmux never runs the hook — stand in for its clean exit.
+        // The spawn double never runs the hook — stand in for its clean exit.
         // (The spawn deleted any stale marker, so write AFTER create returns.)
         try writeSetupMarker(worktreeID: wt.id, exitCode: 0)
         // Wait on the LAST write of the teardown, not the first. The watcher's
@@ -219,6 +201,10 @@ struct AutoCloseSetupTests {
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == primary.id)
         let markerPath = WorktreeLifecycle.setupMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath), "marker must be consumed")
+        // The closed tab's holder and job were handed to the registry's
+        // teardown, not left running behind a deleted row.
+        let abandoned = holder.abandonments.map(\.terminalID)
+        #expect(abandoned.contains(setup.id))
     }
 
     @Test func flagOnFailureKeepsSetupTab() async throws {
@@ -257,7 +243,7 @@ struct AutoCloseSetupTests {
                 "a failed hook must leave the tab order untouched")
     }
 
-    @Test func flagOnWithoutHookSpawnsPlainShell() async throws {
+    @Test func flagOnWithoutHookSpawnsNoSetupTab() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let (tempDir, repoDir) = try await createTestRepo()
@@ -265,19 +251,18 @@ struct AutoCloseSetupTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setAutoCloseSetup(enabled: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-        // No hook resolves → hook-less "Setup" tab stays a plain shell even
-        // with the flag on; no marker machinery, no watcher.
-        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
-        #expect(!windowCalls.contains { ($0.last ?? "").contains("runtime/setup") })
-        // Hook-less setup tab is a plain interactive shell: no remain-on-exit.
-        #expect(!recorder.snapshot().contains { $0.contains("remain-on-exit") })
+        // No hook resolves → no "Setup" tab opens even with the flag on, so
+        // nothing runs the marker machinery and no watcher is armed.
+        let commandLines = holder.launches.compactMap(\.commandLine)
+        #expect(!commandLines.isEmpty, "the primary spawned through the double")
+        #expect(!commandLines.contains { $0.contains("runtime/setup") })
         let terminals = try await db.terminals.list(worktreeID: wt.id)
-        #expect(terminals.contains { $0.label == TerminalLabel.setup })
+        #expect(!terminals.contains { $0.label == TerminalLabel.setup })
     }
 }
 }

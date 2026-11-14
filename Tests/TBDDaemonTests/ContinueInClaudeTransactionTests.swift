@@ -5,12 +5,18 @@ import Testing
 import DaemonTestSupport
 import TestSupport
 
-// Nested under TBDHomeSerialized: the continue-in-Claude path resolves
-// `TBD_HOME` per call through static members with no seam (the continuation
-// packet and the per-session overlay under the runtime dir), so this suite must
-// not run while a sibling suite has `TBD_HOME` pointed at a temp dir it is about
-// to delete. See TBDHomeSerializedSuites.swift.
+// Nested under TBDHomeSerialized: the startup sweep prunes continuation packets
+// under the runtime dir, which it resolves from `TBD_HOME` per call through a
+// static member with no seam, so this suite must not run while a sibling suite
+// has `TBD_HOME` pointed at a temp dir it is about to delete. See
+// TBDHomeSerializedSuites.swift.
 extension TBDHomeSerialized {
+/// Continue in Claude. The replacement it made ran in a tmux window, and TBD
+/// no longer starts processes on tmux, so `terminal.continueInClaude` refuses
+/// every terminal and the startup sweep only reports a replacement an earlier
+/// build left pending. What remains under test is each refusal, that the
+/// sweep restores nothing, the packet-file pruning, and the store and
+/// readiness primitives the transaction was built from.
 @Suite("Continue in Claude transaction")
 struct ContinueInClaudeTransactionTests {
     private final class CommandRecorder: @unchecked Sendable {
@@ -22,38 +28,109 @@ struct ContinueInClaudeTransactionTests {
         }
 
         var commands: [[String]] { lock.withLock { storage } }
+    }
 
-        var freshClaudeSessionID: String? {
-            let command = commands.last { $0.contains("respawn-window") }?.last
-            guard let command,
-                  let suffix = command.components(separatedBy: "--session-id ").last,
-                  suffix != command else { return nil }
-            return suffix.split(separator: " ").first.map(String.init)
+    // MARK: - The refusals
+
+    @Test("a Codex tab on tmux is refused and left exactly as it was")
+    func tmuxCodexTabIsRefused() async throws {
+        let fixture = try await makeRPCFixture(kind: .codex, transport: .tmux)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let response = await continueRequest(fixture)
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.tmuxContinueInClaudeRefusal(
+            terminalID: fixture.terminal.id))
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
+        #expect(fixture.recorder.commands.isEmpty,
+                "a refused continue drove tmux: \(fixture.recorder.commands)")
+    }
+
+    @Test("a Codex tab on the pty holder is refused and left exactly as it was")
+    func holderCodexTabIsRefused() async throws {
+        let fixture = try await makeRPCFixture(kind: .codex, transport: .holder)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let response = await continueRequest(fixture)
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderContinueInClaudeRefusal(
+            terminalID: fixture.terminal.id))
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
+        #expect(fixture.recorder.commands.isEmpty)
+    }
+
+    /// A tab that is not Codex keeps the wrong-provider code, which clients
+    /// read to tell "nothing to continue" from a transport refusal.
+    @Test("a tab that is not Codex is refused with the wrong-provider code")
+    func nonCodexTabIsRefusedWithTheWrongProviderCode() async throws {
+        let fixture = try await makeRPCFixture(kind: .claude, transport: .tmux)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let response = await continueRequest(fixture)
+
+        #expect(!response.success)
+        #expect(response.knownErrorCode == .terminalWrongProvider)
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
+        #expect(fixture.recorder.commands.isEmpty)
+    }
+
+    // MARK: - The startup sweep
+
+    /// A replacement an earlier build left pending is reported, never acted
+    /// on: restoring Codex meant relaunching a process in its tmux window.
+    @Test("the startup sweep leaves a pending replacement exactly as it was")
+    func startupSweepRestoresNothing() async throws {
+        let fixture = try await makeRPCFixture(kind: .codex, transport: .tmux)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let pending = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: UUID()))
+
+        await fixture.router.reconcilePendingContinueInClaude()
+
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == pending)
+        #expect(try await fixture.db.terminals.listPendingCodexContinuations()
+            .map(\.id) == [fixture.terminal.id])
+        #expect(fixture.recorder.commands.isEmpty,
+                "the sweep drove tmux: \(fixture.recorder.commands)")
+    }
+
+    @Test("stale continuation packets are pruned and fresh ones are kept")
+    func stalePacketFilesArePruned() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("packet-prune-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func packet(_ text: String) throws -> String {
+            let url = directory.appendingPathComponent(
+                ContinuationPacketFile.prefix + UUID().uuidString + ContinuationPacketFile.suffix)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return url.path
         }
-    }
-
-    private final class FailurePlan: @unchecked Sendable {
-        enum Failure: Error { case injected }
-        private let lock = NSLock()
-        private var remaining: Int
-
-        init(_ remaining: Int) { self.remaining = remaining }
-
-        func next() -> Error? {
-            lock.withLock {
-                guard remaining > 0 else { return nil }
-                if remaining != .max { remaining -= 1 }
-                return Failure.injected
-            }
+        let stalePath = try packet("old")
+        let freshPath = try packet("new")
+        let unrelated = directory.appendingPathComponent("unrelated.txt")
+        try "keep".write(to: unrelated, atomically: true, encoding: .utf8)
+        let now = Date()
+        for path in [stalePath, unrelated.path] {
+            try FileManager.default.setAttributes(
+                [.modificationDate: now.addingTimeInterval(-2 * ContinuationPacketFile.staleAge)],
+                ofItemAtPath: path)
         }
+
+        ContinuationPacketFile.pruneStale(directory: directory, now: now)
+
+        #expect(!FileManager.default.fileExists(atPath: stalePath))
+        #expect(FileManager.default.fileExists(atPath: freshPath))
+        #expect(FileManager.default.fileExists(atPath: unrelated.path),
+                "the sweep removed a stale file that is not a packet")
     }
 
-    private final class DeltaRecorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storage: [StateDelta] = []
-        func append(_ delta: StateDelta) { lock.withLock { storage.append(delta) } }
-        var deltas: [StateDelta] { lock.withLock { storage } }
-    }
+    // MARK: - The primitives
 
     @Test("readiness remembers an exact token and rejects mismatches")
     func readinessIsExactAndRemembered() async throws {
@@ -186,927 +263,23 @@ struct ContinueInClaudeTransactionTests {
         #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == changed)
     }
 
-    @Test("RPC success keeps one row and one window and commits only after readiness")
-    func rpcSuccessReplacesInPlace() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalContinueInClaude,
-            params: TerminalContinueInClaudeParams(
-                sourceTerminalID: fixture.terminal.id))
-        let responseTask = Task { await fixture.router.handle(request) }
-        let pending = try await waitForPending(
-            terminalID: fixture.terminal.id, in: fixture.db)
-        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
-            in: fixture.recorder))
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?.kind == .codex)
-
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: freshSessionID,
-                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: pending))
-        #expect((await fixture.router.handle(hook)).success)
-
-        let response = await responseTask.value
-        #expect(response.success)
-        let updated = try response.decodeResult(Terminal.self)
-        #expect(updated.id == fixture.terminal.id)
-        #expect(updated.tmuxWindowID == fixture.terminal.tmuxWindowID)
-        #expect(updated.tmuxPaneID == fixture.terminal.tmuxPaneID)
-        #expect(updated.kind == .claude)
-        #expect(updated.sessionIncarnationID == pending)
-        #expect(updated.pendingSessionIncarnationID == nil)
-        #expect(try await fixture.db.terminals.list(
-            worktreeID: fixture.terminal.worktreeID).count == 1)
-        #expect(fixture.recorder.commands.filter { $0.contains("respawn-window") }.count == 1)
-        #expect(!fixture.recorder.commands.contains { $0.contains("send-keys") })
-        let replacement = fixture.deltas.deltas.compactMap { delta -> Terminal? in
-            guard case .terminalReplaced(let terminal) = delta else { return nil }
-            return terminal
-        }.last
-        #expect(replacement == updated)
-    }
-
-    /// A tmux Codex row carries no agent status, so it reads `.unknown`. The
-    /// rollout is the idle check, and an idle rollout lets the action proceed.
-    @Test("continue proceeds from an unknown row when the rollout is idle")
-    func continueProceedsFromUnknownWhenTheRolloutIsIdle() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        try await fixture.db.terminals.setActivityState(
-            id: fixture.terminal.id, activityState: .unknown, source: .derived,
-            observedAt: Date(timeIntervalSinceReferenceDate: 20))
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
-            .activityState == .unknown)
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalContinueInClaude,
-            params: TerminalContinueInClaudeParams(
-                sourceTerminalID: fixture.terminal.id))
-        let responseTask = Task { await fixture.router.handle(request) }
-        let pending = try await waitForPending(
-            terminalID: fixture.terminal.id, in: fixture.db)
-        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
-            in: fixture.recorder))
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: freshSessionID,
-                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: pending))
-        #expect((await fixture.router.handle(hook)).success)
-
-        let response = await responseTask.value
-        #expect(response.success, "error: \(response.error ?? "nil")")
-        #expect(try response.decodeResult(Terminal.self).kind == .claude)
-    }
-
-    /// Admits every start, after running `between` — consulted once
-    /// preparation has read the rollout and before the final fence, so a test
-    /// can change the source in exactly that window.
-    private final class AdmitAfter: StartAdmissionEvaluating {
-        private let between: @Sendable () async throws -> Void
-
-        init(_ between: @escaping @Sendable () async throws -> Void) {
-            self.between = between
-        }
-
-        func evaluate(_ request: StartAdmissionRequest) async -> StartAdmissionVerdict {
-            do {
-                try await between()
-            } catch {
-                Issue.record("changing the source between preparation and the fence failed: \(error)")
-            }
-            return .admit
-        }
-    }
-
-    /// The rollout read in preparation is the idle gate; the final fence holds
-    /// it to the source it read. A turn started since, or any write to the
-    /// row's activity since, refuses before anything is replaced.
-    @Test("the final fence refuses a source that changed after preparation")
-    func finalFenceRefusesASourceChangedAfterPreparation() async throws {
-        do {
-            let fixture = try await makeRPCFixture(ownsPane: true)
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            try await fixture.db.config.setStartAdmissionEnabled(true)
-            let rollout = fixture.rollout
-            fixture.router.startAdmission = AdmitAfter {
-                let started = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"late-turn","started_at":40}}"#
-                let handle = try FileHandle(forWritingTo: rollout)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: Data((started + "\n").utf8))
-            }
-            let before = try #require(
-                try await fixture.db.terminals.get(id: fixture.terminal.id))
-
-            let response = await continueRequest(fixture)
-
-            #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
-            #expect(try await fixture.db.terminals.get(id: before.id) == before)
-            #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-        }
-        do {
-            let fixture = try await makeRPCFixture(ownsPane: true)
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            try await fixture.db.config.setStartAdmissionEnabled(true)
-            let db = fixture.db
-            let terminalID = fixture.terminal.id
-            fixture.router.startAdmission = AdmitAfter {
-                try await db.terminals.setActivityState(
-                    id: terminalID, activityState: .unknown, source: .derived,
-                    observedAt: Date(timeIntervalSinceReferenceDate: 40))
-            }
-
-            let response = await continueRequest(fixture)
-
-            #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
-            let after = try #require(try await fixture.db.terminals.get(id: terminalID))
-            #expect(after.kind == .codex)
-            #expect(after.pendingSessionIncarnationID == nil)
-            #expect(after.activityStateSource == .derived)
-            #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-        }
-    }
-
-    @Test("start admission holds the continuation before the source is replaced")
-    func startAdmissionHoldsTheContinuation() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let stub = StubAdmission(.hold(reason: "camera in use"))
-        fixture.router.startAdmission = stub
-        try await fixture.db.config.setStartAdmissionEnabled(true)
-
-        let response = await continueRequest(fixture)
-
-        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
-        #expect(response.error == "camera in use")
-        #expect(stub.requests.map(\.kind) == [.create])
-        #expect(stub.requests.first?.agent == .claude)
-        #expect(stub.requests.first?.terminalID == fixture.terminal.id)
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-        // The Codex source is exactly as it was.
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
-    }
-
-    /// The Claude destination launches under the pending incarnation that
-    /// finalization promotes to the row. With the flag on, that launch carries
-    /// the session mod and its spawn record — written before the launch —
-    /// names the pending incarnation; with the flag off, neither.
-    @Test("the Claude destination carries the session mod only with the flag on",
-          arguments: [true, false])
-    func continueInClaudeExportsTheMod(flagOn: Bool) async throws {
-        let sessionsDir = try makeSessionsDir()
-        defer { try? FileManager.default.removeItem(at: sessionsDir) }
-        let fixture = try await makeRPCFixture(ownsPane: true, sessionsDir: sessionsDir)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        try await fixture.db.config.setComposerDraftAsTheOnlyModFeature(flagOn)
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalContinueInClaude,
-            params: TerminalContinueInClaudeParams(
-                sourceTerminalID: fixture.terminal.id))
-        let responseTask = Task { await fixture.router.handle(request) }
-        let pending = try await waitForPending(
-            terminalID: fixture.terminal.id, in: fixture.db)
-        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
-            in: fixture.recorder))
-        // The launch has been issued, so whatever it carried is recorded and
-        // the spawn record, if any, is already on disk.
-        let launch = try #require(
-            fixture.recorder.commands.last { $0.contains("respawn-window") })
-        let launchEnv = tmuxEnvironmentFlags(launch)
-        if flagOn {
-            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
-            #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
-            #expect(launchEnv[SessionModSpawn.incarnationVariable] == pending.uuidString)
-            let spawn = try #require(readSpawnRecord(
-                sessionsDir: sessionsDir, sessionID: freshSessionID))
-            #expect(spawn.sessionId == freshSessionID)
-            #expect(spawn.incarnationId == pending.uuidString)
-            #expect(spawn.features == ["composer-draft"])
-        } else {
-            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
-            #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
-            #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
-            #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
-        }
-
-        // Finish the transaction so the request returns.
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: freshSessionID,
-                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: pending))
-        #expect((await fixture.router.handle(hook)).success)
-        let response = await responseTask.value
-        #expect(response.success)
-        #expect(try response.decodeResult(Terminal.self).sessionIncarnationID == pending)
-    }
-
-    @Test("a packet far over tmux's command limit travels as a file and is reclaimed")
-    func largePacketTravelsAsFile() async throws {
-        // tmux rejects a respawn-window command over about 16 KiB ("command
-        // too long"), so a sizeable packet must not ride in the command.
-        let marker = "LARGE-PACKET-MARKER"
-        let fixture = try await makeRPCFixture(
-            ownsPane: true,
-            userMessage: marker + String(repeating: "x", count: 30_000))
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalContinueInClaude,
-            params: TerminalContinueInClaudeParams(
-                sourceTerminalID: fixture.terminal.id))
-        let responseTask = Task { await fixture.router.handle(request) }
-        let pending = try await waitForPending(
-            terminalID: fixture.terminal.id, in: fixture.db)
-        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
-            in: fixture.recorder))
-
-        let lastRespawn = fixture.recorder.commands.last { $0.contains("respawn-window") }
-        let respawn = try #require(lastRespawn)
-        let shellCommand = try #require(respawn.last)
-        let argvBytes = respawn.reduce(0) { $0 + $1.utf8.count }
-        #expect(argvBytes < 15_000,
-                "respawn argv is too large for tmux: \(argvBytes) bytes")
-        #expect(!shellCommand.contains(marker))
-        let afterCat = try #require(
-            shellCommand.components(separatedBy: "\"$(cat '").last)
-        let packetPath = try #require(afterCat.components(separatedBy: "')\"").first)
-        let staged = try String(contentsOfFile: packetPath, encoding: .utf8)
-        #expect(staged.contains(marker))
-        #expect(staged.utf8.count > 20_000)
-
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: freshSessionID,
-                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: pending))
-        #expect((await fixture.router.handle(hook)).success)
-        #expect((await responseTask.value).success)
-        #expect(!FileManager.default.fileExists(atPath: packetPath))
-    }
-
-    @Test("stale continuation packets are pruned and fresh ones are kept")
-    func stalePacketFilesArePruned() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("packet-prune-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let stalePath = try ContinuationPacketFile.write(
-            "old", terminalID: UUID(), directory: directory)
-        let freshPath = try ContinuationPacketFile.write(
-            "new", terminalID: UUID(), directory: directory)
-        let unrelated = directory.appendingPathComponent("unrelated.txt")
-        try "keep".write(to: unrelated, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes(
-            [.modificationDate: Date().addingTimeInterval(-2 * ContinuationPacketFile.staleAge)],
-            ofItemAtPath: stalePath)
-
-        ContinuationPacketFile.pruneStale(directory: directory)
-
-        #expect(!FileManager.default.fileExists(atPath: stalePath))
-        #expect(FileManager.default.fileExists(atPath: freshPath))
-        #expect(FileManager.default.fileExists(atPath: unrelated.path))
-        let mode = try #require(
-            try FileManager.default.attributesOfItem(atPath: freshPath)[.posixPermissions]
-                as? NSNumber)
-        #expect(mode.intValue & 0o077 == 0, "packet files must be owner-only")
-    }
-
-    @Test("strict pane ownership refusal clears the fence without respawning")
-    func rpcOwnershipFenceLeavesCodexUntouched() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: false)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let before = fixture.terminal
-
-        let response = await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalContinueInClaude,
-            params: TerminalContinueInClaudeParams(
-                sourceTerminalID: fixture.terminal.id)))
-
-        #expect(!response.success)
-        #expect(response.errorCode == RPCErrorCode.terminalSessionGone.rawValue)
-        let after = try #require(try await fixture.db.terminals.get(id: before.id))
-        #expect(after.kind == .codex)
-        #expect(after.claudeSessionID == before.claudeSessionID)
-        #expect(after.transcriptPath == before.transcriptPath)
-        #expect(after.sessionIncarnationID == before.sessionIncarnationID)
-        #expect(after.pendingSessionIncarnationID == nil)
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    @Test("an unreadable ownership probe retracts the staged fence")
-    func rpcThrowingOwnershipProbeLeavesCodexUntouched() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, paneProbeThrows: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let before = fixture.terminal
-
-        let response = await continueRequest(fixture)
-
-        #expect(!response.success)
-        let after = try #require(try await fixture.db.terminals.get(id: before.id))
-        #expect(after.kind == .codex)
-        #expect(after.sessionIncarnationID == before.sessionIncarnationID)
-        #expect(after.pendingSessionIncarnationID == nil)
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    @Test("durable pending recovery always restores Codex")
-    func startupRecoveryRestoresSourceIdentity() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        let recoveryTask = Task {
-            await fixture.router.reconcilePendingContinueInClaude()
-        }
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            differentFrom: crashedDestinationToken,
-            in: fixture.db)
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken))
-        #expect((await fixture.router.handle(hook)).success)
-        await recoveryTask.value
-
-        let restored = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(restored.kind == .codex)
-        #expect(restored.claudeSessionID == "codex-thread")
-        #expect(restored.transcriptPath == fixture.rollout.path)
-        #expect(restored.sessionIncarnationID == recoveryToken)
-        #expect(restored.pendingSessionIncarnationID == nil)
-        #expect(try await fixture.db.terminals.list(
-            worktreeID: fixture.terminal.worktreeID).count == 1)
-    }
-
-    private static let launchOptions = CodexLaunchOptions(
-        model: "acme-model", disabledFeatures: ["computer_use"])
-    private static let relaunchWithOptions =
-        #"tbd -c 'model="acme-model"' --disable 'computer_use' --no-daemon --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 'codex-thread'"#
-
-    /// The Codex a recovery restores runs in the same tab, so it keeps the
-    /// model and disabled features the tab was started with.
-    @Test("durable pending recovery restores Codex with its launch options")
-    func startupRecoveryReappliesLaunchOptions() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, codexLaunchOptions: Self.launchOptions)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        let recoveryTask = Task {
-            await fixture.router.reconcilePendingContinueInClaude()
-        }
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            differentFrom: crashedDestinationToken,
-            in: fixture.db)
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken)))).success)
-        await recoveryTask.value
-
-        let relaunch = try #require(
-            fixture.recorder.commands.last { $0.contains("respawn-window") }?.last)
-        #expect(relaunch.contains(Self.relaunchWithOptions))
-        let restored = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(restored.kind == .codex)
-        #expect(restored.codexLaunchOptions == Self.launchOptions)
-    }
-
-    @Test("destination launch failure restores Codex with its launch options")
-    func destinationLaunchFailureReappliesLaunchOptions() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, respawnFailures: 1, codexLaunchOptions: Self.launchOptions)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let responseTask = Task { await continueRequest(fixture) }
-        try await waitForRespawnCount(2, in: fixture.recorder)
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            in: fixture.db)
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken)))).success)
-        #expect(!(await responseTask.value).success)
-
-        let relaunch = try #require(
-            fixture.recorder.commands.last { $0.contains("respawn-window") }?.last)
-        #expect(relaunch.contains(Self.relaunchWithOptions))
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
-            .codexLaunchOptions == Self.launchOptions)
-    }
-
-    /// A dedicated Codex home carries the tab's guard; a Claude process
-    /// would not run under it, so the tab stays on Codex.
-    @Test("a Codex tab with a dedicated home is refused before anything changes")
-    func guardedHomeTabIsRefused() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true,
-            codexLaunchOptions: CodexLaunchOptions(codexHome: "/synthetic/guarded-home"))
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let before = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        let response = await continueRequest(fixture)
-        #expect(!response.success)
-        #expect(response.error?.contains("dedicated Codex home") == true)
-        #expect(try await fixture.db.terminals.get(id: before.id) == before)
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    /// Recovery relaunches Codex in the same tab, so a guarded row whose home
-    /// no longer passes its check stays pending instead of restoring Codex on
-    /// the shared home.
-    @Test("durable pending recovery leaves a guarded row pending when its home lost its guard")
-    func startupRecoveryRefusesUnguardedHome() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true,
-            codexLaunchOptions: CodexLaunchOptions(codexHome: "/synthetic/missing-guarded-home"))
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        await fixture.router.reconcilePendingContinueInClaude()
-
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-        let row = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(row.pendingSessionIncarnationID == crashedDestinationToken)
-        #expect(row.codexLaunchOptions?.codexHome == "/synthetic/missing-guarded-home")
-    }
-
-    /// Once the tab runs Claude, the Codex options no longer describe it.
-    @Test("RPC success clears the Codex launch options")
-    func rpcSuccessClearsLaunchOptions() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, codexLaunchOptions: Self.launchOptions)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let responseTask = Task { await continueRequest(fixture) }
-        let pending = try await waitForPending(
-            terminalID: fixture.terminal.id, in: fixture.db)
-        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
-            in: fixture.recorder))
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: freshSessionID,
-                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: pending)))).success)
-
-        let response = await responseTask.value
-        #expect(response.success)
-        let updated = try response.decodeResult(Terminal.self)
-        #expect(updated.kind == .claude)
-        #expect(updated.codexLaunchOptions == nil)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
-            .codexLaunchOptions == nil)
-    }
-
-    @Test("recovery leaves a live owned pane alone while its rollout shows a turn in flight")
-    func recoveryLeavesBusyLivePaneAlone() async throws {
-        // A daemon that died before the respawn leaves the original Codex
-        // running, and the user may have resumed work in it. Persisted activity
-        // is frozen while the row is pending, so the rollout is the evidence.
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-        let started = """
-            {"type":"event_msg","payload":{"type":"task_started","turn_id":"live-turn","started_at":20}}
-            """
-        try append(started + "\n", to: fixture.rollout)
-
-        await fixture.router.reconcilePendingContinueInClaude()
-
-        let after = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(after.kind == .codex)
-        #expect(after.pendingSessionIncarnationID == crashedDestinationToken,
-                "a deferred recovery must leave the pending row untouched")
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
-        #expect(!fixture.recorder.commands.contains { $0.contains("kill-window") })
-    }
-
-    @Test("recovery adopts a live exact-stamped pane in its actual window")
-    func recoveryAdoptsExactStampedPaneWindow() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, paneWindowID: "@actual")
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        let recoveryTask = Task {
-            await fixture.router.reconcilePendingContinueInClaude()
-        }
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            differentFrom: crashedDestinationToken,
-            in: fixture.db)
-        try await waitForRespawnCount(1, in: fixture.recorder)
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken)))).success)
-        await recoveryTask.value
-
-        let restored = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(restored.tmuxWindowID == "@actual")
-        #expect(restored.tmuxPaneID == "%source")
-        #expect(restored.pendingSessionIncarnationID == nil)
-        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
-        #expect(fixture.recorder.commands.contains {
-            $0.contains("respawn-window") && $0.contains("@actual")
-        })
-    }
-
-    @Test("recovery does not kill the replacement when tmux reuses the stale window id")
-    func recoveryKeepsReplacementWhenTmuxReusesStaleWindowID() async throws {
-        // A restarted tmux server hands the fresh replacement the same
-        // coordinate the dead row still records. Dry-run createWindow's first
-        // id is "@mock-0", so pointing the row at it reproduces that shape.
-        let fixture = try await makeRPCFixture(
-            ownsPane: false,
-            sourceWindowID: "@mock-0",
-            paneTargetOverride: .absent)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        let recoveryTask = Task {
-            await fixture.router.reconcilePendingContinueInClaude()
-        }
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            differentFrom: crashedDestinationToken,
-            in: fixture.db)
-        try await waitForRespawnCount(1, in: fixture.recorder)
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken)))).success)
-        await recoveryTask.value
-
-        let restored = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(restored.kind == .codex)
-        #expect(restored.pendingSessionIncarnationID == nil)
-        #expect(restored.tmuxWindowID == "@mock-0")
-        #expect(fixture.recorder.commands.contains { $0.contains("new-window") })
-        #expect(!fixture.recorder.commands.contains {
-            $0.contains("kill-window") && $0.contains("@mock-0")
-        }, "recovery killed the freshly-created replacement: \(fixture.recorder.commands)")
-        #expect(fixture.recorder.commands.contains {
-            $0.contains("respawn-window") && $0.contains("@mock-0")
-        }, "replacement was not respawned: \(fixture.recorder.commands)")
-    }
-
-    @Test("recovery refuses a live pane whose identity is unavailable")
-    func recoveryFailsClosedForUnstampedLivePane() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: false)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        await fixture.router.reconcilePendingContinueInClaude()
-
-        let pending = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(pending.kind == .codex)
-        #expect(pending.pendingSessionIncarnationID != nil)
-        #expect(pending.pendingSessionIncarnationID != crashedDestinationToken)
-        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    @Test("recovery refuses an unreachable pane read while the tmux server may be alive")
-    func recoveryFailsClosedForUnreachablePane() async throws {
-        // `.unreachable` is a failed read, not evidence the pane is gone, and
-        // the dry-run server presence defaults to `.alive`, so no positive
-        // "no server running" answer exists to justify a second agent window.
-        let fixture = try await makeRPCFixture(
-            ownsPane: false,
-            paneTargetOverride: .unreachable)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let crashedDestinationToken = UUID()
-        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
-            id: fixture.terminal.id,
-            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
-            pendingIncarnationID: crashedDestinationToken))
-
-        await fixture.router.reconcilePendingContinueInClaude()
-
-        let pending = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(pending.kind == .codex)
-        #expect(pending.pendingSessionIncarnationID != nil)
-        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    @Test("an open turn in the rollout refuses continue, whatever the row reads")
-    func authoritativeWorkingRolloutRefusesContinue() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let started = """
-            {"type":"event_msg","payload":{"type":"task_started","turn_id":"live-turn","started_at":20}}
-            """
-        try append(started + "\n", to: fixture.rollout)
-
-        let response = await continueRequest(fixture)
-
-        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
-        let after = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(after.observedActivity?.value == .idle)
-        #expect(after.pendingSessionIncarnationID == nil)
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    @Test("authoritative rollout inspection fails closed while bounded scan is behind")
-    func authoritativeBehindRolloutRefusesContinue() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let bulkyRecord = "{\"type\":\"response_item\",\"padding\":\""
-            + String(repeating: "x", count: 1_100_000) + "\"}\n"
-        try append(bulkyRecord, to: fixture.rollout)
-
-        let response = await continueRequest(fixture)
-
-        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
-            .pendingSessionIncarnationID == nil)
-        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-    }
-
-    @Test("busy, wrong-provider, unreadable-rollout, and missing-profile preflight do not respawn")
-    func preflightRefusalsLeaveSourceUntouched() async throws {
-        do {
-            let fixture = try await makeRPCFixture(ownsPane: true)
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            // Busy is the rollout's open turn.
-            let started = """
-                {"type":"event_msg","payload":{"type":"task_started","turn_id":"busy-turn","started_at":30}}
-                """
-            try append(started + "\n", to: fixture.rollout)
-            let before = try #require(
-                try await fixture.db.terminals.get(id: fixture.terminal.id))
-            let response = await continueRequest(fixture)
-            #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
-            #expect(try await fixture.db.terminals.get(id: before.id) == before)
-            #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
-        }
-        do {
-            let fixture = try await makeRPCFixture(ownsPane: true)
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            let shell = try await fixture.db.terminals.create(
-                worktreeID: fixture.terminal.worktreeID,
-                tmuxWindowID: "@shell",
-                tmuxPaneID: "%shell",
-                label: TerminalLabel.shell,
-                kind: .shell)
-            let before = try #require(
-                try await fixture.db.terminals.get(id: shell.id))
-            let response = await fixture.router.handle(try RPCRequest(
-                method: RPCMethod.terminalContinueInClaude,
-                params: TerminalContinueInClaudeParams(sourceTerminalID: shell.id)))
-            #expect(response.errorCode == RPCErrorCode.terminalWrongProvider.rawValue)
-            #expect(try await fixture.db.terminals.get(id: shell.id) == before)
-        }
-        do {
-            let fixture = try await makeRPCFixture(ownsPane: true)
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            try FileManager.default.removeItem(at: fixture.rollout)
-            let before = try #require(
-                try await fixture.db.terminals.get(id: fixture.terminal.id))
-            let response = await continueRequest(fixture)
-            #expect(!response.success)
-            #expect(try await fixture.db.terminals.get(id: before.id) == before)
-        }
-        do {
-            let fixture = try await makeRPCFixture(ownsPane: true)
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            let before = try #require(
-                try await fixture.db.terminals.get(id: fixture.terminal.id))
-            let response = await fixture.router.handle(try RPCRequest(
-                method: RPCMethod.terminalContinueInClaude,
-                params: TerminalContinueInClaudeParams(
-                    sourceTerminalID: fixture.terminal.id,
-                    profileID: UUID())))
-            #expect(response.errorCode == RPCErrorCode.profileMissing.rawValue)
-            #expect(try await fixture.db.terminals.get(id: before.id) == before)
-        }
-    }
-
-    @Test("destination launch failure restores Codex under a rotated token")
-    func destinationLaunchFailureRollsBack() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, respawnFailures: 1)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let responseTask = Task { await continueRequest(fixture) }
-        try await waitForRespawnCount(2, in: fixture.recorder)
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            in: fixture.db)
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken)))).success)
-
-        let response = await responseTask.value
-        #expect(!response.success)
-        let restored = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(restored.kind == .codex)
-        #expect(restored.sessionIncarnationID == recoveryToken)
-        #expect(restored.pendingSessionIncarnationID == nil)
-        #expect(restored.claudeSessionID == "codex-thread")
-        #expect(restored.transcriptPath == fixture.rollout.path)
-    }
-
-    @Test("destination timeout rolls back and a delayed target hook stays stale")
-    func destinationTimeoutRollsBackAndRejectsDelayedHook() async throws {
-        let fixture = try await makeRPCFixture(ownsPane: true)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        fixture.router.continueInClaudeReadinessTimeout = .seconds(1)
-        let responseTask = Task { await continueRequest(fixture) }
-        let destinationToken = try await waitForPending(
-            terminalID: fixture.terminal.id, in: fixture.db)
-        let recoveryToken = try await waitForPending(
-            terminalID: fixture.terminal.id,
-            differentFrom: destinationToken,
-            in: fixture.db,
-            iterations: 100_000)
-        try await waitForRespawnCount(2, in: fixture.recorder)
-        #expect((await fixture.router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "codex-thread",
-                transcriptPath: fixture.rollout.path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: recoveryToken)))).success)
-        #expect(!(await responseTask.value).success)
-        let restored = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-
-        let delayed = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: fixture.terminal.id,
-                sessionID: "delayed-claude",
-                transcriptPath: fixture.root.appendingPathComponent("delayed.jsonl").path,
-                source: "startup",
-                cwd: fixture.root.path,
-                sessionIncarnationID: destinationToken))
-        #expect((await fixture.router.handle(delayed)).success)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == restored)
-    }
-
-    @Test("failed rollback leaves a durable Codex recovery candidate")
-    func failedRollbackRemainsPending() async throws {
-        let fixture = try await makeRPCFixture(
-            ownsPane: true, respawnFailures: .max)
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let response = await continueRequest(fixture)
-        #expect(!response.success)
-        let pending = try #require(
-            try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(pending.kind == .codex)
-        #expect(pending.pendingSessionIncarnationID != nil)
-        #expect(pending.claudeSessionID == "codex-thread")
-        #expect(pending.transcriptPath == fixture.rollout.path)
-        #expect(try await fixture.db.terminals.listPendingCodexContinuations()
-            .map(\.id) == [fixture.terminal.id])
-    }
-
-    private struct StoreFixture {
-        let root: URL
-        let rollout: URL
-        let db: TBDDatabase
-        let terminal: Terminal
-    }
+    // MARK: - Fixtures
 
     private struct RPCFixture {
         let root: URL
-        let rollout: URL
         let db: TBDDatabase
         let router: RPCRouter
         let recorder: CommandRecorder
-        let deltas: DeltaRecorder
         let terminal: Terminal
     }
 
     private func makeRPCFixture(
-        ownsPane: Bool,
-        respawnFailures: Int = 0,
-        paneWindowID: String = "@source",
-        paneProbeThrows: Bool = false,
-        sourceWindowID: String = "@source",
-        paneTargetOverride: PaneSendTarget? = nil,
-        userMessage: String = "Continue the task.",
-        sessionsDir: URL? = nil,
-        codexLaunchOptions: CodexLaunchOptions? = nil
+        kind: TerminalKind, transport: TerminalTransport
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
-        try await run("/usr/bin/git", ["init", root.path])
-        let rollout = root.appendingPathComponent("rollout.jsonl")
-        let sessionMeta = """
-            {"type":"session_meta","payload":{"id":"codex-thread","cwd":\(json(root.path))}}
-            """
-        let userMessage = """
-            {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":\(json(userMessage))}]}}
-            """
-        let lifecycleClose = """
-            {"type":"event_msg","payload":{"type":"task_complete","turn_id":"ready-turn","started_at":1,"last_agent_message":"Ready."}}
-            """
-        try (sessionMeta + "\n" + userMessage + "\n" + lifecycleClose + "\n").write(
-            to: rollout, atomically: true, encoding: .utf8)
-
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: root.path,
@@ -1118,54 +291,24 @@ struct ContinueInClaudeTransactionTests {
             branch: "feature/sample",
             path: root.path,
             tmuxServer: "continue-rpc")
-        let terminalID = UUID()
         let recorder = CommandRecorder()
-        let failurePlan = FailurePlan(respawnFailures)
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: recorder.append,
-            dryRunRespawnWindowError: { _ in failurePlan.next() },
-            dryRunPaneSendTarget: { _, _ in
-                if paneProbeThrows { throw FailurePlan.Failure.injected }
-                if let paneTargetOverride { return paneTargetOverride }
-                return .live(terminalID: ownsPane ? terminalID.uuidString : nil)
-            },
-            dryRunPaneWindowID: { _, _ in paneWindowID })
-        let subscriptions = StateSubscriptionManager()
-        let deltas = DeltaRecorder()
-        subscriptions.addSubscriber { data in
-            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
-                deltas.append(delta)
-            }
-            return true
-        }
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder.append)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
-            subscriptions: subscriptions,
             configDirManager: isolatedConfigDirManager(),
-            sessionsDir: sessionsDir ?? root.appendingPathComponent("sessions", isDirectory: true),
+            sessionsDir: root.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: makeTestActuationLog())
-        router.codexExecutableResolver = { "/opt/test/bin/codex" }
-        router.codexHomeEnsurer = {
-            root.appendingPathComponent("codex-home", isDirectory: true)
-        }
         let created = try await db.terminals.create(
-            id: terminalID,
             worktreeID: worktree.id,
-            tmuxWindowID: sourceWindowID,
-            tmuxPaneID: "%source",
-            label: TerminalLabel.codex,
-            kind: .codex,
-            codexLaunchOptions: codexLaunchOptions)
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: created.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: created),
-            sessionID: "codex-thread",
-            transcriptPath: rollout.path,
-            observedAt: Date(timeIntervalSinceReferenceDate: 5)))
+            tmuxWindowID: transport == .holder ? "" : "@source",
+            tmuxPaneID: transport == .holder ? "" : "%source",
+            label: kind == .codex ? TerminalLabel.codex : TerminalLabel.claudeCode,
+            claudeSessionID: "source-thread",
+            kind: kind,
+            transport: transport)
         try await db.terminals.setActivityState(
             id: created.id,
             activityState: .idle,
@@ -1173,13 +316,7 @@ struct ContinueInClaudeTransactionTests {
             observedAt: Date(timeIntervalSinceReferenceDate: 10))
         let terminal = try #require(try await db.terminals.get(id: created.id))
         return RPCFixture(
-            root: root,
-            rollout: rollout,
-            db: db,
-            router: router,
-            recorder: recorder,
-            deltas: deltas,
-            terminal: terminal)
+            root: root, db: db, router: router, recorder: recorder, terminal: terminal)
     }
 
     private func continueRequest(_ fixture: RPCFixture) async -> RPCResponse {
@@ -1189,87 +326,11 @@ struct ContinueInClaudeTransactionTests {
                 sourceTerminalID: fixture.terminal.id)))
     }
 
-    private func waitForPending(
-        terminalID: UUID,
-        differentFrom oldToken: UUID? = nil,
-        in db: TBDDatabase,
-        iterations: Int = 100_000
-    ) async throws -> UUID {
-        for _ in 0..<iterations {
-            if let token = try await db.terminals.get(id: terminalID)?
-                .pendingSessionIncarnationID,
-               token != oldToken {
-                return token
-            }
-            await Task.yield()
-        }
-        Issue.record("replacement never persisted a pending incarnation")
-        throw CancellationError()
-    }
-
-    private func waitForRespawnCount(
-        _ count: Int,
-        in recorder: CommandRecorder
-    ) async throws {
-        let deadline = TestDeadlines.saturatedPass
-        let outcome = await pollUntilTrue(
-            timeout: deadline,
-            pollInterval: .milliseconds(10)
-        ) {
-            recorder.commands.filter { $0.contains("respawn-window") }.count >= count
-        }
-        switch outcome {
-        case .satisfied:
-            return
-        case .cancelled:
-            throw CancellationError()
-        case .timedOut:
-            let observed = recorder.commands.filter {
-                $0.contains("respawn-window")
-            }.count
-            throw BoundedWaitTimeout(
-                what: "replacement to reach respawn count \(count)",
-                observed: "\(observed) respawns",
-                deadline: deadline)
-        }
-    }
-
-    private func waitForFreshClaudeSessionID(
-        in recorder: CommandRecorder
-    ) async -> String? {
-        _ = await pollUntilTrue(
-            timeout: TestDeadlines.saturatedPass,
-            pollInterval: .milliseconds(10)
-        ) {
-            recorder.freshClaudeSessionID != nil
-        }
-        return recorder.freshClaudeSessionID
-    }
-
-    private func json(_ value: String) -> String {
-        let data = try! JSONSerialization.data(withJSONObject: [value])
-        let array = String(decoding: data, as: UTF8.self)
-        return String(array.dropFirst().dropLast())
-    }
-
-    /// Runs `executable` to completion, discarding its output, and waits
-    /// through `collectOutput(of:)` so the wait parks no cooperative-pool
-    /// thread.
-    private func run(_ executable: String, _ arguments: [String]) async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let output = try await collectOutput(of: process)
-        guard output.status == 0 else {
-            throw CocoaError(.executableRuntimeMismatch)
-        }
-    }
-
-    private func append(_ value: String, to url: URL) throws {
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data(value.utf8))
+    private struct StoreFixture {
+        let root: URL
+        let rollout: URL
+        let db: TBDDatabase
+        let terminal: Terminal
     }
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {

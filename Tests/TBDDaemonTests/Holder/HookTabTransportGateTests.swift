@@ -15,11 +15,12 @@ extension TBDHomeSerialized {
 /// a hook tab's *transport* changes what the lifecycle does to it: the liveness
 /// probe that decides `.paneKilled`, and the teardown.
 ///
-/// A real holder needs a `TBDHolder` binary, so the flag-on branch is reached
-/// the way `TerminalCreateTransportGateTests` reaches it — a registry that
-/// cannot spawn (tmux fallback) and a spawner whose executable does not exist
-/// (the holder path is taken, and fails). The probe and the teardown are
-/// asserted against holder ROWS, which need no live process at all.
+/// A real holder needs a `TBDHolder` binary, so the gate's branches are reached
+/// the way `TerminalCreateTransportGateTests` reaches them — the holder spawn
+/// double (the tab lands), a registry that cannot spawn (refused), and a
+/// spawner whose executable does not exist (the holder path is taken, and
+/// fails). The probe and the teardown are asserted against holder ROWS, which
+/// need no live process at all.
 @Suite("Hook-tab transport gate")
 struct HookTabTransportGateTests {
 
@@ -70,45 +71,74 @@ struct HookTabTransportGateTests {
 
     // MARK: - Spawn
 
-    /// Flag on, nothing to spawn with: the hook tab is created on tmux, the
-    /// same fallback every other spawn path takes. A refusal here would block
-    /// worktree creation outright.
-    @Test("flag on with a registry that cannot spawn puts the hook tab on tmux")
-    func flagOnWithoutASpawnerFallsBackToTmux() async throws {
+    /// A registry that can spawn: the hook tab opens on a holder, carrying the
+    /// spawn's pids in its descriptor and its row, and tmux is never asked.
+    @Test("a registry that can spawn puts the hook tab on a holder")
+    func aRegistryThatCanSpawnPutsTheHookTabOnAHolder() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture()
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
-        try await fx.db.config.setPtyHolderEnabled(true)
         try await installPreSessionHook(repoDir: fx.repoDir)
-        let scratch = fencedScratchRoot(prefix: "tbdhtg")
-        defer { try? FileManager.default.removeItem(atPath: scratch) }
 
-        var lifecycle = makeLifecycle(db: fx.db)
-        lifecycle.holderRegistry = Self.registry(spawner: nil, home: scratch)
+        let recorder = PreSessionRecordedCommands()
+        let launch = FakeHolderLaunch()
+        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder)
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: launch)
 
         let spawn = try #require(try await lifecycle.spawnPreSessionTerminal(
             worktree: fx.worktree, repo: fx.repo, worktreePath: fx.repoDir.path))
 
-        #expect(spawn.transport == .tmux)
-        #expect(spawn.holderPID == nil)
-        #expect(spawn.childPID == nil)
-        #expect(!spawn.windowID.isEmpty)
+        let started = try #require(launch.launch(for: spawn.terminalID))
+        #expect(spawn.transport == .holder)
+        #expect(spawn.holderPID == started.handle.holderPID)
+        #expect(spawn.childPID == started.handle.childPID)
+        #expect(spawn.windowID.isEmpty)
         let row = try #require(try await fx.db.terminals.get(id: spawn.terminalID))
-        #expect(row.transport == .tmux)
+        #expect(row.transport == .holder)
         #expect(row.label == TerminalLabel.preSession)
+        #expect(
+            !recorder.snapshot().contains { $0.contains("new-window") || $0.contains("new-session") },
+            "a holder hook tab opened tmux: \(recorder.snapshot())")
     }
 
-    /// Flag on with a spawner that cannot start anything: the holder path IS
-    /// taken — that is what the throw proves — and it fails before any row, so
-    /// nothing is left claiming a tab that never opened.
+    /// Nothing to spawn with: the hook tab is refused with the gate's reason,
+    /// before any row or tmux server exists, and worktree creation fails with
+    /// the same words.
+    @Test("a registry that cannot spawn refuses the hook tab")
+    func aRegistryThatCannotSpawnRefusesTheHookTab() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let fx = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+        try await installPreSessionHook(repoDir: fx.repoDir)
+        let scratch = fencedScratchRoot(prefix: "tbdhtg")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+
+        let recorder = PreSessionRecordedCommands()
+        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder)
+        lifecycle.holderRegistry = Self.registry(spawner: nil, home: scratch)
+
+        await #expect(throws: TerminalSpawnRefusal.holderUnavailable) {
+            _ = try await lifecycle.spawnPreSessionTerminal(
+                worktree: fx.worktree, repo: fx.repo, worktreePath: fx.repoDir.path)
+        }
+
+        #expect(try await fx.db.terminals.list(worktreeID: fx.worktree.id).isEmpty)
+        #expect(
+            !recorder.snapshot().contains { $0.contains("new-window") || $0.contains("new-session") },
+            "a refused hook tab opened tmux: \(recorder.snapshot())")
+    }
+
+    /// A spawner that cannot start anything: the holder path IS taken — that
+    /// is what the throw proves — and it fails before any row, so nothing is
+    /// left claiming a tab that never opened.
     @Test("a holder hook-tab spawn failure throws and leaves no terminal row")
     func holderSpawnFailureLeavesNoRow() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
         let fx = try await makeWorktreeFixture()
         defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
-        try await fx.db.config.setPtyHolderEnabled(true)
         try await installPreSessionHook(repoDir: fx.repoDir)
         let scratch = fencedScratchRoot(prefix: "tbdhtg")
         defer { try? FileManager.default.removeItem(atPath: scratch) }
@@ -126,8 +156,8 @@ struct HookTabTransportGateTests {
             thrown = error
         }
         #expect(
-            thrown != nil,
-            "the hook-tab spawn did not take the holder path — it succeeded on tmux instead")
+            thrown != nil && !(thrown is TerminalSpawnRefusal),
+            "the hook-tab spawn did not fail at the holder launch: \(String(describing: thrown))")
 
         #expect(try await fx.db.terminals.list(worktreeID: fx.worktree.id).isEmpty)
         #expect(
@@ -323,9 +353,8 @@ struct HookTabTransportGateTests {
 
         let recorder = PreSessionRecordedCommands()
         var lifecycle = makeLifecycle(db: fx.db, recorder: recorder, timeout: 2)
-        // Pinned rather than assumed: the branch under test is the one a daemon
-        // in mock mode takes, and it must stay reachable if `makeLifecycle`
-        // ever starts wiring a registry.
+        // `makeLifecycle` wires a registry; the branch under test is the one a
+        // lifecycle with none takes.
         lifecycle.holderRegistry = nil
 
         // The cascade a repo removal performs mid-wait: the worktree row goes,

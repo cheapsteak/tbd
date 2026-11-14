@@ -203,8 +203,8 @@ struct WorktreeReviveFreshTests {
         _ = try installGeneratedBranchCollisionHook(repoDir: repoDir, rejections: 2)
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedSource(
             db: db,
@@ -230,9 +230,8 @@ struct WorktreeReviveFreshTests {
         // on the claude invocation itself rather than on any prompt wording —
         // the carryover spawn no longer sends a prompt, so a text-based check
         // here would pass for the wrong reason.
-        #expect(
-            recorder.snapshot().compactMap(\.last).contains { $0.contains("claude ") } == false
-        )
+        let claudeSpawn = launchedCommand(holder, containing: "claude ")
+        #expect(claudeSpawn == nil, "a failed revive spawned a conversation: \(claudeSpawn ?? "")")
         let worktreeRoot = try #require(repo.worktreeRoot)
         let createdPaths = try FileManager.default.contentsOfDirectory(atPath: worktreeRoot)
         #expect(createdPaths.isEmpty)
@@ -271,8 +270,8 @@ struct WorktreeReviveFreshTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedSource(
             db: db,
@@ -323,12 +322,7 @@ struct WorktreeReviveFreshTests {
         #expect(claudeTerminals.first?.claudeSessionID == "A")
 
         let shortRemoteSHA = String(remoteSHA.prefix(7))
-        let claudeCommand = try #require(
-            recorder.snapshot()
-                .filter { $0.contains("new-window") }
-                .compactMap(\.last)
-                .first { $0.contains("claude ") }
-        )
+        let claudeCommand = try #require(launchedCommand(holder, containing: "claude "))
         #expect(claudeCommand.contains("--resume A"))
         #expect(claudeCommand.contains("--fork-session"))
         // The revived session opens idle at the composer — no trailing prompt
@@ -384,8 +378,8 @@ struct WorktreeReviveFreshTests {
             claudeSettingsOverlay: #"{"acmeSession":"B"}"#, pluginDirs: [plugB.path])
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedSource(
             db: db,
@@ -414,12 +408,7 @@ struct WorktreeReviveFreshTests {
         #expect(claude.claudeSpawnExtras == extrasA)
         #expect(try await db.terminals.get(id: claude.id)?.claudeSpawnExtras == extrasA)
 
-        let command = try #require(
-            recorder.snapshot()
-                .filter { $0.contains("new-window") }
-                .compactMap(\.last)
-                .first { $0.contains("claude ") }
-        )
+        let command = try #require(launchedCommand(holder, containing: "claude "))
         #expect(command.contains("--resume A"), "\(command)")
         #expect(command.contains("--fork-session"), "\(command)")
         #expect(
@@ -497,8 +486,7 @@ struct WorktreeReviveFreshTests {
         try await installPreSessionHook(repoDir: repoDir)
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let lifecycle = makeReviveFreshLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let archived = try await makeArchivedSource(
             db: db,
@@ -738,10 +726,10 @@ struct WorktreeReviveFreshTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let db = try TBDDatabase(inMemory: true)
         let profileID = try await seedDefaultOAuthProfile(db: db)
-        let recorder = PreSessionRecordedCommands()
+        let holder = FakeHolderLaunch()
         let lifecycle = makeReviveFreshLifecycle(
             db: db,
-            recorder: recorder,
+            holder: holder,
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config
             ),
@@ -780,12 +768,7 @@ struct WorktreeReviveFreshTests {
             FileManager.default.fileExists(
                 atPath: derived.appendingPathComponent("A.jsonl").path)
         )
-        let claudeCommand = try #require(
-            recorder.snapshot()
-                .filter { $0.contains("new-window") }
-                .compactMap(\.last)
-                .first { $0.contains("claude ") }
-        )
+        let claudeCommand = try #require(launchedCommand(holder, containing: "claude "))
         #expect(claudeCommand.contains("--resume A"))
         #expect(claudeCommand.contains("--fork-session"))
         #expect(
@@ -887,10 +870,11 @@ struct WorktreeReviveFreshTests {
         // Advance the default branch after the source was archived.
         try await shell("git commit --allow-empty -m 'current base'", at: repoDir)
         let currentSHA = try await GitManager().headSHA(repoPath: repoDir.path)
-        let recorder = PreSessionRecordedCommands()
-        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let holder = FakeHolderLaunch()
+        let lifecycle = makeReviveFreshLifecycle(db: db, holder: holder)
         let router = RPCRouter(db: db, lifecycle: lifecycle, tmux: lifecycle.tmux,
             actuationLog: makeTestActuationLog())
+        router.holderRegistry = lifecycle.holderRegistry
         let admission = StubAdmission(.admit)
         router.startAdmission = admission
         try await db.config.setStartAdmissionEnabled(true)
@@ -913,16 +897,19 @@ struct WorktreeReviveFreshTests {
         #expect(terminal.kind == .codex)
         #expect(terminal.claudeSessionID == "native-thread")
         #expect(terminal.codexLaunchOptions == options)
-        let spawn = try #require(recorder.snapshot().first {
-            $0.contains("new-window") && ($0.last?.contains("resume ") ?? false) && ($0.last?.contains("native-thread") ?? false)
-        })
-        let command = try #require(spawn.last)
+        #expect(terminal.transport == .holder)
+        let spawn = try #require(holder.launch(for: terminal.id))
+        let command = try #require(spawn.commandLine)
+        #expect(command.contains("resume ") && command.contains("native-thread"), "\(command)")
         #expect(command.contains("acme-model"))
         #expect(command.contains("--disable") && command.contains("example_feature"))
         #expect(!command.contains("--fork-session"))
         #expect(!command.contains(" -- "))
-        #expect(spawn.contains("DISABLE_AUTO_UPDATE=true"))
-        #expect(spawn.contains("CODEX_HOME=\(codexHome.path)") || command.contains(codexHome.path))
+        // The job's process environment, where the tmux transport's `-e`
+        // pairs went.
+        let jobEnvironment = spawn.request.environment
+        #expect(jobEnvironment["DISABLE_AUTO_UPDATE"] == "true")
+        #expect(jobEnvironment["CODEX_HOME"] == codexHome.path || command.contains(codexHome.path))
         #expect(try await db.localAgentSessions.get(worktreeID: source.id, identity: identity) == association)
         #expect(try await db.localAgentSessions.list(worktreeID: result.worktree.id).isEmpty)
         let note = try #require(try await db.notes.list(worktreeID: result.worktree.id).first)
@@ -1011,29 +998,22 @@ struct WorktreeReviveFreshTests {
             params: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self))
     }
 
+    /// Every spawn goes through the holder spawn double `holder`, whose
+    /// `launches` record what each tab was asked to run. Pass the same
+    /// registry to any router built over this lifecycle.
     private func makeReviveFreshLifecycle(
         db: TBDDatabase,
-        recorder: PreSessionRecordedCommands? = nil,
+        holder: FakeHolderLaunch = FakeHolderLaunch(),
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
         configDirManager: ClaudeProfileConfigDirManager? = nil
     ) -> WorktreeLifecycle {
         let claudeHome = TBDConstants.configDir
             .appendingPathComponent("claude-home", isDirectory: true)
-        let dryRunRecorder: (@Sendable ([String]) -> Void)?
-        if let recorder {
-            dryRunRecorder = { arguments in recorder.append(arguments) }
-        } else {
-            dryRunRecorder = nil
-        }
-        let tmux = TmuxManager(
-            dryRun: true,
-            dryRunRecorder: dryRunRecorder
-        )
-        return WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: tmux,
+            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             subscriptions: subscriptions,
             modelProfileResolver: modelProfileResolver,
@@ -1043,9 +1023,23 @@ struct WorktreeReviveFreshTests {
                     hostBaseDirectory: claudeHome
                 ),
             preSessionPollInterval: 0.05,
+            // The pre-session wait reads the hook tab's job pid, which the
+            // double's pids never name, so the double's jobs read as running
+            // and the hook ends only when a test writes its marker.
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning,
             codexExecutableResolver: { "/usr/bin/true" },
             codexHomeEnsurer: { TBDConstants.configDir.appendingPathComponent("codex") }
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        return lifecycle
+    }
+
+    /// The first command line the double was asked to run that contains
+    /// `fragment`, or nil when none did.
+    private func launchedCommand(
+        _ holder: FakeHolderLaunch, containing fragment: String
+    ) -> String? {
+        holder.launches.compactMap(\.commandLine).first { $0.contains(fragment) }
     }
 
     private func makeReviveFreshRouter(
@@ -1063,13 +1057,15 @@ struct WorktreeReviveFreshTests {
             db: db,
             subscriptions: subscriptions
         )
-        return RPCRouter(
+        let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
             tmux: lifecycle.tmux,
             subscriptions: subscriptions,
             actuationLog: makeTestActuationLog()
         )
+        router.holderRegistry = lifecycle.holderRegistry
+        return router
     }
 
     private func makeArchivedSource(

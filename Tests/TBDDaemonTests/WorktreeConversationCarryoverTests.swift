@@ -20,10 +20,10 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        let recorder = PreSessionRecordedCommands()
+        let holder = FakeHolderLaunch()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
-            db: db, recorder: recorder, claudeHome: claudeHome
+            db: db, holder: holder, claudeHome: claudeHome
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
@@ -50,7 +50,7 @@ struct WorktreeConversationCarryoverTests {
 
         try await assertCarriedConversation(
             db: db,
-            recorder: recorder,
+            holder: holder,
             worktree: pending,
             sourceSessionID: sourceSessionID,
             notesSeed: notesSeed,
@@ -66,10 +66,10 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.codex)
-        let recorder = PreSessionRecordedCommands()
+        let holder = FakeHolderLaunch()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
-            db: db, recorder: recorder, claudeHome: claudeHome
+            db: db, holder: holder, claudeHome: claudeHome
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
@@ -99,7 +99,7 @@ struct WorktreeConversationCarryoverTests {
 
         try await assertCarriedConversation(
             db: db,
-            recorder: recorder,
+            holder: holder,
             worktree: pending,
             sourceSessionID: sourceSessionID,
             notesSeed: notesSeed,
@@ -117,7 +117,7 @@ struct WorktreeConversationCarryoverTests {
         try await db.config.setPrimaryAgentPreference(.codex)
         let lifecycle = makeCarryoverLifecycle(
             db: db,
-            recorder: PreSessionRecordedCommands(),
+            holder: FakeHolderLaunch(),
             claudeHome: tempDir.appendingPathComponent("claude-home", isDirectory: true)
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -145,10 +145,10 @@ struct WorktreeConversationCarryoverTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let recorder = PreSessionRecordedCommands()
+        let holder = FakeHolderLaunch()
         let claudeHome = tempDir.appendingPathComponent("claude-home", isDirectory: true)
         let lifecycle = makeCarryoverLifecycle(
-            db: db, recorder: recorder, claudeHome: claudeHome
+            db: db, holder: holder, claudeHome: claudeHome
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         // Display name deliberately differs from `name`: the `--name` assertion
@@ -171,12 +171,7 @@ struct WorktreeConversationCarryoverTests {
             preSessionTerminalID: nil
         )
 
-        let command = try #require(
-            recorder.snapshot()
-                .filter { $0.contains("new-window") }
-                .compactMap(\.last)
-                .first { $0.contains("claude ") }
-        )
+        let command = try #require(claudeCommandLine(holder))
         #expect(command.contains("--resume ARCHIVED-1"))
         #expect(!command.contains("--fork-session"))
         #expect(
@@ -204,10 +199,10 @@ struct WorktreeConversationCarryoverTests {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPrimaryAgentPreference(.claude)
-        let recorder = PreSessionRecordedCommands()
+        let holder = FakeHolderLaunch()
         let lifecycle = makeCarryoverLifecycle(
             db: db,
-            recorder: recorder,
+            holder: holder,
             claudeHome: tempDir.appendingPathComponent("claude-home", isDirectory: true)
         )
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
@@ -219,12 +214,7 @@ struct WorktreeConversationCarryoverTests {
             carryover: nil
         )
 
-        let command = try #require(
-            recorder.snapshot()
-                .filter { $0.contains("new-window") }
-                .compactMap(\.last)
-                .first { $0.contains("claude ") }
-        )
+        let command = try #require(claudeCommandLine(holder))
         #expect(command.contains("--session-id "))
         #expect(!command.contains("--resume "))
         #expect(command.hasSuffix(" 'do the thing'"))
@@ -263,25 +253,33 @@ struct WorktreeConversationCarryoverTests {
         #expect(!isPromptFreeResumeInvocation(escaped + " 'anything at all'", forkSession: true))
     }
 
+    /// Spawns go to the holder spawn double (`holder.launches`), and a hook
+    /// tab's job reads as running until the test writes its marker: the
+    /// double's pids name no process.
     private func makeCarryoverLifecycle(
         db: TBDDatabase,
-        recorder: PreSessionRecordedCommands,
+        holder: FakeHolderLaunch,
         claudeHome: URL
     ) -> WorktreeLifecycle {
-        WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(),
-            tmux: TmuxManager(
-                dryRun: true,
-                dryRunRecorder: { recorder.append($0) }
-            ),
+            tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(),
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: claudeHome.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: claudeHome
             ),
-            preSessionPollInterval: 0.05
+            preSessionPollInterval: 0.05,
+            processSignaller: ScriptedLivenessSignaller.doubleJobsRunning
         )
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: holder)
+        return lifecycle
+    }
+
+    /// The command line of the first spawn that runs claude.
+    private func claudeCommandLine(_ holder: FakeHolderLaunch) -> String? {
+        holder.launches.compactMap(\.commandLine).first { $0.contains("claude ") }
     }
 
     private func writeSourceTranscript(sessionID: String, projectsRoot: URL) throws {
@@ -297,7 +295,7 @@ struct WorktreeConversationCarryoverTests {
 
     private func assertCarriedConversation(
         db: TBDDatabase,
-        recorder: PreSessionRecordedCommands,
+        holder: FakeHolderLaunch,
         worktree: Worktree,
         sourceSessionID: String,
         notesSeed: String,
@@ -309,9 +307,8 @@ struct WorktreeConversationCarryoverTests {
         let primary = try #require(claudeTerminals.first)
         #expect(primary.claudeSessionID == sourceSessionID)
 
-        let claudeCommands = recorder.snapshot()
-            .filter { $0.contains("new-window") }
-            .compactMap(\.last)
+        let claudeCommands = holder.launches
+            .compactMap(\.commandLine)
             .filter { $0.contains("claude ") }
         #expect(claudeCommands.count == 1)
         let command = try #require(claudeCommands.first)

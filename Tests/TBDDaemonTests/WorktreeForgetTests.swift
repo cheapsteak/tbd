@@ -17,12 +17,13 @@ import Testing
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
+    var lifecycle = WorktreeLifecycle(
         db: db,
         git: GitManager(),
         tmux: TmuxManager(dryRun: true),
         hooks: HookResolver()
     )
+    lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
 
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)

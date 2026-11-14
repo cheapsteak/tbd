@@ -115,10 +115,12 @@ struct WorktreeArchiveUncommittedGuardTests {
         let db = try TBDDatabase(inMemory: true)
         // A global hooks directory that does not exist, so the only archive
         // hook that can resolve is one a test installs in the worktree.
-        let lifecycle = WorktreeLifecycle(
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
             hooks: HookResolver(
                 globalHooksDir: tempDir.appendingPathComponent("no-global-hooks").path))
+        lifecycle.holderRegistry = registry
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
         let actuationLogPath = tempDir
@@ -128,6 +130,7 @@ struct WorktreeArchiveUncommittedGuardTests {
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: TmuxManager(dryRun: true),
             subscriptions: StateSubscriptionManager(), actuationLog: actuationLog)
+        router.holderRegistry = registry
         return Fixture(
             tempDir: tempDir, db: db, lifecycle: lifecycle, router: router,
             actuationLog: actuationLog, actuationLogPath: actuationLogPath,
