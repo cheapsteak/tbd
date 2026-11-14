@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import TerminalCorpus
 import TestSupport
 import Testing
 

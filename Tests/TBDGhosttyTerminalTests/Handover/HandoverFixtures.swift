@@ -2,6 +2,7 @@
 // once per process, and the threads the suites run their bodies on.
 import Foundation
 import Synchronization
+import TerminalCorpus
 import TestSupport
 import Testing
 

@@ -22,6 +22,7 @@ included:
   - Tests/TBDHolderTests
   - Tests/TBDPeerHelperTests
   - Tests/TBDGhosttyTerminalTests
+  - Tests/TerminalCorpus
   - Tests/TestSupport
   - Tests/DaemonTestSupport
 

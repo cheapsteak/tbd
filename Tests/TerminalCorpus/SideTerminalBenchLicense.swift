@@ -1,7 +1,7 @@
 // The notice and licence for the code HandoverCorpus.swift adapts from side-terminal-bench
 // (https://github.com/gazishahi/side-terminal-bench, commit f94797090bac3d9e7585dbf1756d6684a18376da):
 // the LCG and the colors, unicode, cursor, tui and scroll workloads. Kept as a Swift comment so the
-// test target needs no resource rule for it. This file declares nothing.
+// corpus target needs no resource rule for it. This file declares nothing.
 //
 // NOTICE
 //

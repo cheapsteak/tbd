@@ -261,7 +261,7 @@ for information. It is not a gate.
 
   The results must be equal, except for a listed set of expected misses, each with its
   reason in the test file, as `HandoverCorpusTests` already does. The streams are the
-  handover corpus (`Tests/TBDGhosttyTerminalTests/Handover/Corpus/HandoverCorpus.swift`,
+  handover corpus (`Tests/TerminalCorpus/HandoverCorpus.swift`,
   111 states) plus new recordings: Claude Code against the fake model API
   (`scripts/claude-stub.py`), and scripted shell sessions in `vim`, `less` and a colour log.
   The repository is public, so no recording comes from a real session, and every recording

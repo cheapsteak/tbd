@@ -387,6 +387,14 @@ let package = Package(
             ],
             path: "Tests/DaemonTestSupport"
         ),
+        // The handover corpus: the libghostty proof of concept's generated terminal states, as
+        // named byte sequences. A target of its own, depending on nothing, so the libghostty
+        // engine's suites and the daemon's feed the same bytes without either test target
+        // depending on the other. Test-only.
+        .target(
+            name: "TerminalCorpus",
+            path: "Tests/TerminalCorpus"
+        ),
         // User defaults the test process must register before any test runs,
         // as the app registers them in `applicationWillFinishLaunching`: a
         // constructor in this target runs when the test bundle loads. AppKit
@@ -535,6 +543,8 @@ let package = Package(
                 "TestSupport",
                 // The handover suites hold the libghostty walks and handback to SwiftTerm's.
                 "TBDTerminalSerialization",
+                // The states the handover suites run, shared with the daemon's suites.
+                "TerminalCorpus",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
