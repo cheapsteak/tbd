@@ -391,13 +391,16 @@ final class GhosttyEngine: TerminalEngine {
     /// would let the preamble's first ESC end that sequence on the fresh
     /// screen: a cut OSC 8 would put its link on every cell the preamble
     /// writes. The CAN first returns the parser to ground from any state. It
-    /// drops an unfinished OSC unread, ends a DCS as it stands (a cut DECRQSS
-    /// answers), and ends a partial UTF-8 character as U+FFFD at the old
-    /// cursor. The reset then clears whatever the CAN left on the screen.
+    /// ends an unfinished OSC or DCS as it stands (a cut DECRQSS answers),
+    /// runs a cut kitty graphics APC, drops a cut CSI, and ends a partial
+    /// UTF-8 character as U+FFFD at the old cursor. The reset then clears
+    /// what those changed on the screen: the link on the pen, the title, the
+    /// images, the stray character. Colours a cut OSC 4, 10, 11 or 12 sets
+    /// survive the reset, as they would if the preamble's ESC had ended it.
     ///
     /// The mute keeps what the two provoke from the delegate: a reply to a
-    /// DCS the CAN ended, and the program status clear libghostty reports for
-    /// RIS.
+    /// sequence the CAN ended, and the program status clear libghostty
+    /// reports for RIS.
     ///
     /// Two calls rather than one lock hold, because no feed can land between
     /// them: like `ingestSnapshot(_:)`, this runs before live output is wired
