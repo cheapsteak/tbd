@@ -63,11 +63,14 @@ scanned and the run fails if it holds the user's name, the host's name, a home
 path (`/Users/...`, `/home/...`), the temporary directory's path, an email
 address, a date or a time of day, or any word listed in the environment
 variable `EMULATOR_PARITY_PRIVATE_WORDS` (comma-separated: an employer, a
-client, anything this repository may not name). Every check reads each
-recording three ways: as raw bytes, as printed text with each escape sequence
-and control replaced by a space, and as printed text with escape sequences,
-controls and line ends removed, so a word that a colour change or a line end
-cuts in two is still found. Claude Code runs with its own
+client, anything this repository may not name). The names, home paths and
+email addresses are looked for in four readings of each recording, described at
+`privacy_findings`, so a word is found when escape sequences sit between its
+letters, when it wraps onto the next line after an indent or a box border, or
+when it is styled a letter at a time and a cursor move sits beside it. Dates and
+times of day are looked for in the printed text and in the OSC payloads, where
+escape parameters, colour specifications and line ends cannot read as one.
+Claude Code runs with its own
 `HOME` and `CLAUDE_CONFIG_DIR` inside the sandbox and never sees the real
 configuration, and its only network peer is the stub on loopback.
 
@@ -477,11 +480,9 @@ def is_wide(char: str) -> bool:
 
 
 def strip_escapes(data: bytes, separator: str = "") -> str:
-    """The printed text: every escape sequence and control replaced by
-    `separator`. The privacy scan reads it both ways. With a space, because a
-    TUI moves the cursor between words instead of printing spaces, and a word
-    glued to its neighbours would slip past a whole-word match; and with
-    nothing, because an escape sequence can also cut a word in two."""
+    """The printed text: every escape sequence and control other than a tab or
+    a line feed replaced by `separator`. The privacy scan reads it with a space
+    and with nothing; see `privacy_findings`."""
     text = data.decode("utf-8", "replace")
     text = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)", separator, text)
     text = re.sub(r"\x1b[P_^X][^\x1b]*\x1b\\", separator, text)
@@ -502,6 +503,20 @@ DATE_PATTERNS = [
 TIME_PATTERN = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?\b|\b(1[0-2]|0?[1-9]) ?[ap]\.?m\.?\b", re.IGNORECASE)
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 HOME_PATTERN = re.compile(r"/Users/|/home/[a-z]|/var/folders/|/private/var/")
+# Sequences that leave the cursor where it is: OSC and the other string
+# sequences, SGR, mode changes, character set designations, and SO and SI.
+CURSOR_STILL = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[P_^X][^\x1b]*\x1b\\"
+    r"|\x1b\[[0-?]*[ -/]*[mhl]"
+    r"|\x1b[()*+\-./][ -/]*[0-~]"
+    r"|[\x0e\x0f]"
+)
+# A line end with the padding or box border on either side of it: a word a TUI
+# wraps onto the next row of a box reads as one word without them.
+LINE_BREAK = re.compile(r"[ \t│┃▎|]*\n[ \t│┃▎|]*")
+OSC_PAYLOAD = re.compile(r"\x1b\][^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)")
+COLOUR_SPEC = re.compile(r"\brgb[ai]?:[0-9a-f./]*|#[0-9a-f]{3,12}\b", re.IGNORECASE)
 
 
 def private_words(temp_root: Path | None) -> list[str]:
@@ -538,35 +553,67 @@ def private_words(temp_root: Path | None) -> list[str]:
     return sorted({word.lower(): word for word in words if len(word) >= 3}.values())
 
 
-def privacy_findings(name: str, data: bytes, words: list[str]) -> list[str]:
-    """Every check over three texts: the raw bytes; the printed text with each
-    escape sequence and control replaced by a space, so a word is found whether
-    an escape sequence or a cursor move sits beside it; and the printed text
-    with escape sequences, controls and line ends removed and nothing put in
-    their place, so a word is found when an escape sequence or a line end cuts
-    it in two, as in Claude Code's shimmer, which styles each character of a
-    word on its own."""
-    findings = []
+def privacy_readings(data: bytes) -> list[tuple[str, str]]:
+    """The four readings the names, home paths and email addresses are looked
+    for in:
+
+    - `raw`: the bytes as UTF-8.
+    - `spaced`: the printed text, each escape sequence and control replaced by
+      a space, so a word a TUI places with cursor moves instead of spaces still
+      stands on its own.
+    - `joined`: the printed text with escape sequences and controls removed and
+      nothing put in their place, and each line end removed with the padding
+      and box border (`│ ┃ ▎ |`) on either side of it, so a word with escape
+      sequences between its letters, as Claude Code's shimmer styles one, or
+      one wrapped onto the next line, indented or bordered, reads whole.
+    - `moved`: the sequences that leave the cursor where it is (`CURSOR_STILL`)
+      removed, and every other escape sequence and control, line ends among
+      them, replaced by a space, so a word styled a letter at a time reads
+      whole and still stands apart from a word a cursor move or a line end
+      separates it from."""
     raw = data.decode("utf-8", "replace")
     spaced = strip_escapes(data, separator=" ")
-    joined = strip_escapes(data).replace("\n", "")
-    texts = [("raw", raw), ("spaced", spaced), ("joined", joined)]
+    joined = LINE_BREAK.sub("", strip_escapes(data))
+    moved = strip_escapes(CURSOR_STILL.sub("", raw).encode("utf-8"), separator=" ").replace("\n", " ")
+    return [("raw", raw), ("spaced", spaced), ("joined", joined), ("moved", moved)]
+
+
+def date_readings(data: bytes) -> list[tuple[str, str]]:
+    """The two readings dates and times of day are looked for in, where an
+    escape sequence's parameters and a colour specification cannot read as one,
+    and line ends stay line ends, which the patterns do not cross: the printed
+    text with escape sequences and controls replaced by spaces, and the OSC
+    payloads (a window title, a link), one per line, with colour specifications
+    removed."""
+    spaced = strip_escapes(data, separator=" ")
+    raw = data.decode("utf-8", "replace")
+    payloads = "\n".join(COLOUR_SPEC.sub(" ", match.group(1)) for match in OSC_PAYLOAD.finditer(raw))
+    return [("spaced", spaced), ("OSC payload", payloads)]
+
+
+def privacy_findings(name: str, data: bytes, words: list[str]) -> list[str]:
+    """Each private word, as a whole word, and each home path and email address
+    in every `privacy_readings` reading; each date and time of day in every
+    `date_readings` reading."""
+    findings = []
+    readings = privacy_readings(data)
     for word in words:
         pattern = re.compile(r"(?<![a-z0-9])" + re.escape(word.lower()) + r"(?![a-z0-9])")
-        found = [label for label, text in texts if pattern.search(text.lower())]
+        found = [label for label, text in readings if pattern.search(text.lower())]
         if found:
             findings.append(
                 f"{name}: names a private word ({len(word)} characters, starts with {word[:1]!r}) "
-                f"in the {', '.join(found)} text"
+                f"in the {', '.join(found)} reading"
             )
-    checks = [("a home or temporary path", HOME_PATTERN), ("an email address", EMAIL_PATTERN)]
-    checks += [("a date", pattern) for pattern in DATE_PATTERNS]
-    checks += [("a time of day", TIME_PATTERN)]
-    for what, pattern in checks:
+    checks = [("a home or temporary path", HOME_PATTERN, readings), ("an email address", EMAIL_PATTERN, readings)]
+    dated = date_readings(data)
+    checks += [("a date", pattern, dated) for pattern in DATE_PATTERNS]
+    checks += [("a time of day", TIME_PATTERN, dated)]
+    for what, pattern, texts in checks:
         for label, text in texts:
             match = pattern.search(text)
             if match:
-                findings.append(f"{name}: holds {what} in the {label} text: {match.group()!r}")
+                findings.append(f"{name}: holds {what} in the {label} reading: {match.group()!r}")
                 break
     return findings
 
