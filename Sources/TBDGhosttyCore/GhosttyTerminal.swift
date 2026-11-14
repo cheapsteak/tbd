@@ -810,12 +810,12 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// `underLock`: every mode back to its default, whether or not the replay names it. Two steps,
     /// both muted. A CAN comes first, because a full reset (`reset()`) clears the screen model and
     /// leaves libghostty's stream parser where it was: inside a sequence the terminal was left in,
-    /// the replay's first ESC would otherwise end that sequence and dispatch it, and a partial
-    /// OSC 8 would put a link on every cell the replay writes. CAN ends the sequence instead, and
-    /// the reset after it wipes whatever that dispatched. The reset keeps the palette and the
-    /// dynamic colours, which a handback does not carry anyway. The program-status clear
-    /// libghostty reports for the reset reaches nobody, and like `reset()` it reports no end for a
-    /// DEC 2026 hold it ends.
+    /// the replay's first ESC would otherwise end that sequence, dispatching an open OSC, DCS or
+    /// APC, and a partial OSC 8 would put a link on every cell the replay writes. CAN ends the
+    /// sequence instead, and the reset after it wipes whatever that dispatched. The reset keeps
+    /// the palette and the dynamic colours, which a handback does not carry anyway. The
+    /// program-status clear libghostty reports for the reset reaches nobody, and like `reset()`
+    /// it reports no end for a DEC 2026 hold it ends.
     ///
     /// `underLock` must not call back into this terminal: the lock is not recursive. It runs even
     /// for an empty `bytes`, and not at all once the terminal is closed. The bytes count toward
@@ -860,8 +860,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// the pen) survives in the model.
     ///
     /// It does not reset libghostty's stream parser: a terminal left inside a sequence is still
-    /// inside it, and the next ESC ends and dispatches it. `feed(_:muted:resetFirst:underLock:)`
-    /// writes a CAN first for that reason.
+    /// inside it, and the next ESC ends it, dispatching an open OSC, DCS or APC.
+    /// `feed(_:muted:resetFirst:underLock:)` writes a CAN first for that reason.
     ///
     /// A reset ends any DEC 2026 hold, and its render signal reports no end: the program finished
     /// no frame.
