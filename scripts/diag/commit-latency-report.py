@@ -228,8 +228,7 @@ def percentile(values: list[float], fraction: float) -> float:
     """Nearest-rank percentile, rank = ceil(p*n), clamped. `values` must be sorted.
 
     `ceil`, not `round(p*n + 0.5)`: Python rounds half to even, so that form
-    overshoots — at n=100 it puts p99 on rank 100, reporting the maximum. This
-    matches InputLatencyRecorder.percentile in the daemon.
+    overshoots — at n=100 it puts p99 on rank 100, reporting the maximum.
     """
     if not values:
         return float("nan")

@@ -150,7 +150,7 @@ test_a_truncated_log_is_a_failure_not_a_pass() {
   # THE RULE THIS FILE EXISTS FOR. A wedged run produces no summary line, and
   # `rc == 0` alone scores it green.
   local d; d="$(mktmpd)"
-  mk_log "$d/trunc.log" "Test run started." "Suite \"ControlModeInputHealth\" started."
+  mk_log "$d/trunc.log" "Test run started." "Suite \"AppearanceDebounce\" started."
   local verdict; verdict="$(judge_iteration 0 "$d/trunc.log" 10)"
   assert_contains "no summary line -> FAIL even with rc=0" "$verdict" "FAIL"
   # The DIAGNOSIS matters as much as the verdict: "it wedged" and "your filter
@@ -564,18 +564,18 @@ test_every_target_names_an_issue_and_a_floor() {
     [[ "$issue" =~ ^[0-9]+$ ]] || { echo "     non-numeric issue: $spec"; bad=$((bad + 1)); }
   done
   assert_eq "every stress target carries a numeric floor and an issue number" "0" "$bad"
-  assert_eq "and there are the four targets the PR describes" "4" "${#TARGETS[@]}"
+  assert_eq "and there are the three targets the ledger names" "3" "${#TARGETS[@]}"
 }
 
 test_targets_reference_only_open_ledger_issues() {
-  # The issues this loop comments on are #494, #961, #496 and #962 — stated in the PR
-  # and asserted here so the two cannot drift apart silently.
+  # The issues this loop comments on are #961, #496 and #962, asserted here so
+  # the target list and the ledger's issue set cannot drift apart silently.
   local spec issue seen=""
   for spec in "${TARGETS[@]}"; do
     issue="$(printf '%s' "$spec" | cut -d'|' -f4)"
     case " $seen " in *" $issue "*) ;; *) seen="$seen $issue" ;; esac
   done
-  assert_eq "the loop attaches to exactly the documented issue set" " 494 961 496 962" "$seen"
+  assert_eq "the loop attaches to exactly the documented issue set" " 961 496 962" "$seen"
 }
 
 # ---------------------------------------------------------------------------

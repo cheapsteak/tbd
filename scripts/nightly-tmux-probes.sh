@@ -5,8 +5,8 @@
 #
 # TBD's tmux layer rests on a set of claims that live in code comments and in
 # people's heads: that pane IDs get reused, that `paste-buffer -p` is the sole
-# thing wrapping a bracketed paste, that a blank line detaches a control-mode
-# client. Each is load-bearing, none is asserted anywhere, and tmux is free to
+# thing wrapping a bracketed paste, that `paste-buffer -d` deletes its buffer.
+# Each is load-bearing, none is asserted anywhere, and tmux is free to
 # change any of them in a point release. These probes turn them into checks that
 # run every night against the real binary, so the day one changes we find out
 # from a nightly report instead of from a user.
@@ -155,7 +155,7 @@ probe_pane_ids_restart_at_zero_after_server_death() {
 
 probe_paste_buffer_p_is_conditional_on_bracketed_paste_mode() {
   probe "P3" "\`paste-buffer -p\` wraps in ESC[200~/ESC[201~ ONLY IF the pane's application enabled bracketed-paste mode (DECSET 2004)" \
-        "PasteExecutor.swift; TerminalPanelView.swift:727 and TBDTerminalView.swift:78 call the daemon-side -p the SOLE bracketed-paste wrapping — true, but silently contingent on the TUI having requested it"
+        "TmuxManager.pasteText (terminal.send on the tmux transport) leaves the paste markers to -p — true, but silently contingent on the TUI having requested it"
 
   local payload="ABCDEFGHIJ"
   printf '%s' "$payload" > "$WORK_DIR/payload.txt"
@@ -186,7 +186,7 @@ probe_paste_buffer_p_is_conditional_on_bracketed_paste_mode() {
 
 probe_paste_buffer_without_p_is_verbatim() {
   probe "P4" "\`paste-buffer\` without -p delivers bytes verbatim" \
-        "TmuxManager.swift:560 and PasteExecutorIntegrationTests — the >4 KB bulk-paste path relies on no wrapping being added"
+        "the contrast arm for P3: TmuxManager.pasteBufferCommand passes -p, and this shows the markers come from -p rather than from the buffer"
 
   local payload="ABCDEFGHIJ"
   printf '%s' "$payload" > "$WORK_DIR/payload4.txt"
@@ -204,7 +204,7 @@ probe_paste_buffer_without_p_is_verbatim() {
 
 probe_paste_buffer_d_deletes_the_buffer() {
   probe "P5" "\`paste-buffer -d\` deletes the named buffer; without -d it survives" \
-        "PasteExecutor.swift:58-72 — the delete-buffer fallback only makes sense if -d normally did the delete"
+        "TmuxManager.pasteText — the delete-buffer fallback only makes sense if -d normally did the delete"
 
   printf 'x' > "$WORK_DIR/payload5.txt"
   tmuxp new-session -d -s probe -x 80 -y 24 'sleep 300' >/dev/null 2>&1
@@ -222,69 +222,6 @@ probe_paste_buffer_d_deletes_the_buffer() {
   tmuxp kill-server >/dev/null 2>&1
 }
 
-# P6/P7/P8 share one control-mode transcript: attaching three times would triple
-# the runtime and test nothing extra.
-probe_control_mode_framing() {
-  local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local transcript="$WORK_DIR/cc.txt"
-
-  tmuxp new-session -d -s cc -x 80 -y 24 'sleep 300' >/dev/null 2>&1
-  if ! python3 "$script_dir/nightly-tmux-cc-probe.py" "$SOCKET" cc > "$transcript" 2>"$WORK_DIR/cc.err"; then
-    echo "   HARNESS ERROR: control-mode driver failed: $(cat "$WORK_DIR/cc.err")" >&2
-    FAILED=$((FAILED + 1))
-    FAILURES+=("P6/P7/P8 — control-mode driver failed to run: $(cat "$WORK_DIR/cc.err")")
-    tmuxp kill-server >/dev/null 2>&1
-    return
-  fi
-
-  local good_phase bad_phase ws_phase
-  good_phase="$(phase_of "$transcript" attached after-good-command)"
-  bad_phase="$(phase_of "$transcript" after-good-command after-bad-command)"
-  ws_phase="$(phase_of "$transcript" after-bad-command after-whitespace-line)"
-
-  probe "P8" "a command yields %begin/%end with a matching id triple; an INVALID command yields %begin/%error" \
-        "TmuxControlParser.swift:34-55 — the %begin…%end/%error framing; %error, not %end, terminates a failed command"
-  local good_begin good_end
-  good_begin="$(printf '%s' "$good_phase" | sed -n 's/^%begin \(.*\)$/\1/p' | tr -d '\r' | head -1)"
-  good_end="$(printf '%s' "$good_phase"   | sed -n 's/^%end \(.*\)$/\1/p'   | tr -d '\r' | head -1)"
-  expect_eq "a good command's %begin and %end carry the same id triple" "$good_begin" "$good_end"
-  expect_eq "a good command's output appears inside the block" "yes" \
-            "$(if printf '%s' "$good_phase" | grep -q 'CCPROBE_OK'; then echo yes; else echo no; fi)"
-  local bad_begin bad_error
-  bad_begin="$(printf '%s' "$bad_phase" | sed -n 's/^%begin \(.*\)$/\1/p' | tr -d '\r' | head -1)"
-  bad_error="$(printf '%s' "$bad_phase" | sed -n 's/^%error \(.*\)$/\1/p' | tr -d '\r' | head -1)"
-  expect_eq "an invalid command terminates with %error carrying the same id triple" "$bad_begin" "$bad_error"
-  expect_eq "an invalid command emits no %end" "0" \
-            "$(printf '%s' "$bad_phase" | grep -c '^%end')"
-
-  probe "P7" "a whitespace-only line produces ZERO command blocks and does not detach" \
-        "control-mode input routing — a stray whitespace write must not be read as a command"
-  expect_eq "whitespace-only line produces no %begin block" "0" \
-            "$(printf '%s' "$ws_phase" | grep -c '^%begin')"
-  expect_eq "whitespace-only line produces no %exit" "0" \
-            "$(printf '%s' "$ws_phase" | grep -c '^%exit')"
-
-  probe "P6" "a BLANK line detaches the control-mode client (%exit)" \
-        "control-mode input routing — an empty write is a detach, so it must never be sent as a no-op keepalive"
-  local blank_phase; blank_phase="$(phase_of "$transcript" after-whitespace-line after-blank-line)"
-  expect_eq "blank line yields %exit" "1" \
-            "$(printf '%s' "$blank_phase" | grep -c '^%exit')"
-  expect_eq "and the client process actually exits" "0" \
-            "$(sed -n 's/^@@EXIT \(.*\)$/\1/p' "$transcript" | head -1)"
-
-  tmuxp kill-server >/dev/null 2>&1
-}
-
-# Extract the transcript between two @@MARK labels.
-phase_of() {
-  local file="$1" from="$2" to="$3"
-  awk -v from="@@MARK $from" -v to="@@MARK $to" '
-    $0 == to   { inside = 0 }
-    inside     { print }
-    $0 == from { inside = 1 }
-  ' "$file"
-}
-
 # --- main ---------------------------------------------------------------------
 
 PROBES=(
@@ -293,7 +230,6 @@ PROBES=(
   probe_paste_buffer_p_is_conditional_on_bracketed_paste_mode
   probe_paste_buffer_without_p_is_verbatim
   probe_paste_buffer_d_deletes_the_buffer
-  probe_control_mode_framing
 )
 
 main() {
@@ -303,9 +239,6 @@ main() {
   fi
 
   command -v tmux >/dev/null 2>&1 || { echo "nightly-tmux-probes: tmux not found" >&2; exit 2; }
-  # A missing python3 must be a HARNESS ERROR, never a silent skip: three probes
-  # would vanish and the run would still report success.
-  command -v python3 >/dev/null 2>&1 || { echo "nightly-tmux-probes: python3 not found (needed for the control-mode pty driver)" >&2; exit 2; }
 
   WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tmux-probes.XXXXXX")" || exit 2
   echo "tmux $(tmux -V | awk '{print $2}') on $(uname -s) — private socket $SOCKET"

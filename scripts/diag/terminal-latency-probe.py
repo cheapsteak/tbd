@@ -46,9 +46,8 @@ WHAT IT CANNOT SHOW
 - The wait before the app's read, except through the echo. Bytes queue in the
   kernel before the reader thread wakes, and that queue is a different object
   on each transport.
-- A draw wait under SwiftTerm's Metal renderer, which emits no draw lines, or
-  anything on the control-mode attach path. libghostty always draws with
-  Metal, and does emit draw lines.
+- A draw wait under SwiftTerm's Metal renderer, which emits no draw lines.
+  libghostty always draws with Metal, and does emit draw lines.
 
 THE RUN RULE: A/B/A AND LOAD BANDS
 ----------------------------------
