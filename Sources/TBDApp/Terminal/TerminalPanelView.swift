@@ -216,6 +216,10 @@ struct TerminalPanelView: View {
     /// which shows the Retry banner. Never lowered: Retry replaces this view,
     /// and this state goes with it.
     @State private var holderAttachRetryOffered = false
+    /// Whether the limit banner's switch or fork is still running. A second
+    /// click while it runs is dropped: a double click on Fork would otherwise
+    /// open two new tabs on the other account.
+    @State private var limitSwitchInFlight = false
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -349,18 +353,24 @@ struct TerminalPanelView: View {
                     Spacer()
                     if let switchTitle = switchesInPlace ? model.switchButtonTitle : model.forkButtonTitle {
                         Button(switchTitle) {
+                            // Raised here, before the task starts, so a second
+                            // click handled before the view redraws as disabled
+                            // still finds it.
+                            guard !limitSwitchInFlight,
+                                  let suggestedID = limitHit.suggestedProfileID else { return }
+                            limitSwitchInFlight = true
                             Task {
-                                if let suggestedID = limitHit.suggestedProfileID {
-                                    await appState.swapTerminalProfile(
-                                        terminalID: terminalID, newProfileID: suggestedID,
-                                        mode: switchesInPlace ? .inPlace : .fork)
-                                    if switchesInPlace {
-                                        appState.limitHits.removeValue(forKey: terminalID)
-                                    }
+                                defer { limitSwitchInFlight = false }
+                                await appState.swapTerminalProfile(
+                                    terminalID: terminalID, newProfileID: suggestedID,
+                                    mode: switchesInPlace ? .inPlace : .fork)
+                                if switchesInPlace {
+                                    appState.limitHits.removeValue(forKey: terminalID)
                                 }
                             }
                         }
                         .controlSize(.small)
+                        .disabled(limitSwitchInFlight)
                     }
                     Button("Dismiss") {
                         appState.limitHits.removeValue(forKey: terminalID)
