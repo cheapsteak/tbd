@@ -195,7 +195,8 @@ enum EmulatorParity {
     ]
     /// Comparison 2: what the emulator sent. The replies to the child, one field per kind of
     /// reply (`replyKind`), each reply on a line of its own, and `replies.order`, the order of
-    /// the kinds both emulators sent; then the program-status reports.
+    /// every reply of the kinds whose replies agree (`narrowReplyOrder`); then the
+    /// program-status reports.
     static let sentFields: [String] = replyKinds.map { "replies." + $0 } + ["replies.order", "reports"]
 
     /// Comparison 3: what a viewer restores from the snapshot, read under `prefix`.

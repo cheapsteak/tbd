@@ -13,12 +13,12 @@ import Testing
 ///    `styledCapture(maxScrollbackLines:)`. Renders are compared with the spaces at the end of a
 ///    row trimmed (`EmulatorParity.trimmedRender`). Both emulators share a clock the suite moves
 ///    by hand, so the screen's age says when each last stamped a byte.
-/// 2. **What the emulator sends**: the replies it writes to the child, split into one per reply
-///    and compared by kind (`EmulatorParity.replyKind`) with the order of the kinds both sent,
-///    and the OSC 7501 reports it delivers, in order. A recording is also fed in 64- and
-///    4,096-byte chunks, so sequences and characters split across reads as a pty splits them,
-///    and all three comparisons are made again. A stream of the queries every program may send
-///    must be answered identically, with no miss (`theQueriesTheDaemonAnswersMatch`).
+/// 2. **What the emulator sends**: the replies it writes to the child, split into one per reply and
+///    compared by kind (`EmulatorParity.replyKind`), then in the order of every reply of the kinds
+///    whose replies agree, and the OSC 7501 reports it delivers, in order. A recording is also fed
+///    in 64- and 4,096-byte chunks, so sequences and characters split across reads as a pty splits
+///    them, and all three comparisons are made again. A stream of the queries every program may
+///    send must be answered identically, with no miss (`theQueriesTheDaemonAnswersMatch`).
 /// 3. **What a viewer restores**: each emulator's attach snapshot is fed, muted, to a fresh
 ///    headless libghostty viewer, as the app's viewer ingests one, and the two viewers' screens
 ///    and scrollback, cursors and cursor shapes, modes, regions and pens are compared, with the
