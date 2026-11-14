@@ -140,13 +140,18 @@ mkrepo() {
   local root="$1"
   git init -q -b main "$root"
   mkdir -p "$root/Sources/TBDKernel" "$root/Sources/TBDShared" "$root/Sources/TBDDaemon/Server" \
-           "$root/Sources/TBDTerminalSerialization" "$root/Sources/TBDApp" "$root/docs"
+           "$root/Sources/TBDTerminalSerialization" "$root/Sources/TBDGhosttyCore" \
+           "$root/Sources/TBDGhosttyTerminal" "$root/Sources/TBDGhosttyShaderTypes/include" \
+           "$root/Sources/TBDApp" "$root/docs"
   echo base > "$root/Sources/TBDKernel/Base.swift"
   echo base > "$root/Sources/TBDShared/Base.swift"
   # TBDDaemonLib's sources, under the directory Package.swift gives that target.
   echo base > "$root/Sources/TBDDaemon/Server/Router.swift"
   echo base > "$root/Sources/TBDDaemon/main.swift"
   echo base > "$root/Sources/TBDTerminalSerialization/Frame.swift"
+  echo base > "$root/Sources/TBDGhosttyCore/Terminal.swift"
+  echo base > "$root/Sources/TBDGhosttyTerminal/TerminalView.swift"
+  echo base > "$root/Sources/TBDGhosttyShaderTypes/include/ShaderTypes.h"
   echo base > "$root/Sources/TBDApp/Base.swift"
   echo base > "$root/docs/notes.md"
   echo base > "$root/Package.swift"
@@ -211,7 +216,7 @@ with_repo() {
 test_the_extraction_found_the_real_step() {
   local script; script="$(cat "$SCRIPT")"
   assert_contains "extracted the step's shell" "$script" 'library_touched'
-  assert_contains "and the paths it gates on" "$script" 'Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved'
+  assert_contains "and the paths it gates on" "$script" 'Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Sources/TBDGhosttyCore Sources/TBDGhosttyTerminal Sources/TBDGhosttyShaderTypes Package.swift Package.resolved'
   assert_contains "and the three-dot diff" "$script" 'origin/$BASE_REF...HEAD'
 }
 
@@ -318,6 +323,26 @@ test_a_pr_touching_tbdterminalserialization_answers_true() { with_repo case_seri
 case_serialization() {
   change_file "$1" Sources/TBDTerminalSerialization/Frame.swift
   assert_eq "TBDTerminalSerialization -> true" "true" "$(decision "$1" pull_request main)"
+}
+
+# The libghostty engine's libraries are wiped in their own right, so a change
+# confined to one of them re-emits it and recompiles TBDApp above it.
+test_a_pr_touching_tbdghosttycore_answers_true() { with_repo case_ghostty_core; }
+case_ghostty_core() {
+  change_file "$1" Sources/TBDGhosttyCore/Terminal.swift
+  assert_eq "TBDGhosttyCore -> true" "true" "$(decision "$1" pull_request main)"
+}
+
+test_a_pr_touching_tbdghosttyterminal_answers_true() { with_repo case_ghostty_terminal; }
+case_ghostty_terminal() {
+  change_file "$1" Sources/TBDGhosttyTerminal/TerminalView.swift
+  assert_eq "TBDGhosttyTerminal -> true" "true" "$(decision "$1" pull_request main)"
+}
+
+test_a_pr_touching_tbdghosttyshadertypes_answers_true() { with_repo case_ghostty_shader_types; }
+case_ghostty_shader_types() {
+  change_file "$1" Sources/TBDGhosttyShaderTypes/include/ShaderTypes.h
+  assert_eq "TBDGhosttyShaderTypes -> true" "true" "$(decision "$1" pull_request main)"
 }
 
 test_a_pr_touching_the_manifest_answers_true() { with_repo case_manifest; }
