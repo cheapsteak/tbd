@@ -65,9 +65,8 @@ import Testing
     /// reachable, so a width table that changes its mind cannot reopen the
     /// outage. `TerminalScreenTests` pins that predicate.
     ///
-    /// The libghostty emulator is pinned to the other form: it drops the `DEL`
-    /// rather than store it, as xterm ignores it, so its line reads without
-    /// the byte. What both owe is the first assertion: a screen comes back.
+    /// The libghostty emulator's line reads the same: its cell renders as
+    /// U+FFFD too.
     @Test("a DEL a child stored in a cell renders as U+FFFD instead of breaking the read", arguments: HolderEmulatorKind.allCases)
     func delInACellRendersAsReplacement(emulator: HolderEmulatorKind) async throws {
         let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
@@ -77,7 +76,7 @@ import Testing
         let screen = try await harness.reader.screen(maxLines: 50)
 
         #expect(
-            Self.delRenderings(emulator, replaced: "a\u{fffd}b", dropped: "ab").contains(screen.lines.first),
+            screen.lines.first == "a\u{fffd}b",
             "rendered \(String(describing: screen.lines.first))")
     }
 
@@ -95,7 +94,7 @@ import Testing
         let screen = try await harness.reader.screen(maxLines: 50)
 
         #expect(
-            Self.delRenderings(emulator, replaced: "a  b\u{fffd}c", dropped: "a  bc").contains(screen.lines.first),
+            screen.lines.first == "a  b\u{fffd}c",
             "rendered \(String(describing: screen.lines.first))")
         #expect(!screen.output.contains(Self.nul))
     }
@@ -525,18 +524,6 @@ import Testing
     // MARK: - Harness
 
     private static func data(_ text: String) -> Data { Data(text.utf8) }
-
-    /// The line a `DEL` test expects: the SwiftTerm emulator stores the byte,
-    /// so the replaced form; the libghostty emulator drops it, so the dropped
-    /// form.
-    private static func delRenderings(
-        _ emulator: HolderEmulatorKind, replaced: String, dropped: String
-    ) -> [String?] {
-        switch emulator {
-        case .swiftTerm: return [replaced]
-        case .ghostty: return [dropped]
-        }
-    }
 
     /// A monotonic clock a test moves by hand.
     ///
