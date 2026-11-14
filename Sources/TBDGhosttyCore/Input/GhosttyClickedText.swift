@@ -82,7 +82,7 @@ extension GhosttyClickedText {
 
 extension GhosttyClickedText.Row {
     /// `gridRow` as SwiftTerm reads a row, or an empty row when it could not be read.
-    init(_ gridRow: GhosttyGridRow?) {
+    package init(_ gridRow: GhosttyGridRow?) {
         guard let gridRow else {
             self.init(text: "", isWrapContinuation: false)
             return

@@ -99,7 +99,7 @@ struct GhosttyGridCell: Equatable, Sendable {
 }
 
 /// One row of the grid.
-struct GhosttyGridRow: Sendable {
+package struct GhosttyGridRow: Sendable {
     var cells: [GhosttyGridCell]
     /// True when the row continues the one above it: a soft wrap.
     var isWrapContinuation: Bool
@@ -107,7 +107,7 @@ struct GhosttyGridRow: Sendable {
 
 extension GhosttyTerminalState {
     /// Where a row is counted from.
-    enum GridArea: Sendable {
+    package enum GridArea: Sendable {
         /// The screen, row 0 at the top.
         case active
         /// The scrollback above the screen, row 0 the oldest.
@@ -177,7 +177,7 @@ extension GhosttyTerminalState {
     }
 
     /// One row, every cell of it. nil for a row outside `area` or once the terminal is closed.
-    func gridRow(_ area: GridArea, _ row: Int, hyperlinks: Bool = false) -> GhosttyGridRow? {
+    package func gridRow(_ area: GridArea, _ row: Int, hyperlinks: Bool = false) -> GhosttyGridRow? {
         guard let raw, row >= 0 else { return nil }
         let width = cols
         var point = GhosttyPoint()

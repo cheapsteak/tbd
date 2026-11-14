@@ -57,8 +57,8 @@ package struct TerminalModifiers: OptionSet, Sendable, Equatable {
 /// **before** any padding is subtracted. The encoder does the pixel → cell conversion itself
 /// from `MouseEncoder.geometry`, so the view must not pre-divide by the cell size.
 package struct SurfacePoint: Sendable, Equatable {
-    var x: Double
-    var y: Double
+    package var x: Double
+    package var y: Double
     package init(x: Double, y: Double) {
         self.x = x
         self.y = y
@@ -96,12 +96,12 @@ package struct MousePress: Sendable, Equatable {
 package struct TerminalPixelGeometry: Sendable, Equatable {
     package var screenWidth: UInt32
     package var screenHeight: UInt32
-    var cellWidth: UInt32
+    package var cellWidth: UInt32
     package var cellHeight: UInt32
-    var paddingTop: UInt32
-    var paddingBottom: UInt32
-    var paddingLeft: UInt32
-    var paddingRight: UInt32
+    package var paddingTop: UInt32
+    package var paddingBottom: UInt32
+    package var paddingLeft: UInt32
+    package var paddingRight: UInt32
 
     package init(
         screenWidth: UInt32,
