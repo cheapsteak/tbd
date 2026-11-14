@@ -800,20 +800,22 @@ public actor HibernationCoordinator {
     }
 
     /// The refusal when the replacement shell could not be started. Says what
-    /// state the session is in, because its program is already gone.
-    static func shellMoveSpawnFailedRefusal(detail: String) -> String {
+    /// state the session is in, because its program is already gone, and what
+    /// moves it: the row was not rewritten, so running the move again starts
+    /// the shell on the holder. Names the session, because the command takes it.
+    static func shellMoveSpawnFailedRefusal(terminalID: UUID, detail: String) -> String {
         "This session's program was stopped, but starting a holder for its replacement shell "
-        + "failed (\(detail)). The session still reads as running on tmux with its window gone, "
-        + "which the tab's window-died recovery repairs; retry the move after that."
+        + "failed (\(detail)). The session still reads as running on tmux with its window gone. "
+        + "Run `tbd terminal migrate \(terminalID.uuidString)` again to start it on the pty holder."
     }
 
     /// The refusal the loser of two concurrent moves of one row meets: a holder
     /// is already registered for this session, so the winner has started its
     /// replacement shell.
     ///
-    /// Its own reason rather than the spawn-failure one, whose recovery advice
-    /// — the session reads as running on tmux with its window gone, and the
-    /// tab's window-died recovery repairs it — describes a row that was not
+    /// Its own reason rather than the spawn-failure one, whose advice — the
+    /// session reads as running on tmux with its window gone, and running the
+    /// move again starts it on the holder — describes a row that was not
     /// moved. The winner has already moved this one, so that advice would be
     /// false in every particular.
     static let shellMoveAlreadyMovingRefusal =
@@ -821,12 +823,14 @@ public actor HibernationCoordinator {
         + "on the pty holder, so this one changed nothing further."
 
     /// The refusal when the one guarded write threw. The holder started for
-    /// the move has been abandoned, so no process outlives the row.
-    static func shellMoveWriteFailedRefusal(detail: String) -> String {
+    /// the move has been abandoned, so no process outlives the row, and the
+    /// row was not rewritten, so running the move again starts the shell on the
+    /// holder.
+    static func shellMoveWriteFailedRefusal(terminalID: UUID, detail: String) -> String {
         "This session's program was stopped and a replacement shell was started, but the move "
         + "could not be recorded (\(detail)), so that shell was stopped again. The session still "
-        + "reads as running on tmux with its window gone, which the tab's window-died recovery "
-        + "repairs."
+        + "reads as running on tmux with its window gone. Run `tbd terminal migrate "
+        + "\(terminalID.uuidString)` again to start it on the pty holder."
     }
 
     /// Move a RUNNING session that has no conversation to resume onto the pty
@@ -843,10 +847,11 @@ public actor HibernationCoordinator {
     /// busy rail; spawn the holder carrying a freshly minted incarnation; write
     /// once. Killing before
     /// the write is the opposite of the parked path's order and is safe for a
-    /// different reason: the write is a compare-and-set, so a recreate that
-    /// notices the dead window first rotates the row's incarnation and this
-    /// write finds its snapshot stale. Both outcomes are consistent, and
-    /// nothing can leave a row naming a transport its live process is not on.
+    /// different reason: the write is a compare-and-set, so any writer that
+    /// changes the row after the kill — closing the tab, say — leaves this
+    /// write a stale snapshot, and it writes nothing. Both outcomes are
+    /// consistent, and nothing can leave a row naming a transport its live
+    /// process is not on.
     ///
     /// **There is nothing to park.** A park exists to preserve a conversation
     /// across a respawn, and this row names none — which is exactly why
@@ -861,9 +866,10 @@ public actor HibernationCoordinator {
     ///
     /// Every failure lands the session in one of two states and no third: the
     /// row untouched with its program still running, or the row untouched with
-    /// its window dead — the ordinary window-died state the app's recovery
-    /// banner already owns. Neither rewrites the row, so a later migration
-    /// still sees exactly what it saw this time.
+    /// its window dead. Neither rewrites the row, so a later migration still
+    /// sees exactly what it saw this time, and moves the dead-window row: its
+    /// gone pane passes the ownership guard, and a kill that tmux answers with
+    /// "no such window" is not a failure to stop anything.
     /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`.
     func moveRunningShellToHolder(terminal: Terminal) async -> ShellTransportMoveOutcome {
         // Before anything is touched. A session whose holder cannot be started
@@ -1016,7 +1022,8 @@ public actor HibernationCoordinator {
             }
             let detail = "\(error)"
             logger.warning("shell transport move: could not start a holder for \(terminal.id, privacy: .public): \(detail, privacy: .public)")
-            return .refused(reason: Self.shellMoveSpawnFailedRefusal(detail: detail))
+            return .refused(reason: Self.shellMoveSpawnFailedRefusal(
+                terminalID: terminal.id, detail: detail))
         }
 
         do {
@@ -1038,7 +1045,8 @@ public actor HibernationCoordinator {
             await abandonHolder(terminal.id, handle)
             let detail = "\(error)"
             logger.error("shell transport move: started a holder for \(terminal.id, privacy: .public) but could not record the move, so it was abandoned: \(detail, privacy: .public)")
-            return .refused(reason: Self.shellMoveWriteFailedRefusal(detail: detail))
+            return .refused(reason: Self.shellMoveWriteFailedRefusal(
+                terminalID: terminal.id, detail: detail))
         }
         logger.info("shell transport move: terminal \(terminal.id, privacy: .public) now runs a fresh login shell on the pty holder (holder \(handle.holderPID, privacy: .public), child \(handle.childPID, privacy: .public))")
         return .moved

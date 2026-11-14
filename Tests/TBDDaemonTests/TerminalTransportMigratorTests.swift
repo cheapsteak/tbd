@@ -785,7 +785,7 @@ struct TerminalTransportMigratorTests {
     /// registry reports that it can spawn and then cannot, which is a holder
     /// that could not be started. The program is already stopped by then, so
     /// the refusal has to say what state the session is in — and the row must
-    /// keep the coordinates its window-died recovery needs.
+    /// keep the coordinates a later move reads.
     @Test("a running shell whose holder cannot be started is refused with its row intact")
     func aRunningShellWhoseHolderCannotBeStartedIsRefused() async throws {
         let fixture = try await Self.makeFixture()

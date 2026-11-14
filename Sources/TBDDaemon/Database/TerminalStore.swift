@@ -1584,16 +1584,15 @@ public struct TerminalStore: Sendable {
     /// which the row stops describing a dead tmux pane and starts describing a
     /// live holder, and a caller that fails anywhere before it leaves the row
     /// untouched — still `tmux`, still awake, naming a window that is now dead,
-    /// which is the ordinary window-died state `terminal.recreateWindow`
-    /// repairs.
+    /// which a later move picks up exactly as this one found it.
     ///
     /// **The guard is the complement of `setParkedTransport`'s.** That one
     /// requires the row to read parked; this one requires it to read awake and
     /// not already holder-backed, so neither can be used for the other's case
-    /// by mistake. Between the caller's kill and this write the app may notice
-    /// the dead window and recreate it, which rotates the row's incarnation:
-    /// the snapshot then fails to match, nothing is written, and the caller
-    /// abandons the holder it started.
+    /// by mistake. Any writer that changes the row between the caller's kill
+    /// and this write — closing the tab, say — leaves the snapshot stale: it
+    /// then fails to match, nothing is written, and the caller abandons the
+    /// holder it started.
     ///
     /// The session and activity columns are cleared through the same helper
     /// `replaceRecreatedShellWindow` uses, because this is the same event — a
