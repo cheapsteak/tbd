@@ -127,5 +127,50 @@ struct ScratchCreateRPCTests {
         let w2 = try r2.decodeResult(Worktree.self)
         #expect(w2.localPath != w1.localPath)
     }
+
+    /// The daemons the spawn gate refuses: one wired with no holder registry,
+    /// and one whose registry cannot spawn because its `TBDHolder` binary has
+    /// gone. The granted branch is every test above.
+    enum UnusableRegistry: CaseIterable, Sendable {
+        case noRegistry
+        case cannotSpawn
+    }
+
+    /// A daemon that cannot start a pty holder refuses the scratch space with
+    /// the holder refusal, before anything is created: no folder, no row, no
+    /// terminal, no launch. A space with no session would be no use, since no
+    /// terminal can be added to it by hand either.
+    @Test(arguments: UnusableRegistry.allCases)
+    func aDaemonThatCannotStartAHolderRefusesAndCreatesNothing(_ unusable: UnusableRegistry) async throws {
+        let iso = isolateTBDHome(); defer { iso.cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let registry: HolderRegistry?
+        switch unusable {
+        case .noRegistry:
+            registry = nil
+        case .cannotSpawn:
+            registry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: FakeHolderLaunch.scratchEnvironment(),
+                listTerminals: { [] },
+                spawner: nil)
+        }
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
+            db: db, lifecycle: lifecycle,
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
+
+        let response = await router.handle(
+            try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "refused")))
+
+        #expect(!response.success)
+        #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(try await db.worktrees.listScratch().isEmpty, "the refused create left a scratch row")
+        let folder = TBDConstants.scratchDir.appendingPathComponent("refused")
+        #expect(!FileManager.default.fileExists(atPath: folder.path), "the refused create left its folder")
+    }
 }
 }

@@ -31,6 +31,21 @@ struct ScratchDeleteRPCTests {
         return router
     }
 
+    /// A router on `tmux` whose registry is the holder spawn double, so
+    /// `scratch.create` passes the spawn gate. The holder tests below clear the
+    /// primary terminal it opens and put the registry under test in its place
+    /// before the delete.
+    private static func routerPastTheSpawnGate(db: TBDDatabase, tmux: TmuxManager) -> RPCRouter {
+        let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+        var lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        let router = RPCRouter(
+            db: db, lifecycle: lifecycle,
+            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        router.holderRegistry = registry
+        return router
+    }
+
     @Test func deletesRowAndTrashesFolder() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
@@ -198,10 +213,7 @@ struct ScratchDeleteRPCTests {
         let tmux = TmuxManager(
             dryRun: true, dryRunRecorder: { recorded.append($0) },
             dryRunWindowIsDead: { _ in true })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = Self.routerPastTheSpawnGate(db: db, tmux: tmux)
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "holder-scratch")))
         let wt = try created.decodeResult(Worktree.self)
@@ -248,10 +260,7 @@ struct ScratchDeleteRPCTests {
     ) async throws -> (RPCRouter, TBDDatabase, Worktree, Terminal, HolderRegistry) {
         let db = try TBDDatabase(inMemory: true)
         let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
-        let router = RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
-            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        let router = Self.routerPastTheSpawnGate(db: db, tmux: tmux)
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: name)))
         let wt = try created.decodeResult(Worktree.self)

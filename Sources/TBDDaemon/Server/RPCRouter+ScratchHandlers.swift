@@ -10,6 +10,17 @@ extension RPCRouter {
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(ScratchCreateParams.self, from: paramsData)
+
+        // The spawn gate, the one the primary spawn below asks, asked before
+        // anything is created or recorded. A scratch space with no session in
+        // it is no use on a daemon that cannot start a pty holder, since no
+        // terminal can be added to it by hand either, so the create fails with
+        // the refusal and leaves no folder and no row, as a `worktree.create`
+        // the gate refuses ends with its row taken back.
+        if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
+            return RPCResponse(error: refusal.message)
+        }
+
         let fm = FileManager.default
         let base = TBDConstants.scratchDir
         try fm.createDirectory(at: base, withIntermediateDirectories: true)
@@ -88,8 +99,10 @@ extension RPCRouter {
 
         // Spawn the default primary agent terminal (Claude/Codex/shell per the
         // global primary-agent preference), mirroring what repo worktrees get on
-        // creation. Best-effort: a spawn failure must not fail scratch creation —
-        // the row + folder already exist and the user can add a terminal manually.
+        // creation. Best-effort: the gate above has already granted a holder,
+        // so a spawn that fails here failed for a reason of its own, and it
+        // must not fail scratch creation — the row + folder already exist and
+        // the user can add a terminal manually.
         var createdTerminals: [(id: UUID, label: String)] = []
         do {
             createdTerminals = try await lifecycle.spawnPrimaryTerminals(

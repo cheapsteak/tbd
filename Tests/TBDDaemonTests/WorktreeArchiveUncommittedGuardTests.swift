@@ -533,17 +533,25 @@ extension TBDHomeSerialized {
         @Test func aScratchSpaceWithAnUntrackedFileArchivesAndKeepsIt() async throws {
             let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
             let db = try TBDDatabase(inMemory: true)
+            // The holder spawn double, so `scratch.create` passes the spawn
+            // gate; the primary terminal it opens is cleared below, so the
+            // archive under test has no session to close.
+            let registry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
+            var lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver())
+            lifecycle.holderRegistry = registry
             let router = RPCRouter(
                 db: db,
-                lifecycle: WorktreeLifecycle(
-                    db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-                    hooks: HookResolver()),
+                lifecycle: lifecycle,
                 tmux: TmuxManager(dryRun: true),
                 subscriptions: StateSubscriptionManager(), actuationLog: makeTestActuationLog())
+            router.holderRegistry = registry
             let created = await router.handle(try RPCRequest(
                 method: RPCMethod.scratchCreate,
                 params: ScratchCreateParams(name: "wt-scratch-uncommitted")))
             let scratch = try created.decodeResult(Worktree.self)
+            try await db.terminals.deleteForWorktree(worktreeID: scratch.id)
             let notes = (scratch.localPath as NSString).appendingPathComponent("notes.md")
             try "half a thought\n".write(toFile: notes, atomically: true, encoding: .utf8)
 
