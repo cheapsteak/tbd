@@ -701,10 +701,10 @@ jobs:
           # it re-emits its own module and recompiles TBDShared and everything
           # above it.
           # `Sources/TBDTerminalSerialization` is a first-party library the #7715
-          # wipe removes in its own right, and TBDDaemonLib's one first-party
-          # dependency beyond TBDShared and TBDKernel, so a change confined to it
-          # re-emits its own module, recompiles TBDDaemonLib and cascades
-          # downstream.
+          # wipe removes in its own right, and one of TBDDaemonLib's two
+          # first-party dependencies beyond TBDShared and TBDKernel, TBDGhosttyCore
+          # being the other, so a change confined to it re-emits its own module,
+          # recompiles TBDDaemonLib and cascades downstream.
           # `Sources/TBDGhosttyCore`, `Sources/TBDGhosttyTerminal` and
           # `Sources/TBDGhosttyShaderTypes` are the libghostty engine's
           # libraries, all three wiped in their own right — the last is the C
@@ -857,8 +857,9 @@ jobs:
       # own right, not only as something TBDDaemonLib imports — TBDDaemonLib
       # and TBDApp both import it, so a symbol added to it is the same shape of
       # change. So are the libghostty engine's libraries: TBDApp imports
-      # TBDGhosttyCore and TBDGhosttyTerminal, and TBDGhosttyTerminal imports
-      # TBDGhosttyCore and the C target TBDGhosttyShaderTypes. Comparing a
+      # TBDGhosttyCore and TBDGhosttyTerminal, TBDDaemonLib imports
+      # TBDGhosttyCore, and TBDGhosttyTerminal imports TBDGhosttyCore and the C
+      # target TBDGhosttyShaderTypes. Comparing a
       # library's sources without removing its artifacts would answer `wipe`
       # on exactly the run that needs it and still leave that library's stale
       # objects in place.
