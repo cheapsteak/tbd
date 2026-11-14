@@ -100,6 +100,27 @@ struct PaneSendRefusal: Sendable {
     let message: String
 }
 
+/// What the locked re-park closure in `handleTerminalRecreateWindow` concluded.
+///
+/// Three outcomes rather than a `didPark` flag, because the window probe is
+/// tri-state and each answer means something different to the caller: the row
+/// was parked, the window turned out to be alive so the request was stale, or
+/// tmux never answered and nothing was touched. Collapsing the last two would
+/// report a transport that could not be reached as a healthy window, which is
+/// the direction that loses a session.
+enum RecreateReparkOutcome: Sendable {
+    case parked(Terminal?)
+    case windowAlive(Terminal?)
+    case probeUnanswered(Terminal?)
+
+    var terminal: Terminal? {
+        switch self {
+        case let .parked(terminal), let .windowAlive(terminal), let .probeUnanswered(terminal):
+            return terminal
+        }
+    }
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -1421,13 +1442,24 @@ extension RPCRouter {
             + "tmux window to recreate. Its session is unchanged."
     }
 
-    /// The refusal `terminal.recreateWindow` returns for a row still on the
-    /// tmux transport. TBD no longer opens tmux windows, so it can neither
-    /// stand a dead one back up nor re-park the row behind it; migrating the
-    /// row to the pty holder is the way forward.
+    /// The refusal `terminal.recreateWindow` returns for a tmux row with no
+    /// agent session to park: a shell, or an agent tab whose session never
+    /// began. TBD no longer opens tmux windows, so it cannot stand a dead one
+    /// back up; migrating the row to the pty holder is the way forward.
     static func tmuxRecreateRefusal(terminalID: UUID) -> String {
         TerminalTransportMigrator.migrateFirstRefusal(
             terminalID: terminalID, retry: "open it again")
+    }
+
+    /// A sibling of `holderRecreateRefusal` for the same reason: one named
+    /// factory per refusal, so the app, the CLI and the tests assert the same
+    /// text. This one is not about a transport that has no window — it is
+    /// about a window whose state could not be established, which is a retry
+    /// rather than a category error.
+    static func unansweredWindowProbeRefusal(terminalID: UUID) -> String {
+        "tmux did not answer whether terminal \(terminalID)'s window is still "
+            + "there within \(TmuxManager.commandTimeout). The window was left "
+            + "alone and the session is unchanged — retry once tmux responds."
     }
 
     /// The refusal `terminal.swapProfile` returns for an in-place switch of a
@@ -1438,13 +1470,21 @@ extension RPCRouter {
             terminalID: terminalID, retry: "switch its account again")
     }
 
-    /// `terminal.recreateWindow` refuses every row and changes nothing.
+    /// `terminal.recreateWindow` never opens a window. TBD starts sessions only
+    /// on the pty holder, so for a tmux row whose window has gone it does the
+    /// one thing that still makes sense, and refuses everything else:
     ///
-    /// It used to stand a tmux window back up under a row whose window had
-    /// gone. TBD opens no tmux windows any more, and a holder row has no window
-    /// to recreate, so the method answers each caller — the CLI, an older app
-    /// build — with the refusal that tells it what to do instead, and leaves
-    /// every column as it was.
+    /// - **A tmux agent row with a session to resume** — Claude, or Codex with
+    ///   a recorded thread — is parked in place with its identity kept, and the
+    ///   parked row is returned. Nothing is spawned. The parked row is what
+    ///   tells the person what happened: a wake of a row parked on tmux
+    ///   refuses and names `tbd terminal migrate`, and the app's parked notice
+    ///   says the same, so the session comes back through a migration followed
+    ///   by a wake.
+    /// - **Any other tmux row** — a shell, or an agent tab whose session never
+    ///   began — has nothing a park could keep, so it is refused with the
+    ///   migrate instruction and left exactly as it was.
+    /// - **A holder row** has no tmux window to recreate and is refused.
     func handleTerminalRecreateWindow(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1453,10 +1493,127 @@ extension RPCRouter {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
+        // Taken BEFORE the worktree lookup: everything downstream exists only
+        // to name a tmux server and window this row does not have. The guard is
+        // the only thing standing between a holder row and the re-park below,
+        // whose probe can only ever answer "gone" for `tmuxWindowID == ""` —
+        // which would park a resumable row whose holder and child are still
+        // running.
         guard terminal.transport != .holder else {
             return RPCResponse(error: Self.holderRecreateRefusal(terminalID: terminal.id))
         }
-        return RPCResponse(error: Self.tmuxRecreateRefusal(terminalID: terminal.id))
+        // A row with no agent session to keep would be recreated as a shell,
+        // which TBD no longer does on tmux.
+        guard let plan = terminal.recoveryResumePlan else {
+            return RPCResponse(error: Self.tmuxRecreateRefusal(terminalID: terminal.id))
+        }
+        guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+        return try await reparkTmuxAgentRow(
+            terminal, plan: plan, worktree: worktree, actor: actor)
+    }
+
+    /// Park a tmux agent row whose window has gone, preserving the identity a
+    /// wake resumes from — the Claude session id and transcript, or the Codex
+    /// thread id and launch options — so the session is not lost with its
+    /// window. Mirrors what startup reconcile does for the same row.
+    ///
+    /// A resumable terminal whose window died must never be recreated as a
+    /// plain shell: that silently turns the tab into a shell and discards the
+    /// session identity, so nothing could resume it any more.
+    private func reparkTmuxAgentRow(
+        _ terminal: Terminal, plan: AgentResumePlan,
+        worktree: LocalWorktree, actor: ActuationActor?
+    ) async throws -> RPCResponse {
+        let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
+        // Record the request before waiting on the shared server lock. The row
+        // is not mutated until the post-lock snapshot check below.
+        let reparkID = try await beginActuation(
+            .recreateWindowRepark, actor: actor,
+            target: .local(worktree: worktree.id, terminal: terminal.id))
+        let repark = try await actuating(reparkID) {
+            try await tmux.withWorktreeServerLock(
+                db: db, worktreeID: worktree.id,
+                allowedStatuses: [worktree.status]
+            ) { currentWorktree -> RecreateReparkOutcome in
+                guard let currentTerminal = try await self.db.terminals.get(
+                    id: terminal.id),
+                      expectedReplacementState.matches(currentTerminal),
+                      currentTerminal.transport != .holder,
+                      currentTerminal.recoveryResumePlan?.identity == plan.identity else {
+                    throw StaleTerminalReplacementError()
+                }
+
+                // Tri-state, because both arms below act: a `false` here would
+                // park a resumable row and then `killWindow` it. The `Bool`
+                // probe answers `false` on a timeout, so a recreate arriving
+                // while the machine is busy would park and kill a session that
+                // is alive and working. Ignorance is reported back to the
+                // caller instead, and nothing is touched.
+                switch await self.tmux.probeWindow(
+                    server: currentWorktree.tmuxServer,
+                    windowID: currentTerminal.tmuxWindowID
+                ) {
+                case .alive:
+                    logger.info("recreateWindow: window \(currentTerminal.tmuxWindowID, privacy: .public) for terminal \(currentTerminal.id, privacy: .public) is alive — ignoring stale recreate request")
+                    return .windowAlive(currentTerminal)
+                case .unknown:
+                    logger.warning("recreateWindow: tmux gave no usable answer about window \(currentTerminal.tmuxWindowID, privacy: .public) for terminal \(currentTerminal.id, privacy: .public) — refusing rather than parking and killing on ignorance")
+                    return .probeUnanswered(currentTerminal)
+                case .absent:
+                    break
+                }
+
+                let currentState = TerminalHibernationSnapshot(terminal: currentTerminal)
+                guard let inertIncarnation = try await self.db.terminals
+                    .beginHibernatedShellRespawn(
+                        id: currentTerminal.id,
+                        expectedState: currentState,
+                        at: self.now()) else {
+                    throw StaleTerminalReplacementError()
+                }
+
+                // No `paneOwnership` check needed: the probe above already
+                // returned `.absent` — tmux's own definitive "no such window"
+                // answer — so there is no live occupant for a pane-identity
+                // probe to protect. And this closure runs inside
+                // `withWorktreeServerLock`, so nothing can race a fresh window
+                // into this coordinate between the probe and this kill.
+                try? await self.tmux.killWindow(
+                    server: currentWorktree.tmuxServer,
+                    windowID: currentTerminal.tmuxWindowID)
+                guard try await self.db.terminals.finalizeHibernatedShellRespawn(
+                    id: currentTerminal.id,
+                    expectedIncarnation: inertIncarnation,
+                    at: self.now()) != nil else {
+                    throw StaleTerminalReplacementError()
+                }
+                await self.pendingQuestions.clear(terminalID: currentTerminal.id)
+                await self.broadcastPendingPrompts(terminalID: currentTerminal.id)
+                return .parked(try await self.db.terminals.get(id: currentTerminal.id))
+            }
+        }
+        if case .probeUnanswered = repark {
+            let refusal = Self.unansweredWindowProbeRefusal(terminalID: terminal.id)
+            // `transportFailed`, not a refusal: the daemon did not decline this
+            // act, it could not reach the transport to perform it.
+            await finishActuation(reparkID, .transportFailed, error: refusal)
+            return RPCResponse(error: refusal)
+        }
+        guard let updated = repark.terminal else {
+            await finishActuation(
+                reparkID, .refused(.notFound), error: "Terminal not found after suspend")
+            return RPCResponse(error: "Terminal not found after suspend")
+        }
+        guard case .parked = repark else {
+            await finishActuation(
+                reparkID, .refused(.notEligible), error: "Terminal window is alive")
+            return try RPCResponse(result: updated)
+        }
+        await finishActuation(reparkID, .dispatched)
+        logger.notice("recreateWindow: parked \(plan.identity.agentKind.rawValue, privacy: .public) terminal \(terminal.id, privacy: .public) on tmux — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(plan.identity.sessionID, privacy: .public) preserved; it wakes after `tbd terminal migrate`")
+        return try RPCResponse(result: updated)
     }
 
     func handleTerminalOutput(_ paramsData: Data) async throws -> RPCResponse {

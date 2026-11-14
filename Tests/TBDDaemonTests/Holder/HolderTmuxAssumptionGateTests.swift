@@ -381,10 +381,12 @@ struct HolderTmuxAssumptionGateTests {
                 "recreateWindow reached tmux for a holder row: \(recorded.snapshot())")
     }
 
-    /// TBD no longer opens tmux windows, so a tmux row whose window is gone is
-    /// refused too, with the migration named, rather than stood back up.
-    @Test("recreateWindow refuses a tmux row whose window is gone and leaves every column alone")
-    func recreateWindowRefusesTmuxRow() async throws {
+    /// TBD no longer opens tmux windows, so a tmux SHELL row whose window is
+    /// gone is refused, with the migration named, rather than stood back up.
+    /// A tmux agent row is parked instead, keeping its session
+    /// (`RecreateWindowProbeTests`).
+    @Test("recreateWindow refuses a tmux shell row whose window is gone and leaves every column alone")
+    func recreateWindowRefusesTmuxShellRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)

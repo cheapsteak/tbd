@@ -14,15 +14,22 @@ import TBDShared
 /// same fixture style as `WakeOnFocusDecisionTests`.
 @Suite("Hibernated banner + parked-pane wake gate")
 struct HibernatedBannerModelTests {
+    /// A holder-backed row unless `transport` says otherwise: every session TBD
+    /// starts is on the holder, and a row parked on tmux gets a notice of its
+    /// own (`parkedOnTmuxRowGetsTheMoveNotice`).
     private func terminal(hibernatedAt: Date? = nil,
                           hibernateReason: HibernateReason? = nil,
                           suspendedAt: Date? = nil,
-                          pendingResumeAt: Date? = nil) -> Terminal {
-        Terminal(id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                          pendingResumeAt: Date? = nil,
+                          transport: TerminalTransport = .holder) -> TBDShared.Terminal {
+        TBDShared.Terminal(id: UUID(), worktreeID: UUID(),
+                 tmuxWindowID: transport == .holder ? "" : "@1",
+                 tmuxPaneID: transport == .holder ? "" : "%1",
                  suspendedAt: suspendedAt,
                  hibernatedAt: hibernatedAt,
                  hibernateReason: hibernateReason,
-                 pendingResumeAt: pendingResumeAt)
+                 pendingResumeAt: pendingResumeAt,
+                 transport: transport)
     }
 
     // MARK: - Hibernated overlay message per park reason
@@ -170,6 +177,37 @@ struct HibernatedBannerModelTests {
         #expect(banner?.cancelTerminalID == nil)
     }
 
+    // MARK: - A row parked on tmux
+
+    /// A row parked on tmux cannot be woken where it is, so its notice says how
+    /// to move it instead of promising a click resumes it — whatever the park
+    /// reason, including the dead-window re-park, which records none.
+    @Test(arguments: [nil, .manual, .auto, .recovery, .merged, .exited] as [HibernateReason?])
+    func parkedOnTmuxRowGetsTheMoveNotice(reason: HibernateReason?) {
+        let banner = HibernatedBannerModel.banner(
+            for: terminal(hibernatedAt: Date(), hibernateReason: reason, transport: .tmux))
+        #expect(banner == .hibernatedOverlay(message: HibernatedBannerModel.parkedOnTmuxMessage))
+        #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains(TransportMigrationMenu.title))
+        #expect(HibernatedBannerModel.parkedOnTmuxMessage.contains("tbd terminal migrate"))
+    }
+
+    /// A start-admission hold is not appended to a tmux row's notice: no wake
+    /// of it can start anything until it is moved.
+    @Test func parkedOnTmuxRowIgnoresAHold() {
+        var held = terminal(hibernatedAt: Date(), hibernateReason: .manual, transport: .tmux)
+        held.startHeldReason = "camera in use"
+        held.startHeldAt = Self.nineTwelveUTC
+        #expect(heldMessage(held) == HibernatedBannerModel.parkedOnTmuxMessage)
+    }
+
+    /// The other branch: the same row on the holder keeps its reason's
+    /// phrasing.
+    @Test func parkedOnTheHolderRowKeepsItsReasonPhrasing() {
+        let banner = HibernatedBannerModel.banner(
+            for: terminal(hibernatedAt: Date(), hibernateReason: .manual, transport: .holder))
+        #expect(banner == .hibernatedOverlay(message: HibernatedBannerModel.message(for: .manual)))
+    }
+
     // MARK: - Full-pane wake overlay gate
 
     /// A parked terminal gets the full-surface click-to-wake overlay.
@@ -198,7 +236,7 @@ struct HibernatedBannerModelTests {
     /// 1970-01-01 09:12 UTC.
     private static let nineTwelveUTC = Date(timeIntervalSince1970: 33_120)
 
-    private func heldMessage(_ terminal: Terminal) -> String {
+    private func heldMessage(_ terminal: TBDShared.Terminal) -> String {
         HibernatedBannerModel.message(
             for: terminal,
             timeZone: TimeZone(identifier: "UTC") ?? .gmt,

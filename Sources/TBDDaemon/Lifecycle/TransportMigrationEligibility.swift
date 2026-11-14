@@ -32,9 +32,9 @@ enum TransportMigrationEligibility: Equatable {
     ///
     /// It tells the person to close the tab rather than to hibernate it first,
     /// because nothing parks a running Codex tab: a manual hibernate is
-    /// Claude-only (`HibernationCoordinator.parkRefusal`), and the only park
-    /// that takes a Codex row is startup recovery's, for a tab whose window
-    /// has already gone.
+    /// Claude-only (`HibernationCoordinator.parkRefusal`), and the only parks
+    /// that take a Codex row are the ones for a tab whose window has already
+    /// gone — startup recovery's and a window recreate's.
     static let codexSkip =
         "A running Codex session cannot be moved; close the tab and open a new one, "
         + "which starts on the pty holder."
