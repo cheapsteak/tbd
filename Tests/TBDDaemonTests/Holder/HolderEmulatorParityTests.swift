@@ -381,17 +381,27 @@ struct HolderEmulatorParityTests {
     }
 
     /// What the viewer readings treat as the same: an ASCII designation and none, and blank
-    /// cells written as spaces and stepped over with CUF under the default pen; and what they
-    /// keep apart: any other designation, and a CUF under a colour.
+    /// cells written as default spaces and stepped over with CUF, whatever pen the output has open
+    /// around the CUF; and what they keep apart: any other designation, and blank cells that
+    /// carry a style.
     @Test func theViewerReadingsJoinOnlyWhatPrintsAlike() {
         func bytes(_ text: String) -> [UInt8] { Array(text.utf8) }
+        func canonical(_ text: String) -> [UInt8] { EmulatorParity.canonicalStyled(bytes(text)) }
         #expect(EmulatorParity.withoutASCIIDesignations(bytes("\u{1b}(B\u{1b})0\u{1b}+B\u{0e}")) == bytes("\u{1b})0\u{0e}"))
-        #expect(EmulatorParity.spacingOutCursorForward(bytes("\u{1b}[2Cin alt")) == bytes("  in alt"))
-        #expect(EmulatorParity.spacingOutCursorForward(bytes("ZXc\u{1b}[5CY\u{1b}[C")) == bytes("ZXc     Y "))
-        #expect(
-            EmulatorParity.spacingOutCursorForward(bytes("\u{1b}[38;5;2mxyz\u{1b}[0m\u{1b}[4Cq"))
-                == bytes("\u{1b}[38;5;2mxyz\u{1b}[0m    q"))
-        #expect(EmulatorParity.spacingOutCursorForward(bytes("\u{1b}[31mx\u{1b}[3Cy")) == bytes("\u{1b}[31mx\u{1b}[3Cy"))
+        #expect(canonical("\u{1b}[2Cin alt") == bytes("  in alt"))
+        #expect(canonical("ZXc\u{1b}[5CY\u{1b}[C") == bytes("ZXc     Y "))
+        // libghostty's viewer of the cursor workload against SwiftTerm's: a gap after a coloured
+        // run, before another colour.
+        let libghosttyGap: String = "\u{1b}[0m\u{1b}[38;5;4mxyz\u{1b}[3C\u{1b}[0m\u{1b}[38;5;7mxyz\u{1b}[0m"
+        let swiftTermGap: String = "\u{1b}[0m\u{1b}[38;5;4mxyz\u{1b}[0m   \u{1b}[0m\u{1b}[38;5;7mxyz\u{1b}[0m"
+        #expect(canonical(libghosttyGap) == canonical(swiftTermGap))
+        // The same colour on both sides of the gap, which the formatter does not write again.
+        #expect(canonical("\u{1b}[31mx\u{1b}[3Cy") == canonical("\u{1b}[0m\u{1b}[31mx\u{1b}[0m   \u{1b}[0m\u{1b}[31my"))
+        #expect(canonical("\u{1b}[31mx\u{1b}[3Cy") == bytes("\u{1b}[0m\u{1b}[31mx\u{1b}[0m   \u{1b}[0m\u{1b}[31my"))
+        // Blanks with a background are written cells, unlike the ones CUF steps over.
+        #expect(canonical("\u{1b}[41m   \u{1b}[0mx") != canonical("\u{1b}[3Cx"))
+        // A hyperlink is kept as it is, in place.
+        #expect(canonical("\u{1b}]8;;https://example.com\u{1b}\\x") == bytes("\u{1b}]8;;https://example.com\u{1b}\\x"))
     }
 
     // MARK: - The outcome

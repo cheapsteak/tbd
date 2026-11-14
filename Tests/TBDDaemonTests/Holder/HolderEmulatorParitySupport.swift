@@ -515,7 +515,7 @@ enum EmulatorParity {
         }
         fields[prefix + "text"] = .text(text)
         let styled = try state.formattedVT(extras: 0, unwrap: true, trim: true)
-        fields[prefix + "styled"] = .text(String(decoding: spacingOutCursorForward(styled), as: UTF8.self))
+        fields[prefix + "styled"] = .text(String(decoding: canonicalStyled(styled), as: UTF8.self))
         let cursor = state.cursor
         fields[prefix + "cursor"] = .value("column \(cursor.col), row \(cursor.row)")
         fields[prefix + "pendingWrap"] = .value("\(state.cursorPendingWrap)")
@@ -593,45 +593,67 @@ enum EmulatorParity {
         return out
     }
 
-    /// `styled` with each cursor-forward `ESC [ n C` written while the output's pen is the
-    /// default replaced by n spaces. libghostty's VT formatter steps over a run of cells that hold
-    /// no character and no style with CUF, and writes a space a program printed as a space, so a
-    /// viewer of libghostty's snapshot, which leaves such cells unwritten, prints `ESC[2C` where a
-    /// viewer of SwiftTerm's, which writes spaces there, prints two spaces. Both read as the same
-    /// blank cells in the default style, and `viewer.text` compares the characters anyway. Only a
-    /// CUF under the default pen is expanded, so one written while a colour or attribute is in
-    /// effect still differs from spaces painted with it.
-    static func spacingOutCursorForward(_ styled: [UInt8]) -> [UInt8] {
+    /// `styled` rewritten so that two outputs painting the same cells read the same: every
+    /// character is written under the pen it is printed with, as `ESC[0m` and then that pen's SGR
+    /// sequences, only where the pen changes, and each cursor-forward `ESC [ n C` becomes n spaces
+    /// in the default style. Other sequences, such as an OSC 8 hyperlink, are kept where they are.
+    ///
+    /// libghostty's VT formatter steps over a run of cells that hold no character and no style
+    /// with CUF, where it prints a space a program wrote as a space. A viewer of libghostty's
+    /// snapshot leaves such cells unwritten and a viewer of SwiftTerm's writes default spaces
+    /// there, so one prints `ESC[2C` where the other prints two spaces. The formatter also writes
+    /// that CUF before it closes the pen of the characters before it, because it switches pens
+    /// only for the next written cell: `xyz ESC[119C ESC[0m ESC[38;5;7m xyz` against
+    /// `xyz ESC[0m` and 119 spaces, then `ESC[0m ESC[38;5;7m xyz`. A CUF paints nothing, so the
+    /// cells it steps over are blank and unstyled whatever pen is open around it, which is what
+    /// default spaces are. A blank cell that carries a style, such as a background colour, is a
+    /// written cell the formatter prints with its pen, so it still differs from an unwritten one.
+    static func canonicalStyled(_ styled: [UInt8]) -> [UInt8] {
         var out: [UInt8] = []
         out.reserveCapacity(styled.count)
-        var penIsDefault = true
+        let reset: [UInt8] = Array("\u{1b}[0m".utf8)
+        // The SGR sequences in effect since the last reset, and the pen `out` last switched to.
+        var pen: [UInt8] = []
+        var written: [UInt8] = []
+        func put(_ byte: UInt8, under cellPen: [UInt8]) {
+            if cellPen != written {
+                out.append(contentsOf: reset)
+                out.append(contentsOf: cellPen)
+                written = cellPen
+            }
+            out.append(byte)
+        }
         var index = 0
         while index < styled.count {
-            guard styled[index] == 0x1b, index + 1 < styled.count, styled[index + 1] == UInt8(ascii: "[") else {
-                out.append(styled[index])
+            let byte = styled[index]
+            guard byte == 0x1b else {
+                if byte < 0x20 { out.append(byte) } else { put(byte, under: pen) }
                 index += 1
                 continue
             }
-            var end = index + 2
-            while end < styled.count, !(0x40...0x7e).contains(styled[end]) { end += 1 }
-            guard end < styled.count else {
-                out.append(contentsOf: styled[index...])
-                break
+            let end = sequenceEnd(styled, from: index)
+            let sequence = styled[index..<end]
+            guard sequence.count >= 3, styled[index + 1] == UInt8(ascii: "["), let terminator = sequence.last else {
+                out.append(contentsOf: sequence)
+                index = end
+                continue
             }
-            let parameters = styled[(index + 2)..<end]
-            let digitsOnly = parameters.allSatisfy { (0x30...0x39).contains($0) }
-            switch styled[end] {
+            let parameters = sequence.dropFirst(2).dropLast()
+            switch terminator {
             case UInt8(ascii: "m"):
-                // `ESC[m` and `ESC[0m` reset the pen; any other SGR sets something.
-                penIsDefault = parameters.allSatisfy { $0 == UInt8(ascii: "0") }
-                out.append(contentsOf: styled[index...end])
-            case UInt8(ascii: "C") where penIsDefault && digitsOnly:
+                // `ESC[m` and `ESC[0m` reset the pen; any other SGR adds to it.
+                if parameters.allSatisfy({ $0 == UInt8(ascii: "0") }) {
+                    pen = []
+                } else {
+                    pen.append(contentsOf: sequence)
+                }
+            case UInt8(ascii: "C") where parameters.allSatisfy({ (0x30...0x39).contains($0) }):
                 let count = parameters.isEmpty ? 1 : Int(String(decoding: parameters, as: UTF8.self)) ?? 1
-                out.append(contentsOf: repeatElement(UInt8(ascii: " "), count: max(count, 1)))
+                for _ in 0..<max(count, 1) { put(UInt8(ascii: " "), under: []) }
             default:
-                out.append(contentsOf: styled[index...end])
+                out.append(contentsOf: sequence)
             }
-            index = end + 1
+            index = end
         }
         return out
     }
