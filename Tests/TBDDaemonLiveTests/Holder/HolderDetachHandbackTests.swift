@@ -311,7 +311,8 @@ struct HandbackFixture {
     }
 
     /// `emulator` is what the registry's flag closure answers, so the adoption
-    /// builds that kind; `HolderAppDeathSeizureTests` takes the default.
+    /// builds that kind; `HolderAppDeathSeizureTests` takes the default except
+    /// where a test is about the libghostty emulator.
     static func start(command: String, emulator: HolderEmulatorKind = .swiftTerm) async throws -> HandbackFixture {
         let process = try await HolderProcessFixture.start(
             launch: HolderProcessFixture.launch(command: command))

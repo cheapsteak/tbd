@@ -86,6 +86,33 @@ struct HolderAppDeathSeizureTests {
         })
     }
 
+    /// A seizure brings no preamble, and the libghostty attach did not wait
+    /// for the child's output to reach a sequence boundary, so the daemon's
+    /// parser can still be inside a sequence the dead app's viewer finished.
+    /// The take-back ends it before the drain resumes: the child's next bytes
+    /// are new output, so `hX` prints, rather than `h` finishing `ESC[4h` and
+    /// turning insert mode on.
+    @Test func aSeizureAbandonsTheSequenceTheDaemonWasLeftInside() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: .ghostty)
+        defer { fixture.tearDown() }
+        // The last thing the daemon read before the attach: half a CSI.
+        await fixture.reader.feedChildOutputForTesting(Data("\u{1b}[4".utf8))
+
+        let viewer = try await fixture.attachAViewer()
+        viewer.close()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
+        #expect(reclaimed == [fixture.terminalID])
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining, "the daemon took the session back without reading it")
+        await resumed.feedChildOutputForTesting(Data("hX".utf8))
+        let screen = await resumed.renderScreen()
+        #expect(screen.contains("hX"), """
+            the child's next bytes finished the sequence the viewer had already finished: \
+            \(screen.debugDescription)
+            """)
+    }
+
     /// The other state a claim can be in, and it takes the other arm. An attach
     /// that timed out unacknowledged kept its *suspended* reader — the viewer
     /// might have been reading all along, so the daemon neither resumed nor

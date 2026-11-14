@@ -65,8 +65,21 @@ protocol HolderEmulator: AnyObject, Sendable {
     /// emulator relies on the preamble's reset prelude, which names every mode
     /// its writer carries. The libghostty emulator resets its terminal first,
     /// muted, in the same hold, because libghostty's formatter names only the
-    /// modes that differ from their defaults.
+    /// modes that differ from their defaults, and ends the sequence its parser
+    /// may still be inside before that, because the reset does not.
     func feedPreamble(_ bytes: ArraySlice<UInt8>)
+
+    /// Ends any sequence the parser was left inside, for a take-back with no
+    /// preamble (`HolderRegistry.takeBackFromViewer`): the viewer that held
+    /// the pty finished that sequence, so the child's next bytes are not its
+    /// tail. Sends the child nothing and does not stamp the ledger.
+    ///
+    /// The SwiftTerm emulator does nothing: its attach waits, within a
+    /// budget, for the child's output to reach a boundary first. The
+    /// libghostty emulator's attach does not, so it ends the sequence here. Never called when the attach is
+    /// cancelled, where the child's bytes never left the daemon and the next
+    /// ones do finish the sequence.
+    func abandonOpenSequence()
 
     /// The kind this emulator is. Fixed at construction; it can differ from
     /// the kind asked for when libghostty could not make its terminal and

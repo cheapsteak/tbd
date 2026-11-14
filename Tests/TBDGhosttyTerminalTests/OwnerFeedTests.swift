@@ -102,6 +102,32 @@ struct OwnerFeedTests {
         #expect(!terminal.isMuted, "the feed's mute outlived it")
     }
 
+    /// The reset clears the screen model, not the stream parser, so a terminal left inside an
+    /// OSC 8 would dispatch it on the replay's first ESC and link every cell the replay writes.
+    /// The CAN before the reset ends the sequence there, and the reset wipes what it dispatched.
+    @Test func aResetFirstFeedAfterAnOpenOSC8LeavesNoLink() throws {
+        let terminal = try Self.makeTerminal()
+        terminal.feed(text: "\u{1b}]8;;https://exa")
+
+        terminal.feed(Self.bytes("\u{1b}[0mhello"), muted: true, resetFirst: true, underLock: {})
+
+        #expect(terminal.withLocked { $0.lineText(0) } == "hello")
+        #expect(terminal.withScreenAccess { $0.hyperlink(column: 0, row: 0) } == nil)
+        let snapshot = try GhosttySnapshotWriter.snapshot(of: terminal, maxScrollbackLines: 100)
+        #expect(snapshot.range(of: Data("https://exa".utf8)) == nil, "the next snapshot carries the cut link")
+    }
+
+    /// The control: without the reset the same replay's first ESC ends the open OSC 8 and the
+    /// link lands on the replay's text, so the test above shows the CAN and the reset at work.
+    @Test func aFeedAfterAnOpenOSC8LinksTheText() throws {
+        let terminal = try Self.makeTerminal()
+        terminal.feed(text: "\u{1b}]8;;https://exa")
+
+        terminal.feed(Self.bytes("\u{1b}[0mhello"), muted: true, underLock: {})
+
+        #expect(terminal.withScreenAccess { $0.hyperlink(column: 0, row: 0) } == "https://exa")
+    }
+
     /// Without `resetFirst` the same replay leaves the modes alone: the reset is what clears them.
     @Test func aFeedWithoutResetFirstKeepsTheModes() throws {
         let terminal = try Self.makeTerminal()

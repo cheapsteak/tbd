@@ -9,12 +9,14 @@ import enum TBDGhosttyCore.GhosttySnapshotWriter
 import enum TBDGhosttyCore.TerminalDeviceIdentity
 
 @testable import TBDDaemonLib
+import TBDShared
 
 /// What the libghostty holder emulator owes the child and the next viewer
 /// beyond the suites both emulators run: the device identity it answers with,
 /// a resize that sends the child nothing, a handback that leaves no stale
-/// mode for the next attach, a snapshot that waits only for a sequence too
-/// long to carry, and an attach that survives a writer that fails. Design:
+/// mode for the next attach, a take-back that leaves no sequence open, a
+/// snapshot that waits only for a sequence too long to carry, and an attach
+/// that survives a writer that fails. Design:
 /// `docs/specs/2026-11-13-swiftterm-retirement-design.md`, stream C.
 ///
 /// The reader-level tests drive a real `HolderReader` over a socketpair,
@@ -123,6 +125,65 @@ import enum TBDGhosttyCore.TerminalDeviceIdentity
         #expect(!Self.contains(next, "\(Self.esc)[?2031h"), "the next attach hands on mode 2031")
         let screen = await harness.reader.renderScreen()
         #expect(screen.contains("hello"), "the handback's screen did not land: \(screen.debugDescription)")
+    }
+
+    // MARK: - A take-back leaves no sequence open
+
+    /// The attach does not wait for the child's sequence to end, so the
+    /// daemon's parser is still inside a cut OSC 8 when the viewer hands back.
+    /// The handback's parse starts by ending it: otherwise its first ESC would
+    /// dispatch the cut link, every cell it restores would carry it, and the
+    /// next attach would hand that link on.
+    @Test func aHandbackAfterACutLinkLeavesNoLink() async throws {
+        let harness = try Harness()
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]8;;https://exa".utf8))
+        close(try await harness.reader.suspendDraining())
+
+        // A viewer that finished the link and wrote a plain line.
+        let viewer = try GhosttyTerminal(
+            cols: 80, rows: 24, scrollbackLines: 200, callbacks: GhosttyTerminalCallbacks())
+        viewer.feed(Array("hello".utf8)[...])
+        let handback = try GhosttySnapshotWriter.snapshot(of: viewer, maxScrollbackLines: 200)
+        #expect(!Self.contains(handback, "https://exa"))
+
+        await harness.reader.ingest(preamble: handback)
+
+        let next = await harness.reader.snapshotPreamble()
+        #expect(!Self.contains(next, "https://exa"), "the next attach hands on the cut link")
+        #expect(await harness.reader.renderScreen().contains("hello"))
+    }
+
+    /// The twin with no preamble, which every app quit with an attached
+    /// session takes. The viewer finished the CSI the daemon's parser was
+    /// left inside, so the child's next bytes are new output: `hX` prints,
+    /// rather than `h` finishing `ESC[4h` and turning insert mode on.
+    @Test func aTakeBackWithNoPreambleAbandonsTheOpenSequence() async throws {
+        let harness = try Harness()
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)[4".utf8))
+        close(try await harness.reader.suspendDraining())
+
+        await harness.reader.abandonOpenSequence()
+        #expect(harness.readReplies().isEmpty, "abandoning the sequence wrote to the child")
+
+        await harness.reader.feedChildOutputForTesting(Data("hX".utf8))
+        #expect(try await harness.reader.screen(maxLines: 8).lines.first == "hX")
+        // Insert mode off: a carriage return and a `Y` overwrite the `h`.
+        await harness.reader.feedChildOutputForTesting(Data("\rY".utf8))
+        #expect(try await harness.reader.screen(maxLines: 8).lines.first == "YX", "insert mode is on")
+    }
+
+    /// The control: without the abandon, the same bytes finish the cut CSI,
+    /// so the test above shows the abandon at work.
+    @Test func withoutTheAbandonTheChildsBytesFinishTheSequence() async throws {
+        let harness = try Harness()
+        defer { harness.tearDown() }
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)[4".utf8))
+
+        await harness.reader.feedChildOutputForTesting(Data("hX".utf8))
+
+        #expect(try await harness.reader.screen(maxLines: 8).lines.first == "X")
     }
 
     // MARK: - The snapshot waits only for what it cannot carry

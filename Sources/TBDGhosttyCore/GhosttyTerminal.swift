@@ -806,11 +806,15 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// muted by this one. For replaying a screen whose replies and reports must not reach the
     /// program. `isMuted` is the setting for a mute that spans several calls.
     ///
-    /// With `resetFirst`, a full reset (`reset()`) runs in the same hold, after `underLock` and
-    /// before the parse, so a replayed screen lands in a terminal with nothing left from its
-    /// earlier life: every mode back to its default, whether or not the replay names it. The
-    /// reset is always muted, so the program-status clear libghostty reports for it reaches
-    /// nobody, and like `reset()` it reports no end for a DEC 2026 hold it ends.
+    /// With `resetFirst`, the parse starts from a cleared terminal, in the same hold, after
+    /// `underLock`: every mode back to its default, whether or not the replay names it. Two steps,
+    /// both muted. A CAN comes first, because a full reset (`reset()`) clears the screen model and
+    /// leaves libghostty's stream parser where it was: inside a sequence the terminal was left in,
+    /// the replay's first ESC would otherwise end that sequence and dispatch it, and a partial
+    /// OSC 8 would put a link on every cell the replay writes. CAN ends the sequence instead, and
+    /// the reset after it wipes whatever that dispatched. The program-status clear libghostty
+    /// reports for the reset reaches nobody, and like `reset()` it reports no end for a DEC 2026
+    /// hold it ends.
     ///
     /// `underLock` must not call back into this terminal: the lock is not recursive. It runs even
     /// for an empty `bytes`, and not at all once the terminal is closed. The bytes count toward
@@ -824,6 +828,9 @@ public final class GhosttyTerminal: @unchecked Sendable {
             defer { core.context.muted = wasMuted }
             if resetFirst {
                 core.context.muted = true
+                Self.cancelSequence.withUnsafeBufferPointer { buffer in
+                    ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
+                }
                 ghostty_terminal_reset(raw)
             }
             guard !bytes.isEmpty else { return }
@@ -834,6 +841,9 @@ public final class GhosttyTerminal: @unchecked Sendable {
             core.outputBytesSinceFrame += bytes.count
         }
     }
+
+    /// CAN: ends any sequence the parser is inside and returns it to ground.
+    private static let cancelSequence: [UInt8] = [0x18]
 
     /// Whether this terminal's lock is held right now, by any thread, the calling one included.
     /// A test seam: from inside `feed(_:muted:resetFirst:underLock:)`'s closure it reads true.

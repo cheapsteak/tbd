@@ -2897,6 +2897,10 @@ actor HolderRegistry {
     /// above the resume would still be above the clear if somebody moved it —
     /// so the window would close in the test while staying open in production.
     /// Inside the call, it cannot be separated from what it stands for.
+    ///
+    /// No open sequence is abandoned here, unlike a take-back with no
+    /// preamble: no viewer read the pty, so the child's next bytes do finish
+    /// the sequence the reader stopped inside.
     private func resumeAfterCancellation(_ reader: HolderReader) async throws {
         await cancelBarrier?()
         try await reader.resumeDraining()
@@ -3189,7 +3193,9 @@ actor HolderRegistry {
     ///
     /// With no preamble there is simply nothing to ingest: the suspended reader
     /// still holds the screen it had before the attach, and the jiggle is what
-    /// gets a repainting program to redraw the rest.
+    /// gets a repainting program to redraw the rest. Its parser may still be
+    /// inside a sequence the viewer has since finished, which the reader
+    /// abandons first (`HolderReader.abandonOpenSequence`).
     ///
     /// **One take-back per attach at a time.** Because the claim stands until
     /// the resume lands, a second take-back of the same attach — the viewer's
@@ -3255,7 +3261,14 @@ actor HolderRegistry {
                 // a restart of its thread. The barrier is where a test parks a
                 // take-back with its claim still standing; see `takeBackBarrier`.
                 await takeBackBarrier?()
-                if let preamble { await suspended.ingest(preamble: preamble) }
+                if let preamble, !preamble.isEmpty {
+                    await suspended.ingest(preamble: preamble)
+                } else {
+                    // The viewer finished whatever sequence the attach left
+                    // the parser inside, so the child's next bytes are not its
+                    // tail; a preamble's ingest ends it on its own.
+                    await suspended.abandonOpenSequence()
+                }
                 try await suspended.resumeDraining()
                 readerCensus.beganReading(
                     .daemon, session: terminalID, at: "handback-resume")

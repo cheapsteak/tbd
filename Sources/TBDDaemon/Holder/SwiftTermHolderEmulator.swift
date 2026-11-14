@@ -123,6 +123,10 @@ final class SwiftTermHolderEmulator: HolderEmulator, @unchecked Sendable {
         }
     }
 
+    /// Nothing: the attach waited for the child's output to reach a sequence
+    /// boundary before it handed the pty over.
+    func abandonOpenSequence() {}
+
     /// Whether the child's output so far ends between sequences, so bytes of
     /// the daemon's own — `snapshotPreamble`'s mode queries and alt-screen
     /// toggle — can be fed without cutting one of the child's short.

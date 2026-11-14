@@ -32,17 +32,25 @@ import enum TBDShared.ProgramStatusProtocol
 /// - **Device identity.** DA1, DA2 and XTVERSION are answered with the frozen
 ///   `TerminalDeviceIdentity` bytes, the ones the SwiftTerm emulator answers
 ///   with.
-/// - **A handback preamble lands in a reset, muted terminal.** `feedPreamble`
-///   resets the terminal and then parses the preamble, both muted, in the
-///   same hold as the stamp: every reply, report and query the preamble
-///   provokes is dropped, and every mode goes back to its default first. The
-///   reset is what clears a mode the preamble does not name: libghostty's
-///   formatter writes only modes that differ from their defaults, and the
-///   writer's reset prelude names a fixed list, so a mode outside it (2048,
-///   2031 and others) would otherwise stay as the daemon last saw it and go
-///   out in the next attach. A probe in a preamble is dropped inside
-///   libghostty, unseen, and leaves no record, where the SwiftTerm emulator
-///   records it as ignored.
+/// - **A handback preamble lands in a cleared, muted terminal.**
+///   `feedPreamble` ends any sequence the parser was left inside, resets the
+///   terminal and then parses the preamble, all muted, in the same hold as
+///   the stamp (`GhosttyTerminal.feed(_:muted:resetFirst:underLock:)`): every
+///   reply, report and query the preamble provokes is dropped, and every mode
+///   goes back to its default first. The reset is what clears a mode the
+///   preamble does not name: libghostty's formatter writes only modes that
+///   differ from their defaults, and the writer's reset prelude names a fixed
+///   list, so a mode outside it (2048, 2031 and others) would otherwise stay
+///   as the daemon last saw it and go out in the next attach. The reset
+///   leaves libghostty's stream parser alone, and the attach does not wait for
+///   the child to reach a boundary, so the parser can still be inside the
+///   child's sequence; the CAN before the reset is what ends it. A probe in a
+///   preamble is dropped inside libghostty, unseen, and leaves no record,
+///   where the SwiftTerm emulator records it as ignored.
+/// - **A take-back with no preamble abandons the open sequence.** The viewer
+///   finished whatever sequence the attach left open, so the child's next
+///   bytes are not its tail. `abandonOpenSequence` feeds a CAN and an OSC 8
+///   close, muted, in one hold, before the reader resumes.
 /// - **A resize sends the child nothing.** Every resize is muted
 ///   (`GhosttyTerminal.resize(cols:rows:muted:)`), so a child that asked for
 ///   in-band size reports with mode 2048 gets none from the daemon, as it got
@@ -165,6 +173,18 @@ final class GhosttyHolderEmulator: HolderEmulator {
     func feedPreamble(_ bytes: ArraySlice<UInt8>) {
         terminal.feed(bytes, muted: true, resetFirst: true, underLock: { ledger.stampArrival() })
     }
+
+    /// A CAN, which returns the parser to ground, then an OSC 8 close, because
+    /// CAN dispatches a partial OSC like any other way out of one, so a cut
+    /// `ESC]8;;URL` would otherwise leave that link on the pen for every cell
+    /// the child writes next. Muted, so nothing either dispatches reaches the
+    /// child or the tap, and not stamped: no byte came from the child.
+    func abandonOpenSequence() {
+        terminal.feed(Self.abandonSequence[...], muted: true, underLock: {})
+    }
+
+    /// CAN, then `ESC ] 8 ; ; ESC \`.
+    private static let abandonSequence: [UInt8] = [0x18] + Array("\u{1b}]8;;\u{1b}\\".utf8)
 
     /// Muted, on every call, so libghostty's in-band size report (mode 2048)
     /// never reaches the child from the daemon, as none ever did from the

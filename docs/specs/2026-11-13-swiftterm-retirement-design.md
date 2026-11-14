@@ -192,6 +192,14 @@ the snapshot could otherwise end only by dropping the rest.
   its libghostty terminal, muted, in the same hold as the handback's parse. Without the
   reset, a mode outside the list, such as 2048, stays on after the program turned it off
   in the viewer, and the next attach hands it on.
+- **End the open sequence on a take-back** – the libghostty attach does not wait for the
+  child's output to reach a boundary, so the daemon's parser can still be inside a
+  sequence the viewer has since finished, and `ghostty_terminal_reset` resets the screen
+  model, not the stream parser. A handback's parse therefore starts with a muted CAN
+  before the reset, which wipes whatever the CAN dispatched. A take-back with no preamble,
+  after an app quit or died, feeds a muted CAN and an OSC 8 close instead, since a cut
+  `ESC]8;;URL` that CAN dispatches would leave its link on the pen. A cancelled attach
+  keeps the sequence: no viewer read the pty, so the child's next bytes finish it.
 - **No binary snapshot** – libghostty's own snapshot format is outside its 1.0 ABI promise,
   and an update hands over between a daemon and an app built from different commits.
 - **Receivers** – until D, a person who turned the app engine off still views with

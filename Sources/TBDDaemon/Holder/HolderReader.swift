@@ -825,6 +825,14 @@ actor HolderReader {
         emulator.feedPreamble([UInt8](preamble)[...])
     }
 
+    /// Ends whatever sequence the emulator's parser was left inside, for a
+    /// take-back that brings no preamble: see
+    /// `HolderEmulator.abandonOpenSequence`.
+    func abandonOpenSequence() {
+        guard state != .stopped else { return }
+        emulator.abandonOpenSequence()
+    }
+
     /// Feeds bytes to the emulator exactly as the drain loop does — as the
     /// child's own output, OSC 7501 handler live. Test-facing: it lets a suite
     /// drive the probe and report paths without a drain thread or a real pty.
