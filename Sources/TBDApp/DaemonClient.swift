@@ -1662,14 +1662,13 @@ actor DaemonClient {
     ///
     /// `terminalID` is what names a HOLDER session: its `paneID`, `windowID`
     /// and server are the empty string by construction, so nothing else in
-    /// these params can identify the row the daemon must branch on. A request
-    /// without one is answered `unavailable`.
+    /// these params can identify the row the daemon must branch on.
     ///
     /// `grid` is the size of the terminal a holder snapshot will be fed into;
     /// see `AttachRequestParams.cols`.
     func attachRequest(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil, attachSeq: UInt64? = nil,
+        terminalID: UUID, attachSeq: UInt64? = nil,
         grid: (cols: Int, rows: Int)? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
@@ -1705,7 +1704,7 @@ actor DaemonClient {
     /// there would be nothing to check the ack against, and confirming the
     /// wrong attach would release a reader a live attach depends on.
     func attachReady(
-        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID
     ) async throws {
         try await callVoidAsync(
             method: RPCMethod.attachReady,
@@ -1721,11 +1720,10 @@ actor DaemonClient {
     /// pane: the detach is a *handback* — the daemon takes the pty back and
     /// puts a drain on it — and `snapshotPreamble` is the screen the viewer
     /// was showing, so the session's model is not left frozen at the instant
-    /// the viewer arrived. Without a `terminalID` the daemon has nothing to
-    /// hand back and answers ok.
+    /// the viewer arrived.
     func paneDetach(
         worktreeID: UUID, paneID: String, generation: UInt64? = nil,
-        terminalID: UUID? = nil, snapshotPreamble: Data? = nil
+        terminalID: UUID, snapshotPreamble: Data? = nil
     ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneDetach,
@@ -1739,10 +1737,9 @@ actor DaemonClient {
     /// Debounced by the caller. Fire-and-forget from the app's view: errors
     /// are dropped because the resize is re-fired repeatedly and the next tick
     /// self-heals.
-    /// `terminalID` names the session, which has no window to key on; without
-    /// one the daemon resizes nothing.
+    /// `terminalID` names the session, which has no window to key on.
     func paneResize(
-        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
+        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID
     ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneResize,
