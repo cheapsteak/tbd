@@ -45,7 +45,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var scratch_profile_override_id: String?
     var auto_hibernate_enabled: Bool?
     var hibernate_idle_minutes: Int?
-    var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
     /// Setup-tab auto-close. **Tri-state**: the frozen
     /// `v57_config_auto_close_setup` migration gave the column a SQL default
@@ -336,7 +335,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
                 ),
                 Config.maxHibernateIdleMinutes
             ),
-            controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
             // NOT `?? false`: NULL means "never chose" and follows the
             // shipped default.
@@ -662,18 +660,6 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET auto_hibernate_enabled = ?, hibernate_idle_minutes = ? WHERE id = ?",
                 arguments: [enabled, minutes, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the tmux control-mode opt-in. The attach gate re-reads this
-    /// per decision (`env || flag`), so no daemon restart is required —
-    /// but only newly created panes pick up the change.
-    public func setControlModeEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET control_mode_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
             )
         }
     }
