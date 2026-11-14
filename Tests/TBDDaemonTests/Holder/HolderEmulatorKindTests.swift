@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import GRDB
 import Testing
 
 @testable import TBDDaemonLib
@@ -9,7 +10,8 @@ import Testing
 /// `ghostty_daemon_emulator_enabled` flag to the emulator built.
 ///
 /// Each branch of the flag has a test: off gives the SwiftTerm emulator, on
-/// gives the libghostty one, and unset follows the shipped default. The
+/// gives the libghostty one, and unset or unreadable follows the shipped
+/// default. The
 /// resolver is the one the daemon hands its registry, read against a real
 /// in-memory database. Design: `docs/specs/2026-11-13-swiftterm-retirement-design.md`
 /// ("The flag", "Testing").
@@ -45,11 +47,34 @@ import Testing
         #expect(await HolderEmulatorKind.configured(by: db.config) == .swiftTerm)
     }
 
+    /// A read that fails costs the flag, never the reader: the kind is the
+    /// one the shipped default picks. The table goes after a choice against
+    /// the default was stored, so a stored value that somehow survived would
+    /// give the other kind.
+    @Test func anUnreadableFlagTakesTheShippedDefault() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let chosen = !Config.ghosttyDaemonEmulatorDefault
+        try await db.config.setGhosttyDaemonEmulator(chosen)
+        #expect(
+            await HolderEmulatorKind.configured(by: db.config)
+                == HolderEmulatorKind(ghosttyDaemonEmulatorEnabled: chosen),
+            "the choice never reached the resolver, so the fallback below proves nothing")
+
+        try await db.writerForTests.write { try $0.execute(sql: "DROP TABLE config") }
+        await #expect(throws: (any Error).self, "the config read still works") {
+            try await db.config.get()
+        }
+
+        #expect(
+            await HolderEmulatorKind.configured(by: db.config)
+                == HolderEmulatorKind(ghosttyDaemonEmulatorEnabled: Config.ghosttyDaemonEmulatorDefault))
+    }
+
     // MARK: - The kind builds its emulator
 
     /// Each kind builds the emulator it names, and that emulator parses: the
     /// SwiftTerm one waits for a sequence boundary before a snapshot, and the
-    /// libghostty one does not.
+    /// libghostty one, at ground, does not.
     @Test(arguments: HolderEmulatorKind.allCases)
     func eachKindBuildsItsOwnEmulator(kind: HolderEmulatorKind) {
         let emulator = Self.build(kind)
