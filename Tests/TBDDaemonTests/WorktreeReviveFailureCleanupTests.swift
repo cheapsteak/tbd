@@ -181,4 +181,36 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: archived.localPath),
                 "the failed checkout left a directory at \(archived.localPath)")
     }
+
+    // MARK: - The spawn gate
+
+    /// A daemon that cannot start a pty holder refuses a revive before git
+    /// runs: the row stays archived, and no checkout is re-added. Asked only at
+    /// the tab spawn, the gate would refuse after the re-add, leaving the
+    /// checkout on disk and the row revived with no tab open.
+    @Test func aReviveTheSpawnGateRefusesTouchesNoGit() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedWorktree(lifecycle: lifecycle, repoID: repo.id)
+        // The same daemon after its `TBDHolder` binary went missing.
+        var withoutRegistry = lifecycle
+        withoutRegistry.holderRegistry = nil
+        let refusing = withoutRegistry
+
+        await #expect(throws: TerminalSpawnRefusal.holderUnavailable) {
+            _ = try await refusing.reviveWorktree(worktreeID: archived.id, skipClaude: true)
+        }
+
+        #expect(try await db.worktrees.get(id: archived.id)?.status == .archived,
+                "the refused revive changed the row's status")
+        #expect(!FileManager.default.fileExists(atPath: archived.localPath),
+                "the refused revive re-added the checkout at \(archived.localPath)")
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        #expect(listed.count == 1, "the refused revive registered a checkout: \(listed.map(\.path))")
+        #expect(try await db.terminals.list(worktreeID: archived.id).isEmpty)
+    }
 }

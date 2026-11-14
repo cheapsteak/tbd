@@ -16,7 +16,7 @@ extension RPCRouter {
         // it is no use on a daemon that cannot start a pty holder, since no
         // terminal can be added to it by hand either, so the create fails with
         // the refusal and leaves no folder and no row, as a `worktree.create`
-        // the gate refuses ends with its row taken back.
+        // the gate refuses does.
         if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
             return RPCResponse(error: refusal.message)
         }

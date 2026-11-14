@@ -283,6 +283,14 @@ extension WorktreeLifecycle {
         }
 
         do {
+            // The spawn gate, asked before anything is made on disk: every tab
+            // this create opens needs a pty holder, so a daemon that cannot
+            // start one refuses the create before the directory, the checkout
+            // or a branch exists, and the rollback below takes back only the
+            // row. The tab spawns ask the same gate again and carry its answer;
+            // a registry's `canSpawn` is fixed when it is built, so they get the
+            // same one.
+            _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
             let clock = ContinuousClock()
             let phaseStart = clock.now
             let creationConfig = try await db.config.get()
@@ -1645,6 +1653,9 @@ extension WorktreeLifecycle {
         // function opens — the primary, the setup-hook tab, the archived-
         // session restores: the same question every other spawn path asks,
         // through the same function. A refusal throws before any tab exists.
+        // A create and a revive have already asked it before touching git, so
+        // for them this answer is settled; it is asked again because this
+        // function is also called on its own, for a worktree already on disk.
         let transport = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
 
         // Resolve model profile. An explicit per-creation `overrideProfileID`

@@ -574,6 +574,14 @@ extension WorktreeLifecycle {
                 prepared: preparedArchivedCodexLaunches, cols: cols, rows: rows)
         }
 
+        // The spawn gate, asked before git or the disk is touched: every tab a
+        // revive opens needs a pty holder, so a daemon that cannot start one
+        // refuses the revive while the row is still archived and nothing has
+        // been re-added. Asking it later would leave the checkout re-added,
+        // the row revived and no tab open. A retry above re-adds nothing, and
+        // its tab spawns ask the gate themselves.
+        _ = try TerminalSpawnTransport.decide(registry: holderRegistry).get()
+
         // Create parent directory if needed
         let parentDir = (worktree.localPath as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(

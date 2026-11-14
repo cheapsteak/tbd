@@ -105,4 +105,32 @@ struct TerminalSpawnGateTests {
         #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
         #expect(try await db.terminals.list(worktreeID: worktree.id).isEmpty)
     }
+
+    /// `worktree.create` on a daemon that cannot start a holder answers with
+    /// the gate's refusal before phase 1, so the caller sees it, and no row
+    /// exists for a detached phase 2 to fail later.
+    @Test func worktreeCreateRefusesBeforeAnythingIsMade() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date(),
+            actuationLog: makeTestActuationLog())
+        router.holderRegistry = Self.registry(spawner: nil)
+        let scratch = fencedScratchRoot(prefix: "tbdgate")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        let repo = try await db.repos.create(
+            path: "\(scratch)/repo", displayName: "acme", defaultBranch: "main")
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.worktreeCreate,
+            params: WorktreeCreateParams(repoID: repo.id)))
+
+        #expect(!response.success)
+        #expect(response.error == TerminalSpawnRefusal.holderUnavailable.message)
+        #expect(try await db.worktrees.list(repoID: repo.id).isEmpty,
+                "the refused create wrote a worktree row")
+    }
 }

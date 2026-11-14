@@ -48,6 +48,15 @@ extension RPCRouter {
             return RPCResponse(error: refusal)
         }
 
+        // The spawn gate, asked here for the same reason: a daemon that cannot
+        // start a pty holder can open none of this worktree's tabs, and a
+        // refusal from detached phase 2 would reach a caller that does not wait
+        // only as a failed create. Asked before phase 1, so nothing is made or
+        // recorded; phase 2 asks it again for its other callers.
+        if case .failure(let refusal) = TerminalSpawnTransport.decide(registry: holderRegistry) {
+            return RPCResponse(error: refusal.message)
+        }
+
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
         let pending = try await lifecycle.beginCreateWorktree(
             repoID: params.repoID,

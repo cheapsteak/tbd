@@ -233,12 +233,15 @@ import Testing
         defer { try? FileManager.default.removeItem(at: parentDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(
+        var lifecycle = WorktreeLifecycle(
             db: db,
             git: GitManager(subprocessTimeout: .milliseconds(1)),
             tmux: TmuxManager(dryRun: true),
             hooks: HookResolver()
         )
+        // A create asks the spawn gate before it runs git, so a lifecycle that
+        // cannot spawn would be refused before the timeout under test.
+        lifecycle.holderRegistry = makeHolderRegistryDouble(launch: FakeHolderLaunch())
         let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
 
         do {
@@ -881,6 +884,39 @@ import Testing
                 "reconcile archived the worktree whose checkout lives at the retried path")
         #expect(try await db.terminals.list(worktreeID: pending.id).isEmpty == false,
                 "the terminals of the retried worktree must survive reconcile")
+    }
+
+    // MARK: - The spawn gate
+
+    /// A daemon that cannot start a pty holder refuses a create before git
+    /// runs, so the refusal's "nothing was changed" is true: no branch, no
+    /// checkout, no directory, and no row. Asked only at the tab spawn, the
+    /// gate would refuse after `git worktree add`, and the rollback would
+    /// re-adopt the checkout as a worktree with no tabs.
+    @Test func aCreateTheSpawnGateRefusesTouchesNoGit() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        // No registry: nothing to spawn with.
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let branchesBefore = try await localBranches(repoDir)
+
+        await #expect(throws: TerminalSpawnRefusal.holderUnavailable) {
+            _ = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+        }
+
+        #expect(try await localBranches(repoDir) == branchesBefore,
+                "the refused create made a branch")
+        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+        #expect(listed.count == 1, "the refused create left a checkout: \(listed.map(\.path))")
+        let base = WorktreeLayout().basePath(for: repo)
+        let survivors = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
+        #expect(survivors.isEmpty, "the refused create left directories: \(survivors)")
+        let rows = try await db.worktrees.list(repoID: repo.id)
+        #expect(rows.isEmpty, "the refused create left a worktree row: \(rows.map(\.name))")
     }
 
     // MARK: - Existing-branch creation cleanup
