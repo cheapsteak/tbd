@@ -34,8 +34,10 @@ enum TransportMigrationOutcome: Sendable, Equatable {
     ///
     /// **It does not promise that nothing happened.** Most skips are refusals
     /// taken before anything was touched, but a park that succeeded and was
-    /// then overtaken skips with the session's program already stopped, and
-    /// such a session resumes on tmux when it is next woken. The reason says
+    /// then overtaken skips with the session's program already stopped. Such a
+    /// session stays parked on tmux, where no wake starts it; the next run of
+    /// the migration finds it parked and moves it without interrupting
+    /// anything, and a wake then resumes it on the pty holder. The reason says
     /// which of the two it was.
     case skipped(reason: String)
     /// The migration could not be attempted or could not be finished. Carries
@@ -180,9 +182,12 @@ actor TerminalTransportMigrator {
 
     /// The skip for a row that parked and then could not be read back. The one
     /// skip that says the session's program was stopped, so it has to say what
-    /// becomes of it.
+    /// becomes of it: the row stays parked on tmux, which no wake resumes, and
+    /// running the migration again moves the parked row, after which a wake
+    /// resumes it on the pty holder.
     static let unreadableAfterParkSkip =
-        "This session was paused, but its row could not be read back, so it was not moved; it resumes on tmux when woken."
+        "This session was paused, but its row could not be read back, so it was not moved. "
+        + "It stays parked: run the migration again to move it to the pty holder, then wake it."
 
     private let db: TBDDatabase
     private let operations: Operations
