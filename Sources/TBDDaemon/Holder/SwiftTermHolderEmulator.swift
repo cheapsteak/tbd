@@ -38,9 +38,9 @@ final class SwiftTermHolderEmulator: HolderEmulator, @unchecked Sendable {
     private var ingestingPreamble = false
 
     let kind: HolderEmulatorKind = .swiftTerm
-    /// The snapshot's `DECRQM` queries and alt-screen toggle feed the live
-    /// terminal; see `snapshotPreamble`.
-    let snapshotNeedsSequenceBoundary = true
+    /// Always: the snapshot's `DECRQM` queries and alt-screen toggle feed the
+    /// live terminal; see `snapshotPreamble`.
+    var snapshotNeedsSequenceBoundary: Bool { true }
 
     init(
         ledger: HolderEmulatorLedger,

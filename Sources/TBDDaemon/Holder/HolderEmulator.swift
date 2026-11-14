@@ -23,8 +23,8 @@ import os
 ///     the stamp and `Terminal.feed`, and around every read.
 ///   - **libghostty**'s `GhosttyTerminal` takes its private, non-recursive
 ///     lock itself, so no caller can wrap a call in it. The emulator feeds
-///     through `GhosttyTerminal.feed(_:muted:underLock:)`, which runs the
-///     stamp in its closure, inside the same hold as
+///     through `GhosttyTerminal.feed(_:muted:resetFirst:underLock:)`, which
+///     runs the stamp in its closure, inside the same hold as
 ///     `ghostty_terminal_vt_write`. Reads go through `withLocked`.
 ///     `GhosttySnapshotWriter` takes the lock itself, so the emulator calls it
 ///     outside any other hold.
@@ -35,6 +35,13 @@ import os
 ///   SwiftTerm emulator's `snapshotPreamble` does, and so says
 ///   `snapshotNeedsSequenceBoundary`; the reader then calls it only after
 ///   waiting for the child's output to reach a sequence boundary.
+/// - **The child hears from the emulator only in answer to its own output.**
+///   A resize and a handback preamble send it nothing.
+///
+/// A known difference, which the corpus parity suite measures rather than
+/// hides: the libghostty emulator answers queries the SwiftTerm one never did
+/// (`CSI ? 996 n`, XTGETTCAP and size reports), and nothing here filters those
+/// answers.
 protocol HolderEmulator: AnyObject, Sendable {
     /// The child's own output — the drain loop's reads, the quiesce remainder.
     /// Stamps the ledger and parses in one hold. Replies to the child's
@@ -49,9 +56,16 @@ protocol HolderEmulator: AnyObject, Sendable {
     /// the child now. An emulator may also drop the other replies the preamble
     /// provokes, because they answer questions the child never asked. The
     /// libghostty emulator drops them: it feeds with
-    /// `GhosttyTerminal.feed(_:muted:underLock:)`, which mutes that one parse
-    /// inside the same hold as the stamp. The SwiftTerm emulator forwards
-    /// them, as `feed` does.
+    /// `GhosttyTerminal.feed(_:muted:resetFirst:underLock:)`, which mutes that
+    /// one parse inside the same hold as the stamp. The SwiftTerm emulator
+    /// forwards them, as `feed` does.
+    ///
+    /// No mode the daemon saw before the attach may survive a preamble that
+    /// leaves it unnamed, or the next attach hands it on. The SwiftTerm
+    /// emulator relies on the preamble's reset prelude, which names every mode
+    /// its writer carries. The libghostty emulator resets its terminal first,
+    /// muted, in the same hold, because libghostty's formatter names only the
+    /// modes that differ from their defaults.
     func feedPreamble(_ bytes: ArraySlice<UInt8>)
 
     /// The kind this emulator is. Fixed at construction; it can differ from
@@ -59,15 +73,21 @@ protocol HolderEmulator: AnyObject, Sendable {
     /// `HolderEmulatorKind.makeEmulator` fell back to SwiftTerm.
     var kind: HolderEmulatorKind { get }
 
-    /// Whether `snapshotPreamble` feeds the live terminal, so that the reader
-    /// must wait for the child's output to reach a sequence boundary before
-    /// calling it (`HolderReader.suspendDraining`). True for SwiftTerm, whose
+    /// Whether a snapshot taken now needs the child's output to reach a
+    /// sequence boundary first, asked by the reader just before it would wait
+    /// (`HolderReader.suspendDraining`); the wait then runs until
+    /// `isAtSequenceBoundary` or its budget. Always true for SwiftTerm, whose
     /// `DECRQM` queries would cut a sequence the child is part-way through.
-    /// False for libghostty, whose snapshot only reads the live terminal and
-    /// ends with the bytes of a sequence left open, for the viewer to finish.
+    /// For libghostty, whose snapshot only reads the live terminal and ends
+    /// with the bytes of a sequence left open for the viewer to finish, true
+    /// only while that sequence is too long for libghostty to have kept its
+    /// bytes, which the snapshot could otherwise end only by dropping its rest.
     var snapshotNeedsSequenceBoundary: Bool { get }
 
-    /// Reshapes the grid. Never touches the tty, which is the reader's.
+    /// Reshapes the grid. Never touches the tty, which is the reader's, and
+    /// sends the child nothing: the libghostty emulator mutes the in-band size
+    /// report a child asks for with mode 2048, which the SwiftTerm emulator
+    /// never had to send.
     func resize(columns: Int, rows: Int)
 
     /// The grid's dimensions.

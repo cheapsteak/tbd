@@ -16,8 +16,8 @@ import enum TBDShared.ProgramStatusProtocol
 /// - **One lock: the terminal's own.** `GhosttyTerminal` keeps a private,
 ///   non-recursive lock and takes it in every call, so nothing here takes a
 ///   lock of its own. A feed stamps the ledger through
-///   `GhosttyTerminal.feed(_:muted:underLock:)`, whose closure runs in the
-///   parse's hold; every read is one `withLocked` hold, which is also where
+///   `GhosttyTerminal.feed(_:muted:resetFirst:underLock:)`, whose closure runs
+///   in the parse's hold; every read is one `withLocked` hold, which is also where
 ///   the ledger builds a screen or a mode reading. `GhosttySnapshotWriter`
 ///   takes the lock itself, so `snapshotPreamble` calls it outside any hold.
 /// - **Replies and reports.** libghostty collects what a parse produces and
@@ -32,16 +32,32 @@ import enum TBDShared.ProgramStatusProtocol
 /// - **Device identity.** DA1, DA2 and XTVERSION are answered with the frozen
 ///   `TerminalDeviceIdentity` bytes, the ones the SwiftTerm emulator answers
 ///   with.
-/// - **A handback preamble is muted.** `feedPreamble` mutes exactly its own
-///   parse, inside the same hold as the stamp: every reply, report and query
-///   the preamble provokes is dropped. A probe in a preamble is therefore
-///   dropped inside libghostty, unseen, and leaves no record, where the
-///   SwiftTerm emulator records it as ignored.
+/// - **A handback preamble lands in a reset, muted terminal.** `feedPreamble`
+///   resets the terminal and then parses the preamble, both muted, in the
+///   same hold as the stamp: every reply, report and query the preamble
+///   provokes is dropped, and every mode goes back to its default first. The
+///   reset is what clears a mode the preamble does not name: libghostty's
+///   formatter writes only modes that differ from their defaults, and the
+///   writer's reset prelude names a fixed list, so a mode outside it (2048,
+///   2031 and others) would otherwise stay as the daemon last saw it and go
+///   out in the next attach. A probe in a preamble is dropped inside
+///   libghostty, unseen, and leaves no record, where the SwiftTerm emulator
+///   records it as ignored.
+/// - **A resize sends the child nothing.** Every resize is muted
+///   (`GhosttyTerminal.resize(cols:rows:muted:)`), so a child that asked for
+///   in-band size reports with mode 2048 gets none from the daemon, as it got
+///   none from the SwiftTerm emulator, which has no mode 2048. While a viewer
+///   holds the pty the viewer answers for the terminal, and the daemon must
+///   not write into the child's input; while the daemon holds it, the child
+///   learns the size from `SIGWINCH`.
 /// - **No reading feeds the terminal.** Modes are read with `mode(_:ansi:)`
 ///   and the snapshot writer feeds only an in-process clone, so the snapshot
 ///   needs no wait for the child's sequence to end: a sequence left open is
-///   carried at the end of the snapshot for the viewer to finish
-///   (`snapshotNeedsSequenceBoundary` is false).
+///   carried at the end of the snapshot for the viewer to finish. The one
+///   exception is a sequence longer than libghostty keeps the bytes of, which
+///   the writer can only end with an opener that drops the rest:
+///   `snapshotNeedsSequenceBoundary` is true for exactly that case, and the
+///   reader waits for it as it waits for the SwiftTerm emulator.
 final class GhosttyHolderEmulator: HolderEmulator {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 
@@ -58,14 +74,26 @@ final class GhosttyHolderEmulator: HolderEmulator {
             cols: columns, rows: rows, scrollbackLines: scrollback, callbacks: callbacks)
     }
 
+    /// Writes the attach snapshot: the terminal and the most scrollback lines
+    /// to keep. A seam, so a test can make the writer fail and reach
+    /// `snapshotPreamble`'s fallback; production passes `writeSnapshot`.
+    typealias SnapshotWriter = @Sendable (
+        _ terminal: TBDGhosttyCore.GhosttyTerminal, _ maxScrollbackLines: Int
+    ) throws -> Data
+
+    /// The production writer: `GhosttySnapshotWriter.snapshot`.
+    static let writeSnapshot: SnapshotWriter = { terminal, maxScrollbackLines in
+        try GhosttySnapshotWriter.snapshot(of: terminal, maxScrollbackLines: maxScrollbackLines)
+    }
+
     private let terminal: TBDGhosttyCore.GhosttyTerminal
     /// Its one mutable field is guarded by the terminal's lock; see the ledger.
     private let ledger: HolderEmulatorLedger
     /// Names the session in the one line this type logs.
     private let sessionID: UUID
+    private let snapshotWriter: SnapshotWriter
 
     let kind: HolderEmulatorKind = .ghostty
-    let snapshotNeedsSequenceBoundary = false
 
     /// Throws what the factory throws, when libghostty cannot make the
     /// terminal. `HolderEmulatorKind.makeEmulator` then builds the SwiftTerm
@@ -76,10 +104,12 @@ final class GhosttyHolderEmulator: HolderEmulator {
         columns: Int, rows: Int, scrollback: Int,
         programStatus: HolderProgramStatusTap?,
         reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void,
-        makeTerminal: TerminalFactory = GhosttyHolderEmulator.makeTerminal
+        makeTerminal: TerminalFactory = GhosttyHolderEmulator.makeTerminal,
+        writeSnapshot: @escaping SnapshotWriter = GhosttyHolderEmulator.writeSnapshot
     ) throws {
         self.ledger = ledger
         self.sessionID = sessionID
+        self.snapshotWriter = writeSnapshot
         self.terminal = try makeTerminal(
             max(1, columns), max(1, rows), max(0, scrollback),
             GhosttyHolderEmulator.callbacks(ledger: ledger, programStatus: programStatus, reply: reply))
@@ -128,15 +158,28 @@ final class GhosttyHolderEmulator: HolderEmulator {
         terminal.feed(bytes, underLock: { ledger.stampArrival() })
     }
 
-    /// `feed`, for a handback preamble, muted for exactly this parse inside
-    /// the same hold as the stamp: nothing the preamble provokes reaches the
-    /// child or the tap.
+    /// `feed`, for a handback preamble: a full reset and then the parse, both
+    /// muted, in the same hold as the stamp. Nothing the preamble provokes
+    /// reaches the child or the tap, and no mode the preamble leaves unnamed
+    /// survives from before it.
     func feedPreamble(_ bytes: ArraySlice<UInt8>) {
-        terminal.feed(bytes, muted: true, underLock: { ledger.stampArrival() })
+        terminal.feed(bytes, muted: true, resetFirst: true, underLock: { ledger.stampArrival() })
     }
 
+    /// Muted, on every call, so libghostty's in-band size report (mode 2048)
+    /// never reaches the child from the daemon, as none ever did from the
+    /// SwiftTerm emulator. A viewer that holds the pty answers for the
+    /// terminal, and the daemon must not write into the child's input then.
     func resize(columns: Int, rows: Int) {
-        terminal.resize(cols: max(1, columns), rows: max(1, rows))
+        terminal.resize(cols: max(1, columns), rows: max(1, rows), muted: true)
+    }
+
+    /// True only while the child is inside a sequence too long for the
+    /// snapshot to carry (`GhosttySnapshotWriter.endsInOverlongSink`). Any
+    /// shorter open sequence is carried at the end of the snapshot, so the
+    /// reader need not wait for it.
+    var snapshotNeedsSequenceBoundary: Bool {
+        terminal.withLocked { GhosttySnapshotWriter.endsInOverlongSink($0) }
     }
 
     var size: (columns: Int, rows: Int) {
@@ -190,7 +233,7 @@ final class GhosttyHolderEmulator: HolderEmulator {
     /// the child's next repaint fills it.
     func snapshotPreamble(maxScrollbackLines: Int) -> Data {
         do {
-            return try GhosttySnapshotWriter.snapshot(of: terminal, maxScrollbackLines: maxScrollbackLines)
+            return try snapshotWriter(terminal, maxScrollbackLines)
         } catch {
             Self.logger.error(
                 """

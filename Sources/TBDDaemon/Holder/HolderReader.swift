@@ -457,7 +457,8 @@ actor HolderReader {
     /// emulator's snapshot feeds the live terminal, the rest is waited for,
     /// briefly, so that the snapshot is taken between sequences
     /// (`awaitSequenceBoundary`). The libghostty emulator's snapshot does not,
-    /// so it is not waited for there (`snapshotNeedsSequenceBoundary`).
+    /// and carries the open sequence instead, so it is waited for only when the
+    /// sequence is too long to carry (`snapshotNeedsSequenceBoundary`).
     ///
     /// The descriptor is deliberately **not** closed: this reader still owns it
     /// and can be put back on it with `resumeDraining()`. The returned `dup` is
@@ -781,14 +782,21 @@ actor HolderReader {
     /// Feeds a departing viewer's handback preamble into this session's screen
     /// model — `snapshotPreamble` run backwards.
     ///
-    /// **It does not reset the emulator first, and does not need to.** The
-    /// preamble opens with `TerminalSnapshotWriter.resetPrelude`, whose whole
-    /// purpose is to supersede whatever state the receiving terminal was
-    /// already in: it leaves the alt screen, resets the scroll region and every
-    /// mode the capture carries, and erases the display *and the scrollback*
-    /// (`ESC[3J`, which SwiftTerm implements as a trim of every line above the
-    /// viewport). A separate reset would only be a second way to say that, and
-    /// there is no way to say it that the writer does not already own.
+    /// **Nothing from before the preamble may survive it**, and how that holds
+    /// is the emulator's:
+    /// - **SwiftTerm** is not reset first, and does not need to be. The
+    ///   preamble opens with `TerminalSnapshotWriter.resetPrelude`, whose whole
+    ///   purpose is to supersede whatever state the receiving terminal was
+    ///   already in: it leaves the alt screen, resets the scroll region and
+    ///   every mode the capture carries, and erases the display *and the
+    ///   scrollback* (`ESC[3J`, which SwiftTerm implements as a trim of every
+    ///   line above the viewport). A separate reset would only be a second way
+    ///   to say that.
+    /// - **libghostty** is reset first, muted, in the same hold as the parse.
+    ///   Its formatter writes only the modes that differ from their defaults,
+    ///   and `GhosttySnapshotWriter.resetPrelude` resets a fixed list, so a
+    ///   mode outside that list (mode 2048, in-band size reports, among others)
+    ///   would stay as this emulator last saw it and go out in the next attach.
     ///
     /// **Must be called with nothing else feeding this emulator**, which on the
     /// handback path means before `resumeDraining()` or before the first

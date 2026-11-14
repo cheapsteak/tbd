@@ -431,6 +431,10 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // Declared because the libghostty holder emulator's suite holds
+                // the daemon's answers to the core's own constants: the frozen
+                // device identity and the snapshot writer's reset prelude.
+                "TBDGhosttyCore",
                 // The test host's SIGPIPE handler is in the bundle either way;
                 // the dependency lets these suites check the handler in their
                 // own two passes. See the target.

@@ -122,16 +122,18 @@ import Testing
 
     /// The three modes the input path composes against. Each is asserted in
     /// both directions, because a reader wired to a constant would satisfy
-    /// either half alone.
+    /// either half alone. Fed as the child's own output: a handback preamble
+    /// starts from a reset on the libghostty emulator, so there it would turn
+    /// a mode off whatever its bytes said.
     @Test("bracketed paste follows the child's DECSET 2004", arguments: HolderEmulatorKind.allCases)
     func bracketedPasteFollowsTheChild(emulator: HolderEmulatorKind) async throws {
         let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).modes.bracketedPaste == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?2004h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?2004h"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.bracketedPaste == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?2004l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?2004l"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.bracketedPaste == false)
     }
 
@@ -141,9 +143,9 @@ import Testing
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).modes.applicationCursor == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1h"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.applicationCursor == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1l"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.applicationCursor == false)
     }
 
@@ -153,9 +155,9 @@ import Testing
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).modes.alternateScreen == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1049h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1049h"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.alternateScreen == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1049l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1049l"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.alternateScreen == false)
     }
 
@@ -186,9 +188,9 @@ import Testing
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?25l"))
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?25h"))
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
     }
 
@@ -234,17 +236,19 @@ import Testing
     /// truncate the child's — routine, since a TUI repaint larger than the pty
     /// buffer arrives split.
     ///
-    /// Here the first ingest ends inside an SGR's parameters. Read the screen,
+    /// Here the first read ends inside an SGR's parameters. Read the screen,
     /// then deliver the rest: the halves must join and colour the `X`. A probe
     /// would have aborted the `ESC[38;5;`, leaving `196m` to print as literal
-    /// text — so the whole line, not just its colour, is the assertion.
+    /// text — so the whole line, not just its colour, is the assertion. The
+    /// halves are fed as the child's output, as the drain reads them; a
+    /// handback preamble starts from a reset on the libghostty emulator.
     @Test("reading a screen does not abort a sequence split across two reads", arguments: HolderEmulatorKind.allCases)
     func readingDoesNotAbortASplitSequence(emulator: HolderEmulatorKind) async throws {
         let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[38;5;"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?25l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[38;5;"))
 
         // Reading mid-sequence answers with the visibility last set, and the
         // half-parsed sequence has printed nothing.
@@ -252,7 +256,7 @@ import Testing
         #expect(midParse.cursor.visible == false)
         #expect(midParse.lines.isEmpty)
 
-        await harness.reader.ingest(preamble: Self.data("196mX"))
+        await harness.reader.feedChildOutputForTesting(Self.data("196mX"))
         let screen = try await harness.reader.screen(maxLines: 8)
         #expect(
             screen.lines.first == "X",

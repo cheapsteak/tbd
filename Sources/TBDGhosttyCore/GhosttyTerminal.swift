@@ -806,16 +806,28 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// muted by this one. For replaying a screen whose replies and reports must not reach the
     /// program. `isMuted` is the setting for a mute that spans several calls.
     ///
+    /// With `resetFirst`, a full reset (`reset()`) runs in the same hold, after `underLock` and
+    /// before the parse, so a replayed screen lands in a terminal with nothing left from its
+    /// earlier life: every mode back to its default, whether or not the replay names it. The
+    /// reset is always muted, so the program-status clear libghostty reports for it reaches
+    /// nobody, and like `reset()` it reports no end for a DEC 2026 hold it ends.
+    ///
     /// `underLock` must not call back into this terminal: the lock is not recursive. It runs even
     /// for an empty `bytes`, and not at all once the terminal is closed. The bytes count toward
     /// `TerminalCore.outputBytesSinceFrame`, muted or not, as `feed(_:)`'s do.
-    package func feed(_ bytes: ArraySlice<UInt8>, muted: Bool = false, underLock: () -> Void) {
-        withCore(signalsRender: true, changesModes: true) { core, raw in
+    package func feed(
+        _ bytes: ArraySlice<UInt8>, muted: Bool = false, resetFirst: Bool = false, underLock: () -> Void
+    ) {
+        withCore(signalsRender: true, changesModes: true, reportsHoldEnd: !resetFirst) { core, raw in
             underLock()
-            guard !bytes.isEmpty else { return }
             let wasMuted = core.context.muted
-            if muted { core.context.muted = true }
             defer { core.context.muted = wasMuted }
+            if resetFirst {
+                core.context.muted = true
+                ghostty_terminal_reset(raw)
+            }
+            guard !bytes.isEmpty else { return }
+            core.context.muted = muted || wasMuted
             bytes.withUnsafeBufferPointer { buffer in
                 ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
             }
@@ -824,7 +836,7 @@ public final class GhosttyTerminal: @unchecked Sendable {
     }
 
     /// Whether this terminal's lock is held right now, by any thread, the calling one included.
-    /// A test seam: from inside `feed(_:muted:underLock:)`'s closure it reads true.
+    /// A test seam: from inside `feed(_:muted:resetFirst:underLock:)`'s closure it reads true.
     var isLockHeldForTesting: Bool {
         guard lock.try() else { return true }
         lock.unlock()
@@ -848,14 +860,28 @@ public final class GhosttyTerminal: @unchecked Sendable {
         resize(cols: cols, rows: rows, cellWidthPx: nil, cellHeightPx: nil)
     }
 
+    /// `resize(cols:rows:)`, muted for exactly this resize when `muted` is true: what the resize
+    /// produces is dropped, the in-band size report a program asked for with mode 2048 included.
+    /// For an owner that keeps a copy of a terminal some other terminal answers the program for.
+    package func resize(cols: Int, rows: Int, muted: Bool) {
+        resize(cols: cols, rows: rows, cellWidthPx: nil, cellHeightPx: nil, muted: muted)
+    }
+
     /// `resize(cols:rows:)` plus the cell size in pixels, which size reports and image protocols
     /// use. The view passes it; nil keeps the last one.
-    package func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?) {
+    ///
+    /// With `muted`, the terminal is muted for exactly this resize, inside its hold, and the
+    /// previous mute is put back before the lock drops, as `feed(_:muted:resetFirst:underLock:)`
+    /// does for a parse.
+    package func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?, muted: Bool = false) {
         let columns = UInt16(clamping: max(cols, 1))
         let lines = UInt16(clamping: max(rows, 1))
         var failure: GhosttyResult?
         let aftermath = locked { core -> Aftermath? in
             guard let raw = core.raw else { return nil }
+            let wasMuted = core.context.muted
+            if muted { core.context.muted = true }
+            defer { core.context.muted = wasMuted }
             let previousSize = core.context.reportedSize
             if let cellWidthPx { core.cellWidthPx = cellWidthPx }
             if let cellHeightPx { core.cellHeightPx = cellHeightPx }
@@ -916,7 +942,8 @@ public final class GhosttyTerminal: @unchecked Sendable {
 
     /// While true, `writePty` and the effect callbacks are dropped, and the queries are not asked.
     /// For replaying a snapshot, whose replies must not reach the program. A mute for one parse
-    /// only is `feed(_:muted:underLock:)`, which sets and restores it inside the parse's hold.
+    /// only is `feed(_:muted:resetFirst:underLock:)`, and for one resize `resize(cols:rows:muted:)`,
+    /// each of which sets and restores it inside its own hold.
     public var isMuted: Bool {
         get { locked { $0.context.muted } }
         set { locked { $0.context.muted = newValue } }

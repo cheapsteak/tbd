@@ -131,7 +131,7 @@ implementations: `SwiftTermHolderEmulator` (today's code, moved behind the seam)
   whether it watched its child from birth. Each emulator keeps its own ledger, and stamps
   it and parses a chunk in one hold of its terminal's own lock. It reads the screen and the
   ledger in one hold too. The SwiftTerm emulator holds `terminalLock`. `GhosttyTerminal`
-  takes its lock itself, so the core adds `feed(_:muted:underLock:)`, which runs the stamp
+  takes its lock itself, so the core adds `feed(_:muted:resetFirst:underLock:)`, which runs the stamp
   inside the same hold as the parse. `GhosttySnapshotWriter` also takes the lock itself, so
   the emulator calls it outside any hold.
 - **Choice at creation** – the reader reads the flag when it is created: for a new session,
@@ -168,18 +168,30 @@ TBD does not use. The daemon takes the app engine's approach:
 libghostty sends device-status, cursor-position and mode replies through `writePty`, after
 its lock drops and before `feed` returns. The daemon forwards them to the child, as the
 SwiftTerm delegate's `send` does. The emulator feeds a handback preamble with
-`feed(_:muted:underLock:)` and `muted` set, which drops them for that one parse.
+`feed(_:muted:resetFirst:underLock:)` and `muted` set, which drops them for that one parse.
+
+A resize sends the child nothing. libghostty sends an in-band size report from inside a
+resize when the program has turned on mode 2048, and SwiftTerm has no mode 2048. The
+emulator resizes with `resize(cols:rows:muted:)` on every resize, because while a viewer
+holds the pty the daemon must not write into the child's input.
 
 The mode capture reads modes with `mode(_:ansi:)`, so the libghostty emulator feeds no
 DECRQM queries into the live terminal. The SwiftTerm emulator's queries could cut a
 program's unfinished sequence, which is why the parser-boundary wait exists. That wait
-stays for the SwiftTerm emulator until D.
+stays for the SwiftTerm emulator until D. The libghostty emulator's snapshot carries an
+open sequence of up to 64 KiB instead, so its attach waits only for a longer one, which
+the snapshot could otherwise end only by dropping the rest.
 
 ### Attach snapshot and handback
 
 - **VT text in both directions** – the daemon writes the attach snapshot with
   `GhosttySnapshotWriter`, and it feeds the viewer's handback VT text into its libghostty
   terminal with replies and OSC 7501 muted.
+- **Reset before a handback** – libghostty's formatter writes only modes that differ from
+  their defaults, and the writer's reset prelude names a fixed list. So the daemon resets
+  its libghostty terminal, muted, in the same hold as the handback's parse. Without the
+  reset, a mode outside the list, such as 2048, stays on after the program turned it off
+  in the viewer, and the next attach hands it on.
 - **No binary snapshot** – libghostty's own snapshot format is outside its 1.0 ABI promise,
   and an update hands over between a daemon and an app built from different commits.
 - **Receivers** – until D, a person who turned the app engine off still views with

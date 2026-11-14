@@ -151,7 +151,17 @@ public enum GhosttySnapshotWriter {
     ///   `CSI ? Pd $ p`, and on an alternate screen also feeds it `?1049l` and a repaint. The first
     ///   ESC of those ends the opener, so if the program is still writing the sequence when a
     ///   viewer attaches, the rest after that point prints as text.
-    static let overlongSequenceSink: [UInt8] = Array("\u{1b}]9999;".utf8)
+    package static let overlongSequenceSink: [UInt8] = Array("\u{1b}]9999;".utf8)
+
+    /// Whether a handback written now would end with `overlongSequenceSink`: the terminal stopped
+    /// inside a sequence it kept no bytes for, too long to carry. The condition `handback` ends
+    /// on, read the same way. Taken inside `withLocked`.
+    ///
+    /// For an owner that can wait before it writes one: the daemon's holder emulator asks this
+    /// before an attach, and waits for the sequence to end only when it is true.
+    package static func endsInOverlongSink(_ state: GhosttyTerminalState) -> Bool {
+        (state.pendingContinuationBytes() ?? []).isEmpty && !state.isAtGround
+    }
 
     /// An alternate screen, with the primary screen behind it written first, from a clone that has
     /// left the alternate screen. The primary's cursor, pen, protection and charsets are put in

@@ -5,8 +5,10 @@ import Testing
 
 /// What the core gives an owner that keeps state beside the terminal: the daemon's holder
 /// emulator. A feed that runs the owner's closure in the parse's own hold and mutes the parse
-/// inside it, the viewport as lines, a count of the probe answers it swaps, and the prelude a
-/// snapshot opens with. Design: `docs/specs/2026-11-13-swiftterm-retirement-design.md`, stream C.
+/// inside it, optionally after a muted reset; a muted resize; the viewport as lines; a count of
+/// the probe answers it swaps; the prelude a snapshot opens with; and whether a snapshot would end
+/// by dropping an open sequence's rest. Design:
+/// `docs/specs/2026-11-13-swiftterm-retirement-design.md`, stream C.
 @Suite(.fastPassBounded)
 struct OwnerFeedTests {
     private static func makeTerminal(
@@ -79,6 +81,62 @@ struct OwnerFeedTests {
         #expect(terminal.isMuted, "an unmuted feed lifted a mute set before it")
     }
 
+    // MARK: - A reset before the parse
+
+    /// A replay lands in a terminal with no mode left from before it, whether or not the replay
+    /// names the mode, and the reset itself reaches no callback.
+    @Test func aResetFirstFeedClearsModesTheBytesDoNotName() throws {
+        let recorder = CallbackRecorder()
+        let terminal = try Self.makeTerminal(recorder.callbacks)
+        terminal.feed(text: "\u{1b}[?2048h\u{1b}[?2031h")
+        #expect(terminal.withLocked { $0.mode(2048) && $0.mode(2031) }, "the modes never came on")
+        let before = recorder.total
+
+        var stamped = false
+        terminal.feed(Self.bytes("replayed"), muted: true, resetFirst: true, underLock: { stamped = true })
+
+        #expect(stamped)
+        #expect(terminal.withLocked { !$0.mode(2048) && !$0.mode(2031) }, "a mode survived the reset")
+        #expect(terminal.withLocked { $0.lineText(0) } == "replayed")
+        #expect(recorder.total == before, "the reset or the replay reached a callback")
+        #expect(!terminal.isMuted, "the feed's mute outlived it")
+    }
+
+    /// Without `resetFirst` the same replay leaves the modes alone: the reset is what clears them.
+    @Test func aFeedWithoutResetFirstKeepsTheModes() throws {
+        let terminal = try Self.makeTerminal()
+        terminal.feed(text: "\u{1b}[?2048h")
+        terminal.feed(Self.bytes("replayed"), muted: true, underLock: {})
+        #expect(terminal.withLocked { $0.mode(2048) })
+    }
+
+    // MARK: - A muted resize
+
+    /// A program that asked for in-band size reports (mode 2048) gets one from an unmuted resize,
+    /// and none from a muted one.
+    @Test func aMutedResizeDeliversNothing() throws {
+        let recorder = CallbackRecorder()
+        let terminal = try Self.makeTerminal(recorder.callbacks)
+        // Whatever turning the mode on sends is the program's own answer, so the count starts after.
+        terminal.feed(text: "\u{1b}[?2048h")
+        let before = recorder.total
+        let writesBefore = recorder.writes.count
+
+        terminal.resize(cols: 50, rows: 10, muted: true)
+        #expect(
+            recorder.total == before,
+            "a muted resize delivered \(Array(recorder.writes.dropFirst(writesBefore)))")
+        #expect(!terminal.isMuted, "the resize's mute outlived it")
+        #expect(terminal.withLocked { $0.cols == 50 && $0.rows == 10 }, "the muted resize did not resize")
+
+        // The control: unmuted, the same terminal reports its new size in band.
+        terminal.resize(cols: 60, rows: 12)
+        let sent = String(decoding: Array(recorder.writes.dropFirst(writesBefore).joined()), as: UTF8.self)
+        #expect(
+            sent.contains("\u{1b}[48;"),
+            "an unmuted resize under mode 2048 sent \(sent.debugDescription), so the muted case proves nothing")
+    }
+
     // MARK: - The viewport as lines
 
     @Test func viewportLinesAreTheRowsWithTrailingEmptyRowsDropped() throws {
@@ -130,6 +188,36 @@ struct OwnerFeedTests {
         #expect(
             ProgramStatusProbeAnswer.replacingLibghosttyAnswers(in: input, with: Self.replacement)
                 == ProgramStatusProbeAnswer.swappingLibghosttyAnswers(in: input, with: Self.replacement).bytes)
+    }
+
+    // MARK: - A sequence too long to carry
+
+    /// `endsInOverlongSink` is true exactly when the snapshot ends with the opener that drops the
+    /// rest: never at ground, never for an open sequence short enough to carry, and always for one
+    /// longer than the terminal keeps.
+    @Test func endsInOverlongSinkAgreesWithTheSnapshot() throws {
+        let terminal = try Self.makeTerminal()
+        let sink = GhosttySnapshotWriter.overlongSequenceSink
+        func endsInSink() throws -> Bool {
+            let snapshot = try GhosttySnapshotWriter.snapshot(of: terminal, maxScrollbackLines: 100)
+            return Array(snapshot.suffix(sink.count)) == sink
+        }
+
+        terminal.feed(text: "at ground")
+        #expect(!terminal.withLocked { GhosttySnapshotWriter.endsInOverlongSink($0) })
+        #expect(try !endsInSink())
+
+        terminal.feed(text: "\u{1b}]0;short")
+        #expect(!terminal.withLocked { GhosttySnapshotWriter.endsInOverlongSink($0) })
+        #expect(try !endsInSink(), "a short open sequence should be carried, not sunk")
+
+        terminal.feed(ArraySlice(repeating: UInt8(ascii: "Q"), count: GhosttyTerminal.continuationMaxBytes + 4096))
+        #expect(terminal.withLocked { GhosttySnapshotWriter.endsInOverlongSink($0) })
+        #expect(try endsInSink())
+
+        terminal.feed(text: "\u{07}")
+        #expect(!terminal.withLocked { GhosttySnapshotWriter.endsInOverlongSink($0) })
+        #expect(try !endsInSink())
     }
 
     // MARK: - The prelude every snapshot opens with
