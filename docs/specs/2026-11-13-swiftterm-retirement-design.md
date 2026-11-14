@@ -126,11 +126,14 @@ implementations: `SwiftTermHolderEmulator` (today's code, moved behind the seam)
   size, the parser-boundary query, cursor visibility, the mode capture, the screen
   projection for `tbd terminal output`, the styled capture, the viewport lines, the attach
   snapshot, the handback feed, the replies to the child and the OSC 7501 reports.
-- **One lock** – today the reader keeps `lastByteAt` and `ingestingPreamble` under the
-  emulator's lock, so feeding a chunk and recording it are one step. The seam keeps that:
-  both implementations provide `withLocked`, and `GhosttyTerminal` exposes its lock for
-  it. `GhosttySnapshotWriter` takes the lock itself, so the reader calls it outside
-  `withLocked`.
+- **One lock** – the reader's bookkeeping lives once, in a ledger that both emulators
+  share: when the emulator began, when it last took in bytes, and whether it watched its
+  child from birth. Each emulator stamps the ledger and parses a chunk in one hold of its
+  terminal's own lock, and reads the screen and the ledger in one hold too. The SwiftTerm
+  emulator holds `terminalLock`. `GhosttyTerminal.feed` takes its lock itself, so the core
+  adds a feed that runs the stamp inside the same hold as the parse.
+  `GhosttySnapshotWriter` also takes the lock itself, so the emulator calls it outside any
+  hold.
 - **Choice at creation** – the reader reads the flag when it is created: for a new session,
   or for every session at re-adoption when the daemon starts. A running session never
   changes emulator.

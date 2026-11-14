@@ -22,6 +22,10 @@ import TBDKernel
 /// it has run its last instruction, but it is stuck inside `proc_exit` and
 /// nothing has reaped it. That is exactly the distinction these tests need, and
 /// the reason a screenful of expected output is never enough on its own.
+///
+/// The tests that read the emulator's screen run once per `HolderEmulatorKind`,
+/// so every emulator the daemon can build is fed by the same drain and held to
+/// the same answers.
 @Suite(.serialized)
 struct HolderReaderTests {
 
@@ -67,7 +71,8 @@ struct HolderReaderTests {
     /// then blocked in `ttywait` forever. The assertion is not that the output
     /// is pretty: it is that the job **exits**, which it can only do if
     /// somebody drained every byte of it.
-    @Test func keepsDrainingPastOneBufferful() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func keepsDrainingPastOneBufferful(emulator: HolderEmulatorKind) async throws {
         let fixture = try await HolderProcessFixture.start(
             command: "for i in $(seq 1 5000); do echo line-$i; done")
         defer { fixture.tearDown() }
@@ -77,7 +82,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            observedChildFromStart: true)
+            emulator: emulator, observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -103,7 +108,8 @@ struct HolderReaderTests {
     /// `CHARLIE`, and the job would then die on a clean terminal no matter how
     /// broken the loop was — so the job writes, pauses long enough for that
     /// first read to happen, and writes again immediately before exiting.
-    @Test func completesTheExitOfAJobThatWroteUnreadOutput() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func completesTheExitOfAJobThatWroteUnreadOutput(emulator: HolderEmulatorKind) async throws {
         let fixture = try await HolderProcessFixture.start(
             command: "printf 'BRAVO\\n'; sleep 0.4; printf 'CHARLIE\\n'")
         defer { fixture.tearDown() }
@@ -113,7 +119,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            observedChildFromStart: true)
+            emulator: emulator, observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -143,7 +149,8 @@ struct HolderReaderTests {
     /// that gave up would still have `ALPHA` nowhere and `BRAVO` nowhere, but a
     /// drain that merely swallowed the error and read once more would show
     /// `ALPHA` alone.
-    @Test func retriesATransientReadFailureAndKeepsDraining() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func retriesATransientReadFailureAndKeepsDraining(emulator: HolderEmulatorKind) async throws {
         let fault = ScriptedReadFault(errno: ENOMEM, times: 3)
         let fixture = try await HolderProcessFixture.start(
             command: "printf 'ALPHA\\n'; sleep 0.6; printf 'BRAVO\\n'; sleep 30")
@@ -154,7 +161,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            readFault: fault.seam(), observedChildFromStart: true)
+            readFault: fault.seam(), emulator: emulator, observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -236,7 +243,8 @@ struct HolderReaderTests {
 
     // MARK: - The emulator
 
-    @Test func drainsChildOutputIntoTheEmulator() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func drainsChildOutputIntoTheEmulator(emulator: HolderEmulatorKind) async throws {
         let fixture = try await HolderProcessFixture.start(
             command: "printf 'ALPHA\\n'; sleep 30")
         defer { fixture.tearDown() }
@@ -246,7 +254,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            observedChildFromStart: true)
+            emulator: emulator, observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -264,7 +272,8 @@ struct HolderReaderTests {
     /// it, so a screen containing `MARKER` would prove only that the terminal
     /// echoed, not that anything read it. `GOT:MARKER` can only have been
     /// produced by the job.
-    @Test func writeReachesTheChild() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func writeReachesTheChild(emulator: HolderEmulatorKind) async throws {
         let fixture = try await HolderProcessFixture.start(
             command: "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done")
         defer { fixture.tearDown() }
@@ -274,7 +283,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            observedChildFromStart: true)
+            emulator: emulator, observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -297,7 +306,8 @@ struct HolderReaderTests {
     /// a self-pipe, precisely so no descriptor is ever closed under a blocked
     /// `read` — and `isDraining` reads the thread's own flag, so this asserts
     /// the thread really left rather than that the actor intended it to.
-    @Test func stopEndsTheDrainWithoutKillingTheChild() async throws {
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func stopEndsTheDrainWithoutKillingTheChild(emulator: HolderEmulatorKind) async throws {
         let fixture = try await HolderProcessFixture.start(
             command: "printf 'DELTA\\n'; sleep 30")
         defer { fixture.tearDown() }
@@ -306,7 +316,7 @@ struct HolderReaderTests {
         let (_, ptyFD) = try await client.handOverPTY()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            observedChildFromStart: true)
+            emulator: emulator, observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
