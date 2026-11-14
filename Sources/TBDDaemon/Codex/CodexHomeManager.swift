@@ -451,8 +451,13 @@ enum CodexExecutableResolver {
 }
 
 struct CodexLaunchPreparation: Sendable {
-    // All launch paths share this lock: moving wake preparation off its actor
-    // must not race another launch writing the same profile or plugin.
+    // Serialises the home ensurer, which writes TBD's profile and plugin into a
+    // Codex home. Every launch path shares it, and wake prepares off its actor,
+    // so without it two launches could write the same files at once. Executable
+    // resolution only reads, so it stays outside the lock: most launch paths
+    // call `prepare` inline from async code, where a launch waiting here blocks
+    // a cooperative-pool thread, and a slow resolver must not hold every other
+    // Codex launch behind it.
     private static let preparationLock = NSLock()
     let executablePath: String
     let codexHome: URL
@@ -461,12 +466,10 @@ struct CodexLaunchPreparation: Sendable {
         executableResolver: @Sendable () throws -> String,
         homeEnsurer: @Sendable () throws -> URL
     ) throws -> CodexLaunchPreparation {
-        preparationLock.lock()
-        defer { preparationLock.unlock() }
         // Keep this order explicit: executable resolution is read-only and
         // should fail before the profile writer touches the global Codex home.
         let executablePath = try executableResolver()
-        let codexHome = try homeEnsurer()
+        let codexHome = try preparationLock.withLock { try homeEnsurer() }
         return CodexLaunchPreparation(
             executablePath: executablePath,
             codexHome: codexHome
