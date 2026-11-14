@@ -235,8 +235,8 @@ actor TerminalTransportMigrator {
         // which is still a shell and moves as one.
         // What keeps it to SHELLS is `TransportMigrationEligibility`, above:
         // the four kinds of row that name no conversation and must not become
-        // a bare login shell — a Codex tab, a Claude tab whose session has not
-        // begun, and a hook tab of either kind — are each skipped there with
+        // a bare login shell — a running Codex tab, a Claude tab whose session
+        // has not begun, and a hook tab of either kind — are each skipped there with
         // their own reason, so by here "nothing to resume" means "a shell". A
         // running Claude session with a conversation still goes park, rewrite,
         // wake.

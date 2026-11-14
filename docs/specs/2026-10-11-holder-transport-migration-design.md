@@ -126,17 +126,25 @@ unsent draft may be lost.
   idle shell prompt. That is the cost of moving a shell, and it is why nothing
   moves without a gesture.
 - **Agents migrate through `--resume`** on the session id the row records, the
-  same argv a wake builds.
+  same argv a wake builds. A parked Codex tab migrates the same way: the
+  rewrite keeps its thread id and recorded launch options, and its next wake
+  on the holder resumes the thread through Codex's own launch preparation.
 - **Four rows that name no conversation are skipped rather than moved,
   each with its own reason.** "No conversation to resume" is what sends a row
   down the shell move, and for these four the move available would start a
   bare login shell where something else belongs — so each is turned away where
   eligibility is decided, and each reason says what the person can do instead.
-  - **A Codex tab.** Moving it properly needs Codex's own launch preparation —
-    the executable resolver, the home ensurer and the merged environment
-    overrides — which lives on the RPC router rather than on this path. A bare
+  - **A running Codex tab.** No park takes it: a manual hibernate is
+    Claude-only, so the one move left would be the shell move, and a bare
     shell in its place would discard the Codex session silently. Close the tab
-    and open a new one.
+    and open a new one, which starts on the holder. A *parked* Codex tab is
+    not skipped. Startup reconcile parks a Codex row whose window died, and
+    the wake refuses every row parked on tmux, so a parked Codex tab that
+    could not migrate could never come back. It is only rewritten — nothing
+    is launched during the move — and the rewrite keeps the thread id and the
+    recorded launch options (model, disabled features, dedicated home) from
+    which the holder wake prepares Codex's resume. So a parked Codex tab that
+    names a thread is eligible like any parked row.
   - **A Claude tab whose session has not begun.** An agent that is still
     starting up, or whose session hook never fired, names no conversation
     either, and that happens in the field. Without a reason of its own it
@@ -389,13 +397,14 @@ wake: a pane tmux cannot answer for is not evidence that a process is there.
   refuses with nothing started.
 - Each row that names no conversation and must not become a shell is skipped
   with its own reason, after the already-holder answer and before the activity
-  rails, with nothing killed, spawned or written: a Codex tab by kind and by
-  label, a Claude tab with no session yet (while the same tab *with* a session
-  stays eligible, so the skip is about the conversation and not the kind), and
-  a hook tab of either kind including an idle one — while a plain `shell` tab
-  with no conversation still moves, which is what keeps the hook skips about
-  the label rather than about shells. A row with no `kind` at all reads as a
-  shell and still moves.
+  rails, with nothing killed, spawned or written: a running Codex tab by kind
+  and by label (while a parked one that names a thread is rewritten, and its
+  next wake resumes the thread on the holder), a Claude tab with no session
+  yet (while the same tab *with* a session stays eligible, so the skip is
+  about the conversation and not the kind), and a hook tab of either kind
+  including an idle one — while a plain `shell` tab with no conversation still
+  moves, which is what keeps the hook skips about the label rather than about
+  shells. A row with no `kind` at all reads as a shell and still moves.
 - A wake that fails after the rewrite is reported as its own outcome rather
   than as a refusal, for each shape of wake answer, and the row it names really
   is holder-backed. Its rewritten row is published like a clean migration's,

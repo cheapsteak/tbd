@@ -9,10 +9,11 @@ import TBDShared
 ///
 /// Four rows are turned away for having nothing to resume, because the only
 /// move available to each of them would start a bare login shell where
-/// something else belongs: a Codex tab, a Claude tab whose session has not
-/// begun, and a hook tab of either kind — `pre-session` or `setup`. Each gets
-/// its own reason, because each has a different thing for the person to do
-/// about it.
+/// something else belongs: a running Codex tab, a Claude tab whose session has
+/// not begun, and a hook tab of either kind — `pre-session` or `setup`. Each
+/// gets its own reason, because each has a different thing for the person to
+/// do about it. A PARKED Codex tab is not among them: it is only rewritten,
+/// and its next wake resumes the Codex thread on the holder.
 ///
 /// It also makes no judgement a later rail will make. The park's own rails
 /// decide — a turn in flight, a permission prompt, a transcript mid-write;
@@ -25,10 +26,18 @@ enum TransportMigrationEligibility: Equatable {
     case alreadyHolder
     case skip(reason: String)
 
-    /// The skip a Codex tab gets. Named so the CLI, the app's report and the
-    /// tests all quote one wording. The other two below are named for the same
-    /// reason.
-    static let codexSkip = "A Codex session cannot be moved; close the tab and open a new one"
+    /// The skip a RUNNING Codex tab gets. Named so the CLI, the app's report
+    /// and the tests all quote one wording. The others below are named for the
+    /// same reason.
+    ///
+    /// It tells the person to close the tab rather than to hibernate it first,
+    /// because nothing parks a running Codex tab: a manual hibernate is
+    /// Claude-only (`HibernationCoordinator.parkRefusal`), and the only park
+    /// that takes a Codex row is startup recovery's, for a tab whose window
+    /// has already gone.
+    static let codexSkip =
+        "A running Codex session cannot be moved; close the tab and open a new one, "
+        + "which starts on the pty holder."
 
     /// The skip a Claude tab with no conversation yet gets.
     static let claudeWithoutConversationSkip =
@@ -74,13 +83,24 @@ enum TransportMigrationEligibility: Equatable {
         if terminal.label == TerminalLabel.setup {
             return .skip(reason: setupSkip)
         }
-        // A Codex tab carries no resumable session and must not be recreated as
-        // a bare shell, which would discard the Codex session in place. Moving
-        // it properly needs Codex's own launch preparation, which this path does
-        // not have. The predicate matches the one the recreate path uses, so one
-        // question has one answer across the daemon.
+        // A RUNNING Codex tab cannot be moved. The park is Claude-only, so the
+        // only move left for it is the running-shell one, which would replace
+        // the Codex session with a bare login shell in place.
+        //
+        // A PARKED Codex tab can, and must be able to: startup reconcile parks
+        // a Codex row whose window died, and the wake refuses every row parked
+        // on tmux, so without this the session could never come back. Nothing
+        // is launched during the move — a parked row is only rewritten — and
+        // the rewrite keeps the thread id and the recorded launch options, from
+        // which the holder wake does Codex's own resume preparation. So it is
+        // eligible exactly when the row names a Codex thread to resume, the
+        // same plan the wake reads (`Terminal.recoveryResumePlan`).
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
-            return .skip(reason: codexSkip)
+            let parkedWithAThread = terminal.isParked
+                && terminal.recoveryResumePlan?.identity.agentKind == .codex
+            guard parkedWithAThread else {
+                return .skip(reason: codexSkip)
+            }
         }
         // A Claude tab whose agent is still starting up, or whose session hook
         // never fired, names no conversation either — and that happens in the

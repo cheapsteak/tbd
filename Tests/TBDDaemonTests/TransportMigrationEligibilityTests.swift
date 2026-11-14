@@ -76,6 +76,35 @@ import Testing
             == .skip(reason: TransportMigrationEligibility.codexSkip))
     }
 
+    /// A RUNNING Codex tab is skipped even when it names a thread: no park
+    /// takes it, so the only move left would replace it with a bare shell.
+    @Test func aRunningCodexTabThatNamesAThreadIsStillSkipped() {
+        let t = makeTerminal(
+            kind: .codex, label: TerminalLabel.codex, claudeSessionID: "acme-thread")
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.codexSkip))
+    }
+
+    /// A PARKED Codex tab that names a thread is eligible: the move only
+    /// rewrites it, and its next wake resumes the thread on the holder.
+    @Test func aParkedCodexTabThatNamesAThreadIsEligible() {
+        let t = makeTerminal(
+            kind: .codex, label: TerminalLabel.codex, claudeSessionID: "acme-thread",
+            hibernatedAt: Date())
+        #expect(TransportMigrationEligibility.decide(t) == .eligible)
+    }
+
+    /// The parked exception needs positive evidence that the id is Codex's:
+    /// a row that only carries the Codex LABEL has no Codex plan to wake from,
+    /// so it keeps the skip even when parked.
+    @Test func aParkedCodexLabelWithoutTheCodexKindIsStillSkipped() {
+        let t = makeTerminal(
+            kind: .shell, label: TerminalLabel.codex, claudeSessionID: "acme-thread",
+            hibernatedAt: Date())
+        #expect(TransportMigrationEligibility.decide(t)
+            == .skip(reason: TransportMigrationEligibility.codexSkip))
+    }
+
     /// `.alreadyHolder` is the one answer that comes first: a Codex tab that
     /// is already holder-backed has nothing to be told about moving.
     @Test func aCodexTabOnTheHolderIsAlreadyWhereItBelongs() {

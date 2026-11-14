@@ -179,8 +179,14 @@ struct TerminalTransportMigratorTests {
     /// `paneForegroundPID` is what the exit-stamped guard turns on: nil leaves
     /// `FakeInspector` answering with the pane's own pid (an idle shell), and
     /// a value different from `panePID` is something the person started.
+    ///
+    /// `holderLaunch` swaps the unspawnable registry for the holder spawn
+    /// double, so a wake after the move really launches on the holder and the
+    /// test can read what it was asked to run. `holderSpawnable` is ignored
+    /// then: the double can always spawn.
     private static func makeFixture(
         holderSpawnable: Bool = true,
+        holderLaunch: FakeHolderLaunch? = nil,
         panePID: String = "4100",
         paneForegroundPID: Int32? = nil,
         paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil
@@ -215,11 +221,16 @@ struct TerminalTransportMigratorTests {
                 claudePID: nil, foregroundPID: paneForegroundPID),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(tag: "transport-migration"))
-        let registry = HolderRegistry(
-            owner: HolderOwnerToken(rawValue: "acme-installation"),
-            environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
-            listTerminals: { [] },
-            spawner: holderSpawnable ? unspawnableSpawner() : nil)
+        let registry: HolderRegistry
+        if let holderLaunch {
+            registry = makeHolderRegistryDouble(launch: holderLaunch)
+        } else {
+            registry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: ["TBD_HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/sh"],
+                listTerminals: { [] },
+                spawner: holderSpawnable ? unspawnableSpawner() : nil)
+        }
         await coordinator.setHolderRegistry(registry)
 
         return Fixture(
@@ -240,6 +251,7 @@ struct TerminalTransportMigratorTests {
         claudeSessionID: String? = sessionID,
         parkReason: HibernateReason = .auto,
         suspended: Bool = false,
+        codexLaunchOptions: CodexLaunchOptions? = nil,
         transcriptTail: String = #"{"type":"user","message":{"content":"move me"}}"#
     ) async throws -> Terminal {
         let transcript = "\(fixture.home)/\(UUID().uuidString).jsonl"
@@ -250,7 +262,8 @@ struct TerminalTransportMigratorTests {
             label: label,
             claudeSessionID: claudeSessionID,
             kind: kind,
-            transport: .tmux)
+            transport: .tmux,
+            codexLaunchOptions: codexLaunchOptions)
         if let claudeSessionID {
             try await fixture.db.terminals.updateSession(
                 id: created.id, sessionID: claudeSessionID, transcriptPath: transcript)
@@ -758,10 +771,9 @@ struct TerminalTransportMigratorTests {
         #expect(after.isParked, "the rewrite woke a parked row")
     }
 
-    /// A Codex tab names no resumable session either, so without its own skip
-    /// it would fall into the shell move and be silently replaced by a bare
-    /// shell. Moving it properly needs Codex's own launch preparation, which
-    /// this path does not have.
+    /// A running Codex tab names no resumable Claude session, and no park takes
+    /// it, so without its own skip it would fall into the shell move and be
+    /// silently replaced by a bare shell.
     @Test("a Codex tab is skipped with its own reason and nothing is touched")
     func aCodexTabIsSkippedWithItsOwnReason() async throws {
         let fixture = try await Self.makeFixture()
@@ -779,6 +791,103 @@ struct TerminalTransportMigratorTests {
                 "the migration killed a Codex tab's window: \(fixture.tmuxArgv.all)")
         #expect(try await fixture.db.terminals.get(id: row.id) == row,
                 "a skipped Codex row was changed")
+    }
+
+    /// A running Codex tab is skipped even when it names a thread. What makes
+    /// a parked one movable is that nothing is launched during its move; a
+    /// running one would have to be parked first, and no park takes it.
+    @Test("a running Codex tab that names a thread is still skipped, with nothing launched")
+    func aRunningCodexTabThatNamesAThreadIsStillSkipped() async throws {
+        let holder = FakeHolderLaunch()
+        let fixture = try await Self.makeFixture(holderLaunch: holder)
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(
+            fixture, kind: .codex, label: TerminalLabel.codex,
+            claudeSessionID: "acme-thread")
+
+        let outcome = await fixture.productionMigrator().migrate(terminalID: row.id)
+
+        #expect(outcome == .skipped(reason: TransportMigrationEligibility.codexSkip))
+        #expect(holder.launches.isEmpty, "a running Codex tab's move launched something")
+        #expect(fixture.tmuxArgv.count("kill-window") == 0,
+                "the migration killed a running Codex tab's window: \(fixture.tmuxArgv.all)")
+        #expect(try await fixture.db.terminals.get(id: row.id) == row,
+                "a skipped Codex row was changed")
+    }
+
+    /// The way back for a Codex tab parked on tmux. Startup reconcile parks a
+    /// Codex row whose window died, and the wake refuses every row parked on
+    /// tmux, so without this the thread could never resume. The move is only
+    /// a rewrite, and the next wake resumes the thread on the holder from the
+    /// thread id and launch options the rewrite kept.
+    @Test("a parked Codex tab moves to the holder, and its next wake resumes the thread there")
+    func aParkedCodexTabMovesAndItsNextWakeResumesTheThreadOnTheHolder() async throws {
+        let holder = FakeHolderLaunch()
+        let fixture = try await Self.makeFixture(holderLaunch: holder)
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(
+            fixture, parked: true, kind: .codex, label: TerminalLabel.codex,
+            claudeSessionID: "acme-thread", parkReason: .recovery,
+            codexLaunchOptions: CodexLaunchOptions(
+                model: "acme-model", disabledFeatures: ["acme-feature"]))
+
+        #expect(await fixture.productionMigrator().migrate(terminalID: row.id) == .migrated)
+
+        let moved = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(moved.transport == .holder)
+        #expect(moved.isParked, "the move woke the Codex tab instead of only rewriting it")
+        #expect(holder.launches.isEmpty, "the move launched something")
+        #expect(moved.claudeSessionID == "acme-thread", "the move lost the thread id")
+        #expect(moved.codexLaunchOptions == row.codexLaunchOptions,
+                "the move lost the recorded launch options")
+
+        let woken = await fixture.coordinator.wake(terminalID: row.id)
+
+        #expect(woken.isOk, "the moved Codex tab did not wake on the holder: \(woken)")
+        let launch = try #require(holder.launch(for: row.id))
+        let command = try #require(launch.commandLine)
+        #expect(command.contains("resume 'acme-thread'"),
+                "the wake did not resume the Codex thread: \(command)")
+        #expect(command.contains("model=\"acme-model\""))
+        #expect(command.contains("--disable 'acme-feature'"))
+        #expect(!command.contains("claude --resume"), "a Codex tab woke as Claude: \(command)")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(!after.isParked)
+        #expect(after.transport == .holder)
+        #expect(after.kind == .codex)
+        #expect(after.claudeSessionID == "acme-thread")
+        #expect(after.holderPID == launch.handle.holderPID)
+    }
+
+    /// The Claude half of the same way back: a Claude tab parked on tmux moves
+    /// with nothing launched, and its next wake resumes the conversation on
+    /// the holder.
+    @Test("a parked Claude tab moves to the holder, and its next wake resumes the session there")
+    func aParkedClaudeTabMovesAndItsNextWakeResumesOnTheHolder() async throws {
+        let holder = FakeHolderLaunch()
+        let fixture = try await Self.makeFixture(holderLaunch: holder)
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(fixture, parked: true)
+
+        #expect(await fixture.productionMigrator().migrate(terminalID: row.id) == .migrated)
+
+        let moved = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(moved.transport == .holder)
+        #expect(moved.isParked, "the move woke the Claude tab instead of only rewriting it")
+        #expect(holder.launches.isEmpty, "the move launched something")
+
+        let woken = await fixture.coordinator.wake(terminalID: row.id)
+
+        #expect(woken.isOk, "the moved Claude tab did not wake on the holder: \(woken)")
+        let launch = try #require(holder.launch(for: row.id))
+        let command = try #require(launch.commandLine)
+        #expect(command.contains("claude --resume \(Self.sessionID)"),
+                "the wake did not resume the conversation: \(command)")
+        let after = try #require(try await fixture.db.terminals.get(id: row.id))
+        #expect(!after.isParked)
+        #expect(after.transport == .holder)
+        #expect(after.claudeSessionID == Self.sessionID)
+        #expect(after.holderPID == launch.handle.holderPID)
     }
 
     /// The production wiring's running-shell arm, end to end: this fixture's
