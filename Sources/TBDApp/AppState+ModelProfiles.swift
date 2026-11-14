@@ -350,66 +350,12 @@ extension AppState {
         }
     }
 
-    /// Help text for the pty-holder transport toggle.
-    ///
-    /// A stored constant rather than a literal in the view so it is assertable:
-    /// it must describe what changes and when, and it must **not** promise
-    /// speed. The design spec is explicit that the justification is scaling
-    /// headroom rather than current latency — there is no measured latency win
-    /// on a quiet machine — so a rewrite that added one would be telling the
-    /// operator something untrue about their own machine.
-    static let ptyHolderHelp = """
-        Each new session runs on its own terminal rather than inside a tmux \
-        window. Sessions already running stay on tmux; the change takes effect \
-        as they end and respawn. Attached sessions keep running uninterrupted \
-        across daemon restarts. Less scrollback is kept than tmux retains. On \
-        by default; turn it off to put new sessions back in tmux windows.
-        """
-
-    /// Why the pty-holder toggle's caption appears. Shown whenever
-    /// `ptyHolderSupported` is false, mirroring the control-mode toggle's
-    /// "Requires tmux 3.2 or later" caption: with no way to start a holder,
-    /// every create falls back to tmux silently, so the flag's ON position
-    /// means nothing on this daemon.
+    /// The caption Settings shows when `ptyHolderSupported` is false. Every
+    /// new session opens on a pty holder, so a daemon that cannot start one
+    /// refuses them all; the caption names the missing helper, because "not
+    /// available" alone would leave the operator with nothing to fix.
     static let ptyHolderUnsupportedCaption =
-        "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it."
-
-    /// Whether the pty-holder toggle is interactive, from what
-    /// `daemon.capabilities` reports: exactly when the daemon can start a
-    /// holder, whichever way the flag sits.
-    ///
-    /// A daemon with no `TBDHolder` helper runs every new session in tmux in
-    /// either position of the flag, so the control is greyed in both.
-    /// Unfetched capabilities read as unsupported, so the toggle is never
-    /// offered on a claim the daemon has not made.
-    ///
-    /// Takes the whole capability result rather than the one field it reads,
-    /// so a test can supply the flag in both positions and pin that it plays
-    /// no part.
-    static func ptyHolderToggleIsInteractive(_ capabilities: DaemonCapabilitiesResult?) -> Bool {
-        capabilities?.ptyHolderSupported ?? false
-    }
-
-    /// Persist the pty-holder transport gate, then re-fetch capabilities so the
-    /// Settings toggle reflects the daemon's persisted state.
-    ///
-    /// **Applies to sessions created after the call, and to no others.** A
-    /// session records its transport at creation and keeps it for life, so
-    /// turning this on never moves a running tmux session onto a holder, and
-    /// turning it off never takes a live holder session away.
-    func setPtyHolderEnabled(_ enabled: Bool) async {
-        do {
-            try await ptyHolderFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set pty holder transport: \(error, privacy: .public)")
-            showAlert(
-                "Failed to set the session transport: \(error.localizedDescription)", isError: true)
-            // A failed write leaves the daemon's value unchanged; re-fetch so
-            // the toggle snaps back to it.
-            await refreshDaemonCapabilities()
-        }
-    }
+        "New sessions need the TBDHolder helper beside the daemon binary; this daemon could not find it, so it cannot open any."
 
     /// Help text for the transcript-streaming toggle. A stored constant rather
     /// than a literal in the view so it is assertable, and it carries the two

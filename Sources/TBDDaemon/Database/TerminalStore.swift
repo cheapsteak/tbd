@@ -767,10 +767,10 @@ public struct TerminalStore: Sendable {
     /// handler rejects user-driven creates on archived rows before spawn.
     /// Promoted rows have no such flow — they are never revived.
     ///
-    /// `transport` is stamped here and never changed afterwards — the
-    /// `pty_holder_enabled` gate is read at spawn time, so a session created on
-    /// one transport keeps it for life. It defaults to `.tmux` so every existing
-    /// call site keeps creating tmux-backed sessions untouched.
+    /// `transport` is stamped here. Every spawn passes `.holder`
+    /// (`WorktreeLifecycle.spawnTerminal`); the `.tmux` default remains for the
+    /// fixtures that write the rows an older build left behind, and only
+    /// `tbd terminal migrate` moves a row off it.
     ///
     /// `sessionIncarnationID` is the incarnation a fresh Claude spawn exports
     /// as `TBD_TERMINAL_INCARNATION_ID` when a session-mod feature is on

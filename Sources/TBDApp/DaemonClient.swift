@@ -1337,18 +1337,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the pty-holder transport gate (default ON). Read fresh at spawn
-    /// time, so no daemon restart is needed — but it applies only to sessions
-    /// created after the call: a session records its transport at creation and
-    /// keeps it for life. Sending either value is an explicit gesture that
-    /// survives a later change to the shipped default.
-    func setPtyHolderEnabled(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetPtyHolderEnabled,
-            params: ConfigSetPtyHolderEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the holder claim-reconcile gate (default OFF, soaking).
     /// `holder.reconcileClaims` reads it on every sweep, so it applies from
     /// the next poll tick. While it is off, a sweep only logs what it would

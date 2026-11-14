@@ -289,7 +289,7 @@ struct GeneralSettingsTab: View {
 
             Section("Experimental") {
                 controlModeToggle
-                ptyHolderToggle
+                holderTransportRow
                 holderClaimReconcileToggle
                 sessionModUsageToggle
                 queuedPromptToggle
@@ -325,24 +325,14 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    /// Pty-holder transport opt-in. Reads the persisted flag from
-    /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
-    /// Interactive only when the daemon can start a holder, in either position
-    /// of the flag, as `AppState.ptyHolderToggleIsInteractive` decides and
-    /// documents. When it cannot, the toggle is greyed and the caption names
-    /// the missing `TBDHolder` helper; when it can, the row for moving existing
-    /// sessions sits beneath it instead.
+    /// The pty-holder transport's row. Every new session opens on a holder, so
+    /// there is nothing to switch: when the daemon can start a holder, the row
+    /// moves the tmux sessions that already exist onto it; when it cannot, the
+    /// caption names the missing `TBDHolder` helper. Unfetched capabilities
+    /// read as unsupported.
     @ViewBuilder
-    private var ptyHolderToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        let supported = capabilities?.ptyHolderSupported ?? false
-        let enabled = capabilities?.ptyHolderEnabled ?? false
-        Toggle("Run new sessions without tmux", isOn: Binding(
-            get: { enabled },
-            set: { newValue in Task { await appState.setPtyHolderEnabled(newValue) } }
-        ))
-        .help(AppState.ptyHolderHelp)
-        .disabled(!AppState.ptyHolderToggleIsInteractive(capabilities))
+    private var holderTransportRow: some View {
+        let supported = appState.daemonCapabilities?.ptyHolderSupported ?? false
         if supported {
             transportMigrationRow
         } else {
@@ -369,9 +359,8 @@ struct GeneralSettingsTab: View {
     static let holderClaimReconcileHelp = "Lets the daemon take back a session the app has stopped showing "
         + "when the handback to the daemon was lost, and is off by default while it soaks."
 
-    /// Moves the sessions that already exist onto the holder. Sits beside the
-    /// toggle because that is where someone who just turned it on looks for what
-    /// to do about them. The report keeps skips and refusals apart: a skip names
+    /// Moves the sessions that already exist onto the holder. The report
+    /// keeps skips and refusals apart: a skip names
     /// a state to change before retrying, a refusal waits on a fact.
     @ViewBuilder
     private var transportMigrationRow: some View {

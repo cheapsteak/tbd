@@ -1165,8 +1165,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetUpdateMode:
                 return try await handleConfigSetUpdateMode(request.paramsData)
-            case RPCMethod.configSetPtyHolderEnabled:
-                return try await handleConfigSetPtyHolderEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptStreamingEnabled:
                 return try await handleConfigSetTranscriptStreamingEnabled(request.paramsData)
             case RPCMethod.peerStatus:
@@ -1228,13 +1226,10 @@ public final class RPCRouter: Sendable {
             claudeCloudLive: claudeCloudLive,
             remoteDeleteEnabled: config.remoteDeleteEnabled,
             updateMode: config.updateMode,
-            ptyHolderEnabled: config.ptyHolderEnabled,
-            // The same second half the spawn gate asks
-            // (`WorktreeLifecycle+Create`): a registry can exist and still be
-            // unable to start a holder, and with the flag on that combination
-            // falls back to tmux silently. Reported so Settings can say so,
-            // and so it can grey the switch out in the one state where neither
-            // direction would change anything.
+            // The question the spawn gate asks
+            // (`TerminalSpawnTransport.decide`): a registry can exist and still
+            // be unable to start a holder, and then every new session is
+            // refused. Reported so Settings can say why.
             ptyHolderSupported: holderRegistry?.canSpawn == true)
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces

@@ -667,10 +667,9 @@ public enum HibernateReason: String, Codable, Sendable {
 }
 /// Which mechanism carries a terminal's session.
 ///
-/// Recorded at creation and never changed for the life of the session: the
-/// `pty_holder_enabled` flag gates *spawning*, not servicing, so flipping it
-/// never migrates a running session. Both transports therefore coexist for as
-/// long as any pre-flip session is alive.
+/// Every session TBD opens is a holder session. A tmux row is one opened
+/// before that, and keeps its transport until `tbd terminal migrate` moves it,
+/// so both transports coexist for as long as any such row does.
 public enum TerminalTransport: String, Codable, Sendable, Equatable {
     /// The session lives in a tmux window; `tmuxWindowID`/`tmuxPaneID` address it.
     case tmux
@@ -1760,23 +1759,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRetainedTranscriptsEnabled: Bool
-    /// Whether new sessions spawn onto the per-session pty-holder transport
-    /// instead of tmux. It is ON: the holder owns a pty and a child process
-    /// that outlive the daemon, and the named reconcilers that reclaim one
-    /// orphaned by a daemon crash — the orphan-GC rendezvous leg, the reaper's
-    /// holder leg, and the reconcile pass — are what make that safe.
-    ///
-    /// The gate covers *spawning* only. A session records its transport at
-    /// creation and keeps it for life, so flipping this never migrates a running
-    /// session and both transports coexist while any pre-flip session is alive.
-    ///
-    /// **Resolved, not stored**, like `gcHangStacksEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `pty_holder_enabled ?? Config.ptyHolderDefault`. NULL means "never chose"
-    /// and follows the shipped default wherever it goes; `0`/`1` is an explicit
-    /// gesture and is honored forever.
-    public var ptyHolderEnabled: Bool
     /// Whether the daemon watches for a newer `main`, and whether it may
     /// install one
     /// (`docs/specs/2026-09-04-automatic-version-updates-design.md` §6).
@@ -1800,7 +1782,7 @@ public struct Config: Codable, Sendable, Equatable {
     ///
     /// It ships ON, and it depends on no other flag.
     ///
-    /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing column
+    /// **Resolved, not stored**, like `gcHangStacksEnabled`: the backing column
     /// carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `transcript_streaming_enabled ?? Config.transcriptStreamingDefault`.
@@ -1951,13 +1933,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
     /// is left alone.
     public static let gcHangStacksEnabledDefault = false
-    /// The shipped default for `ptyHolderEnabled`, and the single place it
-    /// lives. The holder transport is graduated: new sessions spawn onto a
-    /// holder unless somebody has chosen otherwise. Because the column carries
-    /// no SQL default, this constant reaches only rows that never chose — an
-    /// explicit `0` is honored forever, and moving the constant needed no
-    /// forcing `UPDATE` migration.
-    public static let ptyHolderDefault = true
     /// The shipped default for `remoteDeleteEnabled`, and the single place it
     /// lives. Delete ships off; graduation — after a soak in which no delete
     /// destroyed a session its user had not confirmed, and every delete that
@@ -2080,7 +2055,6 @@ public struct Config: Codable, Sendable, Equatable {
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
                 gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault,
-                ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
@@ -2117,7 +2091,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
         self.gcHangStacksEnabled = gcHangStacksEnabled
-        self.ptyHolderEnabled = ptyHolderEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.updateMode = updateMode
@@ -2197,11 +2170,6 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcHangStacksEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcHangStacksEnabled) ?? Config.gcHangStacksEnabledDefault
-        // And once more: absent means the sender knew nothing about the flag,
-        // which is the NULL column's situation — follow the shipped default
-        // rather than hardcoding `false`.
-        ptyHolderEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
         // And the same shape for the remote-delete gate: absent means the sender
         // knew nothing about the flag, which is the NULL column's situation —
         // follow the shipped default, never a hardcoded `false`.

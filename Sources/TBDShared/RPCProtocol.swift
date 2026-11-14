@@ -609,10 +609,6 @@ public enum RPCMethod {
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
-    /// The pty-holder transport gate (`pty_holder_enabled`) — the feature's only
-    /// opt-in. Reading needs no method of its own: `config.get` already carries
-    /// the resolved value.
-    public static let configSetPtyHolderEnabled = "config.setPtyHolderEnabled"
     /// The transcript-streaming gate (`transcript_streaming_enabled`) — whether
     /// the transcript renders a provisional assistant row while the model
     /// streams. Reading needs no method of its own: `config.get` carries the
@@ -2372,17 +2368,6 @@ public struct RemoteRenameParams: Codable, Sendable {
 }
 
 public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setPtyHolderEnabled` — the pty-holder transport gate
-/// (default OFF during soak), which decides whether a *new* session is spawned
-/// onto a holder rather than into a tmux window. Writing either value is the
-/// explicit gesture that lifts the column out of its NULL "never chose" state,
-/// so an operator who turns the feature off stays off when the shipped default
-/// graduates.
-public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -4308,20 +4293,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `config.get` so the toggle and the daemon can never disagree about which
     /// of them last wrote the column.
     public let updateMode: UpdateMode
-    /// Whether the pty-holder transport gate (`pty_holder_enabled`) is set,
-    /// as this daemon resolved it. Default ON. Read at spawn time, so the
-    /// Settings toggle reads it back from here rather than from a local guess
-    /// — and a session already running keeps the transport it was created on
-    /// either way.
-    public let ptyHolderEnabled: Bool
     /// Whether this daemon could actually put a new session on a holder — that
     /// is, whether it located the `TBDHolder` helper beside its own binary
     /// (`HolderRegistry.canSpawn`). Computed daemon-side, exactly as
     /// `controlModeSupported` is, so the app never inspects the filesystem.
     ///
-    /// With the flag on and this false, every create silently falls back to
-    /// tmux — so Settings says why, and greys the toggle out in the one state
-    /// where neither direction would change anything (already off, no helper).
+    /// Every session opens on a holder, so with this false the daemon refuses
+    /// every new session, naming the missing helper — and Settings says why.
     public let ptyHolderSupported: Bool
     /// Whether transcript streaming is on (`transcript_streaming_enabled`),
     /// resolved daemon-side through `Config.transcriptStreamingDefault`.
@@ -4408,7 +4386,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 claudeCloudLive: Bool = false,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
-                ptyHolderEnabled: Bool = false,
                 ptyHolderSupported: Bool = false,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
@@ -4427,7 +4404,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.claudeCloudLive = claudeCloudLive
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.updateMode = updateMode
-        self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.profileBalancingEnabled = profileBalancingEnabled
@@ -4477,15 +4453,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // whole decode.
         updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
             ?? Config.updateModeDefault
-        // New fields for the pty-holder transport gate. Both absences read
-        // false rather than resolving through the shipped default: a daemon
-        // that does not send `ptyHolderEnabled` has no holder path at all, so
-        // it is running no holder-backed session whatever this install's
-        // default says. This is a different question from the config column's
-        // NULL: there, nobody chose; here, the sender does not know the field
-        // exists.
-        ptyHolderEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .ptyHolderEnabled) ?? false
+        // Absent reads false: a daemon that does not send it has no holder
+        // path at all.
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
         transcriptStreamingEnabled = try c.decodeIfPresent(
