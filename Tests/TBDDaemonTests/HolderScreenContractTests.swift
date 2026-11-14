@@ -20,6 +20,9 @@ import Testing
 /// calls. No drain thread and no real pty are involved, so nothing here is
 /// timing-dependent — including the ages, which are read from an injected
 /// monotonic clock rather than measured.
+///
+/// The tests run against both emulators the daemon can build, except where a
+/// test names a SwiftTerm behaviour and says why.
 @Suite struct HolderScreenContractTests {
 
     private static let esc = "\u{1b}"
@@ -31,9 +34,9 @@ import Testing
     /// render substitutes a space, *and* the screen was constructible at all.
     /// A render that stopped substituting would not return a screen with holes
     /// in it — it would throw.
-    @Test("a never-written cell reaches the screen as a space, never a NUL")
-    func neverWrittenCellsProjectAsSpaces() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a never-written cell reaches the screen as a space, never a NUL", arguments: HolderEmulatorKind.allCases)
+    func neverWrittenCellsProjectAsSpaces(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("✻\(Self.esc)[3GCogitated"))
@@ -61,9 +64,12 @@ import Testing
     /// `TerminalScreen.isDisallowed` rather than a list of the ones known to be
     /// reachable, so a width table that changes its mind cannot reopen the
     /// outage. `TerminalScreenTests` pins that predicate.
-    @Test("a DEL a child stored in a cell renders as U+FFFD instead of breaking the read")
-    func delInACellRendersAsReplacement() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    ///
+    /// The libghostty emulator's line reads the same: its cell renders as
+    /// U+FFFD too.
+    @Test("a DEL a child stored in a cell renders as U+FFFD instead of breaking the read", arguments: HolderEmulatorKind.allCases)
+    func delInACellRendersAsReplacement(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("a\u{7f}b"))
@@ -79,9 +85,9 @@ import Testing
     /// render that mapped every disallowed scalar to `U+FFFD` without keeping
     /// the NUL special would fill a differentially-painted line with visible
     /// junk where `tmux capture-pane` returns blanks.
-    @Test("a never-written cell is still a space, not a replacement character")
-    func nulStillProjectsAsASpaceBesideTheSubstitution() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a never-written cell is still a space, not a replacement character", arguments: HolderEmulatorKind.allCases)
+    func nulStillProjectsAsASpaceBesideTheSubstitution(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("a\(Self.esc)[4Gb\u{7f}c"))
@@ -97,9 +103,9 @@ import Testing
     /// is not an unwritten cell: padding it to a space would double the width
     /// of every CJK character and every emoji. The line is one grapheme per
     /// glyph.
-    @Test("a wide glyph's trailing half is omitted rather than padded")
-    func wideGlyphTrailingHalfIsOmitted() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a wide glyph's trailing half is omitted rather than padded", arguments: HolderEmulatorKind.allCases)
+    func wideGlyphTrailingHalfIsOmitted(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("日本 x"))
@@ -115,48 +121,50 @@ import Testing
 
     /// The three modes the input path composes against. Each is asserted in
     /// both directions, because a reader wired to a constant would satisfy
-    /// either half alone.
-    @Test("bracketed paste follows the child's DECSET 2004")
-    func bracketedPasteFollowsTheChild() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    /// either half alone. Fed as the child's own output: a handback preamble
+    /// starts from a reset on the libghostty emulator, so there it would turn
+    /// a mode off whatever its bytes said.
+    @Test("bracketed paste follows the child's DECSET 2004", arguments: HolderEmulatorKind.allCases)
+    func bracketedPasteFollowsTheChild(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).modes.bracketedPaste == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?2004h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?2004h"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.bracketedPaste == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?2004l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?2004l"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.bracketedPaste == false)
     }
 
-    @Test("application cursor follows the child's DECCKM")
-    func applicationCursorFollowsTheChild() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("application cursor follows the child's DECCKM", arguments: HolderEmulatorKind.allCases)
+    func applicationCursorFollowsTheChild(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).modes.applicationCursor == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1h"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.applicationCursor == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1l"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.applicationCursor == false)
     }
 
-    @Test("the alternate screen flag follows 1049")
-    func alternateScreenFollowsTheChild() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("the alternate screen flag follows 1049", arguments: HolderEmulatorKind.allCases)
+    func alternateScreenFollowsTheChild(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).modes.alternateScreen == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1049h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1049h"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.alternateScreen == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?1049l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?1049l"))
         #expect(try await harness.reader.screen(maxLines: 8).modes.alternateScreen == false)
     }
 
     // MARK: - Cursor
 
-    @Test("the cursor reports its viewport row and column")
-    func cursorPosition() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("the cursor reports its viewport row and column", arguments: HolderEmulatorKind.allCases)
+    func cursorPosition(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         // `ESC[3;5H` is row 3, column 5, both 1-based; the screen reports them
@@ -167,19 +175,21 @@ import Testing
         #expect(screen.cursor.column == 4)
     }
 
-    /// `cursorHidden` is not a public property, so visibility is tracked on the
-    /// delegate: SwiftTerm calls `showCursor`/`hideCursor` whenever the child
-    /// sets or resets mode 25. Asserted in both directions, because a reader
-    /// wired to the mode's default would satisfy either half alone.
-    @Test("cursor visibility follows DECTCEM")
-    func cursorVisibility() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    /// `cursorHidden` is not a public property, so the SwiftTerm emulator
+    /// tracks visibility on the delegate: SwiftTerm calls `showCursor`/
+    /// `hideCursor` whenever the child sets or resets mode 25. The libghostty
+    /// emulator reads the mode from the terminal. Asserted in both directions,
+    /// because a reader wired to the mode's default would satisfy either half
+    /// alone.
+    @Test("cursor visibility follows DECTCEM", arguments: HolderEmulatorKind.allCases)
+    func cursorVisibility(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?25l"))
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == false)
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25h"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?25h"))
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
     }
 
@@ -194,6 +204,11 @@ import Testing
     /// `ESC c`) restores the visibility it found, so a hidden cursor stays
     /// hidden across one. Both are asserted from hidden, which is the only
     /// starting point at which either could diverge.
+    ///
+    /// SwiftTerm only. The libghostty emulator tracks nothing by notification:
+    /// it reads DECTCEM from the terminal in the same hold as the screen, so
+    /// the reading cannot disagree with the terminal, and what each reset does
+    /// to the cursor is libghostty's own behaviour, not this reader's.
     @Test("a soft reset shows the cursor and the tracking follows; a full reset preserves it")
     func cursorVisibilityAcrossResets() async throws {
         let harness = try Harness(columns: 40, rows: 8)
@@ -220,17 +235,19 @@ import Testing
     /// truncate the child's — routine, since a TUI repaint larger than the pty
     /// buffer arrives split.
     ///
-    /// Here the first ingest ends inside an SGR's parameters. Read the screen,
+    /// Here the first read ends inside an SGR's parameters. Read the screen,
     /// then deliver the rest: the halves must join and colour the `X`. A probe
     /// would have aborted the `ESC[38;5;`, leaving `196m` to print as literal
-    /// text — so the whole line, not just its colour, is the assertion.
-    @Test("reading a screen does not abort a sequence split across two reads")
-    func readingDoesNotAbortASplitSequence() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    /// text — so the whole line, not just its colour, is the assertion. The
+    /// halves are fed as the child's output, as the drain reads them; a
+    /// handback preamble starts from a reset on the libghostty emulator.
+    @Test("reading a screen does not abort a sequence split across two reads", arguments: HolderEmulatorKind.allCases)
+    func readingDoesNotAbortASplitSequence(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
-        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[38;5;"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[?25l"))
+        await harness.reader.feedChildOutputForTesting(Self.data("\(Self.esc)[38;5;"))
 
         // Reading mid-sequence answers with the visibility last set, and the
         // half-parsed sequence has printed nothing.
@@ -238,7 +255,7 @@ import Testing
         #expect(midParse.cursor.visible == false)
         #expect(midParse.lines.isEmpty)
 
-        await harness.reader.ingest(preamble: Self.data("196mX"))
+        await harness.reader.feedChildOutputForTesting(Self.data("196mX"))
         let screen = try await harness.reader.screen(maxLines: 8)
         #expect(
             screen.lines.first == "X",
@@ -255,9 +272,9 @@ import Testing
     /// Ten numbered lines on a four-row grid, asked for six: the tail is lines
     /// 5 through 10, the viewport is the last four of them, and the cursor sits
     /// on the last line of all.
-    @Test("viewportStart indexes the viewport's first row inside lines")
-    func viewportStartLocatesTheViewport() async throws {
-        let harness = try Harness(columns: 40, rows: 4)
+    @Test("viewportStart indexes the viewport's first row inside lines", arguments: HolderEmulatorKind.allCases)
+    func viewportStartLocatesTheViewport(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 4, emulator: emulator)
         defer { harness.tearDown() }
 
         let numbered = (1...10).map { "line \($0)" }.joined(separator: "\r\n")
@@ -285,9 +302,9 @@ import Testing
     /// one blank scrollback row and four blank viewport rows: six enumerated,
     /// one surviving, and a viewport index of 2 — an index a consumer that
     /// trusted `viewportStart <= lines.count` would use to slice and trap on.
-    @Test("viewportStart can exceed lines.count when the trim eats into scrollback")
-    func viewportStartCanExceedTheLineCount() async throws {
-        let harness = try Harness(columns: 40, rows: 4)
+    @Test("viewportStart can exceed lines.count when the trim eats into scrollback", arguments: HolderEmulatorKind.allCases)
+    func viewportStartCanExceedTheLineCount(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 4, emulator: emulator)
         defer { harness.tearDown() }
 
         // "a", then five newlines: three walk the cursor to the last row and
@@ -315,10 +332,10 @@ import Testing
     /// consumed a byte, and — before it ever has — how long ago the store
     /// itself was adopted. So a fresh, silent session reads as exactly as old
     /// as it is rather than as instantly current.
-    @Test("before any byte, the age is the age of the store itself")
-    func ageBeforeTheFirstByteIsTheStoresOwn() async throws {
+    @Test("before any byte, the age is the age of the store itself", arguments: HolderEmulatorKind.allCases)
+    func ageBeforeTheFirstByteIsTheStoresOwn(emulator: HolderEmulatorKind) async throws {
         let clock = SteppedMonotonicClock()
-        let harness = try Harness(columns: 40, rows: 8, monotonicNow: clock.read)
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator, monotonicNow: clock.read)
         defer { harness.tearDown() }
 
         clock.advance(by: .seconds(30))
@@ -328,10 +345,10 @@ import Testing
     /// After a byte the measurement moves to that byte, which is what makes the
     /// number mean "how stale is this view" rather than "how old is this
     /// session".
-    @Test("after a byte, the age is measured from that byte")
-    func ageAfterAByteIsMeasuredFromIt() async throws {
+    @Test("after a byte, the age is measured from that byte", arguments: HolderEmulatorKind.allCases)
+    func ageAfterAByteIsMeasuredFromIt(emulator: HolderEmulatorKind) async throws {
         let clock = SteppedMonotonicClock()
-        let harness = try Harness(columns: 40, rows: 8, monotonicNow: clock.read)
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator, monotonicNow: clock.read)
         defer { harness.tearDown() }
 
         clock.advance(by: .seconds(30))
@@ -346,10 +363,10 @@ import Testing
     /// A read is not a byte the child sent. If anything a read did counted,
     /// every read would reset the age it was taken to measure and no screen
     /// could ever be reported stale.
-    @Test("reading a screen does not make the screen look fresher")
-    func readingDoesNotResetTheAge() async throws {
+    @Test("reading a screen does not make the screen look fresher", arguments: HolderEmulatorKind.allCases)
+    func readingDoesNotResetTheAge(emulator: HolderEmulatorKind) async throws {
         let clock = SteppedMonotonicClock()
-        let harness = try Harness(columns: 40, rows: 8, monotonicNow: clock.read)
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator, monotonicNow: clock.read)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("hello"))
@@ -370,9 +387,9 @@ import Testing
     /// needs a real pty and a real job. It is asserted live, in
     /// `HolderAttachHandoffTests` and `HolderDetachHandbackTests`, on both
     /// sides of an attach.
-    @Test("a reader that is not draining answers staleDaemon")
-    func anIdleReaderIsStale() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a reader that is not draining answers staleDaemon", arguments: HolderEmulatorKind.allCases)
+    func anIdleReaderIsStale(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).source == .staleDaemon)
@@ -383,10 +400,10 @@ import Testing
     /// so they cannot be allowed to drift apart — pairing one store's modes
     /// with another's screen is exactly what the `source` field exists to make
     /// impossible.
-    @Test("modeReading agrees with the screen it is a narrower view of")
-    func modeReadingAgreesWithTheScreen() async throws {
+    @Test("modeReading agrees with the screen it is a narrower view of", arguments: HolderEmulatorKind.allCases)
+    func modeReadingAgreesWithTheScreen(emulator: HolderEmulatorKind) async throws {
         let clock = SteppedMonotonicClock()
-        let harness = try Harness(columns: 40, rows: 8, monotonicNow: clock.read)
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator, monotonicNow: clock.read)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(
@@ -410,9 +427,9 @@ import Testing
     /// the preamble was seeded from this one, so it can take nothing away that
     /// it did not put there. The ingest here is a `DECRST`, so the *value*
     /// moves and the provenance must not.
-    @Test("a reader born with its child reports its modes as observed")
-    func aReaderBornWithItsChildReportsObservedModes() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a reader born with its child reports its modes as observed", arguments: HolderEmulatorKind.allCases)
+    func aReaderBornWithItsChildReportsObservedModes(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(await harness.reader.modeReading().modesObserved)
@@ -440,9 +457,9 @@ import Testing
     /// The preamble here is a **set**, deliberately: `bracketedPaste` moves to
     /// `true`, so the assertions can tell the restored value apart from the
     /// provenance that did not follow it.
-    @Test("a reader built over a running child stays unobserved across a preamble")
-    func aReaderOverARunningChildStaysUnobservedAcrossAPreamble() async throws {
-        let harness = try Harness(columns: 40, rows: 8, observedChildFromStart: false)
+    @Test("a reader built over a running child stays unobserved across a preamble", arguments: HolderEmulatorKind.allCases)
+    func aReaderOverARunningChildStaysUnobservedAcrossAPreamble(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator, observedChildFromStart: false)
         defer { harness.tearDown() }
 
         #expect(await harness.reader.modeReading().modesObserved == false)
@@ -464,9 +481,9 @@ import Testing
     /// A handback does not lower it either, for the reason a handback does not
     /// lower the modes: the emulator that captured the preamble was seeded from
     /// this one.
-    @Test("a reader born with its child reports its screen content as observed")
-    func aReaderBornWithItsChildReportsObservedContent() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a reader born with its child reports its screen content as observed", arguments: HolderEmulatorKind.allCases)
+    func aReaderBornWithItsChildReportsObservedContent(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).contentObserved)
@@ -488,9 +505,9 @@ import Testing
     /// and the provenance does not follow them, because the viewer that
     /// captured that screen was itself painted by this reader's own attach
     /// preamble and can hand back no more than it was given.
-    @Test("a reader built over a running child stays content-unobserved across a preamble")
-    func aReaderOverARunningChildStaysContentUnobservedAcrossAPreamble() async throws {
-        let harness = try Harness(columns: 40, rows: 8, observedChildFromStart: false)
+    @Test("a reader built over a running child stays content-unobserved across a preamble", arguments: HolderEmulatorKind.allCases)
+    func aReaderOverARunningChildStaysContentUnobservedAcrossAPreamble(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator, observedChildFromStart: false)
         defer { harness.tearDown() }
 
         #expect(try await harness.reader.screen(maxLines: 8).contentObserved == false)

@@ -1,0 +1,13 @@
+-- Gate for the daemon's libghostty-vt emulator: when it is on, the daemon
+-- parses each holder-backed session's output with libghostty instead of a
+-- headless SwiftTerm (docs/specs/2026-11-13-swiftterm-retirement-design.md,
+-- "C – the daemon's emulator moves to libghostty-vt"). The emulator replaces a
+-- load-bearing path, so it soaks behind its own switch. A reader reads the flag
+-- when it is built, so new sessions take a change at once and every session
+-- takes it at the next daemon start.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0). The shipped default lives in exactly one place:
+-- Config.ghosttyDaemonEmulatorDefault.
+ALTER TABLE config ADD COLUMN ghostty_daemon_emulator_enabled INTEGER;

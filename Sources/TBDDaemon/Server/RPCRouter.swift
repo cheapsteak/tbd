@@ -1070,6 +1070,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetQueuedPrompt(request.paramsData)
             case RPCMethod.configSetSessionRestore:
                 return try await handleConfigSetSessionRestore(request.paramsData)
+            case RPCMethod.configSetGhosttyDaemonEmulator:
+                return try await handleConfigSetGhosttyDaemonEmulator(request.paramsData)
             case RPCMethod.configSetClaudeCloud:
                 return try await handleConfigSetClaudeCloud(request.paramsData)
             case RPCMethod.configSetAutoCloseSetup:
@@ -1251,6 +1253,7 @@ public final class RPCRouter: Sendable {
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
         result.sessionRestoreEnabled = config.sessionRestoreEnabled
+        result.ghosttyDaemonEmulatorEnabled = config.ghosttyDaemonEmulatorEnabled
         return try RPCResponse(result: result)
     }
 

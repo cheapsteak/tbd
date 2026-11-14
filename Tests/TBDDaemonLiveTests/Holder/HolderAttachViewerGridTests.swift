@@ -16,6 +16,9 @@ import Testing
 /// and the daemon reshapes the session to it, emulator and tty both, before it
 /// writes the snapshot.
 ///
+/// Each test runs once per emulator the daemon can build, chosen through the
+/// registry's flag closure as the daemon chooses it.
+///
 /// **Tier 3.** A real `TBDHolder`, a real pty, and a real job.
 @Suite(.serialized)
 struct HolderAttachViewerGridTests {
@@ -33,8 +36,9 @@ struct HolderAttachViewerGridTests {
     /// A taller viewer at the same width, so nothing rewraps.
     private static let viewer = (columns: 80, rows: 40)
 
-    @Test func anAttachNamingItsViewersGridIsSnapshottedAtThatSize() async throws {
-        let fixture = try await GridFixture.start(command: Self.numberedJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func anAttachNamingItsViewersGridIsSnapshottedAtThatSize(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await GridFixture.start(command: Self.numberedJob, emulator: emulator)
         defer { fixture.tearDown() }
         try await fixture.waitForTheLastLine(Self.lastLine)
 
@@ -64,9 +68,15 @@ struct HolderAttachViewerGridTests {
 
     /// The control that makes the test above discriminate: with no grid named,
     /// the session keeps its size and its snapshot misplaces the cursor in a
-    /// taller viewer, which is the defect.
-    @Test func anAttachNamingNoGridLeavesTheSessionAtItsSize() async throws {
-        let fixture = try await GridFixture.start(command: Self.numberedJob)
+    /// taller viewer, which is the defect: the cursor lands at the old height,
+    /// under some line other than the last.
+    ///
+    /// Where the history lands is the SwiftTerm writer's, which fills the
+    /// taller viewer to its bottom; the libghostty writer's formatter decides
+    /// that for itself, so that one assertion is the SwiftTerm emulator's.
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func anAttachNamingNoGridLeavesTheSessionAtItsSize(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await GridFixture.start(command: Self.numberedJob, emulator: emulator)
         defer { fixture.tearDown() }
         try await fixture.waitForTheLastLine(Self.lastLine)
 
@@ -81,13 +91,19 @@ struct HolderAttachViewerGridTests {
         let replay = CursorReplay(columns: Self.viewer.columns, rows: Self.viewer.rows)
         replay.feed(vend.snapshotPreamble)
         let cursor = replay.cursorRow
-        let bottomLine = replay.line(Self.viewer.rows - 2)
-        #expect(
-            bottomLine == Self.lastLine,
-            "the history should fill the taller viewer to its bottom: \(bottomLine.debugDescription)")
+        if emulator == .swiftTerm {
+            let bottomLine = replay.line(Self.viewer.rows - 2)
+            #expect(
+                bottomLine == Self.lastLine,
+                "the history should fill the taller viewer to its bottom: \(bottomLine.debugDescription)")
+        }
         #expect(
             cursor == Self.launched.rows - 1,
             "a snapshot written at \(Self.launched.rows) rows put the cursor on row \(cursor)")
+        let lineAbove = replay.line(cursor - 1)
+        #expect(
+            lineAbove != Self.lastLine,
+            "the cursor sits under the last line, so this control shows no defect: \(lineAbove.debugDescription)")
     }
 }
 
@@ -104,7 +120,7 @@ private struct GridFixture {
 
     var terminalID: UUID { process.sessionID }
 
-    static func start(command: String) async throws -> GridFixture {
+    static func start(command: String, emulator: HolderEmulatorKind) async throws -> GridFixture {
         let process = try await HolderProcessFixture.start(
             launch: HolderProcessFixture.launch(command: command))
         // The spawner's handshake connection has to go first: a holder serves
@@ -113,14 +129,19 @@ private struct GridFixture {
         let registry = HolderRegistry(
             owner: process.owner,
             environment: HolderProcessFixture.environment(home: process.home),
-            listTerminals: { [] })
-        return GridFixture(
+            listTerminals: { [] },
+            emulatorKind: { emulator })
+        let fixture = GridFixture(
             process: process,
             registry: registry,
             reader: try await registry.adopt(
                 terminal: TBDShared.Terminal(
                     id: process.sessionID, worktreeID: UUID(), tmuxWindowID: "",
                     tmuxPaneID: "", transport: .holder)))
+        // The adoption read the flag closure: the reader runs the emulator it
+        // named.
+        #expect(fixture.reader.emulatorKind == emulator, "the adopted reader runs \(fixture.reader.emulatorKind)")
+        return fixture
     }
 
     /// Waits for the job's last line to reach the daemon's screen, so the

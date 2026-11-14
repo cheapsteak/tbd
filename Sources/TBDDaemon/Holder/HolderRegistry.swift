@@ -692,6 +692,12 @@ actor HolderRegistry {
     /// probe; nil (tests that do not exercise the protocol) leaves OSC 7501
     /// unhandled in the daemon's emulators.
     private let programStatus: ProgramStatusStore?
+    /// Which emulator a reader this registry builds gets: the daemon's
+    /// `ghostty_daemon_emulator_enabled` flag, read each time a reader is
+    /// built, on a spawn and on every adoption. So a new session takes a change
+    /// at once, every session takes it when the next daemon re-adopts it, and
+    /// a running session never changes emulator.
+    private let emulatorKind: @Sendable () async -> HolderEmulatorKind
     private let clock: any Clock<Duration>
 
     /// Set by `adoptAll`'s budget timer, read by its loop between holders.
@@ -781,9 +787,11 @@ actor HolderRegistry {
         attachGenerationBase: UInt64 = HolderRegistry.randomAttachGenerationBase(),
         programStatus: ProgramStatusStore? = nil,
         spawnFabricator: (any HolderSpawnFabricator)? = nil,
+        emulatorKind: @escaping @Sendable () async -> HolderEmulatorKind = { .swiftTerm },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.programStatus = programStatus
+        self.emulatorKind = emulatorKind
         self.owner = owner
         self.environment = environment
         self.listTerminals = listTerminals
@@ -1111,6 +1119,9 @@ actor HolderRegistry {
         guard slots[terminalID] == nil else {
             throw Error.sessionAlreadyRegistered(terminalID: terminalID)
         }
+        // Read before the fork, so nothing waits on it between the child's
+        // first output and the reader that drains it.
+        let emulator = await emulatorKind()
 
         let spawned = try await spawner.spawn(
             sessionID: terminalID, launch: launch, owner: owner, environment: environment)
@@ -1121,6 +1132,7 @@ actor HolderRegistry {
                 terminalID: terminalID,
                 over: spawned.client,
                 expecting: owner,
+                emulator: emulator,
                 // The job has only just been forked, and nothing has read its
                 // pty yet, so whatever it says about its modes on startup lands
                 // in this emulator — and so does every cell it ever paints,
@@ -1707,11 +1719,16 @@ actor HolderRegistry {
         let clock = self.clock
         let notifyEndOfOutput = endOfOutputNotifier(for: terminalID)
         let statusTap = self.programStatusTap(for: terminalID)
+        let chooseEmulator = self.emulatorKind
         let task = Task<Adoption, Swift.Error> {
-            try await Self.attach(
+            // Read inside the task, not before it: the slot below is claimed
+            // with no suspension between the vacancy check and the claim.
+            let emulator = await chooseEmulator()
+            return try await Self.attach(
                 terminalID: terminalID,
                 socketPath: socketPath,
                 expecting: expected,
+                emulator: emulator,
                 busyRetryBudget: budget,
                 receiveTimeout: receiveTimeout,
                 clock: clock,
@@ -2048,6 +2065,7 @@ actor HolderRegistry {
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken,
+        emulator: HolderEmulatorKind,
         busyRetryBudget: Duration,
         receiveTimeout: Duration,
         clock: any Clock<Duration>,
@@ -2063,6 +2081,7 @@ actor HolderRegistry {
                     terminalID: terminalID,
                     socketPath: socketPath,
                     expecting: owner,
+                    emulator: emulator,
                     receiveTimeout: receiveTimeout,
                     observedChildFromStart: observedChildFromStart,
                     onEndOfOutput: onEndOfOutput,
@@ -2088,6 +2107,7 @@ actor HolderRegistry {
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken,
+        emulator: HolderEmulatorKind,
         receiveTimeout: Duration,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)?,
@@ -2098,6 +2118,7 @@ actor HolderRegistry {
             terminalID: terminalID,
             over: HolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout),
             expecting: owner,
+            emulator: emulator,
             observedChildFromStart: observedChildFromStart,
             onEndOfOutput: onEndOfOutput,
             programStatus: programStatus,
@@ -2128,6 +2149,7 @@ actor HolderRegistry {
         terminalID: UUID,
         over client: HolderClient,
         expecting owner: HolderOwnerToken,
+        emulator: HolderEmulatorKind,
         observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
         programStatus: HolderProgramStatusTap? = nil,
@@ -2180,6 +2202,7 @@ actor HolderRegistry {
             rows: grid.rows,
             onEndOfOutput: onEndOfOutput,
             programStatus: programStatus,
+            emulator: emulator,
             observedChildFromStart: observedChildFromStart)
         // BEFORE the drain starts, and that ordering is the whole of the
         // handback's fidelity: the preamble's reset prelude erases the display
@@ -2874,6 +2897,10 @@ actor HolderRegistry {
     /// above the resume would still be above the clear if somebody moved it —
     /// so the window would close in the test while staying open in production.
     /// Inside the call, it cannot be separated from what it stands for.
+    ///
+    /// No open sequence is abandoned here, unlike a take-back with no
+    /// preamble: no viewer read the pty, so the child's next bytes do finish
+    /// the sequence the reader stopped inside.
     private func resumeAfterCancellation(_ reader: HolderReader) async throws {
         await cancelBarrier?()
         try await reader.resumeDraining()
@@ -3013,7 +3040,10 @@ actor HolderRegistry {
     ) -> Task<Void, Never>? {
         guard let recipient else { return nil }
         let recipientIsGone = appsConfirmedGone.contains(recipient)
+        let viewerMayHaveRead: Bool
         if var pending = pendingAttaches[terminalID], pending.generation == generation {
+            // Still pending, so the dead app never read the descriptor.
+            viewerMayHaveRead = false
             pending.recipient = recipient
             if recipientIsGone {
                 // Its acknowledgement cannot come now, so it is settled the
@@ -3032,7 +3062,9 @@ actor HolderRegistry {
             // after it; and a death's pass settles only attaches whose
             // recipient is already recorded. Kept so that an ordering that does
             // reach it still records the owner a death needs, rather than
-            // leaving the claim ownerless.
+            // leaving the claim ownerless. A claim came from an ack or a
+            // ready-timeout, so its viewer may have read.
+            viewerMayHaveRead = true
             viewerAttachments[terminalID]?.owner = recipient
         } else {
             return nil
@@ -3047,7 +3079,8 @@ actor HolderRegistry {
             """)
         return Task {
             await self.takeBackLateDelivery(
-                terminalID: terminalID, generation: generation, recipient: recipient)
+                terminalID: terminalID, generation: generation, recipient: recipient,
+                viewerMayHaveRead: viewerMayHaveRead)
         }
     }
 
@@ -3055,12 +3088,16 @@ actor HolderRegistry {
     /// an app already confirmed gone: that one session, under the generation
     /// the record named. Generation-checked through `seizeFromDeadApp`, so an
     /// attach that moved on before this ran — released, or re-attached by a
-    /// live app — is left alone.
+    /// live app — is left alone. `viewerMayHaveRead` is the record's: false
+    /// for an attach still pending, true for one already a claim.
     private func takeBackLateDelivery(
-        terminalID: UUID, generation: UInt64, recipient: ProcessIdentity
+        terminalID: UUID, generation: UInt64, recipient: ProcessIdentity,
+        viewerMayHaveRead: Bool
     ) async {
         do {
-            try await seizeFromDeadApp(terminalID: terminalID, generation: generation)
+            try await seizeFromDeadApp(
+                terminalID: terminalID, generation: generation,
+                viewerMayHaveRead: viewerMayHaveRead)
             Self.logger.notice(
                 """
                 took session \(terminalID.uuidString, privacy: .public) back from attach \
@@ -3149,8 +3186,11 @@ actor HolderRegistry {
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminal.id)
         }
+        // The app detaches with an empty preamble when its viewer never read
+        // the pty; see `viewerMayHaveRead` on `takeBackFromViewer`.
         try await takeBackFromViewer(
-            terminalID: terminal.id, generation: generation, preamble: preamble)
+            terminalID: terminal.id, generation: generation, preamble: preamble,
+            viewerMayHaveRead: !preamble.isEmpty)
     }
 
     /// Takes a session back from a viewer, with or without the viewer's help.
@@ -3166,7 +3206,27 @@ actor HolderRegistry {
     ///
     /// With no preamble there is simply nothing to ingest: the suspended reader
     /// still holds the screen it had before the attach, and the jiggle is what
-    /// gets a repainting program to redraw the rest.
+    /// gets a repainting program to redraw the rest. Its parser may still be
+    /// inside a sequence, and `viewerMayHaveRead` says whose it is to finish.
+    /// True, a viewer may have read the pty and finished it, so the reader
+    /// abandons it first (`HolderReader.abandonOpenSequence`): an app's death
+    /// (`seizeFromDeadApp`), a claim sweep (`reconcileClaims`), and a late
+    /// delivery whose attach was already a claim. False, no viewer read the pty
+    /// and the child's next bytes finish it, so it is kept: a detach with an
+    /// empty preamble, which the app sends when it never received the
+    /// descriptor or tore its view down before its reader started, and a late
+    /// delivery whose attach was still pending (`takeBackLateDelivery`). The
+    /// caller states it because nothing here can see it.
+    ///
+    /// Two kinds of case fall the wrong way, as the lesser harm: an empty
+    /// preamble from a viewer that read, or a death pass or a sweep after an
+    /// attach nobody read. The first comes from an app whose ack is refused or
+    /// lost after its reader started, and from the app's libghostty engine
+    /// when its snapshot writer throws; the second from an unacknowledged
+    /// attach whose reply was lost, or a lost empty-preamble release. Telling
+    /// them apart needs the app to report whether it read, a protocol change
+    /// outside the daemon's libghostty flag. A non-empty preamble ends the
+    /// sequence through its own ingest either way.
     ///
     /// **One take-back per attach at a time.** Because the claim stands until
     /// the resume lands, a second take-back of the same attach — the viewer's
@@ -3193,7 +3253,7 @@ actor HolderRegistry {
     /// daemon's whole life, and a hand-over from the holder is a legitimate
     /// recovery whenever that state is somehow reached.
     private func takeBackFromViewer(
-        terminalID: UUID, generation: UInt64, preamble: Data?
+        terminalID: UUID, generation: UInt64, preamble: Data?, viewerMayHaveRead: Bool
     ) async throws {
         guard viewerAttachments[terminalID]?.generation == generation else {
             throw Error.handbackSuperseded(terminalID: terminalID, generation: generation)
@@ -3232,7 +3292,14 @@ actor HolderRegistry {
                 // a restart of its thread. The barrier is where a test parks a
                 // take-back with its claim still standing; see `takeBackBarrier`.
                 await takeBackBarrier?()
-                if let preamble { await suspended.ingest(preamble: preamble) }
+                if let preamble, !preamble.isEmpty {
+                    await suspended.ingest(preamble: preamble)
+                } else if viewerMayHaveRead {
+                    // That viewer finished whatever sequence the attach left
+                    // the parser inside, so the child's next bytes are not its
+                    // tail; see the header.
+                    await suspended.abandonOpenSequence()
+                }
                 try await suspended.resumeDraining()
                 readerCensus.beganReading(
                     .daemon, session: terminalID, at: "handback-resume")
@@ -3313,9 +3380,16 @@ actor HolderRegistry {
     /// Generation-checked, and that matters more here than on the handback, not
     /// less: the arbitration is asynchronous, so a verdict about a dead app can
     /// land after a live one has attached the same session.
-    func seizeFromDeadApp(terminalID: UUID, generation: UInt64) async throws {
+    ///
+    /// `viewerMayHaveRead` is passed to `takeBackFromViewer`: true for an app
+    /// that died holding the pty (`reclaimSessions`); from a late delivery
+    /// (`takeBackLateDelivery`), false while its attach was still pending.
+    func seizeFromDeadApp(
+        terminalID: UUID, generation: UInt64, viewerMayHaveRead: Bool
+    ) async throws {
         try await takeBackFromViewer(
-            terminalID: terminalID, generation: generation, preamble: nil)
+            terminalID: terminalID, generation: generation, preamble: nil,
+            viewerMayHaveRead: viewerMayHaveRead)
     }
 
     /// Reverts every session the confirmed-dead `app` was holding to
@@ -3387,7 +3461,8 @@ actor HolderRegistry {
         var reclaimed: [UUID] = []
         for (terminalID, generation) in claims {
             do {
-                try await seizeFromDeadApp(terminalID: terminalID, generation: generation)
+                try await seizeFromDeadApp(
+                    terminalID: terminalID, generation: generation, viewerMayHaveRead: true)
                 reclaimed.append(terminalID)
             } catch {
                 Self.logger.error(
@@ -3503,7 +3578,8 @@ actor HolderRegistry {
             }
             do {
                 try await takeBackFromViewer(
-                    terminalID: terminalID, generation: generation, preamble: nil)
+                    terminalID: terminalID, generation: generation, preamble: nil,
+                    viewerMayHaveRead: true)
                 takenBack.append(terminalID)
                 Self.logger.notice(
                     """

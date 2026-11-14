@@ -1319,6 +1319,18 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the daemon's libghostty emulator flag (default OFF). The daemon
+    /// reads it when it builds a session's reader, so new sessions take a change
+    /// at once and every session takes it at the next daemon start; sending
+    /// either value is an explicit gesture that survives a later change to the
+    /// shipped default.
+    func setGhosttyDaemonEmulator(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetGhosttyDaemonEmulator,
+            params: ConfigSetGhosttyDaemonEmulatorParams(enabled: enabled)
+        )
+    }
+
     /// Persist the holder claim-reconcile gate (default OFF, soaking).
     /// `holder.reconcileClaims` reads it on every sweep, so it applies from
     /// the next poll tick. While it is off, a sweep only logs what it would

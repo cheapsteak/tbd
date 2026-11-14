@@ -795,9 +795,75 @@ public final class GhosttyTerminal: @unchecked Sendable {
         }
     }
 
-    /// A full reset (RIS): screens, scrollback, modes and the cursor go back to their initial
-    /// state. The size is kept. Use before replaying a snapshot into a terminal that was used
-    /// before, so nothing from its earlier life (an alternate screen, a colour) survives.
+    /// `feed(_:)`, with `underLock` run in the same hold of the lock as the parse, just before it,
+    /// for an owner that keeps state of its own beside the terminal's and must change it in the
+    /// same step: the daemon's holder emulator stamps when it last took in bytes there, so a
+    /// reading of the screen and its age is always of one moment.
+    ///
+    /// With `muted`, the terminal is muted for exactly this parse, inside the same hold: `writePty`
+    /// and the effect callbacks drop what the bytes produce, and the queries are not asked. The
+    /// previous mute is put back before the lock drops, so a feed on another thread is never
+    /// muted by this one. For replaying a screen whose replies and reports must not reach the
+    /// program. `isMuted` is the setting for a mute that spans several calls.
+    ///
+    /// With `resetFirst`, the parse starts from a cleared terminal, in the same hold, after
+    /// `underLock`: every mode back to its default, whether or not the replay names it. Two steps,
+    /// both muted. A CAN comes first, because a full reset (`reset()`) clears the screen model and
+    /// leaves libghostty's stream parser where it was: inside a sequence the terminal was left in,
+    /// the replay's first ESC would otherwise end that sequence, dispatching an open OSC, DCS or
+    /// APC, and a partial OSC 8 would put a link on every cell the replay writes. CAN ends the
+    /// sequence instead and returns the parser to ground. Whether libghostty dispatches a cut OSC
+    /// on the CAN is not relied on: it is muted, and the reset after it puts the screen model
+    /// back to its initial state either way. The reset keeps the palette and the dynamic
+    /// colours, which a handback does not carry anyway. The program-status clear libghostty
+    /// reports for the reset reaches nobody, and like `reset()` it reports no end for a DEC 2026
+    /// hold it ends.
+    ///
+    /// `underLock` must not call back into this terminal: the lock is not recursive. It runs even
+    /// for an empty `bytes`, and not at all once the terminal is closed. The bytes count toward
+    /// `TerminalCore.outputBytesSinceFrame`, muted or not, as `feed(_:)`'s do.
+    package func feed(
+        _ bytes: ArraySlice<UInt8>, muted: Bool = false, resetFirst: Bool = false, underLock: () -> Void
+    ) {
+        withCore(signalsRender: true, changesModes: true, reportsHoldEnd: !resetFirst) { core, raw in
+            underLock()
+            let wasMuted = core.context.muted
+            defer { core.context.muted = wasMuted }
+            if resetFirst {
+                core.context.muted = true
+                Self.cancelSequence.withUnsafeBufferPointer { buffer in
+                    ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
+                }
+                ghostty_terminal_reset(raw)
+            }
+            guard !bytes.isEmpty else { return }
+            core.context.muted = muted || wasMuted
+            bytes.withUnsafeBufferPointer { buffer in
+                ghostty_terminal_vt_write(raw, buffer.baseAddress, buffer.count)
+            }
+            core.outputBytesSinceFrame += bytes.count
+        }
+    }
+
+    /// CAN: ends any sequence the parser is inside and returns it to ground.
+    private static let cancelSequence: [UInt8] = [0x18]
+
+    /// Whether this terminal's lock is held right now, by any thread, the calling one included.
+    /// A test seam: from inside `feed(_:muted:resetFirst:underLock:)`'s closure it reads true.
+    var isLockHeldForTesting: Bool {
+        guard lock.try() else { return true }
+        lock.unlock()
+        return false
+    }
+
+    /// A full reset (RIS) of the screen model: screens, scrollback, modes and the cursor go back
+    /// to their initial state. The size is kept. Use before replaying a snapshot into a terminal
+    /// that was used before, so nothing from its earlier life (an alternate screen, a colour on
+    /// the pen) survives in the model.
+    ///
+    /// It does not reset libghostty's stream parser: a terminal left inside a sequence is still
+    /// inside it, and the next ESC ends it, dispatching an open OSC, DCS or APC.
+    /// `feed(_:muted:resetFirst:underLock:)` writes a CAN first for that reason.
     ///
     /// A reset ends any DEC 2026 hold, and its render signal reports no end: the program finished
     /// no frame.
@@ -812,14 +878,28 @@ public final class GhosttyTerminal: @unchecked Sendable {
         resize(cols: cols, rows: rows, cellWidthPx: nil, cellHeightPx: nil)
     }
 
+    /// `resize(cols:rows:)`, muted for exactly this resize when `muted` is true: what the resize
+    /// produces is dropped, the in-band size report a program asked for with mode 2048 included.
+    /// For an owner that keeps a copy of a terminal some other terminal answers the program for.
+    package func resize(cols: Int, rows: Int, muted: Bool) {
+        resize(cols: cols, rows: rows, cellWidthPx: nil, cellHeightPx: nil, muted: muted)
+    }
+
     /// `resize(cols:rows:)` plus the cell size in pixels, which size reports and image protocols
     /// use. The view passes it; nil keeps the last one.
-    package func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?) {
+    ///
+    /// With `muted`, the terminal is muted for exactly this resize, inside its hold, and the
+    /// previous mute is put back before the lock drops, as `feed(_:muted:resetFirst:underLock:)`
+    /// does for a parse.
+    package func resize(cols: Int, rows: Int, cellWidthPx: UInt32?, cellHeightPx: UInt32?, muted: Bool = false) {
         let columns = UInt16(clamping: max(cols, 1))
         let lines = UInt16(clamping: max(rows, 1))
         var failure: GhosttyResult?
         let aftermath = locked { core -> Aftermath? in
             guard let raw = core.raw else { return nil }
+            let wasMuted = core.context.muted
+            if muted { core.context.muted = true }
+            defer { core.context.muted = wasMuted }
             let previousSize = core.context.reportedSize
             if let cellWidthPx { core.cellWidthPx = cellWidthPx }
             if let cellHeightPx { core.cellHeightPx = cellHeightPx }
@@ -879,7 +959,9 @@ public final class GhosttyTerminal: @unchecked Sendable {
     }
 
     /// While true, `writePty` and the effect callbacks are dropped, and the queries are not asked.
-    /// For replaying a snapshot, whose replies must not reach the program.
+    /// For replaying a snapshot, whose replies must not reach the program. A mute for one parse
+    /// only is `feed(_:muted:resetFirst:underLock:)`, and for one resize `resize(cols:rows:muted:)`,
+    /// each of which sets and restores it inside its own hold.
     public var isMuted: Bool {
         get { locked { $0.context.muted } }
         set { locked { $0.context.muted = newValue } }

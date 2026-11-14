@@ -28,6 +28,11 @@ import Testing
 /// `terminal.output` calls — `renderScreen` is the viewport-only twin the
 /// holder suites read a session's screen with. No drain thread and no real pty
 /// are involved, so nothing here is timing-dependent.
+///
+/// Every test runs against both emulators the daemon can build. libghostty
+/// stores no code in a cell nobody wrote either, so the same projection is
+/// owed: `GhosttyScreenProjection` for `screen`, and
+/// `GhosttyTerminalState.viewportLines` for `renderScreen`.
 @Suite struct HolderRenderProjectionTests {
 
     private static let nul = "\u{0}"
@@ -37,9 +42,9 @@ import Testing
 
     /// The signature that started this: a spinner glyph, a jump to column 3,
     /// and a word. The cell between them was never written.
-    @Test("a cursor jump on the current row renders as a space")
-    func aColumnJumpRendersAsASpace() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a cursor jump on the current row renders as a space", arguments: HolderEmulatorKind.allCases)
+    func aColumnJumpRendersAsASpace(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("✻\(Self.esc)[3GCogitated"))
@@ -52,9 +57,9 @@ import Testing
     }
 
     /// Cursor-forward from the start of a row. Five columns nobody wrote.
-    @Test("cursor-forward leaves spaces across the columns it skipped")
-    func cursorForwardLeavesSpaces() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("cursor-forward leaves spaces across the columns it skipped", arguments: HolderEmulatorKind.allCases)
+    func cursorForwardLeavesSpaces(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("\r\(Self.esc)[5Cx"))
@@ -68,9 +73,9 @@ import Testing
     /// `getTrimmedLength()`, which is computed before the projection, so
     /// turning never-written cells into spaces must not pad blank rows out to
     /// the full width.
-    @Test("a positioned write pads its own row and leaves the rows above empty")
-    func aPositionedWriteLeavesBlankRowsBlank() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a positioned write pads its own row and leaves the rows above empty", arguments: HolderEmulatorKind.allCases)
+    func aPositionedWriteLeavesBlankRowsBlank(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("\(Self.esc)[3;10Hhello"))
@@ -89,9 +94,9 @@ import Testing
     /// The trailing half of a two-cell glyph carries code 0 as well, and it is
     /// *not* an unwritten cell: projecting it as a space would double the width
     /// of every CJK character and every emoji.
-    @Test("a wide glyph is not padded with a stray space")
-    func wideGlyphsAreNotDoubled() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("a wide glyph is not padded with a stray space", arguments: HolderEmulatorKind.allCases)
+    func wideGlyphsAreNotDoubled(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("日本 x"))
@@ -104,9 +109,9 @@ import Testing
     /// Wide glyphs and a positioned write on the row below, to show the two
     /// projections do not interfere: the gap after `a` is three spaces because
     /// `ESC[4G` is column 4, and the wide row above is still two glyphs wide.
-    @Test("columns still line up on the row after a wide-glyph run")
-    func columnsLineUpBelowAWideGlyphRun() async throws {
-        let harness = try Harness(columns: 40, rows: 8)
+    @Test("columns still line up on the row after a wide-glyph run", arguments: HolderEmulatorKind.allCases)
+    func columnsLineUpBelowAWideGlyphRun(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
         defer { harness.tearDown() }
 
         await harness.reader.ingest(preamble: Self.data("日本\r\na\(Self.esc)[4Gb"))
@@ -122,9 +127,9 @@ import Testing
     /// projection in its own right. The gap here is deliberately placed on a
     /// line that has already scrolled off the viewport, so only the scrollback
     /// path can produce it.
-    @Test("the scrollback render projects never-written cells as spaces too")
-    func scrollbackRenderProjectsNeverWrittenCells() async throws {
-        let harness = try Harness(columns: 40, rows: 5)
+    @Test("the scrollback render projects never-written cells as spaces too", arguments: HolderEmulatorKind.allCases)
+    func scrollbackRenderProjectsNeverWrittenCells(emulator: HolderEmulatorKind) async throws {
+        let harness = try Harness(columns: 40, rows: 5, emulator: emulator)
         defer { harness.tearDown() }
 
         var stream = ""

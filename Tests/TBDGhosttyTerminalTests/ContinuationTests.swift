@@ -76,4 +76,26 @@ struct ContinuationTests {
         #expect(encoded != GHOSTTY_SUCCESS, "with tracking off, cloning in the middle of an SGR succeeded")
         #expect(pending == nil, "with tracking off, \(String(describing: pending)) was reported pending")
     }
+
+    /// A handback's reset must leave tracking on, or the daemon's next attach could not carry a
+    /// sequence the child is part-way through: `ghostty_terminal_reset` resets the terminal's
+    /// state, and the option is set once, before the first byte.
+    @Test func trackingSurvivesAResetFirstFeed() throws {
+        let terminal = try Self.makeTerminal()
+        defer { terminal.close() }
+        terminal.feed(Array("replayed".utf8)[...], muted: true, resetFirst: true, underLock: {})
+
+        let limit = try terminal.withLocked { state -> Int in
+            let raw = try #require(state.raw, "the terminal is closed")
+            var limit = 0
+            _ = ghostty_terminal_get(raw, GHOSTTY_TERMINAL_DATA_CONTINUATION_MAX_BYTES, &limit)
+            return limit
+        }
+        #expect(limit == TBDGhosttyCore.GhosttyTerminal.continuationMaxBytes,
+                "after the reset, continuation tracking is set to \(limit) bytes")
+
+        terminal.feed(Self.partial[...])
+        let pending = terminal.withLocked { $0.pendingContinuationBytes() }
+        #expect(pending == Self.partial, "after the reset, \(String(describing: pending)) is pending")
+    }
 }

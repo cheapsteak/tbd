@@ -240,6 +240,12 @@ let package = Package(
                 // simply never touches the view types.
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 "TBDTerminalSerialization",
+                // The libghostty-vt emulator a holder-backed session's reader
+                // uses when `ghostty_daemon_emulator_enabled` is on
+                // (Sources/TBDDaemon/Holder/GhosttyHolderEmulator.swift). The
+                // headless core only: no AppKit, no Metal. Its `c++` linker
+                // setting reaches the daemon through this dependency.
+                "TBDGhosttyCore",
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ],
             path: "Sources/TBDDaemon",
@@ -425,6 +431,10 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // Declared because the libghostty holder emulator's suite holds
+                // the daemon's answers to the core's own constants: the frozen
+                // device identity and the snapshot writer's reset prelude.
+                "TBDGhosttyCore",
                 // The test host's SIGPIPE handler is in the bundle either way;
                 // the dependency lets these suites check the handler in their
                 // own two passes. See the target.

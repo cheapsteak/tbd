@@ -2,6 +2,9 @@ import Foundation
 import TBDShared
 import TBDKernel
 import os
+// Scoped: the daemon only names the engine's log setting. The rest of the core
+// is the holder emulator's business.
+import enum TBDGhosttyCore.GhosttyCoreLog
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
@@ -849,6 +852,9 @@ public final class Daemon: Sendable {
     public func start() async throws {
         // 0. Raise the file-descriptor limit before any tmux server is spawned.
         Self.raiseFileDescriptorLimit()
+        // The libghostty engine logs under this process's subsystem. Set before
+        // the holder registry can build a reader with a libghostty terminal.
+        GhosttyCoreLog.configure(subsystem: "com.tbd.daemon")
 
         // Mock harness: when TBD_MOCK is set, this daemon seeds a fixture and
         // skips all live reconciliation so hand-authored state renders as
@@ -1113,13 +1119,20 @@ public final class Daemon: Sendable {
         // through the process environment, so a mock daemon's land under the
         // isolated `TBD_HOME` that `scripts/mock.sh` exports, and the script's
         // `down` reclaims any holder still listening there.
+        //
+        // The registry reads the daemon's libghostty emulator flag each time it
+        // builds a reader.
+        let holderEmulatorKind: @Sendable () async -> HolderEmulatorKind = { [config = database.config] in
+            await HolderEmulatorKind.configured(by: config)
+        }
         let holderRegistry: HolderRegistry? = HolderRegistry(
             owner: await HolderRegistry.installationOwner(config: database.config),
             listTerminals: { [database] in try await database.terminals.list() },
             spawner: HolderSpawner.locateSiblingExecutable().map {
                 HolderSpawner(executableURL: $0)
             },
-            programStatus: programStatusStore)
+            programStatus: programStatusStore,
+            emulatorKind: holderEmulatorKind)
         self.holderRegistry = holderRegistry
 
         // Input for a holder-backed session, routed by who is reading its pty.

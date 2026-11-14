@@ -37,6 +37,11 @@ final class SwiftTermHolderEmulator: HolderEmulator, @unchecked Sendable {
     /// which `feedPreamble` holds that lock around — like everything else here.
     private var ingestingPreamble = false
 
+    let kind: HolderEmulatorKind = .swiftTerm
+    /// Always: the snapshot's `DECRQM` queries and alt-screen toggle feed the
+    /// live terminal; see `snapshotPreamble`.
+    var snapshotNeedsSequenceBoundary: Bool { true }
+
     init(
         ledger: HolderEmulatorLedger,
         columns: Int, rows: Int, scrollback: Int,
@@ -117,6 +122,10 @@ final class SwiftTermHolderEmulator: HolderEmulator, @unchecked Sendable {
             terminal.feed(buffer: bytes)
         }
     }
+
+    /// Nothing: the attach waited for the child's output to reach a sequence
+    /// boundary before it handed the pty over.
+    func abandonOpenSequence() {}
 
     /// Whether the child's output so far ends between sequences, so bytes of
     /// the daemon's own — `snapshotPreamble`'s mode queries and alt-screen

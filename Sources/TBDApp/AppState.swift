@@ -2321,6 +2321,10 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var sessionRestoreFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setSessionRestore(enabled: enabled) }
+    /// How `setGhosttyDaemonEmulatorEnabled` persists the daemon's libghostty
+    /// emulator flag — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var ghosttyDaemonEmulatorFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setGhosttyDaemonEmulator(enabled: enabled) }
     /// How `setHolderClaimReconcileEnabled` persists the holder claim-reconcile
     /// soak flag — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =

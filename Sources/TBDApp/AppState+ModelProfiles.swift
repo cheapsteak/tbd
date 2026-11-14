@@ -350,6 +350,20 @@ extension AppState {
         }
     }
 
+    /// Persist the daemon's libghostty emulator flag, then re-fetch
+    /// capabilities so the Settings toggle reflects the daemon's persisted
+    /// state. Sessions created or re-adopted after the change use the new
+    /// emulator; a running session keeps the one it was built with.
+    func setGhosttyDaemonEmulatorEnabled(_ enabled: Bool) async {
+        do {
+            try await ghosttyDaemonEmulatorFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set the daemon emulator: \(error, privacy: .public)")
+            showAlert("Failed to set the daemon emulator: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// The caption Settings shows when `ptyHolderSupported` is false. Every
     /// new session opens on a pty holder, so a daemon that cannot start one
     /// refuses them all; the caption names the missing helper, because "not

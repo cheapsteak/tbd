@@ -190,6 +190,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// migration carries no SQL default, so `nil` means "never chose". Resolve
     /// it through `Config.phoneControlEnabledDefault`, never through `?? false`.
     var phone_control_enabled: Bool?
+    /// The daemon's libghostty emulator gate. **Genuinely tri-state**: the
+    /// `20261113231818_config_ghostty_daemon_emulator` migration carries no SQL
+    /// default, so `nil` means "never chose". Resolve it through
+    /// `Config.ghosttyDaemonEmulatorDefault`, never through `?? false`.
+    var ghostty_daemon_emulator_enabled: Bool?
     /// Normalized relay base URL; `nil` means phone control is not set up.
     var phone_relay_url: String?
     /// Loader URL override; `nil` means `Config.phoneLoaderURLDefault`.
@@ -276,6 +281,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `session_restore_enabled` — the restore pass's gate.
     /// - Parameter phoneControlDefault: same shape again, for
     ///   `phone_control_enabled` — the phone bridge's gate.
+    /// - Parameter ghosttyDaemonEmulatorDefault: same shape again, for
+    ///   `ghostty_daemon_emulator_enabled` — the daemon's libghostty emulator
+    ///   gate.
     /// - Parameter worktreeParksOnMerge: whether a worktree that is not
     ///   archived overrides park-on-merge to true. It lives in the `worktree`
     ///   table, so `ConfigStore.get()` reads it with one query beside this row;
@@ -304,6 +312,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
         sessionRestoreDefault: Bool = Config.sessionRestoreDefault,
         phoneControlDefault: Bool = Config.phoneControlEnabledDefault,
+        ghosttyDaemonEmulatorDefault: Bool = Config.ghosttyDaemonEmulatorDefault,
         worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -425,6 +434,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         config.sessionRestoreEnabled = session_restore_enabled ?? sessionRestoreDefault
         // Phone control gate — NOT `?? false`.
         config.phoneControlEnabled = phone_control_enabled ?? phoneControlDefault
+        // The daemon's libghostty emulator gate — NOT `?? false`.
+        config.ghosttyDaemonEmulatorEnabled =
+            ghostty_daemon_emulator_enabled ?? ghosttyDaemonEmulatorDefault
         config.phoneRelayURL = phone_relay_url
         config.phoneLoaderURL = phone_loader_url
         return config
@@ -724,6 +736,21 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET session_restore_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the daemon's libghostty emulator gate. Off is the shipped
+    /// default. Writing either value is an explicit gesture that leaves the
+    /// column non-NULL forever after, so an operator who turns the emulator off
+    /// keeps it off when the shipped default graduates. The holder registry
+    /// reads it when it builds a reader, so a running session keeps the
+    /// emulator it was built with.
+    public func setGhosttyDaemonEmulator(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET ghostty_daemon_emulator_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

@@ -129,14 +129,15 @@ set -uo pipefail
 #
 # `Sources/TBDTerminalSerialization` is here for two reasons. It is a library
 # the wipe step removes in its own right — TBDDaemonLib and TBDApp both import
-# it, so a symbol added to it is the change #7715 breaks on. And it is
-# TBDDaemonLib's one first-party dependency beyond TBDShared and TBDKernel, so a
-# commit touching only that target recompiles TBDDaemonLib as well.
+# it, so a symbol added to it is the change #7715 breaks on. And it is one of
+# TBDDaemonLib's two first-party dependencies beyond TBDShared and TBDKernel,
+# TBDGhosttyCore being the other, so a commit touching only that target
+# recompiles TBDDaemonLib as well.
 #
 # `Sources/TBDGhosttyCore` and `Sources/TBDGhosttyTerminal` are the libghostty
 # engine's two Swift libraries, which the wipe step removes in their own right:
-# TBDApp imports both and TBDGhosttyTerminal imports TBDGhosttyCore, so a symbol
-# added to either is the change #7715 breaks on. `Sources/TBDGhosttyShaderTypes`
+# TBDApp imports both, and TBDDaemonLib and TBDGhosttyTerminal import
+# TBDGhosttyCore, so a symbol added to either is the change #7715 breaks on. `Sources/TBDGhosttyShaderTypes`
 # is the C target TBDGhosttyTerminal depends on, so a change to its header
 # recompiles TBDGhosttyTerminal; being on this list makes it a wiped module as
 # well. Their one other first-party dependency, TBDShared (and TBDKernel below

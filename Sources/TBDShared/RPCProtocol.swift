@@ -436,6 +436,12 @@ public enum RPCMethod {
     /// a running pass. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetSessionRestore = "config.setSessionRestore"
+    /// The daemon's libghostty emulator gate (`ghostty_daemon_emulator_enabled`).
+    /// Read when a session's reader is built, so new sessions take a change at
+    /// once and every session takes it at the next daemon start. Reading needs
+    /// no method of its own: `config.get` and `daemon.capabilities` carry the
+    /// resolved value.
+    public static let configSetGhosttyDaemonEmulator = "config.setGhosttyDaemonEmulator"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
     public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
@@ -3616,6 +3622,19 @@ public struct ConfigSetSessionRestoreParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setGhosttyDaemonEmulator` — the daemon's libghostty
+/// emulator flag (default OFF, design 2026-11-13). The holder registry reads it
+/// when it builds a session's reader, on a spawn and on a re-adoption, so no
+/// daemon restart is required for new sessions.
+///
+/// Sending either value is an explicit gesture: the backing column is NULL
+/// until this verb writes to it, and a written `false` stays off even after the
+/// shipped default graduates.
+public struct ConfigSetGhosttyDaemonEmulatorParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setClaudeCloud` — the Claude cloud sessions gate
 /// (design 2026-08-15 §7, default OFF). A second gate inside
 /// `remote_backends_enabled`, never a bypass.
@@ -4380,6 +4399,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `profileBalancingEnabled` gives.
     public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
+    /// Whether the daemon parses holder-backed sessions with libghostty
+    /// (`ghostty_daemon_emulator_enabled`). Default OFF while it soaks.
+    /// Resolved through `Config.ghosttyDaemonEmulatorDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `profileBalancingEnabled` gives.
+    public var ghosttyDaemonEmulatorEnabled: Bool = Config.ghosttyDaemonEmulatorDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4511,6 +4537,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         remoteTranscriptLiveSyncEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remoteTranscriptLiveSyncEnabled)
             ?? Config.remoteTranscriptLiveSyncEnabledDefault
+        // A daemon that does not send it has no libghostty emulator, so fall
+        // through to the shipped default.
+        ghosttyDaemonEmulatorEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .ghosttyDaemonEmulatorEnabled)
+            ?? Config.ghosttyDaemonEmulatorDefault
     }
 }
 

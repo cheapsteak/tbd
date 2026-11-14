@@ -124,6 +124,10 @@ actor HolderReader {
     /// thread needs. `nonisolated` for the same reason it is a `let` — it is
     /// fixed at construction, so reading it can never race the actor.
     nonisolated let observedChildFromStart: Bool
+    /// Which emulator parses this session: the kind asked for at
+    /// construction, or SwiftTerm when libghostty could not make its terminal.
+    /// `nonisolated` because it is fixed at construction.
+    nonisolated let emulatorKind: HolderEmulatorKind
     private let descriptor: PTYDescriptor
     private let emulator: any HolderEmulator
     private let stopTimeout: Duration
@@ -188,9 +192,10 @@ actor HolderReader {
     ///   every report's payload to the tap's `deliver`. nil leaves OSC 7501
     ///   unhandled, as it was before the protocol existed.
     /// - Parameter emulator: which terminal parses the session's output, read
-    ///   once here, so a running session never changes emulator. Production
-    ///   passes nothing. The six screen-reading `HolderReaderTests` run once
-    ///   per kind. The harnesses in `HolderScreenContractTests`,
+    ///   once here, so a running session never changes emulator. The registry
+    ///   passes the kind the daemon's flag picks; `emulatorKind` reports the
+    ///   kind actually built. The six screen-reading `HolderReaderTests` run
+    ///   once per kind. The harnesses in `HolderScreenContractTests`,
     ///   `HolderProgramStatusTests` and `HolderRenderProjectionTests` take a
     ///   kind, defaulting to SwiftTerm, so each test there can choose.
     init(
@@ -221,7 +226,7 @@ actor HolderReader {
         // A device-status or cursor-position report that never reaches the
         // child is a hang in that child, not a cosmetic loss — the program
         // asked the terminal a question and is waiting for the answer.
-        self.emulator = emulator.makeEmulator(
+        let built = emulator.makeEmulator(
             sessionID: sessionID,
             columns: columns,
             rows: rows,
@@ -230,6 +235,8 @@ actor HolderReader {
             monotonicNow: monotonicNow,
             programStatus: programStatus,
             reply: { [descriptor] bytes in descriptor.replyBestEffort(bytes) })
+        self.emulator = built
+        self.emulatorKind = built.kind
     }
 
     deinit {
@@ -446,9 +453,12 @@ actor HolderReader {
     /// after this call therefore sees every byte the session had produced up to
     /// the moment it stopped reading, and everything after that moment is still
     /// queued on the tty for whoever reads next. Nothing falls between the two.
-    /// If those bytes end part-way through one of the child's sequences, the
-    /// rest is waited for, briefly, so that the snapshot is taken between
-    /// sequences (`awaitSequenceBoundary`).
+    /// If those bytes end part-way through one of the child's sequences and the
+    /// emulator's snapshot feeds the live terminal, the rest is waited for,
+    /// briefly, so that the snapshot is taken between sequences
+    /// (`awaitSequenceBoundary`). The libghostty emulator's snapshot does not,
+    /// and carries the open sequence instead, so it is waited for only when the
+    /// sequence is too long to carry (`snapshotNeedsSequenceBoundary`).
     ///
     /// The descriptor is deliberately **not** closed: this reader still owns it
     /// and can be put back on it with `resumeDraining()`. The returned `dup` is
@@ -488,7 +498,7 @@ actor HolderReader {
             state = .suspended
         }
         let outputEnded = drainRemainder()
-        if !outputEnded { await awaitSequenceBoundary() }
+        if !outputEnded, emulator.snapshotNeedsSequenceBoundary { await awaitSequenceBoundary() }
         // That wait can park this actor, and a stop or a resume that lands in
         // it means this call is no longer the descriptor's only reader.
         switch state {
@@ -561,7 +571,7 @@ actor HolderReader {
     /// and when the attach is cancelled, which must not wait for anything.
     private func awaitSequenceBoundary() async {
         let elapsed = Self.stopwatch(on: clock)
-        while !emulator.isAtSequenceBoundary {
+        while snapshotMustWait {
             guard elapsed() < sequenceBoundaryBudget else {
                 abandonedSequenceBoundaryWaits += 1
                 Self.logger.notice(
@@ -582,6 +592,15 @@ actor HolderReader {
         }
     }
 
+    /// Whether the wait goes on: the output is mid-sequence and the emulator
+    /// still needs a boundary for its snapshot. Asked again after every read,
+    /// because for the libghostty emulator the answer changes with the
+    /// sequence: a read that ends an over-long one and opens a short one ends
+    /// the wait, since the snapshot carries the short one.
+    private var snapshotMustWait: Bool {
+        !emulator.isAtSequenceBoundary && emulator.snapshotNeedsSequenceBoundary
+    }
+
     /// Reads a bufferful at a time while the output is still mid-sequence and
     /// the budget lasts, until the descriptor would block.
     ///
@@ -589,7 +608,7 @@ actor HolderReader {
     ///   output, so that nothing more will ever arrive on it.
     private func readTowardSequenceBoundary(within elapsed: () -> Duration) -> Bool {
         var buffer = [UInt8](repeating: 0, count: Self.sequenceBoundaryReadSize)
-        while !emulator.isAtSequenceBoundary, elapsed() < sequenceBoundaryBudget {
+        while snapshotMustWait, elapsed() < sequenceBoundaryBudget {
             switch descriptor.read(into: &buffer) {
             case .bytes(let count): emulator.feed(buffer[0..<count])
             case .interrupted: continue
@@ -772,14 +791,21 @@ actor HolderReader {
     /// Feeds a departing viewer's handback preamble into this session's screen
     /// model — `snapshotPreamble` run backwards.
     ///
-    /// **It does not reset the emulator first, and does not need to.** The
-    /// preamble opens with `TerminalSnapshotWriter.resetPrelude`, whose whole
-    /// purpose is to supersede whatever state the receiving terminal was
-    /// already in: it leaves the alt screen, resets the scroll region and every
-    /// mode the capture carries, and erases the display *and the scrollback*
-    /// (`ESC[3J`, which SwiftTerm implements as a trim of every line above the
-    /// viewport). A separate reset would only be a second way to say that, and
-    /// there is no way to say it that the writer does not already own.
+    /// **Nothing from before the preamble may survive it**, and how that holds
+    /// is the emulator's:
+    /// - **SwiftTerm** is not reset first, and does not need to be. The
+    ///   preamble opens with `TerminalSnapshotWriter.resetPrelude`, whose whole
+    ///   purpose is to supersede whatever state the receiving terminal was
+    ///   already in: it leaves the alt screen, resets the scroll region and
+    ///   every mode the capture carries, and erases the display *and the
+    ///   scrollback* (`ESC[3J`, which SwiftTerm implements as a trim of every
+    ///   line above the viewport). A separate reset would only be a second way
+    ///   to say that.
+    /// - **libghostty** is reset first, muted, in the same hold as the parse.
+    ///   Its formatter writes only the modes that differ from their defaults,
+    ///   and `GhosttySnapshotWriter.resetPrelude` resets a fixed list, so a
+    ///   mode outside that list (mode 2048, in-band size reports, among others)
+    ///   would stay as this emulator last saw it and go out in the next attach.
     ///
     /// **Must be called with nothing else feeding this emulator**, which on the
     /// handback path means before `resumeDraining()` or before the first
@@ -806,6 +832,14 @@ actor HolderReader {
     func ingest(preamble: Data) {
         guard state != .stopped, !preamble.isEmpty else { return }
         emulator.feedPreamble([UInt8](preamble)[...])
+    }
+
+    /// Ends whatever sequence the emulator's parser was left inside, for a
+    /// take-back that brings no preamble from a viewer that may have read the
+    /// pty: see `HolderEmulator.abandonOpenSequence`.
+    func abandonOpenSequence() {
+        guard state != .stopped else { return }
+        emulator.abandonOpenSequence()
     }
 
     /// Feeds bytes to the emulator exactly as the drain loop does — as the

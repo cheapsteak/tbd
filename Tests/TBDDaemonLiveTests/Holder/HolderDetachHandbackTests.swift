@@ -31,6 +31,10 @@ import TBDKernel
 /// modes — so an attached session has a reader and is not being read. The
 /// honest instrument is `isDraining`, which reads the drain thread's own flag.
 ///
+/// Each test runs once per emulator the daemon can build, chosen through the
+/// registry's flag closure as the daemon chooses it: the handback is fed to
+/// whichever emulator the daemon runs.
+///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real job.
 @Suite(.serialized)
 struct HolderDetachHandbackTests {
@@ -43,8 +47,9 @@ struct HolderDetachHandbackTests {
 
     // MARK: - The screen out, and back
 
-    @Test func aHandbackClearsTheClaimAndPutsTheDaemonBackOnThePty() async throws {
-        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aHandbackClearsTheClaimAndPutsTheDaemonBackOnThePty(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         // Something only the daemon ever saw...
@@ -76,6 +81,7 @@ struct HolderDetachHandbackTests {
                 "the viewer claim survived the handback, so this session is still bricked")
         let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
         #expect(await resumed.isDraining, "the daemon took the session back without reading it")
+        #expect(resumed.emulatorKind == emulator, "the take-back left a reader running \(resumed.emulatorKind)")
 
         let screen = await resumed.renderScreen()
         #expect(screen.contains("GOT:BEFORE-ATTACH"), """
@@ -101,8 +107,9 @@ struct HolderDetachHandbackTests {
     /// it is read from the reader's own state, so a reader that is not actually
     /// on a pty cannot answer it. `HolderScreenContractTests` says as much in
     /// place of building a fake.
-    @Test func aHandbackMakesTheDaemonTheLiveStoreAgain() async throws {
-        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aHandbackMakesTheDaemonTheLiveStoreAgain(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let viewer = try await fixture.attachAViewer()
@@ -130,8 +137,9 @@ struct HolderDetachHandbackTests {
     /// ack and a lost app are indistinguishable. A detach is the evidence that
     /// settles it — the viewer was there all along — so the handback puts that
     /// same reader back on the pty rather than opening a second hand-over.
-    @Test func aHandbackAfterAnUnacknowledgedAttachResumesTheSuspendedReader() async throws {
-        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aHandbackAfterAnUnacknowledgedAttachResumesTheSuspendedReader(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
@@ -167,8 +175,9 @@ struct HolderDetachHandbackTests {
     /// pty. Applying it would clear the successor's claim and put a drain on a
     /// descriptor another process is reading — the double read this whole path
     /// exists to prevent, reached by a plain sequence with no race in it.
-    @Test func aStaleHandbackLeavesTheCurrentAttachAlone() async throws {
-        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aStaleHandbackLeavesTheCurrentAttachAlone(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let viewer = try await fixture.attachAViewer()
@@ -213,8 +222,9 @@ struct HolderDetachHandbackTests {
     /// and still correct; it is simply unreachable from here now. Its sibling
     /// `HolderAppDeathSeizureTests.aFailedSeizureIsNoLongerReachableThroughAMissingSocket`
     /// records the same for the seizure.
-    @Test func aHandbackSucceedsWithoutTheHoldersSocket() async throws {
-        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aHandbackSucceedsWithoutTheHoldersSocket(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let viewer = try await fixture.attachAViewer()
@@ -251,6 +261,37 @@ struct HolderDetachHandbackTests {
         })
     }
 
+    /// An empty preamble is the detach of an app whose viewer never read the
+    /// pty: it never received the descriptor, or tore its view down before its
+    /// reader started. The child's next bytes then finish the sequence the
+    /// attach left the daemon's parser inside, so the take-back keeps it
+    /// (`viewerMayHaveRead` false): the cut 24-bit colour completes, and `X`
+    /// prints in it rather than after the colour's tail printed as text.
+    @Test func anEmptyHandbackKeepsTheSequenceForTheChildToFinish() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: .ghostty)
+        defer { fixture.tearDown() }
+        // The last thing the daemon read before the attach: a colour cut short.
+        await fixture.reader.feedChildOutputForTesting(Data("\u{1b}[38;2;21".utf8))
+
+        let viewer = try await fixture.attachAViewer()
+        viewer.close()
+        try await fixture.registry.acceptHandback(
+            terminal: fixture.terminalRow, generation: viewer.generation, preamble: Data())
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining, "the daemon took the session back without reading it")
+        await resumed.feedChildOutputForTesting(Data("5;119;87mX".utf8))
+        let screen = await resumed.renderScreen()
+        #expect(screen.contains("X") && !screen.contains("5;119;87m"), """
+            the take-back abandoned the colour the child was still writing, so its tail printed: \
+            \(screen.debugDescription)
+            """)
+        let capture = try #require(await resumed.closedTerminalCapture())
+        #expect(capture.contains("38;2;215;119;87mX"), """
+            `X` is not in the colour the child finished: \(capture.debugDescription)
+            """)
+    }
+
     /// The negative that scopes this task: **an app that dies mid-detach needs
     /// no special handling here.** Its descriptors close with the process,
     /// which is the same evidence a completed detach carries — but the evidence
@@ -258,8 +299,9 @@ struct HolderDetachHandbackTests {
     /// invisible to this one. So the claim stands until an app-liveness verdict
     /// releases it, which is Task 13's arbitration and deliberately not this
     /// path's job. Asserted rather than built for.
-    @Test func aViewerThatVanishesWithoutDetachingIsLeftToAppLiveness() async throws {
-        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+    @Test(arguments: HolderEmulatorKind.allCases)
+    func aViewerThatVanishesWithoutDetachingIsLeftToAppLiveness(emulator: HolderEmulatorKind) async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: emulator)
         defer { fixture.tearDown() }
 
         let viewer = try await fixture.attachAViewer()
@@ -299,7 +341,10 @@ struct HandbackFixture {
             transport: .holder)
     }
 
-    static func start(command: String) async throws -> HandbackFixture {
+    /// `emulator` is what the registry's flag closure answers, so the adoption
+    /// builds that kind; `HolderAppDeathSeizureTests` takes the default except
+    /// where a test is about the libghostty emulator.
+    static func start(command: String, emulator: HolderEmulatorKind = .swiftTerm) async throws -> HandbackFixture {
         let process = try await HolderProcessFixture.start(
             launch: HolderProcessFixture.launch(command: command))
         // The spawner's handshake connection has to go before anything else can
@@ -308,13 +353,18 @@ struct HandbackFixture {
         let registry = HolderRegistry(
             owner: process.owner,
             environment: HolderProcessFixture.environment(home: process.home),
-            listTerminals: { [] })
+            listTerminals: { [] },
+            emulatorKind: { emulator })
         let row = TBDShared.Terminal(
             id: process.sessionID, worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             transport: .holder)
-        return HandbackFixture(
+        let fixture = HandbackFixture(
             process: process, registry: registry,
             reader: try await registry.adopt(terminal: row))
+        // The adoption read the flag closure: the reader runs the emulator it
+        // named.
+        #expect(fixture.reader.emulatorKind == emulator, "the adopted reader runs \(fixture.reader.emulatorKind)")
+        return fixture
     }
 
     /// The app every viewer this fixture plays is vended to. Scripted rather

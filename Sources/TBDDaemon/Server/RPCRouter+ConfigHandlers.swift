@@ -173,6 +173,21 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the daemon's libghostty emulator flag (design 2026-11-13).
+    ///
+    /// Either value is an explicit gesture that takes the backing column out of
+    /// its NULL "never chose" state for good. Nothing running changes: the
+    /// holder registry reads the flag when it builds a reader, so a session
+    /// spawned or re-adopted after this call takes the new value, and the rest
+    /// take it at the next daemon start.
+    func handleConfigSetGhosttyDaemonEmulator(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetGhosttyDaemonEmulatorParams.self, from: paramsData)
+        try await db.config.setGhosttyDaemonEmulator(params.enabled)
+        // Broadcast so the app reloads daemon capabilities.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the Claude cloud sessions gate (design 2026-08-15 §7).
     ///
     /// The daemon builds its provider manager, and registers the built-in

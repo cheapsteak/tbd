@@ -5,7 +5,7 @@ import Synchronization
 /// chooses.
 ///
 /// The host calls `configure(subsystem:)` once at startup, before it makes a terminal. The app
-/// keeps the default, `com.tbd.app`; the daemon will pass `com.tbd.daemon`, so the engine's lines
+/// keeps the default, `com.tbd.app`; the daemon passes `com.tbd.daemon`, so the engine's lines
 /// in each process sit under that process's own subsystem and one predicate shows them with the
 /// rest of its log. Until a host calls it, the engine logs under the default.
 package enum GhosttyCoreLog {

@@ -126,14 +126,14 @@ implementations: `SwiftTermHolderEmulator` (today's code, moved behind the seam)
   size, the parser-boundary query, cursor visibility, the mode capture, the screen
   projection for `tbd terminal output`, the styled capture, the viewport lines, the attach
   snapshot, the handback feed, the replies to the child and the OSC 7501 reports.
-- **One lock** – the reader's bookkeeping lives once, in a ledger that both emulators
-  share: when the emulator began, when it last took in bytes, and whether it watched its
-  child from birth. Each emulator stamps the ledger and parses a chunk in one hold of its
-  terminal's own lock, and reads the screen and the ledger in one hold too. The SwiftTerm
-  emulator holds `terminalLock`. `GhosttyTerminal.feed` takes its lock itself, so the core
-  adds a feed that runs the stamp inside the same hold as the parse.
-  `GhosttySnapshotWriter` also takes the lock itself, so the emulator calls it outside any
-  hold.
+- **One lock** – the emulator's bookkeeping lives in one type, `HolderEmulatorLedger`,
+  that both emulators use: when the emulator began, when it last took in bytes, and
+  whether it watched its child from birth. Each emulator keeps its own ledger, and stamps
+  it and parses a chunk in one hold of its terminal's own lock. It reads the screen and the
+  ledger in one hold too. The SwiftTerm emulator holds `terminalLock`. `GhosttyTerminal`
+  takes its lock itself, so the core adds `feed(_:muted:resetFirst:underLock:)`, which runs the stamp
+  inside the same hold as the parse. `GhosttySnapshotWriter` also takes the lock itself, so
+  the emulator calls it outside any hold.
 - **Choice at creation** – the reader reads the flag when it is created: for a new session,
   or for every session at re-adoption when the daemon starts. A running session never
   changes emulator.
@@ -167,18 +167,55 @@ TBD does not use. The daemon takes the app engine's approach:
 
 libghostty sends device-status, cursor-position and mode replies through `writePty`, after
 its lock drops and before `feed` returns. The daemon forwards them to the child, as the
-SwiftTerm delegate's `send` does. `isMuted` drops them while a handback preamble is fed.
+SwiftTerm delegate's `send` does. The emulator feeds a handback preamble with
+`feed(_:muted:resetFirst:underLock:)` and `muted` set, which drops them for that one parse.
+
+A resize sends the child nothing. libghostty sends an in-band size report from inside a
+resize when the program has turned on mode 2048, and SwiftTerm has no mode 2048. The
+emulator resizes with `resize(cols:rows:muted:)` on every resize, because while a viewer
+holds the pty the daemon must not write into the child's input.
 
 The mode capture reads modes with `mode(_:ansi:)`, so the libghostty emulator feeds no
 DECRQM queries into the live terminal. The SwiftTerm emulator's queries could cut a
 program's unfinished sequence, which is why the parser-boundary wait exists. That wait
-stays for the SwiftTerm emulator until D.
+stays for the SwiftTerm emulator until D. The libghostty emulator's snapshot carries an
+open sequence of up to 64 KiB instead, so its attach waits only for a longer one, which
+the snapshot could otherwise end only by dropping the rest.
 
 ### Attach snapshot and handback
 
 - **VT text in both directions** – the daemon writes the attach snapshot with
   `GhosttySnapshotWriter`, and it feeds the viewer's handback VT text into its libghostty
   terminal with replies and OSC 7501 muted.
+- **Reset before a handback** – libghostty's formatter writes only modes that differ from
+  their defaults, and the writer's reset prelude names a fixed list. So the daemon resets
+  its libghostty terminal, muted, in the same hold as the handback's parse. Without the
+  reset, a mode outside the list, such as 2048, stays on after the program turned it off
+  in the viewer, and the next attach hands it on.
+- **End the open sequence on a take-back** – the libghostty attach does not wait for the
+  child's output to reach a boundary, so the daemon's parser can still be inside a
+  sequence the viewer has since finished, and `ghostty_terminal_reset` resets the screen
+  model, not the stream parser. A CAN ends any open sequence and returns the parser to
+  ground, so a handback's parse starts with a muted CAN before the reset. A take-back
+  with no preamble feeds a muted CAN and an OSC 8 close instead. libghostty drops a cut
+  OSC 7501 probe on the CAN rather than answering it. Whether it dispatches any other cut
+  OSC is not relied on: the CAN is muted, and the OSC 8 close ends a link a dispatched
+  `ESC]8;;URL` would leave on the pen. The take-back abandons the sequence only when its
+  caller says a viewer may have read the pty (`viewerMayHaveRead`):
+  - **Abandoned** – an app that died holding the pty (`seizeFromDeadApp`), a claim
+    sweep (`reconcileClaims`), and a late delivery (`takeBackLateDelivery`) whose attach
+    was already a claim, from an ack or a ready-timeout.
+  - **Kept, for the child's next bytes to finish** – a detach with an empty preamble,
+    which the app sends when it never received the descriptor or tore its view down
+    before its reader started; a late delivery whose attach was still pending; and a
+    cancelled attach.
+  - **The lesser harm** – an empty preamble from a viewer that read keeps the sequence,
+    and a death pass or a sweep after an attach nobody read abandons it. The first comes
+    from an app whose ack is refused or lost after its reader started, and from the
+    app's libghostty engine when its snapshot writer throws; the second from an
+    unacknowledged attach whose reply was lost, or a lost empty-preamble release.
+    Telling them apart needs the app to report whether it read, a protocol change
+    outside this flag.
 - **No binary snapshot** – libghostty's own snapshot format is outside its 1.0 ABI promise,
   and an update hands over between a daemon and an app built from different commits.
 - **Receivers** – until D, a person who turned the app engine off still views with
