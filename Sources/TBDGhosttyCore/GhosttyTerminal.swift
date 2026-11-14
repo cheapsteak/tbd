@@ -812,10 +812,12 @@ public final class GhosttyTerminal: @unchecked Sendable {
     /// leaves libghostty's stream parser where it was: inside a sequence the terminal was left in,
     /// the replay's first ESC would otherwise end that sequence, dispatching an open OSC, DCS or
     /// APC, and a partial OSC 8 would put a link on every cell the replay writes. CAN ends the
-    /// sequence instead, and the reset after it wipes whatever that dispatched. The reset keeps
-    /// the palette and the dynamic colours, which a handback does not carry anyway. The
-    /// program-status clear libghostty reports for the reset reaches nobody, and like `reset()`
-    /// it reports no end for a DEC 2026 hold it ends.
+    /// sequence instead and returns the parser to ground. Whether libghostty dispatches a cut OSC
+    /// on the CAN is not relied on: it is muted, and the reset after it puts the screen model
+    /// back to its initial state either way. The reset keeps the palette and the dynamic
+    /// colours, which a handback does not carry anyway. The program-status clear libghostty
+    /// reports for the reset reaches nobody, and like `reset()` it reports no end for a DEC 2026
+    /// hold it ends.
     ///
     /// `underLock` must not call back into this terminal: the lock is not recursive. It runs even
     /// for an empty `bytes`, and not at all once the terminal is closed. The bytes count toward

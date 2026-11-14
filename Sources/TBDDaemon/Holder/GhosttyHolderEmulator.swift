@@ -173,20 +173,24 @@ final class GhosttyHolderEmulator: HolderEmulator {
 
     /// `feed`, for a handback preamble: a CAN, a full reset and then the
     /// parse, all muted, in the same hold as the stamp. The CAN ends any
-    /// sequence the parser was left inside, which the reset does not, and the
-    /// reset wipes whatever the CAN dispatched. Nothing the preamble provokes
-    /// reaches the child or the tap, and no mode the preamble leaves unnamed
-    /// survives from before it.
+    /// sequence the parser was left inside and returns it to ground, which the
+    /// reset does not. Whether libghostty dispatches a cut OSC on the CAN is
+    /// not relied on: the reset after it puts the screen model back to its
+    /// initial state either way. Nothing the preamble provokes reaches the
+    /// child or the tap, and no mode the preamble leaves unnamed survives from
+    /// before it.
     func feedPreamble(_ bytes: ArraySlice<UInt8>) {
         terminal.feed(bytes, muted: true, resetFirst: true, underLock: { ledger.stampArrival() })
     }
 
-    /// A CAN, which returns the parser to ground, then an OSC 8 close, because
-    /// CAN dispatches a partial OSC like any other way out of one, so a cut
-    /// `ESC]8;;URL` would otherwise leave that link on the pen for every cell
-    /// the child writes next. Muted, so nothing either dispatches reaches the
-    /// child or the tap, and not stamped: no byte came from the child. A cut
-    /// UTF-8 character first prints as U+FFFD.
+    /// A CAN, which ends any open sequence and returns the parser to ground,
+    /// then an OSC 8 close. libghostty drops a cut OSC 7501 probe on the CAN
+    /// rather than answering it. Whether it dispatches any other cut OSC is
+    /// not relied on: the CAN is muted, and the close ends the link a
+    /// dispatched `ESC]8;;URL` would leave on the pen for every cell the child
+    /// writes next. Muted, so nothing either could provoke reaches the child or
+    /// the tap, and not stamped: no byte came from the child. A cut UTF-8
+    /// character first prints as U+FFFD.
     func abandonOpenSequence() {
         terminal.feed(Self.abandonSequence[...], muted: true, underLock: {})
     }

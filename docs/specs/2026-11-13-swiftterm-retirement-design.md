@@ -195,11 +195,13 @@ the snapshot could otherwise end only by dropping the rest.
 - **End the open sequence on a take-back** – the libghostty attach does not wait for the
   child's output to reach a boundary, so the daemon's parser can still be inside a
   sequence the viewer has since finished, and `ghostty_terminal_reset` resets the screen
-  model, not the stream parser. A handback's parse therefore starts with a muted CAN
-  before the reset, which wipes whatever the CAN dispatched. A take-back with no preamble
-  feeds a muted CAN and an OSC 8 close instead, since a cut `ESC]8;;URL` that CAN
-  dispatches would leave its link on the pen, but only when its caller says a viewer may
-  have read the pty (`viewerMayHaveRead`):
+  model, not the stream parser. A CAN ends any open sequence and returns the parser to
+  ground, so a handback's parse starts with a muted CAN before the reset. A take-back
+  with no preamble feeds a muted CAN and an OSC 8 close instead. libghostty drops a cut
+  OSC 7501 probe on the CAN rather than answering it. Whether it dispatches any other cut
+  OSC is not relied on: the CAN is muted, and the OSC 8 close ends a link a dispatched
+  `ESC]8;;URL` would leave on the pen. The take-back abandons the sequence only when its
+  caller says a viewer may have read the pty (`viewerMayHaveRead`):
   - **Abandoned** – an app that died holding the pty (`seizeFromDeadApp`), a claim
     sweep (`reconcileClaims`), and a late delivery (`takeBackLateDelivery`) whose attach
     was already a claim, from an ack or a ready-timeout.

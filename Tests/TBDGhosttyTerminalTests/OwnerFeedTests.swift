@@ -104,7 +104,9 @@ struct OwnerFeedTests {
 
     /// The reset clears the screen model, not the stream parser, so a terminal left inside an
     /// OSC 8 would dispatch it on the replay's first ESC and link every cell the replay writes.
-    /// The CAN before the reset ends the sequence there, and the reset wipes what it dispatched.
+    /// The CAN before the reset ends the sequence there and returns the parser to ground, and the
+    /// reset puts the screen model back to its initial state whether or not the CAN dispatched
+    /// the link.
     @Test func aResetFirstFeedAfterAnOpenOSC8LeavesNoLink() throws {
         let terminal = try Self.makeTerminal()
         terminal.feed(text: "\u{1b}]8;;https://exa")

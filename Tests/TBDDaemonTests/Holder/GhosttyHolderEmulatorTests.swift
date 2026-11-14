@@ -186,10 +186,9 @@ import TBDShared
         #expect(try await harness.firstLine() == "X")
     }
 
-    /// The abandon is muted. Its CAN dispatches a cut query like any other
-    /// way out of one, so a cut program-status probe (`ESC]7501;?`), which
-    /// this emulator answers, would put an answer into the child's input
-    /// that nobody asked for now.
+    /// Abandoning a cut program-status probe (`ESC]7501;?`), a query this
+    /// emulator answers once it is finished, writes nothing into the child's
+    /// input.
     @Test func abandoningACutQuerySendsTheChildNothing() async throws {
         let harness = try Harness(answersProbes: true)
         defer { harness.tearDown() }
@@ -202,21 +201,39 @@ import TBDShared
         #expect(sent.isEmpty, "abandoning a cut query wrote \(Self.describe(sent)) into the child's input")
     }
 
-    /// The control: the same cut probe, ended by a CAN the child sends, is
-    /// answered, so the test above shows the mute at work and not a query the
-    /// CAN never dispatched.
-    @Test func aProbeEndedByACANIsAnswered() async throws {
+    /// A CAN ends a cut program-status probe and returns the parser to
+    /// ground: libghostty drops the probe rather than answering it, and the
+    /// next byte prints. Unmuted, so an answer would reach the child. The
+    /// abandon and the handback's reset both rest on the grounding: were a
+    /// CAN ignored inside an OSC string, what followed it would be swallowed
+    /// into the OSC.
+    @Test func aCANDropsACutProbeAndReturnsToGround() async throws {
         let harness = try Harness(answersProbes: true)
         defer { harness.tearDown() }
 
-        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]7501;?\u{18}".utf8))
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]7501;?\u{18}X".utf8))
 
-        #expect(!harness.readReplies().isEmpty, "a probe ended by a CAN drew no answer")
+        let sent = harness.readReplies()
+        #expect(sent.isEmpty, "a probe ended by a CAN drew \(Self.describe(sent))")
+        #expect(try await harness.firstLine() == "X", "the byte after the CAN did not print")
     }
 
-    /// CAN alone dispatches a cut `ESC]8;;URL`, which would leave that link on
-    /// the pen for everything the child writes next and hand it on at the next
-    /// attach. The abandon closes the link after the CAN.
+    /// A CAN ends a cut `ESC]8;;URL` and returns the parser to ground, so the
+    /// next byte prints. Whether that byte carries the link is not pinned: the
+    /// abandon's OSC 8 close ends a link either way.
+    @Test func aCANEndsACutLinkAndReturnsToGround() async throws {
+        let harness = try Harness()
+        defer { harness.tearDown() }
+
+        await harness.reader.feedChildOutputForTesting(Data("\(Self.esc)]8;;https://exa\u{18}X".utf8))
+
+        #expect(try await harness.firstLine() == "X", "the byte after the CAN did not print")
+    }
+
+    /// A cut `ESC]8;;URL` the abandon ends must leave no link on the pen for
+    /// the text the child writes next, or the next attach would hand it on.
+    /// Whether the CAN dispatches the cut link is not relied on: the OSC 8
+    /// close after it ends a link either way.
     @Test func abandoningACutLinkLeavesNoLink() async throws {
         let harness = try Harness()
         defer { harness.tearDown() }
