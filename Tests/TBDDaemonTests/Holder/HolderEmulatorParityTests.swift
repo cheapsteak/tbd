@@ -65,6 +65,10 @@ struct HolderEmulatorParityTests {
         reason: "SwiftTerm has no overline, so the overlined cells reach its viewer without it; libghostty's snapshot keeps it. The daemon's two styled captures agree, because libghostty's leaves overline out",
         fields: ["viewer.styled"])
 
+    static let focusReportedOnEnable = Miss(
+        reason: "SwiftTerm reports focus-in (`CSI I`) as soon as a program turns on focus reporting (1004), as xterm does; libghostty reports nothing until the focus changes, and the daemon's terminal never has a focus change",
+        fields: ["replies.focus"])
+
     static let wideCharacterWrapped = Miss(
         reason: "a wide character that does not fit in the last column wraps to the next row: SwiftTerm leaves an empty cell behind, which its snapshot writes as a space, where libghostty keeps a spacer its formatter does not print, so the soft-wrapped line joins differently",
         fields: ["viewer.styled"])
@@ -93,12 +97,19 @@ struct HolderEmulatorParityTests {
         "full-reset": [Miss(
             reason: "a full reset (RIS) drops every program-status record, and libghostty reports that as `state=clear`; SwiftTerm reports nothing",
             fields: ["reports"])],
-        "claude-stub": [Miss(
-            reason: "SwiftTerm answers the kitty graphics query and reports a cell size for `CSI 16 t`; the daemon's libghostty has kitty graphics off and a cell size of zero",
-            fields: ["replies.kittyGraphics", "replies.windowOps"])],
-        "vim": [Miss(
-            reason: "SwiftTerm answers the OSC 10 and OSC 11 colour queries with its default colours; the daemon's libghostty has no colours set to answer with",
-            fields: ["replies.OSC10", "replies.OSC11"])],
+        "focus-reporting": [focusReportedOnEnable],
+        "claude-stub": [
+            Miss(
+                reason: "SwiftTerm answers the kitty graphics query and reports a cell size for `CSI 16 t`; the daemon's libghostty has kitty graphics off and a cell size of zero",
+                fields: ["replies.kittyGraphics", "replies.windowOps"]),
+            focusReportedOnEnable,
+        ],
+        "vim": [
+            Miss(
+                reason: "SwiftTerm answers the OSC 10 and OSC 11 colour queries with its default colours; the daemon's libghostty has no colours set to answer with",
+                fields: ["replies.OSC10", "replies.OSC11"]),
+            focusReportedOnEnable,
+        ],
 
         // Comparison 3: what SwiftTerm's snapshot does not carry.
         "pending-wrap": [pendingWrapLost],
@@ -129,6 +140,9 @@ struct HolderEmulatorParityTests {
         "lr-margins": [Miss(
             reason: "SwiftTerm's snapshot turns DECLRMM on but writes no left and right margins (DECSLRM)",
             fields: ["viewer.region"])],
+        "cursor-style": [Miss(
+            reason: "DECSCUSR 5 asks for a blinking bar. libghostty keeps the blink as mode 12, which its snapshot writes; SwiftTerm's snapshot writes neither the cursor's shape nor mode 12, so its viewer's cursor does not blink. libghostty's viewer is the right one, and neither snapshot carries the bar",
+            fields: ["viewer.mode.cursorBlink"])],
         "tabstops-custom": [Miss(
             reason: "SwiftTerm's snapshot does not write tab stops, so its viewer has one every eight columns",
             fields: ["viewer.tabstops"])],
@@ -144,6 +158,11 @@ struct HolderEmulatorParityTests {
         "colour-log": [wideCharacterWrapped],
         "wide-at-edge": [wideCharacterWrapped],
         "wide-in-scrollback": [wideCharacterWrapped],
+
+        // Comparison 3: the one workload cut past the scrollback the snapshot carries.
+        "unicode@1000003": [Miss(
+            reason: "libghostty prunes its scrollback a whole page at a time until it holds no more than the 5,000 lines the daemon asks for, so once a stream outgrows them it keeps up to a page fewer, 168 rows here; SwiftTerm keeps exactly 5,000. The daemon's own reads take 1,000 lines and agree, but the snapshot, which carries up to 5,000, gives libghostty's viewer fewer",
+            fields: ["viewer.text", "viewer.styled"])],
 
         // Comparison 3: the workload cuts that stop with a colour or an attribute set.
         "colors@166666": [penNotRestored], "colors@333339": [penNotRestored], "colors@500006": [penNotRestored],
@@ -297,8 +316,8 @@ struct HolderEmulatorParityTests {
 
     /// The outcome check itself, on a fake entry: a stream that differs in every field its misses
     /// name passes, one that has stopped differing in one fails and names it, one that differs in
-    /// a field no miss names fails and prints the difference, and a plan's own entry adds to the
-    /// stream's.
+    /// a field no miss names fails and prints the difference, one that does both fails once with
+    /// both, and a plan's own entry adds to the stream's.
     @Test func theOutcomeHoldsTheListExact() {
         let misses = [
             "fake": [Miss(reason: "a fake miss", fields: ["render", "capture"])],
@@ -321,6 +340,13 @@ struct HolderEmulatorParityTests {
         let chunked = Self.outcomeFailures("fake, chunked", keys: ["fake", "fake/64"], differences: extra, misses: misses)
         #expect(chunked.isEmpty, "\(chunked)")
 
+        // An unlisted difference and a stale miss together are one message holding both.
+        let bothWays = Self.outcomeFailures(
+            "fake", keys: ["fake"], differences: ["render": "fake", "replies.other": "fake"], misses: misses)
+        #expect(bothWays.count == 1, "\(bothWays)")
+        #expect(bothWays.first?.contains("beyond its listed misses") == true, "\(bothWays)")
+        #expect(bothWays.first?.contains("now match in [\"capture\"]") == true, "\(bothWays)")
+
         // The whole feed's own key adds to the bare name's, and only for that plan.
         let wholeKeys = ["fake", EmulatorParity.FeedPlan(chunkSize: nil).missKey(for: "fake")]
         let whole = both.merging(["reports": "fake difference"]) { $1 }
@@ -336,13 +362,27 @@ struct HolderEmulatorParityTests {
         let bytes = Array(
             ("\u{1b}[?65;1c\u{1b}[>65;20;1c\u{1b}P>|name\u{1b}\\\u{1b}[0n\u{1b}[5;10R\u{1b}[?2026;2$y"
                 + "\u{1b}]7501;?\u{07}\u{1b}]10;rgb:0/0/0\u{1b}\\\u{1b}]11;rgb:f/f/f\u{07}\u{1b}[6;16;10t"
-                + "\u{1b}_Gi=31;OK\u{1b}\\\u{1b}[?0u").utf8)
+                + "\u{1b}_Gi=31;OK\u{1b}\\\u{1b}[I\u{1b}[?0u").utf8)
         let replies = EmulatorParity.splitReplies(bytes)
         #expect(replies.map { EmulatorParity.replyKind($0) } == [
             "DA1", "DA2", "XTVERSION", "DSR", "CPR", "DECRQM", "7501probe", "OSC10", "OSC11", "windowOps",
-            "kittyGraphics", "other",
+            "kittyGraphics", "focus", "other",
         ])
         #expect(EmulatorParity.escaped([0x61, 0xff, 0xe2, 0x9c, 0x93, 0xe2, 0x9c]) == "a\\xFF✓\\xE2\\x9C")
+    }
+
+    /// What the viewer readings treat as the same: an ASCII designation and none, and blank
+    /// cells written as spaces and stepped over with CUF under the default pen; and what they
+    /// keep apart: any other designation, and a CUF under a colour.
+    @Test func theViewerReadingsJoinOnlyWhatPrintsAlike() {
+        func bytes(_ text: String) -> [UInt8] { Array(text.utf8) }
+        #expect(EmulatorParity.withoutASCIIDesignations(bytes("\u{1b}(B\u{1b})0\u{1b}+B\u{0e}")) == bytes("\u{1b})0\u{0e}"))
+        #expect(EmulatorParity.spacingOutCursorForward(bytes("\u{1b}[2Cin alt")) == bytes("  in alt"))
+        #expect(EmulatorParity.spacingOutCursorForward(bytes("ZXc\u{1b}[5CY\u{1b}[C")) == bytes("ZXc     Y "))
+        #expect(
+            EmulatorParity.spacingOutCursorForward(bytes("\u{1b}[38;5;2mxyz\u{1b}[0m\u{1b}[4Cq"))
+                == bytes("\u{1b}[38;5;2mxyz\u{1b}[0m    q"))
+        #expect(EmulatorParity.spacingOutCursorForward(bytes("\u{1b}[31mx\u{1b}[3Cy")) == bytes("\u{1b}[31mx\u{1b}[3Cy"))
     }
 
     // MARK: - The outcome
@@ -355,10 +395,11 @@ struct HolderEmulatorParityTests {
         }
     }
 
-    /// Why a stream's differences fail, one message each: fields no miss under `keys` names, and
-    /// fields one names that no longer differ, which leaves the list stale. Empty when the
-    /// differences are what the list says. `keys` is the stream's own and, for a recording, its
-    /// feed plan's, whose fields add to the stream's.
+    /// Why a stream's differences fail, as one message, so a run shows all of it at once: the
+    /// fields no miss under `keys` names, with their differences, and then the fields one names
+    /// that no longer differ, which leaves the list stale. Empty when the differences are what
+    /// the list says. `keys` is the stream's own and, for a recording, its feed plan's, whose
+    /// fields add to the stream's.
     static func outcomeFailures(
         _ label: String, keys: [String], differences: [String: String], misses: [String: [Miss]]
     ) -> [String] {
@@ -367,19 +408,19 @@ struct HolderEmulatorParityTests {
         func summary(_ fields: [String]) -> String {
             fields.sorted().map { "\($0): \(differences[$0] ?? "")" }.joined(separator: " | ")
         }
-        var failures: [String] = []
+        var parts: [String] = []
         let unexplained = differences.keys.filter { !listed.contains($0) }
         if !unexplained.isEmpty {
             let expected = differences.keys.filter { listed.contains($0) }.sorted()
             let also = expected.isEmpty ? "" : " (it also differs, as listed, in \(expected))"
-            failures.append("\(label): the libghostty emulator differs from SwiftTerm's beyond its listed misses\(also): \(summary(unexplained))")
+            parts.append("the libghostty emulator differs from SwiftTerm's beyond its listed misses\(also): \(summary(unexplained))")
         }
         let matching = listed.subtracting(differences.keys)
         if !matching.isEmpty {
             let reasons = entries.filter { !$0.fields.isDisjoint(with: matching) }.map(\.reason)
-            failures.append(
-                "\(label) is listed as differing but the emulators now match in \(matching.sorted()): remove them from its entry (\(reasons.joined(separator: "; ")))")
+            parts.append(
+                "it is listed as differing but the emulators now match in \(matching.sorted()): remove them from its entry (\(reasons.joined(separator: "; ")))")
         }
-        return failures
+        return parts.isEmpty ? [] : ["\(label): " + parts.joined(separator: "; and ")]
     }
 }

@@ -300,7 +300,7 @@ enum EmulatorParity {
     /// The kinds of reply `replyKind` tells apart, each compared as a field of its own.
     static let replyKinds = [
         "DA1", "DA2", "XTVERSION", "DSR", "CPR", "DECRQM", "7501probe", "OSC10", "OSC11", "windowOps",
-        "kittyGraphics", "other",
+        "kittyGraphics", "focus", "other",
     ]
 
     /// An emulator's reply bytes as one sequence per reply, however its writes cut them: each CSI,
@@ -346,8 +346,8 @@ enum EmulatorParity {
 
     /// What a reply answers, by its form: DA1 `CSI ? … c`, DA2 `CSI > … c`, XTVERSION
     /// `DCS > | … ST`, DSR `CSI … n`, CPR `CSI … R`, DECRQM `CSI … $ y`, the OSC 7501 probe, the
-    /// OSC 10 and 11 colours, window ops `CSI … t`, a kitty graphics `APC G … ST`, and anything
-    /// else.
+    /// OSC 10 and 11 colours, window ops `CSI … t`, a kitty graphics `APC G … ST`, a focus report
+    /// `CSI I` or `CSI O`, and anything else.
     static func replyKind(_ reply: [UInt8]) -> String {
         guard reply.count >= 3, reply[0] == 0x1b else { return "other" }
         let body = reply.dropFirst(2)
@@ -362,6 +362,7 @@ enum EmulatorParity {
             case UInt8(ascii: "R"): return "CPR"
             case UInt8(ascii: "y") where parameters.last == UInt8(ascii: "$"): return "DECRQM"
             case UInt8(ascii: "t"): return "windowOps"
+            case UInt8(ascii: "I"), UInt8(ascii: "O"): return parameters.isEmpty ? "focus" : "other"
             default: return "other"
             }
         case UInt8(ascii: "]"):
@@ -513,7 +514,7 @@ enum EmulatorParity {
         }
         fields[prefix + "text"] = .text(text)
         let styled = try state.formattedVT(extras: 0, unwrap: true, trim: true)
-        fields[prefix + "styled"] = .text(String(decoding: styled, as: UTF8.self))
+        fields[prefix + "styled"] = .text(String(decoding: spacingOutCursorForward(styled), as: UTF8.self))
         let cursor = state.cursor
         fields[prefix + "cursor"] = .value("column \(cursor.col), row \(cursor.row)")
         fields[prefix + "pendingWrap"] = .value("\(state.cursorPendingWrap)")
@@ -541,7 +542,8 @@ enum EmulatorParity {
         var fields: [String: Observed] = [:]
         for extra in viewerExtras {
             let output = try state.formattedVT(extras: extra.bits, unwrap: false, trim: true)
-            fields[prefix + extra.name] = .value(escaped(added(output, to: base)))
+            let restores = added(output, to: base)
+            fields[prefix + extra.name] = .value(escaped(extra.name == "charsets" ? withoutASCIIDesignations(restores) : restores))
         }
         return fields
     }
@@ -552,16 +554,84 @@ enum EmulatorParity {
     /// screen's saved cursor; a reading on an alternate screen has its `viewer.leave.` twin for that.
     private static func savedCursorState(_ state: TBDGhosttyCore.GhosttyTerminalState) throws -> String {
         let base = try state.formattedVT(extras: 0, unwrap: false, trim: true)
-        func extra(_ bits: UInt32) throws -> String {
+        func extra(_ bits: UInt32) throws -> [UInt8] {
             let output = try state.formattedVT(extras: bits, unwrap: false, trim: true)
-            return escaped(added(output, to: base))
+            return added(output, to: base)
         }
-        let pen = try extra(GhosttyVTFormat.style)
-        let charsets = try extra(GhosttyVTFormat.charsets)
-        let protection = try extra(GhosttyVTFormat.protection)
+        let pen = try escaped(extra(GhosttyVTFormat.style))
+        let charsets = try escaped(withoutASCIIDesignations(extra(GhosttyVTFormat.charsets)))
+        let protection = try escaped(extra(GhosttyVTFormat.protection))
         let cursor = state.cursor
         return "column \(cursor.col), row \(cursor.row), pendingWrap \(state.cursorPendingWrap), "
             + "origin \(state.mode(6)), pen \(pen), charsets \(charsets), protection \(protection)"
+    }
+
+    /// `charsets` with every designation of ASCII removed: `ESC ( B`, `ESC ) B`, `ESC * B` and
+    /// `ESC + B`. libghostty's default for G0 to G3 is its UTF-8 set, and its formatter writes
+    /// every slot that holds anything else, ASCII included. libghostty's snapshot opens with
+    /// `ESC ( B` (`GhosttySnapshotWriter.resetPrelude`, "G0 is ASCII and in use"), so a viewer of
+    /// it holds ASCII in G0 where a viewer of SwiftTerm's, whose prelude designates nothing, holds
+    /// UTF-8. The two print alike: libghostty prints a character as it is under either set (its
+    /// `printCell` maps only British and DEC special graphics), so an ASCII designation reads as
+    /// no designation, on both sides.
+    static func withoutASCIIDesignations(_ charsets: [UInt8]) -> [UInt8] {
+        var out: [UInt8] = []
+        var index = 0
+        while index < charsets.count {
+            if index + 2 < charsets.count, charsets[index] == 0x1b,
+                [UInt8(ascii: "("), UInt8(ascii: ")"), UInt8(ascii: "*"), UInt8(ascii: "+")].contains(charsets[index + 1]),
+                charsets[index + 2] == UInt8(ascii: "B")
+            {
+                index += 3
+                continue
+            }
+            out.append(charsets[index])
+            index += 1
+        }
+        return out
+    }
+
+    /// `styled` with each cursor-forward `ESC [ n C` written while the output's pen is the
+    /// default replaced by n spaces. libghostty's VT formatter steps over a run of cells that hold
+    /// no character and no style with CUF, and writes a space a program printed as a space, so a
+    /// viewer of libghostty's snapshot, which leaves such cells unwritten, prints `ESC[2C` where a
+    /// viewer of SwiftTerm's, which writes spaces there, prints two spaces. Both read as the same
+    /// blank cells in the default style, and `viewer.text` compares the characters anyway. Only a
+    /// CUF under the default pen is expanded, so one written while a colour or attribute is in
+    /// effect still differs from spaces painted with it.
+    static func spacingOutCursorForward(_ styled: [UInt8]) -> [UInt8] {
+        var out: [UInt8] = []
+        out.reserveCapacity(styled.count)
+        var penIsDefault = true
+        var index = 0
+        while index < styled.count {
+            guard styled[index] == 0x1b, index + 1 < styled.count, styled[index + 1] == UInt8(ascii: "[") else {
+                out.append(styled[index])
+                index += 1
+                continue
+            }
+            var end = index + 2
+            while end < styled.count, !(0x40...0x7e).contains(styled[end]) { end += 1 }
+            guard end < styled.count else {
+                out.append(contentsOf: styled[index...])
+                break
+            }
+            let parameters = styled[(index + 2)..<end]
+            let digitsOnly = parameters.allSatisfy { (0x30...0x39).contains($0) }
+            switch styled[end] {
+            case UInt8(ascii: "m"):
+                // `ESC[m` and `ESC[0m` reset the pen; any other SGR sets something.
+                penIsDefault = parameters.allSatisfy { $0 == UInt8(ascii: "0") }
+                out.append(contentsOf: styled[index...end])
+            case UInt8(ascii: "C") where penIsDefault && digitsOnly:
+                let count = parameters.isEmpty ? 1 : Int(String(decoding: parameters, as: UTF8.self)) ?? 1
+                out.append(contentsOf: repeatElement(UInt8(ascii: " "), count: max(count, 1)))
+            default:
+                out.append(contentsOf: styled[index...end])
+            }
+            index = end + 1
+        }
+        return out
     }
 
     /// The bytes `output` has that `base` does not: what lies between their common prefix and
