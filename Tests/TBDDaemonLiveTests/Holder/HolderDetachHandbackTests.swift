@@ -261,6 +261,37 @@ struct HolderDetachHandbackTests {
         })
     }
 
+    /// An empty preamble is the detach of an app whose viewer never read the
+    /// pty: it never received the descriptor, or tore its view down before its
+    /// reader started. The child's next bytes then finish the sequence the
+    /// attach left the daemon's parser inside, so the take-back keeps it
+    /// (`viewerMayHaveRead` false): the cut 24-bit colour completes, and `X`
+    /// prints in it rather than after the colour's tail printed as text.
+    @Test func anEmptyHandbackKeepsTheSequenceForTheChildToFinish() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: .ghostty)
+        defer { fixture.tearDown() }
+        // The last thing the daemon read before the attach: a colour cut short.
+        await fixture.reader.feedChildOutputForTesting(Data("\u{1b}[38;2;21".utf8))
+
+        let viewer = try await fixture.attachAViewer()
+        viewer.close()
+        try await fixture.registry.acceptHandback(
+            terminal: fixture.terminalRow, generation: viewer.generation, preamble: Data())
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining, "the daemon took the session back without reading it")
+        await resumed.feedChildOutputForTesting(Data("5;119;87mX".utf8))
+        let screen = await resumed.renderScreen()
+        #expect(screen.contains("X") && !screen.contains("5;119;87m"), """
+            the take-back abandoned the colour the child was still writing, so its tail printed: \
+            \(screen.debugDescription)
+            """)
+        let capture = try #require(await resumed.closedTerminalCapture())
+        #expect(capture.contains("38;2;215;119;87mX"), """
+            `X` is not in the colour the child finished: \(capture.debugDescription)
+            """)
+    }
+
     /// The negative that scopes this task: **an app that dies mid-detach needs
     /// no special handling here.** Its descriptors close with the process,
     /// which is the same evidence a completed detach carries — but the evidence

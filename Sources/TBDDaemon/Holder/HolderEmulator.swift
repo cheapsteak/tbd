@@ -69,16 +69,27 @@ protocol HolderEmulator: AnyObject, Sendable {
     /// may still be inside before that, because the reset does not.
     func feedPreamble(_ bytes: ArraySlice<UInt8>)
 
-    /// Ends any sequence the parser was left inside, for a take-back with no
-    /// preamble (`HolderRegistry.takeBackFromViewer`): the viewer that held
-    /// the pty finished that sequence, so the child's next bytes are not its
-    /// tail. Sends the child nothing and does not stamp the ledger.
+    /// Ends any sequence the parser was left inside, before a take-back that
+    /// brings no preamble resumes the drain, when a viewer may have read the
+    /// pty (`viewerMayHaveRead` in `HolderRegistry.takeBackFromViewer`): that
+    /// viewer finished the sequence, so the child's next bytes are not its
+    /// tail. Sends the child nothing and does not stamp the ledger. A cut UTF-8
+    /// character first prints as U+FFFD.
     ///
     /// The SwiftTerm emulator does nothing: its attach waits, within a
     /// budget, for the child's output to reach a boundary first. The
-    /// libghostty emulator's attach does not, so it ends the sequence here. Never called when the attach is
-    /// cancelled, where the child's bytes never left the daemon and the next
-    /// ones do finish the sequence.
+    /// libghostty emulator's attach does not, so it ends the sequence here.
+    ///
+    /// Not called where no viewer read the pty, because there the child's
+    /// next bytes do finish the sequence: a cancelled attach, a descriptor
+    /// delivered to an app already confirmed gone, and a detach with an empty
+    /// preamble, which the app sends when it never received the descriptor or
+    /// tore its view down before its reader started. Two cases come out the
+    /// other way, as the lesser harm. An app that refuses its ack after its
+    /// reader started also detaches with an empty preamble, so the sequence
+    /// is kept although its viewer read. A claim sweep after a lost attach
+    /// reply abandons a sequence nobody read. Telling either apart needs the
+    /// app to report whether it read, a protocol change outside this flag.
     func abandonOpenSequence()
 
     /// The kind this emulator is. Fixed at construction; it can differ from
@@ -87,9 +98,10 @@ protocol HolderEmulator: AnyObject, Sendable {
     var kind: HolderEmulatorKind { get }
 
     /// Whether a snapshot taken now needs the child's output to reach a
-    /// sequence boundary first, asked by the reader just before it would wait
-    /// (`HolderReader.suspendDraining`); the wait then runs until
-    /// `isAtSequenceBoundary` or its budget. Always true for SwiftTerm, whose
+    /// sequence boundary first, asked by the reader before it waits
+    /// (`HolderReader.suspendDraining`) and again after each read of the
+    /// wait, which runs until `isAtSequenceBoundary`, until this turns false,
+    /// or until its budget runs out. Always true for SwiftTerm, whose
     /// `DECRQM` queries would cut a sequence the child is part-way through.
     /// For libghostty, whose snapshot only reads the live terminal and ends
     /// with the bytes of a sequence left open for the viewer to finish, true

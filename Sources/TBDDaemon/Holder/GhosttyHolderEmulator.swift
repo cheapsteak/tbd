@@ -47,10 +47,14 @@ import enum TBDShared.ProgramStatusProtocol
 ///   child's sequence; the CAN before the reset is what ends it. A probe in a
 ///   preamble is dropped inside libghostty, unseen, and leaves no record,
 ///   where the SwiftTerm emulator records it as ignored.
-/// - **A take-back with no preamble abandons the open sequence.** The viewer
-///   finished whatever sequence the attach left open, so the child's next
-///   bytes are not its tail. `abandonOpenSequence` feeds a CAN and an OSC 8
-///   close, muted, in one hold, before the reader resumes.
+/// - **A take-back with no preamble abandons the open sequence when a viewer
+///   may have read the pty** (`viewerMayHaveRead`). That viewer finished
+///   whatever sequence the attach left open, so the child's next bytes are
+///   not its tail. `abandonOpenSequence` feeds a CAN and an OSC 8 close,
+///   muted, in one hold, before the reader resumes. Where no viewer read the
+///   pty the sequence is kept, for the child's next bytes to finish. The
+///   cases the daemon cannot tell apart, and why they fall as they do, are
+///   in `HolderEmulator.abandonOpenSequence`.
 /// - **A resize sends the child nothing.** Every resize is muted
 ///   (`GhosttyTerminal.resize(cols:rows:muted:)`), so a child that asked for
 ///   in-band size reports with mode 2048 gets none from the daemon, as it got
@@ -64,8 +68,9 @@ import enum TBDShared.ProgramStatusProtocol
 ///   carried at the end of the snapshot for the viewer to finish. The one
 ///   exception is a sequence longer than libghostty keeps the bytes of, which
 ///   the writer can only end with an opener that drops the rest:
-///   `snapshotNeedsSequenceBoundary` is true for exactly that case, and the
-///   reader waits for it as it waits for the SwiftTerm emulator.
+///   `snapshotNeedsSequenceBoundary` is true for exactly that case, so the
+///   reader waits only for an over-long sequence to end, where under the
+///   SwiftTerm emulator it waits for any.
 final class GhosttyHolderEmulator: HolderEmulator {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 
@@ -166,8 +171,10 @@ final class GhosttyHolderEmulator: HolderEmulator {
         terminal.feed(bytes, underLock: { ledger.stampArrival() })
     }
 
-    /// `feed`, for a handback preamble: a full reset and then the parse, both
-    /// muted, in the same hold as the stamp. Nothing the preamble provokes
+    /// `feed`, for a handback preamble: a CAN, a full reset and then the
+    /// parse, all muted, in the same hold as the stamp. The CAN ends any
+    /// sequence the parser was left inside, which the reset does not, and the
+    /// reset wipes whatever the CAN dispatched. Nothing the preamble provokes
     /// reaches the child or the tap, and no mode the preamble leaves unnamed
     /// survives from before it.
     func feedPreamble(_ bytes: ArraySlice<UInt8>) {
@@ -178,7 +185,8 @@ final class GhosttyHolderEmulator: HolderEmulator {
     /// CAN dispatches a partial OSC like any other way out of one, so a cut
     /// `ESC]8;;URL` would otherwise leave that link on the pen for every cell
     /// the child writes next. Muted, so nothing either dispatches reaches the
-    /// child or the tap, and not stamped: no byte came from the child.
+    /// child or the tap, and not stamped: no byte came from the child. A cut
+    /// UTF-8 character first prints as U+FFFD.
     func abandonOpenSequence() {
         terminal.feed(Self.abandonSequence[...], muted: true, underLock: {})
     }

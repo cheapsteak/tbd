@@ -835,8 +835,8 @@ actor HolderReader {
     }
 
     /// Ends whatever sequence the emulator's parser was left inside, for a
-    /// take-back that brings no preamble: see
-    /// `HolderEmulator.abandonOpenSequence`.
+    /// take-back that brings no preamble from a viewer that may have read the
+    /// pty: see `HolderEmulator.abandonOpenSequence`.
     func abandonOpenSequence() {
         guard state != .stopped else { return }
         emulator.abandonOpenSequence()

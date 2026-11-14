@@ -113,6 +113,38 @@ struct HolderAppDeathSeizureTests {
             """)
     }
 
+    /// The twin that keeps the sequence. A descriptor delivered to an app
+    /// already confirmed gone was never read, so nothing finished the
+    /// sequence the attach left the daemon's parser inside, and the child's
+    /// next bytes are its tail (`viewerMayHaveRead` false): `h` completes
+    /// `ESC[4h`, and only `X` prints.
+    @Test func aLateDeliveryKeepsTheSequenceForTheChildToFinish() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob, emulator: .ghostty)
+        defer { fixture.tearDown() }
+        await fixture.reader.feedChildOutputForTesting(Data("\u{1b}[4".utf8))
+
+        // The app dies while its descriptor is on the way, and the death is
+        // acted on before the delivery is recorded.
+        let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        Darwin.close(vend.ptyFD)
+        await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
+        let takeBack = try #require(
+            await fixture.registry.recordAttachRecipient(
+                HandbackFixture.viewerApp, terminalID: fixture.terminalID,
+                generation: vend.generation),
+            "a delivery to an app already confirmed gone started no take-back")
+        await takeBack.value
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining, "the daemon took the session back without reading it")
+        await resumed.feedChildOutputForTesting(Data("hX".utf8))
+        let screen = await resumed.renderScreen()
+        #expect(screen.contains("X") && !screen.contains("hX"), """
+            the take-back abandoned a sequence no viewer read, so its tail printed: \
+            \(screen.debugDescription)
+            """)
+    }
+
     /// The other state a claim can be in, and it takes the other arm. An attach
     /// that timed out unacknowledged kept its *suspended* reader — the viewer
     /// might have been reading all along, so the daemon neither resumed nor
@@ -214,7 +246,8 @@ struct HolderAppDeathSeizureTests {
         await #expect(throws: HolderRegistry.Error.handbackSuperseded(
             terminalID: fixture.terminalID, generation: viewer.generation &+ 1)) {
             try await fixture.registry.seizeFromDeadApp(
-                terminalID: fixture.terminalID, generation: viewer.generation &+ 1)
+                terminalID: fixture.terminalID, generation: viewer.generation &+ 1,
+                viewerMayHaveRead: true)
         }
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == viewer.generation,
                 "a stale seizure took the pty from the attach that holds it")
@@ -308,7 +341,8 @@ struct HolderAppDeathSeizureTests {
 
         // The app has quit, and its death is confirmed while the handback is
         // still putting the reader back.
-        try await registry.seizeFromDeadApp(terminalID: terminalID, generation: generation)
+        try await registry.seizeFromDeadApp(
+            terminalID: terminalID, generation: generation, viewerMayHaveRead: true)
 
         #expect(await !suspended.isDraining, """
             the seizure resumed the reader while the app's own handback was still taking the \

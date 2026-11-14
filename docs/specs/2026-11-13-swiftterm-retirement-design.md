@@ -196,10 +196,20 @@ the snapshot could otherwise end only by dropping the rest.
   child's output to reach a boundary, so the daemon's parser can still be inside a
   sequence the viewer has since finished, and `ghostty_terminal_reset` resets the screen
   model, not the stream parser. A handback's parse therefore starts with a muted CAN
-  before the reset, which wipes whatever the CAN dispatched. A take-back with no preamble,
-  after an app quit or died, feeds a muted CAN and an OSC 8 close instead, since a cut
-  `ESC]8;;URL` that CAN dispatches would leave its link on the pen. A cancelled attach
-  keeps the sequence: no viewer read the pty, so the child's next bytes finish it.
+  before the reset, which wipes whatever the CAN dispatched. A take-back with no preamble
+  feeds a muted CAN and an OSC 8 close instead, since a cut `ESC]8;;URL` that CAN
+  dispatches would leave its link on the pen, but only when its caller says a viewer may
+  have read the pty (`viewerMayHaveRead`):
+  - **Abandoned** – an app that died holding the pty (`seizeFromDeadApp`) and a claim
+    sweep (`reconcileClaims`).
+  - **Kept, for the child's next bytes to finish** – a detach with an empty preamble,
+    which the app sends when it never received the descriptor or tore its view down
+    before its reader started; a descriptor delivered to an app already confirmed gone
+    (`takeBackLateDelivery`); and a cancelled attach.
+  - **The lesser harm** – an app that refuses its ack after its reader started also
+    detaches with an empty preamble, so its sequence is kept although it read, and a
+    claim sweep after a lost attach reply abandons a sequence nobody read. Telling either
+    apart needs the app to report whether it read, a protocol change outside this flag.
 - **No binary snapshot** – libghostty's own snapshot format is outside its 1.0 ABI promise,
   and an update hands over between a daemon and an app built from different commits.
 - **Receivers** – until D, a person who turned the app engine off still views with
