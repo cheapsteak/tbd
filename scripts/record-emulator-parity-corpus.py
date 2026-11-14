@@ -1326,7 +1326,9 @@ def record(names: list[str], out_dir: Path, debug_dir: Path | None = None) -> in
             "Recorded terminal output for the emulator parity suite. Each .vt file holds only the bytes "
             "the program wrote to its pty, recorded by scripts/record-emulator-parity-corpus.py, which "
             "documents the environment, the keystrokes and the query answers. Feed a file to a fresh "
-            "terminal of the listed size."
+            "terminal of the listed size. The recordings hold the screens that Claude Code, vim, less "
+            "and bash print, Claude Code's logo art and onboarding text among them, captured as "
+            "terminal output; no third-party source code is adapted."
         ),
         "recorder": "scripts/record-emulator-parity-corpus.py",
         "platform": f"{platform.system()} {platform.machine()}",
