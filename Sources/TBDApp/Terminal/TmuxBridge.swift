@@ -169,6 +169,13 @@ final class TmuxBridge: @unchecked Sendable {
         ["set-option", "-wt", windowID, "remain-on-exit-format", ""]
     }
 
+    /// Hands a window's size back to the clients attached to it. The same
+    /// option the daemon's `TmuxManager.setWindowSizeLatestCommand` sets, in
+    /// this bridge's argument form (the bridge adds `-L <server>` itself).
+    static func windowSizeLatestArgs(windowID: String) -> [String] {
+        ["set-option", "-wt", windowID, "window-size", "latest"]
+    }
+
     static func activeWindowQueryArgs(sessionName: String) -> [String] {
         ["display-message", "-p", "-t", sessionName, "#{window_id}"]
     }
@@ -350,6 +357,25 @@ final class TmuxBridge: @unchecked Sendable {
                 server: server,
                 windowID: windowID,
                 sessionName: sessionName
+            )
+        }
+
+        // Windows left at `window-size manual` by the retired tmux control
+        // mode, which set it on every window it attached and never set it
+        // back. A manual window keeps its size whatever its clients' ptys
+        // say, so the viewer this session is for could never resize it.
+        // Setting `latest` on every preparation is harmless — it is what
+        // `TmuxManager.resizeWindow` leaves behind too — and best-effort: the
+        // view works without it, so a failure is logged and preparation
+        // carries on.
+        let windowSizeResult = await runTmux(
+            tmuxExecutablePath: tmuxExecutablePath,
+            server: server,
+            args: Self.windowSizeLatestArgs(windowID: windowID)
+        )
+        if !windowSizeResult.success {
+            bridgeLogger.warning(
+                "Could not hand window \(windowID, privacy: .public) on server \(server, privacy: .public) back to window-size latest: \(windowSizeResult.output, privacy: .public)"
             )
         }
 
