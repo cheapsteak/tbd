@@ -150,7 +150,9 @@ engine instead of the SwiftTerm view.
 taking SwiftTerm's shape:
 
 - `feed` – `ghostty_terminal_vt_write`.
-- `prepareForPreamble` – `ghostty_terminal_reset`.
+- `prepareForPreamble` – a CAN through `ghostty_terminal_vt_write`, then
+  `ghostty_terminal_reset`, both muted. The reset leaves libghostty's stream parser where it
+  was, so the CAN first returns it to ground from any sequence the output stopped inside.
 - `ingestSnapshot` – `ghostty_terminal_vt_write`, with the `GHOSTTY_TERMINAL_OPT_WRITE_PTY`
   callback dropping replies and the effect callbacks checking a muted flag.
 - Resize – `ghostty_terminal_resize`.
@@ -206,8 +208,9 @@ The same coordinator code runs for both engines.
 - **Attach, on holder panels:**
   1. The coordinator receives the attachment: the snapshot preamble and the pty.
   2. If the view has been used before, it calls `prepareForPreamble()`. The libghostty
-     engine resets its terminal. The SwiftTerm engine does nothing, because a reset in
-     SwiftTerm leaves stale alternate-screen content that a later `?1049h` shows again.
+     engine ends any open sequence with a CAN and resets its terminal. The SwiftTerm
+     engine does nothing, because a reset in SwiftTerm leaves stale alternate-screen content
+     that a later `?1049h` shows again.
   3. It calls `ingestSnapshot(preamble)`.
 - **Live bytes** – `HolderStreamReader` on the IO thread, then `TerminalViewHolder.feed`,
   then `TerminalLatencyTap`, then `feed`.
