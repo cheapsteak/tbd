@@ -47,10 +47,10 @@ private final class MonotonicCounter: @unchecked Sendable {
 }
 
 /// A tiny per-daemon service that holds the sidecar socket the app connects to.
-/// Phase 2 has exactly one client (the app), so at most one connection is
-/// adopted at a time; a new adoption replaces the old one.
+/// It has exactly one client (the app), so at most one connection is adopted
+/// at a time; a new adoption replaces the old one.
 ///
-/// M2.1 promotes the sidecar to a **bidirectional framed data channel**:
+/// The sidecar is a **bidirectional framed data channel**:
 /// - daemon → app: `sendReportingRecipient(fd:header:)` vends a holder
 ///   session's pty descriptor wrapped in a length-prefixed `.fdVend` frame.
 /// - app → daemon: `.injectionAck` and `.screenReply` frames, decoded on a

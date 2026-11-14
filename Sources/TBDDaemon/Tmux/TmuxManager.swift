@@ -350,8 +350,7 @@ public struct TmuxManager: Sendable {
         // first guarantees even window 0, created by new-session at server
         // birth, gets the full limit. The server auto-starts for this list
         // because it contains new-session; set-option -g then runs before any
-        // window exists. 50000 matches the control-mode replay capture depth
-        // (`capture-pane -S -50000`).
+        // window exists.
         //
         // Place size flags before -PF so the format spec stays last
         // (consistent with tmux argument-order conventions).
