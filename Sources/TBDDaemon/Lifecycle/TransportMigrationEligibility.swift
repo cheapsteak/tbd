@@ -56,6 +56,35 @@ enum TransportMigrationEligibility: Equatable {
 
     static func decide(_ terminal: Terminal) -> TransportMigrationEligibility {
         if terminal.transport == .holder { return .alreadyHolder }
+        if let reason = nothingToResumeSkip(terminal) {
+            return .skip(reason: reason)
+        }
+        // Same wording as `HibernationCoordinator.manualBlockReason`, so a
+        // person meets one vocabulary.
+        switch terminal.activityState {
+        case .working:
+            return .skip(reason: "Session is actively running")
+        case .waitingForUser:
+            return .skip(reason: "Session is waiting on a permission prompt")
+        default:
+            return .eligible
+        }
+    }
+
+    /// The skip `decide` gives a row it turns away for having nothing to
+    /// resume — a hook tab, a running Codex tab, a Claude tab with no
+    /// conversation — or nil for any other row.
+    ///
+    /// Each of those reasons tells the person what to do instead of migrating,
+    /// because no run of the migration will ever move the row. So another
+    /// refusal that would otherwise name `tbd terminal migrate` asks this
+    /// first, and gives the same advice for these rows: a window recreate
+    /// (`RPCRouter.tmuxRecreateRefusal(for:)`). The busy skips in `decide`
+    /// are not among them: they clear when the turn ends.
+    ///
+    /// Judges the row whatever its transport; `decide` asks the transport
+    /// first.
+    static func nothingToResumeSkip(_ terminal: Terminal) -> String? {
         // A pre-session hook tab is a shell with no session id, so without this
         // it is eligible — and a fleet run during a worktree creation would kill
         // the hook mid-run, which `waitForPreSessionCompletion` reports as
@@ -66,7 +95,7 @@ enum TransportMigrationEligibility: Equatable {
         // costs nothing even once the hook has finished, and a row-only view
         // cannot see whether the creation flow is still waiting on it.
         if terminal.label == TerminalLabel.preSession {
-            return .skip(reason: preSessionSkip)
+            return preSessionSkip
         }
         // A `setup` hook tab is skipped for a reason the process-table busy
         // rail cannot see. A setup hook that FAILED has `exec $SHELL`'d, so the
@@ -81,7 +110,7 @@ enum TransportMigrationEligibility: Equatable {
         // whenever `auto_close_setup_enabled` is on, which the row alone cannot
         // see either.
         if terminal.label == TerminalLabel.setup {
-            return .skip(reason: setupSkip)
+            return setupSkip
         }
         // A RUNNING Codex tab cannot be moved. The park is Claude-only, so the
         // only move left for it is the running-shell one, which would replace
@@ -99,7 +128,7 @@ enum TransportMigrationEligibility: Equatable {
             let parkedWithAThread = terminal.isParked
                 && terminal.recoveryResumePlan?.identity.agentKind == .codex
             guard parkedWithAThread else {
-                return .skip(reason: codexSkip)
+                return codexSkip
             }
         }
         // A Claude tab whose agent is still starting up, or whose session hook
@@ -112,17 +141,8 @@ enum TransportMigrationEligibility: Equatable {
         // A nil `kind` reads as a shell, the same `(kind ?? .shell)` idiom the
         // rest of the daemon uses for a row written before kinds existed.
         if terminal.claudeSessionID == nil, (terminal.kind ?? .shell) == .claude {
-            return .skip(reason: claudeWithoutConversationSkip)
+            return claudeWithoutConversationSkip
         }
-        // Same wording as `HibernationCoordinator.manualBlockReason`, so a
-        // person meets one vocabulary.
-        switch terminal.activityState {
-        case .working:
-            return .skip(reason: "Session is actively running")
-        case .waitingForUser:
-            return .skip(reason: "Session is waiting on a permission prompt")
-        default:
-            return .eligible
-        }
+        return nil
     }
 }

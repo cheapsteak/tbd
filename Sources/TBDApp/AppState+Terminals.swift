@@ -28,15 +28,16 @@ enum AutomaticTerminalRecreationOutcome: Equatable {
 }
 
 /// What the daemon said when it refused a window recreate: its own sentence,
-/// and whether the row must first move to the pty holder, which no retry of
-/// the same request can do.
+/// and whether the row is still on the tmux transport. Such a row's sentence
+/// says what to do — migrate it, or close the tab and open a new one — and no
+/// retry of the same request can succeed.
 ///
 /// Decided from the refusal's code, never its text
 /// (`RPCErrorCode.terminalOnTmux`), so the daemon can reword the sentence
 /// without changing what the panel offers.
 struct TerminalRecreationRefusal: Equatable, Sendable {
     let message: String
-    let needsMigration: Bool
+    let rowIsOnTmux: Bool
 
     /// The refusal `error` carries, or nil when the daemon did not write one —
     /// a dropped connection, a timeout, an unreadable answer.
@@ -44,7 +45,7 @@ struct TerminalRecreationRefusal: Equatable, Sendable {
         guard case DaemonClientError.rpcError(let message, let code) = error else { return nil }
         return TerminalRecreationRefusal(
             message: message,
-            needsMigration: code == RPCErrorCode.terminalOnTmux.rawValue)
+            rowIsOnTmux: code == RPCErrorCode.terminalOnTmux.rawValue)
     }
 }
 

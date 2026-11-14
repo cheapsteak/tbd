@@ -402,10 +402,76 @@ struct HolderTmuxAssumptionGateTests {
             params: TerminalRecreateWindowParams(terminalID: terminal.id)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.tmuxRecreateRefusal(terminalID: terminal.id))
+        #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
         #expect(response.knownErrorCode == .terminalOnTmux,
                 "the app reads the code, not the text, to hide its Retry")
         #expect(response.error?.contains("tbd terminal migrate \(terminal.id.uuidString)") == true)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "recreateWindow mutated a tmux row it was supposed to refuse")
+        #expect(!recorded.snapshot().contains { $0.contains("new-window") || $0.contains("kill-window") },
+                "recreateWindow opened or killed a tmux window: \(recorded.snapshot())")
+    }
+
+    /// The tmux rows the migration always skips, one of each kind, with the
+    /// skip the migration gives it.
+    enum UnmovableTmuxRow: CaseIterable, Sendable {
+        case codexWithoutThread
+        case claudeWithoutSession
+        case setupHookTab
+
+        var skip: String {
+            switch self {
+            case .codexWithoutThread: return TransportMigrationEligibility.codexSkip
+            case .claudeWithoutSession: return TransportMigrationEligibility.claudeWithoutConversationSkip
+            case .setupHookTab: return TransportMigrationEligibility.setupSkip
+            }
+        }
+    }
+
+    /// A tmux row whose window is gone and which the migration would skip is
+    /// refused with the migration's own advice, not told to run a migration
+    /// that would turn it away. The code stays `terminalOnTmux`, so the app
+    /// still offers no Retry, and the row is left as it was.
+    @Test("recreateWindow gives a tmux row the migration skips the migration's advice",
+          arguments: UnmovableTmuxRow.allCases)
+    func recreateWindowGivesAnUnmovableTmuxRowTheMigrationsAdvice(_ kind: UnmovableTmuxRow) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal: TBDShared.Terminal
+        switch kind {
+        case .codexWithoutThread:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.codex, kind: .codex)
+        case .claudeWithoutSession:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.claudeCode, kind: .claude)
+        case .setupHookTab:
+            terminal = try await db.terminals.create(
+                worktreeID: wt.id, tmuxWindowID: "@old", tmuxPaneID: "%old",
+                label: TerminalLabel.setup, kind: .shell)
+        }
+        #expect(TransportMigrationEligibility.decide(terminal) == .skip(reason: kind.skip),
+                "the fixture is not a row the migration skips")
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.tmuxRecreateRefusal(for: terminal))
+        #expect(response.error?.hasSuffix(kind.skip) == true,
+                "the refusal did not give the migration's advice: \(response.error ?? "nil")")
+        #expect(response.error?.contains("tbd terminal migrate") == false,
+                "the refusal sent the person to a migration that skips this row")
+        #expect(response.knownErrorCode == .terminalOnTmux,
+                "the app reads the code, not the text, to hide its Retry")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "recreateWindow mutated a tmux row it was supposed to refuse")

@@ -149,9 +149,10 @@ public enum RPCErrorCode: String, Sendable {
     /// A request that would start or replace the process behind a terminal —
     /// a window recreate, an in-place account switch — was refused because the
     /// row is still on the tmux transport, which TBD no longer starts sessions
-    /// on. Nothing was changed. The text names `tbd terminal migrate <id>`:
-    /// moving the row to the pty holder is the remedy, so a plain retry cannot
-    /// help and the app offers none.
+    /// on. Nothing was changed. The text says what to do instead: run
+    /// `tbd terminal migrate <id>` to move the row to the pty holder, or, for a
+    /// tab no migration can move, close it and open a new one. Either way a
+    /// plain retry cannot help, so the app offers none.
     case terminalOnTmux
     /// An agent start or wake was held by the user's start-admission command
     /// (`~/tbd/hooks/start-admission`). The message is the command's reason.

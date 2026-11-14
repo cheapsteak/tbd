@@ -37,6 +37,22 @@ import Testing
             == .skip(reason: "Session is waiting on a permission prompt"))
     }
 
+    /// `nothingToResumeSkip` names only the rows no migration will ever move,
+    /// which other refusals give the migration's advice. A busy session is
+    /// skipped only until its turn ends, and a shell is moved, so neither has
+    /// one; a tab the migration always skips has the same reason `decide`
+    /// gives it.
+    @Test func onlyTheRowsNoMigrationMovesHaveANothingToResumeSkip() throws {
+        #expect(TransportMigrationEligibility.nothingToResumeSkip(
+            makeTerminal(activityState: .working)) == nil)
+        #expect(TransportMigrationEligibility.nothingToResumeSkip(
+            makeTerminal(kind: .shell, claudeSessionID: nil)) == nil)
+        let unmovable = makeTerminal(claudeSessionID: nil)
+        let reason = try #require(TransportMigrationEligibility.nothingToResumeSkip(unmovable))
+        #expect(reason == TransportMigrationEligibility.claudeWithoutConversationSkip)
+        #expect(TransportMigrationEligibility.decide(unmovable) == .skip(reason: reason))
+    }
+
     // The resumable-Claude guard that the profile swap and manual hibernate
     // apply is deliberately NOT applied here: a shell must be migratable.
     @Test func aShellWithNoSessionIDIsEligible() {

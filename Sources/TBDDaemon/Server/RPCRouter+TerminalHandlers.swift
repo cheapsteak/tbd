@@ -1443,12 +1443,26 @@ extension RPCRouter {
     }
 
     /// The refusal `terminal.recreateWindow` returns for a tmux row with no
-    /// agent session to park: a shell, or an agent tab whose session never
-    /// began. TBD no longer opens tmux windows, so it cannot stand a dead one
-    /// back up; migrating the row to the pty holder is the way forward.
-    static func tmuxRecreateRefusal(terminalID: UUID) -> String {
-        TerminalTransportMigrator.migrateFirstRefusal(
-            terminalID: terminalID, retry: "open it again")
+    /// agent session to park. TBD no longer opens tmux windows, so it cannot
+    /// stand a dead one back up, and what to do instead depends on whether a
+    /// migration can move the row:
+    ///
+    /// - **A shell** can be moved, so the refusal names
+    ///   `tbd terminal migrate <id>`.
+    /// - **A tab the migration always skips** — a running Codex tab with no
+    ///   thread, a Claude tab whose session never began, a setup or
+    ///   pre-session hook tab — gets the migration's own advice for it,
+    ///   which is to close the tab and open a new one, or that there is
+    ///   nothing to move. The rows and the words are the migration's
+    ///   (`TransportMigrationEligibility.nothingToResumeSkip`), so the two
+    ///   refusals cannot disagree about a row.
+    static func tmuxRecreateRefusal(for terminal: Terminal) -> String {
+        guard let reason = TransportMigrationEligibility.nothingToResumeSkip(terminal) else {
+            return TerminalTransportMigrator.migrateFirstRefusal(
+                terminalID: terminal.id, retry: "open it again")
+        }
+        return "Terminal \(terminal.id.uuidString) runs on the tmux transport, which TBD no longer "
+            + "starts sessions on, so its window cannot be recreated. \(reason)"
     }
 
     /// A sibling of `holderRecreateRefusal` for the same reason: one named
@@ -1481,9 +1495,11 @@ extension RPCRouter {
     ///   refuses and names `tbd terminal migrate`, and the app's parked notice
     ///   says the same, so the session comes back through a migration followed
     ///   by a wake.
-    /// - **Any other tmux row** — a shell, or an agent tab whose session never
-    ///   began — has nothing a park could keep, so it is refused with the
-    ///   migrate instruction and left exactly as it was.
+    /// - **Any other tmux row** — a shell, an agent tab whose session never
+    ///   began, a hook tab — has nothing a park could keep, so it is refused
+    ///   and left exactly as it was. The refusal says what to do: migrate a
+    ///   shell, close and reopen a tab the migration cannot move
+    ///   (`tmuxRecreateRefusal(for:)`).
     /// - **A holder row** has no tmux window to recreate and is refused.
     func handleTerminalRecreateWindow(
         _ paramsData: Data, actor: ActuationActor? = nil
@@ -1506,7 +1522,7 @@ extension RPCRouter {
         // which TBD no longer does on tmux.
         guard let plan = terminal.recoveryResumePlan else {
             return RPCResponse(
-                error: Self.tmuxRecreateRefusal(terminalID: terminal.id),
+                error: Self.tmuxRecreateRefusal(for: terminal),
                 code: RPCErrorCode.terminalOnTmux.rawValue)
         }
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {

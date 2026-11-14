@@ -126,11 +126,11 @@ enum TerminalRecoveryPresentation {
     }
 
     /// The banner for a recreate the daemon refused: its own sentence, which
-    /// says what to do. A row that must first move to the pty holder gets no
-    /// Retry, because repeating the request cannot move it; every other
-    /// refusal keeps one.
+    /// says what to do. A row still on tmux gets no Retry, because repeating
+    /// the request cannot change the transport it is on; every other refusal
+    /// keeps one.
     static func guidance(for refusal: TerminalRecreationRefusal) -> TerminalRecoveryGuidance {
-        if refusal.needsMigration {
+        if refusal.rowIsOnTmux {
             return TerminalRecoveryGuidance(message: refusal.message, offersRetry: false)
         }
         return TerminalRecoveryGuidance(
