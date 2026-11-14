@@ -323,7 +323,16 @@ struct HolderHibernationLiveTests {
         try await fixture.db.config.setEnvOverrides(["DISABLE_AUTO_UPDATE": "false", "GLOBAL_ONLY": "global", "CODEX_HOME": "/tmp/acme-wrong-home", "COLLISION": "global"])
         try await fixture.db.repos.setEnvOverrides(id: try #require(fixture.worktree.repoID), overrides: ["DISABLE_AUTO_UPDATE": "false", "REPO_ONLY": "repo", "COLLISION": "repo"])
         try await fixture.db.config.setComposerDraftEnabled(true)
-        let result = await fixture.coordinator.wake(terminalID: terminal.id, initialPrompt: "must not be sent")
+        // A Codex wake cannot deliver an initial prompt, so it refuses one
+        // before touching anything: the row stays parked and no holder starts.
+        let refused = await fixture.coordinator.wake(terminalID: terminal.id, initialPrompt: "must not be sent")
+        #expect(refused == .respawnFailed(reason: "Codex wake cannot deliver an initial prompt; resume without a prompt, then send it to the session."))
+        let stillParked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(stillParked.isParked)
+        #expect(stillParked.sessionIncarnationID == before.sessionIncarnationID)
+        #expect(await fixture.registry.reader(for: terminal.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath))
+        let result = await fixture.coordinator.wake(terminalID: terminal.id)
         try #require(result.isOk, "Codex wake refused: \(result)")
         let awake = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(!awake.isParked)
