@@ -439,9 +439,14 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // The emulator parity suite feeds the handover corpus to both
+                // daemon emulators, and reads each one's snapshot back through
+                // a headless libghostty viewer.
+                "TerminalCorpus",
                 // Declared because the libghostty holder emulator's suite holds
                 // the daemon's answers to the core's own constants: the frozen
-                // device identity and the snapshot writer's reset prelude.
+                // device identity and the snapshot writer's reset prelude. The
+                // parity suite also reads its viewer through the core.
                 "TBDGhosttyCore",
                 // The test host's SIGPIPE handler is in the bundle either way;
                 // the dependency lets these suites check the handler in their

@@ -1,0 +1,311 @@
+import Foundation
+@testable import TBDDaemonLib
+import TerminalCorpus
+import TestSupport
+import Testing
+
+/// The daemon's libghostty emulator must answer as its SwiftTerm emulator does, so nothing that
+/// reads a session can tell which one the daemon runs. Every stream, the handover corpus's 111
+/// states and the four recordings in `Fixtures/EmulatorParity`, is fed to a fresh emulator of each
+/// kind, of the same size and scrollback, and three things are compared:
+///
+/// 1. **What the daemon reads**: `screen(maxLines:source:)` field by field, `renderScreen()` and
+///    `styledCapture(maxScrollbackLines:)`. Renders are compared with the spaces at the end of a
+///    row trimmed (`EmulatorParity.trimmedRender`).
+/// 2. **What the emulator sends**: the replies it writes to the child and the OSC 7501 reports it
+///    delivers, each in order. A recording is also fed in 64- and 4,096-byte chunks, so sequences
+///    and characters split across reads as a pty splits them, and all three comparisons are made
+///    again.
+/// 3. **What a viewer restores**: each emulator's attach snapshot is fed, muted, to a fresh
+///    headless libghostty viewer, as the app's viewer ingests one, and the two viewers' screens
+///    and scrollback, cursors, modes, regions and pens are compared, with the state the formatter
+///    alone can read: the open hyperlink, tab stops, character sets, modifyOtherKeys and
+///    protection. A viewer left on an alternate screen also leaves it, the way the stream
+///    entered it, and is compared again under `viewer.leave.`.
+///
+/// A stream may differ only in the fields `misses` lists for it, each listed with its reason, and
+/// the list is exact: a difference it does not list fails, and so does a listed field that stops
+/// differing, which means the list is stale. A failure prints every field that differs, with the
+/// first difference in each. The comparison 1 entries are the engine suites' misses for the same
+/// states (`ProjectionParityTests`); the rest are derived from what each snapshot writer carries
+/// and from what each engine answers, and CI confirms them.
+///
+/// Every body runs on a thread the tests own, one at a time: see `EmulatorParity.onOwnThread`.
+@Suite(.serialized, .fastPassBounded)
+struct HolderEmulatorParityTests {
+    /// Fields a stream may differ in, and why.
+    struct Miss: Sendable {
+        let reason: String
+        let fields: Set<String>
+    }
+
+    // MARK: - Reasons shared by several streams
+
+    static let penNotRestored = Miss(
+        reason: "SwiftTerm's snapshot does not restore the pen, so its viewer writes the next character in the default style; libghostty's restores it",
+        fields: ["viewer.pen"])
+
+    static let pendingWrapLost = Miss(
+        reason: "SwiftTerm's snapshot places the cursor with CUP, which cannot express a pending wrap, so its viewer's next character overwrites the last column instead of wrapping; libghostty's snapshot keeps the pending wrap",
+        fields: ["viewer.pendingWrap"])
+
+    static let mouseEncodingLost = Miss(
+        reason: "SwiftTerm's snapshot writes the SGR mouse encoding (1006) and no other, so the UTF-8 (1005), urxvt (1015) and SGR-pixel (1016) encodings arrive as X10's; libghostty's snapshot keeps them",
+        fields: ["viewer.mouseEncoding"])
+
+    static let charsetsLost = Miss(
+        reason: "SwiftTerm's snapshot does not write the character sets, so a line-drawing set the program left in use arrives as ASCII; the cells it already drew are the same",
+        fields: ["viewer.charsets"])
+
+    static let noOverline = Miss(
+        reason: "SwiftTerm has no overline, so the overlined cells reach its viewer without it; libghostty's snapshot keeps it. The daemon's two styled captures agree, because libghostty's leaves overline out",
+        fields: ["viewer.styled"])
+
+    static let wideCharacterWrapped = Miss(
+        reason: "a wide character that does not fit in the last column wraps to the next row: SwiftTerm leaves an empty cell behind, which its snapshot writes as a space, where libghostty keeps a spacer its formatter does not print, so the soft-wrapped line joins differently",
+        fields: ["viewer.styled"])
+
+    // MARK: - The misses
+
+    /// Keyed by stream: a corpus state's name, a workload cut's `<workload>@<offset>`, or a
+    /// recording's name. A key `<recording>/<chunk size>` adds fields for one feed plan only.
+    static let misses: [String: [Miss]] = [
+        // Comparison 1, with what follows from it in comparison 3.
+        "scroll-up-down": [Miss(
+            reason: "libghostty keeps the rows SU scrolls off the top as scrollback; SwiftTerm deletes them, so its snapshot carries none either",
+            fields: ["screen.lines", "screen.viewportStart", "capture", "viewer.text", "viewer.styled"])],
+        "vs16-at-edge": [Miss(
+            reason: "libghostty widens a heart with VS16 to two columns and wraps it to the next row; SwiftTerm keeps it one column wide in the last column. A viewer of either snapshot holds the same text, because it widens the heart again, but SwiftTerm's snapshot puts the cursor where SwiftTerm had it",
+            fields: ["screen.lines", "screen.cursor", "render", "capture", "viewer.cursor"])],
+        "wide-overwrite-tail": [Miss(
+            reason: "printing over the second half of a wide character: libghostty clears its first half, SwiftTerm keeps it, and SwiftTerm's snapshot writes it",
+            fields: ["screen.lines", "render", "capture", "viewer.text", "viewer.styled"])],
+        "hidden-then-alt": [Miss(
+            reason: "SwiftTerm shows the cursor when a program switches to the alternate screen, so its emulator reports the cursor the program hid as visible and its snapshot shows it; libghostty leaves visibility alone on a switch",
+            fields: ["screen.cursorVisible", "viewer.cursorVisible", "viewer.leave.cursorVisible"])],
+
+        // Comparison 2.
+        "full-reset": [Miss(
+            reason: "a full reset (RIS) drops every program-status record, and libghostty reports that as `state=clear`; SwiftTerm reports nothing",
+            fields: ["reports"])],
+        "claude-stub": [Miss(
+            reason: "SwiftTerm answers the kitty graphics query and reports a cell size for `CSI 16 t`; the daemon's libghostty has kitty graphics off and a cell size of zero",
+            fields: ["replies"])],
+        "vim": [Miss(
+            reason: "SwiftTerm answers the OSC 10 and OSC 11 colour queries with its default colours; the daemon's libghostty has no colours set to answer with",
+            fields: ["replies"])],
+
+        // Comparison 3: what SwiftTerm's snapshot does not carry.
+        "pending-wrap": [pendingWrapLost],
+        "pending-wrap-styled": [pendingWrapLost, penNotRestored],
+        "no-autowrap": [pendingWrapLost],
+        "open-pen": [penNotRestored],
+        "mouse-utf8": [mouseEncodingLost],
+        "mouse-urxvt": [mouseEncodingLost],
+        "mouse-sgr-pixels": [mouseEncodingLost],
+        "mouse-x10": [Miss(
+            reason: "SwiftTerm's snapshot writes the 1000, 1002 and 1003 tracking modes and no other, so X10 tracking (9) arrives off",
+            fields: ["viewer.mouseTracking"])],
+        "sync-output-open": [Miss(
+            reason: "SwiftTerm's snapshot does not write synchronized output (2026)",
+            fields: ["viewer.mode.syncOutput"])],
+        "reverse-video": [Miss(
+            reason: "SwiftTerm's snapshot does not write reverse video (DECSCNM, 5)",
+            fields: ["viewer.mode.reverseVideo"])],
+        "linefeed-mode": [Miss(
+            reason: "SwiftTerm's snapshot does not write line feed/new line mode (LNM, 20)",
+            fields: ["viewer.mode.LNM"])],
+        "kitty-keyboard-flags": [Miss(
+            reason: "SwiftTerm's snapshot does not write the kitty keyboard flags",
+            fields: ["viewer.kittyFlags"])],
+        "modify-other-keys": [Miss(
+            reason: "SwiftTerm's snapshot does not write modifyOtherKeys",
+            fields: ["viewer.keyboard"])],
+        "lr-margins": [Miss(
+            reason: "SwiftTerm's snapshot turns DECLRMM on but writes no left and right margins (DECSLRM)",
+            fields: ["viewer.region"])],
+        "tabstops-custom": [Miss(
+            reason: "SwiftTerm's snapshot does not write tab stops, so its viewer has one every eight columns",
+            fields: ["viewer.tabstops"])],
+        "charset-linedraw-open": [charsetsLost],
+        "charset-so": [charsetsLost],
+        "hyperlink": [Miss(
+            reason: "SwiftTerm's snapshot writes no OSC 8 hyperlinks, so the linked cells arrive unlinked",
+            fields: ["viewer.styled"])],
+        "hyperlink-open": [Miss(
+            reason: "SwiftTerm's snapshot writes no OSC 8 hyperlinks, so the linked cells arrive unlinked and the link the program left open is closed",
+            fields: ["viewer.styled", "viewer.link"])],
+        "overline": [noOverline],
+        "colour-log": [noOverline],
+        "wide-at-edge": [wideCharacterWrapped],
+        "wide-in-scrollback": [wideCharacterWrapped],
+
+        // Comparison 3: the workload cuts that stop with a colour or an attribute set.
+        "colors@166666": [penNotRestored], "colors@333339": [penNotRestored], "colors@500006": [penNotRestored],
+        "colors@666682": [penNotRestored], "colors@833335": [penNotRestored], "colors@1000006": [penNotRestored],
+        "cursor@166666": [penNotRestored], "cursor@333333": [penNotRestored], "cursor@500002": [penNotRestored],
+        "cursor@666666": [penNotRestored], "cursor@833335": [penNotRestored], "cursor@1000003": [penNotRestored],
+        "scroll@166666": [penNotRestored], "scroll@333333": [penNotRestored], "scroll@500000": [penNotRestored],
+        "scroll@666666": [penNotRestored], "scroll@1000000": [penNotRestored],
+        "tui@333335": [penNotRestored], "tui@666672": [penNotRestored], "tui@1000003": [penNotRestored],
+    ]
+
+    // MARK: - The streams
+
+    static let scenarios = HandoverCorpus.scenarios.map(\.name)
+    static let workloads = HandoverCorpus.checkpoints.map { $0.workload }
+
+    @Test(arguments: HolderEmulatorParityTests.scenarios)
+    func scenarioMatches(_ name: String) async throws {
+        try await EmulatorParity.onOwnThread {
+            let state = HandoverCorpus.state(named: name)
+            let pair = try EmulatorParity.Pair(cols: state.cols, rows: state.rows)
+            pair.feed(state.bytes[...])
+            Self.expectOutcome(name, plan: nil, differences: try pair.differences(stream: state.bytes[...]))
+        }
+    }
+
+    /// A workload is fed once and read at each of its cuts, which leaves both emulators exactly
+    /// as a fresh one fed the cut's bytes would be: the reads change nothing, and SwiftTerm's
+    /// snapshot changes its terminal only on an alternate screen, which no workload enters.
+    @Test(arguments: HolderEmulatorParityTests.workloads)
+    func workloadMatchesAtEveryCut(_ workload: String) async throws {
+        try await EmulatorParity.onOwnThread {
+            guard let offsets = HandoverCorpus.checkpoints.first(where: { $0.workload == workload })?.offsets else {
+                throw EmulatorParity.Failure(description: "the corpus has no workload named \(workload)")
+            }
+            let bytes = HandoverCorpus.workloadBytes(workload)
+            let pair = try EmulatorParity.Pair(cols: HandoverCorpus.workloadCols, rows: HandoverCorpus.workloadRows)
+            var fed = 0
+            for offset in offsets {
+                pair.feed(bytes[fed..<offset])
+                fed = offset
+                let name = "\(workload)@\(offset)"
+                if try pair.swiftTerm.screen(maxLines: 0, source: .daemon).modes.alternateScreen {
+                    Issue.record(EmulatorParity.Failure(
+                        description: "\(name) is on the alternate screen, where reading SwiftTerm's snapshot changes its terminal; feed each cut to fresh emulators instead"))
+                }
+                Self.expectOutcome(name, plan: nil, differences: try pair.differences(stream: bytes[..<offset]))
+            }
+        }
+    }
+
+    @Test(arguments: EmulatorParity.Recordings.names, EmulatorParity.FeedPlan.all)
+    func recordingMatches(_ name: String, plan: EmulatorParity.FeedPlan) async throws {
+        try await EmulatorParity.onOwnThread {
+            let entry = try EmulatorParity.Recordings.entry(named: name)
+            let bytes = try EmulatorParity.Recordings.bytes(of: entry)
+            let pair = try EmulatorParity.Pair(cols: entry.cols, rows: entry.rows)
+            pair.feed(bytes[...], chunkSize: plan.chunkSize)
+            Self.expectOutcome(name, plan: plan, differences: try pair.differences(stream: bytes[...]))
+        }
+    }
+
+    // MARK: - The list itself
+
+    /// The suite covers the corpus: its scenarios and workload cuts are every state the
+    /// handover suites run.
+    @Test func theStreamsCoverTheHandoverCorpus() {
+        let cuts = HandoverCorpus.checkpoints.flatMap { entry in entry.offsets.map { "\(entry.workload)@\($0)" } }
+        let streams = HandoverCorpus.scenarios.map(\.name) + cuts
+        #expect(streams.count == 111, "\(streams.count) corpus states")
+        #expect(Set(streams) == Set(HandoverCorpus.names))
+    }
+
+    /// Every key names a stream, every entry a reason and fields, and every field is one the
+    /// suite reads.
+    @Test func everyMissNamesAStreamAndFieldsTheSuiteReads() {
+        let recordingPlans = EmulatorParity.Recordings.names.flatMap { name in
+            EmulatorParity.FeedPlan.chunkSizes.map { "\(name)/\($0)" }
+        }
+        let streams = Set(HandoverCorpus.names + EmulatorParity.Recordings.names + recordingPlans)
+        for (stream, entries) in Self.misses {
+            #expect(streams.contains(stream), "\(stream) is listed as a miss but is not a stream the suite feeds")
+            #expect(!entries.isEmpty, "\(stream) is listed with no miss")
+            for miss in entries {
+                #expect(!miss.reason.isEmpty, "\(stream) has a miss with no reason")
+                #expect(!miss.fields.isEmpty, "\(stream) has a miss with no field it may differ in")
+                let unknown = miss.fields.subtracting(EmulatorParity.allFields)
+                #expect(unknown.isEmpty, "\(stream) lists fields the suite does not read: \(unknown.sorted())")
+            }
+        }
+    }
+
+    /// The fields a reading holds are the ones `EmulatorParity.allFields` names, so a miss that
+    /// names one can match: checked on a stream left on the alternate screen, which reads them all.
+    @Test func aReadingHoldsEveryFieldTheListCanName() async throws {
+        try await EmulatorParity.onOwnThread {
+            let state = HandoverCorpus.state(named: "alt-simple")
+            let pair = try EmulatorParity.Pair(cols: state.cols, rows: state.rows)
+            pair.feed(state.bytes[...])
+            for emulator in [(pair.swiftTerm, pair.swiftTermSink), (pair.ghostty, pair.ghosttySink)] {
+                let reading = try pair.observe(emulator.0, sink: emulator.1, stream: state.bytes[...])
+                #expect(Set(reading.keys) == EmulatorParity.allFields, "\(emulator.0.kind)")
+            }
+        }
+    }
+
+    /// The outcome check itself, on a fake entry: a stream that differs in every field its misses
+    /// name passes, one that has stopped differing in one fails and names it, one that differs in
+    /// a field no miss names fails and prints the difference, and a plan's own entry adds to the
+    /// stream's.
+    @Test func theOutcomeHoldsTheListExact() {
+        let misses = [
+            "fake": [Miss(reason: "a fake miss", fields: ["render", "capture"])],
+            "fake/64": [Miss(reason: "a fake chunked miss", fields: ["replies"])],
+        ]
+        let both = ["render": "fake difference", "capture": "fake difference"]
+        let passing = Self.outcomeFailures("fake", keys: ["fake"], differences: both, misses: misses)
+        #expect(passing.isEmpty, "\(passing)")
+
+        let stale = Self.outcomeFailures("fake", keys: ["fake"], differences: ["render": "fake"], misses: misses)
+        #expect(stale.count == 1, "\(stale)")
+        #expect(stale.first?.contains("now match in [\"capture\"]") == true, "\(stale)")
+
+        let extra = both.merging(["replies": "SwiftTerm \"a\", libghostty \"b\""]) { $1 }
+        let unlisted = Self.outcomeFailures("fake", keys: ["fake"], differences: extra, misses: misses)
+        #expect(unlisted.count == 1, "\(unlisted)")
+        #expect(unlisted.first?.contains("replies: SwiftTerm \"a\", libghostty \"b\"") == true, "\(unlisted)")
+
+        let chunked = Self.outcomeFailures("fake, chunked", keys: ["fake", "fake/64"], differences: extra, misses: misses)
+        #expect(chunked.isEmpty, "\(chunked)")
+    }
+
+    // MARK: - The outcome
+
+    private static func expectOutcome(_ name: String, plan: EmulatorParity.FeedPlan?, differences: [String: String]) {
+        let label = plan?.chunkSize.map { "\(name), fed in \($0)-byte chunks" } ?? name
+        let keys = [name] + [plan?.missKey(for: name)].compactMap { $0 }
+        for failure in outcomeFailures(label, keys: keys, differences: differences, misses: misses) {
+            Issue.record(EmulatorParity.Failure(description: failure))
+        }
+    }
+
+    /// Why a stream's differences fail, one message each: fields no miss under `keys` names, and
+    /// fields one names that no longer differ, which leaves the list stale. Empty when the
+    /// differences are what the list says. `keys` is the stream's own and, for a recording fed
+    /// in chunks, its plan's, whose fields add to the stream's.
+    static func outcomeFailures(
+        _ label: String, keys: [String], differences: [String: String], misses: [String: [Miss]]
+    ) -> [String] {
+        let entries = keys.flatMap { misses[$0] ?? [] }
+        let listed = entries.reduce(into: Set<String>()) { $0.formUnion($1.fields) }
+        func summary(_ fields: [String]) -> String {
+            fields.sorted().map { "\($0): \(differences[$0] ?? "")" }.joined(separator: " | ")
+        }
+        var failures: [String] = []
+        let unexplained = differences.keys.filter { !listed.contains($0) }
+        if !unexplained.isEmpty {
+            let expected = differences.keys.filter { listed.contains($0) }.sorted()
+            let also = expected.isEmpty ? "" : " (it also differs, as listed, in \(expected))"
+            failures.append("\(label): the libghostty emulator differs from SwiftTerm's beyond its listed misses\(also): \(summary(unexplained))")
+        }
+        let matching = listed.subtracting(differences.keys)
+        if !matching.isEmpty {
+            let reasons = entries.filter { !$0.fields.isDisjoint(with: matching) }.map(\.reason)
+            failures.append(
+                "\(label) is listed as differing but the emulators now match in \(matching.sorted()): remove them from its entry (\(reasons.joined(separator: "; ")))")
+        }
+        return failures
+    }
+}
