@@ -291,16 +291,17 @@ struct PhoneCreateTests {
         #expect(h.actions.worktreeCreates.isEmpty)
     }
 
-    /// A first message over `firstPromptMaxBytes` creates the worktree with
-    /// it: a new session opens on the pty holder, whose spawn takes the
-    /// message whole.
-    @Test func aFirstMessageOverTheTmuxCapCreates() async throws {
+    /// A long first message creates the worktree with it whole: a new
+    /// session opens on the pty holder, whose spawn takes the message as one
+    /// argument. 20,000 bytes is past the roughly 16 KB a tmux command could
+    /// carry.
+    @Test func aLongFirstMessageCreates() async throws {
         let h = try await PhoneServiceHarness.make()
         let repo = try await Self.seedRepo(h)
         let worktree = try await Self.seedCreatedWorktree(h, in: repo)
         _ = try await Self.seedTab(h, in: worktree, kind: .claude)
         let outbox = await h.connect()
-        let message = String(repeating: "a", count: PhoneAppConstants.firstPromptMaxBytes + 1)
+        let message = String(repeating: "a", count: 20_000)
         let params = PhoneWorktreeCreateParams(repoID: repo.id, message: message)
 
         let (reply, _) = try await h.request(.worktreeCreate, params: params, on: outbox)
