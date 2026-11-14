@@ -65,9 +65,9 @@ import Testing
     /// reachable, so a width table that changes its mind cannot reopen the
     /// outage. `TerminalScreenTests` pins that predicate.
     ///
-    /// libghostty may drop the `DEL` rather than store it, so on that emulator
-    /// the line is either form. What both owe is the first assertion: a screen
-    /// comes back.
+    /// The libghostty emulator is pinned to the other form: it drops the `DEL`
+    /// rather than store it, as xterm ignores it, so its line reads without
+    /// the byte. What both owe is the first assertion: a screen comes back.
     @Test("a DEL a child stored in a cell renders as U+FFFD instead of breaking the read", arguments: HolderEmulatorKind.allCases)
     func delInACellRendersAsReplacement(emulator: HolderEmulatorKind) async throws {
         let harness = try Harness(columns: 40, rows: 8, emulator: emulator)
@@ -526,15 +526,15 @@ import Testing
 
     private static func data(_ text: String) -> Data { Data(text.utf8) }
 
-    /// The lines a `DEL` test accepts: the SwiftTerm emulator stores the byte,
-    /// so only the replaced form; the libghostty emulator stores it or drops
-    /// it.
+    /// The line a `DEL` test expects: the SwiftTerm emulator stores the byte,
+    /// so the replaced form; the libghostty emulator drops it, so the dropped
+    /// form.
     private static func delRenderings(
         _ emulator: HolderEmulatorKind, replaced: String, dropped: String
     ) -> [String?] {
         switch emulator {
         case .swiftTerm: return [replaced]
-        case .ghostty: return [replaced, dropped]
+        case .ghostty: return [dropped]
         }
     }
 
